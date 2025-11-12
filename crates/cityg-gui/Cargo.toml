@@ -1,0 +1,47 @@
+[package]
+name = "cityg-gui"
+version = "0.1.0"
+edition = "2024"
+description = "City-G graphical client built with gpui"
+
+[features]
+default = []
+native-app = ["dep:gpui", "dep:gpui-macros"]
+debug-api = ["cityg-api-client/debug-api"]
+
+[dependencies]
+gpui = { version = "0.2.2", optional = true }
+gpui-macros = { version = "0.2.2", optional = true }
+cityg-api-client = { path = "../cityg-api-client" }
+cityg-client = { path = "../cityg-client" }
+cityg-config = { path = "../cityg-config" }
+msphf-orchestrator = { path = "../msphf-orchestrator" }
+anchor-seed = { path = "../anchor-seed" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio-tungstenite = "0.24"
+futures = "0.3"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+rand = "0.8"
+pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
+pqcrypto-traits = "0.3"
+hex = "0.4"
+ciborium = "0.2"
+dirs = "5"
+blake3 = "1"
+humantime = "2"
+msphf-core = { path = "../msphf-core" }
+serde_bytes = "0.11"
+msphf-rlwe = { path = "../msphf-rlwe" }
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+ahash = { version = "0.8", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "join_leave"
+path = "src/bin/join_leave.rs"

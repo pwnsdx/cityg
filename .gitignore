@@ -1,0 +1,28 @@
+# Build artifacts
+/target
+/artifacts
+Cargo.lock
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test outputs
+*.profraw
+*.profdata
+/coverage
+lcov.info
+*.lcov
+
+# Temporary files
+*.tmp
+*.bak
+*.log

@@ -1,0 +1,32 @@
+[package]
+name = "cityg-api-client"
+version = "0.1.0"
+license = "MIT"
+authors = ["Sabri Haddouche"]
+edition.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+debug-api = []
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+prost = "0.12"
+prost-types = "0.12"
+bytes = "1"
+thiserror = "1"
+cityg-client = { path = "../cityg-client" }
+msphf-orchestrator = { path = "../msphf-orchestrator" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tokio = { version = "1.38", features = ["time"] }
+
+[dev-dependencies]
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
+hex = "0.4"
+
+[build-dependencies]
+prost-build = "0.12"
+protoc-bin-vendored = "3"

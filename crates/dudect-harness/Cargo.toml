@@ -1,0 +1,13 @@
+[package]
+name = "dudect-harness"
+version = "0.1.0"
+license = "MIT"
+authors = ["Sabri Haddouche"]
+edition.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+msphf-core = { path = "../msphf-core" }
+capss = { path = "../capss" }
+once_cell = "1"

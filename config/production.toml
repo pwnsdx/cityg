@@ -1,0 +1,82 @@
+# CityG Production Configuration
+# This configuration is optimized for production deployments
+
+[server]
+# Server bind address - bind to all interfaces
+address = "0.0.0.0:8080"
+
+# WebSocket broadcast channel capacity
+# Increased for production load
+websocket_capacity = 5000
+
+# Window TTL (2 minutes in seconds)
+window_ttl_secs = 120
+
+[client]
+# Default server URL for connections
+# Override this with CITYG_CLIENT_DEFAULT_SERVER_URL environment variable
+default_server_url = "http://127.0.0.1:8080"
+
+# Polling interval for fetching updates (seconds)
+# Slightly higher to reduce server load
+fetch_poll_interval_secs = 5
+
+# Retry interval for failed fetch operations (seconds)
+fetch_retry_interval_secs = 15
+
+# WebSocket reconnection delay (seconds)
+websocket_reconnect_delay_secs = 10
+
+# API timeout for requests (seconds)
+api_timeout_secs = 60
+
+[protocol]
+# Time window duration (seconds)
+window_duration_secs = 120
+
+# Maximum concurrent heads in multi-head window
+max_concurrent_heads = 32
+
+# Epoch rotation interval (10 minutes in seconds)
+# Longer interval for production stability
+epoch_rotation_interval_secs = 600
+
+# Default maximum SRX payload size (2 MB in bytes)
+# Increased for production use cases
+default_srx_max_bytes = 2097152
+
+# Maximum HP proof size (512 KB in bytes)
+max_hp_proof_bytes = 524288
+
+# Maximum VRF proof size (6 KB in bytes)
+max_vrf_proof_bytes = 6144
+
+# FS CAPSS maximum size (16 KB in bytes)
+fs_capss_max_bytes = 16384
+
+# SRX Smallwood maximum size (16 KB in bytes)
+srx_smallwood_max_bytes = 16384
+
+# Maximum HP envelope size (16 KB in bytes)
+max_hp_envelope_bytes = 16384
+
+# Minimum SRX maximum size (256 KB in bytes)
+min_srx_max_bytes = 262144
+
+# Cache TTL for receiver cache (seconds)
+# Increased for better performance
+receiver_cache_ttl_secs = 60
+
+[gui]
+# Default window dimensions (pixels)
+default_window_width = 1160.0
+default_window_height = 760.0
+
+# Members per page for pagination
+# Increased for production
+members_page_limit = 500
+
+# Card dimensions (pixels)
+min_card_width = 320.0
+max_card_width = 960.0
+max_card_height = 780.0

@@ -1,0 +1,1904 @@
+mod pb {
+    include!(concat!(env!("OUT_DIR"), "/cityg.api.v1.rs"));
+}
+
+pub mod health;
+mod middleware;
+
+use std::{
+    collections::{BTreeMap, HashSet},
+    convert::TryInto,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use ahash::AHashMap;
+
+use axum::{
+    Router,
+    body::Bytes,
+    extract::ws::{Message as WsMessage, WebSocket},
+    extract::{State, WebSocketUpgrade},
+    http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
+    middleware as axum_middleware,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use bytes::BytesMut;
+use ciborium::ser::into_writer;
+use futures::{SinkExt, StreamExt};
+use hex::FromHex;
+use pb::{
+    AcceptEpochRequest, AcceptEpochResponse, BootstrapRoomRequest, BootstrapRoomResponse,
+    ChatMessage, ConfigureWindowRequest, ConfigureWindowResponse, FetchMessagesRequest,
+    FetchMessagesResponse, FreezeStat, GetBundleRequest, GetBundleResponse, GetTelemetryRequest,
+    GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse, IdentityBinding,
+    JoinTicketRequest, JoinTicketResponse, Member, MembersRequest, MembersResponse,
+    MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
+    SeedHeadRequest, SeedHeadResponse, SendMessageRequest, SendMessageResponse, TelemetryEntry,
+    WindowEntry, WindowHead,
+};
+use prost::Message;
+use thiserror::Error;
+use tokio::sync::{RwLock, broadcast};
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+
+use cityg_client::demo::bootstrap_public;
+use cityg_client::{CityGError as ClientError, ClientEpochBundle};
+use cityg_server::{CityGServer, MergeTicketBundle, ServerConfig, ServerOutcome};
+use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
+use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
+use msphf_orchestrator::{
+    AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, FsPolicyConfig,
+    LeafIdMode, PivotParity, compute_leaf_id,
+};
+use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
+use serde::Serialize;
+use serde_bytes::ByteBuf;
+use serde_json::to_vec as to_json_vec;
+
+#[derive(Clone, Debug)]
+struct AliasBinding {
+    leaf_id: [u8; 32],
+    pop_public_key: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MemberMetadata {
+    join_timestamp_ms: u64,
+    last_seen_timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+enum BroadcastNotification {
+    Message(MessageNotification),
+    Membership(MembershipNotification),
+}
+
+#[derive(Clone)]
+struct ApiState {
+    server: Arc<RwLock<CityGServer>>,
+    messages: Arc<RwLock<AHashMap<[u8; 32], Vec<StoredMessage>>>>,
+    bundles: Arc<RwLock<AHashMap<[u8; 32], Vec<u8>>>>,
+    freeze_counts: Arc<RwLock<BTreeMap<(u32, String), u64>>>,
+    // Alias registry: alias -> (leaf_id, pop_pk) for TOFU
+    alias_registry: Arc<RwLock<AHashMap<String, AliasBinding>>>,
+    member_metadata: Arc<RwLock<AHashMap<[u8; 32], MemberMetadata>>>,
+    weid_to_leaf: Arc<RwLock<AHashMap<[u8; 32], [u8; 32]>>>,
+    // Broadcast channel for WebSocket notifications
+    notification_tx: broadcast::Sender<BroadcastNotification>,
+}
+
+#[derive(Clone, Debug)]
+struct MessageNotification {
+    we_epoch_id: [u8; 32],
+    timestamp_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MembershipEventKind {
+    Join,
+    Revoke,
+}
+
+#[derive(Clone, Debug)]
+struct MembershipNotification {
+    gid: [u8; 32],
+    leaf_id: [u8; 32],
+    event: MembershipEventKind,
+    timestamp_ms: u64,
+}
+
+impl ApiState {
+    async fn record_freeze(&self, freeze: FreezeError) {
+        let mut guard = self.freeze_counts.write().await;
+        let key = (freeze.code, freeze.reason.to_string());
+        *guard.entry(key).or_insert(0) += 1;
+    }
+
+    async fn freeze_stats(&self) -> Vec<(u32, String, u64)> {
+        let guard = self.freeze_counts.read().await;
+        guard
+            .iter()
+            .map(|((code, reason), count)| (*code, reason.clone(), *count))
+            .collect()
+    }
+
+    /// Register an alias binding using Trust-On-First-Use (TOFU) semantics.
+    /// Returns Ok(true) if this is a new binding, Ok(false) if it matches an existing binding.
+    /// Returns Err if the alias is already bound to a different public key.
+    async fn register_alias(
+        &self,
+        alias: &str,
+        leaf_id: [u8; 32],
+        pop_public_key: Vec<u8>,
+    ) -> Result<bool, ApiError> {
+        let mut guard = self.alias_registry.write().await;
+
+        if let Some(existing) = guard.get_mut(alias) {
+            // TOFU: First binding wins
+            if existing.pop_public_key == pop_public_key {
+                if existing.leaf_id != leaf_id {
+                    existing.leaf_id = leaf_id;
+                    info!(
+                        "Alias '{}' verified: updated leaf binding to {}",
+                        alias,
+                        hex::encode(leaf_id)
+                    );
+                } else {
+                    info!("Alias '{}' verified: matches existing binding", alias);
+                }
+                return Ok(false);
+            } else {
+                // Different device trying to use same alias - TOFU violation
+                error!(
+                    "TOFU violation: Alias '{}' already bound to different public key",
+                    alias
+                );
+                return Err(ApiError::InvalidRequest(
+                    "alias already bound to a different identity",
+                ));
+            }
+        }
+
+        // New alias, register it
+        let binding = AliasBinding {
+            leaf_id,
+            pop_public_key: pop_public_key.clone(),
+        };
+        guard.insert(alias.to_string(), binding);
+        info!("Alias '{}' registered with new binding", alias);
+        Ok(true)
+    }
+
+    async fn record_member_join(
+        &self,
+        leaf_id: [u8; 32],
+        we_epoch_id: [u8; 32],
+        timestamp_ms: u64,
+    ) {
+        {
+            let mut metadata = self.member_metadata.write().await;
+            metadata.insert(
+                leaf_id,
+                MemberMetadata {
+                    join_timestamp_ms: timestamp_ms,
+                    last_seen_timestamp_ms: timestamp_ms,
+                },
+            );
+        }
+
+        {
+            let mut map = self.weid_to_leaf.write().await;
+            map.retain(|_, existing| *existing != leaf_id);
+            map.insert(we_epoch_id, leaf_id);
+        }
+    }
+
+    async fn record_member_revocations(&self, leaves: &[[u8; 32]]) {
+        if leaves.is_empty() {
+            return;
+        }
+        let revoked: HashSet<[u8; 32]> = leaves.iter().copied().collect();
+        {
+            let mut metadata = self.member_metadata.write().await;
+            for leaf in &revoked {
+                metadata.remove(leaf);
+            }
+        }
+        {
+            let mut map = self.weid_to_leaf.write().await;
+            map.retain(|_, existing| !revoked.contains(existing));
+        }
+    }
+
+    async fn touch_member_for_weid(&self, we_epoch_id: &[u8; 32], timestamp_ms: u64) {
+        let leaf = {
+            let map = self.weid_to_leaf.read().await;
+            map.get(we_epoch_id).copied()
+        };
+        if let Some(leaf_id) = leaf {
+            let mut metadata = self.member_metadata.write().await;
+            if let Some(entry) = metadata.get_mut(&leaf_id) {
+                entry.last_seen_timestamp_ms = timestamp_ms;
+            }
+        }
+    }
+
+    fn broadcast_message(&self, notification: MessageNotification) {
+        let _ = self
+            .notification_tx
+            .send(BroadcastNotification::Message(notification));
+    }
+
+    fn broadcast_membership(
+        &self,
+        gid: [u8; 32],
+        leaf_id: [u8; 32],
+        event: MembershipEventKind,
+        timestamp_ms: u64,
+    ) {
+        let notification = MembershipNotification {
+            gid,
+            leaf_id,
+            event,
+            timestamp_ms,
+        };
+        let _ = self
+            .notification_tx
+            .send(BroadcastNotification::Membership(notification));
+    }
+}
+
+#[derive(Clone)]
+struct StoredMessage {
+    we_epoch_id: [u8; 32],
+    ciphertext: Vec<u8>,
+    sender: Vec<u8>,
+    timestamp_ms: u64,
+}
+
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[derive(Debug, Error)]
+enum ApiError {
+    #[error("failed to decode protobuf payload: {0}")]
+    Decode(#[from] prost::DecodeError),
+    #[error("invalid request: {0}")]
+    InvalidRequest(&'static str),
+    #[error("server error: {message}")]
+    Server {
+        message: String,
+        freeze: Option<FreezeError>,
+        error_label: Option<&'static str>,
+        failed_index: Option<u32>,
+    },
+    #[error("resource not found")]
+    NotFound,
+}
+
+impl ApiError {
+    fn server_message(message: impl Into<String>) -> Self {
+        Self::server_with_context(message.into(), None, None, None)
+    }
+
+    fn server_with_freeze(message: impl Into<String>, freeze: FreezeError) -> Self {
+        Self::server_with_context(message.into(), Some(freeze), None, None)
+    }
+
+    fn server_message_with_context(
+        message: impl Into<String>,
+        error_label: Option<&'static str>,
+        failed_index: Option<u32>,
+    ) -> Self {
+        Self::server_with_context(message.into(), None, error_label, failed_index)
+    }
+
+    fn server_with_freeze_context(
+        message: impl Into<String>,
+        freeze: FreezeError,
+        error_label: Option<&'static str>,
+        failed_index: Option<u32>,
+    ) -> Self {
+        Self::server_with_context(message.into(), Some(freeze), error_label, failed_index)
+    }
+
+    fn server_with_context(
+        message: String,
+        freeze: Option<FreezeError>,
+        error_label: Option<&'static str>,
+        failed_index: Option<u32>,
+    ) -> Self {
+        ApiError::Server {
+            message,
+            freeze,
+            error_label,
+            failed_index,
+        }
+    }
+}
+
+impl From<ClientError> for ApiError {
+    fn from(err: ClientError) -> Self {
+        match err {
+            ClientError::Acceptance(inner) => match inner {
+                AcceptanceError::Freeze(freeze) => ApiError::server_with_freeze(
+                    format!("acceptance error: {}", freeze.reason),
+                    freeze,
+                ),
+                other => ApiError::server_message(format!("acceptance error: {other:?}")),
+            },
+            other => ApiError::server_message(other.to_string()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ErrorResponse<'a> {
+    message: &'a str,
+    freeze_code: Option<u32>,
+    freeze_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed_index: Option<u32>,
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, message, freeze, error_label, failed_index) = match self {
+            ApiError::Decode(err) => (StatusCode::BAD_REQUEST, err.to_string(), None, None, None),
+            ApiError::InvalidRequest(msg) => {
+                (StatusCode::BAD_REQUEST, msg.to_string(), None, None, None)
+            }
+            ApiError::NotFound => (
+                StatusCode::NOT_FOUND,
+                "resource not found".to_string(),
+                None,
+                None,
+                None,
+            ),
+            ApiError::Server {
+                message,
+                freeze,
+                error_label,
+                failed_index,
+            } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                message,
+                freeze,
+                error_label,
+                failed_index,
+            ),
+        };
+        let freeze_code = freeze.map(|f| f.code);
+        let freeze_reason = freeze.map(|f| f.reason);
+        error!(status = %status, message = %message, freeze_code = ?freeze_code, freeze_reason = ?freeze_reason, "request failed");
+        let body = ErrorResponse {
+            message: &message,
+            freeze_code,
+            freeze_reason,
+            error: error_label,
+            failed_index,
+        };
+        // Handle serialization error gracefully with a fallback error message
+        let payload = to_json_vec(&body).unwrap_or_else(|e| {
+            error!("failed to serialize error body: {}", e);
+            // Fallback to a simple JSON error message
+            r#"{"message":"Internal server error"}"#.as_bytes().to_vec()
+        });
+        let mut response = (status, payload).into_response();
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        response
+    }
+}
+
+fn parse_gid(room_id: &str) -> Result<[u8; 32], ApiError> {
+    let bytes = Vec::from_hex(room_id)
+        .map_err(|_| ApiError::InvalidRequest("room_id must be 64 hex characters"))?;
+    if bytes.len() != 32 {
+        return Err(ApiError::InvalidRequest("room_id must be 32 bytes"));
+    }
+    let mut gid = [0u8; 32];
+    gid.copy_from_slice(&bytes);
+    Ok(gid)
+}
+
+/// Verifies an identity binding signature.
+/// The signature should be over CBOR([alias, pop_public_key])
+fn verify_identity_binding(binding: &IdentityBinding) -> Result<(), ApiError> {
+    use pqcrypto_dilithium::dilithium5;
+    use pqcrypto_traits::sign::{
+        DetachedSignature as DetachedSignatureTrait, PublicKey as PublicKeyTrait,
+    };
+    use serde_bytes::ByteBuf;
+
+    // Validate inputs
+    if binding.pop_public_key.len() != dilithium5::public_key_bytes() {
+        return Err(ApiError::InvalidRequest("invalid pop_public_key length"));
+    }
+    if binding.signature.len() != dilithium5::signature_bytes() {
+        return Err(ApiError::InvalidRequest("invalid signature length"));
+    }
+    if binding.alias.is_empty() {
+        return Err(ApiError::InvalidRequest("alias cannot be empty"));
+    }
+
+    // Reconstruct the signed message: CBOR([alias, pop_public_key])
+    let message_data = (
+        ByteBuf::from(binding.alias.as_bytes().to_vec()),
+        ByteBuf::from(binding.pop_public_key.clone()),
+    );
+    let mut message = Vec::new();
+    ciborium::ser::into_writer(&message_data, &mut message)
+        .map_err(|_| ApiError::InvalidRequest("failed to encode message for verification"))?;
+
+    // Parse public key and signature using trait methods
+    let public_key = <dilithium5::PublicKey as PublicKeyTrait>::from_bytes(&binding.pop_public_key)
+        .map_err(|_| ApiError::InvalidRequest("invalid pop_public_key"))?;
+    let signature =
+        <dilithium5::DetachedSignature as DetachedSignatureTrait>::from_bytes(&binding.signature)
+            .map_err(|_| ApiError::InvalidRequest("invalid signature"))?;
+
+    // Verify signature
+    dilithium5::verify_detached_signature(&signature, &message, &public_key)
+        .map_err(|_| ApiError::InvalidRequest("signature verification failed"))?;
+
+    Ok(())
+}
+
+async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = AcceptEpochRequest::decode(body)?;
+    let bundle = match ClientEpochBundle::from_cbor(&request.bundle_cbor) {
+        Ok(bundle) => bundle,
+        Err(ClientError::InvalidInput(_)) => {
+            return Err(ApiError::InvalidRequest("invalid bundle encoding"));
+        }
+        Err(err) => return Err(ApiError::from(err)),
+    };
+
+    let response = apply_bundle(&state, &bundle, request.bundle_cbor).await?;
+    Ok(protobuf_response(&response))
+}
+
+async fn apply_bundle(
+    state: &ApiState,
+    bundle: &ClientEpochBundle,
+    bundle_bytes: Vec<u8>,
+) -> Result<AcceptEpochResponse, ApiError> {
+    let mut weid = [0u8; 32];
+    weid.copy_from_slice(&bundle.we_epoch_id);
+
+    let outcome = {
+        let mut guard = state.server.write().await;
+        match guard.accept_epoch(bundle) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                drop(guard);
+                return Err(map_accept_error(state, err, None, None).await);
+            }
+        }
+    };
+
+    persist_bundle(state, bundle, weid, bundle_bytes).await?;
+    Ok(accept_response_from(&outcome))
+}
+
+async fn store_bundle_bytes(state: &ApiState, weid: [u8; 32], bytes: Vec<u8>) {
+    let mut guard = state.bundles.write().await;
+    guard.insert(weid, bytes);
+}
+
+async fn persist_bundle(
+    state: &ApiState,
+    bundle: &ClientEpochBundle,
+    weid: [u8; 32],
+    bytes: Vec<u8>,
+) -> Result<(), ApiError> {
+    record_membership_updates(state, bundle, weid).await?;
+    store_bundle_bytes(state, weid, bytes).await;
+    Ok(())
+}
+
+async fn record_membership_updates(
+    state: &ApiState,
+    bundle: &ClientEpochBundle,
+    weid: [u8; 32],
+) -> Result<(), ApiError> {
+    let delta = bundle.membership_delta().map_err(|err| {
+        ApiError::server_message(format!("failed to compute membership delta: {err}"))
+    })?;
+    let gid: [u8; 32] = bundle
+        .gid()
+        .try_into()
+        .map_err(|_| ApiError::server_message("invalid gid length in bundle"))?;
+
+    let timestamp_ms = current_timestamp_ms();
+    for leaf in &delta.joined {
+        state.record_member_join(*leaf, weid, timestamp_ms).await;
+        state.broadcast_membership(gid, *leaf, MembershipEventKind::Join, timestamp_ms);
+    }
+    if !delta.revoked.is_empty() {
+        state.record_member_revocations(&delta.revoked).await;
+        for leaf in &delta.revoked {
+            state.broadcast_membership(gid, *leaf, MembershipEventKind::Revoke, timestamp_ms);
+        }
+    }
+    Ok(())
+}
+
+fn accept_response_from(outcome: &ServerOutcome) -> AcceptEpochResponse {
+    AcceptEpochResponse {
+        we_epoch_id: outcome.we_epoch_id.to_vec(),
+        wid: outcome.wid.to_vec(),
+        parent_root: outcome.parent_root.to_vec(),
+        new_root: outcome.new_root.to_vec(),
+    }
+}
+
+async fn map_accept_error(
+    state: &ApiState,
+    err: ClientError,
+    error_label: Option<&'static str>,
+    failed_index: Option<u32>,
+) -> ApiError {
+    match err {
+        ClientError::InvalidInput(_) => ApiError::InvalidRequest("invalid bundle components"),
+        ClientError::Acceptance(AcceptanceError::Freeze(freeze)) => {
+            state.record_freeze(freeze).await;
+            ApiError::server_with_freeze_context(
+                format!("acceptance error: {}", freeze.reason),
+                freeze,
+                error_label,
+                failed_index,
+            )
+        }
+        ClientError::Acceptance(other) => ApiError::server_message_with_context(
+            format!("acceptance error: {other:?}"),
+            error_label,
+            failed_index,
+        ),
+        other => {
+            ApiError::server_message_with_context(other.to_string(), error_label, failed_index)
+        }
+    }
+}
+
+const MEMBERS_DEFAULT_PAGE_SIZE: u32 = 256;
+const MEMBERS_MAX_PAGE_SIZE: u32 = 2000;
+
+async fn members(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = MembersRequest::decode(body)?;
+    if request.gid.is_empty() {
+        return Err(ApiError::InvalidRequest("gid must be provided"));
+    }
+    let gid = request.gid;
+    let offset = request.offset.unwrap_or(0);
+    let limit = request
+        .limit
+        .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
+        .clamp(1, MEMBERS_MAX_PAGE_SIZE);
+
+    let (members, root) = {
+        let guard = state.server.read().await;
+        if request.parent_root.is_empty() {
+            let latest_root = guard.latest_parent_root(&gid).ok_or(ApiError::NotFound)?;
+            let list = guard
+                .members_for_root(&gid, &latest_root)
+                .unwrap_or_default();
+            (list, latest_root)
+        } else {
+            if request.parent_root.len() != 32 {
+                return Err(ApiError::InvalidRequest("parent_root must be 32 bytes"));
+            }
+            let mut root = [0u8; 32];
+            root.copy_from_slice(&request.parent_root);
+            let list = guard
+                .members_for_root(&gid, &root)
+                .ok_or(ApiError::NotFound)?;
+            (list, root)
+        }
+    };
+
+    let total_count = members.len() as u64;
+    let start = offset.min(total_count) as usize;
+    let end = (start as u64 + u64::from(limit)).min(total_count) as usize;
+    let next_offset = if end as u64 >= total_count {
+        total_count
+    } else {
+        end as u64
+    };
+
+    let slice = &members[start..end];
+
+    let alias_lookup = {
+        let registry = state.alias_registry.read().await;
+        let mut map: AHashMap<[u8; 32], (String, Vec<u8>)> = AHashMap::new();
+        for (alias, binding) in registry.iter() {
+            map.insert(
+                binding.leaf_id,
+                (alias.clone(), binding.pop_public_key.clone()),
+            );
+        }
+        map
+    };
+    let metadata = state.member_metadata.read().await;
+
+    let reply = MembersResponse {
+        members: slice
+            .iter()
+            .map(|leaf| {
+                let alias_info = alias_lookup.get(leaf);
+                let metadata_entry = metadata.get(leaf);
+
+                Member {
+                    leaf_id: leaf.to_vec(),
+                    alias: alias_info.map(|(alias, _)| alias.clone()),
+                    pop_public_key: alias_info.map(|(_, pk)| pk.clone()),
+                    join_date: metadata_entry.map(|entry| entry.join_timestamp_ms),
+                    last_seen: metadata_entry.map(|entry| entry.last_seen_timestamp_ms),
+                }
+            })
+            .collect(),
+        root: root.to_vec(),
+        total_count,
+        next_offset,
+    };
+
+    Ok(protobuf_response(&reply))
+}
+
+async fn search_members(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = pb::SearchMembersRequest::decode(body)?;
+    if request.gid.is_empty() {
+        return Err(ApiError::InvalidRequest("gid must be provided"));
+    }
+    if request.query.is_empty() {
+        return Err(ApiError::InvalidRequest("query must be provided"));
+    }
+    let gid = request.gid;
+    let query = request.query.to_lowercase();
+    let offset = request.offset.unwrap_or(0);
+    let limit = request
+        .limit
+        .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
+        .clamp(1, MEMBERS_MAX_PAGE_SIZE);
+
+    let (members, root) = {
+        let guard = state.server.read().await;
+        if request.parent_root.is_empty() {
+            let latest_root = guard.latest_parent_root(&gid).ok_or(ApiError::NotFound)?;
+            let list = guard
+                .members_for_root(&gid, &latest_root)
+                .unwrap_or_default();
+            (list, latest_root)
+        } else {
+            if request.parent_root.len() != 32 {
+                return Err(ApiError::InvalidRequest("parent_root must be 32 bytes"));
+            }
+            let mut root = [0u8; 32];
+            root.copy_from_slice(&request.parent_root);
+            let list = guard
+                .members_for_root(&gid, &root)
+                .ok_or(ApiError::NotFound)?;
+            (list, root)
+        }
+    };
+
+    // Get alias registry for filtering
+    let alias_lookup = {
+        let registry = state.alias_registry.read().await;
+        let mut map: AHashMap<[u8; 32], (String, Vec<u8>)> = AHashMap::new();
+        for (alias, binding) in registry.iter() {
+            map.insert(
+                binding.leaf_id,
+                (alias.clone(), binding.pop_public_key.clone()),
+            );
+        }
+        map
+    };
+    let metadata = state.member_metadata.read().await;
+
+    // Filter members by query (alias or leaf_id hex)
+    let filtered_members: Vec<[u8; 32]> = members
+        .iter()
+        .filter(|leaf| {
+            // Check if leaf_id hex matches query
+            let hex = hex::encode(leaf);
+            if hex.contains(&query) {
+                return true;
+            }
+
+            // Check if alias matches query
+            for (leaf_id, (alias, _)) in alias_lookup.iter() {
+                if leaf_id == *leaf && alias.to_lowercase().contains(&query) {
+                    return true;
+                }
+            }
+
+            false
+        })
+        .copied()
+        .collect();
+
+    let total_count = filtered_members.len() as u64;
+    let start = offset.min(total_count) as usize;
+    let end = (start as u64 + u64::from(limit)).min(total_count) as usize;
+    let next_offset = if end as u64 >= total_count {
+        total_count
+    } else {
+        end as u64
+    };
+
+    let slice = &filtered_members[start..end];
+
+    let reply = pb::SearchMembersResponse {
+        members: slice
+            .iter()
+            .map(|leaf| {
+                let alias_info = alias_lookup.get(leaf);
+                let metadata_entry = metadata.get(leaf);
+
+                Member {
+                    leaf_id: leaf.to_vec(),
+                    alias: alias_info.map(|(alias, _)| alias.clone()),
+                    pop_public_key: alias_info.map(|(_, pk)| pk.clone()),
+                    join_date: metadata_entry.map(|entry| entry.join_timestamp_ms),
+                    last_seen: metadata_entry.map(|entry| entry.last_seen_timestamp_ms),
+                }
+            })
+            .collect(),
+        root: root.to_vec(),
+        total_count,
+        next_offset,
+    };
+
+    Ok(protobuf_response(&reply))
+}
+
+async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = JoinTicketRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    let gid = parse_gid(&request.room_id)?;
+
+    // Verify and register identity binding if provided
+    let confirmed_binding = if let Some(binding) = &request.identity_binding {
+        // Verify the signature
+        verify_identity_binding(binding)?;
+
+        // Compute the leaf_id from the pop_public_key
+        let computed_leaf_id = compute_leaf_id(
+            LeafIdMode::PerGroup,
+            &gid,
+            "ML-DSA-65",
+            &binding.pop_public_key,
+        )
+        .map_err(|e| ApiError::server_message(format!("failed to compute leaf_id: {}", e)))?;
+
+        // Register the alias using TOFU
+        state
+            .register_alias(
+                &binding.alias,
+                computed_leaf_id,
+                binding.pop_public_key.clone(),
+            )
+            .await?;
+
+        Some(binding.clone())
+    } else {
+        None
+    };
+
+    let (ticket, policy_version, fs_policy_version, fs_epoch_base_ts) = {
+        let mut guard = state.server.write().await;
+        let bundle = guard.build_join_ticket(&gid).map_err(ApiError::from)?;
+        let policy_version = guard.context().policy_version().to_string();
+        let fs_policy_version = guard
+            .context()
+            .fs_policy_version()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "fs-demo-policy".to_string());
+        let fs_epoch_base_ts = guard.context().fs_base_ts().unwrap_or(0);
+        (bundle, policy_version, fs_policy_version, fs_epoch_base_ts)
+    };
+
+    if let Some(binding) = confirmed_binding.as_ref() {
+        state
+            .register_alias(
+                &binding.alias,
+                ticket.leaf_id,
+                binding.pop_public_key.clone(),
+            )
+            .await?;
+    }
+
+    let response = JoinTicketResponse {
+        gid: ticket.gid.to_vec(),
+        cat: ticket.cat.to_vec(),
+        parent_root: ticket.parent_root.to_vec(),
+        revoked_root: ticket.revoked_root.to_vec(),
+        revoked_since_root: ticket.revoked_since_root.to_vec(),
+        tswe_salt_hash: ticket.tswe_salt_hash.to_vec(),
+        join_delta_root: ticket.join_delta_root.to_vec(),
+        leaf_id: ticket.leaf_id.to_vec(),
+        pox_r_commit: ticket.pox_r_commit.to_vec(),
+        witness_cbor: ticket.witness_cbor,
+        srx_cbor: ticket.srx_cbor,
+        msphf_crs_id: RLWE_CRS_ID_DEFAULT.to_string(),
+        msphf_params_id: RLWE_PARAMS_ID_MOCK.to_string(),
+        proof_mode: DEFAULT_PROOF_MODE.to_string(),
+        vrf_id: DEFAULT_VRF_ID.to_string(),
+        policy_version,
+        fs_policy_version,
+        fs_epoch_base_ts,
+        kbroad_public: ticket.kbroad_public,
+        bootstrap_public: bootstrap_public().to_vec(),
+        confirmed_binding,
+    };
+
+    Ok(protobuf_response(&response))
+}
+
+async fn bootstrap_room(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = BootstrapRoomRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    if request.kbroad_public.is_empty() {
+        return Err(ApiError::InvalidRequest("kbroad_public must be provided"));
+    }
+
+    if request.kbroad_public.len() != ml_kem_public_key_bytes() {
+        return Err(ApiError::InvalidRequest(
+            "kbroad_public has unexpected length",
+        ));
+    }
+
+    let gid = parse_gid(&request.room_id)?;
+
+    {
+        let mut guard = state.server.write().await;
+        guard
+            .register_group(&gid, request.kbroad_public)
+            .map_err(ApiError::from)?;
+    }
+
+    let response = BootstrapRoomResponse {
+        status: "registered".to_string(),
+    };
+
+    Ok(protobuf_response(&response))
+}
+
+async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = MergeTicketRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    if request.leaf_id.len() != 32 {
+        return Err(ApiError::InvalidRequest("leaf_id must be 32 bytes"));
+    }
+
+    let gid = parse_gid(&request.room_id)?;
+    let mut leaf_id = [0u8; 32];
+    leaf_id.copy_from_slice(&request.leaf_id);
+
+    let bundle = {
+        let mut guard = state.server.write().await;
+        guard
+            .build_merge_ticket(&gid, &leaf_id)
+            .map_err(ApiError::from)?
+    };
+
+    let MergeTicketBundle {
+        gid: _,
+        cat,
+        parent_root,
+        leaf_id: _,
+        pivot_we_epoch_id,
+        parities,
+        witness_cbor,
+        srx_cbor,
+        join_delta_root,
+        revoked_since_root,
+        revoked_root,
+        tswe_salt_hash,
+        pox_r_commit,
+        proof_mode,
+        vrf_id,
+        policy_version,
+        msphf_crs_id,
+        msphf_params_id,
+        fs_policy_version,
+        fs_epoch_base_ts,
+        kbroad_public,
+    } = bundle;
+
+    let pivot_parity_cbor = parities
+        .iter()
+        .map(pivot_parity_to_cbor)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let response = MergeTicketResponse {
+        we_epoch_id: pivot_we_epoch_id.to_vec(),
+        pivot_parity_cbor,
+        witness_cbor,
+        proof_mode,
+        vrf_id,
+        policy_version,
+        kbroad_public,
+        cat: cat.to_vec(),
+        parent_root: parent_root.to_vec(),
+        join_delta_root: join_delta_root.to_vec(),
+        revoked_since_root: revoked_since_root.to_vec(),
+        revoked_root: revoked_root.to_vec(),
+        tswe_salt_hash: tswe_salt_hash.to_vec(),
+        pox_r_commit: pox_r_commit.to_vec(),
+        srx_cbor,
+        msphf_crs_id,
+        msphf_params_id,
+        fs_policy_version,
+        fs_epoch_base_ts,
+    };
+
+    Ok(protobuf_response(&response))
+}
+
+async fn send_message(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = SendMessageRequest::decode(body)?;
+    if request.we_epoch_id.len() != 32 {
+        return Err(ApiError::InvalidRequest("we_epoch_id must be 32 bytes"));
+    }
+
+    let mut weid = [0u8; 32];
+    weid.copy_from_slice(&request.we_epoch_id);
+    let ciphertext = request.ciphertext;
+    if ciphertext.is_empty() {
+        return Err(ApiError::InvalidRequest("ciphertext must be provided"));
+    }
+
+    let sender = request.sender;
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let stored = StoredMessage {
+        we_epoch_id: weid,
+        ciphertext,
+        sender,
+        timestamp_ms,
+    };
+
+    {
+        let mut guard = state.messages.write().await;
+        guard.entry(weid).or_default().push(stored);
+    }
+
+    // Broadcast notification to WebSocket clients
+    let notification = MessageNotification {
+        we_epoch_id: weid,
+        timestamp_ms,
+    };
+    state.broadcast_message(notification);
+
+    state.touch_member_for_weid(&weid, timestamp_ms).await;
+
+    let reply = SendMessageResponse {
+        status: "stored".to_string(),
+    };
+    Ok(protobuf_response(&reply))
+}
+
+async fn fetch_messages(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = FetchMessagesRequest::decode(body)?;
+    if request.we_epoch_id.len() != 32 {
+        return Err(ApiError::InvalidRequest("we_epoch_id must be 32 bytes"));
+    }
+    let mut weid = [0u8; 32];
+    weid.copy_from_slice(&request.we_epoch_id);
+
+    let messages = {
+        let guard = state.messages.read().await;
+        guard.get(&weid).cloned().unwrap_or_default()
+    };
+
+    let reply = FetchMessagesResponse {
+        messages: messages
+            .into_iter()
+            .map(|msg| ChatMessage {
+                ciphertext: msg.ciphertext,
+                we_epoch_id: msg.we_epoch_id.to_vec(),
+                sender: msg.sender,
+                timestamp_ms: msg.timestamp_ms,
+            })
+            .collect(),
+    };
+
+    Ok(protobuf_response(&reply))
+}
+
+async fn websocket_handler(ws: WebSocketUpgrade, State(state): State<ApiState>) -> Response {
+    ws.on_upgrade(|socket| handle_websocket(socket, state))
+}
+
+async fn handle_websocket(socket: WebSocket, state: ApiState) {
+    let (mut sender, mut receiver) = socket.split();
+
+    // Subscribe to server notifications
+    let mut rx = state.notification_tx.subscribe();
+
+    debug!("WebSocket client connected");
+
+    // Track connection health for auto-reconnect signaling
+    let connection_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let conn_healthy_clone = connection_healthy.clone();
+
+    // Spawn a task to handle incoming messages from the client (ping/pong)
+    let mut recv_task = tokio::spawn(async move {
+        let mut last_pong = Instant::now();
+        let pong_timeout = Duration::from_secs(60);
+
+        while let Some(result) = receiver.next().await {
+            match result {
+                Ok(WsMessage::Close(_)) => {
+                    debug!("WebSocket client sent close message");
+                    conn_healthy_clone.store(false, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+                Ok(WsMessage::Ping(_)) => {
+                    debug!("WebSocket received ping");
+                    last_pong = Instant::now();
+                }
+                Ok(WsMessage::Pong(_)) => {
+                    debug!("WebSocket received pong");
+                    last_pong = Instant::now();
+                }
+                Ok(_) => {
+                    // Ignore other message types from client
+                }
+                Err(e) => {
+                    warn!("WebSocket receive error: {}", e);
+                    conn_healthy_clone.store(false, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+            }
+
+            // Check for pong timeout
+            if last_pong.elapsed() > pong_timeout {
+                warn!("WebSocket pong timeout, considering connection unhealthy");
+                conn_healthy_clone.store(false, std::sync::atomic::Ordering::Relaxed);
+                break;
+            }
+        }
+    });
+
+    // Main task: forward message notifications to the WebSocket client
+    let mut send_task = tokio::spawn(async move {
+        let ping_interval = Duration::from_secs(30);
+        let mut last_ping = Instant::now();
+
+        loop {
+            // Check connection health
+            if !connection_healthy.load(std::sync::atomic::Ordering::Relaxed) {
+                debug!("WebSocket connection marked unhealthy, closing send loop");
+                break;
+            }
+
+            tokio::select! {
+                // Wait for message notifications
+                result = rx.recv() => {
+                    match result {
+                        Ok(notification) => {
+                            let payload = match notification {
+                                BroadcastNotification::Message(msg) => serde_json::json!({
+                                    "type": "message",
+                                    "we_epoch_id": hex::encode(msg.we_epoch_id),
+                                    "timestamp_ms": msg.timestamp_ms,
+                                    "connection_healthy": true
+                                }),
+                                BroadcastNotification::Membership(event) => {
+                                    let kind = match event.event {
+                                        MembershipEventKind::Join => "join",
+                                        MembershipEventKind::Revoke => "revoke",
+                                    };
+                                    serde_json::json!({
+                                        "type": "membership",
+                                        "gid": hex::encode(event.gid),
+                                        "leaf_id": hex::encode(event.leaf_id),
+                                        "event": kind,
+                                        "timestamp_ms": event.timestamp_ms
+                                    })
+                                }
+                            };
+
+                            let text = match serde_json::to_string(&payload) {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    error!("Failed to serialize notification: {}", e);
+                                    continue;
+                                }
+                            };
+
+                            if let Err(e) = sender.send(WsMessage::Text(text)).await {
+                                warn!("Failed to send WebSocket message: {}", e);
+                                connection_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("WebSocket client lagged by {} messages", n);
+                            // Send lag notification to client
+                            let lag_notification = serde_json::json!({
+                                "type": "lag",
+                                "lagged_messages": n,
+                                "recommendation": "consider reconnecting"
+                            });
+                            if let Ok(text) = serde_json::to_string(&lag_notification) {
+                                let _ = sender.send(WsMessage::Text(text)).await;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            info!("Message broadcast channel closed");
+                            break;
+                        }
+                    }
+                }
+
+                // Send periodic ping to keep connection alive
+                _ = tokio::time::sleep(ping_interval) => {
+                    if last_ping.elapsed() >= ping_interval {
+                        if let Err(e) = sender.send(WsMessage::Ping(vec![])).await {
+                            warn!("Failed to send ping: {}", e);
+                            connection_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                        last_ping = Instant::now();
+                    }
+                }
+            }
+        }
+    });
+
+    // Wait for either task to complete
+    tokio::select! {
+        _ = &mut send_task => {
+            debug!("WebSocket send task completed");
+            recv_task.abort();
+        }
+        _ = &mut recv_task => {
+            debug!("WebSocket receive task completed");
+            send_task.abort();
+        }
+    }
+
+    info!("WebSocket client disconnected");
+}
+
+async fn get_bundle(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = GetBundleRequest::decode(body)?;
+    if request.we_epoch_id.len() != 32 {
+        return Err(ApiError::InvalidRequest("we_epoch_id must be 32 bytes"));
+    }
+    let mut weid = [0u8; 32];
+    weid.copy_from_slice(&request.we_epoch_id);
+
+    let bytes = {
+        let guard = state.bundles.read().await;
+        guard.get(&weid).cloned().ok_or(ApiError::NotFound)?
+    };
+
+    let reply = GetBundleResponse { bundle_cbor: bytes };
+
+    Ok(protobuf_response(&reply))
+}
+
+async fn health_legacy_with_state(State(_state): State<ApiState>) -> Response {
+    let reply = HealthResponse {
+        status: "ok".to_string(),
+    };
+    protobuf_response(&reply)
+}
+
+async fn health_liveness(State(_state): State<ApiState>) -> Response {
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "alive": true
+        })),
+    )
+        .into_response()
+}
+
+async fn health_readiness(State(_state): State<ApiState>) -> Response {
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "ready": true
+        })),
+    )
+        .into_response()
+}
+
+async fn health_detailed(State(_state): State<ApiState>) -> Response {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "status": "healthy",
+            "timestamp": timestamp,
+            "version": env!("CARGO_PKG_VERSION"),
+            "checks": [
+                {
+                    "name": "system",
+                    "status": "healthy",
+                    "message": "Service is running"
+                }
+            ]
+        })),
+    )
+        .into_response()
+}
+
+async fn get_window(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let _ = GetWindowRequest::decode(body)?;
+    let snapshot = {
+        let guard = state.server.read().await;
+        let now = guard.context().current_time();
+        guard
+            .context()
+            .mh_window
+            .snapshot()
+            .into_iter()
+            .map(|(wid, heads)| WindowEntry {
+                wid,
+                heads: heads
+                    .into_iter()
+                    .map(|record| {
+                        let age_ms = now
+                            .duration_since(record.accept_time())
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64;
+                        WindowHead {
+                            we_epoch_id: record.we_epoch_id.to_vec(),
+                            msphf_hp_commit: record.msphf_hp_commit.to_vec(),
+                            seed_ctx_hash: record.seed_ctx_hash.to_vec(),
+                            rho_commit: record.rho_commit.to_vec(),
+                            seed_commit: record.seed_commit.to_vec(),
+                            xk_hash: record.xk_hash.to_vec(),
+                            accept_seq: record.accept_seq,
+                            age_ms,
+                        }
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let reply = GetWindowResponse { entries: snapshot };
+    Ok(protobuf_response(&reply))
+}
+
+async fn get_telemetry(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let _ = GetTelemetryRequest::decode(body)?;
+    let report = {
+        let guard = state.server.read().await;
+        guard.context().telemetry_report()
+    };
+
+    let entries = report
+        .into_iter()
+        .map(|(key, counters)| TelemetryEntry {
+            gid: key.gid.to_vec(),
+            parent_root: key.parent_root.to_vec(),
+            head_attempts: counters.head_attempts,
+            head_insertions: counters.head_insertions,
+            freeze_window_full: counters.freeze_window_full,
+            freeze_rho_replay: counters.freeze_rho_replay,
+            last_active_heads: counters.last_active_heads as u64,
+        })
+        .collect();
+
+    let freeze_stats = state
+        .freeze_stats()
+        .await
+        .into_iter()
+        .map(|(code, reason, count)| FreezeStat {
+            code,
+            reason,
+            count,
+        })
+        .collect();
+
+    let reply = GetTelemetryResponse {
+        entries,
+        freeze_stats,
+    };
+    Ok(protobuf_response(&reply))
+}
+
+fn pivot_parity_to_cbor(parity: &PivotParity) -> Result<Vec<u8>, ApiError> {
+    #[derive(Serialize)]
+    struct PivotParitySerializable {
+        gid: ByteBuf,
+        cat: ByteBuf,
+        parent_root: ByteBuf,
+        we_epoch_id: ByteBuf,
+        rho_commit: ByteBuf,
+        seed_ctx_hash: ByteBuf,
+        seed_commit: ByteBuf,
+        hp_commit: ByteBuf,
+        xk_hash: ByteBuf,
+        join_delta_root: ByteBuf,
+        revoked_since_root: ByteBuf,
+        revoked_root: ByteBuf,
+        accept_seq: u64,
+        crs_id: ByteBuf,
+        params_id: ByteBuf,
+        policy_version: String,
+        proof_mode: String,
+        vrf_id: String,
+        vrf_proof: ByteBuf,
+        vrf_public: ByteBuf,
+        mask_a: ByteBuf,
+        mask_b: ByteBuf,
+        fs_capss: ByteBuf,
+        proofs_commit: ByteBuf,
+        srx_commit: Option<ByteBuf>,
+        is_join: bool,
+        hp_envelope: ByteBuf,
+        fs_epoch_commit: Option<ByteBuf>,
+        fs_ec: Option<u64>,
+        fs_dev_commit: Option<ByteBuf>,
+    }
+
+    let serializable = PivotParitySerializable {
+        gid: ByteBuf::from(parity.gid.clone()),
+        cat: ByteBuf::from(parity.cat.clone()),
+        parent_root: ByteBuf::from(parity.parent_root.to_vec()),
+        we_epoch_id: ByteBuf::from(parity.we_epoch_id.to_vec()),
+        rho_commit: ByteBuf::from(parity.rho_commit.to_vec()),
+        seed_ctx_hash: ByteBuf::from(parity.seed_ctx_hash.to_vec()),
+        seed_commit: ByteBuf::from(parity.seed_commit.to_vec()),
+        hp_commit: ByteBuf::from(parity.hp_commit.to_vec()),
+        xk_hash: ByteBuf::from(parity.xk_hash.to_vec()),
+        join_delta_root: ByteBuf::from(parity.join_delta_root.to_vec()),
+        revoked_since_root: ByteBuf::from(parity.revoked_since_root.to_vec()),
+        revoked_root: ByteBuf::from(parity.revoked_root.to_vec()),
+        accept_seq: parity.accept_seq,
+        crs_id: ByteBuf::from(parity.crs_id.clone()),
+        params_id: ByteBuf::from(parity.params_id.clone()),
+        policy_version: parity.policy_version.clone(),
+        proof_mode: parity.proof_mode.clone(),
+        vrf_id: parity.vrf_id.clone(),
+        vrf_proof: ByteBuf::from(parity.vrf_proof.clone()),
+        vrf_public: ByteBuf::from(parity.vrf_public.clone()),
+        mask_a: ByteBuf::from(parity.mask_a.to_vec()),
+        mask_b: ByteBuf::from(parity.mask_b.to_vec()),
+        fs_capss: ByteBuf::from(parity.fs_capss.clone()),
+        proofs_commit: ByteBuf::from(parity.proofs_commit.to_vec()),
+        srx_commit: parity
+            .srx_commit
+            .map(|commit| ByteBuf::from(commit.to_vec())),
+        is_join: parity.is_join,
+        hp_envelope: ByteBuf::from(parity.hp_envelope.as_ref().to_vec()),
+        fs_epoch_commit: parity
+            .fs_epoch_commit
+            .map(|commit| ByteBuf::from(commit.to_vec())),
+        fs_ec: parity.fs_ec,
+        fs_dev_commit: parity
+            .fs_dev_commit
+            .map(|commit| ByteBuf::from(commit.to_vec())),
+    };
+
+    let mut buf = Vec::new();
+    into_writer(&serializable, &mut buf)
+        .map_err(|_| ApiError::server_message("failed to encode pivot parity"))?;
+    Ok(buf)
+}
+
+async fn configure_window(
+    State(state): State<ApiState>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let request = ConfigureWindowRequest::decode(body)?;
+    let h_max = request
+        .h_max
+        .map(|value| {
+            if value == 0 {
+                Err(ApiError::InvalidRequest("h_max must be at least 1"))
+            } else if value > 1024 {
+                Err(ApiError::InvalidRequest("h_max too large"))
+            } else {
+                Ok(value as usize)
+            }
+        })
+        .transpose()?;
+    let ttl = request
+        .ttl_ms
+        .map(|value| {
+            if value == 0 {
+                Err(ApiError::InvalidRequest("ttl_ms must be positive"))
+            } else {
+                Ok(Duration::from_millis(u64::from(value)))
+            }
+        })
+        .transpose()?;
+
+    let (effective_h, effective_ttl) = {
+        let mut guard = state.server.write().await;
+        guard.update_window_limits(h_max, ttl);
+        guard.window_limits()
+    };
+
+    let ttl_ms = effective_ttl.as_millis().min(u128::from(u32::MAX)) as u32;
+
+    let reply = ConfigureWindowResponse {
+        h_max: effective_h as u32,
+        ttl_ms,
+    };
+    Ok(protobuf_response(&reply))
+}
+
+fn protobuf_response<M: Message>(message: &M) -> Response {
+    let mut buf = BytesMut::new();
+    buf.reserve(message.encoded_len());
+
+    // Handle encoding error gracefully
+    if let Err(e) = message.encode(&mut buf) {
+        error!("failed to encode protobuf response: {}", e);
+        return ApiError::server_message("Failed to encode response").into_response();
+    }
+
+    let mut response = Response::new(buf.freeze().into());
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/x-protobuf"),
+    );
+    response
+}
+
+pub async fn run() -> anyhow::Result<()> {
+    use cityg_config::CityGConfig;
+
+    // Load configuration
+    let config =
+        CityGConfig::load().map_err(|e| anyhow::anyhow!("failed to load configuration: {}", e))?;
+
+    // Validate configuration
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("configuration validation failed: {}", e))?;
+
+    tracing::info!("Configuration loaded successfully");
+    tracing::info!("Server will bind to: {}", config.server.address);
+
+    let addr = config.server.address.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse server address '{}': {}",
+            config.server.address,
+            e
+        )
+    })?;
+
+    run_with_config(addr, config).await
+}
+
+pub async fn run_with_addr(addr: SocketAddr) -> anyhow::Result<()> {
+    use cityg_config::CityGConfig;
+    let config = CityGConfig::default();
+    run_with_config(addr, config).await
+}
+
+fn server_from_config(cfg: &cityg_config::CityGConfig) -> CityGServer {
+    let mut server_cfg = ServerConfig::new();
+    server_cfg.h_max = Some(cfg.protocol.max_concurrent_heads);
+    server_cfg.window_ttl = Some(Duration::from_secs(cfg.server.window_ttl_secs));
+
+    let mut acceptance = AcceptanceOptions {
+        srx_max_bytes: cfg.protocol.default_srx_max_bytes,
+        fs_policy_config: fs_policy_from_settings(&cfg.protocol.fs_policy),
+        ..AcceptanceOptions::default()
+    };
+
+    if cfg.server.seed_demo_room {
+        acceptance.bootstrap_policy = BootstrapPolicy::CaMlDsa {
+            public_key: cityg_client::demo::bootstrap_public().to_vec(),
+        };
+        let mut registry = BTreeMap::new();
+        registry.insert(
+            cityg_client::demo::DEMO_GID.to_vec(),
+            cityg_client::demo::kbroad_public().to_vec(),
+        );
+        acceptance.kbroad_registry = Some(registry);
+    }
+
+    server_cfg.acceptance_options = Some(acceptance);
+
+    let mut server = CityGServer::new(server_cfg);
+    let version = cfg.protocol.fs_policy_version.clone();
+    {
+        let ctx = server.context_mut();
+        ctx.set_allowed_fs_policy_version(Some(version.clone()));
+        ctx.set_fs_policy_version(Some(version));
+    }
+    server
+}
+
+fn fs_policy_from_settings(settings: &cityg_config::FsPolicySettings) -> FsPolicyConfig {
+    FsPolicyConfig {
+        h_seconds: settings.h_seconds,
+        checkpoint_interval_seconds: settings.checkpoint_interval_seconds,
+        checkpoint_head_threshold: settings.checkpoint_head_threshold,
+        slack_anchor: settings.slack_anchor,
+        slack_first_device: settings.slack_first_device,
+        slack_device: settings.slack_device,
+    }
+}
+
+pub async fn run_with_config(
+    addr: SocketAddr,
+    config: cityg_config::CityGConfig,
+) -> anyhow::Result<()> {
+    // Initialize structured logging based on environment
+    init_logging()?;
+
+    // Initialize metrics exporter
+    let prometheus_handle = match middleware::init_metrics_exporter() {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            warn!("metrics exporter disabled: {}", err);
+            None
+        }
+    };
+
+    let server = server_from_config(&config);
+    // Create broadcast channel for WebSocket notifications (capacity from config)
+    let (notification_tx, _) = broadcast::channel(config.server.websocket_capacity);
+
+    let state = ApiState {
+        server: Arc::new(RwLock::new(server)),
+        messages: Arc::new(RwLock::new(AHashMap::new())),
+        bundles: Arc::new(RwLock::new(AHashMap::new())),
+        freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
+        alias_registry: Arc::new(RwLock::new(AHashMap::new())),
+        member_metadata: Arc::new(RwLock::new(AHashMap::new())),
+        weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+        notification_tx,
+    };
+
+    // Build router with all routes
+    let mut router_with_state = Router::new()
+        .route("/health", get(health_legacy_with_state))
+        .route("/health/live", get(health_liveness))
+        .route("/health/ready", get(health_readiness))
+        .route("/health/detailed", get(health_detailed))
+        .route("/v1/ws", get(websocket_handler))
+        .route("/v1/accept_epoch", post(accept_epoch))
+        .route("/v1/members", post(members))
+        .route("/v1/members/search", post(search_members))
+        .route("/v1/send_message", post(send_message))
+        .route("/v1/messages", post(fetch_messages))
+        .route("/v1/window", post(get_window))
+        .route("/v1/telemetry", post(get_telemetry))
+        .route("/v1/config/window", post(configure_window))
+        .route("/v1/bundle", post(get_bundle))
+        .route("/v1/rooms/bootstrap", post(bootstrap_room))
+        .route("/v1/rooms/join_ticket", post(join_ticket))
+        .route("/v1/rooms/merge_ticket", post(merge_ticket))
+        .route("/v1/pivot/refresh", post(refresh_pivot));
+
+    #[cfg(any(debug_assertions, feature = "debug-api"))]
+    {
+        router_with_state =
+            router_with_state.route("/v1/debug/window/seed", post(seed_window_head));
+    }
+
+    let metrics_handle = prometheus_handle.clone();
+    if let Some(handle) = metrics_handle {
+        let handle_clone = handle.clone();
+        router_with_state = router_with_state.route(
+            "/metrics",
+            get(move || {
+                let handle = handle_clone.clone();
+                async move { handle.render() }
+            }),
+        );
+    } else {
+        router_with_state =
+            router_with_state.route("/metrics", get(|| async { "metrics not available" }));
+    }
+
+    let mut app: Router = router_with_state
+        .with_state(state)
+        .layer(axum_middleware::from_fn(
+            middleware::request_tracing_middleware,
+        ));
+
+    if prometheus_handle.is_some() {
+        app = app.layer(axum_middleware::from_fn(middleware::metrics_middleware));
+    }
+
+    info!("listening on {addr}");
+    info!("metrics available at http://{}/metrics", addr);
+    info!("health check at http://{}/health/detailed", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Initialize logging based on environment variables
+fn init_logging() -> anyhow::Result<()> {
+    let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?;
+
+    // Check if JSON logging is requested
+    let use_json = std::env::var("LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    if use_json {
+        // JSON structured logging for production
+        // Ignore error if subscriber is already initialized (e.g., in tests)
+        let _ = tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt::layer().json())
+            .try_init();
+    } else {
+        // Human-readable logging for development
+        // Ignore error if subscriber is already initialized (e.g., in tests)
+        let _ = tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt::layer())
+            .try_init();
+    }
+
+    Ok(())
+}
+
+#[cfg(any(debug_assertions, feature = "debug-api"))]
+async fn seed_window_head(
+    State(state): State<ApiState>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    use msphf_core::hash::h_l;
+    use msphf_orchestrator::mhw::HeadRecord;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct WindowInputs<'a> {
+        #[serde(with = "serde_bytes")]
+        gid: &'a [u8],
+        #[serde(with = "serde_bytes")]
+        parent_root: &'a [u8; 32],
+        #[serde(with = "serde_bytes")]
+        seed_ctx_hash: &'a [u8; 32],
+    }
+
+    let request = SeedHeadRequest::decode(body)?;
+    if request.bundle_cbor.is_empty() {
+        return Err(ApiError::InvalidRequest("bundle_cbor must be provided"));
+    }
+
+    let bundle = match ClientEpochBundle::from_cbor(&request.bundle_cbor) {
+        Ok(bundle) => bundle,
+        Err(ClientError::InvalidInput(_)) => {
+            return Err(ApiError::InvalidRequest("invalid bundle encoding"));
+        }
+        Err(err) => return Err(ApiError::server_message(err.to_string())),
+    };
+
+    let wid = h_l(
+        "mhw/window",
+        &WindowInputs {
+            gid: bundle.gid(),
+            parent_root: &bundle.anchor.parent_root,
+            seed_ctx_hash: &bundle.hp_binding.seed_ctx_hash,
+        },
+    )
+    .map_err(|err| ApiError::server_message(err.to_string()))?;
+
+    {
+        let mut guard = state.server.write().await;
+        let accept_time = guard.context_mut().next_accept_instant();
+        let record = HeadRecord::new(
+            bundle.we_epoch_id,
+            bundle.hp_binding.hp_commit,
+            bundle.hp_binding.seed_ctx_hash,
+            bundle.hp_binding.rho_commit,
+            bundle.hp_binding.seed_commit,
+            bundle.hp_binding.xk_hash,
+            bundle.anchor.join_delta_root,
+            bundle.anchor.revoked_since_prev_root,
+            bundle.anchor.revoked_root,
+            0,
+            accept_time,
+        );
+        guard
+            .context_mut()
+            .mh_window
+            .accept_head(&wid, record, accept_time)
+            .map_err(|err| ApiError::server_message(err.reason.to_string()))?;
+    }
+
+    let reply = SeedHeadResponse {};
+    Ok(protobuf_response(&reply))
+}
+
+async fn refresh_pivot(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = RefreshPivotRequest::decode(body)?;
+    if request.bundle_cbor.is_empty() {
+        return Err(ApiError::InvalidRequest("bundle_cbor must be provided"));
+    }
+
+    let bundle = match ClientEpochBundle::from_cbor(&request.bundle_cbor) {
+        Ok(bundle) => bundle,
+        Err(ClientError::InvalidInput(_)) => {
+            return Err(ApiError::InvalidRequest("invalid bundle encoding"));
+        }
+        Err(err) => return Err(ApiError::server_message(err.to_string())),
+    };
+
+    {
+        let mut guard = state.server.write().await;
+        guard
+            .refresh_pivot(&bundle)
+            .map_err(|err| ApiError::server_message(err.to_string()))?;
+    }
+
+    let reply = RefreshPivotResponse {};
+    Ok(protobuf_response(&reply))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use cityg_config::CityGConfig;
+    use pqcrypto_dilithium::dilithium5;
+    use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+    use serde_bytes::ByteBuf;
+    use serde_json::Value;
+
+    #[test]
+    fn test_identity_binding_creation_and_verification() {
+        // Generate a keypair
+        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let pop_public_key = pop_pk.as_bytes().to_vec();
+        let alias = "alice".to_string();
+
+        // Create the message to sign: CBOR([alias, pop_public_key])
+        let message_data = (
+            ByteBuf::from(alias.as_bytes().to_vec()),
+            ByteBuf::from(pop_public_key.clone()),
+        );
+        let mut message = Vec::new();
+        ciborium::ser::into_writer(&message_data, &mut message)
+            .expect("encode identity binding message");
+
+        // Sign the message
+        let signature = dilithium5::detached_sign(&message, &pop_sk);
+
+        // Create the identity binding
+        let binding = IdentityBinding {
+            alias: alias.clone(),
+            pop_public_key: pop_public_key.clone(),
+            signature: signature.as_bytes().to_vec(),
+        };
+
+        // Verify it
+        let result = verify_identity_binding(&binding);
+        assert!(
+            result.is_ok(),
+            "Identity binding verification should succeed"
+        );
+    }
+
+    #[test]
+    fn test_identity_binding_wrong_signature() {
+        // Generate a keypair
+        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let pop_public_key = pop_pk.as_bytes().to_vec();
+        let alias = "alice".to_string();
+
+        // Sign the wrong message
+        let wrong_message = b"wrong message";
+        let signature = dilithium5::detached_sign(wrong_message, &pop_sk);
+
+        // Create the identity binding with wrong signature
+        let binding = IdentityBinding {
+            alias: alias.clone(),
+            pop_public_key: pop_public_key.clone(),
+            signature: signature.as_bytes().to_vec(),
+        };
+
+        // Verify it should fail
+        let result = verify_identity_binding(&binding);
+        assert!(
+            result.is_err(),
+            "Identity binding with wrong signature should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_alias_updates_leaf_binding() {
+        let state = ApiState {
+            server: Arc::new(RwLock::new(server_from_config(&CityGConfig::default()))),
+            messages: Arc::new(RwLock::new(AHashMap::new())),
+            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
+            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
+            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
+            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+            notification_tx: broadcast::channel(4).0,
+        };
+
+        let alias = "alice";
+        let pop_public_key = vec![0xAA; 8];
+        let initial_leaf = [0x11; 32];
+        let assigned_leaf = [0x22; 32];
+
+        // First registration reserves the alias.
+        state
+            .register_alias(alias, initial_leaf, pop_public_key.clone())
+            .await
+            .expect("initial alias registration");
+
+        // Second registration with the confirmed leaf updates the binding.
+        state
+            .register_alias(alias, assigned_leaf, pop_public_key.clone())
+            .await
+            .expect("alias update");
+
+        let registry = state.alias_registry.read().await;
+        let binding = registry.get(alias).expect("binding present");
+        assert_eq!(
+            binding.leaf_id, assigned_leaf,
+            "alias binding should track the server-issued leaf id"
+        );
+        assert_eq!(
+            binding.pop_public_key, pop_public_key,
+            "alias binding must retain the original pop key"
+        );
+    }
+
+    #[tokio::test]
+    async fn burst_step_error_response_includes_index() {
+        let freeze = FreezeError {
+            code: 9449,
+            reason: "fs_burst_non_monotone_ec",
+        };
+        let response = ApiError::server_with_freeze_context(
+            "acceptance error: fs_burst_non_monotone_ec",
+            freeze,
+            Some("burst_step_failed"),
+            Some(3),
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body bytes");
+        let json: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["error"], "burst_step_failed");
+        assert_eq!(json["failed_index"], 3);
+        assert_eq!(json["freeze_code"], 9449);
+        assert_eq!(json["freeze_reason"], "fs_burst_non_monotone_ec");
+    }
+}

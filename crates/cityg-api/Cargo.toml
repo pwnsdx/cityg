@@ -1,0 +1,53 @@
+[package]
+name = "cityg-api"
+version = "0.1.0"
+license = "MIT"
+authors = ["Sabri Haddouche"]
+edition.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+debug-api = ["cityg-server/debug-api"]
+
+[dependencies]
+axum = { version = "0.7", features = ["macros", "ws"] }
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+tower = { version = "0.4", features = ["make"] }
+bytes = "1"
+prost = "0.12"
+prost-types = "0.12"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+cityg-server = { path = "../cityg-server" }
+cityg-client = { path = "../cityg-client" }
+cityg-config = { path = "../cityg-config" }
+msphf-core = { path = "../msphf-core" }
+msphf-orchestrator = { path = "../msphf-orchestrator" }
+ciborium = "0.2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1"
+hex = "0.4"
+pqcrypto-kyber = "0.8"
+pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
+pqcrypto-traits = "0.3"
+ahash = { version = "0.8", features = ["serde"] }
+
+[dev-dependencies]
+cityg-api-client = { path = "../cityg-api-client" }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
+chacha20poly1305 = "0.10"
+reqwest = "0.12"
+
+[build-dependencies]
+prost-build = "0.12"
+protoc-bin-vendored = "3"

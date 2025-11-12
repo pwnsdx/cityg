@@ -1,0 +1,18 @@
+[package]
+name = "cityg-client"
+version = "0.1.0"
+license = "MIT"
+authors = ["Sabri Haddouche"]
+edition.workspace = true
+
+[dependencies]
+msphf-core = { path = "../msphf-core" }
+msphf-orchestrator = { path = "../msphf-orchestrator" }
+ciborium = "0.2"
+pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
+pqcrypto-traits = "0.3"
+pqcrypto-kyber = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+dirs = "5"
+ahash = { version = "0.8", features = ["serde"] }

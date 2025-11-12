@@ -1,0 +1,71 @@
+# Prometheus configuration for City-G metrics collection
+#
+# This configuration:
+# - Scrapes City-G API metrics every 15 seconds
+# - Retains data for 15 days
+# - Includes alerting rules for common issues
+#
+# Mount this file in Docker Compose or copy to Prometheus config directory
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'cityg-cluster'
+    replica: '1'
+
+# Alertmanager configuration (optional)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# Load alerting rules
+rule_files:
+  # - "alerts/*.yml"
+
+# Scrape configurations
+scrape_configs:
+  # City-G API Server
+  - job_name: 'cityg-api'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: '/metrics'
+    static_configs:
+      - targets:
+          - 'cityg-api:8080'  # Docker Compose service name
+          # - 'localhost:8080'  # For local development
+        labels:
+          service: 'cityg-api'
+          environment: 'production'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    scrape_interval: 30s
+    static_configs:
+      - targets:
+          - 'localhost:9090'
+
+# Example alerting rules (create alerts/cityg.yml)
+# groups:
+#   - name: cityg_alerts
+#     interval: 30s
+#     rules:
+#       - alert: HighErrorRate
+#         expr: rate(http_responses_total{status=~"5.."}[5m]) > 0.01
+#         for: 5m
+#         labels:
+#           severity: critical
+#         annotations:
+#           summary: "High error rate detected"
+#           description: "{{ $labels.instance }} has error rate {{ $value }}"
+#
+#       - alert: CircuitBreakerOpen
+#         expr: circuit_breaker_state{state="open"} == 1
+#         for: 1m
+#         labels:
+#           severity: warning
+#         annotations:
+#           summary: "Circuit breaker is open"
+#           description: "Circuit breaker opened on {{ $labels.instance }}"

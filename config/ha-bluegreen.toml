@@ -1,0 +1,48 @@
+# CityG HA / Blue-Green configuration example
+# This file illustrates the knobs we recommend when running two `cityg-api`
+# instances (blue + green) behind a load balancer. Copy it to `cityg.toml` and
+# override values via environment variables for secrets (KBROAD keys, etc.).
+
+[server]
+address = "0.0.0.0:8443"            # Bind on TLS terminator or localhost if behind proxy
+websocket_capacity = 20000          # Sized for ~20k concurrent devices per site
+window_ttl_secs = 86400             # Override default (120s) to retain heads for blue/green handoffs
+seed_demo_room = false              # Production deployments should not seed demo material
+
+[client]
+default_server_url = "https://cityg.example.com"
+fetch_poll_interval_secs = 5
+fetch_retry_interval_secs = 15
+websocket_reconnect_delay_secs = 5
+api_timeout_secs = 30
+
+[protocol]
+window_duration_secs = 86400        # Match the server TTL override above
+max_concurrent_heads = 64           # Higher H_MAX to tolerate overlapping bursts
+epoch_rotation_interval_secs = 300
+default_srx_max_bytes = 1048576
+max_hp_proof_bytes = 524288
+max_vrf_proof_bytes = 6144
+fs_capss_max_bytes = 16384
+srx_smallwood_max_bytes = 16384
+max_hp_envelope_bytes = 16384
+min_srx_max_bytes = 262144
+receiver_cache_ttl_secs = 30
+fs_policy_version = "fs-prod-v1"
+
+[protocol.fs_policy]
+h_seconds = 300
+checkpoint_interval_seconds = 1800  # Trigger checkpoints every 30 minutes
+checkpoint_head_threshold = 24
+slack_anchor = 0
+slack_first_device = 0
+slack_device = 4
+
+[gui]
+default_window_width = 1920.0
+default_window_height = 1080.0
+members_page_limit = 500
+members_refresh_interval_secs = 20
+min_card_width = 320.0
+max_card_width = 960.0
+max_card_height = 780.0

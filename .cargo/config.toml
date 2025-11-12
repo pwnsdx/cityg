@@ -1,0 +1,3 @@
+# Make nextest the default test runner
+[alias]
+test = "nextest run"

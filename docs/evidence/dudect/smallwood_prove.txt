@@ -1,0 +1,5 @@
+Running target 'smallwood_prove' with 200000 samples (inner loop 16)
+Class 0: mean 462911.085870 ns (n=200000)
+Class 1: mean 462694.630710 ns (n=200000)
+Welch t-statistic: 2.1693
+|t| > 4.5 is suspicious. Current |t| = 2.1693

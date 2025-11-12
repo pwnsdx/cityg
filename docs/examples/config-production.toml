@@ -1,0 +1,134 @@
+# City-G Production Configuration
+#
+# This file demonstrates recommended production settings for a City-G deployment.
+# Copy to cityg.toml or specify via --config flag.
+#
+# Environment variables (CITYG_*) override these settings.
+
+[server]
+# Server bind address
+# Production: Bind to all interfaces for load balancer access
+address = "0.0.0.0:8080"
+
+# WebSocket broadcast channel capacity
+# Increase for high-traffic deployments
+websocket_capacity = 2000
+
+# Multi-head window time-to-live (seconds)
+# Longer TTL = more memory, better tolerance for delayed clients
+# Production default: 120 seconds (raise to 240+ only if client jitter demands it)
+window_ttl_secs = 120
+
+[client]
+# Default server URL for client connections
+# Update to your production domain
+default_server_url = "https://cityg.example.com"
+
+# Message fetch polling interval (seconds)
+# Production: 5-10 seconds (WebSocket provides real-time updates)
+fetch_poll_interval_secs = 5
+
+# Failed fetch retry interval (seconds)
+fetch_retry_interval_secs = 15
+
+# WebSocket reconnection delay (seconds)
+websocket_reconnect_delay_secs = 5
+
+# API request timeout (seconds)
+# Production: 30-60 seconds for proof generation latency
+api_timeout_secs = 60
+
+[protocol]
+# Window duration for multi-head tracking (seconds)
+# Production: Match server window_ttl_secs
+window_duration_secs = 120
+
+# Maximum concurrent heads in multi-head window
+# Production: 32-64 for high concurrency
+max_concurrent_heads = 32
+
+# Forward secrecy epoch rotation interval (seconds)
+# Production: 300-3600 (5 minutes to 1 hour)
+# Shorter = better forward secrecy, higher CPU usage
+epoch_rotation_interval_secs = 600
+
+# Default maximum SRX (witness) payload size (bytes)
+# Production: 2MB default is usually sufficient
+default_srx_max_bytes = 2097152
+
+# Maximum HP proof size (bytes)
+max_hp_proof_bytes = 524288
+
+# Maximum VRF proof size (bytes)
+max_vrf_proof_bytes = 6144
+
+# FS CAPSS maximum size (bytes)
+fs_capss_max_bytes = 16384
+
+# SRX Smallwood maximum size (bytes)
+srx_smallwood_max_bytes = 16384
+
+# Maximum HP envelope size (bytes)
+max_hp_envelope_bytes = 16384
+
+# Minimum SRX maximum size (bytes)
+min_srx_max_bytes = 262144
+
+# Receiver cache TTL (seconds)
+# Production: 30-60 seconds
+receiver_cache_ttl_secs = 60
+
+[gui]
+# Default window dimensions (pixels)
+default_window_width = 1920.0
+default_window_height = 1080.0
+
+# Members per page for pagination
+# Production: 200-500 depending on expected group sizes
+members_page_limit = 500
+
+# Automatic roster refresh interval (seconds)
+# Production: 30-60 seconds
+members_refresh_interval_secs = 30
+
+# Card dimensions for UI layout (pixels)
+min_card_width = 320.0
+max_card_width = 960.0
+max_card_height = 780.0
+
+# Production deployment notes:
+#
+# 1. TLS/HTTPS:
+#    - Use reverse proxy (nginx, traefik) for TLS termination
+#    - Set default_server_url to https://
+#
+# 2. Monitoring:
+#    - Enable /metrics endpoint (always on)
+#    - Configure Prometheus scraping
+#    - Set up Grafana dashboards
+#
+# 3. Logging:
+#    - Set LOG_FORMAT=json for structured logging
+#    - Ship logs to ELK/Splunk/CloudWatch
+#    - Set RUST_LOG=info for production
+#
+# 4. Performance:
+#    - Increase max_concurrent_heads for high load
+#    - Only raise window_ttl_secs above 120s if real-world jitter demands it
+#    - Monitor window utilization (h/h_max ratio)
+#
+# 5. Durability:
+#    - Enable journal with state_path (server config)
+#    - Use SSD/NVMe for journal storage
+#    - Back up journal alongside application data
+#
+# 6. Scaling:
+#    - Deploy multiple API servers behind load balancer
+#    - Use sticky sessions for WebSocket connections
+#    - Share journal via network filesystem (caution: performance)
+#
+# 7. Security:
+#    - Run server as non-root user
+#    - Use read-only container filesystem
+#    - Enable firewall rules (only port 8080)
+#    - Verify server-blindness: ./scripts/verify_no_secrets.sh

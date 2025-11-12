@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "crates/msphf-core",
+    "crates/anchor-seed",
+    "crates/msphf-rlwe",
+    "crates/msphf-orchestrator",
+    "crates/msphf-lb-vrf",
+    "crates/cityg-client",
+    "crates/cityg-server",
+    "crates/cityg-api",
+    "crates/cityg-api-client",
+    "crates/dudect-harness", "crates/capss",
+    "crates/cityg-gui", "crates/cityg-config",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+authors = ["Sabri Haddouche"]
+repository = "https://github.com/pwnsdx/cityg"
+
+[profile.release]
+lto = true              # Link-time optimization for better performance
+codegen-units = 1       # Single codegen unit for maximum optimization
+opt-level = 3           # Maximum speed optimization
+
+[profile.release-small]
+inherits = "release"
+lto = true
+codegen-units = 1
+opt-level = "z"         # Optimize for binary size
+strip = true            # Strip debug symbols

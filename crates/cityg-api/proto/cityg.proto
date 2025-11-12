@@ -1,0 +1,273 @@
+syntax = "proto3";
+
+package cityg.api.v1;
+
+// Wire compatibility guidelines:
+// - New, breaking wire formats must live under a new package (cityg.api.v{N}).
+// - Field numbers 1000-1999 are intentionally reserved in every message so we
+//   can retire fields without risking accidental reuse.
+
+message AcceptEpochRequest {
+  reserved 1000 to 1999;
+  bytes bundle_cbor = 1;
+}
+
+message AcceptEpochResponse {
+  reserved 1000 to 1999;
+  bytes we_epoch_id = 1;
+  bytes wid = 2;
+  bytes parent_root = 3;
+  bytes new_root = 4;
+}
+
+message MembersRequest {
+  reserved 1000 to 1999;
+  bytes gid = 1;
+  bytes parent_root = 2; // optional: empty for latest
+  optional uint64 offset = 3;
+  optional uint32 limit = 4;
+}
+
+// Identity binding - cryptographically binds alias to device key
+message IdentityBinding {
+  reserved 1000 to 1999;
+  string alias = 1;
+  bytes pop_public_key = 2;  // ML-DSA-65 public key (48 bytes)
+  bytes signature = 3;        // ML-DSA-65 signature over CBOR([alias, pop_public_key])
+}
+
+message Member {
+  reserved 1000 to 1999;
+  bytes leaf_id = 1;
+  optional string alias = 2;           // Display name if known
+  optional bytes pop_public_key = 3;   // Device public key
+  optional uint64 join_date = 4;       // Unix timestamp (milliseconds) when member joined
+  optional uint64 last_seen = 5;       // Unix timestamp (milliseconds) of last activity
+}
+
+message MembersResponse {
+  reserved 1000 to 1999;
+  repeated Member members = 1;
+  bytes root = 2;
+  uint64 total_count = 3;
+  uint64 next_offset = 4;
+}
+
+message SearchMembersRequest {
+  reserved 1000 to 1999;
+  bytes gid = 1;
+  string query = 2;                    // Search query (alias or partial leaf_id hex)
+  bytes parent_root = 3;               // optional: empty for latest
+  optional uint64 offset = 4;
+  optional uint32 limit = 5;
+}
+
+message SearchMembersResponse {
+  reserved 1000 to 1999;
+  repeated Member members = 1;
+  bytes root = 2;
+  uint64 total_count = 3;
+  uint64 next_offset = 4;
+}
+
+message SendMessageRequest {
+  reserved 1000 to 1999;
+  bytes we_epoch_id = 1;
+  bytes ciphertext = 2;
+  bytes sender = 3;
+}
+
+message SendMessageResponse {
+  reserved 1000 to 1999;
+  string status = 1;
+}
+
+message FetchMessagesRequest {
+  reserved 1000 to 1999;
+  bytes we_epoch_id = 1;
+}
+
+message ChatMessage {
+  reserved 1000 to 1999;
+  bytes ciphertext = 1;
+  bytes we_epoch_id = 2;
+  bytes sender = 3;
+  uint64 timestamp_ms = 4;
+}
+
+message FetchMessagesResponse {
+  reserved 1000 to 1999;
+  repeated ChatMessage messages = 1;
+}
+
+message HealthResponse {
+  reserved 1000 to 1999;
+  string status = 1;
+}
+
+message GetBundleRequest {
+  reserved 1000 to 1999;
+  bytes we_epoch_id = 1;
+}
+
+message GetBundleResponse {
+  reserved 1000 to 1999;
+  bytes bundle_cbor = 1;
+}
+
+message GetWindowRequest {
+  reserved 1000 to 1999;
+}
+
+message WindowHead {
+  reserved 1000 to 1999;
+  bytes we_epoch_id = 1;
+  bytes msphf_hp_commit = 2;
+  bytes seed_ctx_hash = 3;
+  bytes rho_commit = 4;
+  bytes seed_commit = 5;
+  bytes xk_hash = 6;
+  uint64 accept_seq = 7;
+  uint64 age_ms = 8;
+}
+
+message WindowEntry {
+  reserved 1000 to 1999;
+  bytes wid = 1;
+  repeated WindowHead heads = 2;
+}
+
+message GetWindowResponse {
+  reserved 1000 to 1999;
+  repeated WindowEntry entries = 1;
+}
+
+message GetTelemetryRequest {
+  reserved 1000 to 1999;
+}
+
+message TelemetryEntry {
+  reserved 1000 to 1999;
+  bytes gid = 1;
+  bytes parent_root = 2;
+  uint64 head_attempts = 3;
+  uint64 head_insertions = 4;
+  uint64 freeze_window_full = 5;
+  uint64 freeze_rho_replay = 6;
+  uint64 last_active_heads = 7;
+}
+
+message FreezeStat {
+  reserved 1000 to 1999;
+  uint32 code = 1;
+  string reason = 2;
+  uint64 count = 3;
+}
+
+message GetTelemetryResponse {
+  reserved 1000 to 1999;
+  repeated TelemetryEntry entries = 1;
+  repeated FreezeStat freeze_stats = 2;
+}
+
+message SeedHeadRequest {
+  reserved 1000 to 1999;
+  bytes bundle_cbor = 1;
+}
+
+message SeedHeadResponse {
+  reserved 1000 to 1999;
+}
+
+message RefreshPivotRequest {
+  reserved 1000 to 1999;
+  bytes bundle_cbor = 1;
+}
+
+message RefreshPivotResponse {
+  reserved 1000 to 1999;
+}
+
+message ConfigureWindowRequest {
+  reserved 1000 to 1999;
+  optional uint32 h_max = 1;
+  optional uint32 ttl_ms = 2;
+}
+
+message ConfigureWindowResponse {
+  reserved 1000 to 1999;
+  uint32 h_max = 1;
+  uint32 ttl_ms = 2;
+}
+
+message JoinTicketRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  string alias = 2;                       // DEPRECATED - use identity_binding instead
+  optional IdentityBinding identity_binding = 3;
+}
+
+message JoinTicketResponse {
+  reserved 1000 to 1999;
+  bytes gid = 1;
+  bytes cat = 2;
+  bytes parent_root = 3;
+  bytes revoked_root = 4;
+  bytes revoked_since_root = 5;
+  bytes tswe_salt_hash = 6;
+  bytes join_delta_root = 7;
+  bytes leaf_id = 8;
+  bytes pox_r_commit = 9;
+  bytes witness_cbor = 10;
+  bytes srx_cbor = 11;
+  string msphf_crs_id = 12;
+  string msphf_params_id = 13;
+  string proof_mode = 14;
+  string vrf_id = 15;
+  string policy_version = 16;
+  string fs_policy_version = 17;
+  uint64 fs_epoch_base_ts = 18;
+  bytes kbroad_public = 19;
+  bytes bootstrap_public = 20;
+  optional IdentityBinding confirmed_binding = 21;  // Server confirms the binding
+}
+
+message MergeTicketRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  bytes leaf_id = 2;
+}
+
+message MergeTicketResponse {
+  reserved 1000 to 1999;
+  bytes we_epoch_id = 1;
+  repeated bytes pivot_parity_cbor = 2;
+  bytes witness_cbor = 3;
+  string proof_mode = 4;
+  string vrf_id = 5;
+  string policy_version = 6;
+  bytes kbroad_public = 7;
+  bytes cat = 8;
+  bytes parent_root = 9;
+  bytes join_delta_root = 10;
+  bytes revoked_since_root = 11;
+  bytes revoked_root = 12;
+  bytes tswe_salt_hash = 13;
+  bytes pox_r_commit = 14;
+  bytes srx_cbor = 15;
+  string msphf_crs_id = 16;
+  string msphf_params_id = 17;
+  string fs_policy_version = 18;
+  uint64 fs_epoch_base_ts = 19;
+}
+
+message BootstrapRoomRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  bytes kbroad_public = 2;
+}
+
+message BootstrapRoomResponse {
+  reserved 1000 to 1999;
+  string status = 1;
+}

@@ -1,0 +1,201 @@
+# Kubernetes deployment manifest for City-G API server
+#
+# This manifest includes:
+# - Deployment with 3 replicas for high availability
+# - Service with LoadBalancer
+# - ConfigMap for configuration
+# - PersistentVolumeClaim for journal storage
+# - Horizontal Pod Autoscaler
+#
+# Usage:
+#   kubectl apply -f kubernetes-deployment.yml
+#
+# Requirements:
+# - Kubernetes 1.19+
+# - Storage class for PVC (optional, for crash recovery)
+# - LoadBalancer support (or use NodePort/ClusterIP)
+
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cityg
+  labels:
+    name: cityg
+
+---
+# ConfigMap for configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cityg-config
+  namespace: cityg
+data:
+  # Server configuration
+  CITYG_SERVER_ADDRESS: "0.0.0.0:8080"
+  CITYG_SERVER_WEBSOCKET_CAPACITY: "1000"
+  CITYG_SERVER_WINDOW_TTL_SECS: "10"
+
+  # Protocol configuration
+  CITYG_PROTOCOL_WINDOW_DURATION_SECS: "10"
+  CITYG_PROTOCOL_MAX_CONCURRENT_HEADS: "16"
+  CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS: "3600"
+
+  # Logging
+  LOG_FORMAT: "json"
+  RUST_LOG: "info"
+
+---
+# PersistentVolumeClaim for journal storage (optional)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cityg-journal-pvc
+  namespace: cityg
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # Uncomment and set your storage class
+  # storageClassName: fast-ssd
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cityg-api
+  namespace: cityg
+  labels:
+    app: cityg-api
+    version: v0.1.0
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cityg-api
+  template:
+    metadata:
+      labels:
+        app: cityg-api
+        version: v0.1.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: cityg-api
+        image: cityg-api:0.1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: cityg-config
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        volumeMounts:
+        - name: journal-storage
+          mountPath: /var/lib/cityg
+      volumes:
+      - name: journal-storage
+        persistentVolumeClaim:
+          claimName: cityg-journal-pvc
+      # Optional: Use emptyDir for ephemeral storage
+      # - name: journal-storage
+      #   emptyDir: {}
+
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: cityg-api-service
+  namespace: cityg
+  labels:
+    app: cityg-api
+spec:
+  type: LoadBalancer
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+    protocol: TCP
+  selector:
+    app: cityg-api
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cityg-api-hpa
+  namespace: cityg
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cityg-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# ServiceMonitor for Prometheus Operator (optional)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cityg-api-metrics
+  namespace: cityg
+  labels:
+    app: cityg-api
+spec:
+  selector:
+    matchLabels:
+      app: cityg-api
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s

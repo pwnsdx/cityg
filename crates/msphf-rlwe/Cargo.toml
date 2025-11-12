@@ -1,0 +1,19 @@
+[package]
+name = "msphf-rlwe"
+version = "0.1.0"
+license = "MIT"
+authors = ["Sabri Haddouche"]
+edition = "2024"
+
+[dependencies]
+blake3 = "1.5"
+ciborium = { version = "0.2", features = ["std"] }
+msphf-core = { path = "../msphf-core" }
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
+pqcrypto-traits = "0.3"

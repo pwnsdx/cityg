@@ -1,0 +1,6852 @@
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+    path::PathBuf,
+    sync::{LazyLock, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use ahash::AHashMap;
+use anchor_seed::{
+    SeedCommitFields, build_anchor_seed_ctx, compute_seed_bundle_commit, compute_seed_commit,
+    compute_seed_ctx_hash,
+};
+use anyhow::{Context as AnyhowContext, Result, anyhow};
+use blake3::hash as blake3_hash;
+use ciborium::value::{Integer, Value};
+use cityg_api_client::{CitygApiClient, Error as ApiClientError, MergeTicket};
+use cityg_client::CityGClient;
+use cityg_client::demo;
+use cityg_client::witness::SrxInputsOwned;
+use cityg_config::CityGConfig;
+use dirs::config_dir;
+use futures::StreamExt;
+use gpui::prelude::*;
+use gpui::{
+    App, Application, Bounds, ClipboardItem, Context as ViewContext, CursorStyle, Div, ElementId,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, Overflow, Render, Task, TitlebarOptions,
+    Window, WindowBounds, WindowDecorations, WindowOptions, div, point, px, rgb, size,
+};
+use hex::{decode as hex_decode, encode as hex_encode};
+use humantime::format_rfc3339_seconds;
+use msphf_core::{ds, hash::h_l};
+use msphf_orchestrator::CapssWitnessBundle;
+use msphf_orchestrator::{
+    AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
+    OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_proofs_commit_bytes,
+    derive_we_epoch_id, deterministic_lb_vrf_keys, hdr,
+};
+use pqcrypto_dilithium::{
+    dilithium3::{
+        self, public_key_bytes as ml_dsa_public_key_bytes,
+        signature_bytes as ml_dsa_signature_bytes,
+    },
+    dilithium5,
+};
+use pqcrypto_traits::sign::{
+    DetachedSignature, PublicKey as DilithiumPublicKey, SecretKey as DilithiumSecretKey,
+};
+use rand::{RngCore, thread_rng};
+use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
+use tracing::{debug, info, warn};
+
+mod tokio_bridge {
+    use anyhow::Error;
+    use gpui::{App, AppContext, Global, Task};
+    use std::future::Future;
+    use tokio::{
+        runtime::{Builder, Runtime},
+        task::AbortHandle,
+    };
+
+    pub fn init(app: &mut App) {
+        app.set_global(GlobalTokio::new());
+    }
+
+    struct GlobalTokio {
+        runtime: Runtime,
+    }
+
+    impl Global for GlobalTokio {}
+
+    impl GlobalTokio {
+        fn new() -> Self {
+            let runtime = Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("failed to initialize Tokio runtime");
+            Self { runtime }
+        }
+    }
+
+    struct AbortGuard(Option<AbortHandle>);
+
+    impl Drop for AbortGuard {
+        fn drop(&mut self) {
+            if let Some(handle) = self.0.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    pub struct Tokio;
+
+    impl Tokio {
+        pub fn spawn_result<C, Fut, R>(cx: &C, f: Fut) -> C::Result<Task<anyhow::Result<R>>>
+        where
+            C: AppContext,
+            Fut: Future<Output = anyhow::Result<R>> + Send + 'static,
+            R: Send + 'static,
+        {
+            cx.read_global(|tokio: &GlobalTokio, cx| {
+                let join_handle = tokio.runtime.spawn(f);
+                let abort_handle = join_handle.abort_handle();
+                let cancel = AbortGuard(Some(abort_handle));
+                cx.background_spawn(async move {
+                    let result = join_handle.await;
+                    drop(cancel);
+                    result.map_err(Error::from)?
+                })
+            })
+        }
+    }
+}
+
+use tokio_bridge::Tokio;
+
+pub fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_target(false)
+        .without_time()
+        .init();
+
+    // Load configuration
+    let config = match CityGConfig::load() {
+        Ok(config) => {
+            if let Err(e) = config.validate() {
+                eprintln!("Configuration validation failed: {}", e);
+                eprintln!("Please check your configuration and try again.");
+                std::process::exit(1);
+            }
+            info!("Configuration loaded successfully");
+            config
+        }
+        Err(e) => {
+            warn!("Failed to load configuration: {}, using defaults", e);
+            CityGConfig::default()
+        }
+    };
+
+    Application::new().run(move |app: &mut App| {
+        info!("Starting City-G GUI");
+        tokio_bridge::init(app);
+
+        let window_options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(12.0), px(12.0))),
+            }),
+            window_decorations: Some(WindowDecorations::Client),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(
+                    px(config.gui.default_window_width),
+                    px(config.gui.default_window_height),
+                ),
+                app,
+            ))),
+            ..Default::default()
+        };
+
+        let config_clone = config.clone();
+        let window_result = app.open_window(window_options, |_, cx| {
+            let entity = cx.new(|_| AppModel::new(config_clone));
+            let weak = entity.downgrade();
+
+            cx.observe_keystrokes(move |event, _, cx| {
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |model, cx| {
+                        model.on_keystroke(&event.keystroke, cx);
+                    });
+                }
+            })
+            .detach();
+
+            entity
+        });
+
+        if let Err(e) = window_result {
+            eprintln!("Failed to open application window: {}", e);
+            eprintln!("Please check your display settings and try again.");
+            std::process::exit(1);
+        }
+
+        app.activate(true);
+    });
+}
+
+struct AppModel {
+    config: CityGConfig,
+    join_form: JoinFormState,
+    join_status: JoinStatus,
+    leave_status: LeaveStatus,
+    session: Option<AppSession>,
+    last_error: Option<String>,
+    categorized_error: Option<CategorizedError>,
+    info_message: Option<String>,
+    toasts: Vec<Toast>,
+    messages: Vec<ChatMessageEntry>,
+    message_keys: HashSet<MessageKey>,
+    fetch_status: FetchStatus,
+    send_status: SendStatus,
+    composer: MessageComposer,
+    fetch_task: Option<Task<()>>,
+    fetch_in_flight: bool,
+    show_ciphertext: bool,
+    members: Vec<MemberEntry>,
+    members_status: MembersStatus,
+    members_total: u64,
+    members_next_offset: Option<u64>,
+    members_loading_append: bool,
+    members_auto_page: bool,
+    members_alias_dirty: bool,
+    members_mode: MembersMode,
+    members_search: MembersSearchState,
+    members_refresh_task: Option<Task<()>>,
+    alias_bindings: AHashMap<String, AliasBindingRecord>,
+    leaf_alias_index: AHashMap<[u8; 32], String>,
+    epoch_rotation_task: Option<Task<()>>, // Background task for automatic epoch rotation
+    ws_task: Option<Task<()>>,             // WebSocket connection task
+    ws_connected: bool,                    // WebSocket connection status
+    last_retry_action: Option<RetryAction>, // Track what action to retry
+    security_events: Vec<SecurityEvent>,
+    security_unread: u32,
+    security_panel_expanded: bool,
+}
+
+enum JoinStatus {
+    Idle,
+    Joining,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeaveStatus {
+    Idle,
+    Leaving,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FetchStatus {
+    Idle,
+    Refreshing,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SendStatus {
+    Idle,
+    Sending,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum MembersStatus {
+    Idle,
+    Loading(String),
+    Error(String),
+}
+
+// Error categorization for user-friendly error handling
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ErrorCategory {
+    Network,
+    Crypto,
+    Policy,
+    Server,
+    Validation,
+}
+
+#[derive(Debug, Clone)]
+struct CategorizedError {
+    category: ErrorCategory,
+    user_message: String,
+    technical_details: String,
+    recovery_suggestion: String,
+    can_retry: bool,
+}
+
+impl CategorizedError {
+    fn new(
+        category: ErrorCategory,
+        user_message: impl Into<String>,
+        technical_details: impl Into<String>,
+        recovery_suggestion: impl Into<String>,
+        can_retry: bool,
+    ) -> Self {
+        Self {
+            category,
+            user_message: user_message.into(),
+            technical_details: technical_details.into(),
+            recovery_suggestion: recovery_suggestion.into(),
+            can_retry,
+        }
+    }
+}
+
+// Toast notification system
+#[derive(Debug, Clone, PartialEq)]
+enum ToastKind {
+    Success,
+    Error,
+    Info,
+}
+
+#[derive(Debug, Clone)]
+struct Toast {
+    kind: ToastKind,
+    message: String,
+    created_at: SystemTime,
+    duration_secs: u64,
+}
+
+impl Toast {
+    fn success(message: impl Into<String>) -> Self {
+        Self {
+            kind: ToastKind::Success,
+            message: message.into(),
+            created_at: SystemTime::now(),
+            duration_secs: 4,
+        }
+    }
+
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            kind: ToastKind::Error,
+            message: message.into(),
+            created_at: SystemTime::now(),
+            duration_secs: 6,
+        }
+    }
+
+    fn info(message: impl Into<String>) -> Self {
+        Self {
+            kind: ToastKind::Info,
+            message: message.into(),
+            created_at: SystemTime::now(),
+            duration_secs: 3,
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        SystemTime::now()
+            .duration_since(self.created_at)
+            .map(|d| d.as_secs() >= self.duration_secs)
+            .unwrap_or(true)
+    }
+}
+
+// Track which action can be retried
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryAction {
+    Join,
+    Send,
+    Leave,
+}
+
+#[derive(Clone, Default)]
+struct MessageComposer {
+    text: String,
+    active: bool,
+}
+
+// Configuration constants have been moved to cityg_config
+// These are kept as fallback if needed but should use config from AppModel
+
+impl MessageComposer {
+    fn clear(&mut self) {
+        self.text.clear();
+    }
+
+    fn is_ready(&self) -> bool {
+        !self.text.trim().is_empty()
+    }
+
+    fn focus(&mut self) {
+        self.active = true;
+    }
+
+    fn blur(&mut self) {
+        self.active = false;
+    }
+
+    fn handle_keystroke(&mut self, ks: &Keystroke) -> KeyOutcome {
+        if !self.active {
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "escape" {
+            self.blur();
+            return KeyOutcome::Updated;
+        }
+
+        if ks.key == "return" || ks.key == "enter" {
+            if self.is_ready() {
+                return KeyOutcome::Submit;
+            }
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "backspace" {
+            if !self.text.is_empty() {
+                self.text.pop();
+                return KeyOutcome::Updated;
+            }
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "delete" {
+            if !self.text.is_empty() {
+                self.text.clear();
+                return KeyOutcome::Updated;
+            }
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "space" {
+            self.text.push(' ');
+            return KeyOutcome::Updated;
+        }
+
+        if let Some(ch) = ks.key_char.as_ref() {
+            if ks.modifiers.control
+                || ks.modifiers.alt
+                || ks.modifiers.platform
+                || ks.modifiers.function
+            {
+                return KeyOutcome::None;
+            }
+            if ch.chars().any(|c| c == '\n' || c == '\r' || c == '\t') {
+                return KeyOutcome::None;
+            }
+            self.text.push_str(ch);
+            return KeyOutcome::Updated;
+        }
+
+        KeyOutcome::None
+    }
+}
+
+#[derive(Clone, Default)]
+struct MembersSearchState {
+    query: String,
+    active: bool,
+}
+
+impl MembersSearchState {
+    fn focus(&mut self) {
+        self.active = true;
+    }
+
+    fn blur(&mut self) {
+        self.active = false;
+    }
+
+    fn clear(&mut self) {
+        self.query.clear();
+    }
+
+    fn handle_keystroke(&mut self, ks: &Keystroke) -> KeyOutcome {
+        if !self.active {
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "escape" {
+            self.blur();
+            return KeyOutcome::Updated;
+        }
+
+        if ks.key == "tab" {
+            self.blur();
+            return KeyOutcome::Updated;
+        }
+
+        if ks.key == "return" || ks.key == "enter" {
+            return KeyOutcome::Submit;
+        }
+
+        if ks.key == "backspace" {
+            if !self.query.is_empty() {
+                self.query.pop();
+                return KeyOutcome::Updated;
+            }
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "delete" {
+            if !self.query.is_empty() {
+                self.query.clear();
+                return KeyOutcome::Updated;
+            }
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "space" {
+            self.query.push(' ');
+            return KeyOutcome::Updated;
+        }
+
+        if let Some(ch) = ks.key_char.as_ref() {
+            if ks.modifiers.control
+                || ks.modifiers.alt
+                || ks.modifiers.platform
+                || ks.modifiers.function
+            {
+                return KeyOutcome::None;
+            }
+
+            if ch.chars().any(|c| c == '\n' || c == '\r' || c == '\t') {
+                return KeyOutcome::None;
+            }
+
+            self.query.push_str(ch);
+            return KeyOutcome::Updated;
+        }
+
+        KeyOutcome::None
+    }
+}
+
+#[derive(Clone, Default)]
+enum MembersMode {
+    #[default]
+    Full,
+    Search {
+        query: String,
+    },
+}
+
+#[derive(Clone)]
+struct SecurityEvent {
+    alias: String,
+    description: String,
+    timestamp_ms: u64,
+}
+
+#[derive(Clone)]
+struct ChatMessageEntry {
+    sender_leaf: Option<[u8; 32]>,
+    fallback_label: String,
+    plaintext: String,
+    ciphertext_hex: String,
+    timestamp_ms: u64,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct MessageKey {
+    timestamp_ms: u64,
+    ciphertext_hex: String,
+    sender_leaf: Option<[u8; 32]>,
+}
+
+#[derive(Clone)]
+struct MemberEntry {
+    leaf_id: [u8; 32],
+    alias: Option<String>,
+    pop_public_key: Option<Vec<u8>>,
+    join_timestamp_ms: Option<u64>,
+    last_seen_timestamp_ms: Option<u64>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct AliasBindingRecord {
+    pop_public_key: Vec<u8>,
+    leaf_id: [u8; 32],
+}
+
+#[derive(Clone)]
+struct AppSession {
+    server_url: String,
+    room_id: String,
+    alias: String,
+    gid: [u8; 32],
+    cat: [u8; 32],
+    leaf_id: [u8; 32],
+    parent_root: [u8; 32],
+    join_delta_root: [u8; 32],
+    revoked_since_root: [u8; 32],
+    revoked_root: [u8; 32],
+    regular_fingerprint: Option<[u8; 32]>,
+    fs_fingerprint: Option<[u8; 32]>,
+    tswe_salt_hash: [u8; 32],
+    pox_r_commit: [u8; 32],
+    we_epoch_id: [u8; 32],
+    epoch_key: [u8; 32],
+    forward_state: ForwardSecrecyState,
+    fs_ec: u64,
+    fs_epoch_commit: [u8; 32],
+    fs_dev_prev_commit: [u8; 32],
+    fs_epoch_created_at: SystemTime, // Timestamp when current epoch was created
+    fs_epoch_rotation_interval_secs: u64, // Epoch rotation interval (default: 300 = 5 min)
+    pop_public_key: Vec<u8>,
+    pop_secret_key: Vec<u8>,
+    msg_sign_public_key: Vec<u8>, // ML-DSA-65 (Dilithium3) for message authentication
+    msg_sign_secret_key: Vec<u8>, // ML-DSA-65 (Dilithium3) for message authentication
+    vrf_secret_key: Vec<u8>,
+    vrf_public_key: Vec<u8>,
+    kbroad_public: Vec<u8>,
+    bootstrap_public: Vec<u8>,
+    proof_mode: String,
+    vrf_id: String,
+    policy_version: String,
+    msphf_crs_id: String,
+    msphf_params_id: String,
+    fs_policy_version: String,
+    fs_epoch_base_ts: u64,
+    last_fetch_timestamp_ms: Option<u64>,
+    capss_witness: Vec<u8>,
+}
+
+impl AppModel {
+    fn new(config: CityGConfig) -> Self {
+        let mut model = Self {
+            config: config.clone(),
+            join_form: JoinFormState {
+                server: config.client.default_server_url.clone(),
+                room_id: AppModel::random_room_id(),
+                alias: String::new(),
+                active: Some(ActiveField::Alias),
+            },
+            join_status: JoinStatus::Idle,
+            leave_status: LeaveStatus::Idle,
+            session: None,
+            last_error: None,
+            categorized_error: None,
+            info_message: None,
+            toasts: Vec::new(),
+            messages: Vec::new(),
+            message_keys: HashSet::new(),
+            fetch_status: FetchStatus::Idle,
+            send_status: SendStatus::Idle,
+            composer: MessageComposer::default(),
+            fetch_task: None,
+            fetch_in_flight: false,
+            show_ciphertext: false,
+            members: Vec::new(),
+            members_status: MembersStatus::Idle,
+            members_total: 0,
+            members_next_offset: None,
+            members_loading_append: false,
+            members_auto_page: false,
+            members_alias_dirty: false,
+            members_mode: MembersMode::default(),
+            members_search: MembersSearchState::default(),
+            members_refresh_task: None,
+            alias_bindings: AHashMap::new(),
+            leaf_alias_index: AHashMap::new(),
+            epoch_rotation_task: None,
+            ws_task: None,
+            ws_connected: false,
+            last_retry_action: None,
+            security_events: Vec::new(),
+            security_unread: 0,
+            security_panel_expanded: false,
+        };
+
+        match load_last_session() {
+            Ok(Some(saved)) => {
+                model.join_form.server = saved.server_url.clone();
+                model.join_form.room_id = saved.room_id.clone();
+                model.join_form.alias = saved.alias.clone();
+                model.join_form.active = None;
+                model.session = Some(saved);
+                model.hydrate_alias_bindings_from_disk();
+                model.load_security_events_from_disk();
+                model.info_message = Some("Restored saved session.".to_string());
+                model.fetch_status = FetchStatus::Idle;
+                model.send_status = SendStatus::Idle;
+                model.messages.clear();
+                model.message_keys.clear();
+                model.composer.clear();
+                model.composer.blur();
+                model.fetch_task = None;
+                model.fetch_in_flight = false;
+                model.show_ciphertext = false;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!("failed to load saved session: {err:?}");
+            }
+        }
+
+        model
+    }
+}
+
+#[derive(Clone)]
+struct JoinFormState {
+    server: String,
+    room_id: String,
+    alias: String,
+    active: Option<ActiveField>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveField {
+    Server,
+    Room,
+    Alias,
+}
+
+enum KeyOutcome {
+    None,
+    Updated,
+    Submit,
+}
+
+impl JoinFormState {
+    fn is_ready(&self) -> bool {
+        let server = self.server.trim();
+        let room = self.room_id.trim();
+        let alias = self.alias.trim();
+
+        !server.is_empty() && !alias.is_empty() && Self::is_valid_room_id(room)
+    }
+
+    fn is_valid_room_id(room: &str) -> bool {
+        room.len() == 64 && room.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    fn field_mut(&mut self, field: ActiveField) -> &mut String {
+        match field {
+            ActiveField::Server => &mut self.server,
+            ActiveField::Room => &mut self.room_id,
+            ActiveField::Alias => &mut self.alias,
+        }
+    }
+
+    fn next_field(field: ActiveField) -> ActiveField {
+        match field {
+            ActiveField::Server => ActiveField::Room,
+            ActiveField::Room => ActiveField::Alias,
+            ActiveField::Alias => ActiveField::Server,
+        }
+    }
+
+    fn previous_field(field: ActiveField) -> ActiveField {
+        match field {
+            ActiveField::Server => ActiveField::Alias,
+            ActiveField::Room => ActiveField::Server,
+            ActiveField::Alias => ActiveField::Room,
+        }
+    }
+
+    fn handle_keystroke(&mut self, ks: &Keystroke) -> KeyOutcome {
+        let Some(active) = self.active else {
+            return KeyOutcome::None;
+        };
+
+        if ks.key == "tab" {
+            let new_field = if ks.modifiers.shift {
+                Self::previous_field(active)
+            } else {
+                Self::next_field(active)
+            };
+            if self.active != Some(new_field) {
+                self.active = Some(new_field);
+                return KeyOutcome::Updated;
+            }
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "escape" {
+            self.active = None;
+            return KeyOutcome::Updated;
+        }
+
+        if ks.key == "backspace" {
+            let field = self.field_mut(active);
+            if !field.is_empty() {
+                field.pop();
+                return KeyOutcome::Updated;
+            }
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "delete" {
+            let field = self.field_mut(active);
+            field.clear();
+            return KeyOutcome::Updated;
+        }
+
+        if ks.key == "return" || ks.key == "enter" {
+            if self.is_ready() {
+                return KeyOutcome::Submit;
+            }
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "space" {
+            // Some layouts report space without key_char.
+            let field = self.field_mut(active);
+            field.push(' ');
+            return KeyOutcome::Updated;
+        }
+
+        if let Some(ch) = ks.key_char.as_ref() {
+            if ks.modifiers.control
+                || ks.modifiers.alt
+                || ks.modifiers.platform
+                || ks.modifiers.function
+            {
+                return KeyOutcome::None;
+            }
+
+            if ch.chars().any(|c| c == '\n' || c == '\r' || c == '\t') {
+                return KeyOutcome::None;
+            }
+
+            let field = self.field_mut(active);
+            field.push_str(ch);
+            return KeyOutcome::Updated;
+        }
+
+        KeyOutcome::None
+    }
+
+    fn join_params(&self) -> JoinParams {
+        JoinParams {
+            server_url: self.server.trim().to_string(),
+            room_id: self.room_id.trim().to_string(),
+            alias: self.alias.trim().to_string(),
+        }
+    }
+}
+
+impl Render for AppModel {
+    fn render(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        self.ensure_fetch_loop(cx);
+        self.ensure_epoch_rotation_task(cx);
+        self.ensure_members_refresh_task(cx);
+        self.cleanup_expired_toasts();
+
+        let background = rgb(0x0f1118);
+        let body: Div = if let Some(session) = &self.session {
+            self.render_session(window, session, cx)
+        } else {
+            self.render_join(cx)
+        };
+
+        let mut root = div()
+            .key_context("cityg-root")
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .w_full()
+            .h_full()
+            .bg(background)
+            .child(body);
+
+        // Add toast notifications overlay
+        if let Some(toasts) = self.render_toasts() {
+            root = root.child(toasts);
+        }
+
+        root
+    }
+}
+
+impl AppModel {
+    fn random_room_id() -> String {
+        let mut bytes = [0u8; 32];
+        thread_rng().fill_bytes(&mut bytes);
+        hex_encode(bytes)
+    }
+
+    // Toast notification helpers
+    fn show_toast(&mut self, toast: Toast, cx: &mut ViewContext<Self>) {
+        self.toasts.push(toast);
+        cx.notify();
+
+        // Schedule cleanup of expired toasts
+        cx.spawn(async move |this, cx| {
+            sleep(Duration::from_secs(8)).await;
+            let _ = this.update(cx, |model, cx| {
+                model.cleanup_expired_toasts();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn show_success(&mut self, message: impl Into<String>, cx: &mut ViewContext<Self>) {
+        self.show_toast(Toast::success(message), cx);
+    }
+
+    fn show_error_toast(&mut self, message: impl Into<String>, cx: &mut ViewContext<Self>) {
+        self.show_toast(Toast::error(message), cx);
+    }
+
+    fn show_info(&mut self, message: impl Into<String>, cx: &mut ViewContext<Self>) {
+        self.show_toast(Toast::info(message), cx);
+    }
+
+    fn cleanup_expired_toasts(&mut self) {
+        self.toasts.retain(|t| !t.is_expired());
+    }
+
+    // Set categorized error with automatic retry action tracking
+    fn set_error(&mut self, err: &anyhow::Error, context: &str, retry_action: Option<RetryAction>) {
+        let categorized = categorize_error(err, context);
+        self.last_error = Some(categorized.user_message.clone());
+        self.categorized_error = Some(categorized);
+        self.last_retry_action = retry_action;
+    }
+
+    fn clear_error(&mut self) {
+        self.last_error = None;
+        self.categorized_error = None;
+        self.last_retry_action = None;
+    }
+
+    // Render loading spinner with animated appearance
+    fn render_spinner(&self) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .text_color(rgb(0x72f88e))
+                    .child("●"),
+            )
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .text_color(rgb(0x5fd87f))
+                    .child("●"),
+            )
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .text_color(rgb(0x4cb86f))
+                    .child("●"),
+            )
+    }
+
+    // Render categorized error box with actions
+    fn render_error_box(&self, cx: &mut ViewContext<Self>) -> Option<Div> {
+        let error = self.categorized_error.as_ref()?;
+
+        let (icon, color) = match error.category {
+            ErrorCategory::Network => ("⚠", rgb(0xffa500)),
+            ErrorCategory::Crypto => ("⚠", rgb(0xff6b6b)),
+            ErrorCategory::Policy => ("⛔", rgb(0xff9f68)),
+            ErrorCategory::Server => ("⚠", rgb(0xff6b6b)),
+            ErrorCategory::Validation => ("ℹ", rgb(0x72a5f8)),
+        };
+
+        let mut error_box = div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .px(px(16.0))
+            .py(px(14.0))
+            .rounded(px(12.0))
+            .bg(rgb(0x1f1f2e))
+            .border_1()
+            .border_color(color)
+            .max_w(px(640.0))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(div().text_size(px(18.0)).child(icon))
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xf2f4ff))
+                            .child(error.user_message.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(0x9aa5d3))
+                    .child(error.recovery_suggestion.clone()),
+            );
+
+        // Add action buttons row
+        let mut action_row = div().flex().flex_wrap().gap(px(8.0)).mt(px(4.0));
+
+        // Primary action: Try Again (if retryable)
+        if error.can_retry {
+            action_row = action_row.child(
+                div()
+                    .px(px(14.0))
+                    .py(px(8.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(0x72f88e))
+                    .text_color(rgb(0x0f1118))
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor(CursorStyle::PointingHand)
+                    .child("Try Again")
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_retry_clicked)),
+            );
+        }
+
+        // Secondary actions
+        action_row = action_row
+            .child(
+                div()
+                    .px(px(14.0))
+                    .py(px(8.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(0x2a3148))
+                    .text_color(rgb(0xc8d0e8))
+                    .text_size(px(13.0))
+                    .cursor(CursorStyle::PointingHand)
+                    .child("Copy Details")
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_copy_error_details)),
+            )
+            .child(
+                div()
+                    .px(px(14.0))
+                    .py(px(8.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(0x2a3148))
+                    .text_color(rgb(0xc8d0e8))
+                    .text_size(px(13.0))
+                    .cursor(CursorStyle::PointingHand)
+                    .child("Report Issue")
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_report_issue)),
+            )
+            .child(
+                div()
+                    .px(px(14.0))
+                    .py(px(8.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(0x1f1f2e))
+                    .text_color(rgb(0x9aa5d3))
+                    .text_size(px(13.0))
+                    .cursor(CursorStyle::PointingHand)
+                    .child("Dismiss")
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_dismiss_error)),
+            );
+
+        error_box = error_box.child(action_row);
+        Some(error_box)
+    }
+
+    // Render toast notifications
+    fn render_toasts(&self) -> Option<Div> {
+        if self.toasts.is_empty() {
+            return None;
+        }
+
+        let mut container = div()
+            .absolute()
+            .top(px(20.0))
+            .right(px(20.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0));
+
+        for toast in &self.toasts {
+            if !toast.is_expired() {
+                let (icon, bg_color) = match toast.kind {
+                    ToastKind::Success => ("✓", rgb(0x2d5f2d)),
+                    ToastKind::Error => ("✗", rgb(0x5f2d2d)),
+                    ToastKind::Info => ("ℹ", rgb(0x2d3d5f)),
+                };
+
+                container = container.child(
+                    div()
+                        .flex()
+                        .gap(px(10.0))
+                        .items_center()
+                        .px(px(16.0))
+                        .py(px(12.0))
+                        .rounded(px(10.0))
+                        .bg(bg_color)
+                        .border_1()
+                        .border_color(rgb(0x3a3a4f))
+                        .child(
+                            div()
+                                .text_size(px(16.0))
+                                .text_color(rgb(0xf2f4ff))
+                                .child(icon),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .text_color(rgb(0xf2f4ff))
+                                .child(toast.message.clone()),
+                        ),
+                );
+            }
+        }
+
+        Some(container)
+    }
+
+    fn render_join(&self, cx: &mut ViewContext<Self>) -> Div {
+        let heading_color = rgb(0xf2f4ff);
+        let subtext_color = rgb(0x9aa5d3);
+        let error_color = rgb(0xff6b6b);
+        let info_color = rgb(0x72f88e);
+        let join_disabled =
+            !self.join_form.is_ready() || matches!(self.join_status, JoinStatus::Joining);
+
+        let form = div()
+            .flex()
+            .flex_col()
+            .px(px(40.0))
+            .py(px(36.0))
+            .gap(px(16.0))
+            .rounded(px(18.0))
+            .bg(rgb(0x151929))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(28.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(heading_color)
+                            .child("Join a City-G Room"),
+                    )
+                    .child(div().text_size(px(14.0)).text_color(subtext_color).child(
+                        "Connect to a City-G server, pick your alias, and request a join ticket.",
+                    )),
+            )
+            .child(self.render_field(
+                "Server URL",
+                &self.join_form.server,
+                "https://server.example",
+                ActiveField::Server,
+                cx,
+            ))
+            .child(self.render_field(
+                "Room ID",
+                &self.join_form.room_id,
+                "64 hex characters",
+                ActiveField::Room,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .text_size(px(12.0))
+                    .text_color(subtext_color)
+                    .child("Room IDs must be 64 hexadecimal characters.")
+                    .child(
+                        div()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .rounded(px(10.0))
+                            .bg(rgb(0x2a3148))
+                            .text_color(rgb(0xf2f4ff))
+                            .cursor(CursorStyle::PointingHand)
+                            .text_size(px(12.0))
+                            .child("Generate new ID")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(Self::on_generate_room_id),
+                            ),
+                    ),
+            )
+            .child(self.render_field(
+                "Alias",
+                &self.join_form.alias,
+                "your name",
+                ActiveField::Alias,
+                cx,
+            ))
+            .child({
+                let status_text = match self.join_status {
+                    JoinStatus::Joining => Some("Requesting join ticket...".to_string()),
+                    JoinStatus::Idle => None,
+                };
+                let mut status_div = div()
+                    .flex()
+                    .gap(px(6.0))
+                    .items_center()
+                    .text_size(px(13.0))
+                    .text_color(subtext_color);
+                if let Some(text) = status_text {
+                    status_div = status_div.child(self.render_spinner()).child(text);
+                }
+                status_div
+            })
+            .child({
+                let mut button = div()
+                    .px(px(18.0))
+                    .py(px(10.0))
+                    .rounded(px(12.0))
+                    .text_size(px(16.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(0x0f1118))
+                    .bg(if join_disabled {
+                        rgb(0x3a3f57)
+                    } else {
+                        rgb(0x72f88e)
+                    })
+                    .cursor(if join_disabled {
+                        CursorStyle::Arrow
+                    } else {
+                        CursorStyle::PointingHand
+                    })
+                    .child(if matches!(self.join_status, JoinStatus::Joining) {
+                        "Joining..."
+                    } else {
+                        "Join room"
+                    });
+
+                if !join_disabled {
+                    button =
+                        button.on_mouse_down(MouseButton::Left, cx.listener(Self::on_join_clicked));
+                }
+                button
+            });
+
+        let mut root = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(20.0))
+            .child(form);
+
+        // Show categorized error box if available
+        if let Some(error_box) = self.render_error_box(cx) {
+            root = root.child(error_box);
+        } else if let Some(err) = &self.last_error {
+            // Fallback to simple error message if no categorized error
+            root = root.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(error_color)
+                    .child(format!("Join failed: {err}")),
+            );
+        }
+
+        if let Some(info) = &self.info_message {
+            root = root.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(info_color)
+                    .child(info.clone()),
+            );
+        }
+
+        root
+    }
+
+    fn render_session(
+        &self,
+        window: &mut Window,
+        session: &AppSession,
+        cx: &mut ViewContext<Self>,
+    ) -> Div {
+        let window_size = window.bounds().size;
+        let window_width = f32::from(window_size.width);
+        let window_height = f32::from(window_size.height);
+
+        let max_card_width = px((window_width - 80.0).clamp(360.0, 960.0));
+        let min_card_width = px(320.0);
+        let max_card_height = px((window_height - 160.0).clamp(320.0, 780.0));
+
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .px(px(36.0))
+            .py(px(32.0))
+            .gap(px(16.0))
+            .rounded(px(18.0))
+            .bg(rgb(0x151929))
+            .child(
+                div()
+                    .text_size(px(28.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xf2f4ff))
+                    .child("Connected to City-G"),
+            )
+            .child(self.session_row("Server", &session.server_url))
+            .child(self.session_row("Room", &session.room_id))
+            .child(self.session_row("Alias", &session.alias))
+            .child(self.session_row("WEID", &hex_encode(session.we_epoch_id)))
+            .child(self.session_row("Epoch key", &hex_encode(session.epoch_key)))
+            .child(self.session_row("Parent root", &hex_encode(session.parent_root)))
+            .child(self.session_row("Join delta", &hex_encode(session.join_delta_root)))
+            .child(self.session_row("Revoked since", &hex_encode(session.revoked_since_root)))
+            .child(self.session_row("Revoked root", &hex_encode(session.revoked_root)))
+            .child(self.render_regular_fingerprint_row(session, cx))
+            .child(self.render_fs_fingerprint_row(session, cx))
+            .child(self.session_row("Proof mode", &session.proof_mode))
+            .child(self.session_row("VRF suite", &session.vrf_id))
+            .child(self.session_row("Policy", &session.policy_version))
+            .child(self.session_row("FS policy", &session.fs_policy_version))
+            .child(self.render_epoch_age_row(session))
+            .child(self.session_row("KBROAD key (hex)", &hex_encode(&session.kbroad_public)))
+            .child(self.render_members_panel(cx))
+            .child(self.render_security_panel(cx))
+            .child(self.render_message_panel(session, cx))
+            .child(self.render_leave_controls(cx));
+
+        if let Some(info) = &self.info_message {
+            content = content.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(0x72f88e))
+                    .child(info.clone()),
+            );
+        }
+
+        // Show categorized error box if available
+        if let Some(error_box) = self.render_error_box(cx) {
+            content = content.child(error_box);
+        } else if let Some(err) = &self.last_error {
+            // Fallback to simple error message
+            content = content.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(0xff9f68))
+                    .child(err.clone()),
+            );
+        }
+
+        let mut scroll = div().flex().flex_col().w_full();
+
+        scroll = scroll
+            .min_w(min_card_width)
+            .max_w(max_card_width)
+            .max_h(max_card_height);
+
+        {
+            let interactivity = scroll.interactivity();
+            interactivity.base_style.overflow.x = Some(Overflow::Scroll);
+            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
+            interactivity.element_id = Some(ElementId::Name("session-scroll".into()));
+            interactivity.block_mouse_except_scroll();
+        }
+
+        scroll.child(content)
+    }
+
+    fn session_row(&self, label: &str, value: &str) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9aa5d3))
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .text_color(rgb(0xf2f4ff))
+                    .child(value.to_string()),
+            )
+    }
+
+    fn render_epoch_age_row(&self, session: &AppSession) -> Div {
+        let epoch_age_secs = SystemTime::now()
+            .duration_since(session.fs_epoch_created_at)
+            .unwrap_or(Duration::from_secs(0))
+            .as_secs();
+
+        let rotation_interval = session.fs_epoch_rotation_interval_secs;
+        let is_stale = epoch_age_secs > rotation_interval + 60; // Consider stale if > interval + 1 min grace period
+
+        let age_text = if epoch_age_secs < 60 {
+            format!("{} seconds", epoch_age_secs)
+        } else if epoch_age_secs < 3600 {
+            format!("{} minutes", epoch_age_secs / 60)
+        } else {
+            format!("{:.1} hours", epoch_age_secs as f64 / 3600.0)
+        };
+
+        let status_text = if is_stale {
+            format!(" (STALE - expected rotation every {}s)", rotation_interval)
+        } else {
+            String::new()
+        };
+
+        let value_text = format!(
+            "Epoch #{} - Age: {}{}",
+            session.fs_ec, age_text, status_text
+        );
+
+        let text_color = if is_stale {
+            rgb(0xff9f68) // Orange/warning color
+        } else {
+            rgb(0xf2f4ff) // Normal white
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9aa5d3))
+                    .child("Forward Secrecy Epoch"),
+            )
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .text_color(text_color)
+                    .child(value_text),
+            )
+    }
+
+    fn render_regular_fingerprint_row(
+        &self,
+        session: &AppSession,
+        cx: &mut ViewContext<Self>,
+    ) -> Div {
+        self.render_fingerprint_row(
+            "Regular fingerprint",
+            format_regular_fingerprint(session.regular_fingerprint.as_ref()),
+            session.regular_fingerprint.is_some(),
+            Self::on_copy_regular_fingerprint,
+            cx,
+        )
+    }
+
+    fn render_fs_fingerprint_row(&self, session: &AppSession, cx: &mut ViewContext<Self>) -> Div {
+        self.render_fingerprint_row(
+            "FS fingerprint",
+            format_fs_fingerprint(session.fs_fingerprint.as_ref(), session.fs_ec),
+            session.fs_fingerprint.is_some(),
+            Self::on_copy_fs_fingerprint,
+            cx,
+        )
+    }
+
+    fn render_fingerprint_row(
+        &self,
+        label: &str,
+        value: String,
+        copy_enabled: bool,
+        handler: fn(&mut Self, &MouseDownEvent, &mut Window, &mut ViewContext<Self>),
+        cx: &mut ViewContext<Self>,
+    ) -> Div {
+        let mut copy_button = div()
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(10.0))
+            .border(px(1.0))
+            .border_color(if copy_enabled {
+                rgb(0x72f88e)
+            } else {
+                rgb(0x2a3148)
+            })
+            .text_size(px(12.0))
+            .text_color(if copy_enabled {
+                rgb(0x72f88e)
+            } else {
+                rgb(0x5b6584)
+            })
+            .cursor(if copy_enabled {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::Arrow
+            })
+            .child("Copy");
+
+        if copy_enabled {
+            copy_button = copy_button.on_mouse_down(MouseButton::Left, cx.listener(handler));
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9aa5d3))
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_grow()
+                            .text_size(px(15.0))
+                            .text_color(rgb(0xf2f4ff))
+                            .child(value),
+                    )
+                    .child(copy_button),
+            )
+    }
+
+    fn render_field(
+        &self,
+        label: &str,
+        value: &str,
+        placeholder: &str,
+        field: ActiveField,
+        cx: &mut ViewContext<Self>,
+    ) -> Div {
+        let is_active = self.join_form.active == Some(field);
+        let border = if is_active {
+            rgb(0x72f88e)
+        } else {
+            rgb(0x2a3148)
+        };
+        let background = if is_active {
+            rgb(0x1b2135)
+        } else {
+            rgb(0x161b2a)
+        };
+        let text_color = if value.is_empty() {
+            rgb(0x5b6584)
+        } else {
+            rgb(0xf5f7ff)
+        };
+        let display = if value.is_empty() {
+            placeholder.to_string()
+        } else {
+            value.to_string()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9aa5d3))
+                    .child(label.to_string()),
+            )
+            .child({
+                let handler_field = field;
+                div()
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .rounded(px(12.0))
+                    .border(px(1.0))
+                    .border_color(border)
+                    .bg(background)
+                    .cursor(CursorStyle::IBeam)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.focus_field(handler_field, cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(16.0))
+                            .text_color(text_color)
+                            .child(display),
+                    )
+            })
+    }
+
+    fn ensure_fetch_loop(&mut self, cx: &mut ViewContext<Self>) {
+        if self.session.is_none() {
+            self.reset_fetch_state();
+            return;
+        }
+
+        if !self.fetch_in_flight && self.fetch_task.is_none() {
+            self.schedule_fetch(cx, Duration::from_millis(0));
+        }
+    }
+
+    fn reset_fetch_state(&mut self) {
+        self.fetch_in_flight = false;
+        self.fetch_status = FetchStatus::Idle;
+        self.fetch_task = None;
+    }
+
+    fn ensure_epoch_rotation_task(&mut self, cx: &mut ViewContext<Self>) {
+        if self.session.is_none() {
+            self.stop_epoch_rotation_task();
+            return;
+        }
+
+        if self.epoch_rotation_task.is_none() {
+            self.start_epoch_rotation_task(cx);
+        }
+    }
+
+    fn ensure_members_refresh_task(&mut self, cx: &mut ViewContext<Self>) {
+        if self.session.is_none() {
+            self.stop_members_refresh_task();
+            return;
+        }
+
+        if self.members_refresh_task.is_none() {
+            self.start_members_refresh_task(cx);
+        }
+    }
+
+    fn schedule_fetch(&mut self, cx: &mut ViewContext<Self>, delay: Duration) {
+        let Some(session) = self.session.clone() else {
+            self.reset_fetch_state();
+            return;
+        };
+
+        if self.fetch_in_flight {
+            return;
+        }
+
+        self.fetch_in_flight = true;
+        if delay.is_zero() {
+            self.fetch_status = FetchStatus::Refreshing;
+        }
+
+        let since = session.last_fetch_timestamp_ms;
+        let params = FetchParams::from_session(&session, since);
+        let expected_weid = session.we_epoch_id;
+
+        let task = cx.spawn(async move |this, cx| {
+            let fetch_future = match Tokio::spawn_result(cx, async move {
+                if !delay.is_zero() {
+                    sleep(delay).await;
+                }
+                perform_fetch(params).await
+            }) {
+                Ok(task) => task,
+                Err(err) => {
+                    let _ = this.update(cx, |model, _| {
+                        model.fetch_task = None;
+                        model.fetch_in_flight = false;
+                        model.fetch_status = FetchStatus::Idle;
+                        model.last_error = Some(format!("Failed to schedule message fetch: {err}"));
+                    });
+                    return;
+                }
+            };
+
+            let outcome = fetch_future.await;
+
+            let _ = this.update(cx, |model, cx| {
+                model.fetch_task = None;
+                model.fetch_in_flight = false;
+                model.handle_fetch_result(outcome, expected_weid, cx);
+            });
+        });
+
+        self.fetch_task = Some(task);
+    }
+
+    fn handle_fetch_result(
+        &mut self,
+        outcome: anyhow::Result<FetchOutcome>,
+        expected_weid: [u8; 32],
+        cx: &mut ViewContext<Self>,
+    ) {
+        let matches_session = self
+            .session
+            .as_ref()
+            .map(|session| session.we_epoch_id == expected_weid)
+            .unwrap_or(false);
+
+        if !matches_session {
+            self.fetch_status = FetchStatus::Idle;
+            return;
+        }
+
+        let delay = match outcome {
+            Ok(result) => {
+                let FetchOutcome {
+                    messages,
+                    last_timestamp_ms,
+                } = result;
+
+                if !messages.is_empty() {
+                    let added = messages.len();
+                    self.append_messages(messages);
+                    self.info_message = Some(format!("Fetched {added} new message(s)."));
+                }
+
+                if let Some(ts) = last_timestamp_ms
+                    && let Some(session) = self.session.as_mut()
+                {
+                    let needs_update = session
+                        .last_fetch_timestamp_ms
+                        .map(|prev| ts > prev)
+                        .unwrap_or(true);
+                    if needs_update {
+                        session.last_fetch_timestamp_ms = Some(ts);
+                        if let Err(err) = persist_session(session) {
+                            warn!("failed to persist session after fetch update: {err:?}");
+                        }
+                    }
+                }
+
+                self.fetch_status = FetchStatus::Idle;
+                self.config.client.fetch_poll_interval()
+            }
+            Err(err) => {
+                self.last_error = Some(format!("Failed to fetch messages: {err}"));
+                self.fetch_status = FetchStatus::Idle;
+                self.config.client.fetch_retry_interval()
+            }
+        };
+
+        if !self.fetch_in_flight {
+            self.schedule_fetch(cx, delay);
+        }
+    }
+
+    fn append_messages(&mut self, new_messages: Vec<ChatMessageEntry>) {
+        for message in new_messages {
+            let key = MessageKey {
+                timestamp_ms: message.timestamp_ms,
+                ciphertext_hex: message.ciphertext_hex.clone(),
+                sender_leaf: message.sender_leaf,
+            };
+            if self.message_keys.insert(key) {
+                self.messages.push(message);
+            }
+        }
+        self.messages.sort_by_key(|m| m.timestamp_ms);
+    }
+
+    // Start background epoch rotation task
+    fn start_epoch_rotation_task(&mut self, cx: &mut ViewContext<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let rotation_interval_secs = session.fs_epoch_rotation_interval_secs;
+        let we_epoch_id = session.we_epoch_id;
+
+        info!(
+            "Starting epoch rotation task (interval: {}s, current epoch: {})",
+            rotation_interval_secs, session.fs_ec
+        );
+
+        let interval_secs = rotation_interval_secs;
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                sleep(Duration::from_secs(interval_secs)).await;
+
+                let should_rotate = this
+                    .read_with(cx, |model, _| {
+                        model
+                            .session
+                            .as_ref()
+                            .map(|s| s.we_epoch_id == we_epoch_id)
+                            .unwrap_or(false)
+                    })
+                    .ok()
+                    .unwrap_or(false);
+
+                if !should_rotate {
+                    info!("Stopping epoch rotation task (session changed or removed)");
+                    break;
+                }
+
+                info!("Performing automatic epoch rotation");
+                match this.update(cx, |model, cx| model.perform_epoch_rotation(cx)) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => warn!("Epoch rotation failed: {err:?}"),
+                    Err(err) => warn!("Epoch rotation update failed: {err:?}"),
+                };
+            }
+        });
+
+        self.epoch_rotation_task = Some(task);
+    }
+
+    // Stop background epoch rotation task
+    fn stop_epoch_rotation_task(&mut self) {
+        if self.epoch_rotation_task.is_some() {
+            info!("Stopping epoch rotation task");
+            self.epoch_rotation_task = None;
+        }
+    }
+
+    fn start_members_refresh_task(&mut self, cx: &mut ViewContext<Self>) {
+        let interval = self.config.gui.members_refresh_interval();
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                sleep(interval).await;
+
+                let keep_running = this
+                    .update(cx, |model, cx| {
+                        if model.session.is_some() {
+                            model.refresh_members_soft(cx);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+
+                if !keep_running {
+                    info!("Stopping members refresh task (session ended)");
+                    break;
+                }
+            }
+        });
+
+        self.members_refresh_task = Some(task);
+    }
+
+    fn stop_members_refresh_task(&mut self) {
+        if self.members_refresh_task.is_some() {
+            info!("Stopping members refresh task");
+            self.members_refresh_task = None;
+        }
+    }
+
+    // Start WebSocket connection
+    fn start_websocket(&mut self, cx: &mut ViewContext<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+
+        // Convert HTTP URL to WebSocket URL
+        let ws_url = session
+            .server_url
+            .replace("http://", "ws://")
+            .replace("https://", "wss://");
+        let ws_url = format!("{}/v1/ws", ws_url);
+
+        info!("Starting WebSocket connection to {}", ws_url);
+
+        let this = cx.weak_entity();
+        let task = cx.spawn(async move |_, cx| {
+            // Attempt to connect with reconnection logic
+            loop {
+                debug!("Attempting WebSocket connection to {}", ws_url);
+
+                match connect_async(&ws_url).await {
+                    Ok((ws_stream, _)) => {
+                        info!("WebSocket connected successfully");
+
+                        // Update connection status
+                        let _ = this.update(cx, |model, cx| {
+                            model.ws_connected = true;
+                            cx.notify();
+                        });
+
+                        let (_write, mut read) = ws_stream.split();
+
+                        // Handle incoming messages
+                        while let Some(msg_result) = read.next().await {
+                            match msg_result {
+                                Ok(WsMessage::Text(text)) => {
+                                    debug!("WebSocket message received: {}", text);
+
+                                    if let Ok(notification) =
+                                        serde_json::from_str::<serde_json::Value>(&text)
+                                    {
+                                        match notification.get("type").and_then(|t| t.as_str()) {
+                                            Some("message") => {
+                                                let _ = this.update(cx, |model, cx| {
+                                                    debug!("Triggering fetch due to message event");
+                                                    if !model.fetch_in_flight {
+                                                        model.schedule_fetch(cx, Duration::ZERO);
+                                                    }
+                                                });
+                                            }
+                                            Some("membership") => {
+                                                if let Some(gid_hex) =
+                                                    notification.get("gid").and_then(|v| v.as_str())
+                                                    && let Some(gid) = decode_hex_32(gid_hex)
+                                                {
+                                                    let _ = this.update(cx, |model, cx| {
+                                                        model.handle_membership_signal(&gid, cx);
+                                                    });
+                                                }
+                                            }
+                                            Some("lag") => {
+                                                warn!("WebSocket lag notification: {}", text);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                Ok(WsMessage::Close(_)) => {
+                                    info!("WebSocket closed by server");
+                                    break;
+                                }
+                                Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) => {
+                                    debug!("WebSocket ping/pong");
+                                }
+                                Err(e) => {
+                                    warn!("WebSocket error: {}", e);
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Update connection status
+                        let _ = this.update(cx, |model, cx| {
+                            model.ws_connected = false;
+                            cx.notify();
+                        });
+
+                        info!("WebSocket connection closed, will retry in 5 seconds");
+                    }
+                    Err(e) => {
+                        warn!("WebSocket connection failed: {}", e);
+
+                        // Update connection status
+                        let _ = this.update(cx, |model, cx| {
+                            model.ws_connected = false;
+                            cx.notify();
+                        });
+                    }
+                }
+
+                // Wait before reconnecting (using config value)
+                let reconnect_delay = this
+                    .upgrade()
+                    .and_then(|entity| {
+                        entity
+                            .read_with(cx, |model, _| {
+                                model.config.client.websocket_reconnect_delay()
+                            })
+                            .ok()
+                    })
+                    .unwrap_or_else(|| Duration::from_secs(5));
+                sleep(reconnect_delay).await;
+
+                // Check if we should still be connected
+                let should_continue = this
+                    .upgrade()
+                    .and_then(|entity| {
+                        entity
+                            .read_with(cx, |model, _| model.session.is_some())
+                            .ok()
+                    })
+                    .unwrap_or(false);
+
+                if !should_continue {
+                    info!("Stopping WebSocket connection (no active session)");
+                    break;
+                }
+            }
+        });
+
+        self.ws_task = Some(task);
+    }
+
+    // Stop WebSocket connection
+    fn stop_websocket(&mut self) {
+        if self.ws_task.is_some() {
+            info!("Stopping WebSocket connection");
+            self.ws_task = None;
+            self.ws_connected = false;
+        }
+    }
+
+    // Perform epoch rotation
+    fn perform_epoch_rotation(&mut self, cx: &mut ViewContext<Self>) -> Result<()> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow!("no active session"))?;
+
+        info!(
+            "Rotating epoch from {} to {}",
+            session.fs_ec,
+            session.fs_ec + 1
+        );
+
+        // Prepare new epoch using ForwardSecrecyState
+        let device_pk = &session.pop_public_key;
+        let artifacts = session
+            .forward_state
+            .prepare_join(device_pk, &session.we_epoch_id)
+            .map_err(|e| anyhow!("failed to prepare epoch rotation: {:?}", e))?;
+
+        // Update session with new epoch data
+        session.fs_ec = artifacts.inputs.fs_ec + 1; // prepare_join already incremented internally
+        session.fs_epoch_commit = artifacts.inputs.fs_epoch_commit;
+        session.fs_dev_prev_commit = artifacts.inputs.fs_dev_prev_commit;
+        session.fs_epoch_created_at = SystemTime::now();
+
+        // Persist the updated session
+        persist_session(session).context("failed to persist session after epoch rotation")?;
+
+        info!(
+            "Epoch rotation complete: new epoch = {}, commit = {}",
+            session.fs_ec,
+            hex_encode(session.fs_epoch_commit)
+        );
+
+        // Notify UI to refresh
+        cx.notify();
+
+        Ok(())
+    }
+
+    fn render_message_panel(&self, _session: &AppSession, cx: &mut ViewContext<Self>) -> Div {
+        let border_color = rgb(0x2a3148);
+        let heading_color = rgb(0xf2f4ff);
+        let subtext_color = rgb(0x9aa5d3);
+        let status_color = match self.fetch_status {
+            FetchStatus::Idle => subtext_color,
+            FetchStatus::Refreshing => rgb(0x72f88e),
+        };
+        let ws_status = if self.ws_connected { "WS" } else { "Poll" };
+        let status_text = match self.fetch_status {
+            FetchStatus::Idle => format!("{} • Idle", ws_status),
+            FetchStatus::Refreshing => format!("{} • Refreshing…", ws_status),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .border(px(1.0))
+            .border_color(border_color)
+            .rounded(px(14.0))
+            .px(px(18.0))
+            .py(px(16.0))
+            .bg(rgb(0x161b2a))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(20.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(heading_color)
+                            .child("Room messages"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(status_color)
+                                    .child(status_text.to_string()),
+                            )
+                            .child({
+                                let mut button = div()
+                                    .px(px(10.0))
+                                    .py(px(6.0))
+                                    .rounded(px(10.0))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0x0f1118))
+                                    .bg(rgb(0x72f88e))
+                                    .cursor(CursorStyle::PointingHand)
+                                    .child(if self.show_ciphertext {
+                                        "Hide ciphertext"
+                                    } else {
+                                        "Show ciphertext"
+                                    });
+                                button = button.on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(Self::on_toggle_ciphertext),
+                                );
+                                button
+                            }),
+                    ),
+            )
+            .child(self.render_message_list())
+            .child(self.render_message_composer(cx))
+    }
+
+    fn render_message_list(&self) -> Div {
+        let mut list = div().flex().flex_col().gap(px(10.0)).max_h(px(240.0));
+
+        if self.messages.is_empty() {
+            return list.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(0x5b6584))
+                    .child("No messages yet. Messaging sync is being wired up."),
+            );
+        }
+
+        for message in &self.messages {
+            let timestamp =
+                format_rfc3339_seconds(UNIX_EPOCH + Duration::from_millis(message.timestamp_ms));
+            let sender = self.resolve_sender_label(message);
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .bg(rgb(0x1b2135))
+                    .rounded(px(10.0))
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .text_size(px(13.0))
+                            .text_color(rgb(0x9aa5d3))
+                            .child(format!("{} • {}", sender, timestamp)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .text_color(rgb(0xf2f4ff))
+                            .child(message.plaintext.clone()),
+                    )
+                    .child(div().text_size(px(11.0)).text_color(rgb(0x5b6584)).child(
+                        if self.show_ciphertext {
+                            format!("ciphertext: {}", message.ciphertext_hex)
+                        } else {
+                            "ciphertext hidden".to_string()
+                        },
+                    )),
+            );
+        }
+
+        list
+    }
+
+    fn resolve_sender_label(&self, message: &ChatMessageEntry) -> String {
+        if let Some(leaf) = message.sender_leaf
+            && let Some(label) = self.member_label_for_leaf(&leaf)
+        {
+            return label;
+        }
+        message.fallback_label.clone()
+    }
+
+    fn member_label_for_leaf(&self, leaf: &[u8; 32]) -> Option<String> {
+        if let Some(member) = self.members.iter().find(|member| &member.leaf_id == leaf) {
+            return Some(format_member_label(member));
+        }
+        if let Some(alias) = self.leaf_alias_index.get(leaf) {
+            return Some(format_alias_display(alias, leaf));
+        }
+        None
+    }
+
+    fn reconcile_alias_bindings(&mut self, cx: &mut ViewContext<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let server_url = session.server_url.clone();
+        let room_id = session.room_id.clone();
+
+        let mut mismatches = Vec::new();
+        let mut refreshed: AHashMap<String, AliasBindingRecord> = AHashMap::new();
+
+        for member in &self.members {
+            let Some(alias) = member
+                .alias
+                .as_ref()
+                .map(|alias| alias.trim())
+                .filter(|alias| !alias.is_empty())
+                .map(|alias| alias.to_string())
+            else {
+                continue;
+            };
+
+            let Some(pop_key) = member.pop_public_key.as_ref().filter(|pk| !pk.is_empty()) else {
+                continue;
+            };
+
+            if let Some(existing) = self.alias_bindings.get(&alias)
+                && existing.pop_public_key != *pop_key
+            {
+                mismatches.push(alias.clone());
+            }
+
+            refreshed.insert(
+                alias,
+                AliasBindingRecord {
+                    pop_public_key: pop_key.clone(),
+                    leaf_id: member.leaf_id,
+                },
+            );
+        }
+
+        for alias in mismatches {
+            let message = format!("TOFU alert: alias '{alias}' broadcast a new identity key.");
+            self.show_error_toast(message.clone(), cx);
+            self.record_security_event(&alias, message, cx);
+        }
+
+        let changed = refreshed != self.alias_bindings;
+        self.alias_bindings = refreshed;
+        self.refresh_leaf_alias_index();
+
+        if changed
+            && let Err(err) = persist_alias_bindings(&server_url, &room_id, &self.alias_bindings)
+        {
+            warn!("failed to persist alias bindings: {err:?}");
+        }
+    }
+
+    fn hydrate_alias_bindings_from_disk(&mut self) {
+        if let Some(session) = &self.session {
+            match load_alias_bindings(&session.server_url, &session.room_id) {
+                Ok(bindings) => {
+                    self.alias_bindings = bindings;
+                    self.refresh_leaf_alias_index();
+                }
+                Err(err) => {
+                    warn!("failed to load alias bindings: {err:?}");
+                    self.alias_bindings.clear();
+                    self.leaf_alias_index.clear();
+                }
+            }
+        } else {
+            self.alias_bindings.clear();
+            self.leaf_alias_index.clear();
+        }
+    }
+
+    fn load_security_events_from_disk(&mut self) {
+        if let Some(session) = &self.session {
+            match load_security_log(&session.server_url, &session.room_id) {
+                Ok(events) => {
+                    self.security_events = events;
+                    self.security_unread = 0;
+                    self.security_panel_expanded = !self.security_events.is_empty();
+                }
+                Err(err) => {
+                    warn!("failed to load security log: {err:?}");
+                    self.security_events.clear();
+                    self.security_unread = 0;
+                    self.security_panel_expanded = false;
+                }
+            }
+        } else {
+            self.security_events.clear();
+            self.security_unread = 0;
+            self.security_panel_expanded = false;
+        }
+    }
+
+    fn persist_security_events_to_disk(&self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if let Err(err) =
+            persist_security_log(&session.server_url, &session.room_id, &self.security_events)
+        {
+            warn!("failed to persist security log: {err:?}");
+        }
+    }
+
+    fn record_security_event(
+        &mut self,
+        alias: &str,
+        description: impl Into<String>,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.security_events.push(SecurityEvent {
+            alias: alias.to_string(),
+            description: description.into(),
+            timestamp_ms,
+        });
+        if self.security_events.len() > MAX_SECURITY_EVENTS {
+            let drain = self.security_events.len() - MAX_SECURITY_EVENTS;
+            self.security_events.drain(0..drain);
+        }
+        self.security_unread = self.security_unread.saturating_add(1);
+        self.security_panel_expanded = true;
+        self.persist_security_events_to_disk();
+        cx.notify();
+    }
+
+    fn acknowledge_security_alerts(&mut self) {
+        if self.security_unread > 0 {
+            self.security_unread = 0;
+        }
+    }
+
+    fn refresh_leaf_alias_index(&mut self) {
+        self.leaf_alias_index.clear();
+        for (alias, record) in &self.alias_bindings {
+            if record.leaf_id.iter().all(|&b| b == 0) {
+                continue;
+            }
+            self.leaf_alias_index.insert(record.leaf_id, alias.clone());
+        }
+    }
+
+    fn render_message_composer(&self, cx: &mut ViewContext<Self>) -> Div {
+        let border_color = if self.composer.active {
+            rgb(0x72f88e)
+        } else {
+            rgb(0x2a3148)
+        };
+        let background = if self.composer.active {
+            rgb(0x1b2135)
+        } else {
+            rgb(0x161b2a)
+        };
+
+        let text_color = if self.composer.text.is_empty() {
+            rgb(0x5b6584)
+        } else {
+            rgb(0xf5f7ff)
+        };
+
+        let placeholder = if self.composer.active {
+            "Type a message…"
+        } else {
+            "Click to start typing…"
+        };
+
+        let mut row = div().flex().items_center().gap(px(12.0));
+
+        row = row.child(
+            div()
+                .flex_grow()
+                .px(px(14.0))
+                .py(px(10.0))
+                .rounded(px(12.0))
+                .border(px(1.0))
+                .border_color(border_color)
+                .bg(background)
+                .cursor(CursorStyle::IBeam)
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_composer_clicked))
+                .child(div().text_size(px(15.0)).text_color(text_color).child(
+                    if self.composer.text.is_empty() {
+                        placeholder.to_string()
+                    } else {
+                        self.composer.text.clone()
+                    },
+                )),
+        );
+
+        let send_disabled = !self.composer.is_ready()
+            || matches!(self.send_status, SendStatus::Sending)
+            || self.session.is_none();
+
+        let label = match self.send_status {
+            SendStatus::Sending => "Sending…",
+            SendStatus::Idle => "Send",
+        };
+
+        let mut button = div()
+            .px(px(16.0))
+            .py(px(10.0))
+            .rounded(px(10.0))
+            .text_size(px(15.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(0x0f1118))
+            .bg(if send_disabled {
+                rgb(0x3a3f57)
+            } else {
+                rgb(0x72f88e)
+            })
+            .cursor(if send_disabled {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::PointingHand
+            })
+            .child(label);
+
+        if !send_disabled {
+            button = button.on_mouse_down(MouseButton::Left, cx.listener(Self::on_send_clicked));
+        }
+
+        row.child(button)
+    }
+
+    fn render_leave_controls(&self, cx: &mut ViewContext<Self>) -> Div {
+        let leaving = matches!(self.leave_status, LeaveStatus::Leaving);
+        let mut leave_button = div()
+            .px(px(16.0))
+            .py(px(10.0))
+            .rounded(px(12.0))
+            .text_size(px(16.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(0xfafafa))
+            .bg(if leaving {
+                rgb(0x42475d)
+            } else {
+                rgb(0xff6b6b)
+            })
+            .cursor(if leaving {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::PointingHand
+            })
+            .child(if leaving { "Leaving…" } else { "Leave room" });
+
+        if !leaving {
+            leave_button =
+                leave_button.on_mouse_down(MouseButton::Left, cx.listener(Self::on_leave_clicked));
+        }
+
+        let reset_button = div()
+            .px(px(16.0))
+            .py(px(10.0))
+            .rounded(px(12.0))
+            .text_size(px(16.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(0xf2f4ff))
+            .bg(rgb(0x2a3148))
+            .cursor(CursorStyle::PointingHand)
+            .child("Reset session")
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_reset_clicked));
+
+        div()
+            .mt(px(12.0))
+            .flex()
+            .gap(px(12.0))
+            .child(leave_button)
+            .child(reset_button)
+    }
+
+    fn render_members_panel(&self, cx: &mut ViewContext<Self>) -> Div {
+        let count = self.members.len();
+        let total = self.members_total.max(count as u64);
+        let title_text = match &self.members_mode {
+            MembersMode::Full => format!("Members ({count} / {total})"),
+            MembersMode::Search { query } => {
+                format!("Search \"{}\" ({count} / {total})", query)
+            }
+        };
+        let mut header = div().flex().items_center().justify_between().child(
+            div()
+                .text_size(px(18.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xf2f4ff))
+                .child(title_text),
+        );
+
+        let refresh_button = div()
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(10.0))
+            .text_size(px(14.0))
+            .text_color(rgb(0xf2f4ff))
+            .bg(rgb(0x2a3148))
+            .cursor(CursorStyle::PointingHand)
+            .child("Refresh")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_members_refresh_clicked),
+            );
+
+        header = header.child(refresh_button);
+
+        if let Some(next_offset) = self.members_next_offset
+            && next_offset < total
+        {
+            let load_more = div()
+                .px(px(10.0))
+                .py(px(6.0))
+                .rounded(px(10.0))
+                .text_size(px(14.0))
+                .text_color(rgb(0xf2f4ff))
+                .bg(rgb(0x38405b))
+                .cursor(CursorStyle::PointingHand)
+                .child("Load more")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(Self::on_members_load_more_clicked),
+                );
+            header = header.child(load_more);
+        }
+
+        let search_placeholder = "Filter alias or leaf hex";
+        let search_active = self.members_search.active;
+        let search_border = if search_active {
+            rgb(0x72f88e)
+        } else {
+            rgb(0x2a3148)
+        };
+        let search_background = if search_active {
+            rgb(0x1b2135)
+        } else {
+            rgb(0x161b2a)
+        };
+        let search_text_color = if self.members_search.query.is_empty() {
+            rgb(0x5b6584)
+        } else {
+            rgb(0xf5f7ff)
+        };
+        let search_display = if self.members_search.query.is_empty() {
+            search_placeholder.to_string()
+        } else {
+            self.members_search.query.clone()
+        };
+
+        let search_field = div()
+            .flex()
+            .items_center()
+            .flex_grow()
+            .px(px(12.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .border(px(1.0))
+            .border_color(search_border)
+            .bg(search_background)
+            .cursor(CursorStyle::IBeam)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_members_search_field_clicked),
+            )
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(search_text_color)
+                    .child(search_display),
+            );
+
+        let search_button = div()
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(10.0))
+            .text_size(px(14.0))
+            .text_color(rgb(0xf2f4ff))
+            .bg(rgb(0x2a3148))
+            .cursor(CursorStyle::PointingHand)
+            .child("Search")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_members_search_button_clicked),
+            );
+
+        let mut search_row = div().flex().items_center().gap(px(10.0));
+        search_row = search_row.child(search_field).child(search_button);
+
+        let has_query = !self.members_search.query.trim().is_empty();
+        if has_query || matches!(self.members_mode, MembersMode::Search { .. }) {
+            let clear_button = div()
+                .px(px(10.0))
+                .py(px(6.0))
+                .rounded(px(10.0))
+                .text_size(px(14.0))
+                .text_color(rgb(0xf2f4ff))
+                .bg(rgb(0x383f56))
+                .cursor(CursorStyle::PointingHand)
+                .child("Clear")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(Self::on_members_search_clear_clicked),
+                );
+            search_row = search_row.child(clear_button);
+        }
+
+        let mut list = div()
+            .mt(px(8.0))
+            .max_h(px(160.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0));
+
+        {
+            let interactivity = list.interactivity();
+            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
+        }
+
+        if self.members.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(rgb(0xb8bed3))
+                    .child("No members reported for this root."),
+            );
+        } else {
+            for member in &self.members {
+                let primary_label = format_member_label(member);
+                let mut entry = div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .rounded(px(8.0))
+                    .bg(rgb(0x1f2436))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0xf2f4ff))
+                            .child(primary_label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x8b92b0))
+                            .child(format!("leaf: {}", hex_encode(member.leaf_id))),
+                    );
+
+                if let Some(joined) = member.join_timestamp_ms {
+                    entry = entry.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x5b6584))
+                            .child(format!("joined {}", format_timestamp(joined))),
+                    );
+                }
+
+                if let Some(last_seen) = member.last_seen_timestamp_ms {
+                    entry = entry.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x5b6584))
+                            .child(format!("last seen {}", format_timestamp(last_seen))),
+                    );
+                }
+
+                list = list.child(entry);
+            }
+        }
+
+        let status_text = match &self.members_status {
+            MembersStatus::Idle => None,
+            MembersStatus::Loading(message) => Some(message.clone()),
+            MembersStatus::Error(message) => Some(message.clone()),
+        };
+
+        let mut root = div()
+            .mt(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(header);
+        root = root.child(search_row);
+        if let Some(text) = status_text {
+            root = root.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(0xff9f68))
+                    .child(text),
+            );
+        }
+        root.child(list)
+    }
+
+    fn render_security_panel(&self, cx: &mut ViewContext<Self>) -> Div {
+        let count = self.security_events.len();
+        let title = div()
+            .text_size(px(18.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(0xf2f4ff))
+            .child(format!("Security alerts ({count})"));
+        let mut header = div().flex().items_center().justify_between().child(title);
+
+        let mut actions = div().flex().items_center().gap(px(8.0));
+        if self.security_unread > 0 {
+            let badge = div()
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded(px(999.0))
+                .bg(rgb(0xff9f68))
+                .text_size(px(11.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0x0f1118))
+                .child(format!("{} new", self.security_unread));
+            let ack_button = div()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(8.0))
+                .text_size(px(12.0))
+                .text_color(rgb(0xf2f4ff))
+                .bg(rgb(0x383f56))
+                .cursor(CursorStyle::PointingHand)
+                .child("Mark read")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(Self::on_security_panel_mark_read_clicked),
+                );
+            actions = actions.child(badge).child(ack_button);
+        }
+
+        let toggle_label = if self.security_panel_expanded {
+            "Hide"
+        } else {
+            "Show"
+        };
+        let toggle_button = div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(8.0))
+            .text_size(px(12.0))
+            .text_color(rgb(0xf2f4ff))
+            .bg(rgb(0x2a3148))
+            .cursor(CursorStyle::PointingHand)
+            .child(toggle_label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_security_panel_toggle_clicked),
+            );
+        actions = actions.child(toggle_button);
+
+        if self.security_panel_expanded && count > 0 {
+            let clear_button = div()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(8.0))
+                .text_size(px(12.0))
+                .text_color(rgb(0xf2f4ff))
+                .bg(rgb(0x383f56))
+                .cursor(CursorStyle::PointingHand)
+                .child("Clear log")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(Self::on_security_log_clear_clicked),
+                );
+            actions = actions.child(clear_button);
+        }
+
+        header = header.child(actions);
+
+        let mut list = div()
+            .mt(px(8.0))
+            .max_h(px(140.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0));
+
+        {
+            let interactivity = list.interactivity();
+            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
+        }
+
+        if !self.security_panel_expanded {
+            let summary = if count == 0 {
+                "No security alerts recorded."
+            } else {
+                "Alerts hidden. Click Show to review details."
+            };
+            list = list.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(0xb8bed3))
+                    .child(summary),
+            );
+        } else if self.security_events.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(0xb8bed3))
+                    .child("No security alerts recorded."),
+            );
+        } else {
+            for event in self.security_events.iter().rev() {
+                let entry = div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .rounded(px(8.0))
+                    .bg(rgb(0x231f2f))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0xf2f4ff))
+                            .child(format!("{} – {}", event.alias, event.description)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x8b92b0))
+                            .child(format_timestamp(event.timestamp_ms)),
+                    );
+                list = list.child(entry);
+            }
+        }
+
+        div()
+            .mt(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(header)
+            .child(list)
+    }
+
+    fn focus_members_search(&mut self, cx: &mut ViewContext<Self>) {
+        self.members_search.focus();
+        self.composer.blur();
+        cx.notify();
+    }
+
+    fn submit_members_search(&mut self, cx: &mut ViewContext<Self>) {
+        let query = self.members_search.query.trim().to_string();
+        if query.is_empty() {
+            if matches!(self.members_mode, MembersMode::Search { .. }) {
+                self.refresh_members(cx);
+            } else {
+                cx.notify();
+            }
+            return;
+        }
+
+        self.refresh_members_for_mode(
+            cx,
+            MembersMode::Search {
+                query: query.clone(),
+            },
+            true,
+            true,
+            format!("Searching for \"{}\"…", query),
+        );
+    }
+
+    fn clear_members_search(&mut self, cx: &mut ViewContext<Self>) {
+        self.members_search.clear();
+        self.members_search.blur();
+        if matches!(self.members_mode, MembersMode::Search { .. }) {
+            self.refresh_members(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn handle_membership_signal(&mut self, gid: &[u8; 32], cx: &mut ViewContext<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if &session.gid != gid {
+            return;
+        }
+        if matches!(self.members_status, MembersStatus::Loading(_)) {
+            return;
+        }
+        let mode = self.members_mode.clone();
+        let message = match &mode {
+            MembersMode::Full => "Syncing roster after membership change…".to_string(),
+            MembersMode::Search { query } => format!("Updating search for \"{}\"…", query),
+        };
+        self.refresh_members_for_mode(cx, mode, true, true, message);
+    }
+
+    fn on_composer_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.join_form.active = None;
+        self.members_search.blur();
+        self.composer.focus();
+        self.last_error = None;
+        cx.notify();
+    }
+
+    fn on_send_clicked(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
+        self.start_send(cx);
+    }
+
+    fn on_toggle_ciphertext(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.show_ciphertext = !self.show_ciphertext;
+        cx.notify();
+    }
+
+    fn focus_field(&mut self, field: ActiveField, cx: &mut ViewContext<Self>) {
+        self.join_form.active = Some(field);
+        self.composer.blur();
+        cx.notify();
+    }
+
+    fn on_join_clicked(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
+        self.start_join(cx);
+    }
+
+    fn on_retry_clicked(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
+        match self.last_retry_action {
+            Some(RetryAction::Join) => self.start_join(cx),
+            Some(RetryAction::Send) => self.start_send(cx),
+            Some(RetryAction::Leave) => {
+                if let Some(session) = &self.session {
+                    let request = LeaveRequest::from_session(session);
+                    self.leave_status = LeaveStatus::Leaving;
+                    self.clear_error();
+                    cx.notify();
+                    let task = Tokio::spawn_result(cx, async move { perform_leave(request).await });
+                    cx.spawn(async move |this, cx| {
+                        let outcome = task.await;
+                        let _ = this.update(cx, |model, cx| {
+                            model.on_leave_finished(outcome, cx);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
+            }
+            None => {}
+        }
+        self.clear_error();
+        cx.notify();
+    }
+
+    fn on_copy_error_details(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        if let Some(error) = &self.categorized_error {
+            let details = format!(
+                "City-G Error Report\n\
+                 ==================\n\n\
+                 Category: {:?}\n\
+                 Error: {}\n\n\
+                 Technical Details:\n\
+                 {}\n\n\
+                 Recovery Suggestion:\n\
+                 {}",
+                error.category,
+                error.user_message,
+                error.technical_details,
+                error.recovery_suggestion
+            );
+
+            // Log the details for now (clipboard API would require platform-specific code)
+            info!("Error details copied to logs:\n{}", details);
+            warn!("Error Report:\n{}", details);
+            self.show_success("Error details logged to console", cx);
+        }
+    }
+
+    fn on_copy_regular_fingerprint(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        if let Some(session) = &self.session {
+            if let Some(bytes) = session.regular_fingerprint {
+                let text = fingerprint_full_hex(&bytes);
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                self.show_success("Regular fingerprint copied", cx);
+            } else {
+                self.show_error_toast("Regular fingerprint unavailable", cx);
+            }
+        } else {
+            self.show_error_toast("No active session", cx);
+        }
+    }
+
+    fn on_copy_fs_fingerprint(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        if let Some(session) = &self.session {
+            if let Some(bytes) = session.fs_fingerprint {
+                let text = fingerprint_full_hex(&bytes);
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                self.show_success("FS fingerprint copied", cx);
+            } else {
+                self.show_error_toast("FS fingerprint unavailable", cx);
+            }
+        } else {
+            self.show_error_toast("No active session", cx);
+        }
+    }
+
+    fn on_report_issue(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
+        if let Some(error) = &self.categorized_error {
+            let report = format!(
+                "City-G Error Report\n\
+                 ==================\n\n\
+                 Category: {:?}\n\
+                 Error: {}\n\n\
+                 Technical Details:\n\
+                 {}\n\n\
+                 Recovery Suggestion:\n\
+                 {}\n\n\
+                 To report this issue:\n\
+                 1. Visit: https://github.com/pwnsdx/cityg/issues/new\n\
+                 2. Copy the error details above\n\
+                 3. Paste them into the issue description",
+                error.category,
+                error.user_message,
+                error.technical_details,
+                error.recovery_suggestion
+            );
+
+            warn!(
+                "===== ERROR REPORT =====\n{}\n========================",
+                report
+            );
+            self.show_info(
+                "Error report logged to console - visit GitHub to submit issue",
+                cx,
+            );
+        }
+    }
+
+    fn on_dismiss_error(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
+        self.clear_error();
+        cx.notify();
+    }
+
+    fn on_generate_room_id(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.join_form.room_id = AppModel::random_room_id();
+        self.join_form.active = Some(ActiveField::Room);
+        self.last_error = None;
+        self.info_message = Some("Generated a new room identifier.".to_string());
+        cx.notify();
+    }
+
+    fn start_join(&mut self, cx: &mut ViewContext<Self>) {
+        if matches!(self.join_status, JoinStatus::Joining) {
+            return;
+        }
+        if !self.join_form.is_ready() {
+            return;
+        }
+
+        self.reset_fetch_state();
+        self.messages.clear();
+        self.message_keys.clear();
+        self.join_status = JoinStatus::Joining;
+        self.last_error = None;
+        self.info_message = None;
+        self.composer.blur();
+        cx.notify();
+
+        let params = self.join_form.join_params();
+
+        let task = Tokio::spawn_result(cx, async move { perform_join(params).await });
+
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |model, cx| {
+                model.on_join_finished(outcome, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn start_send(&mut self, cx: &mut ViewContext<Self>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if !self.composer.is_ready() {
+            return;
+        }
+        if matches!(self.send_status, SendStatus::Sending) {
+            return;
+        }
+
+        let plaintext = self.composer.text.trim().to_string();
+        if plaintext.is_empty() {
+            return;
+        }
+
+        self.composer.clear();
+        self.composer.focus();
+
+        self.send_status = SendStatus::Sending;
+        self.last_error = None;
+        self.info_message = None;
+        cx.notify();
+
+        let params = SendParams::from_session(session, plaintext);
+        let task = Tokio::spawn_result(cx, async move { perform_send(params).await });
+
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |model, cx| {
+                model.on_send_finished(outcome, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn on_join_finished(&mut self, result: anyhow::Result<AppSession>, cx: &mut ViewContext<Self>) {
+        self.join_status = JoinStatus::Idle;
+        self.leave_status = LeaveStatus::Idle;
+        match result {
+            Ok(mut session) => {
+                session.last_fetch_timestamp_ms = None;
+                if let Err(err) = persist_session(&session) {
+                    warn!("joined room but failed to persist session: {err:?}");
+                    self.last_error =
+                        Some(format!("Joined room, but failed to save session: {err}"));
+                    self.info_message = None;
+                    self.show_error_toast("Joined room, but failed to save session", cx);
+                } else {
+                    self.last_error = None;
+                    self.categorized_error = None;
+                    self.info_message = Some("Joined room. Session saved locally.".to_string());
+                    self.show_success("Successfully joined room!", cx);
+                }
+                self.session = Some(session);
+                self.hydrate_alias_bindings_from_disk();
+                self.load_security_events_from_disk();
+                self.messages.clear();
+                self.composer.clear();
+                self.composer.blur();
+                self.send_status = SendStatus::Idle;
+                self.join_form.active = None;
+                self.reset_fetch_state();
+                self.schedule_fetch(cx, Duration::from_millis(0));
+                self.refresh_members(cx);
+
+                // Start automatic epoch rotation
+                self.start_epoch_rotation_task(cx);
+
+                // Start WebSocket connection
+                self.start_websocket(cx);
+            }
+            Err(err) => {
+                self.set_error(&err, "join", Some(RetryAction::Join));
+                self.info_message = None;
+                self.reset_fetch_state();
+            }
+        }
+    }
+
+    fn on_leave_clicked(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
+        if matches!(self.leave_status, LeaveStatus::Leaving) {
+            return;
+        }
+        let session = match &self.session {
+            Some(session) => session,
+            None => return,
+        };
+
+        let request = LeaveRequest::from_session(session);
+        self.leave_status = LeaveStatus::Leaving;
+        self.last_error = None;
+        self.info_message = None;
+        cx.notify();
+
+        let task = Tokio::spawn_result(cx, async move { perform_leave(request).await });
+
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |model, cx| {
+                model.on_leave_finished(outcome, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn on_leave_finished(&mut self, result: anyhow::Result<()>, cx: &mut ViewContext<Self>) {
+        self.leave_status = LeaveStatus::Idle;
+        match result {
+            Ok(()) => {
+                self.reset_fetch_state();
+                self.stop_epoch_rotation_task();
+                self.stop_websocket();
+                self.stop_members_refresh_task();
+                if let Some(session) = self.session.take() {
+                    if let Err(err) = remove_security_log(&session.server_url, &session.room_id) {
+                        warn!("failed to remove security log: {err:?}");
+                    }
+                    match remove_persisted_session(&session.server_url, &session.room_id) {
+                        Ok(()) => {
+                            self.info_message = Some("Device left the room.".to_string());
+                            self.clear_error();
+                            self.show_success("Successfully left the room", cx);
+                        }
+                        Err(err) => {
+                            let message =
+                                format!("Left room, but failed to remove session data: {err}");
+                            warn!("{message}");
+                            self.last_error = Some(message.clone());
+                            self.info_message = None;
+                            self.show_error_toast(message, cx);
+                        }
+                    }
+                } else {
+                    self.info_message = Some("Device left the room.".to_string());
+                    self.clear_error();
+                    self.show_success("Successfully left the room", cx);
+                }
+                self.messages.clear();
+                self.composer.clear();
+                self.composer.blur();
+                self.send_status = SendStatus::Idle;
+                self.fetch_status = FetchStatus::Idle;
+                self.members.clear();
+                self.members_status = MembersStatus::Idle;
+                self.members_total = 0;
+                self.members_next_offset = None;
+                self.members_loading_append = false;
+                self.alias_bindings.clear();
+                self.leaf_alias_index.clear();
+                self.members_auto_page = false;
+                self.members_mode = MembersMode::Full;
+                self.members_search.clear();
+                self.members_search.blur();
+                self.members_alias_dirty = false;
+                self.security_events.clear();
+                self.security_unread = 0;
+                self.security_panel_expanded = false;
+            }
+            Err(err) => {
+                self.set_error(&err, "leave", Some(RetryAction::Leave));
+                self.info_message = None;
+            }
+        }
+    }
+
+    fn refresh_members(&mut self, cx: &mut ViewContext<Self>) {
+        self.refresh_members_for_mode(
+            cx,
+            MembersMode::Full,
+            true,
+            true,
+            "Loading member roster…".to_string(),
+        );
+    }
+
+    fn refresh_members_soft(&mut self, cx: &mut ViewContext<Self>) {
+        if matches!(self.members_status, MembersStatus::Loading(_)) {
+            return;
+        }
+        let mode = self.members_mode.clone();
+        let message = match &mode {
+            MembersMode::Full => "Refreshing member roster…".to_string(),
+            MembersMode::Search { query } => format!("Refreshing search for \"{}\"…", query),
+        };
+        self.refresh_members_for_mode(cx, mode, false, true, message);
+    }
+
+    fn refresh_members_for_mode(
+        &mut self,
+        cx: &mut ViewContext<Self>,
+        mode: MembersMode,
+        reset_state: bool,
+        auto_page: bool,
+        message: String,
+    ) {
+        let session = match &self.session {
+            Some(session) => session,
+            None => return,
+        };
+        if reset_state {
+            self.members.clear();
+            self.members_total = 0;
+            self.members_next_offset = None;
+            self.members_alias_dirty = false;
+        }
+        if !matches!(mode, MembersMode::Full) {
+            self.members_alias_dirty = false;
+        }
+        self.members_mode = mode.clone();
+        self.members_auto_page = auto_page;
+        let params =
+            MembersParams::from_session(session, 0, self.config.gui.members_page_limit, mode);
+        self.start_members_fetch(params, false, message, cx);
+    }
+
+    fn load_more_members(&mut self, cx: &mut ViewContext<Self>) {
+        self.load_more_members_with_mode(cx, false);
+    }
+
+    fn load_more_members_with_mode(&mut self, cx: &mut ViewContext<Self>, auto_triggered: bool) {
+        if matches!(self.members_status, MembersStatus::Loading(_)) {
+            return;
+        }
+        if !auto_triggered {
+            self.members_auto_page = false;
+        }
+        let session = match &self.session {
+            Some(session) => session,
+            None => return,
+        };
+        let next = match self.members_next_offset {
+            Some(offset) if offset < self.members_total => offset,
+            _ => return,
+        };
+        let params = MembersParams::from_session(
+            session,
+            next,
+            self.config.gui.members_page_limit,
+            self.members_mode.clone(),
+        );
+        self.start_members_fetch(params, true, "Loading more members…".to_string(), cx);
+    }
+
+    fn start_members_fetch(
+        &mut self,
+        params: MembersParams,
+        append: bool,
+        message: String,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.members_status = MembersStatus::Loading(message);
+        self.members_loading_append = append;
+        cx.notify();
+        let task = Tokio::spawn_result(cx, async move { perform_fetch_members(params).await });
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |model, cx| {
+                model.on_members_refreshed(outcome, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn on_members_refreshed(
+        &mut self,
+        result: anyhow::Result<MembersPage>,
+        cx: &mut ViewContext<Self>,
+    ) {
+        match result {
+            Ok(mut page) => {
+                page.members.sort_by(|a, b| {
+                    let alias_cmp = a.alias.as_ref().cmp(&b.alias.as_ref());
+                    if alias_cmp.is_eq() {
+                        a.leaf_id.cmp(&b.leaf_id)
+                    } else {
+                        alias_cmp
+                    }
+                });
+                if self.members_loading_append {
+                    self.members.extend(page.members);
+                } else {
+                    self.members = page.members;
+                    self.members_alias_dirty = matches!(self.members_mode, MembersMode::Full);
+                }
+                self.members_total = page.total_count;
+                self.members_next_offset = if page.next_offset < page.total_count {
+                    Some(page.next_offset)
+                } else {
+                    None
+                };
+                self.members_status = MembersStatus::Idle;
+                if self.members_auto_page {
+                    if self.members_next_offset.is_some() {
+                        self.load_more_members_with_mode(cx, true);
+                        return;
+                    } else {
+                        self.members_auto_page = false;
+                    }
+                }
+                if self.members_alias_dirty && self.members_next_offset.is_none() {
+                    self.members_alias_dirty = false;
+                    if matches!(self.members_mode, MembersMode::Full) {
+                        self.reconcile_alias_bindings(cx);
+                    }
+                }
+            }
+            Err(err) => {
+                let detail = http_error_detail_from_anyhow(&err).unwrap_or_else(|| err.to_string());
+                warn!("failed to refresh members: {detail}");
+                self.members_status = MembersStatus::Error(detail);
+                self.members_auto_page = false;
+                self.members_alias_dirty = false;
+            }
+        }
+        self.members_loading_append = false;
+    }
+
+    fn on_reset_clicked(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
+        match self.reset_session_state() {
+            Ok(()) => {
+                self.info_message = Some("Session reset. Local state cleared.".to_string());
+                self.last_error = None;
+            }
+            Err(err) => {
+                self.last_error = Some(format!("Failed to reset session: {err}"));
+                self.info_message = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_members_refresh_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let mode = self.members_mode.clone();
+        let message = match &mode {
+            MembersMode::Full => "Loading member roster…".to_string(),
+            MembersMode::Search { query } => format!("Refreshing search for \"{}\"…", query),
+        };
+        self.refresh_members_for_mode(cx, mode, true, true, message);
+    }
+
+    fn on_members_load_more_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.load_more_members(cx);
+    }
+
+    fn on_members_search_field_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.focus_members_search(cx);
+    }
+
+    fn on_members_search_button_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.submit_members_search(cx);
+    }
+
+    fn on_members_search_clear_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.clear_members_search(cx);
+    }
+
+    fn on_security_log_clear_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.security_events.clear();
+        self.persist_security_events_to_disk();
+        self.security_unread = 0;
+        self.security_panel_expanded = false;
+        cx.notify();
+    }
+
+    fn on_security_panel_toggle_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.security_panel_expanded = !self.security_panel_expanded;
+        if self.security_panel_expanded {
+            self.acknowledge_security_alerts();
+        }
+        cx.notify();
+    }
+
+    fn on_security_panel_mark_read_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.acknowledge_security_alerts();
+        cx.notify();
+    }
+
+    fn reset_session_state(&mut self) -> Result<()> {
+        let removal_result = if let Some(session) = self.session.take() {
+            if let Err(err) = remove_security_log(&session.server_url, &session.room_id) {
+                warn!("failed to remove security log: {err:?}");
+            }
+            remove_persisted_session(&session.server_url, &session.room_id)
+        } else if let Some(pointer) = read_last_session_pointer()? {
+            if let Err(err) = remove_security_log(&pointer.server_url, &pointer.room_id) {
+                warn!("failed to remove security log: {err:?}");
+            }
+            remove_persisted_session(&pointer.server_url, &pointer.room_id)
+        } else {
+            Ok(())
+        };
+
+        self.reset_fetch_state();
+        self.fetch_task = None;
+        self.fetch_in_flight = false;
+        self.join_status = JoinStatus::Idle;
+        self.leave_status = LeaveStatus::Idle;
+        self.send_status = SendStatus::Idle;
+        self.fetch_status = FetchStatus::Idle;
+        self.session = None;
+        self.stop_members_refresh_task();
+        self.alias_bindings.clear();
+        self.leaf_alias_index.clear();
+        self.members_auto_page = false;
+        self.members_alias_dirty = false;
+        self.members_mode = MembersMode::Full;
+        self.members_search.clear();
+        self.members_search.blur();
+        self.security_events.clear();
+        self.security_unread = 0;
+        self.security_panel_expanded = false;
+        self.messages.clear();
+        self.message_keys.clear();
+        self.composer.clear();
+        self.composer.blur();
+        self.show_ciphertext = false;
+        self.join_form.active = Some(ActiveField::Alias);
+
+        removal_result
+    }
+
+    fn on_send_finished(
+        &mut self,
+        result: anyhow::Result<ChatMessageEntry>,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.send_status = SendStatus::Idle;
+        match result {
+            Ok(entry) => {
+                let ts = entry.timestamp_ms;
+                self.append_messages(vec![entry]);
+                self.info_message = Some("Message sent.".to_string());
+                self.show_success("Message sent successfully", cx);
+
+                if let Some(session) = self.session.as_mut() {
+                    let needs_update = session
+                        .last_fetch_timestamp_ms
+                        .map(|prev| ts > prev)
+                        .unwrap_or(true);
+                    if needs_update {
+                        session.last_fetch_timestamp_ms = Some(ts);
+                        if let Err(err) = persist_session(session) {
+                            warn!("failed to persist session after send: {err:?}");
+                        }
+                    }
+                }
+
+                if !self.fetch_in_flight {
+                    self.schedule_fetch(cx, Duration::from_millis(500));
+                }
+            }
+            Err(err) => {
+                self.set_error(&err, "send", Some(RetryAction::Send));
+            }
+        }
+    }
+
+    fn on_keystroke(&mut self, keystroke: &Keystroke, cx: &mut ViewContext<Self>) {
+        if self.session.is_some() {
+            if self.members_search.active {
+                match self.members_search.handle_keystroke(keystroke) {
+                    KeyOutcome::None => {}
+                    KeyOutcome::Updated => cx.notify(),
+                    KeyOutcome::Submit => self.submit_members_search(cx),
+                }
+                return;
+            }
+            match self.composer.handle_keystroke(keystroke) {
+                KeyOutcome::None => {}
+                KeyOutcome::Updated => cx.notify(),
+                KeyOutcome::Submit => self.start_send(cx),
+            }
+            return;
+        }
+        if matches!(self.join_status, JoinStatus::Joining) {
+            return;
+        }
+
+        match self.join_form.handle_keystroke(keystroke) {
+            KeyOutcome::None => {}
+            KeyOutcome::Updated => cx.notify(),
+            KeyOutcome::Submit => self.start_join(cx),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct JoinParams {
+    server_url: String,
+    room_id: String,
+    alias: String,
+}
+
+#[derive(Clone)]
+struct LeaveRequest {
+    server_url: String,
+    room_id: String,
+    gid: [u8; 32],
+    leaf_id: [u8; 32],
+    pop_public_key: Vec<u8>,
+    pop_secret_key: Vec<u8>,
+    vrf_secret_key: Vec<u8>,
+    vrf_public_key: Vec<u8>,
+    fs_ec: u64,
+    fs_epoch_commit: [u8; 32],
+    fs_dev_prev_commit: [u8; 32],
+}
+
+#[derive(Clone)]
+struct MembersParams {
+    server_url: String,
+    gid: [u8; 32],
+    parent_root: [u8; 32],
+    offset: u64,
+    limit: u32,
+    mode: MembersMode,
+}
+
+struct MembersPage {
+    members: Vec<MemberEntry>,
+    total_count: u64,
+    next_offset: u64,
+}
+
+impl LeaveRequest {
+    fn from_session(session: &AppSession) -> Self {
+        Self {
+            server_url: session.server_url.clone(),
+            room_id: session.room_id.clone(),
+            gid: session.gid,
+            leaf_id: session.leaf_id,
+            pop_public_key: session.pop_public_key.clone(),
+            pop_secret_key: session.pop_secret_key.clone(),
+            vrf_secret_key: session.vrf_secret_key.clone(),
+            vrf_public_key: session.vrf_public_key.clone(),
+            fs_ec: session.fs_ec,
+            fs_epoch_commit: session.fs_epoch_commit,
+            fs_dev_prev_commit: session.fs_dev_prev_commit,
+        }
+    }
+}
+
+impl MembersParams {
+    fn from_session(session: &AppSession, offset: u64, limit: u32, mode: MembersMode) -> Self {
+        Self {
+            server_url: session.server_url.clone(),
+            gid: session.gid,
+            parent_root: session.parent_root,
+            offset,
+            limit,
+            mode,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SendParams {
+    server_url: String,
+    we_epoch_id: [u8; 32],
+    epoch_key: [u8; 32],
+    leaf_id: [u8; 32],
+    alias: String,
+    plaintext: String,
+    msg_sign_secret_key: Vec<u8>,
+    msg_sign_public_key: Vec<u8>,
+}
+
+impl SendParams {
+    fn from_session(session: &AppSession, plaintext: String) -> Self {
+        Self {
+            server_url: session.server_url.clone(),
+            we_epoch_id: session.we_epoch_id,
+            epoch_key: session.epoch_key,
+            leaf_id: session.leaf_id,
+            alias: session.alias.clone(),
+            plaintext,
+            msg_sign_secret_key: session.msg_sign_secret_key.clone(),
+            msg_sign_public_key: session.msg_sign_public_key.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct FetchParams {
+    server_url: String,
+    we_epoch_id: [u8; 32],
+    epoch_key: [u8; 32],
+    since: Option<u64>,
+}
+
+impl FetchParams {
+    fn from_session(session: &AppSession, since: Option<u64>) -> Self {
+        Self {
+            server_url: session.server_url.clone(),
+            we_epoch_id: session.we_epoch_id,
+            epoch_key: session.epoch_key,
+            since,
+        }
+    }
+}
+
+struct FetchOutcome {
+    messages: Vec<ChatMessageEntry>,
+    last_timestamp_ms: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedSession {
+    version: u32,
+    server_url: String,
+    room_id: String,
+    alias: String,
+    gid_hex: String,
+    cat_hex: String,
+    leaf_hex: String,
+    parent_root_hex: String,
+    join_delta_root_hex: String,
+    revoked_since_root_hex: String,
+    revoked_root_hex: String,
+    tswe_salt_hash_hex: String,
+    pox_r_commit_hex: String,
+    we_epoch_id_hex: String,
+    epoch_key_hex: String,
+    proof_mode: String,
+    vrf_id: String,
+    policy_version: String,
+    msphf_crs_id: String,
+    msphf_params_id: String,
+    fs_policy_version: String,
+    fs_epoch_base_ts: u64,
+    kbroad_public_hex: String,
+    bootstrap_public_hex: String,
+    pop_public_hex: String,
+    pop_secret_hex: String,
+    msg_sign_public_hex: String,
+    msg_sign_secret_hex: String,
+    vrf_public_hex: String,
+    vrf_secret_hex: String,
+    fs_ec: u64,
+    fs_epoch_commit_hex: String,
+    fs_dev_prev_commit_hex: String,
+    #[serde(default)]
+    fs_epoch_created_at_unix_ms: u64, // Epoch creation timestamp (milliseconds since UNIX_EPOCH)
+    #[serde(default = "default_epoch_rotation_interval")]
+    fs_epoch_rotation_interval_secs: u64, // Epoch rotation interval in seconds (default: 300 = 5 min)
+    forward_state: PersistedForwardState,
+    #[serde(default)]
+    last_fetch_timestamp_ms: Option<u64>,
+    #[serde(default)]
+    capss_witness_hex: String,
+    #[serde(default)]
+    regular_fingerprint_hex: String,
+}
+
+const ALIAS_STORE_VERSION: u32 = 2;
+const SECURITY_LOG_VERSION: u32 = 1;
+const MAX_SECURITY_EVENTS: usize = 128;
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedAliasStore {
+    version: u32,
+    bindings: AHashMap<String, PersistedAliasBinding>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedAliasBinding {
+    pop_public_key_hex: String,
+    #[serde(default)]
+    leaf_id_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedSecurityLog {
+    version: u32,
+    events: Vec<PersistedSecurityEvent>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedSecurityEvent {
+    alias: String,
+    description: String,
+    timestamp_ms: u64,
+}
+
+fn default_epoch_rotation_interval() -> u64 {
+    300 // 5 minutes in seconds
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedForwardState {
+    k_fs_hex: String,
+    fs_ec: u64,
+    fs_dev_commit_hex: String,
+    #[serde(default)]
+    fs_last_weid_hex: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LastSessionPointer {
+    server_url: String,
+    room_id: String,
+}
+
+impl PersistedSession {
+    fn from_session(session: &AppSession) -> Self {
+        let snapshot = session.forward_state.snapshot();
+        let fs_epoch_created_at_unix_ms = session
+            .fs_epoch_created_at
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+
+        Self {
+            version: 6, // Version 6: FS fingerprint derived from persisted FS fields
+            server_url: session.server_url.clone(),
+            room_id: session.room_id.clone(),
+            alias: session.alias.clone(),
+            gid_hex: hex_encode(session.gid),
+            cat_hex: hex_encode(session.cat),
+            leaf_hex: hex_encode(session.leaf_id),
+            parent_root_hex: hex_encode(session.parent_root),
+            join_delta_root_hex: hex_encode(session.join_delta_root),
+            revoked_since_root_hex: hex_encode(session.revoked_since_root),
+            revoked_root_hex: hex_encode(session.revoked_root),
+            tswe_salt_hash_hex: hex_encode(session.tswe_salt_hash),
+            pox_r_commit_hex: hex_encode(session.pox_r_commit),
+            we_epoch_id_hex: hex_encode(session.we_epoch_id),
+            epoch_key_hex: hex_encode(session.epoch_key),
+            proof_mode: session.proof_mode.clone(),
+            vrf_id: session.vrf_id.clone(),
+            policy_version: session.policy_version.clone(),
+            msphf_crs_id: session.msphf_crs_id.clone(),
+            msphf_params_id: session.msphf_params_id.clone(),
+            fs_policy_version: session.fs_policy_version.clone(),
+            fs_epoch_base_ts: session.fs_epoch_base_ts,
+            kbroad_public_hex: hex_encode(&session.kbroad_public),
+            bootstrap_public_hex: hex_encode(&session.bootstrap_public),
+            pop_public_hex: hex_encode(&session.pop_public_key),
+            pop_secret_hex: hex_encode(&session.pop_secret_key),
+            msg_sign_public_hex: hex_encode(&session.msg_sign_public_key),
+            msg_sign_secret_hex: hex_encode(&session.msg_sign_secret_key),
+            vrf_public_hex: hex_encode(&session.vrf_public_key),
+            vrf_secret_hex: hex_encode(&session.vrf_secret_key),
+            fs_ec: session.fs_ec,
+            fs_epoch_commit_hex: hex_encode(session.fs_epoch_commit),
+            fs_dev_prev_commit_hex: hex_encode(session.fs_dev_prev_commit),
+            fs_epoch_created_at_unix_ms,
+            fs_epoch_rotation_interval_secs: session.fs_epoch_rotation_interval_secs,
+            forward_state: PersistedForwardState {
+                k_fs_hex: hex_encode(snapshot.k_fs),
+                fs_ec: snapshot.fs_ec,
+                fs_dev_commit_hex: hex_encode(snapshot.fs_dev_commit),
+                fs_last_weid_hex: hex_encode(snapshot.last_weid),
+            },
+            last_fetch_timestamp_ms: session.last_fetch_timestamp_ms,
+            capss_witness_hex: hex_encode(&session.capss_witness),
+            regular_fingerprint_hex: session
+                .regular_fingerprint
+                .as_ref()
+                .map(|bytes| hex_encode(bytes))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn into_app_session(self) -> Result<AppSession> {
+        let PersistedSession {
+            version,
+            server_url,
+            room_id,
+            alias,
+            gid_hex,
+            cat_hex,
+            leaf_hex,
+            parent_root_hex,
+            join_delta_root_hex,
+            revoked_since_root_hex,
+            revoked_root_hex,
+            tswe_salt_hash_hex,
+            pox_r_commit_hex,
+            we_epoch_id_hex,
+            epoch_key_hex,
+            proof_mode,
+            vrf_id,
+            policy_version,
+            msphf_crs_id,
+            msphf_params_id,
+            fs_policy_version,
+            fs_epoch_base_ts,
+            kbroad_public_hex,
+            bootstrap_public_hex,
+            pop_public_hex,
+            pop_secret_hex,
+            msg_sign_public_hex,
+            msg_sign_secret_hex,
+            vrf_public_hex,
+            vrf_secret_hex,
+            fs_ec: fs_join_ec,
+            fs_epoch_commit_hex,
+            fs_dev_prev_commit_hex,
+            fs_epoch_created_at_unix_ms,
+            fs_epoch_rotation_interval_secs,
+            forward_state,
+            last_fetch_timestamp_ms,
+            capss_witness_hex,
+            regular_fingerprint_hex,
+        } = self;
+
+        if !(version == 4 || version == 5 || version == 6) {
+            return Err(anyhow!(
+                "unsupported session file version {version} (expected 4, 5, or 6 with ML-DSA-65 authentication)"
+            ));
+        }
+
+        let gid = decode_hex32("gid_hex", &gid_hex)?;
+        let cat = decode_hex32("cat_hex", &cat_hex)?;
+        let leaf_id = decode_hex32("leaf_hex", &leaf_hex)?;
+        let parent_root = decode_hex32("parent_root_hex", &parent_root_hex)?;
+        let join_delta_root = decode_hex32("join_delta_root_hex", &join_delta_root_hex)?;
+        let revoked_since_root = decode_hex32("revoked_since_root_hex", &revoked_since_root_hex)?;
+        let revoked_root = decode_hex32("revoked_root_hex", &revoked_root_hex)?;
+        let tswe_salt_hash = decode_hex32("tswe_salt_hash_hex", &tswe_salt_hash_hex)?;
+        let pox_r_commit = decode_hex32("pox_r_commit_hex", &pox_r_commit_hex)?;
+        let we_epoch_id = decode_hex32("we_epoch_id_hex", &we_epoch_id_hex)?;
+        let epoch_key = decode_hex32("epoch_key_hex", &epoch_key_hex)?;
+
+        let kbroad_public = decode_hex_vec("kbroad_public_hex", &kbroad_public_hex)?;
+        let bootstrap_public = decode_hex_vec("bootstrap_public_hex", &bootstrap_public_hex)?;
+        let pop_public_key = decode_hex_vec("pop_public_hex", &pop_public_hex)?;
+        let pop_secret_key = decode_hex_vec("pop_secret_hex", &pop_secret_hex)?;
+        let msg_sign_public_key = decode_hex_vec("msg_sign_public_hex", &msg_sign_public_hex)?;
+        let msg_sign_secret_key = decode_hex_vec("msg_sign_secret_hex", &msg_sign_secret_hex)?;
+        let vrf_public_key = decode_hex_vec("vrf_public_hex", &vrf_public_hex)?;
+        let vrf_secret_key = decode_hex_vec("vrf_secret_hex", &vrf_secret_hex)?;
+        let fs_epoch_commit = decode_hex32("fs_epoch_commit_hex", &fs_epoch_commit_hex)?;
+        let fs_dev_prev_commit = decode_hex32("fs_dev_prev_commit_hex", &fs_dev_prev_commit_hex)?;
+        let capss_witness = decode_hex_vec("capss_witness_hex", &capss_witness_hex)?;
+        let regular_fingerprint = if regular_fingerprint_hex.is_empty() {
+            None
+        } else {
+            Some(decode_hex32(
+                "regular_fingerprint_hex",
+                &regular_fingerprint_hex,
+            )?)
+        };
+        let PersistedForwardState {
+            k_fs_hex,
+            fs_ec,
+            fs_dev_commit_hex,
+            fs_last_weid_hex,
+        } = forward_state;
+
+        let k_fs = decode_hex32("forward_state.k_fs_hex", &k_fs_hex)?;
+        let fs_dev_commit = decode_hex32("forward_state.fs_dev_commit_hex", &fs_dev_commit_hex)?;
+        let fs_last_weid = if fs_last_weid_hex.is_empty() {
+            we_epoch_id
+        } else {
+            decode_hex32("forward_state.fs_last_weid_hex", &fs_last_weid_hex)?
+        };
+        let forward_state =
+            ForwardSecrecyState::with_state(k_fs, fs_ec, fs_dev_commit, fs_last_weid);
+
+        // Restore epoch timestamp, default to now if not persisted or invalid
+        let fs_epoch_created_at = if fs_epoch_created_at_unix_ms > 0 {
+            UNIX_EPOCH + Duration::from_millis(fs_epoch_created_at_unix_ms)
+        } else {
+            SystemTime::now()
+        };
+
+        let mut session = AppSession {
+            server_url,
+            room_id,
+            alias,
+            gid,
+            cat,
+            leaf_id,
+            parent_root,
+            join_delta_root,
+            revoked_since_root,
+            revoked_root,
+            regular_fingerprint,
+            fs_fingerprint: None,
+            tswe_salt_hash,
+            pox_r_commit,
+            we_epoch_id,
+            epoch_key,
+            forward_state,
+            fs_ec: fs_join_ec,
+            fs_epoch_commit,
+            fs_dev_prev_commit,
+            fs_epoch_created_at,
+            fs_epoch_rotation_interval_secs,
+            pop_public_key,
+            pop_secret_key,
+            msg_sign_public_key,
+            msg_sign_secret_key,
+            vrf_secret_key,
+            vrf_public_key,
+            kbroad_public,
+            bootstrap_public,
+            proof_mode,
+            vrf_id,
+            policy_version,
+            msphf_crs_id,
+            msphf_params_id,
+            fs_policy_version,
+            fs_epoch_base_ts,
+            last_fetch_timestamp_ms,
+            capss_witness,
+        };
+
+        session.fs_fingerprint = derive_fs_fingerprint_from_fields(
+            session.fs_policy_version.as_str(),
+            session.fs_ec,
+            &session.fs_epoch_commit,
+            session.fs_epoch_base_ts,
+        );
+
+        Ok(session)
+    }
+}
+
+fn persist_session(session: &AppSession) -> Result<()> {
+    let persisted = PersistedSession::from_session(session);
+    let path = session_file_path(&session.server_url, &session.room_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let data =
+        serde_json::to_vec_pretty(&persisted).context("failed to serialize session to JSON")?;
+    fs::write(&path, data).with_context(|| format!("failed to write {}", path.display()))?;
+
+    let pointer = LastSessionPointer {
+        server_url: session.server_url.clone(),
+        room_id: session.room_id.clone(),
+    };
+    let pointer_path = last_session_pointer_path()?;
+    if let Some(parent) = pointer_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let pointer_data = serde_json::to_vec(&pointer).context("failed to encode session pointer")?;
+    fs::write(&pointer_path, pointer_data)
+        .with_context(|| format!("failed to write {}", pointer_path.display()))?;
+
+    Ok(())
+}
+
+fn remove_persisted_session(server_url: &str, room_id: &str) -> Result<()> {
+    let path = session_file_path(server_url, room_id)?;
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+
+    let pointer_path = last_session_pointer_path()?;
+    if pointer_path.exists() {
+        let should_remove = fs::read(&pointer_path)
+            .ok()
+            .and_then(|data| serde_json::from_slice::<LastSessionPointer>(&data).ok())
+            .map(|pointer| pointer.server_url == server_url && pointer.room_id == room_id)
+            .unwrap_or(false);
+
+        if should_remove {
+            fs::remove_file(&pointer_path)
+                .with_context(|| format!("failed to remove {}", pointer_path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn load_last_session() -> Result<Option<AppSession>> {
+    let pointer_path = last_session_pointer_path()?;
+    if !pointer_path.exists() {
+        return Ok(None);
+    }
+
+    let data = fs::read(&pointer_path)
+        .with_context(|| format!("failed to read {}", pointer_path.display()))?;
+    let pointer: LastSessionPointer =
+        serde_json::from_slice(&data).context("invalid session pointer JSON")?;
+    let session = load_session_at(&pointer.server_url, &pointer.room_id)?;
+    if session.is_none() {
+        let _ = fs::remove_file(&pointer_path);
+    }
+    Ok(session)
+}
+
+fn read_last_session_pointer() -> Result<Option<LastSessionPointer>> {
+    let pointer_path = last_session_pointer_path()?;
+    if !pointer_path.exists() {
+        return Ok(None);
+    }
+
+    let data = fs::read(&pointer_path)
+        .with_context(|| format!("failed to read {}", pointer_path.display()))?;
+    let pointer: LastSessionPointer =
+        serde_json::from_slice(&data).context("invalid session pointer JSON")?;
+    Ok(Some(pointer))
+}
+
+fn load_session_at(server_url: &str, room_id: &str) -> Result<Option<AppSession>> {
+    let path = session_file_path(server_url, room_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let persisted: PersistedSession =
+        serde_json::from_slice(&data).context("invalid session JSON")?;
+    persisted.into_app_session().map(Some)
+}
+
+fn session_key_hash(server_url: &str, room_id: &str) -> Result<String> {
+    let mut key = server_url.as_bytes().to_vec();
+    key.push(0u8);
+    key.extend_from_slice(room_id.as_bytes());
+    let hash = blake3_hash(&key);
+    Ok(hex_encode(hash.as_bytes()))
+}
+
+fn session_file_path(server_url: &str, room_id: &str) -> Result<PathBuf> {
+    let base = session_dir()?;
+    let hash = session_key_hash(server_url, room_id)?;
+    Ok(base.join(format!("session-{}.json", hash)))
+}
+
+fn roster_file_path(server_url: &str, room_id: &str) -> Result<PathBuf> {
+    let base = session_dir()?;
+    let hash = session_key_hash(server_url, room_id)?;
+    Ok(base.join(format!("roster-{}.json", hash)))
+}
+
+fn last_session_pointer_path() -> Result<PathBuf> {
+    Ok(session_dir()?.join("last-session.json"))
+}
+
+fn session_dir() -> Result<PathBuf> {
+    if let Some(path) = CONFIG_DIR_OVERRIDE
+        .lock()
+        .expect("config dir lock poisoned")
+        .clone()
+    {
+        return Ok(path);
+    }
+
+    if let Ok(override_path) = std::env::var("CITYG_GUI_CONFIG_DIR")
+        && !override_path.is_empty()
+    {
+        let base = PathBuf::from(override_path).join("cityg").join("gui");
+        return Ok(base);
+    }
+
+    let base = config_dir().ok_or_else(|| anyhow!("cannot determine config directory"))?;
+    Ok(base.join("cityg").join("gui"))
+}
+
+fn load_alias_bindings(
+    server_url: &str,
+    room_id: &str,
+) -> Result<AHashMap<String, AliasBindingRecord>> {
+    let path = roster_file_path(server_url, room_id)?;
+    if !path.exists() {
+        return Ok(AHashMap::new());
+    }
+
+    let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let store: PersistedAliasStore = match serde_json::from_slice(&data) {
+        Ok(store) => store,
+        Err(_) => {
+            let bindings: AHashMap<String, String> =
+                serde_json::from_slice(&data).context("invalid alias store JSON")?;
+            PersistedAliasStore {
+                version: 0,
+                bindings: bindings
+                    .into_iter()
+                    .map(|(alias, pop)| {
+                        (
+                            alias,
+                            PersistedAliasBinding {
+                                pop_public_key_hex: pop,
+                                leaf_id_hex: String::new(),
+                            },
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    };
+
+    let mut map = AHashMap::new();
+    for (alias, entry) in store.bindings {
+        if entry.pop_public_key_hex.is_empty() {
+            continue;
+        }
+        let pop_key = match hex_decode(&entry.pop_public_key_hex) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                warn!(
+                    "skipping alias binding '{}' due to invalid public key hex: {}",
+                    alias, err
+                );
+                continue;
+            }
+        };
+
+        let leaf_id = if entry.leaf_id_hex.is_empty() {
+            [0u8; 32]
+        } else {
+            match decode_hex32("alias_leaf", &entry.leaf_id_hex) {
+                Ok(arr) => arr,
+                Err(err) => {
+                    warn!(
+                        "alias '{}' has invalid leaf id '{}': {err}",
+                        alias, entry.leaf_id_hex
+                    );
+                    [0u8; 32]
+                }
+            }
+        };
+
+        map.insert(
+            alias,
+            AliasBindingRecord {
+                pop_public_key: pop_key,
+                leaf_id,
+            },
+        );
+    }
+    Ok(map)
+}
+
+fn persist_alias_bindings(
+    server_url: &str,
+    room_id: &str,
+    bindings: &AHashMap<String, AliasBindingRecord>,
+) -> Result<()> {
+    let path = roster_file_path(server_url, room_id)?;
+    if bindings.is_empty() {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let store = PersistedAliasStore {
+        version: ALIAS_STORE_VERSION,
+        bindings: bindings
+            .iter()
+            .map(|(alias, record)| {
+                (
+                    alias.clone(),
+                    PersistedAliasBinding {
+                        pop_public_key_hex: hex_encode(&record.pop_public_key),
+                        leaf_id_hex: hex_encode(record.leaf_id),
+                    },
+                )
+            })
+            .collect(),
+    };
+    let data =
+        serde_json::to_vec_pretty(&store).context("failed to serialize alias bindings to JSON")?;
+    fs::write(&path, data).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn security_log_file_path(server_url: &str, room_id: &str) -> Result<PathBuf> {
+    let base = session_dir()?;
+    let hash = session_key_hash(server_url, room_id)?;
+    Ok(base.join(format!("security-log-{}.json", hash)))
+}
+
+fn load_security_log(server_url: &str, room_id: &str) -> Result<Vec<SecurityEvent>> {
+    let path = security_log_file_path(server_url, room_id)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let log: PersistedSecurityLog =
+        serde_json::from_slice(&data).context("invalid security log JSON")?;
+    let mut events = Vec::with_capacity(log.events.len());
+    for entry in log.events {
+        events.push(SecurityEvent {
+            alias: entry.alias,
+            description: entry.description,
+            timestamp_ms: entry.timestamp_ms,
+        });
+    }
+    Ok(events)
+}
+
+fn persist_security_log(server_url: &str, room_id: &str, events: &[SecurityEvent]) -> Result<()> {
+    let path = security_log_file_path(server_url, room_id)?;
+    if events.is_empty() {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let log = PersistedSecurityLog {
+        version: SECURITY_LOG_VERSION,
+        events: events
+            .iter()
+            .map(|event| PersistedSecurityEvent {
+                alias: event.alias.clone(),
+                description: event.description.clone(),
+                timestamp_ms: event.timestamp_ms,
+            })
+            .collect(),
+    };
+    let data =
+        serde_json::to_vec_pretty(&log).context("failed to serialize security log to JSON")?;
+    fs::write(&path, data).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn remove_security_log(server_url: &str, room_id: &str) -> Result<()> {
+    let path = security_log_file_path(server_url, room_id)?;
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn set_config_dir_override_for_tests(path: Option<PathBuf>) -> ConfigDirGuard {
+    let mut guard = CONFIG_DIR_OVERRIDE
+        .lock()
+        .expect("config dir lock poisoned");
+    let previous = guard.clone();
+    *guard = path;
+    ConfigDirGuard { previous }
+}
+
+#[cfg(test)]
+struct ConfigDirGuard {
+    previous: Option<PathBuf>,
+}
+
+#[cfg(test)]
+impl Drop for ConfigDirGuard {
+    fn drop(&mut self) {
+        *CONFIG_DIR_OVERRIDE
+            .lock()
+            .expect("config dir lock poisoned") = self.previous.clone();
+    }
+}
+
+fn decode_hex32(name: &str, value: &str) -> Result<[u8; 32]> {
+    let bytes = hex_decode(value).with_context(|| format!("{name} is not valid hex"))?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("{name} must decode to 32 bytes, got {}", bytes.len()))
+}
+
+fn decode_hex_vec(name: &str, value: &str) -> Result<Vec<u8>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    hex_decode(value).with_context(|| format!("{name} is not valid hex"))
+}
+
+fn describe_http_failure(
+    status_text: &str,
+    message: &str,
+    freeze_code: Option<u32>,
+    freeze_reason: Option<&str>,
+) -> String {
+    let mut detail = format!("server error ({status_text}): {message}");
+    if let Some(code) = freeze_code {
+        match freeze_reason {
+            Some(reason) => detail.push_str(&format!(" [freeze {code} {reason}]")),
+            None => detail.push_str(&format!(" [freeze {code}]")),
+        }
+    }
+    detail
+}
+
+fn http_error_detail_from_anyhow(err: &anyhow::Error) -> Option<String> {
+    for cause in err.chain() {
+        if let Some(ApiClientError::HttpStatus {
+            status,
+            message,
+            freeze_code,
+            freeze_reason,
+            ..
+        }) = cause.downcast_ref::<ApiClientError>()
+        {
+            return Some(describe_http_failure(
+                status.as_str(),
+                message,
+                *freeze_code,
+                freeze_reason.as_deref(),
+            ));
+        }
+    }
+    None
+}
+
+// Categorize errors into user-friendly messages with recovery suggestions
+fn categorize_error(err: &anyhow::Error, context: &str) -> CategorizedError {
+    let err_str = err.to_string().to_lowercase();
+    let technical_details = http_error_detail_from_anyhow(err).unwrap_or_else(|| err.to_string());
+
+    // Network errors
+    if err_str.contains("connection refused") {
+        return CategorizedError::new(
+            ErrorCategory::Network,
+            "Connection refused",
+            technical_details.clone(),
+            "The server actively refused the connection. Verify the server URL and ensure the server is running.",
+            true,
+        );
+    }
+
+    if err_str.contains("timeout") {
+        return CategorizedError::new(
+            ErrorCategory::Network,
+            "Connection timeout",
+            technical_details.clone(),
+            "The server took too long to respond. Check your internet connection or try again later.",
+            true,
+        );
+    }
+
+    if err_str.contains("connection")
+        || err_str.contains("dns")
+        || err_str.contains("network")
+        || err_str.contains("unreachable")
+    {
+        return CategorizedError::new(
+            ErrorCategory::Network,
+            "Unable to connect to server",
+            technical_details.clone(),
+            "Check your internet connection and verify the server URL is correct. The server may be temporarily unavailable.",
+            true,
+        );
+    }
+
+    // HTTP status errors
+    if err_str.contains("404") || err_str.contains("not found") {
+        return CategorizedError::new(
+            ErrorCategory::Server,
+            "Resource not found",
+            technical_details.clone(),
+            "The requested resource was not found on the server. The room may not exist or the server URL may be incorrect.",
+            false,
+        );
+    }
+
+    if err_str.contains("401") || err_str.contains("unauthorized") {
+        return CategorizedError::new(
+            ErrorCategory::Policy,
+            "Authentication failed",
+            technical_details.clone(),
+            "Your credentials were rejected. You may need to rejoin the room with valid credentials.",
+            true,
+        );
+    }
+
+    if err_str.contains("403") || err_str.contains("forbidden") {
+        return CategorizedError::new(
+            ErrorCategory::Policy,
+            "Access denied",
+            technical_details.clone(),
+            "You don't have permission to perform this action. Contact the room administrator.",
+            false,
+        );
+    }
+
+    // Crypto/proof errors
+    if err_str.contains("proof")
+        || err_str.contains("crypto")
+        || err_str.contains("verification")
+        || err_str.contains("witness")
+        || err_str.contains("signature")
+    {
+        return CategorizedError::new(
+            ErrorCategory::Crypto,
+            "Cryptographic operation failed",
+            technical_details.clone(),
+            "The cryptographic proof generation or verification failed. This may indicate a system issue or invalid cryptographic parameters. Try rejoining the room.",
+            true,
+        );
+    }
+
+    // Policy/freeze errors
+    if err_str.contains("rho_replay") {
+        return CategorizedError::new(
+            ErrorCategory::Policy,
+            "Duplicate message detected",
+            technical_details.clone(),
+            "This message was already sent and the server prevented a duplicate. No action needed.",
+            false,
+        );
+    }
+
+    if err_str.contains("freeze") {
+        return CategorizedError::new(
+            ErrorCategory::Policy,
+            "Room policy violation",
+            technical_details.clone(),
+            "The room's security policy prevented this action. You may need to rejoin the room or contact the administrator for details.",
+            false,
+        );
+    }
+
+    if err_str.contains("policy") {
+        return CategorizedError::new(
+            ErrorCategory::Policy,
+            "Policy check failed",
+            technical_details.clone(),
+            "The action was blocked by a policy check. Ensure you're following room rules and try again.",
+            false,
+        );
+    }
+
+    // Validation errors
+    if err_str.contains("must not be empty") {
+        return CategorizedError::new(
+            ErrorCategory::Validation,
+            "Required field missing",
+            technical_details.clone(),
+            "One or more required fields are empty. Fill in all required information and try again.",
+            false,
+        );
+    }
+
+    if err_str.contains("invalid") || err_str.contains("not valid") {
+        return CategorizedError::new(
+            ErrorCategory::Validation,
+            "Invalid input",
+            technical_details.clone(),
+            "Some input data is invalid. Check the format and content of your input fields.",
+            false,
+        );
+    }
+
+    if err_str.contains("required") {
+        return CategorizedError::new(
+            ErrorCategory::Validation,
+            "Missing required information",
+            technical_details.clone(),
+            "Required information is missing. Please provide all necessary details.",
+            false,
+        );
+    }
+
+    // Server errors (5xx status codes)
+    if err_str.contains("500") || err_str.contains("internal server error") {
+        return CategorizedError::new(
+            ErrorCategory::Server,
+            "Internal server error",
+            technical_details.clone(),
+            "The server encountered an internal error. Please try again in a moment. If the problem persists, the server may need attention.",
+            true,
+        );
+    }
+
+    if err_str.contains("502") || err_str.contains("bad gateway") {
+        return CategorizedError::new(
+            ErrorCategory::Network,
+            "Bad gateway",
+            technical_details.clone(),
+            "The server received an invalid response from an upstream server. Try again in a moment.",
+            true,
+        );
+    }
+
+    if err_str.contains("503") || err_str.contains("service unavailable") {
+        return CategorizedError::new(
+            ErrorCategory::Server,
+            "Service temporarily unavailable",
+            technical_details.clone(),
+            "The server is temporarily unable to handle your request. Please try again in a few minutes.",
+            true,
+        );
+    }
+
+    if err_str.contains("server error") {
+        return CategorizedError::new(
+            ErrorCategory::Server,
+            "Server error occurred",
+            technical_details.clone(),
+            "The server encountered an error. Please try again in a moment. If the problem persists, contact support.",
+            true,
+        );
+    }
+
+    // Default fallback
+    let user_msg = match context {
+        "join" => "Failed to join room",
+        "send" => "Failed to send message",
+        "leave" => "Failed to leave room",
+        "fetch" => "Failed to fetch messages",
+        _ => "Operation failed",
+    };
+
+    CategorizedError::new(
+        ErrorCategory::Server,
+        user_msg,
+        technical_details.clone(),
+        "An unexpected error occurred. Please try again or contact support if the issue persists.",
+        true,
+    )
+}
+
+async fn perform_join(params: JoinParams) -> Result<AppSession> {
+    let JoinParams {
+        server_url,
+        room_id,
+        alias,
+    } = params;
+
+    if server_url.is_empty() {
+        return Err(anyhow!("server URL must not be empty"));
+    }
+    if room_id.is_empty() {
+        return Err(anyhow!("room id must not be empty"));
+    }
+    if alias.is_empty() {
+        return Err(anyhow!("alias must not be empty"));
+    }
+
+    // Generate keypair BEFORE calling join_ticket so we can sign the identity binding
+    let (pop_pk, pop_sk) = dilithium5::keypair();
+    let pop_public_key = pop_pk.as_bytes().to_vec();
+    let pop_secret_key = pop_sk.as_bytes().to_vec();
+
+    // Create identity binding by signing (alias || pop_public_key)
+    let identity_binding = {
+        use ciborium::ser::into_writer;
+        use cityg_api_client::IdentityBinding;
+        use pqcrypto_dilithium::dilithium5;
+        use pqcrypto_traits::sign::DetachedSignature as _;
+        use serde_bytes::ByteBuf;
+
+        // Create the message to sign: CBOR([alias, pop_public_key])
+        let message_data = (
+            ByteBuf::from(alias.as_bytes().to_vec()),
+            ByteBuf::from(pop_public_key.clone()),
+        );
+        let mut message = Vec::new();
+        into_writer(&message_data, &mut message)
+            .context("failed to encode identity binding message")?;
+
+        // Sign the message
+        let signature = dilithium5::detached_sign(&message, &pop_sk);
+
+        Some(IdentityBinding {
+            alias: alias.clone(),
+            pop_public_key: pop_public_key.clone(),
+            signature: signature.as_bytes().to_vec(),
+        })
+    };
+
+    let client = CitygApiClient::new(&server_url);
+    let mut bootstrap_attempted = false;
+    let ticket = loop {
+        match client
+            .join_ticket(&room_id, &alias, identity_binding.clone())
+            .await
+        {
+            Ok(ticket) => break ticket,
+            Err(ApiClientError::HttpStatus {
+                status,
+                message,
+                freeze_code,
+                freeze_reason,
+                ..
+            }) => {
+                if !bootstrap_attempted
+                    && status.is_server_error()
+                    && message.contains("kbroad key missing")
+                {
+                    bootstrap_attempted = true;
+                    client
+                        .bootstrap_room(&room_id, demo::kbroad_public())
+                        .await
+                        .context("failed to bootstrap room")?;
+                    continue;
+                }
+                let detail = describe_http_failure(
+                    status.as_str(),
+                    &message,
+                    freeze_code,
+                    freeze_reason.as_deref(),
+                );
+                return Err(anyhow!(detail));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    };
+
+    let gid = bytes32("gid", &ticket.gid)?;
+    let cat = bytes32("cat", &ticket.cat)?;
+    let parent_root = bytes32("parent_root", &ticket.parent_root)?;
+    let revoked_root = bytes32("revoked_root", &ticket.revoked_root)?;
+    let revoked_since_root = bytes32("revoked_since_root", &ticket.revoked_since_root)?;
+    let tswe_salt_hash = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
+    let join_delta_root = bytes32("join_delta_root", &ticket.join_delta_root)?;
+    let leaf_id = bytes32("leaf_id", &ticket.leaf_id)?;
+    let pox_r_commit = bytes32("pox_r_commit", &ticket.pox_r_commit)?;
+    let kbroad_public = if ticket.kbroad_public.is_empty() {
+        return Err(anyhow!("server returned empty KBROAD public key"));
+    } else {
+        ticket.kbroad_public.clone()
+    };
+    let bootstrap_public = ticket.bootstrap_public.clone();
+
+    let witness_bytes = if ticket.witness_cbor.is_empty() {
+        return Err(anyhow!("server did not include canonical witness"));
+    } else {
+        ticket.witness_cbor
+    };
+
+    let srx_inputs = SrxInputsOwned::from_cbor(&ticket.srx_cbor)
+        .context("unable to decode SRX bundle from server")?
+        .into_srx_inputs();
+
+    let mut header_map = BTreeMap::new();
+    header_map.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+    header_map.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
+
+    let mut k_fs = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut k_fs);
+    let mut fs_state = ForwardSecrecyState::new(k_fs);
+
+    // pop_pk, pop_sk, pop_public_key, pop_secret_key already generated above
+
+    // Generate ML-DSA-65 (Dilithium3) keys for message authentication
+    let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
+    let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
+    let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
+
+    let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
+
+    let msphf_crs_id = if ticket.msphf_crs_id.is_empty() {
+        "rlwe-merkle/v1".to_string()
+    } else {
+        ticket.msphf_crs_id
+    };
+    let msphf_params_id = if ticket.msphf_params_id.is_empty() {
+        "rlwe-params/mock".to_string()
+    } else {
+        ticket.msphf_params_id
+    };
+    let proof_mode = if ticket.proof_mode.is_empty() {
+        "lin+zkvrf".to_string()
+    } else {
+        ticket.proof_mode
+    };
+    let vrf_id = if ticket.vrf_id.is_empty() {
+        "lb-vrf/v1".to_string()
+    } else {
+        ticket.vrf_id
+    };
+    let policy_version = if ticket.policy_version.is_empty() {
+        "v0".to_string()
+    } else {
+        ticket.policy_version
+    };
+    let fs_policy_version = if ticket.fs_policy_version.is_empty() {
+        "fs-demo-policy".to_string()
+    } else {
+        ticket.fs_policy_version
+    };
+    let fs_epoch_base_ts = ticket.fs_epoch_base_ts;
+
+    let params = OrchestrationParams {
+        msphf_crs_id: msphf_crs_id.as_str(),
+        params_id: msphf_params_id.as_str(),
+        srx: Some(srx_inputs),
+        srx_mode: SrxMode::Complete,
+        pop_keys: Some(PopKeypair {
+            algorithm: "ML-DSA-65",
+            public_key: pop_public_key.as_slice(),
+            secret_key: &pop_sk,
+        }),
+        leaf_id_mode: LeafIdMode::PerGroup,
+        proof_mode: proof_mode.as_str(),
+        vrf_id: vrf_id.as_str(),
+        policy_version: policy_version.as_str(),
+        vrf_secret_key: Some(vrf_secret_key),
+        vrf_public_key: Some(vrf_public_key),
+        fs_policy_version: fs_policy_version.as_str(),
+        fs_epoch_base_ts,
+        fs_join: FsJoinInputs::default(),
+        fs_merge: FsMergeInputs::default(),
+    };
+
+    let parts = AnchorInstanceParts {
+        gid: &gid,
+        cat: &cat,
+        tswe_salt_hash: &tswe_salt_hash,
+        parent_root: &parent_root,
+        join_delta_root: &join_delta_root,
+        revoked_since_prev_root: &revoked_since_root,
+        revoked_root: &revoked_root,
+        pox_r_commit: Some(&pox_r_commit),
+    };
+
+    let mut bundle = CityGClient::generate_epoch(
+        header_map,
+        parts,
+        params,
+        &mut fs_state,
+        Some(&witness_bytes),
+    )
+    .context("failed to build join anchor")?;
+
+    let capss_witness_bytes = encode_capss_witness(&bundle.capss_witness)?;
+
+    if parent_root == [0u8; 32] {
+        demo::attach_bootstrap(&mut bundle).context("failed to attach bootstrap data")?;
+    }
+
+    client
+        .accept_epoch_bundle(&bundle)
+        .await
+        .context("server rejected join bundle")?;
+
+    let forward_state = fs_state;
+    let fs_ec: u64 = bundle
+        .header_map
+        .get(&hdr::HDR_FS_EC)
+        .and_then(Value::as_integer)
+        .ok_or_else(|| anyhow!("join bundle missing fs_ec"))?
+        .try_into()
+        .map_err(|_| anyhow!("fs_ec out of range"))?;
+    let fs_epoch_commit: [u8; 32] = bundle
+        .header_map
+        .get(&hdr::HDR_FS_EPOCH_COMMIT)
+        .and_then(Value::as_bytes)
+        .map(|bytes| bytes.as_slice())
+        .ok_or_else(|| anyhow!("join bundle missing fs_epoch_commit"))?
+        .try_into()
+        .map_err(|_| anyhow!("fs_epoch_commit length"))?;
+    let fs_dev_prev_commit: [u8; 32] = bundle
+        .header_map
+        .get(&hdr::HDR_FS_DEV_PREV_COMMIT)
+        .and_then(Value::as_bytes)
+        .map(|bytes| bytes.as_slice())
+        .ok_or_else(|| anyhow!("join bundle missing fs_dev_prev_commit"))?
+        .try_into()
+        .map_err(|_| anyhow!("fs_dev_prev_commit length"))?;
+    let regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
+    let fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
+        derive_fs_fingerprint_from_fields(
+            fs_policy_version.as_str(),
+            fs_ec,
+            &fs_epoch_commit,
+            fs_epoch_base_ts,
+        )
+    });
+    let session = AppSession {
+        server_url,
+        room_id,
+        alias,
+        gid,
+        cat,
+        leaf_id,
+        parent_root,
+        join_delta_root,
+        revoked_since_root,
+        revoked_root,
+        regular_fingerprint,
+        fs_fingerprint,
+        tswe_salt_hash,
+        pox_r_commit,
+        we_epoch_id: bundle.we_epoch_id,
+        epoch_key: bundle.epoch_key,
+        forward_state,
+        fs_ec,
+        fs_epoch_commit,
+        fs_dev_prev_commit,
+        fs_epoch_created_at: SystemTime::now(), // Initialize epoch timestamp
+        fs_epoch_rotation_interval_secs: 300,   // Default: 5 minutes
+        pop_public_key,
+        pop_secret_key,
+        msg_sign_public_key,
+        msg_sign_secret_key,
+        vrf_secret_key: vrf_secret_key.to_vec(),
+        vrf_public_key: vrf_public_key.to_vec(),
+        kbroad_public,
+        bootstrap_public,
+        proof_mode,
+        vrf_id,
+        policy_version,
+        msphf_crs_id,
+        msphf_params_id,
+        fs_policy_version,
+        fs_epoch_base_ts,
+        last_fetch_timestamp_ms: None,
+        capss_witness: capss_witness_bytes,
+    };
+
+    Ok(session)
+}
+
+async fn perform_leave(request: LeaveRequest) -> Result<()> {
+    let LeaveRequest {
+        server_url,
+        room_id,
+        gid,
+        leaf_id,
+        pop_public_key,
+        pop_secret_key,
+        vrf_secret_key,
+        vrf_public_key,
+        fs_ec,
+        fs_epoch_commit,
+        fs_dev_prev_commit,
+        ..
+    } = request;
+
+    let client = CitygApiClient::new(&server_url);
+    let ticket = client
+        .merge_ticket(&room_id, &leaf_id)
+        .await
+        .context("failed to obtain merge ticket")?;
+
+    let MergeTicket {
+        we_epoch_id: _,
+        parities: raw_parities,
+        witness_cbor,
+        srx_cbor,
+        proof_mode,
+        vrf_id,
+        policy_version,
+        cat,
+        parent_root,
+        join_delta_root,
+        revoked_since_root,
+        revoked_root,
+        tswe_salt_hash,
+        pox_r_commit,
+        kbroad_public,
+        msphf_crs_id,
+        msphf_params_id,
+        fs_policy_version,
+        fs_epoch_base_ts,
+    } = ticket;
+
+    let srx_inputs = SrxInputsOwned::from_cbor(&srx_cbor)
+        .context("unable to parse SRX payload from merge ticket")?
+        .into_srx_inputs();
+
+    let mut header = BTreeMap::new();
+    header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+    header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
+
+    let cat_arr = bytes32("cat", &cat)?;
+    let pox_r_commit_arr = bytes32("pox_r_commit", &pox_r_commit)?;
+
+    let pop_secret =
+        Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
+
+    let params = OrchestrationParams {
+        msphf_crs_id: msphf_crs_id.as_str(),
+        params_id: msphf_params_id.as_str(),
+        srx: Some(srx_inputs),
+        srx_mode: SrxMode::Complete,
+        pop_keys: Some(PopKeypair {
+            algorithm: "ML-DSA-65",
+            public_key: pop_public_key.as_slice(),
+            secret_key: pop_secret.as_ref(),
+        }),
+        leaf_id_mode: LeafIdMode::PerGroup,
+        proof_mode: proof_mode.as_str(),
+        vrf_id: vrf_id.as_str(),
+        policy_version: policy_version.as_str(),
+        vrf_secret_key: Some(vrf_secret_key.as_slice()),
+        vrf_public_key: Some(vrf_public_key.as_slice()),
+        fs_policy_version: fs_policy_version.as_str(),
+        fs_epoch_base_ts,
+        fs_join: FsJoinInputs {
+            fs_ec,
+            fs_epoch_commit,
+            fs_dev_prev_commit,
+        },
+        fs_merge: FsMergeInputs::default(),
+    };
+
+    let witness_bytes = if witness_cbor.is_empty() {
+        None
+    } else {
+        Some(witness_cbor.as_slice())
+    };
+
+    let parities = hydrate_parities(&raw_parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit);
+
+    let pivot = select_pivot_parity(&parities)
+        .ok_or_else(|| anyhow!("merge ticket did not include any pivot parities"))?;
+    let parent_root_arr = bytes32("parent_root", &parent_root)?;
+    let join_delta_root_arr = bytes32("join_delta_root", &join_delta_root)?;
+    let revoked_since_root_arr = bytes32("revoked_since_root", &revoked_since_root)?;
+    let revoked_root_arr = bytes32("revoked_root", &revoked_root)?;
+    let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &tswe_salt_hash)?;
+
+    let parts = AnchorInstanceParts {
+        gid: &gid,
+        cat: cat_arr.as_slice(),
+        tswe_salt_hash: tswe_salt_hash_arr.as_slice(),
+        parent_root: parent_root_arr.as_slice(),
+        join_delta_root: join_delta_root_arr.as_slice(),
+        revoked_since_prev_root: revoked_since_root_arr.as_slice(),
+        revoked_root: revoked_root_arr.as_slice(),
+        pox_r_commit: Some(pox_r_commit_arr.as_slice()),
+    };
+
+    let mut bundle =
+        CityGClient::generate_merge(header, parts, params, &parities, None, witness_bytes)
+            .context("failed to build merge bundle")?;
+
+    strip_rollup_metadata(&mut bundle.header_map);
+    apply_pivot_alignment(&mut bundle.header_map, pivot);
+
+    let anchor_ctx =
+        build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
+    let seed_ctx_hash = compute_seed_ctx_hash(&anchor_ctx).context("compute seed_ctx_hash")?;
+    let seed_commit = compute_seed_commit(
+        &anchor_ctx,
+        &SeedCommitFields {
+            gid: &gid,
+            cat: cat_arr.as_slice(),
+            we_epoch_id: bundle.we_epoch_id,
+        },
+    )
+    .context("compute seed_commit")?;
+    let seed_bundle_commit = compute_seed_bundle_commit(
+        &anchor_ctx,
+        &bundle.hp_binding.rho_commit,
+        &gid,
+        cat_arr.as_slice(),
+        &parent_root_arr,
+    )
+    .context("compute seed_bundle_commit")?;
+    let derived_we_epoch_id =
+        derive_we_epoch_id(&gid, &parent_root_arr, &seed_ctx_hash).context("derive we_epoch_id")?;
+
+    bundle.anchor.anchor_hdr_ctx = anchor_ctx.clone();
+    bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
+    bundle.hp_binding.seed_commit = seed_commit;
+    bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
+    bundle.we_epoch_id = derived_we_epoch_id;
+    bundle
+        .header_map
+        .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
+    bundle.header_map.insert(
+        hdr::HDR_RHO_COMMIT,
+        Value::Bytes(bundle.hp_binding.rho_commit.to_vec()),
+    );
+    bundle.header_map.insert(
+        hdr::HDR_SEED_BUNDLE_COMMIT,
+        Value::Bytes(seed_bundle_commit.to_vec()),
+    );
+
+    if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
+        bundle
+            .header_map
+            .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
+    }
+
+    if let Some(recomputed) = recompute_proofs_commit(&bundle.header_map)
+        .ok()
+        .map(|arr| arr.to_vec())
+    {
+        bundle
+            .header_map
+            .insert(hdr::HDR_PROOFS_COMMIT, Value::Bytes(recomputed));
+    }
+
+    client
+        .refresh_pivot(&bundle)
+        .await
+        .context("refresh pivot parity")?;
+
+    client
+        .accept_epoch_bundle(&bundle)
+        .await
+        .context("server rejected merge bundle")?;
+
+    Ok(())
+}
+
+async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
+    let client = CitygApiClient::new(&params.server_url);
+    let (raw_members, total_count, next_offset) = match &params.mode {
+        MembersMode::Full => {
+            let response = client
+                .members_with_range(
+                    &params.gid,
+                    Some(&params.parent_root),
+                    Some(params.offset),
+                    Some(params.limit),
+                )
+                .await?;
+            (response.members, response.total_count, response.next_offset)
+        }
+        MembersMode::Search { query } => {
+            let response = client
+                .search_members(
+                    &params.gid,
+                    query,
+                    Some(&params.parent_root),
+                    Some(params.offset),
+                    Some(params.limit),
+                )
+                .await?;
+            (response.members, response.total_count, response.next_offset)
+        }
+    };
+    let mut members = Vec::with_capacity(raw_members.len());
+    for entry in raw_members {
+        let leaf_id: [u8; 32] = entry
+            .leaf_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("member leaf id must be 32 bytes"))?;
+        let alias = entry.alias.filter(|alias| !alias.trim().is_empty());
+        let pop_public_key = entry.pop_public_key.filter(|pk| !pk.is_empty());
+        members.push(MemberEntry {
+            leaf_id,
+            alias,
+            pop_public_key,
+            join_timestamp_ms: entry.join_date,
+            last_seen_timestamp_ms: entry.last_seen,
+        });
+    }
+    Ok(MembersPage {
+        members,
+        total_count,
+        next_offset,
+    })
+}
+async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
+    let SendParams {
+        server_url,
+        we_epoch_id,
+        epoch_key,
+        leaf_id,
+        alias,
+        plaintext,
+        msg_sign_secret_key,
+        msg_sign_public_key,
+    } = params;
+
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    // Sign the message with ML-DSA-65
+    let signature = sign_message(
+        &leaf_id,
+        timestamp_ms,
+        plaintext.as_bytes(),
+        &msg_sign_secret_key,
+    )
+    .context("failed to sign message")?;
+
+    let authenticated_msg = encode_authenticated_message(
+        timestamp_ms,
+        plaintext.as_bytes(),
+        &msg_sign_public_key,
+        &signature,
+    );
+
+    // Encrypt the authenticated message
+    let ciphertext =
+        encrypt_message(&authenticated_msg, &epoch_key).context("failed to encrypt message")?;
+
+    // Send with leaf_id as sender identifier
+    let client = CitygApiClient::new(&server_url);
+    client
+        .send_message(&we_epoch_id, &ciphertext, Some(&leaf_id))
+        .await
+        .context("failed to send message")?;
+
+    Ok(ChatMessageEntry {
+        sender_leaf: Some(leaf_id),
+        fallback_label: alias,
+        plaintext,
+        ciphertext_hex: hex_encode(&ciphertext),
+        timestamp_ms,
+    })
+}
+
+async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
+    let FetchParams {
+        server_url,
+        we_epoch_id,
+        epoch_key,
+        since,
+    } = params;
+
+    let client = CitygApiClient::new(&server_url);
+    let response = client
+        .fetch_messages(&we_epoch_id)
+        .await
+        .context("failed to fetch messages")?;
+
+    let mut messages = Vec::new();
+    let mut max_timestamp = since.unwrap_or(0);
+
+    for message in response.messages {
+        if let Some(threshold) = since
+            && message.timestamp_ms <= threshold
+        {
+            continue;
+        }
+
+        // Decrypt using ChaCha20-Poly1305
+        let authenticated_msg = match decrypt_message(&message.ciphertext, &epoch_key) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                // Skip messages that fail decryption (might be from different epoch or corrupted)
+                tracing::warn!("failed to decrypt message: {}", e);
+                continue;
+            }
+        };
+
+        // Parse authenticated message format: plaintext || pub_key_len (4) || pub_key || signature
+        // ML-DSA-65: public key is 1952 bytes, signature is 3293 bytes
+        const MLDSA65_PUBKEY_SIZE: usize = ml_dsa_public_key_bytes();
+        const MLDSA65_SIG_SIZE: usize = ml_dsa_signature_bytes();
+        const MIN_MSG_SIZE: usize =
+            MESSAGE_PREFIX.len() + 8 + 4 + 4 + MLDSA65_PUBKEY_SIZE + 4 + MLDSA65_SIG_SIZE;
+
+        if authenticated_msg.len() < MIN_MSG_SIZE {
+            tracing::warn!(
+                "message too small for authenticated format: {} bytes < {} bytes minimum",
+                authenticated_msg.len(),
+                MIN_MSG_SIZE
+            );
+            continue; // Skip messages that don't meet minimum size
+        }
+
+        // Extract leaf_id from sender field (must be 32 bytes)
+        if message.sender.len() != 32 {
+            tracing::warn!(
+                "sender field is not 32 bytes (got {}), skipping message",
+                message.sender.len()
+            );
+            continue;
+        }
+        // Safe conversion: we verified length == 32 above
+        let leaf_id: [u8; 32] = message.sender[..32]
+            .try_into()
+            .expect("sender is guaranteed to be 32 bytes by length check above");
+
+        let envelope = match decode_authenticated_message(&authenticated_msg) {
+            Ok(env) => env,
+            Err(err) => {
+                tracing::warn!("failed to decode authenticated message: {err}");
+                continue;
+            }
+        };
+
+        if envelope.public_key.len() != MLDSA65_PUBKEY_SIZE {
+            tracing::warn!(
+                "unexpected public key length: {} (expected {})",
+                envelope.public_key.len(),
+                MLDSA65_PUBKEY_SIZE
+            );
+            continue;
+        }
+        if envelope.signature.len() != MLDSA65_SIG_SIZE {
+            tracing::warn!(
+                "unexpected signature length: {} (expected {})",
+                envelope.signature.len(),
+                MLDSA65_SIG_SIZE
+            );
+            continue;
+        }
+
+        // Verify signature
+        match verify_message_signature(
+            &leaf_id,
+            envelope.timestamp_ms,
+            envelope.plaintext,
+            envelope.signature,
+            envelope.public_key,
+        ) {
+            Ok(()) => {
+                let sender_display = format!("{}✓", hex_encode(&leaf_id[..4]));
+                let plaintext = String::from_utf8_lossy(envelope.plaintext).into_owned();
+
+                if message.timestamp_ms > max_timestamp {
+                    max_timestamp = message.timestamp_ms;
+                }
+
+                tracing::info!("message from {}: verification=verified", sender_display);
+
+                messages.push(ChatMessageEntry {
+                    sender_leaf: Some(leaf_id),
+                    fallback_label: sender_display,
+                    plaintext,
+                    ciphertext_hex: hex_encode(&message.ciphertext),
+                    timestamp_ms: message.timestamp_ms,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "signature verification failed for message from {}: {}",
+                    hex_encode(&leaf_id[..4]),
+                    e
+                );
+                // Skip messages with invalid signatures
+                continue;
+            }
+        }
+    }
+
+    let last_timestamp_ms = if messages.is_empty() {
+        since
+    } else {
+        Some(max_timestamp)
+    };
+
+    Ok(FetchOutcome {
+        messages,
+        last_timestamp_ms,
+    })
+}
+
+fn strip_rollup_metadata(header: &mut BTreeMap<u64, Value>) {
+    for key in [
+        hdr::HDR_ROLLUP_PROVENANCE_COMMIT,
+        hdr::HDR_ROLLUP_EPOCH_REPLAY,
+        hdr::HDR_ROLLUP_VCK_COMMIT,
+    ] {
+        header.remove(&key);
+    }
+}
+
+fn hydrate_parities(
+    parities: &[PivotParity],
+    fs_ec: u64,
+    fs_epoch_commit: [u8; 32],
+    fs_dev_commit: [u8; 32],
+) -> Vec<PivotParity> {
+    parities
+        .iter()
+        .cloned()
+        .map(|mut parity| {
+            if parity.fs_ec.is_none() {
+                parity.fs_ec = Some(fs_ec);
+            }
+            if parity.fs_epoch_commit.is_none() {
+                parity.fs_epoch_commit = Some(fs_epoch_commit);
+            }
+            if parity.fs_dev_commit.is_none() {
+                parity.fs_dev_commit = Some(fs_dev_commit);
+            }
+            parity
+        })
+        .collect()
+}
+
+fn apply_pivot_alignment(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity) {
+    header.insert(
+        hdr::HDR_POLICY_VERSION,
+        Value::Text(pivot.policy_version.clone()),
+    );
+    header.insert(hdr::HDR_PROOF_MODE, Value::Text(pivot.proof_mode.clone()));
+    header.insert(hdr::HDR_VRF_ID, Value::Text(pivot.vrf_id.clone()));
+    header.insert(hdr::HDR_VRF_PROOF, Value::Bytes(pivot.vrf_proof.clone()));
+    header.insert(
+        hdr::HDR_VRF_PUBLIC_KEY,
+        Value::Bytes(pivot.vrf_public.clone()),
+    );
+    header.insert(hdr::HDR_VRF_MASK_A, Value::Bytes(pivot.mask_a.to_vec()));
+    header.insert(hdr::HDR_VRF_MASK_B, Value::Bytes(pivot.mask_b.to_vec()));
+    header.insert(hdr::HDR_FS_CAPSS, Value::Bytes(pivot.fs_capss.clone()));
+    header.insert(
+        hdr::HDR_PROOFS_COMMIT,
+        Value::Bytes(pivot.proofs_commit.to_vec()),
+    );
+
+    if let Some(fs_ec) = pivot.fs_ec {
+        header
+            .entry(hdr::HDR_FS_EC)
+            .or_insert_with(|| Value::Integer(Integer::from(fs_ec)));
+        header
+            .entry(hdr::HDR_FS_CHECKPOINT_EC)
+            .or_insert_with(|| Value::Integer(Integer::from(fs_ec)));
+    }
+    if let Some(epoch_commit) = pivot.fs_epoch_commit {
+        header
+            .entry(hdr::HDR_FS_EPOCH_COMMIT)
+            .or_insert_with(|| Value::Bytes(epoch_commit.to_vec()));
+    }
+    if let Some(dev_commit) = pivot.fs_dev_commit {
+        header
+            .entry(hdr::HDR_FS_DEV_PREV_COMMIT)
+            .or_insert_with(|| Value::Bytes(dev_commit.to_vec()));
+        header
+            .entry(hdr::HDR_FS_DEV_COMMIT)
+            .or_insert_with(|| Value::Bytes(dev_commit.to_vec()));
+    }
+}
+
+fn select_pivot_parity(parities: &[PivotParity]) -> Option<&PivotParity> {
+    parities.iter().max_by(|a, b| {
+        a.accept_seq
+            .cmp(&b.accept_seq)
+            .then_with(|| b.xk_hash.cmp(&a.xk_hash))
+    })
+}
+
+fn hex_encode_prefix(bytes: &[u8; 32], prefix_len: usize) -> String {
+    let hex = hex_encode(bytes);
+    if prefix_len >= hex.len() {
+        hex
+    } else {
+        format!("{}…", &hex[..prefix_len])
+    }
+}
+
+fn format_alias_display(alias: &str, leaf: &[u8; 32]) -> String {
+    format!("{alias} ({})", hex_encode_prefix(leaf, 8))
+}
+
+fn fingerprint_full_hex(bytes: &[u8; 32]) -> String {
+    hex_encode(bytes)
+}
+
+fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
+    let hex = fingerprint_full_hex(bytes);
+    if hex.len() <= 16 {
+        return hex;
+    }
+    let first = &hex[..8];
+    let second = &hex[8..16];
+    format!(
+        "{}-{} {}-{} …",
+        &first[..4],
+        &first[4..],
+        &second[..4],
+        &second[4..]
+    )
+}
+
+fn format_regular_fingerprint(value: Option<&[u8; 32]>) -> String {
+    match value {
+        Some(bytes) => fingerprint_preview_hex(bytes),
+        None => "Not available".to_string(),
+    }
+}
+
+fn format_fs_fingerprint(value: Option<&[u8; 32]>, fs_ec: u64) -> String {
+    match value {
+        Some(bytes) => format!("{} · fs_ec {}", fingerprint_preview_hex(bytes), fs_ec),
+        None => "Not available".to_string(),
+    }
+}
+
+#[derive(Serialize)]
+struct FsFingerprintInputs<'a> {
+    fs_policy_version: &'a str,
+    fs_ec: u64,
+    #[serde(with = "serde_bytes")]
+    fs_epoch_commit: &'a [u8],
+    fs_epoch_base_ts: u64,
+}
+
+fn derive_fs_fingerprint_from_fields(
+    fs_policy_version: &str,
+    fs_ec: u64,
+    fs_epoch_commit: &[u8; 32],
+    fs_epoch_base_ts: u64,
+) -> Option<[u8; 32]> {
+    let inputs = FsFingerprintInputs {
+        fs_policy_version,
+        fs_ec,
+        fs_epoch_commit,
+        fs_epoch_base_ts,
+    };
+    h_l("fs/fingerprint", &inputs).ok()
+}
+
+fn compute_fs_fingerprint_from_header(header: &BTreeMap<u64, Value>) -> Option<[u8; 32]> {
+    let policy = header_text(header, hdr::HDR_FS_POLICY_VERSION)?;
+    let fs_ec = header_u64(header, hdr::HDR_FS_EC)?;
+    let fs_epoch_commit = header_bytes32(header, hdr::HDR_FS_EPOCH_COMMIT)?;
+    let fs_epoch_base_ts = header_u64(header, hdr::HDR_FS_EPOCH_BASE_TS)?;
+    derive_fs_fingerprint_from_fields(policy, fs_ec, &fs_epoch_commit, fs_epoch_base_ts)
+}
+
+fn header_text<'a>(header: &'a BTreeMap<u64, Value>, key: u64) -> Option<&'a str> {
+    match header.get(&key)? {
+        Value::Text(text) => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+fn header_u64(header: &BTreeMap<u64, Value>, key: u64) -> Option<u64> {
+    match header.get(&key)? {
+        Value::Integer(int) => int.clone().try_into().ok(),
+        _ => None,
+    }
+}
+
+fn header_bytes32(header: &BTreeMap<u64, Value>, key: u64) -> Option<[u8; 32]> {
+    match header.get(&key)? {
+        Value::Bytes(bytes) => bytes.as_slice().try_into().ok(),
+        _ => None,
+    }
+}
+
+fn decode_hex_32(input: &str) -> Option<[u8; 32]> {
+    let bytes = hex_decode(input).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&bytes);
+    Some(result)
+}
+
+fn format_member_label(member: &MemberEntry) -> String {
+    if let Some(alias) = member.alias.as_ref().filter(|s| !s.is_empty()) {
+        format_alias_display(alias, &member.leaf_id)
+    } else {
+        hex_encode(member.leaf_id)
+    }
+}
+
+fn format_timestamp(ts_ms: u64) -> String {
+    let dt = UNIX_EPOCH + Duration::from_millis(ts_ms);
+    format_rfc3339_seconds(dt).to_string()
+}
+
+fn recompute_proofs_commit(header: &BTreeMap<u64, Value>) -> Result<[u8; 32]> {
+    let vrf = header_bytes(header, hdr::HDR_VRF_PROOF, "vrf_proof")?;
+    let fs = header_bytes(header, hdr::HDR_FS_CAPSS, "fs_capss")?;
+    let srx_root = header_bytes32_opt(header, hdr::HDR_SRX_ROOT_SW)?;
+    let srx_smallwood = header_bytes_opt(header, hdr::HDR_SRX_SMALLWOOD)?;
+    compute_proofs_commit_bytes(
+        &vrf,
+        &fs,
+        srx_root.as_ref().map(|arr| arr.as_slice()),
+        srx_smallwood.as_deref(),
+    )
+    .map_err(|err| anyhow!("compute proofs commit: {err}"))
+}
+
+fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]>> {
+    let payload = match header.get(&hdr::HDR_SRX_PAYLOAD) {
+        Some(Value::Bytes(bytes)) => bytes.as_slice(),
+        Some(Value::Null) | None => return Ok(None),
+        Some(_) => return Err(anyhow!("srx_payload must be bytes")),
+    };
+
+    #[derive(Serialize)]
+    struct SrxCommit<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+
+    let commit = h_l(ds::MSPHF_SRX_COMMIT, &SrxCommit(payload))
+        .map_err(|err| anyhow!("compute srx commit: {err}"))?;
+    Ok(Some(commit))
+}
+
+fn header_bytes(header: &BTreeMap<u64, Value>, key: u64, label: &'static str) -> Result<Vec<u8>> {
+    match header.get(&key) {
+        Some(Value::Bytes(bytes)) => Ok(bytes.clone()),
+        Some(_) => Err(anyhow!("{label} must be bytes")),
+        None => Err(anyhow!("{label} missing")),
+    }
+}
+
+fn header_bytes_opt(header: &BTreeMap<u64, Value>, key: u64) -> Result<Option<Vec<u8>>> {
+    match header.get(&key) {
+        Some(Value::Bytes(bytes)) => Ok(Some(bytes.clone())),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(anyhow!("header {key} must be bytes")),
+    }
+}
+
+fn header_bytes32_opt(header: &BTreeMap<u64, Value>, key: u64) -> Result<Option<[u8; 32]>> {
+    match header.get(&key) {
+        Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(bytes);
+            Ok(Some(arr))
+        }
+        Some(Value::Bytes(_)) => Err(anyhow!("header {key} must be 32 bytes")),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(anyhow!("header {key} must be bytes")),
+    }
+}
+
+fn bytes32(name: &str, data: &[u8]) -> Result<[u8; 32]> {
+    data.try_into()
+        .map_err(|_| anyhow!("{name} must be 32 bytes, received {} bytes", data.len()))
+}
+
+const MESSAGE_PREFIX: &[u8; 4] = b"CGM1";
+
+#[derive(Debug)]
+struct AuthenticatedMessage<'a> {
+    timestamp_ms: u64,
+    plaintext: &'a [u8],
+    public_key: &'a [u8],
+    signature: &'a [u8],
+}
+
+fn encode_authenticated_message(
+    timestamp_ms: u64,
+    plaintext: &[u8],
+    public_key: &[u8],
+    signature: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        MESSAGE_PREFIX.len() + 8 + 4 + plaintext.len() + 4 + public_key.len() + 4 + signature.len(),
+    );
+
+    out.extend_from_slice(MESSAGE_PREFIX);
+    out.extend_from_slice(&timestamp_ms.to_le_bytes());
+    out.extend_from_slice(&(plaintext.len() as u32).to_le_bytes());
+    out.extend_from_slice(plaintext);
+    out.extend_from_slice(&(public_key.len() as u32).to_le_bytes());
+    out.extend_from_slice(public_key);
+    out.extend_from_slice(&(signature.len() as u32).to_le_bytes());
+    out.extend_from_slice(signature);
+
+    out
+}
+
+fn decode_authenticated_message(data: &[u8]) -> Result<AuthenticatedMessage<'_>> {
+    if data.len() < MESSAGE_PREFIX.len() + 8 + 4 + 4 + 4 {
+        return Err(anyhow!("authenticated message too short"));
+    }
+
+    if &data[..MESSAGE_PREFIX.len()] != MESSAGE_PREFIX {
+        return Err(anyhow!("invalid message prefix"));
+    }
+
+    let mut cursor = MESSAGE_PREFIX.len();
+
+    let timestamp_ms = {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&data[cursor..cursor + 8]);
+        cursor += 8;
+        u64::from_le_bytes(buf)
+    };
+
+    let plaintext_len = {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&data[cursor..cursor + 4]);
+        cursor += 4;
+        u32::from_le_bytes(buf) as usize
+    };
+    if data.len() < cursor + plaintext_len {
+        return Err(anyhow!("authenticated message truncated (plaintext)"));
+    }
+    let plaintext = &data[cursor..cursor + plaintext_len];
+    cursor += plaintext_len;
+
+    let public_key_len = {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&data[cursor..cursor + 4]);
+        cursor += 4;
+        u32::from_le_bytes(buf) as usize
+    };
+    if data.len() < cursor + public_key_len {
+        return Err(anyhow!("authenticated message truncated (public key)"));
+    }
+    let public_key = &data[cursor..cursor + public_key_len];
+    cursor += public_key_len;
+
+    let signature_len = {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&data[cursor..cursor + 4]);
+        cursor += 4;
+        u32::from_le_bytes(buf) as usize
+    };
+    if data.len() != cursor + signature_len {
+        return Err(anyhow!("authenticated message truncated (signature)"));
+    }
+    let signature = &data[cursor..];
+
+    Ok(AuthenticatedMessage {
+        timestamp_ms,
+        plaintext,
+        public_key,
+        signature,
+    })
+}
+
+/// Sign a message with ML-DSA-65 (Dilithium3)
+/// The signature covers: leaf_id || timestamp_ms || plaintext
+fn sign_message(
+    leaf_id: &[u8; 32],
+    timestamp_ms: u64,
+    plaintext: &[u8],
+    secret_key: &[u8],
+) -> Result<Vec<u8>> {
+    let sk = dilithium3::SecretKey::from_bytes(secret_key)
+        .map_err(|_| anyhow!("invalid ML-DSA-65 secret key"))?;
+
+    let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
+    payload.extend_from_slice(leaf_id);
+    payload.extend_from_slice(&timestamp_ms.to_le_bytes());
+    payload.extend_from_slice(plaintext);
+
+    let signature = dilithium3::detached_sign(&payload, &sk);
+    Ok(signature.as_bytes().to_vec())
+}
+
+/// Verify a message signature using ML-DSA-65 (Dilithium3)
+/// Returns Ok(()) if signature is valid, Err otherwise
+fn verify_message_signature(
+    leaf_id: &[u8; 32],
+    timestamp_ms: u64,
+    plaintext: &[u8],
+    signature_bytes: &[u8],
+    public_key_bytes: &[u8],
+) -> Result<()> {
+    let pk = dilithium3::PublicKey::from_bytes(public_key_bytes)
+        .map_err(|_| anyhow!("invalid ML-DSA-65 public key"))?;
+
+    let signature = dilithium3::DetachedSignature::from_bytes(signature_bytes)
+        .map_err(|_| anyhow!("invalid ML-DSA-65 signature"))?;
+
+    let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
+    payload.extend_from_slice(leaf_id);
+    payload.extend_from_slice(&timestamp_ms.to_le_bytes());
+    payload.extend_from_slice(plaintext);
+
+    dilithium3::verify_detached_signature(&signature, &payload, &pk)
+        .map_err(|_| anyhow!("signature verification failed"))?;
+
+    Ok(())
+}
+
+fn encrypt_message(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    use chacha20poly1305::{
+        ChaCha20Poly1305,
+        aead::{Aead, AeadCore, KeyInit, OsRng},
+    };
+
+    let cipher = ChaCha20Poly1305::new(key.into());
+    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext)
+        .map_err(|e| anyhow!("encryption failed: {}", e))?;
+
+    // Format: nonce (12 bytes) || ciphertext || tag (16 bytes, included in ciphertext)
+    let mut result = nonce.to_vec();
+    result.extend_from_slice(&ciphertext);
+
+    Ok(result)
+}
+
+/// Decrypt message using ChaCha20-Poly1305 (post-quantum resistant AEAD)
+/// Expects: nonce (12 bytes) || ciphertext || tag (16 bytes)
+fn decrypt_message(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    use chacha20poly1305::{
+        ChaCha20Poly1305,
+        aead::{Aead, KeyInit},
+    };
+
+    if data.len() < 12 {
+        return Err(anyhow!(
+            "ciphertext too short (need at least 12-byte nonce)"
+        ));
+    }
+
+    let (nonce_bytes, ciphertext) = data.split_at(12);
+    let nonce = nonce_bytes.into();
+
+    let cipher = ChaCha20Poly1305::new(key.into());
+
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| anyhow!("decryption failed: {}", e))
+}
+
+fn encode_capss_witness(witness: &CapssWitnessBundle) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(witness, &mut buf).context("failed to encode CAPSS witness")?;
+    Ok(buf)
+}
+
+#[cfg(test)]
+fn decode_capss_witness(data: &[u8]) -> Result<CapssWitnessBundle> {
+    ciborium::de::from_reader(data).context("failed to decode CAPSS witness")
+}
+
+static CONFIG_DIR_OVERRIDE: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use msphf_rlwe::CapssBranchWitness;
+    use rand::{RngCore, SeedableRng, rngs::StdRng};
+    use tempfile::TempDir;
+
+    #[test]
+    fn session_persistence_roundtrip() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let array = |val: u8| {
+            let mut bytes = [0u8; 32];
+            bytes.fill(val);
+            bytes
+        };
+
+        let mut random_vec = |len: usize| {
+            let mut buf = vec![0u8; len];
+            rng.fill_bytes(&mut buf);
+            buf
+        };
+
+        let forward_state =
+            ForwardSecrecyState::with_state(array(0xAA), 17, array(0x55), array(0x99));
+        let capss_witness_bundle = CapssWitnessBundle {
+            branch_a: CapssBranchWitness {
+                branch_artifact: random_vec(24),
+                ctx_tag: random_vec(16),
+            },
+            branch_b: CapssBranchWitness {
+                branch_artifact: random_vec(24),
+                ctx_tag: random_vec(16),
+            },
+        };
+        let capss_witness_bytes =
+            encode_capss_witness(&capss_witness_bundle).expect("encode witness bundle");
+
+        let mut session = AppSession {
+            server_url: "https://example.invalid".to_string(),
+            room_id: "room-123".to_string(),
+            alias: "alice".to_string(),
+            gid: array(0x01),
+            cat: array(0x02),
+            leaf_id: array(0x03),
+            parent_root: array(0x04),
+            join_delta_root: array(0x05),
+            revoked_since_root: array(0x06),
+            revoked_root: array(0x07),
+            regular_fingerprint: Some(array(0x0A)),
+            fs_fingerprint: None,
+            tswe_salt_hash: array(0x08),
+            pox_r_commit: array(0x09),
+            we_epoch_id: array(0x10),
+            epoch_key: array(0x11),
+            forward_state,
+            fs_ec: 17,
+            fs_epoch_commit: array(0x12),
+            fs_dev_prev_commit: array(0x13),
+            fs_epoch_created_at: SystemTime::now(),
+            fs_epoch_rotation_interval_secs: 300,
+            pop_public_key: random_vec(48),
+            pop_secret_key: random_vec(96),
+            msg_sign_public_key: random_vec(1952), // ML-DSA-65 public key
+            msg_sign_secret_key: random_vec(4032), // ML-DSA-65 secret key
+            vrf_secret_key: random_vec(32),
+            vrf_public_key: random_vec(32),
+            kbroad_public: random_vec(24),
+            bootstrap_public: random_vec(24),
+            proof_mode: "lin+zkvrf".to_string(),
+            vrf_id: "vrf-demo".to_string(),
+            policy_version: "v1".to_string(),
+            msphf_crs_id: "rlwe-merkle/v1".to_string(),
+            msphf_params_id: "rlwe-params/mock".to_string(),
+            fs_policy_version: "fs-demo-policy".to_string(),
+            fs_epoch_base_ts: 42,
+            last_fetch_timestamp_ms: Some(1_234_567),
+            capss_witness: capss_witness_bytes.clone(),
+        };
+        session.fs_fingerprint = derive_fs_fingerprint_from_fields(
+            session.fs_policy_version.as_str(),
+            session.fs_ec,
+            &session.fs_epoch_commit,
+            session.fs_epoch_base_ts,
+        );
+
+        persist_session(&session).expect("persist");
+        let loaded = load_session_at(&session.server_url, &session.room_id)
+            .expect("load result")
+            .expect("session present");
+
+        assert_eq!(loaded.server_url, session.server_url);
+        assert_eq!(loaded.room_id, session.room_id);
+        assert_eq!(loaded.alias, session.alias);
+        assert_eq!(loaded.gid, session.gid);
+        assert_eq!(loaded.cat, session.cat);
+        assert_eq!(loaded.leaf_id, session.leaf_id);
+        assert_eq!(loaded.parent_root, session.parent_root);
+        assert_eq!(loaded.join_delta_root, session.join_delta_root);
+        assert_eq!(loaded.revoked_since_root, session.revoked_since_root);
+        assert_eq!(loaded.revoked_root, session.revoked_root);
+        assert_eq!(loaded.regular_fingerprint, session.regular_fingerprint);
+        assert_eq!(loaded.fs_fingerprint, session.fs_fingerprint);
+        assert_eq!(loaded.tswe_salt_hash, session.tswe_salt_hash);
+        assert_eq!(loaded.pox_r_commit, session.pox_r_commit);
+        assert_eq!(loaded.we_epoch_id, session.we_epoch_id);
+        assert_eq!(loaded.epoch_key, session.epoch_key);
+        assert_eq!(loaded.kbroad_public, session.kbroad_public);
+        assert_eq!(loaded.bootstrap_public, session.bootstrap_public);
+        assert_eq!(loaded.pop_public_key, session.pop_public_key);
+        assert_eq!(loaded.pop_secret_key, session.pop_secret_key);
+        assert_eq!(loaded.vrf_public_key, session.vrf_public_key);
+        assert_eq!(loaded.vrf_secret_key, session.vrf_secret_key);
+        assert_eq!(loaded.proof_mode, session.proof_mode);
+        assert_eq!(loaded.vrf_id, session.vrf_id);
+        assert_eq!(loaded.policy_version, session.policy_version);
+        assert_eq!(loaded.msphf_crs_id, session.msphf_crs_id);
+        assert_eq!(loaded.msphf_params_id, session.msphf_params_id);
+        assert_eq!(loaded.fs_policy_version, session.fs_policy_version);
+        assert_eq!(loaded.fs_epoch_base_ts, session.fs_epoch_base_ts);
+        assert_eq!(
+            loaded.last_fetch_timestamp_ms,
+            session.last_fetch_timestamp_ms
+        );
+
+        assert_eq!(
+            loaded.forward_state.snapshot(),
+            session.forward_state.snapshot()
+        );
+        assert_eq!(loaded.fs_ec, session.fs_ec);
+        assert_eq!(loaded.fs_epoch_commit, session.fs_epoch_commit);
+        assert_eq!(loaded.fs_dev_prev_commit, session.fs_dev_prev_commit);
+        assert_eq!(
+            loaded.fs_epoch_rotation_interval_secs,
+            session.fs_epoch_rotation_interval_secs
+        );
+        // Verify epoch timestamp is persisted (allow small time difference)
+        let epoch_age_diff = loaded
+            .fs_epoch_created_at
+            .duration_since(session.fs_epoch_created_at)
+            .unwrap_or(Duration::from_secs(0))
+            .as_secs();
+        assert!(
+            epoch_age_diff <= 1,
+            "epoch timestamp should be preserved within 1 second"
+        );
+        assert_eq!(loaded.capss_witness, capss_witness_bytes);
+
+        let decoded = decode_capss_witness(&loaded.capss_witness).expect("decode witness");
+        assert_eq!(decoded, capss_witness_bundle);
+
+        // Clean up persisted files to avoid leaking into other tests.
+        remove_persisted_session(&session.server_url, &session.room_id).expect("cleanup");
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let key = [42u8; 32];
+        let plaintext = b"Hello, City-G! This is a test message.";
+
+        let ciphertext = encrypt_message(plaintext, &key).expect("encryption failed");
+        let decrypted = decrypt_message(&ciphertext, &key).expect("decryption failed");
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypt_produces_different_ciphertexts() {
+        let key = [42u8; 32];
+        let plaintext = b"Same message, different ciphertext";
+
+        let ciphertext1 = encrypt_message(plaintext, &key).expect("encryption failed");
+        let ciphertext2 = encrypt_message(plaintext, &key).expect("encryption failed");
+
+        // Different nonces should produce different ciphertexts
+        assert_ne!(ciphertext1, ciphertext2);
+
+        // But both should decrypt to the same plaintext
+        let decrypted1 = decrypt_message(&ciphertext1, &key).expect("decryption failed");
+        let decrypted2 = decrypt_message(&ciphertext2, &key).expect("decryption failed");
+        assert_eq!(decrypted1, plaintext);
+        assert_eq!(decrypted2, plaintext);
+    }
+
+    #[test]
+    fn decrypt_with_wrong_key_fails() {
+        let correct_key = [42u8; 32];
+        let wrong_key = [99u8; 32];
+        let plaintext = b"Secret message";
+
+        let ciphertext = encrypt_message(plaintext, &correct_key).expect("encryption failed");
+        let result = decrypt_message(&ciphertext, &wrong_key);
+
+        assert!(result.is_err(), "Decryption should fail with wrong key");
+        let err = result.expect_err("expected wrong-key failure");
+        assert!(
+            err.to_string().contains("decryption failed"),
+            "Error message should indicate decryption failure"
+        );
+    }
+
+    #[test]
+    fn decrypt_tampered_ciphertext_fails() {
+        let key = [42u8; 32];
+        let plaintext = b"Authenticated message";
+
+        let mut ciphertext = encrypt_message(plaintext, &key).expect("encryption failed");
+
+        // Tamper with the ciphertext (flip a bit in the middle)
+        if ciphertext.len() > 20 {
+            ciphertext[20] ^= 0x01;
+        }
+
+        let result = decrypt_message(&ciphertext, &key);
+
+        assert!(result.is_err(), "Decryption should fail for tampered data");
+        let err = result.expect_err("expected tamper failure");
+        assert!(
+            err.to_string().contains("decryption failed"),
+            "Error message should indicate decryption failure"
+        );
+    }
+
+    #[test]
+    fn decrypt_short_ciphertext_fails() {
+        let key = [42u8; 32];
+        let short_data = b"short"; // Less than 12 bytes (nonce size)
+
+        let result = decrypt_message(short_data, &key);
+
+        assert!(result.is_err(), "Decryption should fail for short data");
+        let err = result.expect_err("expected short data failure");
+        assert!(
+            err.to_string().contains("too short"),
+            "Error should mention data is too short"
+        );
+    }
+
+    #[test]
+    fn encrypt_empty_message() {
+        let key = [42u8; 32];
+        let plaintext = b"";
+
+        let ciphertext = encrypt_message(plaintext, &key).expect("encryption failed");
+        let decrypted = decrypt_message(&ciphertext, &key).expect("decryption failed");
+
+        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.len(), 0);
+    }
+
+    #[test]
+    fn encrypt_large_message() {
+        let key = [42u8; 32];
+        let plaintext = vec![b'A'; 10_000]; // 10KB message
+
+        let ciphertext = encrypt_message(&plaintext, &key).expect("encryption failed");
+        let decrypted = decrypt_message(&ciphertext, &key).expect("decryption failed");
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn ciphertext_format_validation() {
+        let key = [42u8; 32];
+        let plaintext = b"Test message";
+
+        let ciphertext = encrypt_message(plaintext, &key).expect("encryption failed");
+
+        // Ciphertext should be: nonce (12) + encrypted_data + tag (16)
+        // Minimum size: 12 (nonce) + 16 (tag) = 28 bytes
+        assert!(
+            ciphertext.len() >= 28,
+            "Ciphertext should be at least 28 bytes (nonce + tag)"
+        );
+
+        // For non-empty plaintext, should be larger
+        assert_eq!(
+            ciphertext.len(),
+            12 + plaintext.len() + 16,
+            "Ciphertext size should be nonce + plaintext + tag"
+        );
+    }
+
+    #[test]
+    fn multiple_keys_independence() {
+        let key1 = [1u8; 32];
+        let key2 = [2u8; 32];
+        let plaintext = b"Multi-key test";
+
+        let ciphertext1 = encrypt_message(plaintext, &key1).expect("encryption with key1 failed");
+        let ciphertext2 = encrypt_message(plaintext, &key2).expect("encryption with key2 failed");
+
+        // Same plaintext with different keys should produce different ciphertexts
+        assert_ne!(ciphertext1, ciphertext2);
+
+        // Each key should only decrypt its own ciphertext
+        assert!(decrypt_message(&ciphertext1, &key1).is_ok());
+        assert!(decrypt_message(&ciphertext2, &key2).is_ok());
+        assert!(decrypt_message(&ciphertext1, &key2).is_err());
+        assert!(decrypt_message(&ciphertext2, &key1).is_err());
+    }
+
+    // ============================================================
+    // Tests for categorize_error function
+    // ============================================================
+
+    #[test]
+    fn categorize_error_connection_refused() {
+        let err = anyhow!("connection refused by server");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Network));
+        assert_eq!(result.user_message, "Connection refused");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_timeout() {
+        let err = anyhow!("request timeout after 30s");
+        let result = categorize_error(&err, "send");
+        assert!(matches!(result.category, ErrorCategory::Network));
+        assert_eq!(result.user_message, "Connection timeout");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_dns_failure() {
+        let err = anyhow!("DNS resolution failed");
+        let result = categorize_error(&err, "fetch");
+        assert!(matches!(result.category, ErrorCategory::Network));
+        assert_eq!(result.user_message, "Unable to connect to server");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_network_unreachable() {
+        let err = anyhow!("network unreachable");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Network));
+        assert_eq!(result.user_message, "Unable to connect to server");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_404_not_found() {
+        let err = anyhow!("404 not found");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Server));
+        assert_eq!(result.user_message, "Resource not found");
+        assert!(!result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_401_unauthorized() {
+        let err = anyhow!("401 unauthorized");
+        let result = categorize_error(&err, "send");
+        assert!(matches!(result.category, ErrorCategory::Policy));
+        assert_eq!(result.user_message, "Authentication failed");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_403_forbidden() {
+        let err = anyhow!("403 forbidden");
+        let result = categorize_error(&err, "leave");
+        assert!(matches!(result.category, ErrorCategory::Policy));
+        assert_eq!(result.user_message, "Access denied");
+        assert!(!result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_crypto_proof_failure() {
+        let err = anyhow!("proof generation failed");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Crypto));
+        assert_eq!(result.user_message, "Cryptographic operation failed");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_crypto_verification() {
+        let err = anyhow!("verification failed");
+        let result = categorize_error(&err, "send");
+        assert!(matches!(result.category, ErrorCategory::Crypto));
+        assert_eq!(result.user_message, "Cryptographic operation failed");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_crypto_witness() {
+        let err = anyhow!("witness bundle generation failed");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Crypto));
+        assert_eq!(result.user_message, "Cryptographic operation failed");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_crypto_signature() {
+        let err = anyhow!("signature validation error");
+        let result = categorize_error(&err, "fetch");
+        assert!(matches!(result.category, ErrorCategory::Crypto));
+        assert_eq!(result.user_message, "Cryptographic operation failed");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_rho_replay() {
+        let err = anyhow!("rho_replay detected");
+        let result = categorize_error(&err, "send");
+        assert!(matches!(result.category, ErrorCategory::Policy));
+        assert_eq!(result.user_message, "Duplicate message detected");
+        assert!(!result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_freeze_violation() {
+        let err = anyhow!("freeze policy violated");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Policy));
+        assert_eq!(result.user_message, "Room policy violation");
+        assert!(!result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_policy_check() {
+        let err = anyhow!("policy check failed");
+        let result = categorize_error(&err, "send");
+        assert!(matches!(result.category, ErrorCategory::Policy));
+        assert_eq!(result.user_message, "Policy check failed");
+        assert!(!result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_empty_field() {
+        let err = anyhow!("field must not be empty");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Validation));
+        assert_eq!(result.user_message, "Required field missing");
+        assert!(!result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_invalid_input() {
+        let err = anyhow!("invalid room ID format");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Validation));
+        assert_eq!(result.user_message, "Invalid input");
+        assert!(!result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_not_valid() {
+        let err = anyhow!("room ID is not valid");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Validation));
+        assert_eq!(result.user_message, "Invalid input");
+        assert!(!result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_required_field() {
+        let err = anyhow!("alias is required");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Validation));
+        assert_eq!(result.user_message, "Missing required information");
+        assert!(!result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_500_internal_server() {
+        let err = anyhow!("500 internal server error");
+        let result = categorize_error(&err, "send");
+        assert!(matches!(result.category, ErrorCategory::Server));
+        assert_eq!(result.user_message, "Internal server error");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_502_bad_gateway() {
+        let err = anyhow!("502 bad gateway");
+        let result = categorize_error(&err, "fetch");
+        assert!(matches!(result.category, ErrorCategory::Network));
+        assert_eq!(result.user_message, "Bad gateway");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_503_service_unavailable() {
+        let err = anyhow!("503 service unavailable");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Server));
+        assert_eq!(result.user_message, "Service temporarily unavailable");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_generic_server_error() {
+        let err = anyhow!("server error occurred");
+        let result = categorize_error(&err, "send");
+        assert!(matches!(result.category, ErrorCategory::Server));
+        assert_eq!(result.user_message, "Server error occurred");
+        assert!(result.can_retry);
+    }
+
+    #[test]
+    fn categorize_error_default_fallback_join() {
+        let err = anyhow!("some unknown error");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Server));
+        assert!(result.user_message.contains("Failed to join room"));
+    }
+
+    #[test]
+    fn categorize_error_default_fallback_send() {
+        let err = anyhow!("some unknown error");
+        let result = categorize_error(&err, "send");
+        assert!(matches!(result.category, ErrorCategory::Server));
+        assert!(result.user_message.contains("Failed to send message"));
+    }
+
+    #[test]
+    fn categorize_error_default_fallback_leave() {
+        let err = anyhow!("some unknown error");
+        let result = categorize_error(&err, "leave");
+        assert!(matches!(result.category, ErrorCategory::Server));
+        assert!(result.user_message.contains("Failed to leave room"));
+    }
+
+    #[test]
+    fn categorize_error_default_fallback_fetch() {
+        let err = anyhow!("some unknown error");
+        let result = categorize_error(&err, "fetch");
+        assert!(matches!(result.category, ErrorCategory::Server));
+        assert!(result.user_message.contains("Failed to fetch messages"));
+    }
+
+    #[test]
+    fn categorize_error_default_fallback_generic() {
+        let err = anyhow!("some unknown error");
+        let result = categorize_error(&err, "unknown_context");
+        assert!(matches!(result.category, ErrorCategory::Server));
+        assert!(result.user_message.contains("Operation failed"));
+    }
+
+    #[test]
+    fn categorize_error_case_insensitive() {
+        // Test that error matching is case insensitive
+        let err1 = anyhow!("CONNECTION REFUSED");
+        let result1 = categorize_error(&err1, "join");
+        assert!(matches!(result1.category, ErrorCategory::Network));
+
+        let err2 = anyhow!("TIMEOUT");
+        let result2 = categorize_error(&err2, "send");
+        assert!(matches!(result2.category, ErrorCategory::Network));
+
+        let err3 = anyhow!("PROOF generation failed");
+        let result3 = categorize_error(&err3, "join");
+        assert!(matches!(result3.category, ErrorCategory::Crypto));
+    }
+
+    // ============================================================
+    // Tests for authenticated message encoding/decoding
+    // ============================================================
+
+    #[test]
+    fn encode_decode_authenticated_message_empty_plaintext() {
+        let (pk, sk) = dilithium3::keypair();
+        let msg_sign_public_key = pk.as_bytes().to_vec();
+        let msg_sign_secret_key = sk.as_bytes().to_vec();
+
+        let leaf_id = [0x42u8; 32];
+        let plaintext = b"";
+        let timestamp_ms = 1_234_567_890u64;
+
+        let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)
+            .expect("signing should succeed");
+        let authenticated_msg =
+            encode_authenticated_message(timestamp_ms, plaintext, &msg_sign_public_key, &signature);
+
+        let envelope =
+            decode_authenticated_message(&authenticated_msg).expect("should decode successfully");
+        assert_eq!(envelope.timestamp_ms, timestamp_ms);
+        assert_eq!(envelope.plaintext, plaintext);
+        assert_eq!(envelope.public_key, msg_sign_public_key.as_slice());
+        assert_eq!(envelope.signature, signature.as_slice());
+    }
+
+    #[test]
+    fn encode_decode_authenticated_message_large_plaintext() {
+        let (pk, sk) = dilithium3::keypair();
+        let msg_sign_public_key = pk.as_bytes().to_vec();
+        let msg_sign_secret_key = sk.as_bytes().to_vec();
+
+        let leaf_id = [0x42u8; 32];
+        let plaintext = vec![b'A'; 5000]; // 5KB message
+        let timestamp_ms = 1_234_567_890u64;
+
+        let signature = sign_message(&leaf_id, timestamp_ms, &plaintext, &msg_sign_secret_key)
+            .expect("signing should succeed");
+        let authenticated_msg = encode_authenticated_message(
+            timestamp_ms,
+            &plaintext,
+            &msg_sign_public_key,
+            &signature,
+        );
+
+        let envelope =
+            decode_authenticated_message(&authenticated_msg).expect("should decode successfully");
+        assert_eq!(envelope.timestamp_ms, timestamp_ms);
+        assert_eq!(envelope.plaintext, plaintext.as_slice());
+        assert_eq!(envelope.public_key, msg_sign_public_key.as_slice());
+        assert_eq!(envelope.signature, signature.as_slice());
+    }
+
+    #[test]
+    fn decode_authenticated_message_too_short() {
+        // Message shorter than minimum size should fail
+        let short_data = vec![0u8; 10];
+        let result = decode_authenticated_message(&short_data);
+        assert!(result.is_err());
+        let err = result.expect_err("expected short authenticated message failure");
+        assert!(err.to_string().contains("authenticated message too short"));
+    }
+
+    #[test]
+    fn decode_authenticated_message_wrong_prefix() {
+        let (pk, sk) = dilithium3::keypair();
+        let msg_sign_public_key = pk.as_bytes().to_vec();
+        let msg_sign_secret_key = sk.as_bytes().to_vec();
+
+        let leaf_id = [0x42u8; 32];
+        let plaintext = b"test";
+        let timestamp_ms = 1_234_567_890u64;
+
+        let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)
+            .expect("signing should succeed");
+        let mut authenticated_msg =
+            encode_authenticated_message(timestamp_ms, plaintext, &msg_sign_public_key, &signature);
+
+        // Corrupt the prefix
+        authenticated_msg[0] ^= 0xFF;
+
+        let result = decode_authenticated_message(&authenticated_msg);
+        assert!(result.is_err());
+        let err = result.expect_err("expected invalid message prefix failure");
+        assert!(err.to_string().contains("invalid message prefix"));
+    }
+
+    // ============================================================
+    // Tests for CAPSS witness encoding/decoding
+    // ============================================================
+
+    #[test]
+    fn encode_decode_capss_witness_roundtrip() {
+        use msphf_rlwe::CapssBranchWitness;
+        use rand::{RngCore, SeedableRng, rngs::StdRng};
+
+        let mut rng = StdRng::seed_from_u64(12345);
+        let mut random_vec = |len: usize| {
+            let mut buf = vec![0u8; len];
+            rng.fill_bytes(&mut buf);
+            buf
+        };
+
+        let witness = CapssWitnessBundle {
+            branch_a: CapssBranchWitness {
+                branch_artifact: random_vec(24),
+                ctx_tag: random_vec(16),
+            },
+            branch_b: CapssBranchWitness {
+                branch_artifact: random_vec(24),
+                ctx_tag: random_vec(16),
+            },
+        };
+
+        let encoded = encode_capss_witness(&witness).expect("encoding should succeed");
+        let decoded = decode_capss_witness(&encoded).expect("decoding should succeed");
+
+        assert_eq!(decoded, witness);
+    }
+
+    #[test]
+    fn decode_capss_witness_invalid_data() {
+        // Try to decode garbage data
+        let invalid_data = vec![0xFF; 100];
+        let result = decode_capss_witness(&invalid_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_capss_witness_empty_data() {
+        let empty_data = vec![];
+        let result = decode_capss_witness(&empty_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn format_regular_fingerprint_blocks_hex() {
+        let mut bytes = [0u8; 32];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let formatted = format_regular_fingerprint(Some(&bytes));
+        assert_eq!(formatted, "0001-0203 0405-0607 …");
+    }
+
+    #[test]
+    fn format_fs_fingerprint_includes_epoch() {
+        let bytes = [0xABu8; 32];
+        let formatted = format_fs_fingerprint(Some(&bytes), 42);
+        assert_eq!(formatted, "abab-abab abab-abab … · fs_ec 42");
+    }
+
+    #[test]
+    fn format_fs_fingerprint_reports_missing() {
+        let formatted = format_fs_fingerprint(None, 99);
+        assert_eq!(formatted, "Not available");
+    }
+
+    // ============================================================
+    // Tests for session removal
+    // ============================================================
+
+    #[test]
+    fn session_removal_after_persistence() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let mut rng = StdRng::seed_from_u64(999);
+        let mut random_vec = |len: usize| {
+            let mut buf = vec![0u8; len];
+            rng.fill_bytes(&mut buf);
+            buf
+        };
+
+        let forward_state =
+            ForwardSecrecyState::with_state([0xAAu8; 32], 17, [0x55u8; 32], [0x99u8; 32]);
+        let capss_witness_bundle = CapssWitnessBundle {
+            branch_a: msphf_rlwe::CapssBranchWitness {
+                branch_artifact: random_vec(24),
+                ctx_tag: random_vec(16),
+            },
+            branch_b: msphf_rlwe::CapssBranchWitness {
+                branch_artifact: random_vec(24),
+                ctx_tag: random_vec(16),
+            },
+        };
+        let capss_witness_bytes =
+            encode_capss_witness(&capss_witness_bundle).expect("encode witness");
+
+        let mut session = AppSession {
+            server_url: "https://remove-test.example.com".to_string(),
+            room_id: "remove-room-123".to_string(),
+            alias: "test-user".to_string(),
+            gid: [0x01u8; 32],
+            cat: [0x02u8; 32],
+            leaf_id: [0x03u8; 32],
+            parent_root: [0x04u8; 32],
+            join_delta_root: [0x05u8; 32],
+            revoked_since_root: [0x06u8; 32],
+            revoked_root: [0x07u8; 32],
+            regular_fingerprint: Some([0x21u8; 32]),
+            fs_fingerprint: None,
+            tswe_salt_hash: [0x08u8; 32],
+            pox_r_commit: [0x09u8; 32],
+            we_epoch_id: [0x10u8; 32],
+            epoch_key: [0x11u8; 32],
+            forward_state,
+            fs_ec: 17,
+            fs_epoch_commit: [0x12u8; 32],
+            fs_dev_prev_commit: [0x13u8; 32],
+            fs_epoch_created_at: SystemTime::now(),
+            fs_epoch_rotation_interval_secs: 300,
+            pop_public_key: random_vec(48),
+            pop_secret_key: random_vec(96),
+            msg_sign_public_key: random_vec(1952),
+            msg_sign_secret_key: random_vec(4032),
+            vrf_secret_key: random_vec(32),
+            vrf_public_key: random_vec(32),
+            kbroad_public: random_vec(24),
+            bootstrap_public: random_vec(24),
+            proof_mode: "lin+zkvrf".to_string(),
+            vrf_id: "vrf-demo".to_string(),
+            policy_version: "v1".to_string(),
+            msphf_crs_id: "rlwe-merkle/v1".to_string(),
+            msphf_params_id: "rlwe-params/mock".to_string(),
+            fs_policy_version: "fs-demo-policy".to_string(),
+            fs_epoch_base_ts: 42,
+            last_fetch_timestamp_ms: Some(1_234_567),
+            capss_witness: capss_witness_bytes,
+        };
+        session.fs_fingerprint = derive_fs_fingerprint_from_fields(
+            session.fs_policy_version.as_str(),
+            session.fs_ec,
+            &session.fs_epoch_commit,
+            session.fs_epoch_base_ts,
+        );
+
+        // Persist, then remove
+        persist_session(&session).expect("persist");
+        let loaded = load_session_at(&session.server_url, &session.room_id)
+            .expect("load result")
+            .expect("session present");
+        assert_eq!(loaded.room_id, session.room_id);
+
+        // Remove and verify it's gone
+        remove_persisted_session(&session.server_url, &session.room_id).expect("remove");
+        let after_removal =
+            load_session_at(&session.server_url, &session.room_id).expect("load should succeed");
+        assert!(after_removal.is_none(), "session should be removed");
+    }
+
+    #[test]
+    fn session_load_nonexistent() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        // Try to load a session that doesn't exist
+        let result = load_session_at("https://nonexistent.example.com", "nonexistent-room")
+            .expect("load should succeed");
+        assert!(result.is_none(), "nonexistent session should return None");
+    }
+}
+
+#[test]
+fn test_message_signing_and_verification() {
+    // Generate test keys
+    let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
+    let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
+    let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
+
+    // Test data
+    let leaf_id = [0x42u8; 32];
+    let plaintext = b"Hello, authenticated world!";
+    let timestamp_ms = 1_234_567_890u64;
+
+    // Sign the message
+    let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)
+        .expect("signing should succeed");
+
+    // Verify the signature - should succeed
+    let result = verify_message_signature(
+        &leaf_id,
+        timestamp_ms,
+        plaintext,
+        &signature,
+        &msg_sign_public_key,
+    );
+    assert!(result.is_ok(), "signature verification should succeed");
+
+    // Verify with wrong plaintext - should fail
+    let wrong_plaintext = b"Wrong message";
+    let result = verify_message_signature(
+        &leaf_id,
+        timestamp_ms,
+        wrong_plaintext,
+        &signature,
+        &msg_sign_public_key,
+    );
+    assert!(
+        result.is_err(),
+        "verification should fail with wrong plaintext"
+    );
+
+    // Verify with wrong timestamp - should fail
+    let wrong_timestamp = timestamp_ms + 1;
+    let result = verify_message_signature(
+        &leaf_id,
+        wrong_timestamp,
+        plaintext,
+        &signature,
+        &msg_sign_public_key,
+    );
+    assert!(
+        result.is_err(),
+        "verification should fail with wrong timestamp"
+    );
+
+    // Verify with wrong leaf_id - should fail
+    let wrong_leaf_id = [0x99u8; 32];
+    let result = verify_message_signature(
+        &wrong_leaf_id,
+        timestamp_ms,
+        plaintext,
+        &signature,
+        &msg_sign_public_key,
+    );
+    assert!(
+        result.is_err(),
+        "verification should fail with wrong leaf_id"
+    );
+
+    // Verify with corrupted signature - should fail
+    let mut corrupted_signature = signature.clone();
+    corrupted_signature[100] ^= 0xFF; // Flip some bits
+    let result = verify_message_signature(
+        &leaf_id,
+        timestamp_ms,
+        plaintext,
+        &corrupted_signature,
+        &msg_sign_public_key,
+    );
+    assert!(
+        result.is_err(),
+        "verification should fail with corrupted signature"
+    );
+}
+
+#[test]
+fn test_authenticated_message_format() {
+    let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
+    let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
+    let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
+
+    let leaf_id = [0x42u8; 32];
+    let plaintext = b"Test message";
+    let timestamp_ms = 987_654_321u64;
+    let epoch_key = [0x55u8; 32];
+
+    let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)
+        .expect("signing should succeed");
+    let authenticated_msg =
+        encode_authenticated_message(timestamp_ms, plaintext, &msg_sign_public_key, &signature);
+
+    let ciphertext =
+        encrypt_message(&authenticated_msg, &epoch_key).expect("encryption should succeed");
+    let decrypted = decrypt_message(&ciphertext, &epoch_key).expect("decryption should succeed");
+    assert_eq!(decrypted, authenticated_msg);
+
+    let envelope =
+        decode_authenticated_message(&decrypted).expect("authenticated message should decode");
+    assert_eq!(envelope.timestamp_ms, timestamp_ms);
+    assert_eq!(envelope.plaintext, plaintext);
+    assert_eq!(envelope.public_key, msg_sign_public_key.as_slice());
+    assert_eq!(envelope.signature, signature.as_slice());
+
+    verify_message_signature(
+        &leaf_id,
+        envelope.timestamp_ms,
+        envelope.plaintext,
+        envelope.signature,
+        envelope.public_key,
+    )
+    .expect("verification should succeed");
+}
+
+#[test]
+fn test_message_authentication_prevents_spoofing() {
+    // Create two different identities
+    let (pk_alice, sk_alice) = dilithium3::keypair();
+    let (pk_bob, _sk_bob) = dilithium3::keypair();
+
+    let leaf_id_alice = [0x11u8; 32];
+    let leaf_id_bob = [0x22u8; 32];
+    let plaintext = b"Message from Alice";
+    let timestamp_ms = 555_555_555u64;
+
+    // Alice signs a message
+    let signature = sign_message(&leaf_id_alice, timestamp_ms, plaintext, sk_alice.as_bytes())
+        .expect("signing should succeed");
+
+    // Verify with Alice's public key - should succeed
+    let result = verify_message_signature(
+        &leaf_id_alice,
+        timestamp_ms,
+        plaintext,
+        &signature,
+        pk_alice.as_bytes(),
+    );
+    assert!(
+        result.is_ok(),
+        "Alice's signature should verify with Alice's key"
+    );
+
+    // Try to verify with Bob's public key - should fail (prevents impersonation)
+    let result = verify_message_signature(
+        &leaf_id_alice,
+        timestamp_ms,
+        plaintext,
+        &signature,
+        pk_bob.as_bytes(),
+    );
+    assert!(
+        result.is_err(),
+        "Alice's signature should NOT verify with Bob's key"
+    );
+
+    // Try to claim message is from Bob using Alice's signature - should fail
+    let result = verify_message_signature(
+        &leaf_id_bob,
+        timestamp_ms,
+        plaintext,
+        &signature,
+        pk_alice.as_bytes(),
+    );
+    assert!(
+        result.is_err(),
+        "Cannot claim message is from Bob using Alice's signature"
+    );
+
+    // Verify with wrong timestamp - should fail
+    let result = verify_message_signature(
+        &leaf_id_alice,
+        timestamp_ms + 1,
+        plaintext,
+        &signature,
+        pk_alice.as_bytes(),
+    );
+    assert!(
+        result.is_err(),
+        "Verification should fail with wrong timestamp"
+    );
+}
+
+#[test]
+fn test_message_format_size_constraints() {
+    const MLDSA65_PUBKEY_SIZE: usize = ml_dsa_public_key_bytes();
+    const MLDSA65_SIG_SIZE: usize = ml_dsa_signature_bytes();
+    const MIN_MSG_SIZE: usize =
+        MESSAGE_PREFIX.len() + 8 + 4 + 4 + MLDSA65_PUBKEY_SIZE + 4 + MLDSA65_SIG_SIZE;
+
+    // Test that minimum size is correct
+    assert_eq!(
+        MIN_MSG_SIZE,
+        4 + 8 + 4 + 4 + MLDSA65_PUBKEY_SIZE + 4 + MLDSA65_SIG_SIZE
+    );
+
+    // Verify dilithium3 key sizes match constants
+    let (pk, sk) = dilithium3::keypair();
+    assert_eq!(pk.as_bytes().len(), MLDSA65_PUBKEY_SIZE);
+    assert_eq!(
+        sk.as_bytes().len(),
+        4032,
+        "ML-DSA-65 secret key is 4032 bytes"
+    );
+
+    // Verify signature size
+    let leaf_id = [0u8; 32];
+    let plaintext = b"test";
+    let sig = sign_message(&leaf_id, 42, plaintext, sk.as_bytes()).expect("sign should work");
+    assert_eq!(sig.len(), MLDSA65_SIG_SIZE);
+}

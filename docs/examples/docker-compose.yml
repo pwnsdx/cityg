@@ -1,0 +1,125 @@
+# Docker Compose configuration for City-G development environment
+#
+# This setup includes:
+# - City-G API server
+# - Prometheus for metrics collection
+# - Grafana for visualization
+# - Example configuration volumes
+#
+# Usage:
+#   docker-compose up -d
+
+version: '3.8'
+
+services:
+  # City-G API Server
+  cityg-api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: cityg-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Logging
+      - LOG_FORMAT=json
+      - RUST_LOG=info
+
+      # Server configuration
+      - CITYG_SERVER_ADDRESS=0.0.0.0:8080
+      - CITYG_SERVER_WEBSOCKET_CAPACITY=1000
+      - CITYG_SERVER_WINDOW_TTL_SECS=10
+
+      # Protocol configuration
+      - CITYG_PROTOCOL_WINDOW_DURATION_SECS=10
+      - CITYG_PROTOCOL_MAX_CONCURRENT_HEADS=16
+      - CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS=3600
+
+      # Client configuration (for integration tests)
+      - CITYG_CLIENT_DEFAULT_SERVER_URL=http://localhost:8080
+      - CITYG_CLIENT_API_TIMEOUT_SECS=30
+    volumes:
+      # Persistent state (journal for crash recovery)
+      - cityg-data:/var/lib/cityg
+
+      # Optional: Mount custom configuration
+      # - ./config-production.toml:/etc/cityg/config.toml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - cityg-network
+    labels:
+      - "com.cityg.service=api"
+      - "com.cityg.version=0.1.0"
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: cityg-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - cityg-network
+    labels:
+      - "com.cityg.service=monitoring"
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: cityg-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana-dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    depends_on:
+      - prometheus
+    networks:
+      - cityg-network
+    labels:
+      - "com.cityg.service=visualization"
+
+networks:
+  cityg-network:
+    driver: bridge
+    labels:
+      - "com.cityg.network=main"
+
+volumes:
+  cityg-data:
+    driver: local
+    labels:
+      - "com.cityg.volume=state"
+  prometheus-data:
+    driver: local
+    labels:
+      - "com.cityg.volume=metrics"
+  grafana-data:
+    driver: local
+    labels:
+      - "com.cityg.volume=dashboards"
+
+# Healthcheck for entire stack
+# docker-compose ps shows health status

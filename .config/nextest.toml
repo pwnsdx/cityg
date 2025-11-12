@@ -1,0 +1,23 @@
+[profile.default]
+# Show test output for failures
+failure-output = "immediate"
+# Show test output for successful tests
+success-output = "never"
+# Number of retries for failed tests
+retries = 0
+
+[profile.ci]
+# In CI, show all output immediately
+failure-output = "immediate-final"
+success-output = "never"
+# Fail fast in CI to save time
+fail-fast = false
+# Run tests with multiple threads
+test-threads = 4
+
+# Profile for local development
+[profile.dev]
+failure-output = "immediate"
+success-output = "never"
+# Don't fail fast during local development
+fail-fast = false

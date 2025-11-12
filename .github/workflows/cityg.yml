@@ -1,0 +1,44 @@
+name: cityg
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy (workspace)
+        run: cargo clippy --workspace --all-targets --no-deps -- -A clippy::never_loop -D clippy::panic -D clippy::unwrap_used -D clippy::todo -D clippy::unimplemented -D warnings
+      - name: Cargo check (workspace)
+        run: cargo check --workspace --all-targets
+      - name: Cargo nextest (workspace)
+        run: cargo nextest run --workspace --profile ci --exclude dudect-harness
+      - name: Security verification (server blindness)
+        run: ./scripts/verify_no_secrets.sh
+      - name: Dudect harness smoke tests
+        run: |
+          targets=(
+            barrett-reduce
+            montgomery-reduce
+            montgomery-add
+            montgomery-sub
+            expand-a
+            smallwood-prove
+            smallwood-verify
+          )
+          for target in "${targets[@]}"; do
+            echo "Running dudect target: $target"
+            cargo run -p dudect-harness --release -- --target "$target" --samples 20000 --inner 16 --seed 4242
+          done

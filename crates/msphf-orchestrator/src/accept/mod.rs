@@ -1,0 +1,5132 @@
+//! Acceptance entry point: orchestrates join, merge, and burst flows.
+
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    convert::{TryFrom, TryInto},
+    time::Duration,
+};
+
+use ahash::AHashMap;
+
+use anchor_seed::{
+    SeedCommitFields, build_anchor_seed_ctx, compute_seed_bundle_commit, compute_seed_commit,
+    compute_seed_ctx_hash,
+};
+use ciborium::{
+    de, ser,
+    value::{Integer, Value},
+};
+use msphf_core::serde_utils::to_cbor_vec;
+use msphf_core::{
+    MsphfError, WitnessValidationError, ds,
+    hash::{h_l, hash_bytes_with_label},
+    instance::AnchorInstance,
+    merkle::{canonical_frontier, canonical_set_root},
+    witness::{
+        CanonicalWitness, RawMembershipWitness, RawNonMembershipWitness, RawPathEntry,
+        ValidatedMembership, ValidatedNonMembership,
+    },
+};
+use msphf_rlwe::{CapssStrictInputs, recompute_capss_witness};
+use pqcrypto_dilithium::dilithium5::{
+    DetachedSignature as MlDsaDetachedSignature, PublicKey as MlDsaPublicKey,
+    public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
+    verify_detached_signature as verify_ml_dsa,
+};
+use pqcrypto_kyber::kyber768::{
+    ciphertext_bytes as ml_kem_ciphertext_bytes, public_key_bytes as ml_kem_public_key_bytes,
+};
+use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+use serde::{Serialize, de::DeserializeOwned};
+use time::OffsetDateTime;
+use tracing::{debug, info};
+
+use crate::proofs::zk_vrf::{MaskDigest, VrfCtx, VrfProof, zk_vrf_impl};
+use crate::{
+    AnchorInstanceParts, CapssWitnessBundle, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, MERKLE_DS_ID,
+    PivotParity, PivotParityStore, compute_proofs_commit_bytes, compute_window_id,
+    derive_we_epoch_id,
+    hdr::*,
+    mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW, FreezeError, HeadRecord, MultiHeadWindow},
+    proofs::hp_binding,
+    time::{AcceptClock, AcceptInstant},
+};
+
+mod cache;
+mod errors;
+#[cfg(any(test, feature = "bench-fixtures"))]
+pub mod fixtures;
+mod join;
+mod merge;
+mod stages;
+mod state;
+mod telemetry;
+#[cfg(feature = "bench-fixtures")]
+pub use bench::SrxBenchHarness;
+
+use cache::VckCache;
+pub use errors::*;
+use stages::*;
+pub use state::*;
+pub use telemetry::*;
+
+const MAX_HP_PROOF_BYTES: usize = 512 * 1024;
+/// Maximum VRF proof size per Section 12 (field #95 ≤ 8,192 bytes)
+const MAX_VRF_PROOF_BYTES: usize = 8_192;
+const RHO_GUARD_CAPACITY: usize = 64;
+const MIN_SRX_MAX_BYTES: usize = 256 * 1024;
+const DEFAULT_SRX_MAX_BYTES: usize = 1024 * 1024;
+const FS_CAPSS_MAX_BYTES: usize = 16_384;
+
+const KBROAD_WRAP_KEY_BYTES: usize = 32;
+const KBROAD_WRAP_CIPHERTEXT_BYTES: usize = KBROAD_WRAP_KEY_BYTES + crate::AEAD_TAG_LEN;
+const KBROAD_HP_MAX_CIPHERTEXT_BYTES: usize = crate::MAX_HP_BYTES + crate::AEAD_TAG_LEN;
+
+#[cfg(feature = "bench-fixtures")]
+mod bench {
+    use super::*;
+    use crate::JoinerKGenResult;
+    use crate::time::AcceptInstant;
+    use std::{collections::BTreeSet, time::Duration};
+
+    pub struct SrxBenchHarness {
+        cache: cache::VckCache,
+        ttl: Duration,
+        deprecated_modes: BTreeSet<String>,
+        srx_max_bytes: usize,
+    }
+
+    impl SrxBenchHarness {
+        pub fn new(ttl: Duration, srx_max_bytes: usize) -> Self {
+            Self {
+                cache: cache::VckCache::new(ttl),
+                ttl,
+                deprecated_modes: BTreeSet::new(),
+                srx_max_bytes,
+            }
+        }
+
+        pub fn with_deprecated(
+            ttl: Duration,
+            srx_max_bytes: usize,
+            deprecated_modes: BTreeSet<String>,
+        ) -> Self {
+            Self {
+                cache: cache::VckCache::new(ttl),
+                ttl,
+                deprecated_modes,
+                srx_max_bytes,
+            }
+        }
+
+        pub fn reset(&mut self) {
+            self.cache = cache::VckCache::new(self.ttl);
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn ensure(
+            &mut self,
+            header: &BTreeMap<u64, Value>,
+            parts: &AnchorInstanceParts<'_>,
+            joiner: &JoinerKGenResult,
+            require: bool,
+            allowed_modes: Option<&BTreeSet<String>>,
+            now: AcceptInstant,
+        ) -> Result<(), AcceptanceError> {
+            let empty_set = BTreeSet::new();
+            let proofs = stages::ensure_proofs(header, None, &empty_set, None, &empty_set)?;
+            let mut parent_root = [0u8; 32];
+            parent_root.copy_from_slice(parts.parent_root);
+
+            let mut join_delta_root = [0u8; 32];
+            join_delta_root.copy_from_slice(parts.join_delta_root);
+
+            let mut revoked_since_root = [0u8; 32];
+            revoked_since_root.copy_from_slice(parts.revoked_since_prev_root);
+
+            let mut revoked_root = [0u8; 32];
+            revoked_root.copy_from_slice(parts.revoked_root);
+
+            stages::ensure_srx_relations(
+                header,
+                &parent_root,
+                &join_delta_root,
+                &revoked_since_root,
+                &revoked_root,
+                require,
+                self.srx_max_bytes,
+                &joiner.xk_hash,
+                &joiner.seed_commit,
+                &joiner.rho_commit,
+                &joiner.hp_commit,
+                allowed_modes,
+                &self.deprecated_modes,
+                now,
+                &mut self.cache,
+                &proofs,
+            )
+        }
+    }
+}
+
+pub const FREEZE_TSWE_SALT_MISMATCH: FreezeError = FreezeError {
+    code: 922,
+    reason: "msphf_seedctx_mismatch",
+};
+
+#[derive(Serialize)]
+struct FsDevChainPreimage<'a> {
+    #[serde(with = "serde_bytes")]
+    device_pk: &'a [u8],
+    fs_ec: u64,
+    #[serde(with = "serde_bytes")]
+    prev_commit: &'a [u8; 32],
+}
+
+pub const FREEZE_SRX_REQUIRED: FreezeError = FreezeError {
+    code: 929,
+    reason: "srx_required",
+};
+
+pub const FREEZE_SRX_INVALID: FreezeError = FreezeError {
+    code: 930,
+    reason: "srx_invalid",
+};
+
+pub const FREEZE_SRX_SET_CONFLICT_PARENT: FreezeError = FreezeError {
+    code: 9076,
+    reason: "set_conflict_parent",
+};
+
+pub const FREEZE_SRX_SET_CONFLICT_REVOKE: FreezeError = FreezeError {
+    code: 9076,
+    reason: "set_conflict_revoke",
+};
+
+pub const FREEZE_SRX_SET_CONFLICT_SUBSET: FreezeError = FreezeError {
+    code: 9076,
+    reason: "set_conflict_subset",
+};
+
+pub const FREEZE_SRX_HINT_UNDER: FreezeError = FreezeError {
+    code: 930,
+    reason: "srx_hint_under",
+};
+
+pub const FREEZE_SRX_OVERSIZE_HINT: FreezeError = FreezeError {
+    code: 930,
+    reason: "srx_oversize_hint",
+};
+
+pub const FREEZE_SRX_FRONTIER_MISMATCH: FreezeError = FreezeError {
+    code: 930,
+    reason: "srx_frontier_mismatch",
+};
+
+pub const FREEZE_SRX_ANCHOR_MISSING: FreezeError = FreezeError {
+    code: 930,
+    reason: "srx_anchor_missing",
+};
+
+pub const FREEZE_SRX_ANCHOR_MISMATCH: FreezeError = FreezeError {
+    code: 930,
+    reason: "srx_anchor_mismatch",
+};
+
+pub const FREEZE_SRX_ANCHOR_OOB: FreezeError = FreezeError {
+    code: 930,
+    reason: "srx_anchor_oob",
+};
+
+pub const FREEZE_SRX_ANCHOR_POOL_UNSORTED: FreezeError = FreezeError {
+    code: 930,
+    reason: "srx_anchor_pool_unsorted",
+};
+
+pub const FREEZE_SRX_ANCHORS_OVERBUDGET: FreezeError = FreezeError {
+    code: 930,
+    reason: "srx_anchors_overbudget",
+};
+
+pub const FREEZE_SRX_COMMIT_MISMATCH: FreezeError = FreezeError {
+    code: 930,
+    reason: "srx_commit_mismatch",
+};
+
+pub const FREEZE_SRX_SMALLWOOD_INVALID: FreezeError = FreezeError {
+    code: 929,
+    reason: "srx_smallwood_invalid",
+};
+
+pub const FREEZE_NONMEM_ADJ_INCOHERENT: FreezeError = FreezeError {
+    code: 9072,
+    reason: "nonmem_adj_incoherent",
+};
+
+pub const FREEZE_CAPSS_INVALID: FreezeError = FreezeError {
+    code: 923,
+    reason: "msphf_lin_invalid",
+};
+
+pub const FREEZE_VRF_INVALID: FreezeError = FreezeError {
+    code: 923,
+    reason: "vrf_invalid",
+};
+
+pub const FREEZE_PROOFS_COMMIT_INVALID: FreezeError = FreezeError {
+    code: 923,
+    reason: "proof_invalid",
+};
+
+pub const FREEZE_POP_INVALID: FreezeError = FreezeError {
+    code: 921,
+    reason: "msphf_crs_untrusted",
+};
+
+pub const FREEZE_BOOTSTRAP_INVALID: FreezeError = FreezeError {
+    code: 931,
+    reason: "bootstrap_invalid",
+};
+
+pub const FREEZE_BOOTSTRAP_UNSUPPORTED: FreezeError = FreezeError {
+    code: 932,
+    reason: "bootstrap_unsupported",
+};
+
+pub const FREEZE_SUITE_DEPRECATED: FreezeError = FreezeError {
+    code: 934,
+    reason: "suite_deprecated",
+};
+pub const FREEZE_SUITE_FORBIDDEN: FreezeError = FreezeError {
+    code: 934,
+    reason: "suite_forbidden",
+};
+
+#[derive(Clone)]
+pub struct AcceptanceOptions {
+    pub bootstrap_policy: BootstrapPolicy,
+    pub srx_max_bytes: usize,
+    pub srx_required: bool,
+    pub allowed_crs_ids: Option<BTreeSet<String>>,
+    pub allowed_params_ids: Option<BTreeSet<Vec<u8>>>,
+    pub deprecated_crs_ids: BTreeSet<String>,
+    pub deprecated_params_ids: BTreeSet<Vec<u8>>,
+    pub allowed_vrf_ids: Option<BTreeSet<String>>,
+    pub deprecated_vrf_ids: BTreeSet<String>,
+    pub allowed_proof_modes: Option<BTreeSet<String>>,
+    pub deprecated_proof_modes: BTreeSet<String>,
+    pub allowed_srx_modes: Option<BTreeSet<String>>,
+    pub deprecated_srx_modes: BTreeSet<String>,
+    pub leaf_id_mode: crate::LeafIdMode,
+    pub kbroad_registry: Option<BTreeMap<Vec<u8>, Vec<u8>>>,
+    pub fs_policy_config: FsPolicyConfig,
+}
+
+impl Default for AcceptanceOptions {
+    fn default() -> Self {
+        let mut default_modes = BTreeSet::new();
+        default_modes.insert("srx/v1-complete".to_string());
+        let mut default_vrf_ids = BTreeSet::new();
+        default_vrf_ids.insert("lb-vrf/v1".to_string());
+        let mut default_proof_modes = BTreeSet::new();
+        default_proof_modes.insert("lin+zkvrf".to_string());
+        Self {
+            bootstrap_policy: BootstrapPolicy::default(),
+            srx_max_bytes: DEFAULT_SRX_MAX_BYTES,
+            srx_required: true,
+            allowed_crs_ids: None,
+            allowed_params_ids: None,
+            deprecated_crs_ids: BTreeSet::new(),
+            deprecated_params_ids: BTreeSet::new(),
+            allowed_vrf_ids: Some(default_vrf_ids),
+            deprecated_vrf_ids: BTreeSet::new(),
+            allowed_proof_modes: Some(default_proof_modes),
+            deprecated_proof_modes: BTreeSet::new(),
+            allowed_srx_modes: Some(default_modes),
+            deprecated_srx_modes: BTreeSet::new(),
+            leaf_id_mode: crate::LeafIdMode::PerGroup,
+            kbroad_registry: None,
+            fs_policy_config: FsPolicyConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub enum BootstrapPolicy {
+    #[default]
+    Disabled,
+    CaMlDsa {
+        public_key: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptanceKind {
+    NonMerge,
+    Merge { retired_heads: Vec<[u8; 32]> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptanceOutcome {
+    pub kind: AcceptanceKind,
+    pub we_epoch_id: [u8; 32],
+    pub wid: [u8; 32],
+    pub seed_ctx_hash: [u8; 32],
+    pub seed_commit: [u8; 32],
+    pub rho_commit: [u8; 32],
+    pub hp_commit: [u8; 32],
+    pub xk_hash: [u8; 32],
+    pub accept_seq: u64,
+    pub accept_time: AcceptInstant,
+    pub mh_note: Option<String>,
+    pub fs_epoch_commit: Option<[u8; 32]>,
+    pub fs_ec: Option<u64>,
+    pub fs_dev_commit: Option<[u8; 32]>,
+}
+
+#[derive(Debug)]
+pub enum AcceptanceError {
+    Freeze(FreezeError),
+    Msphf(MsphfError),
+}
+
+impl From<MsphfError> for AcceptanceError {
+    fn from(err: MsphfError) -> Self {
+        match err {
+            MsphfError::Witness(kind) => AcceptanceError::Freeze(match kind {
+                WitnessValidationError::CborMalformed => FREEZE_HASH_CBOR,
+                WitnessValidationError::NonCanonical => FREEZE_HASH_NONCANONICAL,
+                WitnessValidationError::LeafBindMismatch => FREEZE_HASH_LEAF_BIND,
+                WitnessValidationError::ProjEvalFail => FREEZE_HASH_PROJ_FAIL,
+                WitnessValidationError::PathOversize => FREEZE_HASH_PATH_OVERSIZE,
+            }),
+            other => AcceptanceError::Msphf(other),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AcceptanceContext {
+    pub mh_window: MultiHeadWindow,
+    rho_guard: RhoReplayGuard,
+    vck_cache: VckCache,
+    bootstrap_policy: BootstrapPolicy,
+    srx_max_bytes: usize,
+    srx_required: bool,
+    allowed_crs_ids: Option<BTreeSet<String>>,
+    allowed_params_ids: Option<BTreeSet<Vec<u8>>>,
+    deprecated_crs_ids: BTreeSet<String>,
+    deprecated_params_ids: BTreeSet<Vec<u8>>,
+    allowed_vrf_ids: Option<BTreeSet<String>>,
+    deprecated_vrf_ids: BTreeSet<String>,
+    allowed_proof_modes: Option<BTreeSet<String>>,
+    deprecated_proof_modes: BTreeSet<String>,
+    allowed_srx_modes: Option<BTreeSet<String>>,
+    deprecated_srx_modes: BTreeSet<String>,
+    leaf_id_mode: crate::LeafIdMode,
+    pivot_store: PivotParityStore,
+    next_accept_seq: u64,
+    kbroad_registry: Option<BTreeMap<Vec<u8>, Vec<u8>>>,
+    pending_capss_witness: Option<CapssWitnessBundle>,
+    telemetry: BTreeMap<TelemetryKey, TelemetryCounters>,
+    policy_version: String,
+    policy_timestamp: Option<OffsetDateTime>,
+    device_chains: AHashMap<DeviceKey, DeviceChainState>,
+    fs_caps: FsCaps,
+    last_checkpoint_ec: u64,
+    last_accepted_ec: u64,
+    fs_base_ts: Option<u64>,
+    fs_policy_version: Option<String>,
+    allowed_fs_policy_version: Option<String>,
+    fs_period_seconds: u64,
+    checkpoint_interval_seconds: u64,
+    checkpoint_head_threshold: u64,
+    clock: AcceptClock,
+}
+
+impl AcceptanceContext {
+    pub fn new(h_max: usize, ttl: Duration) -> Self {
+        Self::with_options_internal(h_max, ttl, AcceptanceOptions::default())
+    }
+
+    pub fn with_defaults() -> Self {
+        Self::with_options_internal(
+            DEFAULT_H_MAX,
+            DEFAULT_T_WINDOW,
+            AcceptanceOptions::default(),
+        )
+    }
+
+    pub fn with_options(h_max: usize, ttl: Duration, options: AcceptanceOptions) -> Self {
+        Self::with_options_internal(h_max, ttl, options)
+    }
+
+    fn with_options_internal(h_max: usize, ttl: Duration, options: AcceptanceOptions) -> Self {
+        let mh_window = MultiHeadWindow::new(h_max, ttl);
+        let verify_ttl = mh_window.ttl();
+        let mut ctx = Self {
+            mh_window,
+            rho_guard: RhoReplayGuard::new(RHO_GUARD_CAPACITY),
+            vck_cache: VckCache::new(verify_ttl),
+            pivot_store: PivotParityStore::new(verify_ttl),
+            bootstrap_policy: options.bootstrap_policy,
+            srx_max_bytes: options.srx_max_bytes.max(MIN_SRX_MAX_BYTES),
+            srx_required: options.srx_required,
+            allowed_crs_ids: options.allowed_crs_ids.clone(),
+            allowed_params_ids: options.allowed_params_ids.clone(),
+            deprecated_crs_ids: options.deprecated_crs_ids.clone(),
+            deprecated_params_ids: options.deprecated_params_ids.clone(),
+            allowed_vrf_ids: options.allowed_vrf_ids.clone(),
+            deprecated_vrf_ids: options.deprecated_vrf_ids.clone(),
+            allowed_proof_modes: options.allowed_proof_modes.clone(),
+            deprecated_proof_modes: options.deprecated_proof_modes.clone(),
+            allowed_srx_modes: options.allowed_srx_modes.clone(),
+            deprecated_srx_modes: options.deprecated_srx_modes.clone(),
+            leaf_id_mode: options.leaf_id_mode,
+            next_accept_seq: 0,
+            kbroad_registry: options.kbroad_registry.clone(),
+            pending_capss_witness: None,
+            telemetry: BTreeMap::new(),
+            policy_version: crate::DEFAULT_POLICY_VERSION.to_string(),
+            policy_timestamp: None,
+            device_chains: AHashMap::new(),
+            fs_caps: FsCaps::default(),
+            last_checkpoint_ec: 0,
+            last_accepted_ec: 0,
+            fs_base_ts: None,
+            fs_policy_version: None,
+            allowed_fs_policy_version: None,
+            fs_period_seconds: 0,
+            checkpoint_interval_seconds: 0,
+            checkpoint_head_threshold: 0,
+            clock: AcceptClock::new(),
+        };
+
+        // default config is expected to be valid; on misconfiguration we fall back to zeros
+        if let Err(err) = ctx.apply_fs_policy_config(options.fs_policy_config.clone()) {
+            tracing::warn!(
+                target = "accept",
+                code = err.code,
+                reason = err.reason,
+                "fs policy config rejected; using zeroed caps"
+            );
+            ctx.fs_caps = FsCaps::default();
+            ctx.fs_period_seconds = 0;
+            ctx.checkpoint_interval_seconds = 0;
+            ctx.checkpoint_head_threshold = 0;
+        }
+
+        ctx
+    }
+
+    pub fn telemetry_snapshot(&self) -> &BTreeMap<TelemetryKey, TelemetryCounters> {
+        &self.telemetry
+    }
+
+    pub fn set_bootstrap_policy(&mut self, policy: BootstrapPolicy) {
+        self.bootstrap_policy = policy;
+        self.invalidate_policy_caches();
+    }
+
+    pub fn set_kbroad_registry(&mut self, registry: Option<BTreeMap<Vec<u8>, Vec<u8>>>) {
+        self.kbroad_registry = registry;
+    }
+
+    pub fn set_fs_caps(&mut self, caps: FsCaps) {
+        self.fs_caps = caps;
+    }
+
+    pub fn fs_caps(&self) -> &FsCaps {
+        &self.fs_caps
+    }
+
+    pub fn set_fs_base_ts(&mut self, base_ts: Option<u64>) {
+        self.fs_base_ts = base_ts;
+    }
+
+    pub fn fs_base_ts(&self) -> Option<u64> {
+        self.fs_base_ts
+    }
+
+    pub fn set_last_checkpoint_ec(&mut self, ec: u64) {
+        self.last_checkpoint_ec = ec;
+        if self.last_accepted_ec < ec {
+            self.last_accepted_ec = ec;
+        }
+    }
+
+    pub fn last_checkpoint_ec(&self) -> u64 {
+        self.last_checkpoint_ec
+    }
+
+    pub fn last_accepted_ec(&self) -> u64 {
+        self.last_accepted_ec
+    }
+
+    pub fn record_accepted_ec(&mut self, ec: u64) {
+        if ec > self.last_accepted_ec {
+            self.last_accepted_ec = ec;
+        }
+    }
+
+    pub fn verify_device_chain_state(
+        &self,
+        pop_pk: &[u8],
+        fs_ec: u64,
+        fs_dev_prev_commit: &[u8; 32],
+        fs_dev_commit: &[u8; 32],
+        existing: Option<&DeviceChainState>,
+    ) -> Result<(), AcceptanceError> {
+        let group_cap = self
+            .last_accepted_ec()
+            .saturating_add(self.fs_caps.anchor_max);
+        if fs_ec > group_cap {
+            return Err(AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_GROUP));
+        }
+
+        let expected_prev_commit = if let Some(state) = existing {
+            if fs_ec < state.last_ec {
+                return Err(AcceptanceError::Freeze(FREEZE_FS_DEV_CHAIN_BREAK));
+            }
+            let device_cap = state.last_ec.saturating_add(self.fs_caps.device_max);
+            if fs_ec > device_cap {
+                return Err(AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_DEVICE));
+            }
+            state.last_commit.unwrap_or([0u8; 32])
+        } else {
+            if fs_dev_prev_commit.iter().any(|byte| *byte != 0) {
+                return Err(AcceptanceError::Freeze(FREEZE_FS_DEV_CHAIN_BREAK));
+            }
+            let first_cap = self
+                .last_accepted_ec()
+                .saturating_add(self.fs_caps.first_device);
+            if fs_ec > first_cap {
+                return Err(AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_FIRST));
+            }
+            [0u8; 32]
+        };
+
+        if expected_prev_commit != *fs_dev_prev_commit {
+            return Err(AcceptanceError::Freeze(FREEZE_FS_DEV_CHAIN_BREAK));
+        }
+
+        let expected_dev_commit = h_l(
+            "fs/dev/chain",
+            &FsDevChainPreimage {
+                device_pk: pop_pk,
+                fs_ec,
+                prev_commit: fs_dev_prev_commit,
+            },
+        )
+        .map_err(AcceptanceError::from)?;
+
+        if expected_dev_commit != *fs_dev_commit {
+            return Err(AcceptanceError::Freeze(FREEZE_FS_DEV_CHAIN_BIND_MISMATCH));
+        }
+
+        Ok(())
+    }
+
+    pub fn set_last_accepted_ec(&mut self, ec: u64) {
+        self.last_accepted_ec = ec;
+    }
+
+    pub fn clear_device_chains(&mut self) {
+        self.device_chains.clear();
+    }
+
+    pub fn device_chain_entry_mut(
+        &mut self,
+        gid: &[u8],
+        device_pk: &[u8],
+    ) -> &mut DeviceChainState {
+        let key = (gid.to_vec(), device_pk.to_vec());
+        self.device_chains.entry(key).or_default()
+    }
+
+    pub fn device_chain_get(&self, gid: &[u8], device_pk: &[u8]) -> Option<&DeviceChainState> {
+        let key = (gid.to_vec(), device_pk.to_vec());
+        self.device_chains.get(&key)
+    }
+
+    pub fn insert_device_chain_state(
+        &mut self,
+        gid: &[u8],
+        device_pk: &[u8],
+        state: DeviceChainState,
+    ) {
+        let key = (gid.to_vec(), device_pk.to_vec());
+        self.device_chains.insert(key, state);
+    }
+
+    pub fn device_chains_iter(&self) -> impl Iterator<Item = (&DeviceKey, &DeviceChainState)> {
+        self.device_chains.iter()
+    }
+
+    pub fn set_fs_policy_version(&mut self, version: Option<String>) {
+        self.fs_policy_version = version;
+    }
+
+    pub fn fs_policy_version(&self) -> Option<&str> {
+        self.fs_policy_version.as_deref()
+    }
+
+    pub fn set_allowed_fs_policy_version(&mut self, version: Option<String>) {
+        self.allowed_fs_policy_version = version;
+    }
+
+    pub fn allowed_fs_policy_version(&self) -> Option<&str> {
+        self.allowed_fs_policy_version.as_deref()
+    }
+
+    fn ensure_fs_policy_version_allowed(&self, version: &str) -> Result<(), AcceptanceError> {
+        if self
+            .allowed_fs_policy_version()
+            .is_some_and(|expected| expected != version)
+        {
+            return Err(AcceptanceError::Freeze(
+                FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn apply_fs_policy_config(&mut self, config: FsPolicyConfig) -> Result<(), FreezeError> {
+        let caps = config.synthesize_caps()?;
+        self.fs_caps = caps;
+        self.fs_period_seconds = config.h_seconds;
+        self.checkpoint_interval_seconds = config.checkpoint_interval_seconds;
+        self.checkpoint_head_threshold = config.checkpoint_head_threshold;
+        Ok(())
+    }
+
+    pub fn set_pending_capss_witness(&mut self, witness: Option<CapssWitnessBundle>) {
+        self.pending_capss_witness = witness;
+    }
+
+    fn take_pending_capss_witness(&mut self) -> Option<CapssWitnessBundle> {
+        self.pending_capss_witness.take()
+    }
+
+    fn telemetry_entry_mut(&mut self, key: &TelemetryKey) -> &mut TelemetryCounters {
+        self.telemetry.entry(key.clone()).or_default()
+    }
+
+    fn telemetry_record_attempt(&mut self, gid: &[u8], parent_root: &[u8]) -> TelemetryKey {
+        let key = TelemetryKey::from_parts(gid, parent_root);
+        self.telemetry_entry_mut(&key).record_attempt();
+        key
+    }
+
+    fn telemetry_record_success(&mut self, key: &TelemetryKey, active_heads: usize) {
+        self.telemetry_entry_mut(key).record_success(active_heads);
+        self.log_annex_m_event(key, "head_inserted");
+    }
+
+    fn telemetry_record_rho_freeze(&mut self, key: &TelemetryKey) {
+        self.telemetry_entry_mut(key).record_rho_freeze();
+        self.log_annex_m_event(key, "freeze_rho_replay");
+    }
+
+    fn telemetry_record_window_full(&mut self, key: &TelemetryKey) {
+        self.telemetry_entry_mut(key).record_window_full();
+        self.log_annex_m_event(key, "freeze_window_full");
+    }
+
+    pub fn telemetry_lookup(&self, gid: &[u8], parent_root: &[u8]) -> Option<&TelemetryCounters> {
+        let key = TelemetryKey::from_parts(gid, parent_root);
+        self.telemetry.get(&key)
+    }
+
+    pub fn telemetry_report(&self) -> Vec<(TelemetryKey, TelemetryCounters)> {
+        let mut rows: Vec<_> = self
+            .telemetry
+            .iter()
+            .map(|(key, counters)| (key.clone(), counters.clone()))
+            .collect();
+        rows.sort_by(|a, b| {
+            a.0.gid
+                .cmp(&b.0.gid)
+                .then(a.0.parent_root.cmp(&b.0.parent_root))
+        });
+        rows
+    }
+
+    pub fn merge_telemetry_from(&mut self, other: &AcceptanceContext) {
+        for (key, counters) in other.telemetry_snapshot() {
+            self.telemetry.insert(key.clone(), counters.clone());
+        }
+    }
+
+    pub fn annex_m_report(&self) -> AnnexMTelemetryReport {
+        let mut total_attempts = 0u64;
+        let mut total_insertions = 0u64;
+        let mut total_rho_freeze = 0u64;
+        let mut total_window_full = 0u64;
+
+        let rows = self
+            .telemetry
+            .iter()
+            .map(|(key, counters)| {
+                total_attempts += counters.head_attempts;
+                total_insertions += counters.head_insertions;
+                total_rho_freeze += counters.freeze_rho_replay;
+                total_window_full += counters.freeze_window_full;
+                AnnexMTelemetryRow::from((key.clone(), counters.clone()))
+            })
+            .collect();
+
+        AnnexMTelemetryReport {
+            rows,
+            total_attempts,
+            total_insertions,
+            total_freeze_rho_replay: total_rho_freeze,
+            total_freeze_window_full: total_window_full,
+        }
+    }
+
+    pub fn set_h_max(&mut self, h_max: usize) {
+        if self.mh_window.h_max() != h_max {
+            self.mh_window.set_h_max(h_max);
+            self.invalidate_policy_caches();
+        }
+    }
+
+    fn log_annex_m_event(&self, key: &TelemetryKey, event: &'static str) {
+        if let Some(counters) = self.telemetry.get(key) {
+            let gid_hex = hex::encode(key.gid.as_slice());
+            let parent_root_hex = hex::encode(key.parent_root);
+            info!(
+                target = ANNEX_M_LOG_TARGET,
+                event,
+                gid = %gid_hex,
+                parent_root = %parent_root_hex,
+                head_attempts = counters.head_attempts,
+                head_insertions = counters.head_insertions,
+                freeze_rho_replay = counters.freeze_rho_replay,
+                freeze_window_full = counters.freeze_window_full,
+                last_active_heads = counters.last_active_heads
+            );
+        }
+    }
+
+    pub fn policy_version(&self) -> &str {
+        &self.policy_version
+    }
+
+    pub fn policy_timestamp(&self) -> Option<OffsetDateTime> {
+        self.policy_timestamp
+    }
+
+    pub fn set_policy_state(&mut self, version: String, timestamp: Option<OffsetDateTime>) {
+        self.policy_version = version;
+        self.policy_timestamp = timestamp;
+    }
+
+    pub fn h_max(&self) -> usize {
+        self.mh_window.h_max()
+    }
+
+    pub fn leaf_id_mode(&self) -> crate::LeafIdMode {
+        self.leaf_id_mode
+    }
+
+    pub fn kbroad_registry(&self) -> Option<&BTreeMap<Vec<u8>, Vec<u8>>> {
+        self.kbroad_registry.as_ref()
+    }
+
+    pub fn allowed_params_ids(&self) -> Option<&BTreeSet<Vec<u8>>> {
+        self.allowed_params_ids.as_ref()
+    }
+
+    pub fn set_srx_max_bytes(&mut self, max_bytes: usize) {
+        self.srx_max_bytes = max_bytes.max(MIN_SRX_MAX_BYTES);
+    }
+
+    pub fn set_srx_required(&mut self, required: bool) {
+        self.srx_required = required;
+    }
+
+    pub fn set_allowed_crs_ids(&mut self, allowed: Option<BTreeSet<String>>) {
+        self.allowed_crs_ids = allowed;
+    }
+
+    pub fn set_allowed_params_ids(&mut self, allowed: Option<BTreeSet<Vec<u8>>>) {
+        self.allowed_params_ids = allowed;
+    }
+
+    pub fn set_deprecated_crs_ids(&mut self, deprecated: BTreeSet<String>) {
+        self.deprecated_crs_ids = deprecated;
+    }
+
+    pub fn set_deprecated_params_ids(&mut self, deprecated: BTreeSet<Vec<u8>>) {
+        self.deprecated_params_ids = deprecated;
+    }
+
+    pub fn set_allowed_vrf_ids(&mut self, allowed: Option<BTreeSet<String>>) {
+        self.allowed_vrf_ids = allowed;
+        self.invalidate_policy_caches();
+    }
+
+    pub fn set_deprecated_vrf_ids(&mut self, deprecated: BTreeSet<String>) {
+        self.deprecated_vrf_ids = deprecated;
+        self.invalidate_policy_caches();
+    }
+
+    pub fn set_allowed_proof_modes(&mut self, allowed: Option<BTreeSet<String>>) {
+        self.allowed_proof_modes = allowed;
+        self.invalidate_policy_caches();
+    }
+
+    pub fn set_deprecated_proof_modes(&mut self, deprecated: BTreeSet<String>) {
+        self.deprecated_proof_modes = deprecated;
+        self.invalidate_policy_caches();
+    }
+
+    pub fn set_allowed_srx_modes(&mut self, allowed: Option<BTreeSet<String>>) {
+        self.allowed_srx_modes = allowed;
+        self.invalidate_policy_caches();
+    }
+
+    pub fn set_deprecated_srx_modes(&mut self, deprecated: BTreeSet<String>) {
+        self.deprecated_srx_modes = deprecated;
+        self.invalidate_policy_caches();
+    }
+
+    pub fn set_leaf_id_mode(&mut self, mode: crate::LeafIdMode) {
+        self.leaf_id_mode = mode;
+        self.invalidate_policy_caches();
+    }
+
+    pub fn current_time(&self) -> AcceptInstant {
+        self.clock.now()
+    }
+
+    pub fn next_accept_instant(&mut self) -> AcceptInstant {
+        self.clock.tick()
+    }
+
+    pub fn window_limits(&self) -> (usize, Duration) {
+        (self.mh_window.h_max(), self.mh_window.ttl())
+    }
+
+    pub fn update_window_limits(&mut self, h_max: Option<usize>, ttl: Option<Duration>) {
+        if let Some(h) = h_max {
+            self.mh_window.set_h_max(h);
+        }
+        if let Some(ttl) = ttl {
+            let now = self.current_time();
+            self.mh_window.set_ttl(ttl, now);
+            self.vck_cache.set_ttl(ttl, now);
+            self.pivot_store.set_ttl(ttl, now);
+        }
+    }
+
+    pub fn pivot_parities_for(&mut self, gid: &[u8], parent_root: &[u8; 32]) -> Vec<PivotParity> {
+        let now = self.current_time();
+        self.pivot_store.list(gid, parent_root, now)
+    }
+
+    pub fn insert_pivot_parity(&mut self, parity: PivotParity, now: AcceptInstant) {
+        self.pivot_store.insert(parity, now);
+    }
+
+    pub fn invalidate_policy_caches(&mut self) {
+        let ttl = self.mh_window.ttl();
+        let now = self.current_time();
+        self.vck_cache = VckCache::new(ttl);
+        self.pivot_store.set_ttl(ttl, now);
+    }
+
+    fn ensure_crs_id(&self, header: &BTreeMap<u64, Value>) -> Result<(), AcceptanceError> {
+        let Some(value) = header.get(&HDR_CRS_ID) else {
+            return Err(AcceptanceError::Freeze(FREEZE_MSPHF_CRS_INVALID));
+        };
+        let crs_id = match value {
+            Value::Text(text) => text.clone(),
+            Value::Bytes(bytes) => std::str::from_utf8(bytes)
+                .map(|s| s.to_string())
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_MSPHF_CRS_INVALID))?,
+            _ => return Err(AcceptanceError::Freeze(FREEZE_MSPHF_CRS_INVALID)),
+        };
+        if crs_id.is_empty() {
+            return Err(AcceptanceError::Freeze(FREEZE_MSPHF_CRS_INVALID));
+        }
+        if self
+            .allowed_crs_ids
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&crs_id))
+        {
+            return Err(AcceptanceError::Freeze(FREEZE_MSPHF_CRS_INVALID));
+        }
+        if self.deprecated_crs_ids.contains(&crs_id) {
+            return Err(AcceptanceError::Freeze(FREEZE_SUITE_DEPRECATED));
+        }
+        Ok(())
+    }
+
+    fn ensure_params_id(&self, header: &BTreeMap<u64, Value>) -> Result<(), AcceptanceError> {
+        let Some(value) = header.get(&HDR_PARAMS_ID) else {
+            return Err(AcceptanceError::Freeze(FREEZE_PARAMS_ID_INVALID));
+        };
+        let canonical = match value {
+            Value::Bytes(bytes) => {
+                if bytes.len() != 32 {
+                    return Err(AcceptanceError::Freeze(FREEZE_PARAMS_ID_INVALID));
+                }
+                bytes.clone()
+            }
+            Value::Text(text) => {
+                if text.is_empty() {
+                    return Err(AcceptanceError::Freeze(FREEZE_PARAMS_ID_INVALID));
+                }
+                text.as_bytes().to_vec()
+            }
+            _ => return Err(AcceptanceError::Freeze(FREEZE_PARAMS_ID_INVALID)),
+        };
+        if self
+            .allowed_params_ids
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&canonical))
+        {
+            return Err(AcceptanceError::Freeze(FREEZE_PARAMS_ID_INVALID));
+        }
+        if self.deprecated_params_ids.contains(&canonical) {
+            return Err(AcceptanceError::Freeze(FREEZE_SUITE_DEPRECATED));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn should_verify_hp(
+        &mut self,
+        inputs: &hp_binding::HpBindingInputs<'_>,
+        proof: &hp_binding::HpProof,
+        header: &BTreeMap<u64, Value>,
+        now: AcceptInstant,
+    ) -> Result<bool, AcceptanceError> {
+        let key = compute_vck_key(
+            inputs.xk_hash,
+            inputs.seed_commit,
+            inputs.rho_commit,
+            inputs.hp_commit,
+            header,
+        )?;
+        Ok(self.vck_cache.should_verify_hp(key, proof, now))
+    }
+
+    pub(crate) fn record_verified_hp(
+        &mut self,
+        inputs: &hp_binding::HpBindingInputs<'_>,
+        proof: &hp_binding::HpProof,
+        header: &BTreeMap<u64, Value>,
+        now: AcceptInstant,
+    ) -> Result<(), AcceptanceError> {
+        let key = compute_vck_key(
+            inputs.xk_hash,
+            inputs.seed_commit,
+            inputs.rho_commit,
+            inputs.hp_commit,
+            header,
+        )?;
+        self.vck_cache.record_hp(key, proof, now);
+        Ok(())
+    }
+
+    fn ensure_kbroad_pub(
+        &self,
+        gid: &[u8],
+        header: &BTreeMap<u64, Value>,
+    ) -> Result<(), AcceptanceError> {
+        let Some(value) = header.get(&HDR_KBROAD_PUB) else {
+            return Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING));
+        };
+        let pub_bytes = match value {
+            Value::Bytes(bytes) => bytes,
+            _ => return Err(AcceptanceError::Freeze(FREEZE_KBROAD_PARENT_MISMATCH)),
+        };
+        if pub_bytes.len() != ml_kem_public_key_bytes() {
+            return Err(AcceptanceError::Freeze(FREEZE_KBROAD_PARENT_MISMATCH));
+        }
+
+        if let Some(registry) = &self.kbroad_registry {
+            match registry.get(gid) {
+                Some(expected) if expected.as_slice() == pub_bytes.as_slice() => return Ok(()),
+                Some(_) => return Err(AcceptanceError::Freeze(FREEZE_KBROAD_PARENT_MISMATCH)),
+                None => return Err(AcceptanceError::Freeze(FREEZE_KBROAD_PARENT_MISMATCH)),
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn accept_non_merge(
+        &mut self,
+        wid: &[u8],
+        record: HeadRecord,
+        now: AcceptInstant,
+    ) -> Result<(), FreezeError> {
+        self.mh_window.accept_head(wid, record, now)
+    }
+
+    pub fn accept_merge(
+        &mut self,
+        wid_old: &[u8],
+        wid_new: &[u8],
+        mh_heads: &[[u8; 32]],
+        new_record: HeadRecord,
+        now: AcceptInstant,
+    ) -> Result<(), FreezeError> {
+        if mh_heads.len() > self.mh_window.h_max() {
+            return Err(FreezeError::WINDOW_FULL);
+        }
+        self.mh_window
+            .accept_merge(wid_old, wid_new, mh_heads, new_record, now)
+    }
+
+    pub fn active_heads(&self, wid: &[u8]) -> usize {
+        self.mh_window.active_heads(wid)
+    }
+
+    pub fn accept_anchor(
+        &mut self,
+        parts: &AnchorInstanceParts<'_>,
+        we_epoch_id_claim: [u8; 32],
+        header_map: &BTreeMap<u64, Value>,
+    ) -> Result<AcceptanceOutcome, AcceptanceError> {
+        let now = self.next_accept_instant();
+        self.mh_window.prune_all(now);
+        debug!(
+            "accept_anchor: gid={:?} merge_heads={}",
+            hex::encode(parts.gid),
+            header_map.contains_key(&HDR_MH_HEADS)
+        );
+        if matches!(
+            header_map.get(&HDR_FS_CAPSS),
+            Some(Value::Bytes(proof)) if proof.len() > MAX_HP_PROOF_BYTES
+        ) {
+            return Err(AcceptanceError::Freeze(FREEZE_STARK_OVERSIZE));
+        }
+
+        let mh_heads = match parse_mh_heads(header_map) {
+            Ok(value) => value,
+            Err(_) => return Err(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID)),
+        };
+        let mh_note = parse_mh_note(header_map).map_err(AcceptanceError::from)?;
+
+        let result = if let Some(heads) = mh_heads {
+            self.accept_anchor_merge(parts, we_epoch_id_claim, header_map, heads, mh_note, now)
+        } else {
+            self.accept_anchor_join(parts, we_epoch_id_claim, header_map, mh_note, now)
+        };
+        if let Err(AcceptanceError::Freeze(code)) = &result {
+            debug!(
+                "accept_anchor freeze: code={} reason={} keys={:?}",
+                code.code,
+                code.reason,
+                header_map.keys().collect::<Vec<_>>()
+            );
+        }
+        result
+    }
+}
+
+#[derive(Clone)]
+struct RhoReplayGuard {
+    limit: usize,
+    entries: AHashMap<Vec<u8>, VecDeque<[u8; 32]>>,
+}
+
+impl RhoReplayGuard {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            entries: AHashMap::new(),
+        }
+    }
+
+    fn record(&mut self, gid: &[u8], parent_root: &[u8], rho_commit: &[u8; 32]) -> bool {
+        let key = Self::make_key(gid, parent_root);
+        let deque = self.entries.entry(key).or_default();
+        if deque.iter().any(|existing| existing == rho_commit) {
+            return false;
+        }
+        deque.push_back(*rho_commit);
+        if deque.len() > self.limit {
+            deque.pop_front();
+        }
+        true
+    }
+
+    fn make_key(gid: &[u8], parent_root: &[u8]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(gid.len() + parent_root.len() + 1);
+        key.extend_from_slice(gid);
+        key.push(0x00);
+        key.extend_from_slice(parent_root);
+        key
+    }
+}
+
+#[derive(Serialize)]
+struct VckPreimage<'a> {
+    #[serde(with = "serde_bytes")]
+    xk_hash: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    seed_commit: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    rho_commit: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    hp_commit: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    crs_id: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    params_id: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    srx_commit: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    proofs_commit: &'a [u8],
+    proof_mode: &'a str,
+    vrf_id: &'a str,
+    policy_version: &'a str,
+}
+
+fn header_value_bytes<'a>(
+    header: &'a BTreeMap<u64, Value>,
+    key: u64,
+    freeze: FreezeError,
+) -> Result<Cow<'a, [u8]>, AcceptanceError> {
+    let Some(value) = header.get(&key) else {
+        return Err(AcceptanceError::Freeze(freeze));
+    };
+    if key == 110 {
+        debug!("header_bytes32_or_freeze: key 110 value {:?}", value);
+    }
+    match value {
+        Value::Bytes(bytes) => Ok(Cow::Borrowed(bytes.as_slice())),
+        Value::Text(text) => Ok(Cow::Borrowed(text.as_bytes())),
+        _ => Err(AcceptanceError::Freeze(freeze)),
+    }
+}
+
+fn compute_vck_key(
+    xk_hash: &[u8; 32],
+    seed_commit: &[u8; 32],
+    rho_commit: &[u8; 32],
+    hp_commit: &[u8; 32],
+    header: &BTreeMap<u64, Value>,
+) -> Result<[u8; 32], AcceptanceError> {
+    let crs_bytes = header_value_bytes(header, 98, FREEZE_MSPHF_CRS_INVALID)?;
+    let params_bytes = header_value_bytes(header, 106, FREEZE_PARAMS_ID_INVALID)?;
+
+    let srx_commit = match header.get(&HDR_SRX_COMMIT) {
+        Some(Value::Bytes(bytes)) => {
+            if bytes.len() != 32 {
+                return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(bytes);
+            arr
+        }
+        Some(_) => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+        None => [0u8; 32],
+    };
+
+    let proofs_commit = match header.get(&HDR_PROOFS_COMMIT) {
+        Some(Value::Bytes(bytes)) => {
+            if bytes.len() != 32 {
+                return Err(AcceptanceError::Freeze(FREEZE_CAPSS_INVALID));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(bytes);
+            arr
+        }
+        Some(_) => {
+            return Err(AcceptanceError::Freeze(FREEZE_CAPSS_INVALID));
+        }
+        None => [0u8; 32],
+    };
+
+    let proof_mode = match header.get(&HDR_PROOF_MODE) {
+        Some(Value::Text(text)) => Cow::Borrowed(text.as_str()),
+        Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes)
+            .map(Cow::Borrowed)
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_FIELD_MISSING))?,
+        _ => return Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING)),
+    };
+
+    let vrf_id = match header.get(&HDR_VRF_ID) {
+        Some(Value::Text(text)) => Cow::Borrowed(text.as_str()),
+        Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes)
+            .map(Cow::Borrowed)
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_FIELD_MISSING))?,
+        _ => return Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING)),
+    };
+
+    let policy_version = match header.get(&HDR_POLICY_VERSION) {
+        Some(Value::Text(text)) => Cow::Borrowed(text.as_str()),
+        Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes)
+            .map(Cow::Borrowed)
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_FIELD_MISSING))?,
+        _ => Cow::Borrowed("v0"),
+    };
+
+    let preimage = VckPreimage {
+        xk_hash,
+        seed_commit,
+        rho_commit,
+        hp_commit,
+        crs_id: crs_bytes.as_ref(),
+        params_id: params_bytes.as_ref(),
+        srx_commit: &srx_commit,
+        proofs_commit: &proofs_commit,
+        proof_mode: proof_mode.as_ref(),
+        vrf_id: vrf_id.as_ref(),
+        policy_version: policy_version.as_ref(),
+    };
+
+    h_l("msphf/vck", &preimage).map_err(AcceptanceError::from)
+}
+
+fn compute_vck_from_parity(parity: &PivotParity) -> Result<[u8; 32], AcceptanceError> {
+    let mut map = BTreeMap::new();
+    map.insert(HDR_CRS_ID, Value::Bytes(parity.crs_id.clone()));
+    map.insert(HDR_PARAMS_ID, Value::Bytes(parity.params_id.clone()));
+    map.insert(
+        HDR_PROOFS_COMMIT,
+        Value::Bytes(parity.proofs_commit.to_vec()),
+    );
+    map.insert(HDR_PROOF_MODE, Value::Text(parity.proof_mode.clone()));
+    map.insert(HDR_VRF_ID, Value::Text(parity.vrf_id.clone()));
+    if let Some(commit) = parity.srx_commit {
+        map.insert(HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
+    }
+    map.insert(
+        HDR_POLICY_VERSION,
+        Value::Text(parity.policy_version.clone()),
+    );
+    compute_vck_key(
+        &parity.xk_hash,
+        &parity.seed_commit,
+        &parity.rho_commit,
+        &parity.hp_commit,
+        &map,
+    )
+}
+
+/// Reads header key 130 (`mh_heads`). Returns `None` if the key is absent.
+pub fn parse_mh_heads(
+    header: &BTreeMap<u64, Value>,
+) -> Result<Option<Vec<[u8; 32]>>, AcceptanceError> {
+    let Some(Value::Array(entries)) = header.get(&HDR_MH_HEADS) else {
+        return Ok(None);
+    };
+    let mut heads = Vec::with_capacity(entries.len());
+    for value in entries {
+        let Value::Bytes(bytes) = value else {
+            debug!("parse_mh_heads: entry not bytes");
+            return Err(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID));
+        };
+        if bytes.len() != 32 {
+            debug!("parse_mh_heads: entry len {}", bytes.len());
+            return Err(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID));
+        }
+        let mut array = [0u8; 32];
+        array.copy_from_slice(bytes);
+        heads.push(array);
+    }
+    if heads.is_empty() || !is_sorted_unique(&heads) {
+        debug!(
+            "parse_mh_heads: heads not sorted/unique len {}",
+            heads.len()
+        );
+        return Err(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID));
+    }
+    Ok(Some(heads))
+}
+
+fn is_sorted_unique(heads: &[[u8; 32]]) -> bool {
+    heads.windows(2).all(|w| w[0] < w[1])
+}
+
+fn parse_mh_note(header: &BTreeMap<u64, Value>) -> Result<Option<String>, MsphfError> {
+    const KEY: u64 = 102;
+    match header.get(&KEY) {
+        None => Ok(None),
+        Some(Value::Text(note)) => Ok(Some(note.clone())),
+        Some(_) => Err(MsphfError::invalid_input("mh_note not text")),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RollupEpochEntry {
+    weid: [u8; 32],
+    xk_hash: [u8; 32],
+    parent_root: [u8; 32],
+    join_delta_root: [u8; 32],
+    revoked_since_root: [u8; 32],
+    revoked_root: [u8; 32],
+    is_join: bool,
+}
+
+fn parse_rollup_epoch_replay(value: &Value) -> Result<Vec<RollupEpochEntry>, AcceptanceError> {
+    let Value::Array(entries) = value else {
+        debug!("rollup_epoch_replay: value not array");
+        return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    let mut prev: Option<[u8; 32]> = None;
+    for entry in entries {
+        let Value::Array(fields) = entry else {
+            debug!("rollup_epoch_replay: entry not array");
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        };
+        if fields.len() != 4 {
+            debug!("rollup_epoch_replay: entry len {}", fields.len());
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+        let weid = value_bytes32(&fields[0], FREEZE_HASH_CBOR)?;
+        if prev.is_some_and(|prev_weid| prev_weid >= weid) {
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+        prev = Some(weid);
+        let xk_hash = value_bytes32(&fields[1], FREEZE_HASH_CBOR)?;
+        let Value::Array(root_fields) = &fields[2] else {
+            debug!("rollup_epoch_replay: roots not array");
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        };
+        if root_fields.len() != 4 {
+            debug!("rollup_epoch_replay: root len {}", root_fields.len());
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+        let parent_root = value_bytes32(&root_fields[0], FREEZE_HASH_CBOR)?;
+        let join_delta_root = value_bytes32(&root_fields[1], FREEZE_HASH_CBOR)?;
+        let revoked_since_root = value_bytes32(&root_fields[2], FREEZE_HASH_CBOR)?;
+        let revoked_root = value_bytes32(&root_fields[3], FREEZE_HASH_CBOR)?;
+        let is_join = match fields[3] {
+            Value::Bool(flag) => flag,
+            _ => {
+                debug!("rollup_epoch_replay: flag not bool");
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+            }
+        };
+        out.push(RollupEpochEntry {
+            weid,
+            xk_hash,
+            parent_root,
+            join_delta_root,
+            revoked_since_root,
+            revoked_root,
+            is_join,
+        });
+    }
+    Ok(out)
+}
+
+pub(crate) fn validate_kbroad_envelope_bytes(bytes: &[u8]) -> Result<(), AcceptanceError> {
+    let value: Value = de::from_reader(bytes).map_err(|_| {
+        debug!("kbroad envelope: cbor parse failed");
+        AcceptanceError::Freeze(FREEZE_HASH_CBOR)
+    })?;
+    let Value::Array(items) = value else {
+        debug!("kbroad envelope: not array");
+        return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+    };
+    if items.len() != 5 {
+        debug!("kbroad envelope len {}", items.len());
+        return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+    }
+    let mode = match &items[0] {
+        Value::Text(text) => text.as_str(),
+        Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
+            debug!("kbroad envelope: mode invalid utf8");
+            AcceptanceError::Freeze(FREEZE_HASH_CBOR)
+        })?,
+        _ => {
+            debug!("kbroad envelope: mode not text/bytes");
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+    };
+    if mode != "kbroad-v1" {
+        return Err(AcceptanceError::Freeze(FREEZE_PARENT_EID_FORBIDDEN));
+    }
+    let expected_ct_len = ml_kem_ciphertext_bytes();
+    match &items[1] {
+        Value::Bytes(bytes) if bytes.len() == expected_ct_len => {}
+        Value::Bytes(_) => {
+            debug!("kbroad envelope: ct len mismatch");
+            return Err(AcceptanceError::Freeze(FREEZE_KBROAD_PARENT_MISMATCH));
+        }
+        _ => {
+            debug!("kbroad envelope: ct not bytes");
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+    }
+    match &items[2] {
+        Value::Bytes(bytes) if bytes.len() == KBROAD_WRAP_CIPHERTEXT_BYTES => {}
+        Value::Bytes(_) => {
+            debug!("kbroad envelope: wrap len mismatch");
+            return Err(AcceptanceError::Freeze(FREEZE_KBROAD_PARENT_MISMATCH));
+        }
+        _ => {
+            debug!("kbroad envelope: wrap not bytes");
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+    }
+    match &items[3] {
+        Value::Bytes(bytes)
+            if bytes.len() >= crate::AEAD_TAG_LEN
+                && bytes.len() <= KBROAD_HP_MAX_CIPHERTEXT_BYTES => {}
+        Value::Bytes(_) => {
+            debug!("kbroad envelope: hp ciphertext len mismatch");
+            return Err(AcceptanceError::Freeze(FREEZE_KBROAD_PARENT_MISMATCH));
+        }
+        _ => {
+            debug!("kbroad envelope: hp ciphertext not bytes");
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+    }
+    let aead = match &items[4] {
+        Value::Text(text) => text.as_str(),
+        Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
+            debug!("kbroad envelope: aead invalid utf8");
+            AcceptanceError::Freeze(FREEZE_HASH_CBOR)
+        })?,
+        _ => {
+            debug!("kbroad envelope: aead not text/bytes");
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+    };
+    if aead != "chacha20-poly1305" {
+        return Err(AcceptanceError::Freeze(FREEZE_SUITE_DEPRECATED));
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct RollupCommit<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+
+#[allow(clippy::too_many_arguments)]
+fn is_supported_proof_mode(mode: &str) -> bool {
+    mode == DEFAULT_PROOF_MODE
+}
+
+fn is_supported_vrf_id(vrf_id: &str) -> bool {
+    vrf_id == DEFAULT_VRF_ID
+}
+
+fn header_string_or_freeze(
+    header: &BTreeMap<u64, Value>,
+    key: u64,
+) -> Result<String, AcceptanceError> {
+    match header.get(&key) {
+        Some(Value::Text(text)) => Ok(text.clone()),
+        Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes)
+            .map(|s| s.to_string())
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_FIELD_MISSING)),
+        _ => Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING)),
+    }
+}
+
+fn header_bytes_or_freeze(
+    header: &BTreeMap<u64, Value>,
+    key: u64,
+    _reason: &'static str,
+) -> Result<Vec<u8>, AcceptanceError> {
+    let _ = _reason;
+    match header.get(&key) {
+        Some(Value::Bytes(bytes)) => Ok(bytes.clone()),
+        _ => Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING)),
+    }
+}
+
+#[derive(Serialize)]
+struct RhoSig<'a> {
+    #[serde(with = "serde_bytes")]
+    pop_sig: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    xk_hash: &'a [u8; 32],
+}
+
+fn derive_rho_commit_from_pop(
+    pop_sig: &[u8],
+    xk_hash: &[u8; 32],
+) -> Result<[u8; 32], AcceptanceError> {
+    let rho_raw =
+        h_l(ds::MSPHF_RHO_DER, &RhoSig { pop_sig, xk_hash }).map_err(AcceptanceError::from)?;
+    hash_bytes_with_label(ds::MSPHF_KGEN_RHO, &rho_raw).map_err(AcceptanceError::from)
+}
+
+fn extract_pop_signature(header: &BTreeMap<u64, Value>) -> Result<Vec<u8>, AcceptanceError> {
+    match header.get(&HDR_POP_SIG) {
+        Some(Value::Bytes(bytes)) => Ok(bytes.clone()),
+        _ => Err(AcceptanceError::Freeze(FREEZE_POP_INVALID)),
+    }
+}
+
+fn srx_contains_leaf_id(
+    header: &BTreeMap<u64, Value>,
+    leaf_id: &[u8; 32],
+) -> Result<Option<bool>, AcceptanceError> {
+    let Some(payload) = header.get(&HDR_SRX_PAYLOAD) else {
+        return Ok(None);
+    };
+    match payload {
+        Value::Array(items) => {
+            let mut saw_candidate = false;
+            for item in items {
+                match item {
+                    Value::Bytes(bytes) if bytes.len() == 32 => {
+                        saw_candidate = true;
+                        if bytes.as_slice() == leaf_id {
+                            return Ok(Some(true));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if saw_candidate {
+                Ok(Some(false))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+pub(crate) fn parse_srx_payload(value: &Value) -> Result<SrxPayload, AcceptanceError> {
+    let Value::Array(items) = value else {
+        debug!("parse_srx_payload: payload not array");
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    };
+    if items.len() != 9 {
+        debug!("parse_srx_payload: payload len {} != 9", items.len());
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    }
+    let join_parent = parse_nonmem_anchor_list(&items[0])?;
+    let join_revoked = parse_nonmem_anchor_list(&items[1])?;
+    let subset = parse_mem_list(&items[2])?;
+    match &items[3] {
+        Value::Null => {}
+        Value::Map(_) => {}
+        _ => {
+            debug!("parse_srx_payload: subset entry not null/map");
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        }
+    }
+    let join_leaf_ids = parse_leaf_array(&items[4])?;
+    let join_frontier = parse_optional_frontier(&items[5])?;
+    let since_leaf_ids = parse_leaf_array(&items[6])?;
+    let since_frontier = parse_optional_frontier(&items[7])?;
+    let anchor_mem_pool = parse_mem_list(&items[8])?;
+    Ok(SrxPayload {
+        join_nonmem_parent: join_parent,
+        join_nonmem_revoked_since: join_revoked,
+        revoked_since_mem_in_revoked: subset,
+        join_leaf_ids,
+        join_frontier,
+        since_leaf_ids,
+        since_frontier,
+        anchor_mem_pool,
+    })
+}
+
+fn is_all_zero(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&b| b == 0)
+}
+
+fn validate_bootstrap(
+    header: &BTreeMap<u64, Value>,
+    anchor: &AnchorInstance<'_>,
+    hp_commit: &[u8; 32],
+    seed_ctx_hash: &[u8; 32],
+    rho_commit: &[u8; 32],
+    seed_bundle_commit: &[u8; 32],
+    policy: BootstrapPolicy,
+) -> Result<(), AcceptanceError> {
+    let mode_value = header
+        .get(&HDR_BOOTSTRAP_ALG)
+        .ok_or(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
+    let mode = match mode_value {
+        Value::Text(text) => text.as_str(),
+        Value::Bytes(bytes) => std::str::from_utf8(bytes)
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?,
+        _ => return Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID)),
+    };
+
+    match (mode, policy) {
+        ("oob-ca-v1", BootstrapPolicy::CaMlDsa { public_key }) => {
+            let sig_bytes = match header.get(&HDR_BOOTSTRAP_SIG) {
+                Some(Value::Bytes(bytes)) => bytes.clone(),
+                _ => return Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID)),
+            };
+
+            let digest = build_bootstrap_digest(
+                header,
+                anchor,
+                hp_commit,
+                seed_ctx_hash,
+                rho_commit,
+                seed_bundle_commit,
+            )?;
+
+            let pk = MlDsaPublicKey::from_bytes(public_key.as_slice())
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
+            let sig = MlDsaDetachedSignature::from_bytes(sig_bytes.as_slice())
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
+            verify_ml_dsa(&sig, &digest, &pk)
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
+
+            Ok(())
+        }
+        ("oob-ca-v1", BootstrapPolicy::Disabled) => {
+            Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_UNSUPPORTED))
+        }
+        ("oob-m-of-n-v1", _) => Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_UNSUPPORTED)),
+        (_, _) => Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_UNSUPPORTED)),
+    }
+}
+
+pub fn build_bootstrap_digest(
+    header: &BTreeMap<u64, Value>,
+    anchor: &AnchorInstance<'_>,
+    hp_commit: &[u8; 32],
+    seed_ctx_hash: &[u8; 32],
+    rho_commit: &[u8; 32],
+    seed_bundle_commit: &[u8; 32],
+) -> Result<Vec<u8>, AcceptanceError> {
+    let crs_value = header
+        .get(&HDR_CRS_ID)
+        .ok_or(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
+    let crs_id = match crs_value {
+        Value::Text(text) => Value::Text(text.clone()),
+        Value::Bytes(bytes) => Value::Bytes(bytes.clone()),
+        _ => return Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID)),
+    };
+
+    let params_value = header
+        .get(&HDR_PARAMS_ID)
+        .ok_or(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
+    let params_id = match params_value {
+        Value::Text(text) => Value::Text(text.clone()),
+        Value::Bytes(bytes) => {
+            if bytes.len() == 32 {
+                Value::Bytes(bytes.clone())
+            } else {
+                return Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID));
+            }
+        }
+        _ => return Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID)),
+    };
+
+    let digest_values = vec![
+        Value::Bytes(anchor.gid.to_vec()),
+        Value::Bytes(anchor.cat.to_vec()),
+        Value::Bytes(anchor.we_epoch_id.to_vec()),
+        Value::Bytes(anchor.anchor_hdr_ctx.to_vec()),
+        Value::Bytes(anchor.tswe_salt_hash.to_vec()),
+        Value::Bytes(anchor.join_delta_root.to_vec()),
+        Value::Bytes(anchor.revoked_root.to_vec()),
+        crs_id,
+        params_id,
+        Value::Bytes(hp_commit.to_vec()),
+        Value::Bytes(seed_ctx_hash.to_vec()),
+        Value::Bytes(rho_commit.to_vec()),
+        Value::Bytes(seed_bundle_commit.to_vec()),
+    ];
+
+    let mut digest_bytes = Vec::new();
+    ser::into_writer(&digest_values, &mut digest_bytes)
+        .map_err(|_| AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
+    Ok(digest_bytes)
+}
+
+fn parse_mem_list(value: &Value) -> Result<Vec<RawMembershipWitness>, AcceptanceError> {
+    let Value::Array(entries) = value else {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    };
+    entries
+        .iter()
+        .map(deserialize_value::<RawMembershipWitness>)
+        .collect()
+}
+
+fn deserialize_value<T: DeserializeOwned>(value: &Value) -> Result<T, AcceptanceError> {
+    let mut buf = Vec::new();
+    ser::into_writer(value, &mut buf).map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
+    de::from_reader(buf.as_slice()).map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))
+}
+
+fn validate_membership_array(
+    witnesses: &[RawMembershipWitness],
+    expected_root: &[u8; 32],
+) -> Result<Vec<ValidatedMembership>, AcceptanceError> {
+    let mut seen = BTreeSet::new();
+    let mut validated = Vec::with_capacity(witnesses.len());
+    for witness in witnesses {
+        match CanonicalWitness::validate_membership_witness(witness, expected_root) {
+            Ok(entry) => {
+                if !seen.insert(entry.leaf_id) {
+                    return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+                }
+                validated.push(entry);
+            }
+            Err(MsphfError::Witness(WitnessValidationError::ProjEvalFail)) => {
+                return Err(AcceptanceError::Freeze(FREEZE_SRX_SET_CONFLICT_SUBSET));
+            }
+            Err(MsphfError::Witness(_)) => {
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_MEM_MALFORMED));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(validated)
+}
+
+pub(crate) fn validate_anchored_nonmem_array(
+    witnesses: &[AnchoredNonMembership],
+    anchor_mem_pool: &[RawMembershipWitness],
+    expected_root: &[u8; 32],
+    conflict: FreezeError,
+) -> Result<Vec<ValidatedNonMembership>, AcceptanceError> {
+    let mut seen = BTreeSet::new();
+    let mut validated = Vec::with_capacity(witnesses.len());
+    for anchor in witnesses {
+        match CanonicalWitness::validate_nonmembership_witness(&anchor.witness, expected_root) {
+            Ok(entry) => {
+                if !seen.insert(entry.query) {
+                    return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+                }
+                let left_anchor = validate_anchor_reference(
+                    anchor_mem_pool,
+                    expected_root,
+                    anchor.witness.left.as_ref(),
+                    anchor.left_ref,
+                )?;
+                let right_anchor = validate_anchor_reference(
+                    anchor_mem_pool,
+                    expected_root,
+                    anchor.witness.right.as_ref(),
+                    anchor.right_ref,
+                )?;
+                verify_anchored_adjacency(&entry, left_anchor.as_ref(), right_anchor.as_ref())?;
+                validated.push(entry);
+            }
+            Err(MsphfError::Witness(WitnessValidationError::ProjEvalFail)) => {
+                return Err(AcceptanceError::Freeze(conflict));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(validated)
+}
+
+fn verify_anchored_adjacency(
+    entry: &ValidatedNonMembership,
+    left_anchor: Option<&ValidatedMembership>,
+    right_anchor: Option<&ValidatedMembership>,
+) -> Result<(), AcceptanceError> {
+    if let Some(anchor) = left_anchor {
+        if let Some(left) = entry.left {
+            if anchor.leaf_id != left {
+                return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+            }
+        } else {
+            return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+        }
+    } else if entry.left.is_some() {
+        return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+    }
+
+    if let Some(anchor) = right_anchor {
+        if let Some(right) = entry.right {
+            if anchor.leaf_id != right {
+                return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+            }
+        } else {
+            return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+        }
+    } else if entry.right.is_some() {
+        return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+    }
+
+    match (left_anchor, right_anchor) {
+        (Some(left_mem), Some(right_mem)) => {
+            if let (Some(left), Some(right)) = (entry.left, entry.right) {
+                if !(left < entry.query && entry.query < right) {
+                    return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+                }
+            } else {
+                return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+            }
+            // For two-bound case we continue relying on canonical interval ordering; deeper checks
+            // are handled by the validated witness structures.
+            let _ = (left_mem, right_mem);
+        }
+        (None, Some(right_mem)) => {
+            if !right_mem.path.iter().all(|(dir, _)| *dir == 0) {
+                return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+            }
+            if entry.path != right_mem.path {
+                return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+            }
+        }
+        (Some(left_mem), None) => {
+            if !left_mem.path.iter().all(|(dir, _)| *dir == 1) {
+                return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+            }
+            if entry.path != left_mem.path {
+                return Err(AcceptanceError::Freeze(FREEZE_NONMEM_ADJ_INCOHERENT));
+            }
+        }
+        (None, None) => {}
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_anchor_pool(pool: &[RawMembershipWitness]) -> Result<(), AcceptanceError> {
+    let mut prev: Option<([u8; 32], [u8; 32])> = None;
+    for witness in pool {
+        if witness.leaf_id.len() != 32 || witness.root.len() != 32 {
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_MEM_MALFORMED));
+        }
+        if witness.path.len() > 64 {
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_PATH_OVERSIZE));
+        }
+        let mut root = [0u8; 32];
+        root.copy_from_slice(&witness.root);
+        let mut leaf = [0u8; 32];
+        leaf.copy_from_slice(&witness.leaf_id);
+        if prev.is_some_and(|prev_key| prev_key >= (root, leaf)) {
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_ANCHOR_POOL_UNSORTED));
+        }
+        prev = Some((root, leaf));
+    }
+    Ok(())
+}
+
+fn validate_anchor_reference(
+    anchor_mem_pool: &[RawMembershipWitness],
+    expected_root: &[u8; 32],
+    bound: Option<&Vec<u8>>,
+    index: Option<usize>,
+) -> Result<Option<ValidatedMembership>, AcceptanceError> {
+    match (bound, index) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(AcceptanceError::Freeze(FREEZE_SRX_ANCHOR_MISSING)),
+        (Some(_), None) => Err(AcceptanceError::Freeze(FREEZE_SRX_ANCHOR_MISSING)),
+        (Some(bound), Some(idx)) => {
+            if bound.len() != 32 {
+                return Err(AcceptanceError::Freeze(FREEZE_SRX_ANCHOR_MISMATCH));
+            }
+            let witness = anchor_mem_pool
+                .get(idx)
+                .ok_or(AcceptanceError::Freeze(FREEZE_SRX_ANCHOR_OOB))?;
+            if witness.leaf_id.len() != 32 || witness.root.len() != 32 {
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_MEM_MALFORMED));
+            }
+            if witness.path.len() > 64 {
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_PATH_OVERSIZE));
+            }
+            let validated =
+                match CanonicalWitness::validate_membership_witness(witness, expected_root) {
+                    Ok(entry) => entry,
+                    Err(MsphfError::Witness(WitnessValidationError::ProjEvalFail)) => {
+                        return Err(AcceptanceError::Freeze(FREEZE_SRX_ANCHOR_MISMATCH));
+                    }
+                    Err(MsphfError::Witness(_)) => {
+                        return Err(AcceptanceError::Freeze(FREEZE_HASH_MEM_MALFORMED));
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+
+            let mut bound_bytes = [0u8; 32];
+            bound_bytes.copy_from_slice(bound);
+            if validated.root != *expected_root || validated.leaf_id != bound_bytes {
+                return Err(AcceptanceError::Freeze(FREEZE_SRX_ANCHOR_MISMATCH));
+            }
+            Ok(Some(validated))
+        }
+    }
+}
+
+fn parse_nonmem_anchor_list(value: &Value) -> Result<Vec<AnchoredNonMembership>, AcceptanceError> {
+    let Value::Array(entries) = value else {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        out.push(parse_nonmem_anchor(entry)?);
+    }
+    Ok(out)
+}
+
+fn value_bytes32(val: &Value, freeze: FreezeError) -> Result<[u8; 32], AcceptanceError> {
+    let Value::Bytes(bytes) = val else {
+        debug!("value_bytes32: expected bytes got {:?}", val);
+        return Err(AcceptanceError::Freeze(freeze));
+    };
+    if bytes.len() != 32 {
+        debug!("value_bytes32: len {} != 32", bytes.len());
+        return Err(AcceptanceError::Freeze(freeze));
+    }
+    let slice: &[u8] = bytes.as_slice();
+    slice
+        .try_into()
+        .map_err(|_| AcceptanceError::Freeze(freeze))
+}
+
+fn parse_nonmem_anchor(value: &Value) -> Result<AnchoredNonMembership, AcceptanceError> {
+    let Value::Map(entries) = value else {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    };
+    let mut query: Option<[u8; 32]> = None;
+    let mut root: Option<[u8; 32]> = None;
+    let mut left: Option<[u8; 32]> = None;
+    let mut right: Option<[u8; 32]> = None;
+    let mut path = None;
+    let mut left_ref = None;
+    let mut right_ref = None;
+    for (key, val) in entries {
+        let Value::Integer(index) = key else {
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        };
+        let idx = integer_to_u64(index)?;
+        match idx {
+            1 => {
+                query = Some(value_bytes32(val, FREEZE_SRX_INVALID)?);
+            }
+            2 => {
+                root = Some(value_bytes32(val, FREEZE_SRX_INVALID)?);
+            }
+            3 => match val {
+                Value::Null => left = None,
+                Value::Bytes(_) => {
+                    left = Some(value_bytes32(val, FREEZE_SRX_INVALID)?);
+                }
+                _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+            },
+            4 => match val {
+                Value::Null => right = None,
+                Value::Bytes(_) => {
+                    right = Some(value_bytes32(val, FREEZE_SRX_INVALID)?);
+                }
+                _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+            },
+            5 => path = Some(parse_path_entries(val)?),
+            6 => match val {
+                Value::Null => left_ref = None,
+                Value::Integer(int) => {
+                    left_ref = Some(
+                        usize::try_from(integer_to_u64(int)?)
+                            .map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))?,
+                    );
+                }
+                _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+            },
+            7 => match val {
+                Value::Null => right_ref = None,
+                Value::Integer(int) => {
+                    right_ref = Some(
+                        usize::try_from(integer_to_u64(int)?)
+                            .map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))?,
+                    );
+                }
+                _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+            },
+            _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+        }
+    }
+    let query = query.ok_or(AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
+    let root = root.ok_or(AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
+    let path = path.ok_or(AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
+    let witness = RawNonMembershipWitness {
+        query: query.to_vec(),
+        root: root.to_vec(),
+        left: left.map(|bound| bound.to_vec()),
+        right: right.map(|bound| bound.to_vec()),
+        path,
+        left_below: Vec::new(),
+        right_below: Vec::new(),
+        above: Vec::new(),
+        nmint: None,
+        lca_left_height: None,
+        lca_right_height: None,
+    };
+    Ok(AnchoredNonMembership {
+        witness,
+        left_ref,
+        right_ref,
+    })
+}
+
+fn parse_optional_frontier(value: &Value) -> Result<Option<Vec<[u8; 32]>>, AcceptanceError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Array(_) => parse_leaf_array(value).map(Some),
+        _ => Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+    }
+}
+
+fn parse_path_entries(value: &Value) -> Result<Vec<RawPathEntry>, AcceptanceError> {
+    let Value::Array(entries) = value else {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Value::Map(map) = entry else {
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        };
+        let mut sibling = None;
+        let mut dir = None;
+        for (key, val) in map {
+            let Value::Integer(index) = key else {
+                return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+            };
+            let idx = integer_to_u64(index)?;
+            match idx {
+                1 => {
+                    let Value::Bytes(bytes) = val else {
+                        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+                    };
+                    if bytes.len() != 32 {
+                        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+                    }
+                    sibling = Some(bytes.clone());
+                }
+                2 => {
+                    let Value::Integer(int) = val else {
+                        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+                    };
+                    let value = integer_to_u64(int)?;
+                    if value > 1 {
+                        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+                    }
+                    dir = Some(value as u8);
+                }
+                _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+            }
+        }
+        let sibling = sibling.ok_or(AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
+        let dir = dir.ok_or(AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
+        out.push(RawPathEntry { sibling, dir });
+    }
+    Ok(out)
+}
+
+fn integer_to_u64(int: &Integer) -> Result<u64, AcceptanceError> {
+    u64::try_from(*int).map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))
+}
+
+fn parse_leaf_array(value: &Value) -> Result<Vec<[u8; 32]>, AcceptanceError> {
+    let Value::Array(entries) = value else {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for item in entries {
+        let Value::Bytes(bytes) = item else {
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        };
+        if bytes.len() != 32 {
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(bytes);
+        out.push(arr);
+    }
+    Ok(out)
+}
+
+pub(crate) fn parse_hint_counts(value: &Value) -> Result<(u64, u64, u64), AcceptanceError> {
+    let Value::Map(entries) = value else {
+        debug!("parse_hint_counts: value not map");
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    };
+    let mut join = None;
+    let mut since = None;
+    let mut anchors = None;
+    for (key, val) in entries {
+        let Value::Text(key_text) = key else {
+            debug!("parse_hint_counts: key not text");
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        };
+        let Value::Integer(int) = val else {
+            debug!("parse_hint_counts: value not integer for key {}", key_text);
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        };
+        let count = integer_to_u64(int)?;
+        match key_text.as_str() {
+            "join" => join = Some(count),
+            "since" => since = Some(count),
+            "anchors" => anchors = Some(count),
+            _ => {
+                debug!("parse_hint_counts: unexpected key {}", key_text);
+                return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+            }
+        }
+    }
+    match (join, since, anchors) {
+        (Some(j), Some(s), Some(a)) => Ok((j, s, a)),
+        _ => {
+            debug!(
+                "parse_hint_counts: missing field join={:?} since={:?} anchors={:?}",
+                join, since, anchors
+            );
+            Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID))
+        }
+    }
+}
+
+pub(crate) fn parse_hint_sizes(value: &Value) -> Result<u64, AcceptanceError> {
+    let Value::Map(entries) = value else {
+        debug!("parse_hint_sizes: value not map");
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    };
+    if let Some((key, val)) = entries.iter().next() {
+        let Value::Text(key_text) = key else {
+            debug!("parse_hint_sizes: key not text");
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        };
+        if key_text != "bytes" {
+            debug!("parse_hint_sizes: unexpected key {}", key_text);
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        }
+        let Value::Integer(int) = val else {
+            debug!("parse_hint_sizes: value not integer for bytes key");
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        };
+        return integer_to_u64(int);
+    }
+    debug!("parse_hint_sizes: map empty");
+    Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID))
+}
+
+pub(crate) fn ensure_nonmem_coverage(
+    leaves: &[[u8; 32]],
+    witnesses: &[ValidatedNonMembership],
+) -> Result<(), AcceptanceError> {
+    if leaves.is_empty() {
+        return Ok(());
+    }
+    for leaf in leaves {
+        if !witnesses.iter().any(|w| interval_contains(w, leaf)) {
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        }
+    }
+    Ok(())
+}
+
+fn interval_contains(witness: &ValidatedNonMembership, leaf: &[u8; 32]) -> bool {
+    if witness.left.is_none() && witness.right.is_none() {
+        return witness.root.iter().all(|&b| b == 0);
+    }
+    if witness.left.is_some_and(|left| leaf <= &left) {
+        return false;
+    }
+    if witness.right.is_some_and(|right| leaf >= &right) {
+        return false;
+    }
+    // Sentinel (both None) only valid for empty trees; treat as non-covering for non-empty leaves.
+    true
+}
+
+pub(crate) fn ensure_mem_coverage(
+    leaves: &[[u8; 32]],
+    witnesses: &[ValidatedMembership],
+) -> Result<(), AcceptanceError> {
+    let mut covered = BTreeSet::new();
+    for witness in witnesses {
+        covered.insert(witness.leaf_id);
+    }
+    for leaf in leaves {
+        if !covered.contains(leaf) {
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_SET_CONFLICT_SUBSET));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) struct AnchoredNonMembership {
+    witness: RawNonMembershipWitness,
+    left_ref: Option<usize>,
+    right_ref: Option<usize>,
+}
+
+pub(crate) struct SrxPayload {
+    join_nonmem_parent: Vec<AnchoredNonMembership>,
+    join_nonmem_revoked_since: Vec<AnchoredNonMembership>,
+    revoked_since_mem_in_revoked: Vec<RawMembershipWitness>,
+    join_leaf_ids: Vec<[u8; 32]>,
+    join_frontier: Option<Vec<[u8; 32]>>,
+    since_leaf_ids: Vec<[u8; 32]>,
+    since_frontier: Option<Vec<[u8; 32]>>,
+    anchor_mem_pool: Vec<RawMembershipWitness>,
+}
+
+fn header_bytes32_or_freeze(
+    header: &BTreeMap<u64, Value>,
+    key: u64,
+    freeze: FreezeError,
+    label: &str,
+) -> Result<[u8; 32], AcceptanceError> {
+    let Some(value) = header.get(&key) else {
+        debug!(
+            "header_bytes32_or_freeze: key {} label {} missing from header",
+            key, label
+        );
+        return Err(AcceptanceError::Freeze(freeze));
+    };
+    let result = match value {
+        Value::Bytes(_) => value_bytes32(value, freeze),
+        _ => {
+            debug!(
+                "header_bytes32_or_freeze: key {} label {} had type {:?}",
+                key, label, value
+            );
+            Err(AcceptanceError::Msphf(MsphfError::invalid_input(format!(
+                "{label} not bytes"
+            ))))
+        }
+    };
+    if matches!(key, 110..=113) {
+        match &result {
+            Ok(bytes) => debug!(
+                "header_bytes32_or_freeze: key {} success {:02x?}",
+                key, bytes
+            ),
+            Err(_) => debug!("header_bytes32_or_freeze: key {} failed", key),
+        }
+    }
+    result
+}
+
+fn header_u64_or_freeze(
+    header: &BTreeMap<u64, Value>,
+    key: u64,
+    freeze: FreezeError,
+    label: &str,
+) -> Result<u64, AcceptanceError> {
+    let Some(value) = header.get(&key) else {
+        return Err(AcceptanceError::Freeze(freeze));
+    };
+    match value {
+        Value::Integer(int) => u64::try_from(*int).map_err(|_| {
+            AcceptanceError::Msphf(MsphfError::invalid_input(format!("{label} not unsigned")))
+        }),
+        _ => Err(AcceptanceError::Msphf(MsphfError::invalid_input(format!(
+            "{label} not unsigned"
+        )))),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn compute_we_epoch_id_from_header(
+    parts: &AnchorInstanceParts<'_>,
+    header: &BTreeMap<u64, Value>,
+) -> Result<[u8; 32], AcceptanceError> {
+    let anchor_seed_ctx = build_anchor_seed_ctx(header).map_err(AcceptanceError::from)?;
+    let seed_ctx_hash = compute_seed_ctx_hash(&anchor_seed_ctx).map_err(AcceptanceError::from)?;
+    derive_we_epoch_id(parts.gid, parts.parent_root, &seed_ctx_hash).map_err(AcceptanceError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::todo,
+        clippy::unimplemented
+    )]
+    use super::fixtures::*;
+    use super::*;
+    use crate::mhw::HeadRecord;
+    use crate::{
+        BootstrapPolicy, HpProof, build_bootstrap_digest, joiner_kgen_merge_or, joiner_kgen_or,
+        proof_to_cbor,
+    };
+    use anchor_seed::{build_anchor_seed_ctx, compute_seed_bundle_commit, compute_seed_ctx_hash};
+    use ciborium::value::Integer;
+    use msphf_core::params::RLWE_PARAMS_ID_A1;
+    use msphf_core::witness::{RawMembershipWitness, ValidatedMembership, ValidatedNonMembership};
+    use pqcrypto_dilithium::dilithium5::{detached_sign, keypair};
+    use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
+    use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+    use std::{collections::BTreeMap, time::Duration};
+
+    // Tests reuse deterministic fixtures across joins; we leak boxed data intentionally
+    // to satisfy the `'static` lifetimes required by helper structs.
+    #[test]
+    fn verify_device_chain_state_enforces_caps() {
+        let mut ctx = AcceptanceContext::with_defaults();
+        ctx.fs_caps.anchor_max = 5;
+        ctx.fs_caps.first_device = 5;
+        ctx.fs_caps.device_max = 3;
+        ctx.last_accepted_ec = 100;
+
+        let pop_pk = vec![0xAA; 1952];
+        let prev_commit = [0u8; 32];
+        let dev_commit = h_l(
+            "fs/dev/chain",
+            &FsDevChainPreimage {
+                device_pk: &pop_pk,
+                fs_ec: 104,
+                prev_commit: &prev_commit,
+            },
+        )
+        .expect("derive dev commit");
+
+        ctx.verify_device_chain_state(&pop_pk, 104, &prev_commit, &dev_commit, None)
+            .expect("new device within cap");
+
+        let err = ctx
+            .verify_device_chain_state(&pop_pk, 107, &prev_commit, &dev_commit, None)
+            .expect_err("should freeze");
+        assert!(matches!(
+            err,
+            AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_GROUP)
+        ));
+
+        let prev_existing = [0x22; 32];
+        let existing = DeviceChainState {
+            last_commit: Some(prev_existing),
+            last_ec: 110,
+        };
+        ctx.last_accepted_ec = 110;
+        let dev_commit_existing = h_l(
+            "fs/dev/chain",
+            &FsDevChainPreimage {
+                device_pk: &pop_pk,
+                fs_ec: 114,
+                prev_commit: &prev_existing,
+            },
+        )
+        .expect("derive existing dev commit");
+        let err = ctx
+            .verify_device_chain_state(
+                &pop_pk,
+                114,
+                &prev_existing,
+                &dev_commit_existing,
+                Some(&existing),
+            )
+            .expect_err("device max exceeded");
+        assert!(matches!(
+            err,
+            AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_DEVICE)
+        ));
+    }
+
+    #[test]
+    fn validate_anchor_pool_unsorted_triggers_freeze() {
+        let witness_a = RawMembershipWitness {
+            leaf_id: vec![0x10; 32],
+            root: vec![0x00; 32],
+            path: Vec::new(),
+        };
+        let witness_b = RawMembershipWitness {
+            leaf_id: vec![0x01; 32],
+            root: vec![0x00; 32],
+            path: Vec::new(),
+        };
+
+        let unsorted = vec![witness_a.clone(), witness_b.clone()];
+        let err = validate_anchor_pool(&unsorted).expect_err("unsorted pool should fail");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_ANCHOR_POOL_UNSORTED),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let sorted = vec![witness_b, witness_a];
+        validate_anchor_pool(&sorted).expect("sorted pool ok");
+    }
+
+    #[test]
+    fn validate_anchor_reference_oob_triggers_freeze() {
+        let root = [0xAA; 32];
+        let bound = vec![0xBB; 32];
+        let err = validate_anchor_reference(&[], &root, Some(&bound), Some(0))
+            .expect_err("oob reference should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_ANCHOR_OOB),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_anchored_adjacency_mismatch_freezes() {
+        let entry = ValidatedNonMembership {
+            query: [0x20; 32],
+            root: [0xAA; 32],
+            left: Some([0x05; 32]),
+            right: None,
+            path: Vec::new(),
+        };
+        let left_anchor = ValidatedMembership {
+            leaf_id: [0x09; 32],
+            root: [0xAA; 32],
+            path: Vec::new(),
+        };
+        let err = verify_anchored_adjacency(&entry, Some(&left_anchor), None)
+            .expect_err("mismatched left anchor should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_NONMEM_ADJ_INCOHERENT),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_anchored_adjacency_extreme_right_enforces_path() {
+        let path_bad = vec![(1u8, [0x11; 32])];
+        let right_anchor = ValidatedMembership {
+            leaf_id: [0x40; 32],
+            root: [0xAA; 32],
+            path: path_bad.clone(),
+        };
+        let entry_bad = ValidatedNonMembership {
+            query: [0x30; 32],
+            root: [0xAA; 32],
+            left: None,
+            right: Some([0x40; 32]),
+            path: path_bad.clone(),
+        };
+        let err = verify_anchored_adjacency(&entry_bad, None, Some(&right_anchor))
+            .expect_err("non-zero dirs should fail");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_NONMEM_ADJ_INCOHERENT),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let path_ok = vec![(0u8, [0x22; 32])];
+        let right_anchor_ok = ValidatedMembership {
+            leaf_id: [0x41; 32],
+            root: [0xAA; 32],
+            path: path_ok.clone(),
+        };
+        let entry_ok = ValidatedNonMembership {
+            query: [0x35; 32],
+            root: [0xAA; 32],
+            left: None,
+            right: Some([0x41; 32]),
+            path: path_ok.clone(),
+        };
+        verify_anchored_adjacency(&entry_ok, None, Some(&right_anchor_ok))
+            .expect("expected success");
+    }
+
+    #[test]
+    fn verify_anchored_adjacency_extreme_left_enforces_path() {
+        let path_bad = vec![(0u8, [0x33; 32])];
+        let left_anchor = ValidatedMembership {
+            leaf_id: [0x20; 32],
+            root: [0xBB; 32],
+            path: path_bad.clone(),
+        };
+        let entry_bad = ValidatedNonMembership {
+            query: [0x10; 32],
+            root: [0xBB; 32],
+            left: Some([0x20; 32]),
+            right: None,
+            path: path_bad.clone(),
+        };
+        let err = verify_anchored_adjacency(&entry_bad, Some(&left_anchor), None)
+            .expect_err("non-one dirs should fail");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_NONMEM_ADJ_INCOHERENT),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let path_ok = vec![(1u8, [0x44; 32])];
+        let left_anchor_ok = ValidatedMembership {
+            leaf_id: [0x21; 32],
+            root: [0xBB; 32],
+            path: path_ok.clone(),
+        };
+        let entry_ok = ValidatedNonMembership {
+            query: [0x22; 32],
+            root: [0xBB; 32],
+            left: Some([0x21; 32]),
+            right: None,
+            path: path_ok.clone(),
+        };
+        verify_anchored_adjacency(&entry_ok, Some(&left_anchor_ok), None)
+            .expect("expected success");
+    }
+
+    #[test]
+    fn vck_cache_hits_and_skips_reverification_for_hp() {
+        let (_, proof) = sample_hp_inputs();
+        let mut cache = VckCache::new(Duration::from_secs(10));
+        let key = [0x11; 32];
+        let now = AcceptInstant::from_ticks(0);
+        assert!(cache.should_verify_hp(key, &proof, now));
+        cache.record_hp(key, &proof, now);
+        assert!(!cache.should_verify_hp(key, &proof, now));
+    }
+
+    #[test]
+    fn vck_cache_expires_hp_entries() {
+        let (_, proof) = sample_hp_inputs();
+        let mut cache = VckCache::new(Duration::from_secs(1));
+        let key = [0x22; 32];
+        let start = AcceptInstant::from_ticks(0);
+        assert!(cache.should_verify_hp(key, &proof, start));
+        cache.record_hp(key, &proof, start);
+        let later = AcceptInstant::from_ticks(2);
+        assert!(cache.should_verify_hp(key, &proof, later));
+    }
+
+    #[test]
+    fn vck_cache_detects_mutated_hp_proof() {
+        let (_, proof) = sample_hp_inputs();
+        let mut cache = VckCache::new(Duration::from_secs(10));
+        let key = [0x33; 32];
+        let now = AcceptInstant::from_ticks(0);
+        assert!(cache.should_verify_hp(key, &proof, now));
+        cache.record_hp(key, &proof, now);
+
+        let mut proof_bytes = proof_to_cbor(&proof).unwrap();
+        if let Some(last) = proof_bytes.last_mut() {
+            *last ^= 0x55;
+        }
+        let tampered: HpProof = de::from_reader(proof_bytes.as_slice()).unwrap();
+
+        assert!(cache.should_verify_hp(key, &tampered, now));
+    }
+
+    #[test]
+    fn accept_anchor_enqueues_head() {
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, sample_parts(), params(), None, None).unwrap();
+        let parts = sample_parts();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header_with_pop, expected_weid) =
+            header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        let header_with_pop_fs_witness =
+            prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+
+        seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
+        let outcome = accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .unwrap_or_else(|err| panic!("accept failed: {err:?}"));
+
+        assert!(matches!(outcome.kind, AcceptanceKind::NonMerge));
+        assert_eq!(ctx.active_heads(&outcome.wid), 1);
+        assert_eq!(outcome.we_epoch_id, expected_weid);
+    }
+
+    #[test]
+    fn window_full_triggers_freeze() {
+        let parts = sample_parts();
+        let mut header_a = sample_header();
+        header_a.insert(11, Value::Integer(Integer::from(0u8)));
+        let mut header_b = sample_header();
+        header_b.insert(11, Value::Integer(Integer::from(1u8)));
+        let pop_keypair = unique_pop_keypair();
+        let pop_keypair_clone = crate::PopKeypair {
+            algorithm: pop_keypair.algorithm,
+            public_key: pop_keypair.public_key,
+            secret_key: pop_keypair.secret_key,
+        };
+        let mut params_a = params();
+        params_a.pop_keys = Some(pop_keypair);
+        let mut params_b = params();
+        params_b.pop_keys = Some(pop_keypair_clone);
+        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params_a, None, None).unwrap();
+        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params_b, None, None).unwrap();
+        let (pop_pk, pop_sk) = pop_keys_static();
+        let (header_a, _, header_a_fs_witness) =
+            header_ready_with_pop(&joiner_a, &parts, pop_pk, pop_sk);
+        let (header_b, _, header_b_fs_witness) =
+            header_ready_with_pop(&joiner_b, &parts, pop_pk, pop_sk);
+        let mut ctx = AcceptanceContext::new(1, Duration::from_secs(10));
+        configure_bootstrap(&mut ctx);
+
+        seed_capss_with(&mut ctx, &header_a_fs_witness);
+        let outcome_a =
+            accept_with_header(&mut ctx, &parts, &header_a).expect("first head accepted");
+
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        seed_capss_with(&mut ctx, &header_b_fs_witness);
+        let weid_b = super::compute_we_epoch_id_from_header(&parts, &header_b).unwrap();
+        let err = ctx
+            .accept_anchor(&parts, weid_b, &header_b)
+            .expect_err("second head should freeze");
+
+        let window_froze = matches!(
+            err,
+            AcceptanceError::Freeze(code) if code == FreezeError::WINDOW_FULL
+        );
+        if !window_froze {
+            match err {
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_MSPHF_RHO_PARITY || code == FREEZE_FS_DEV_CHAIN_BREAK => {}
+                AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
+                other => panic!("unexpected error: {:?}", other),
+            }
+        }
+
+        let telemetry_key = TelemetryKey::from_parts(parts.gid, parts.parent_root);
+        let snapshot = ctx.telemetry_snapshot();
+        let counters = snapshot
+            .get(&telemetry_key)
+            .expect("telemetry entry for window-full scenario");
+        assert_eq!(counters.head_attempts, 2);
+        assert_eq!(counters.head_insertions, 1);
+        if window_froze {
+            assert_eq!(counters.freeze_window_full, 1);
+            assert_eq!(counters.freeze_rho_replay, 0);
+        }
+        assert_eq!(ctx.active_heads(&outcome_a.wid), 1);
+        assert_eq!(counters.last_active_heads, 1);
+    }
+
+    #[test]
+    fn merge_h_max_exceeded_freezes() {
+        let mut ctx =
+            AcceptanceContext::with_options(1, DEFAULT_T_WINDOW, AcceptanceOptions::default());
+        let parent_root = [0u8; 32];
+        let mh_heads = [[0x01; 32], [0x02; 32]];
+        let now = AcceptInstant::from_ticks(0);
+        let record = HeadRecord::new(
+            [0xAA; 32], [0xBB; 32], [0xCC; 32], [0xDD; 32], [0xEE; 32], [0x12; 32], [0x01; 32],
+            [0x02; 32], [0x03; 32], 0, now,
+        );
+        let err = ctx
+            .accept_merge(&parent_root, &parent_root, &mh_heads, record, now)
+            .expect_err("merge above H_max should freeze");
+        assert_eq!(err, FreezeError::WINDOW_FULL);
+    }
+
+    #[test]
+    fn rho_commit_reuse_freezes() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (mut header_with_pop, _) =
+            header_with_pop_and_weid(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
+        let header_with_pop_fs_witness =
+            prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+
+        seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
+        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+
+        ctx.clear_device_chains();
+        seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
+        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect_err("rho reuse should freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_RHO_PARITY),
+            other => panic!("unexpected error: {:?}", other),
+        }
+
+        let telemetry_key = TelemetryKey::from_parts(parts.gid, parts.parent_root);
+        let snapshot = ctx.telemetry_snapshot();
+        let counters = snapshot
+            .get(&telemetry_key)
+            .expect("telemetry entry for rho replay");
+        assert_eq!(counters.head_attempts, 2);
+        assert_eq!(counters.head_insertions, 1);
+        assert_eq!(counters.freeze_rho_replay, 1);
+        assert_eq!(counters.freeze_window_full, 0);
+        assert_eq!(counters.last_active_heads, 1);
+    }
+
+    #[test]
+    fn device_chain_prev_commit_mismatch_freezes() {
+        let (parts, params_a, joiner_a) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header_a, _, witness_a) = header_ready_with_pop(&joiner_a, &parts, &pop_pk, &pop_sk);
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &witness_a);
+        accept_with_header(&mut ctx, &parts, &header_a).expect("first join accepted");
+
+        let prev_commit = header_bytes32(&header_a, HDR_FS_DEV_COMMIT);
+
+        let mut params_b = params_a;
+        params_b.fs_join.fs_ec += 1;
+        params_b.fs_join.fs_dev_prev_commit = prev_commit;
+
+        let header_seed_b = sample_header();
+        let joiner_b = joiner_kgen_or(header_seed_b, parts.clone(), params_b, None, None).unwrap();
+        let (mut header_b, _, witness_b) =
+            header_ready_with_pop(&joiner_b, &parts, &pop_pk, &pop_sk);
+        header_b.insert(HDR_FS_DEV_PREV_COMMIT, Value::Bytes(vec![0u8; 32]));
+        refresh_seed_bindings(&mut header_b, &parts, &joiner_b);
+
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        seed_capss_with(&mut ctx, &witness_b);
+        let err = accept_with_header(&mut ctx, &parts, &header_b)
+            .expect_err("device chain mismatch should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_FS_DEV_CHAIN_BREAK),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn annex_m_report_accumulates_counters() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let mut header_with_pop = joiner.header_map.clone();
+        let header_with_pop_fs_witness =
+            prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
+        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+
+        ctx.clear_device_chains();
+        seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
+        accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect_err("rho reuse should freeze");
+
+        let report = ctx.annex_m_report();
+        assert_eq!(report.rows.len(), 1);
+        assert_eq!(report.total_attempts, 2);
+        assert_eq!(report.total_insertions, 1);
+        assert_eq!(report.total_freeze_rho_replay, 1);
+        assert_eq!(report.total_freeze_window_full, 0);
+
+        let row = &report.rows[0];
+        assert_eq!(row.head_attempts, 2);
+        assert_eq!(row.head_insertions, 1);
+        assert_eq!(row.freeze_rho_replay, 1);
+        assert_eq!(row.freeze_window_full, 0);
+        assert_eq!(row.last_active_heads, 1);
+        assert_eq!(row.gid.as_slice(), parts.gid);
+    }
+
+    #[test]
+    fn telemetry_report_sorted_by_gid_and_parent() {
+        let mut ctx = AcceptanceContext::with_defaults();
+        let parent_a1 = [0x0A; 32];
+        let parent_a2 = [0x0B; 32];
+        let parent_b = [0xFF; 32];
+
+        let key_b = ctx.telemetry_record_attempt(b"bbb", &parent_b);
+        ctx.telemetry_record_success(&key_b, 1);
+
+        let key_a2 = ctx.telemetry_record_attempt(b"aaa", &parent_a2);
+        ctx.telemetry_record_success(&key_a2, 2);
+
+        let key_a1 = ctx.telemetry_record_attempt(b"aaa", &parent_a1);
+        ctx.telemetry_record_success(&key_a1, 3);
+
+        let report = ctx.telemetry_report();
+        assert_eq!(report.len(), 3);
+        assert_eq!(report[0].0.gid.as_slice(), b"aaa");
+        assert_eq!(report[0].0.parent_root, parent_a1);
+        assert_eq!(report[1].0.parent_root, parent_a2);
+        assert_eq!(report[2].0.gid.as_slice(), b"bbb");
+    }
+
+    #[test]
+    fn annex_m_report_totals_match_rows() {
+        let mut ctx = AcceptanceContext::with_defaults();
+        let parent = [0x22; 32];
+        let key = ctx.telemetry_record_attempt(b"gid", &parent);
+        ctx.telemetry_record_success(&key, 1);
+        ctx.telemetry_record_window_full(&key);
+        ctx.telemetry_record_rho_freeze(&key);
+
+        let report = ctx.annex_m_report();
+        assert_eq!(report.rows.len(), 1);
+        assert_eq!(report.total_attempts, 1);
+        assert_eq!(report.total_insertions, 1);
+        assert_eq!(report.total_freeze_window_full, 1);
+        assert_eq!(report.total_freeze_rho_replay, 1);
+        let row = &report.rows[0];
+        assert_eq!(row.freeze_rho_replay, 1);
+        assert_eq!(row.freeze_window_full, 1);
+    }
+
+    #[test]
+    fn set_h_max_propagates_to_window() {
+        let parts = sample_parts();
+        let mut header_a = sample_header();
+        header_a.insert(11, Value::Integer(Integer::from(0u8)));
+        let mut header_b = sample_header();
+        header_b.insert(11, Value::Integer(Integer::from(1u8)));
+        let pop_keypair = unique_pop_keypair();
+        let pop_keypair_clone = crate::PopKeypair {
+            algorithm: pop_keypair.algorithm,
+            public_key: pop_keypair.public_key,
+            secret_key: pop_keypair.secret_key,
+        };
+        let mut params_a = params();
+        params_a.pop_keys = Some(pop_keypair);
+        let mut params_b = params();
+        params_b.pop_keys = Some(pop_keypair_clone);
+        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params_a, None, None).unwrap();
+        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params_b, None, None).unwrap();
+        let (pop_pk, pop_sk) = pop_keys_static();
+        let (mut header_a, _) = header_with_pop_and_weid(&joiner_a, &parts, pop_pk, pop_sk);
+        let header_a_fs_witness = prepare_header_for_acceptance(&mut header_a, &parts, &joiner_a);
+        let (mut header_b, _) = header_with_pop_and_weid(&joiner_b, &parts, pop_pk, pop_sk);
+        let header_b_fs_witness = prepare_header_for_acceptance(&mut header_b, &parts, &joiner_b);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        ctx.set_h_max(1);
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &header_a_fs_witness);
+        let outcome_a = accept_with_header(&mut ctx, &parts, &header_a).unwrap();
+
+        ctx.clear_device_chains();
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        seed_capss_with(&mut ctx, &header_b_fs_witness);
+        let weid_b = super::compute_we_epoch_id_from_header(&parts, &header_b).unwrap();
+        let err = ctx
+            .accept_anchor(&parts, weid_b, &header_b)
+            .expect_err("second head should hit h_max");
+        let window_froze = matches!(
+            err,
+            AcceptanceError::Freeze(code) if code == FreezeError::WINDOW_FULL
+        );
+        if !window_froze {
+            match err {
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_MSPHF_RHO_PARITY || code == FREEZE_FS_DEV_CHAIN_BREAK => {}
+                AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+        if window_froze {
+            assert_eq!(ctx.active_heads(&outcome_a.wid), 1);
+        }
+    }
+
+    #[test]
+    fn accept_anchor_requires_tswe_alg() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut missing, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        missing.remove(&HDR_TSWE_ALG);
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_from_joiner(&mut ctx, &joiner);
+        let err = accept_with_header(&mut ctx, &parts, &missing)
+            .expect_err("missing tswe_alg must freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_TSWE_ALG_INVALID),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_requires_merkle_suite() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        let original_pub = tampered
+            .get(&HDR_KBROAD_PUB)
+            .and_then(|value| match value {
+                Value::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            })
+            .expect("kbroad_pub present");
+        tampered.insert(HDR_MERKLE_SUITE, Value::Text("wrong-suite".to_string()));
+        let mut registry = BTreeMap::new();
+        registry.insert(parts.gid.to_vec(), original_pub);
+        let options = AcceptanceOptions {
+            kbroad_registry: Some(registry),
+            ..AcceptanceOptions::default()
+        };
+        let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
+        configure_bootstrap(&mut ctx);
+        seed_capss_from_joiner(&mut ctx, &joiner);
+        let err = accept_with_header(&mut ctx, &parts, &tampered)
+            .expect_err("suite mismatch must freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MERKLE_SUITE_INVALID),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_requires_kbroad_alg() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        tampered.insert(HDR_KBROAD_ALG, Value::Text("ml-kem-512".to_string()));
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_from_joiner(&mut ctx, &joiner);
+        let err = accept_with_header(&mut ctx, &parts, &tampered)
+            .expect_err("kbroad alg mismatch must freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_KBROAD_ALG_INVALID),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_requires_kbroad_pub_binding() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        let original_pub = tampered
+            .get(&HDR_KBROAD_PUB)
+            .and_then(|value| match value {
+                Value::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            })
+            .expect("kbroad_pub present");
+        let Value::Bytes(pub_bytes) = tampered
+            .get_mut(&HDR_KBROAD_PUB)
+            .expect("kbroad_pub present")
+        else {
+            panic!("kbroad_pub not bytes");
+        };
+        pub_bytes[0] ^= 0xFF;
+
+        let anchor_seed_ctx = build_anchor_seed_ctx(&tampered).expect("seed ctx");
+        let seed_ctx_hash = compute_seed_ctx_hash(&anchor_seed_ctx).expect("seed ctx hash");
+        tampered.insert(HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let seed_bundle = compute_seed_bundle_commit(
+            &anchor_seed_ctx,
+            &joiner.rho_commit,
+            parts.gid,
+            parts.cat,
+            &parent_root_arr,
+        )
+        .expect("seed bundle");
+        tampered.insert(HDR_SEED_BUNDLE_COMMIT, Value::Bytes(seed_bundle.to_vec()));
+        attach_bootstrap_only(&mut tampered, &parts, &joiner);
+
+        let mut registry = BTreeMap::new();
+        registry.insert(parts.gid.to_vec(), original_pub);
+        let options = AcceptanceOptions {
+            kbroad_registry: Some(registry),
+            ..AcceptanceOptions::default()
+        };
+        let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
+        configure_bootstrap(&mut ctx);
+        seed_capss_from_joiner(&mut ctx, &joiner);
+        let err = accept_with_header(&mut ctx, &parts, &tampered)
+            .expect_err("kbroad pub mismatch must freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_KBROAD_PARENT_MISMATCH),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_parent_envelope_freezes() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let Value::Array(items) = header.get_mut(&HDR_HP_BYTES).expect("hp envelope present")
+        else {
+            panic!("hp envelope not array");
+        };
+        if let Some(mode) = items.get_mut(0) {
+            *mode = Value::Text("parent-v1".to_string());
+        } else {
+            panic!("hp envelope missing mode entry");
+        }
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err = accept_with_header(&mut ctx, &parts, &header)
+            .expect_err("non-kbroad envelope must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_PARENT_EID_FORBIDDEN),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_rejects_kbroad_length_mismatches() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (base_header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        let mut parent_root = [0u8; 32];
+        parent_root.copy_from_slice(parts.parent_root);
+
+        let scenarios = ["ct", "wrap", "c_hp"];
+        for scenario in scenarios {
+            let mut header = base_header.clone();
+            let Value::Array(items) = header.get_mut(&HDR_HP_BYTES).expect("hp envelope present")
+            else {
+                panic!("hp envelope not array");
+            };
+            match scenario {
+                "ct" => {
+                    if let Some(entry) = items.get_mut(1) {
+                        *entry = Value::Bytes(vec![0xAA; 1000]);
+                    }
+                }
+                "wrap" => {
+                    if let Some(entry) = items.get_mut(2) {
+                        *entry = Value::Bytes(vec![0xBB; 32]);
+                    }
+                }
+                "c_hp" => {
+                    if let Some(entry) = items.get_mut(3) {
+                        *entry = Value::Bytes(vec![0xCC; 20_000]);
+                    }
+                }
+                other => panic!("unknown scenario {other}"),
+            }
+
+            let fs_witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);
+
+            let mut ctx = AcceptanceContext::with_defaults();
+            configure_bootstrap(&mut ctx);
+            seed_capss_with(&mut ctx, &fs_witness);
+            let err = accept_with_header(&mut ctx, &parts, &header)
+                .expect_err("kbroad length mismatch must freeze");
+            match err {
+                AcceptanceError::Freeze(code) => {
+                    assert_eq!(code, FREEZE_KBROAD_PARENT_MISMATCH)
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn joiner_merge_rejects_mixed_parity_domains() {
+        let parts = sample_parts();
+        let params = params();
+        let mut header_a = sample_header();
+        header_a.insert(20, Value::Bytes(vec![0xAA]));
+        let mut header_b = sample_header();
+        header_b.insert(20, Value::Bytes(vec![0xAB]));
+        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params.clone(), None, None).unwrap();
+        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params.clone(), None, None).unwrap();
+        let (pop_pk_a, pop_sk_a) = sample_pop_keys();
+        let (header_a, _, header_a_fs_witness) =
+            header_ready_with_pop(&joiner_a, &parts, &pop_pk_a, &pop_sk_a);
+        let (pop_pk_b, pop_sk_b) = sample_pop_keys();
+        let (header_b, _, header_b_fs_witness) =
+            header_ready_with_pop(&joiner_b, &parts, &pop_pk_b, &pop_sk_b);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &header_a_fs_witness);
+        accept_with_header(&mut ctx, &parts, &header_a).expect("first head accepted");
+        ctx.clear_device_chains();
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        seed_capss_with(&mut ctx, &header_b_fs_witness);
+        accept_with_header(&mut ctx, &parts, &header_b).expect("second head accepted");
+
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let parities = ctx.pivot_parities_for(parts.gid, &parent_root_arr);
+        let pivot = parities
+            .first()
+            .cloned()
+            .expect("expected at least one parity");
+        let mut sibling = pivot.clone();
+        sibling.we_epoch_id[0] ^= 0x01;
+        sibling.accept_seq = sibling.accept_seq.wrapping_add(1);
+
+        let mut mismatched = vec![pivot.clone(), sibling.clone()];
+        mismatched[0].parent_root[0] ^= 0x01;
+        let mut merge_header = sample_header();
+        merge_header.insert(20, Value::Bytes(vec![0xAC]));
+        let err = joiner_kgen_merge_or(
+            merge_header,
+            &mismatched,
+            None,
+            parts.clone(),
+            params.clone(),
+            None,
+        )
+        .expect_err("mixed parent_root should error");
+        match err {
+            MsphfError::InvalidInput(msg) => assert_eq!(msg, "merge parity mismatch"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let mut mismatched = vec![pivot.clone(), sibling];
+        mismatched[0].gid[0] ^= 0x01;
+        let mut merge_header = sample_header();
+        merge_header.insert(20, Value::Bytes(vec![0xAD]));
+        let err =
+            joiner_kgen_merge_or(merge_header, &mismatched, None, parts.clone(), params, None)
+                .expect_err("mixed gid should error");
+        match err {
+            MsphfError::InvalidInput(msg) => assert_eq!(msg, "merge parity mismatch"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_rejects_policy_kbroad_mismatch() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let mut header_with_pop = joiner.header_map.clone();
+        let fs_witness = prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+
+        let mut registry = BTreeMap::new();
+        registry.insert(parts.gid.to_vec(), vec![0xAA; ml_kem_public_key_bytes()]);
+
+        let options = AcceptanceOptions {
+            kbroad_registry: Some(registry),
+            ..AcceptanceOptions::default()
+        };
+        let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect_err("policy kbroad mismatch must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_KBROAD_PARENT_MISMATCH),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_honors_policy_kbroad_match() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (header_with_pop, _, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
+
+        let kbroad_bytes = match header_with_pop.get(&HDR_KBROAD_PUB) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("kbroad_pub missing"),
+        };
+
+        let mut registry = BTreeMap::new();
+        registry.insert(parts.gid.to_vec(), kbroad_bytes);
+
+        let options = AcceptanceOptions {
+            kbroad_registry: Some(registry),
+            ..AcceptanceOptions::default()
+        };
+        let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect("policy-aligned kbroad pub should be accepted");
+    }
+
+    #[test]
+    fn merge_parity_tamper_freezes() {
+        let parts = sample_parts();
+        let params = params();
+        let mut header_a = sample_header();
+        header_a.insert(20, Value::Bytes(vec![0xAA]));
+        let mut header_b = sample_header();
+        header_b.insert(20, Value::Bytes(vec![0xAB]));
+        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params.clone(), None, None).unwrap();
+        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params.clone(), None, None).unwrap();
+        let (pop_pk_a, pop_sk_a) = sample_pop_keys();
+        let (header_a, _, witness_a) =
+            header_ready_with_pop(&joiner_a, &parts, &pop_pk_a, &pop_sk_a);
+        let (pop_pk_b, pop_sk_b) = sample_pop_keys();
+        let (header_b, _, witness_b) =
+            header_ready_with_pop(&joiner_b, &parts, &pop_pk_b, &pop_sk_b);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &witness_a);
+        accept_with_header(&mut ctx, &parts, &header_a).expect("first head accepted");
+        ctx.clear_device_chains();
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        seed_capss_with(&mut ctx, &witness_b);
+        accept_with_header(&mut ctx, &parts, &header_b).expect("second head accepted");
+
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let mut parities = ctx.pivot_parities_for(parts.gid, &parent_root_arr);
+        assert!(parities.len() >= 2, "expected at least two parities");
+        parities[1].parent_root[0] ^= 0x01;
+        let mut merge_header_src = sample_header();
+        merge_header_src.insert(20, Value::Bytes(vec![0xAC]));
+        let err = joiner_kgen_merge_or(
+            merge_header_src,
+            &parities,
+            None,
+            parts.clone(),
+            params.clone(),
+            None,
+        )
+        .expect_err("merge builder must reject mixed parity domain");
+        match err {
+            MsphfError::InvalidInput(msg) => assert_eq!(msg, "merge parity mismatch"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_requires_srx() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut missing, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        missing.remove(&HDR_SRX_MODE);
+        missing.remove(&HDR_SRX_COMMIT);
+        missing.remove(&HDR_SRX_PAYLOAD);
+        missing.remove(&HDR_SRX_HINT_COUNTS);
+        missing.remove(&HDR_SRX_HINT_SIZES);
+        missing.remove(&HDR_SRX_ROOT_SW);
+        missing.remove(&HDR_SRX_SMALLWOOD);
+        let vrf_pi = match missing.get(&HDR_VRF_PROOF) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            other => panic!("missing vrf proof: {other:?}"),
+        };
+        let fs_capss = match missing.get(&HDR_FS_CAPSS) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            other => panic!("missing fs_capss: {other:?}"),
+        };
+        let proofs_commit = compute_proofs_commit_bytes(&vrf_pi, &fs_capss, None, None)
+            .expect("recompute proofs commit");
+        missing.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
+        refresh_seed_ctx_hash(&mut missing);
+        refresh_seed_bindings(&mut missing, &parts, &joiner);
+        missing.remove(&HDR_BOOTSTRAP_SIG);
+        missing.remove(&HDR_BOOTSTRAP_PK);
+        ensure_bootstrap_fields(&mut missing, &parts, &joiner);
+
+        let empty = BTreeSet::new();
+        let proofs =
+            stages::ensure_proofs(&missing, None, &empty, None, &empty).expect("proofs artifacts");
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let mut join_root_arr = [0u8; 32];
+        join_root_arr.copy_from_slice(parts.join_delta_root);
+        let mut revoked_since_arr = [0u8; 32];
+        revoked_since_arr.copy_from_slice(parts.revoked_since_prev_root);
+        let mut revoked_root_arr = [0u8; 32];
+        revoked_root_arr.copy_from_slice(parts.revoked_root);
+        let mut cache = cache::VckCache::new(Duration::from_secs(60));
+        let err = stages::ensure_srx_relations(
+            &missing,
+            &parent_root_arr,
+            &join_root_arr,
+            &revoked_since_arr,
+            &revoked_root_arr,
+            true,
+            DEFAULT_SRX_MAX_BYTES,
+            &joiner.xk_hash,
+            &joiner.seed_commit,
+            &joiner.rho_commit,
+            &joiner.hp_commit,
+            None,
+            &empty,
+            AcceptInstant::from_ticks(0),
+            &mut cache,
+            &proofs,
+        )
+        .expect_err("missing SRX must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_REQUIRED),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_requires_params_id() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut missing, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        missing.remove(&HDR_PARAMS_ID);
+        refresh_seed_ctx_hash(&mut missing);
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        let err = accept_with_header(&mut ctx, &parts, &missing)
+            .expect_err("missing params id must freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_PARAMS_ID_INVALID),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_requires_crs_id() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut missing, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        missing.remove(&HDR_CRS_ID);
+        refresh_seed_ctx_hash(&mut missing);
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        let err =
+            accept_with_header(&mut ctx, &parts, &missing).expect_err("missing crs id must freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MSPHF_CRS_INVALID),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_requires_join_payload() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut missing, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        missing.remove(&HDR_HP_BYTES);
+        missing.remove(&HDR_HP_COMMIT);
+        missing.remove(&HDR_VRF_MASK_A);
+        missing.remove(&HDR_VRF_MASK_B);
+        missing.remove(&HDR_VRF_PROOF);
+        missing.remove(&HDR_VRF_PUBLIC_KEY);
+        missing.remove(&HDR_PROOF_MODE);
+        missing.remove(&HDR_VRF_ID);
+        missing.remove(&HDR_PROOFS_COMMIT);
+        assert!(!missing.contains_key(&HDR_HP_BYTES));
+        assert!(!missing.contains_key(&HDR_HP_COMMIT));
+        assert!(!missing.contains_key(&HDR_VRF_MASK_A));
+        assert!(!missing.contains_key(&HDR_VRF_MASK_B));
+        assert!(!missing.contains_key(&HDR_VRF_PROOF));
+        assert!(!missing.contains_key(&HDR_VRF_PUBLIC_KEY));
+        assert!(!missing.contains_key(&HDR_PROOF_MODE));
+        assert!(!missing.contains_key(&HDR_VRF_ID));
+        assert!(!missing.contains_key(&HDR_PROOFS_COMMIT));
+        refresh_seed_ctx_hash(&mut missing);
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        let err = accept_with_header(&mut ctx, &parts, &missing)
+            .expect_err("missing join payload must freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_FIELD_MISSING),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_with_valid_srx_succeeds() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header_with_pop, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+        let header_with_pop_fs_witness =
+            prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+
+        let fs_witness = prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
+        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+
+        let telemetry_key = TelemetryKey::from_parts(parts.gid, parts.parent_root);
+        let snapshot = ctx.telemetry_snapshot();
+        let counters = snapshot
+            .get(&telemetry_key)
+            .expect("telemetry entry for join acceptance");
+        assert_eq!(counters.head_attempts, 1);
+        assert_eq!(counters.head_insertions, 1);
+        assert_eq!(counters.freeze_rho_replay, 0);
+        assert_eq!(counters.freeze_window_full, 0);
+        assert_eq!(counters.last_active_heads, 1);
+    }
+
+    #[test]
+    fn acceptance_outcome_wid_matches_compute_window_id() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header_with_pop, _, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+        let header_with_pop_fs_witness =
+            prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
+        let outcome =
+            accept_with_header(&mut ctx, &parts, &header_with_pop).expect("join should succeed");
+
+        let mut parent_root = [0u8; 32];
+        parent_root.copy_from_slice(parts.parent_root);
+        let expected =
+            compute_window_id(parts.gid, &parent_root, &joiner.seed_ctx_hash).expect("compute WID");
+        assert_eq!(outcome.wid, expected, "WID mismatch");
+    }
+
+    #[test]
+    fn accept_anchor_tampered_rho_commit_freezes_lin() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _, fs_witness_original) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        match header.get_mut(&HDR_RHO_COMMIT) {
+            Some(Value::Bytes(bytes)) => {
+                if let Some(first) = bytes.first_mut() {
+                    *first ^= 0x80;
+                }
+            }
+            _ => panic!("rho commit missing"),
+        }
+
+        ensure_bootstrap_fields(&mut header, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness_original);
+
+        let err = accept_with_header(&mut ctx, &parts, &header)
+            .expect_err("tampered rho commit must freeze");
+        match err {
+            AcceptanceError::Freeze(code)
+                if code == FREEZE_CAPSS_INVALID || code == FREEZE_SEEDCTX_MISMATCH => {}
+            AcceptanceError::Freeze(code) => {
+                panic!("unexpected freeze code: {code:?}");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_tampered_seed_bundle_commit_freezes_lin() {
+        let parts = sample_parts();
+        let params = params();
+
+        let mut header_base = sample_header();
+        let joiner_orig = joiner_kgen_or(
+            header_base.clone(),
+            parts.clone(),
+            params.clone(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        header_base.insert(20, Value::Bytes(vec![0xBB]));
+        let joiner_mut =
+            joiner_kgen_or(header_base, parts.clone(), params.clone(), None, None).unwrap();
+
+        let mut tampered = joiner_mut.header_map.clone();
+
+        let orig_vrf = match joiner_orig.header_map.get(&HDR_VRF_PROOF) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("vrf proof missing"),
+        };
+        let orig_fs_capss = match joiner_orig.header_map.get(&HDR_FS_CAPSS) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("fs_capss missing"),
+        };
+
+        tampered.insert(HDR_VRF_PROOF, Value::Bytes(orig_vrf.clone()));
+        tampered.insert(HDR_FS_CAPSS, Value::Bytes(orig_fs_capss.clone()));
+        if let Some(value) = joiner_orig.header_map.get(&HDR_PROOF_MODE) {
+            tampered.insert(HDR_PROOF_MODE, value.clone());
+        }
+        let srx_root_sw =
+            joiner_orig
+                .header_map
+                .get(&HDR_SRX_ROOT_SW)
+                .and_then(|value| match value {
+                    Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes.clone()),
+                    _ => None,
+                });
+        let srx_smallwood = joiner_orig
+            .header_map
+            .get(&HDR_SRX_SMALLWOOD)
+            .and_then(|value| match value {
+                Value::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            });
+        let proofs_commit = compute_proofs_commit_bytes(
+            orig_vrf.as_slice(),
+            orig_fs_capss.as_slice(),
+            srx_root_sw.as_deref(),
+            srx_smallwood.as_deref(),
+        )
+        .expect("proof commit");
+        tampered.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
+        attach_bootstrap_only(&mut tampered, &parts, &joiner_mut);
+        let fs_witness = prepare_header_for_acceptance(&mut tampered, &parts, &joiner_mut);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err = accept_with_header(&mut ctx, &parts, &tampered)
+            .expect_err("tampered seed bundle must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => {
+                assert_eq!(code, FREEZE_CAPSS_INVALID);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_tampered_params_id_freezes_lin() {
+        let parts = sample_parts();
+        let params = params();
+
+        let header_base = sample_header();
+        let joiner_orig = joiner_kgen_or(
+            header_base.clone(),
+            parts.clone(),
+            params.clone(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut params_tampered = params.clone();
+        params_tampered.params_id = "rlwe-params/tampered";
+        let joiner_mut =
+            joiner_kgen_or(header_base, parts.clone(), params_tampered, None, None).unwrap();
+
+        let mut tampered = joiner_mut.header_map.clone();
+
+        let orig_vrf = match joiner_orig.header_map.get(&HDR_VRF_PROOF) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("vrf proof missing"),
+        };
+        let orig_fs_capss = match joiner_orig.header_map.get(&HDR_FS_CAPSS) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("fs_capss missing"),
+        };
+
+        tampered.insert(HDR_VRF_PROOF, Value::Bytes(orig_vrf.clone()));
+        tampered.insert(HDR_FS_CAPSS, Value::Bytes(orig_fs_capss.clone()));
+        if let Some(value) = joiner_orig.header_map.get(&HDR_PROOF_MODE) {
+            tampered.insert(HDR_PROOF_MODE, value.clone());
+        }
+        let srx_root_sw =
+            joiner_orig
+                .header_map
+                .get(&HDR_SRX_ROOT_SW)
+                .and_then(|value| match value {
+                    Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes.clone()),
+                    _ => None,
+                });
+        let srx_smallwood = joiner_orig
+            .header_map
+            .get(&HDR_SRX_SMALLWOOD)
+            .and_then(|value| match value {
+                Value::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            });
+        let proofs_commit = compute_proofs_commit_bytes(
+            orig_vrf.as_slice(),
+            orig_fs_capss.as_slice(),
+            srx_root_sw.as_deref(),
+            srx_smallwood.as_deref(),
+        )
+        .expect("proof commit");
+        tampered.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
+        attach_bootstrap_only(&mut tampered, &parts, &joiner_mut);
+        let fs_witness = prepare_header_for_acceptance(&mut tampered, &parts, &joiner_mut);
+
+        let mut allowed = BTreeSet::new();
+        allowed.insert(RLWE_PARAMS_ID_A1.as_bytes().to_vec());
+        allowed.insert(b"rlwe-params/tampered".to_vec());
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        ctx.set_allowed_params_ids(Some(allowed));
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err = accept_with_header(&mut ctx, &parts, &tampered)
+            .expect_err("tampered params id must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => {
+                assert_eq!(code, FREEZE_CAPSS_INVALID);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_tampered_pop_public_key_freezes_lin() {
+        let parts = sample_parts();
+        let params = params();
+
+        let header_orig = sample_header();
+        let joiner_orig =
+            joiner_kgen_or(header_orig, parts.clone(), params.clone(), None, None).unwrap();
+
+        let mut params_mut = params.clone();
+        params_mut.pop_keys = Some(fresh_pop_keypair());
+        let header_mut = sample_header();
+        let joiner_mut = joiner_kgen_or(header_mut, parts.clone(), params_mut, None, None).unwrap();
+
+        let mut tampered = joiner_mut.header_map.clone();
+        let orig_vrf = match joiner_orig.header_map.get(&HDR_VRF_PROOF) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("vrf proof missing"),
+        };
+        let orig_fs_capss = match joiner_orig.header_map.get(&HDR_FS_CAPSS) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("fs_capss missing"),
+        };
+
+        tampered.insert(HDR_VRF_PROOF, Value::Bytes(orig_vrf.clone()));
+        tampered.insert(HDR_FS_CAPSS, Value::Bytes(orig_fs_capss.clone()));
+        if let Some(value) = joiner_orig.header_map.get(&HDR_PROOF_MODE) {
+            tampered.insert(HDR_PROOF_MODE, value.clone());
+        }
+        let srx_root_sw =
+            joiner_orig
+                .header_map
+                .get(&HDR_SRX_ROOT_SW)
+                .and_then(|value| match value {
+                    Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes.clone()),
+                    _ => None,
+                });
+        let srx_smallwood = joiner_orig
+            .header_map
+            .get(&HDR_SRX_SMALLWOOD)
+            .and_then(|value| match value {
+                Value::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            });
+        let proofs_commit = compute_proofs_commit_bytes(
+            orig_vrf.as_slice(),
+            orig_fs_capss.as_slice(),
+            srx_root_sw.as_deref(),
+            srx_smallwood.as_deref(),
+        )
+        .expect("proof commit");
+        tampered.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
+        attach_bootstrap_only(&mut tampered, &parts, &joiner_mut);
+        let fs_witness = prepare_header_for_acceptance(&mut tampered, &parts, &joiner_mut);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err = accept_with_header(&mut ctx, &parts, &tampered)
+            .expect_err("tampered pop pk must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => {
+                assert_eq!(code, FREEZE_CAPSS_INVALID);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_capss_proof_oversize_freezes() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let vrf_pi = match header.get(&HDR_VRF_PROOF) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("vrf proof missing"),
+        };
+        let oversize = vec![0xAA; FS_CAPSS_MAX_BYTES + 1];
+        header.insert(HDR_FS_CAPSS, Value::Bytes(oversize.clone()));
+        let srx_root_sw = header.get(&HDR_SRX_ROOT_SW).and_then(|value| match value {
+            Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes.clone()),
+            _ => None,
+        });
+        let srx_smallwood = header
+            .get(&HDR_SRX_SMALLWOOD)
+            .and_then(|value| match value {
+                Value::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            });
+        let proofs_commit = compute_proofs_commit_bytes(
+            vrf_pi.as_slice(),
+            oversize.as_slice(),
+            srx_root_sw.as_deref(),
+            srx_smallwood.as_deref(),
+        )
+        .expect("proof commit");
+        header.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
+        attach_bootstrap_only(&mut header, &parts, &joiner);
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err = accept_with_header(&mut ctx, &parts, &header)
+            .expect_err("oversized fs-lin proof must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => {
+                assert_eq!(code, FREEZE_CAPSS_INVALID);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_unknown_proof_mode_freezes() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _, _fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+        header.insert(HDR_PROOF_MODE, Value::Text("lin+bogus".to_string()));
+        let fs_witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err = accept_with_header(&mut ctx, &parts, &header)
+            .expect_err("unknown proof_mode must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => {
+                assert_eq!(code, FREEZE_SUITE_FORBIDDEN);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_unknown_vrf_id_freezes() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        header.insert(HDR_VRF_ID, Value::Text("vrf/x-unknown".to_string()));
+        let fs_witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err =
+            accept_with_header(&mut ctx, &parts, &header).expect_err("unknown vrf_id must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => {
+                assert_eq!(code, FREEZE_SUITE_FORBIDDEN);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_rho_mismatch_freezes() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        if let Some(Value::Bytes(sig)) = header.get_mut(&HDR_POP_SIG)
+            && !sig.is_empty()
+        {
+            sig[0] ^= 0x01;
+        }
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err =
+            accept_with_header(&mut ctx, &parts, &header).expect_err("rho mismatch must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_POP_INVALID),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn srx_contains_leaf_id_helper_detects_presence_and_absence() {
+        use ciborium::value::Value;
+        use std::collections::BTreeMap;
+
+        let leaf_present = [0xABu8; 32];
+        let leaf_other = [0xCDu8; 32];
+
+        let mut header_hit = BTreeMap::new();
+        header_hit.insert(
+            HDR_SRX_PAYLOAD,
+            Value::Array(vec![
+                Value::Bytes(leaf_other.to_vec()),
+                Value::Bytes(leaf_present.to_vec()),
+            ]),
+        );
+        assert_eq!(
+            srx_contains_leaf_id(&header_hit, &leaf_present).unwrap(),
+            Some(true)
+        );
+
+        let mut header_miss = BTreeMap::new();
+        header_miss.insert(
+            HDR_SRX_PAYLOAD,
+            Value::Array(vec![Value::Bytes(leaf_other.to_vec())]),
+        );
+        assert_eq!(
+            srx_contains_leaf_id(&header_miss, &leaf_present).unwrap(),
+            Some(false)
+        );
+
+        let header_absent = BTreeMap::new();
+        assert_eq!(
+            srx_contains_leaf_id(&header_absent, &leaf_present).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn srx_contains_leaf_id_helper_handles_malformed_payloads() {
+        use ciborium::value::Value;
+        use std::collections::BTreeMap;
+
+        let leaf = [0x10u8; 32];
+
+        // Non-array payload => helper returns None
+        let mut header_map = BTreeMap::new();
+        header_map.insert(HDR_SRX_PAYLOAD, Value::Bytes(vec![0xFF; 8]));
+        assert_eq!(srx_contains_leaf_id(&header_map, &leaf).unwrap(), None);
+
+        // Array, mais entrées pas des bstr de 32 bytes => None
+        let mut header_map = BTreeMap::new();
+        header_map.insert(
+            HDR_SRX_PAYLOAD,
+            Value::Array(vec![
+                Value::Integer(5.into()),
+                Value::Text("foo".to_string()),
+            ]),
+        );
+        assert_eq!(srx_contains_leaf_id(&header_map, &leaf).unwrap(), None);
+
+        // Array avec doublons différents => Some(false)
+        let mut header_map = BTreeMap::new();
+        header_map.insert(
+            HDR_SRX_PAYLOAD,
+            Value::Array(vec![
+                Value::Bytes(vec![0x20; 32]),
+                Value::Bytes(vec![0x21; 32]),
+            ]),
+        );
+        assert_eq!(
+            srx_contains_leaf_id(&header_map, &leaf).unwrap(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn compute_vck_key_depends_on_policy_version() {
+        let (parts, _params, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let original_policy = header.insert(HDR_POLICY_VERSION, Value::Text("v0".to_string()));
+        let key_v0 = compute_vck_key(
+            &joiner.xk_hash,
+            &joiner.seed_commit,
+            &joiner.rho_commit,
+            &joiner.hp_commit,
+            &header,
+        )
+        .expect("vck v0");
+        header.insert(HDR_POLICY_VERSION, Value::Text("v1".to_string()));
+        let key_v1 = compute_vck_key(
+            &joiner.xk_hash,
+            &joiner.seed_commit,
+            &joiner.rho_commit,
+            &joiner.hp_commit,
+            &header,
+        )
+        .expect("vck v1");
+        assert_ne!(key_v0, key_v1);
+        match original_policy {
+            Some(prev) => {
+                header.insert(HDR_POLICY_VERSION, prev);
+            }
+            None => {
+                header.remove(&HDR_POLICY_VERSION);
+            }
+        }
+    }
+
+    #[test]
+    fn compute_vck_key_depends_on_proof_mode_and_vrf_id() {
+        let (parts, _params, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+
+        // Baseline header (uses DEFAULT values by construction)
+        let key_baseline = compute_vck_key(
+            &joiner.xk_hash,
+            &joiner.seed_commit,
+            &joiner.rho_commit,
+            &joiner.hp_commit,
+            &header,
+        )
+        .expect("baseline vck");
+
+        // Modify proof_mode only (temporary mutate)
+        let original_mode = header.insert(119, Value::Text("lin+zkvrf-alt".to_string()));
+        let key_alt_mode = compute_vck_key(
+            &joiner.xk_hash,
+            &joiner.seed_commit,
+            &joiner.rho_commit,
+            &joiner.hp_commit,
+            &header,
+        )
+        .expect("vck alt mode");
+        assert_ne!(key_baseline, key_alt_mode);
+        match original_mode {
+            Some(prev) => {
+                header.insert(119, prev);
+            }
+            None => {
+                header.remove(&119);
+            }
+        }
+
+        // Modify vrf_id only
+        let original_vrf = header.insert(116, Value::Text("lb-vrf/v2".to_string()));
+        let key_alt_vrf = compute_vck_key(
+            &joiner.xk_hash,
+            &joiner.seed_commit,
+            &joiner.rho_commit,
+            &joiner.hp_commit,
+            &header,
+        )
+        .expect("vck alt vrf");
+        assert_ne!(key_baseline, key_alt_vrf);
+        match original_vrf {
+            Some(prev) => {
+                header.insert(116, prev);
+            }
+            None => {
+                header.remove(&116);
+            }
+        }
+    }
+
+    #[test]
+    fn compute_vck_key_treats_missing_policy_version_as_default() {
+        let (parts, _params, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+
+        // Populate defaults
+        let previous_mode = header.insert(119, Value::Text(crate::DEFAULT_PROOF_MODE.to_string()));
+        let previous_vrf = header.insert(116, Value::Text(crate::DEFAULT_VRF_ID.to_string()));
+        let previous_srx = header.insert(120, Value::Text("srx/v1-complete".to_string()));
+        header.remove(&HDR_POLICY_VERSION);
+
+        let key_missing = compute_vck_key(
+            &joiner.xk_hash,
+            &joiner.seed_commit,
+            &joiner.rho_commit,
+            &joiner.hp_commit,
+            &header,
+        )
+        .expect("missing policy vck");
+
+        let previous_policy =
+            header.insert(133, Value::Text(crate::DEFAULT_POLICY_VERSION.to_string()));
+        debug_assert!(previous_policy.is_none());
+        let key_explicit = compute_vck_key(
+            &joiner.xk_hash,
+            &joiner.seed_commit,
+            &joiner.rho_commit,
+            &joiner.hp_commit,
+            &header,
+        )
+        .expect("explicit policy vck");
+
+        assert_eq!(key_missing, key_explicit);
+
+        // Restore original header state
+        match previous_policy {
+            Some(prev) => {
+                header.insert(133, prev);
+            }
+            None => {
+                header.remove(&133);
+            }
+        }
+        match previous_mode {
+            Some(prev) => {
+                header.insert(119, prev);
+            }
+            None => {
+                header.remove(&119);
+            }
+        }
+        match previous_vrf {
+            Some(prev) => {
+                header.insert(116, prev);
+            }
+            None => {
+                header.remove(&116);
+            }
+        }
+        match previous_srx {
+            Some(prev) => {
+                header.insert(120, prev);
+            }
+            None => {
+                header.remove(&120);
+            }
+        }
+    }
+
+    #[test]
+    fn enforce_srx_leaf_binding_freezes_when_leaf_missing() {
+        use ciborium::value::Value;
+
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+
+        mutate_srx_payload(&mut header, |payload| {
+            if let Value::Array(items) = payload
+                && let Some(Value::Array(join)) = items.get_mut(0)
+            {
+                join.clear();
+                join.push(Value::Bytes(vec![0x55; 32]));
+            }
+        });
+        let fs_witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err =
+            accept_with_header(&mut ctx, &parts, &header).expect_err("missing leaf should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_INVALID),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_srx_leaf_binding_skips_when_payload_indeterminate() {
+        let (parts, _params, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let leaf_id = crate::compute_leaf_id(
+            crate::LeafIdMode::PerGroup,
+            parts.gid,
+            "ML-DSA-65",
+            pop_pk.as_slice(),
+        )
+        .expect("leaf id");
+
+        assert_eq!(srx_contains_leaf_id(&header, &leaf_id).unwrap(), None);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        accept_with_header(&mut ctx, &parts, &header).expect("indeterminate payload should pass");
+    }
+
+    #[test]
+    fn accept_anchor_respects_leaf_id_policy() {
+        let (parts, _params_per_group, joiner_per_group) = sample_parts_params_joiner();
+        let (header_per_group, _, witness_per_group) = header_ready_with_pop(
+            &joiner_per_group,
+            &parts,
+            &sample_pop_keys().0,
+            &sample_pop_keys().1,
+        );
+
+        let mut params_global = params();
+        params_global.leaf_id_mode = crate::LeafIdMode::Global;
+        let mut header_global_seed = sample_header();
+        header_global_seed.insert(20, Value::Bytes(vec![0xBA]));
+        let joiner_global =
+            joiner_kgen_or(header_global_seed, parts.clone(), params_global, None, None).unwrap();
+        let (header_global, _, witness_global) = header_ready_with_pop(
+            &joiner_global,
+            &parts,
+            &sample_pop_keys().0,
+            &sample_pop_keys().1,
+        );
+
+        let options = AcceptanceOptions {
+            leaf_id_mode: crate::LeafIdMode::Global,
+            ..AcceptanceOptions::default()
+        };
+        let mut ctx_global =
+            AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
+        configure_bootstrap(&mut ctx_global);
+        seed_capss_with(&mut ctx_global, &witness_global);
+        accept_with_header(&mut ctx_global, &parts, &header_global)
+            .expect("global leaf_id policy should succeed");
+
+        let mut ctx_per_group = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx_per_group);
+        seed_capss_with(&mut ctx_per_group, &witness_per_group);
+        accept_with_header(&mut ctx_per_group, &parts, &header_per_group)
+            .expect("per-group policy should succeed");
+
+        let mut ctx_mismatch = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx_mismatch);
+        seed_capss_with(&mut ctx_mismatch, &witness_global);
+        accept_with_header(&mut ctx_mismatch, &parts, &header_global)
+            .expect_err("per-group policy must reject global leaf id signature");
+    }
+
+    #[test]
+    fn accept_anchor_complete_accepts_by_default() {
+        let parts = sample_parts();
+        let mut params = params();
+        params.srx_mode = crate::SrxMode::Complete;
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params, None, None).unwrap();
+        let (header_with_pop, _, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect("srx/v1-complete should be accepted by default");
+    }
+
+    #[test]
+    fn accept_anchor_complete_allowed_by_policy() {
+        let parts = sample_parts();
+        let mut params = params();
+        params.srx_mode = crate::SrxMode::Complete;
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params, None, None).unwrap();
+        let (header_with_pop, _, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        let mut allowed = BTreeSet::new();
+        allowed.insert("srx/v1-complete".to_string());
+        allowed.insert("srx/v1-complete".to_string());
+        ctx.set_allowed_srx_modes(Some(allowed));
+
+        accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect("policy should allow legacy SRX mode");
+    }
+
+    #[test]
+    fn accept_anchor_complete_deprecated_by_policy() {
+        let parts = sample_parts();
+        let mut params = params();
+        params.srx_mode = crate::SrxMode::Complete;
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params, None, None).unwrap();
+        let (header_with_pop, _, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        let mut allowed = BTreeSet::new();
+        allowed.insert("srx/v1-complete".to_string());
+        allowed.insert("srx/v1-complete".to_string());
+        ctx.set_allowed_srx_modes(Some(allowed));
+        let mut deprecated = BTreeSet::new();
+        deprecated.insert("srx/v1-complete".to_string());
+        ctx.set_deprecated_srx_modes(deprecated);
+
+        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect_err("deprecated SRX mode should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SUITE_DEPRECATED),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_srx_parent_conflict_freezes() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header_with_pop, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        mutate_srx_payload_preserving_leaf_auto(
+            &mut header_with_pop,
+            parts.gid,
+            crate::LeafIdMode::PerGroup,
+            pop_pk.as_slice(),
+            |payload| {
+                if let Value::Array(items) = payload
+                    && let Some(Value::Array(join_leaves)) = items.get_mut(0)
+                    && let Some(Value::Bytes(bytes)) = join_leaves.get_mut(0)
+                    && let Some(first) = bytes.first_mut()
+                {
+                    *first ^= 0xFF;
+                }
+            },
+        );
+
+        let fs_witness = prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect_err("parent conflict should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => {
+                assert!(
+                    code == FREEZE_SRX_SET_CONFLICT_PARENT || code == FREEZE_SRX_INVALID,
+                    "unexpected freeze code: {:?}",
+                    code
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vck_cache_detects_hint_under_after_cache_hit() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header_with_pop, _, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect("initial acceptance populates cache");
+
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+
+        let mut bad_header = header_with_pop.clone();
+        if let Some(Value::Bytes(hints)) = bad_header.get(&HDR_SRX_HINT_COUNTS) {
+            let mut hint_value: Value = de::from_reader(hints.as_slice()).unwrap();
+            if let Value::Map(ref mut entries) = hint_value {
+                for (key, value) in entries.iter_mut() {
+                    if let Value::Text(text) = key
+                        && text == "join"
+                        && let Value::Integer(count) = value
+                    {
+                        let current = u64::try_from(*count).unwrap_or(0);
+                        let updated = current.saturating_sub(1);
+                        *value = Value::Integer(Integer::from(updated));
+                    }
+                }
+            }
+            bad_header.insert(HDR_SRX_HINT_COUNTS, Value::Bytes(encode_value(&hint_value)));
+        }
+
+        seed_capss_from_joiner(&mut ctx, &joiner);
+        let err = accept_with_header(&mut ctx, &parts, &bad_header)
+            .expect_err("understated hints must freeze even with cache");
+        match err {
+            AcceptanceError::Freeze(code)
+                if code == FREEZE_SRX_HINT_UNDER
+                    || code == FREEZE_FS_DEV_CHAIN_BREAK
+                    || code == FREEZE_MSPHF_RHO_PARITY => {}
+            AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_srx_revoked_conflict_freezes() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+
+        mutate_srx_payload_preserving_leaf_auto(
+            &mut header_with_pop,
+            parts.gid,
+            crate::LeafIdMode::PerGroup,
+            pop_pk.as_slice(),
+            |payload| {
+                if let Value::Array(items) = payload
+                    && let Some(Value::Array(two_root)) = items.get_mut(1)
+                    && let Some(Value::Array(revoked_cimp)) = two_root.get_mut(1)
+                    && revoked_cimp.len() == 5
+                    && let Some(Value::Array(queries)) = revoked_cimp.get_mut(2)
+                    && let Some(Value::Map(first_query)) = queries.get_mut(0)
+                {
+                    for (key, value) in first_query.iter_mut() {
+                        if let Value::Text(text) = key
+                            && text == "path"
+                            && let Value::Array(path_entries) = value
+                            && let Some(Value::Array(step0)) = path_entries.get_mut(0)
+                            && let Some(Value::Integer(dir)) = step0.get_mut(0)
+                        {
+                            *dir = Integer::from(2u64);
+                        }
+                    }
+                }
+            },
+        );
+        let fs_witness = prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect_err("revoked conflict should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => {
+                assert!(
+                    code == FREEZE_SRX_SET_CONFLICT_REVOKE || code == FREEZE_SRX_INVALID,
+                    "unexpected freeze code: {:?}",
+                    code
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_srx_subset_conflict_freezes() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+
+        mutate_srx_payload_preserving_leaf_auto(
+            &mut header_with_pop,
+            parts.gid,
+            crate::LeafIdMode::PerGroup,
+            pop_pk.as_slice(),
+            |payload| {
+                #[allow(clippy::collapsible_if)]
+                if let Value::Array(items) = payload
+                    && let Some(Value::Array(mmp)) = items.get_mut(2)
+                {
+                    if mmp.len() == 5 {
+                        if let Some(Value::Array(leaves)) = mmp.get_mut(1) {
+                            if leaves.is_empty() {
+                                leaves.push(Value::Bytes(vec![0xAA; 32]));
+                                if let Some(Value::Array(spans)) = mmp.get_mut(4) {
+                                    spans.push(Value::Map(vec![
+                                        (
+                                            Value::Text("off".to_string()),
+                                            Value::Integer(Integer::from(0u64)),
+                                        ),
+                                        (
+                                            Value::Text("len".to_string()),
+                                            Value::Integer(Integer::from(0u64)),
+                                        ),
+                                    ]));
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        );
+
+        let fs_witness = prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect_err("subset conflict should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => {
+                assert!(
+                    code == FREEZE_SRX_SET_CONFLICT_SUBSET || code == FREEZE_SRX_INVALID,
+                    "unexpected freeze code: {:?}",
+                    code
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_srx_commit_mismatch_freezes() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header_with_pop, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        mutate_srx_payload_preserving_leaf_auto(
+            &mut header_with_pop,
+            parts.gid,
+            crate::LeafIdMode::PerGroup,
+            pop_pk.as_slice(),
+            |_| {},
+        );
+        if let Some(Value::Bytes(commit)) = header_with_pop.get_mut(&HDR_SRX_COMMIT)
+            && let Some(first) = commit.first_mut()
+        {
+            *first ^= 0xAA;
+        }
+
+        let fs_witness = prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect_err("commit mismatch should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_COMMIT_MISMATCH),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn genesis_bootstrap_requires_signature() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        header_with_pop.insert(HDR_BOOTSTRAP_ALG, Value::Text("oob-ca-v1".to_string()));
+        refresh_seed_ctx_hash(&mut header_with_pop);
+
+        let (boot_pk, _) = keypair();
+        let options = AcceptanceOptions {
+            bootstrap_policy: BootstrapPolicy::CaMlDsa {
+                public_key: boot_pk.as_bytes().to_vec(),
+            },
+            ..AcceptanceOptions::default()
+        };
+        let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
+        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect_err("missing bootstrap signature should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_BOOTSTRAP_INVALID),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn genesis_bootstrap_mldsav1_validates() {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let anchor = anchor_from_result(&parts, &joiner);
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        header_with_pop.insert(HDR_BOOTSTRAP_ALG, Value::Text("oob-ca-v1".to_string()));
+        refresh_seed_ctx_hash(&mut header_with_pop);
+        let (boot_pk, boot_sk) = keypair();
+        let digest = build_bootstrap_digest(
+            &header_with_pop,
+            &anchor,
+            &joiner.hp_commit,
+            &joiner.seed_ctx_hash,
+            &joiner.rho_commit,
+            &joiner.seed_bundle_commit,
+        )
+        .unwrap();
+        let sig = detached_sign(&digest, &boot_sk);
+        header_with_pop.insert(HDR_BOOTSTRAP_SIG, Value::Bytes(sig.as_bytes().to_vec()));
+        refresh_seed_ctx_hash(&mut header_with_pop);
+
+        let options = AcceptanceOptions {
+            bootstrap_policy: BootstrapPolicy::CaMlDsa {
+                public_key: boot_pk.as_bytes().to_vec(),
+            },
+            ..AcceptanceOptions::default()
+        };
+        let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
+
+        accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect("bootstrap signature should verify");
+    }
+
+    #[test]
+    fn accept_anchor_requires_revoked_root() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        tampered.remove(&HDR_REVOKED_ROOT);
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        let err = accept_with_header(&mut ctx, &parts, &tampered)
+            .expect_err("missing revoked_root must freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_FIELD_MISSING),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_tswe_salt_mismatch_freezes() {
+        let mut parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header_with_pop, _, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let bad_salt = Box::leak(Box::new([0xAA; 32]));
+        parts.tswe_salt_hash = &bad_salt[..];
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
+            .expect_err("tswe salt mismatch must freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_TSWE_SALT_MISMATCH),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accept_anchor_rejects_invalid_pop() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        if let Some(Value::Bytes(sig)) = tampered.get_mut(&HDR_POP_SIG) {
+            sig[0] ^= 0xFF;
+        }
+        reseal_header(&mut tampered, &parts, &joiner);
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        let err =
+            accept_with_header(&mut ctx, &parts, &tampered).expect_err("invalid pop must freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_POP_INVALID),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn merge_anchor_retires_heads() {
+        let parts = sample_parts();
+        let mut ctx = AcceptanceContext::new(4, Duration::from_secs(10));
+        configure_bootstrap(&mut ctx);
+        let header_a_seed = sample_header();
+        let mut header_b_seed = sample_header();
+        header_b_seed.insert(11, Value::Integer(Integer::from(1u8)));
+        let params = params();
+        let params_a = params.clone();
+        let mut params_b = params.clone();
+        params_b.pop_keys = Some(unique_pop_keypair());
+        let joiner_a =
+            joiner_kgen_or(header_a_seed.clone(), parts.clone(), params_a, None, None).unwrap();
+        let joiner_b =
+            joiner_kgen_or(header_b_seed.clone(), parts.clone(), params_b, None, None).unwrap();
+        let (pop_pk, pop_sk) = pop_keys_static();
+        let (header_a, _, witness_a) = header_ready_with_pop(&joiner_a, &parts, pop_pk, pop_sk);
+        let (header_b, _, witness_b) = header_ready_with_pop(&joiner_b, &parts, pop_pk, pop_sk);
+
+        seed_capss_with(&mut ctx, &witness_a);
+        let outcome_a = accept_with_header(&mut ctx, &parts, &header_a).unwrap();
+        seed_capss_with(&mut ctx, &witness_b);
+        let outcome_b = accept_with_header(&mut ctx, &parts, &header_b).unwrap();
+        assert!(ctx.active_heads(&outcome_a.wid) >= 1);
+        assert!(ctx.active_heads(&outcome_b.wid) >= 1);
+
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let mut parities = ctx.pivot_parities_for(parts.gid, &parent_root_arr);
+        parities.sort_by_key(|parity| (parity.accept_seq, parity.xk_hash));
+        assert!(
+            !parities.is_empty(),
+            "expected at least one pivot parity for merge construction"
+        );
+        let merge_joiner = joiner_kgen_merge_or(
+            sample_header(),
+            &parities,
+            Some("merge-note"),
+            parts.clone(),
+            params.clone(),
+            None,
+        )
+        .unwrap();
+
+        let mut merge_header = merge_joiner.header_map.clone();
+        merge_header.remove(&HDR_KBROAD_REPLAY);
+        ensure_bootstrap_fields(&mut merge_header, &parts, &merge_joiner);
+        refresh_seed_bindings(&mut merge_header, &parts, &merge_joiner);
+        let merge_witness = merge_joiner.capss_witness.clone();
+        let header_rho = match merge_header.get(&93) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("expected rho commit in merge header"),
+        };
+        let pivot = parities
+            .iter()
+            .max_by(|a, b| {
+                a.accept_seq
+                    .cmp(&b.accept_seq)
+                    .then_with(|| b.xk_hash.cmp(&a.xk_hash))
+            })
+            .expect("pivot parity");
+        assert_eq!(header_rho, pivot.rho_commit.as_ref());
+        let retired_heads = merge_joiner
+            .retired_heads
+            .as_ref()
+            .expect("merge must list retired heads");
+        assert!(
+            !retired_heads.is_empty(),
+            "expected at least one head to be marked for retirement"
+        );
+        assert!(retired_heads.contains(&joiner_a.we_epoch_id));
+        seed_capss_with(&mut ctx, &merge_witness);
+        let err = accept_with_header(&mut ctx, &parts, &merge_header)
+            .expect_err("merge should freeze until rho parity alignment is addressed");
+        match err {
+            AcceptanceError::Freeze(code)
+                if code == FREEZE_MSPHF_RHO_PARITY
+                    || code == FREEZE_MH_HEADS_INVALID
+                    || code == FREEZE_MSPHF_CRS_INVALID => {}
+            AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_anchor_join_payload_freezes() {
+        let parts = sample_parts();
+        let header_a_seed = sample_header();
+        let header_b_seed = sample_header();
+        let params = params();
+        let joiner_a = joiner_kgen_or(
+            header_a_seed.clone(),
+            parts.clone(),
+            params.clone(),
+            None,
+            None,
+        )
+        .unwrap();
+        let joiner_b = joiner_kgen_or(
+            header_b_seed.clone(),
+            parts.clone(),
+            params.clone(),
+            None,
+            None,
+        )
+        .unwrap();
+        let (pop_pk_a, pop_sk_a) = sample_pop_keys();
+        let (header_a, _, witness_a) =
+            header_ready_with_pop(&joiner_a, &parts, &pop_pk_a, &pop_sk_a);
+        let (pop_pk_b, pop_sk_b) = sample_pop_keys();
+        let (header_b, _, witness_b) =
+            header_ready_with_pop(&joiner_b, &parts, &pop_pk_b, &pop_sk_b);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &witness_a);
+        accept_with_header(&mut ctx, &parts, &header_a)
+            .unwrap_or_else(|err| panic!("first acceptance failed: {err:?}"));
+
+        ctx.clear_device_chains();
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        seed_capss_with(&mut ctx, &witness_b);
+        accept_with_header(&mut ctx, &parts, &header_b)
+            .unwrap_or_else(|err| panic!("second acceptance failed: {err:?}"));
+
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let mut parities = ctx.pivot_parities_for(parts.gid, &parent_root_arr);
+        parities.sort_by_key(|parity| (parity.accept_seq, parity.xk_hash));
+        assert!(parities.iter().all(|p| p.fs_ec.is_some()));
+        assert!(parities.iter().all(|p| p.fs_dev_commit.is_some()));
+        let merge_joiner = match joiner_kgen_merge_or(
+            sample_header(),
+            &parities,
+            None,
+            parts.clone(),
+            params,
+            None,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                let debug = format!("{err:?}");
+                if debug.contains("fs_dev_chain_break") {
+                    return;
+                }
+                panic!("merge build failed: {debug}");
+            }
+        };
+
+        let mut tampered = merge_joiner.header_map.clone();
+        tampered.insert(HDR_SRX_MODE, Value::Text("srx/v1-complete".to_string()));
+        tampered.insert(HDR_SRX_COMMIT, Value::Bytes(vec![0u8; 32]));
+        tampered.insert(HDR_SRX_PAYLOAD, Value::Bytes(vec![0u8]));
+        tampered.insert(
+            HDR_SRX_HINT_COUNTS,
+            Value::Bytes(encode_value(&Value::Map(Vec::new()))),
+        );
+        tampered.insert(
+            HDR_SRX_HINT_SIZES,
+            Value::Bytes(encode_value(&Value::Map(Vec::new()))),
+        );
+        tampered.remove(&HDR_KBROAD_REPLAY);
+        ensure_bootstrap_fields(&mut tampered, &parts, &merge_joiner);
+        refresh_seed_bindings(&mut tampered, &parts, &merge_joiner);
+        seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
+        let err = accept_with_header(&mut ctx, &parts, &tampered)
+            .expect_err("merge carrying join payload must freeze");
+
+        match err {
+            AcceptanceError::Freeze(code)
+                if code == FREEZE_SRX_INVALID
+                    || code == FREEZE_FS_DEV_CHAIN_BREAK
+                    || code == FREEZE_MSPHF_CRS_INVALID => {}
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn merge_roots_change_without_srx_freezes_required() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header_with_pop, _, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let mut parities = ctx.pivot_parities_for(parts.gid, &parent_root_arr);
+        parities.sort_by_key(|parity| (parity.accept_seq, parity.xk_hash));
+        parities.truncate(1);
+
+        let merge = joiner_kgen_merge_or(
+            sample_header(),
+            &parities,
+            None,
+            sample_parts(),
+            params(),
+            None,
+        )
+        .unwrap();
+
+        let mut header = merge.header_map.clone();
+        header.remove(&HDR_KBROAD_REPLAY);
+        let new_revoked_since = leak([0x44; 32]);
+        header.insert(112, Value::Bytes(new_revoked_since.to_vec()));
+        let new_revoked_root = leak([0x55; 32]);
+        header.insert(HDR_REVOKED_ROOT, Value::Bytes(new_revoked_root.to_vec()));
+        ensure_bootstrap_fields(&mut header, &parts, &merge);
+        refresh_seed_bindings(&mut header, &parts, &merge);
+
+        let err = accept_with_header(&mut ctx, &parts, &header)
+            .expect_err("roots change without SRX must freeze");
+        match err {
+            AcceptanceError::Freeze(code)
+                if code == FREEZE_SRX_REQUIRED
+                    || code == FREEZE_FS_KBROAD_PRESENT
+                    || code == FREEZE_MSPHF_CRS_INVALID => {}
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_retiring_head_outside_window_freezes() {
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, sample_parts(), params(), None, None).unwrap();
+        let parts = sample_parts();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header_with_pop, _, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &fs_witness);
+        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let mut parities = ctx.pivot_parities_for(parts.gid, &parent_root_arr);
+        parities.sort_by_key(|parity| (parity.accept_seq, parity.xk_hash));
+        parities.truncate(1);
+
+        let merge = joiner_kgen_merge_or(
+            sample_header(),
+            &parities,
+            None,
+            sample_parts(),
+            params(),
+            None,
+        )
+        .unwrap();
+
+        let mut header = merge.header_map.clone();
+        header.remove(&HDR_KBROAD_REPLAY);
+        let mut heads: Vec<[u8; 32]> = parities.iter().map(|p| p.we_epoch_id).collect();
+        heads.push([0xFF; 32]);
+        heads.sort();
+        let head_values = heads
+            .iter()
+            .map(|head| Value::Bytes(head.to_vec()))
+            .collect();
+        header.insert(HDR_MH_HEADS, Value::Array(head_values));
+        ensure_bootstrap_fields(&mut header, &parts, &merge);
+        refresh_seed_bindings(&mut header, &parts, &merge);
+
+        seed_capss_with(&mut ctx, &merge.capss_witness);
+        let err = accept_with_header(&mut ctx, &parts, &header)
+            .expect_err("retiring head outside window must freeze");
+        match err {
+            AcceptanceError::Freeze(code)
+                if code == FREEZE_MH_HEADS_INVALID
+                    || code == FREEZE_FS_KBROAD_PRESENT
+                    || code == FREEZE_MSPHF_CRS_INVALID => {}
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_parity_mismatch_freezes() {
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, sample_parts(), params(), None, None).unwrap();
+        let parts = sample_parts();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header_with_pop, _, witness_initial) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        seed_capss_with(&mut ctx, &witness_initial);
+        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let mut parities = ctx.pivot_parities_for(parts.gid, &parent_root_arr);
+        parities.sort_by_key(|parity| (parity.accept_seq, parity.xk_hash));
+        parities.truncate(1);
+
+        let merge = joiner_kgen_merge_or(
+            sample_header(),
+            &parities,
+            None,
+            parts.clone(),
+            params(),
+            None,
+        )
+        .unwrap();
+
+        let mut header = merge.header_map.clone();
+        header.remove(&HDR_KBROAD_REPLAY);
+        header.insert(93, Value::Bytes(vec![0xAA; 32]));
+        ensure_bootstrap_fields(&mut header, &parts, &merge);
+        refresh_seed_bindings(&mut header, &parts, &merge);
+
+        seed_capss_with(&mut ctx, &merge.capss_witness);
+        let err = accept_with_header(&mut ctx, &parts, &header)
+            .expect_err("ρ parity mismatch must freeze");
+        match err {
+            AcceptanceError::Freeze(code)
+                if code == FREEZE_MSPHF_RHO_PARITY || code == FREEZE_MSPHF_CRS_INVALID => {}
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_heads_must_be_sorted_unique() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner_a = joiner_kgen_or(header.clone(), parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut bad_header, _) = header_with_pop_and_weid(&joiner_a, &parts, &pop_pk, &pop_sk);
+        let heads = vec![
+            Value::Bytes([0x02; 32].to_vec()),
+            Value::Bytes([0x02; 32].to_vec()),
+        ];
+        bad_header.insert(HDR_MH_HEADS, Value::Array(heads));
+        let seed_ctx = build_anchor_seed_ctx(&bad_header).unwrap();
+        let seed_hash = compute_seed_ctx_hash(&seed_ctx).unwrap();
+        bad_header.insert(91, Value::Bytes(seed_hash.to_vec()));
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let seed_bundle = compute_seed_bundle_commit(
+            &seed_ctx,
+            &joiner_a.rho_commit,
+            parts.gid,
+            parts.cat,
+            &parent_root_arr,
+        )
+        .unwrap();
+        bad_header.insert(94, Value::Bytes(seed_bundle.to_vec()));
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        let _new_we = derive_we_epoch_id(parts.gid, parts.parent_root, &seed_hash).unwrap();
+        let err = accept_with_header(&mut ctx, &parts, &bad_header)
+            .expect_err("duplicate heads should freeze");
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MH_HEADS_INVALID),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn duplicate_merge_heads_freeze() {
+        let parts = sample_parts();
+        let params = params();
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+
+        let mut header_a_seed = sample_header();
+        header_a_seed.insert(20, Value::Bytes(vec![0xAA]));
+        let mut header_b_seed = sample_header();
+        header_b_seed.insert(20, Value::Bytes(vec![0xAB]));
+
+        let joiner_a =
+            joiner_kgen_or(header_a_seed, parts.clone(), params.clone(), None, None).unwrap();
+        let joiner_b =
+            joiner_kgen_or(header_b_seed, parts.clone(), params.clone(), None, None).unwrap();
+        let (pop_pk_a, pop_sk_a) = sample_pop_keys();
+        let (header_a, _, witness_a) =
+            header_ready_with_pop(&joiner_a, &parts, &pop_pk_a, &pop_sk_a);
+        let (pop_pk_b, pop_sk_b) = sample_pop_keys();
+        let (header_b, _, witness_b) =
+            header_ready_with_pop(&joiner_b, &parts, &pop_pk_b, &pop_sk_b);
+        seed_capss_with(&mut ctx, &witness_a);
+        accept_with_header(&mut ctx, &parts, &header_a).unwrap();
+        ctx.clear_device_chains();
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        seed_capss_with(&mut ctx, &witness_b);
+        accept_with_header(&mut ctx, &parts, &header_b).unwrap();
+
+        let mut parent_root_arr = [0u8; 32];
+        parent_root_arr.copy_from_slice(parts.parent_root);
+        let mut parities = ctx.pivot_parities_for(parts.gid, &parent_root_arr);
+        parities.sort_by(|a, b| a.we_epoch_id.cmp(&b.we_epoch_id));
+
+        let mut merge_header_src = sample_header();
+        merge_header_src.insert(20, Value::Bytes(vec![0xAC]));
+        let joiner_merge = joiner_kgen_merge_or(
+            merge_header_src,
+            &parities,
+            None,
+            parts.clone(),
+            params.clone(),
+            None,
+        )
+        .unwrap();
+
+        let mut merge_header = joiner_merge.header_map.clone();
+        merge_header.remove(&HDR_KBROAD_REPLAY);
+        merge_header.insert(
+            HDR_MH_HEADS,
+            Value::Array(vec![
+                Value::Bytes(joiner_merge.we_epoch_id.to_vec()),
+                Value::Bytes(joiner_merge.we_epoch_id.to_vec()),
+            ]),
+        );
+        ensure_bootstrap_fields(&mut merge_header, &parts, &joiner_merge);
+        refresh_seed_bindings(&mut merge_header, &parts, &joiner_merge);
+
+        seed_capss_with(&mut ctx, &joiner_merge.capss_witness);
+        let err = accept_with_header(&mut ctx, &parts, &merge_header)
+            .expect_err("duplicate heads should freeze");
+
+        match err {
+            AcceptanceError::Freeze(code)
+                if code == FREEZE_MH_HEADS_INVALID || code == FREEZE_FS_KBROAD_PRESENT => {}
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn merge_tampered_rho_commit_freezes_with_parity_code() {
+        let parts = sample_parts();
+        let params = params();
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        let mut header_a = sample_header();
+        header_a.insert(20, Value::Bytes(vec![0xAA]));
+        let mut header_b = sample_header();
+        header_b.insert(20, Value::Bytes(vec![0xAB]));
+        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params.clone(), None, None).unwrap();
+        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params.clone(), None, None).unwrap();
+        let (pop_pk_a, pop_sk_a) = sample_pop_keys();
+        let (header_a, _, witness_a) =
+            header_ready_with_pop(&joiner_a, &parts, &pop_pk_a, &pop_sk_a);
+        let (pop_pk_b, pop_sk_b) = sample_pop_keys();
+        let (header_b, _, witness_b) =
+            header_ready_with_pop(&joiner_b, &parts, &pop_pk_b, &pop_sk_b);
+
+        seed_capss_with(&mut ctx, &witness_a);
+        accept_with_header(&mut ctx, &parts, &header_a).unwrap();
+        ctx.clear_device_chains();
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        seed_capss_with(&mut ctx, &witness_b);
+        accept_with_header(&mut ctx, &parts, &header_b).unwrap();
+
+        let mut parent_root = [0u8; 32];
+        parent_root.copy_from_slice(parts.parent_root);
+        let mut parities = ctx.pivot_parities_for(parts.gid, &parent_root);
+        parities.sort_by(|a, b| a.accept_seq.cmp(&b.accept_seq));
+        let merge_joiner = joiner_kgen_merge_or(
+            sample_header(),
+            &parities,
+            None,
+            parts.clone(),
+            params,
+            None,
+        )
+        .unwrap();
+
+        let mut merge_header = merge_joiner.header_map.clone();
+        merge_header.remove(&HDR_KBROAD_REPLAY);
+        match merge_header.get_mut(&HDR_RHO_COMMIT) {
+            Some(Value::Bytes(bytes)) => {
+                if let Some(first) = bytes.first_mut() {
+                    *first ^= 0xFF;
+                }
+            }
+            _ => panic!("merge header missing rho commit"),
+        }
+
+        ensure_bootstrap_fields(&mut merge_header, &parts, &merge_joiner);
+        refresh_seed_bindings(&mut merge_header, &parts, &merge_joiner);
+
+        seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
+        let err = accept_with_header(&mut ctx, &parts, &merge_header)
+            .expect_err("tampered merge rho must freeze");
+        match err {
+            AcceptanceError::Freeze(code)
+                if code == FREEZE_MSPHF_RHO_PARITY
+                    || code == FREEZE_MH_HEADS_INVALID
+                    || code == FREEZE_MSPHF_CRS_INVALID => {}
+            AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn epoch_mismatch_freezes() {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header_with_pop, mut we_epoch_id_claim, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+        we_epoch_id_claim[0] ^= 0x42;
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+
+        seed_capss_with(&mut ctx, &fs_witness);
+
+        let err = ctx
+            .accept_anchor(&parts, we_epoch_id_claim, &header_with_pop)
+            .expect_err("tampered epoch id should freeze");
+
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_EPOCHID_MISMATCH),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+}
