@@ -215,7 +215,7 @@ fn map_smallwood_verify_error(_: Error) -> AcceptanceError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::anyhow;
+    use anyhow::{Result, anyhow, bail};
     use rand_chacha::ChaCha20Rng;
     use rand_core::{OsRng, SeedableRng};
 
@@ -268,18 +268,20 @@ mod tests {
     }
 
     #[test]
-    fn proof_from_bytes_rejects_garbage() {
-        let err = Proof::from_bytes(vec![0xAA, 0xBB])
-            .err()
-            .expect("should reject invalid capss proof");
+    fn proof_from_bytes_rejects_garbage() -> Result<()> {
+        let err = match Proof::from_bytes(vec![0xAA, 0xBB]) {
+            Ok(_) => bail!("should reject invalid capss proof"),
+            Err(e) => e,
+        };
         assert!(matches!(
             err,
             AcceptanceError::Freeze(code) if code == FREEZE_CAPSS_INVALID
         ));
+        Ok(())
     }
 
     #[test]
-    fn verify_rejects_modified_statement() {
+    fn verify_rejects_modified_statement() -> Result<()> {
         let seed_commit = filled(0x11);
         let seed_bundle_commit = filled(0x22);
         let rho_commit = filled(0x33);
@@ -308,8 +310,8 @@ mod tests {
 
         // Generate a valid proof.
         let mut rng = ChaCha20Rng::seed_from_u64(42);
-        let proof = prove(&mut rng, &inputs).expect("capss prove");
-        verify(&inputs, &proof).expect("baseline verify should succeed");
+        let proof = prove(&mut rng, &inputs)?;
+        verify(&inputs, &proof)?;
 
         // Mutate the statement while keeping the proof fixed – verification must fail.
         let mut tampered_dev_commit = fs_dev_commit;
@@ -328,16 +330,19 @@ mod tests {
             &tampered_dev_commit,
         );
 
-        let err =
-            verify(&bad_inputs, &proof).expect_err("verify should fail when statement changes");
+        let err = match verify(&bad_inputs, &proof) {
+            Ok(_) => bail!("verify should fail when statement changes"),
+            Err(e) => e,
+        };
         assert!(matches!(
             err,
             AcceptanceError::Freeze(code) if code == FREEZE_CAPSS_INVALID
         ));
+        Ok(())
     }
 
     #[test]
-    fn proof_rehydrates_after_roundtrip() {
+    fn proof_rehydrates_after_roundtrip() -> Result<()> {
         let seed_commit = filled(0x01);
         let seed_bundle_commit = filled(0x02);
         let rho_commit = filled(0x03);
@@ -365,11 +370,12 @@ mod tests {
         );
 
         let mut rng = OsRng;
-        let proof = prove(&mut rng, &inputs).expect("capss prove");
+        let proof = prove(&mut rng, &inputs)?;
         let bytes = proof.as_bytes().to_vec();
-        let decoded = Proof::from_bytes(bytes.clone()).expect("decode proof");
+        let decoded = Proof::from_bytes(bytes.clone())?;
         assert_eq!(decoded.as_bytes(), bytes.as_slice());
-        verify(&inputs, &decoded).expect("verify");
+        verify(&inputs, &decoded)?;
+        Ok(())
     }
 
     #[test]

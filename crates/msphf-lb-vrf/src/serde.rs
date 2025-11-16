@@ -283,20 +283,20 @@ fn unpack_mod_p_poly<R: Read>(res: &mut Poly32, reader: &mut R) -> Result<()> {
 }
 
 #[test]
-fn test_packing() {
+fn test_packing() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut rng = rand::thread_rng();
     let p = Poly256::uniform_random(&mut rng);
     let mut v: Vec<u8> = vec![];
-    pack_mod_q_poly(&p, &mut v).expect("pack_mod_q_poly");
+    pack_mod_q_poly(&p, &mut v)?;
     let mut p2 = Poly256::zero();
-    unpack_mod_q_poly(&mut p2, &mut v[..].as_ref()).expect("unpack_mod_q_poly");
+    unpack_mod_q_poly(&mut p2, &mut v[..].as_ref())?;
     assert_eq!(p, p2);
 
     let p = Poly256::rand_mod_beta(&mut rng);
     let mut v: Vec<u8> = vec![];
-    pack_mod_beta_poly(&p, &mut v).expect("pack_mod_beta_poly");
+    pack_mod_beta_poly(&p, &mut v)?;
     let mut p2 = Poly256::zero();
-    unpack_mod_beta_poly(&mut p2, &mut v[..].as_ref()).expect("unpack_mod_beta_poly");
+    unpack_mod_beta_poly(&mut p2, &mut v[..].as_ref())?;
     assert_eq!(p, p2);
-    // assert!(false);
+    Ok(())
 }

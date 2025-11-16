@@ -1767,6 +1767,7 @@ async fn refresh_pivot(State(state): State<ApiState>, body: Bytes) -> Result<Res
     Ok(protobuf_response(&reply))
 }
 #[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use axum::body::to_bytes;
@@ -1777,6 +1778,7 @@ mod tests {
     use serde_json::Value;
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn test_identity_binding_creation_and_verification() {
         // Generate a keypair
         let (pop_pk, pop_sk) = dilithium5::keypair();

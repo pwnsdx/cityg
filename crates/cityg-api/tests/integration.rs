@@ -21,6 +21,7 @@ async fn spawn_server_on(port: u16) -> JoinHandle<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn end_to_end_demo_flow() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new("error"))
@@ -98,6 +99,7 @@ async fn end_to_end_demo_flow() {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn window_limits_can_be_tuned() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new("error"))
@@ -163,6 +165,7 @@ async fn window_limits_can_be_tuned() {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn configure_window_rejects_invalid() -> Result<()> {
     let port = 8091;
     let handle = spawn_server_on(port).await;
@@ -179,6 +182,7 @@ async fn configure_window_rejects_invalid() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn window_snapshot_reflects_heads() {
     let port = 8092;
     let handle = spawn_server_on(port).await;
@@ -213,6 +217,7 @@ async fn window_snapshot_reflects_heads() {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn window_full_rest_api_freeze() -> Result<()> {
     let port = 8093;
     let handle = spawn_server_on(port).await;
@@ -262,6 +267,7 @@ async fn window_full_rest_api_freeze() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn window_full_concurrent_freeze() -> Result<()> {
     let port = 8094;
     let handle = spawn_server_on(port).await;
@@ -356,6 +362,7 @@ async fn window_full_concurrent_freeze() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn members_pagination() -> Result<()> {
     let port = 8095;
     let handle = spawn_server_on(port).await;
@@ -424,6 +431,7 @@ fn assert_bad_request<T: std::fmt::Debug>(result: Result<T, Error>) -> Result<()
 // ========== Error Handling Tests ==========
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn error_invalid_room_id_format() -> Result<()> {
     let port = 8096;
     let handle = spawn_server_on(port).await;
@@ -450,6 +458,7 @@ async fn error_invalid_room_id_format() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn error_server_unavailable() -> Result<()> {
     // Create client pointing to non-existent server
     let client = CitygApiClient::new("http://127.0.0.1:9999");
@@ -466,6 +475,7 @@ async fn error_server_unavailable() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn error_invalid_bundle_data() -> Result<()> {
     let port = 8097;
     let handle = spawn_server_on(port).await;
@@ -496,6 +506,7 @@ async fn error_invalid_bundle_data() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn error_message_with_invalid_epoch() -> Result<()> {
     let port = 8098;
     let handle = spawn_server_on(port).await;
@@ -525,6 +536,7 @@ async fn error_message_with_invalid_epoch() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn error_members_with_invalid_gid() -> Result<()> {
     let port = 8099;
     let handle = spawn_server_on(port).await;
@@ -556,6 +568,7 @@ async fn error_members_with_invalid_gid() -> Result<()> {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn error_recovery_graceful_degradation() -> Result<()> {
     let port = 8100;
     let handle = spawn_server_on(port).await;

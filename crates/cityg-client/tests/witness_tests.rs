@@ -33,13 +33,14 @@ fn test_sequential_leaf_structure() {
 }
 
 #[test]
-fn test_join_delta_root_single_leaf() {
+fn test_join_delta_root_single_leaf() -> Result<(), Box<dyn std::error::Error>> {
     let leaves = vec![[1u8; 32]];
     let result = join_delta_root(&leaves);
     assert!(result.is_ok(), "Should compute root for single leaf");
 
-    let root = result.expect("single leaf should have a root");
+    let root = result?;
     assert_ne!(root, [0u8; 32], "Root should not be all zeros");
+    Ok(())
 }
 
 #[test]
@@ -58,7 +59,7 @@ fn test_join_delta_root_empty() {
 }
 
 #[test]
-fn test_witness_cbor_roundtrip() {
+fn test_witness_cbor_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     use msphf_core::witness::{CanonicalWitness, RawMembershipWitness, WitnessVariants};
 
     let witness = CanonicalWitness {
@@ -72,12 +73,13 @@ fn test_witness_cbor_roundtrip() {
         },
     };
 
-    let bytes = witness_to_cbor(&witness).expect("encode");
-    let decoded = witness_from_cbor(&bytes).expect("decode");
+    let bytes = witness_to_cbor(&witness)?;
+    let decoded = witness_from_cbor(&bytes)?;
 
     // Verify the witness mode is preserved
     use msphf_core::witness::WitnessMode;
     assert_eq!(decoded.mode(), WitnessMode::A);
+    Ok(())
 }
 
 #[test]
@@ -101,7 +103,7 @@ fn test_demo_pox_commit() {
 }
 
 #[test]
-fn test_build_branch_b_artifacts_produces_valid_data() {
+fn test_build_branch_b_artifacts_produces_valid_data() -> Result<(), Box<dyn std::error::Error>> {
     let join_leaves = vec![[1u8; 32], [2u8; 32]];
     let parent_leaves: Vec<[u8; 32]> = vec![];
     let parent_root = [0u8; 32];
@@ -115,17 +117,18 @@ fn test_build_branch_b_artifacts_produces_valid_data() {
     );
     assert!(result.is_ok(), "Should succeed with valid inputs");
 
-    let (_witness, srx_owned) = result.expect("branch B artifacts");
+    let (_witness, srx_owned) = result?;
     assert_eq!(srx_owned.join_leaf_ids, join_leaves);
+    Ok(())
 }
 
 #[test]
-fn test_build_branch_b_with_parent() {
+fn test_build_branch_b_with_parent() -> Result<(), Box<dyn std::error::Error>> {
     use msphf_core::merkle::canonical_set_root;
 
     let parent_leaves = vec![[0x10; 32], [0x20; 32]];
     let join_leaves = vec![[0x30; 32]];
-    let parent_root = canonical_set_root(&parent_leaves).expect("parent root");
+    let parent_root = canonical_set_root(&parent_leaves)?;
     let revoked_since_root = [0u8; 32];
 
     let result = build_branch_b_artifacts(
@@ -135,15 +138,16 @@ fn test_build_branch_b_with_parent() {
         revoked_since_root,
     );
     assert!(result.is_ok(), "Should handle parent leaves");
+    Ok(())
 }
 
 #[test]
-fn test_srx_inputs_cbor_roundtrip() {
+fn test_srx_inputs_cbor_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     use msphf_core::merkle::canonical_set_root;
 
     let parent_leaves = vec![[0x10; 32]];
     let join_leaves = vec![[0x30; 32]];
-    let parent_root = canonical_set_root(&parent_leaves).expect("parent root");
+    let parent_root = canonical_set_root(&parent_leaves)?;
     let revoked_since_root = [0u8; 32];
 
     let (_witness, srx_owned) = build_branch_b_artifacts(
@@ -151,11 +155,11 @@ fn test_srx_inputs_cbor_roundtrip() {
         &join_leaves,
         parent_root,
         revoked_since_root,
-    )
-    .expect("build artifacts");
+    )?;
 
-    let bytes = srx_owned.to_cbor().expect("serialize");
-    let decoded = SrxInputsOwned::from_cbor(&bytes).expect("deserialize");
+    let bytes = srx_owned.to_cbor()?;
+    let decoded = SrxInputsOwned::from_cbor(&bytes)?;
 
     assert_eq!(decoded.join_leaf_ids, srx_owned.join_leaf_ids);
+    Ok(())
 }

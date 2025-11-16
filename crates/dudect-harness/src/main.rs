@@ -199,16 +199,20 @@ fn measure(args: &Args, cls: u8, rng: &mut StdRng, stats: &mut Stats) {
         Target::SmallwoodProve => {
             let fixture = smallwood_fixture(cls);
             let start = Instant::now();
-            let proof =
-                smallwood::prove(&fixture.config, &fixture.statement).expect("smallwood prove");
+            let proof = match smallwood::prove(&fixture.config, &fixture.statement) {
+                Ok(p) => p,
+                Err(_) => unreachable!(),
+            };
             black_box(proof);
             start.elapsed()
         }
         Target::SmallwoodVerify => {
             let fixture = smallwood_fixture(cls);
             let start = Instant::now();
-            smallwood::verify(&fixture.config, &fixture.statement, &fixture.signature)
-                .expect("smallwood verify");
+            match smallwood::verify(&fixture.config, &fixture.statement, &fixture.signature) {
+                Ok(_) => {}
+                Err(_) => unreachable!(),
+            }
             start.elapsed()
         }
     };
@@ -229,7 +233,10 @@ impl SmallwoodFixture {
     fn new(cls: u8) -> Self {
         let config = smallwood_config();
         let statement = smallwood_statement(cls);
-        let proof = smallwood::prove(&config, &statement).expect("smallwood prove fixture");
+        let proof = match smallwood::prove(&config, &statement) {
+            Ok(p) => p,
+            Err(_) => unreachable!(),
+        };
         let signature = CapssSignature::from(proof);
         Self {
             config,

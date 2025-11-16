@@ -12,7 +12,6 @@ use blake3::Hasher as Blake3Hasher;
 use rand::{CryptoRng, RngCore};
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 use sha2::{Digest, Sha512};
-use std::convert::TryInto;
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
 
@@ -121,7 +120,7 @@ impl VRF for LBVRF {
 
 impl LBVRF {
     pub fn paramgen_with_rng<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Result<Param> {
-        Ok(Param::init(rng))
+        Param::init(rng)
     }
 
     pub fn keygen_with_rng<R: RngCore + CryptoRng + ?Sized>(
@@ -190,7 +189,8 @@ pub(crate) fn hash_to_new_basis(input: &[u8]) -> [Poly32; 9] {
     hasher.update(input);
     hasher.update(b"domain seperator: hash to basis");
     let digest = hasher.finalize();
-    let seed: [u8; 32] = digest[0..32].try_into().expect("Wrong length");
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&digest[0..32]);
     let mut rng = ChaCha20Rng::from_seed(seed);
     let mut res = [Poly32::zero(); 9];
     for e in res.iter_mut() {

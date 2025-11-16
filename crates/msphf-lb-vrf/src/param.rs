@@ -1,3 +1,4 @@
+use crate::error::Result;
 use crate::poly::PolyArith;
 use crate::poly256::Poly256;
 use crate::serde::Serdes;
@@ -65,7 +66,7 @@ pub struct Param {
 }
 
 impl Param {
-    pub fn init<R: RngCore + CryptoRng + ?Sized>(mut rng: &mut R) -> Self {
+    pub fn init<R: RngCore + CryptoRng + ?Sized>(mut rng: &mut R) -> Result<Self> {
         let mut res = Self {
             matrix: [[Poly256::zero(); 9]; 4],
             digest: [0; 32],
@@ -74,8 +75,7 @@ impl Param {
         for e in res.matrix.iter_mut() {
             for f in e.iter_mut() {
                 *f = Poly256::uniform_random(&mut rng);
-                (*f).serialize(&mut buf)
-                    .expect("writing to Vec cannot fail");
+                (*f).serialize(&mut buf)?;
             }
         }
         let mut hasher = Sha512::new();
@@ -83,6 +83,6 @@ impl Param {
         let digest = hasher.finalize();
         res.digest.copy_from_slice(&digest[0..32]);
         buf.zeroize();
-        res
+        Ok(res)
     }
 }

@@ -131,9 +131,15 @@ mod tests {
     #[test]
     fn canonical_root_single_leaf() {
         let leaves = [leaf(1)];
-        let root = canonical_set_root(&leaves).expect("root");
+        let root = match canonical_set_root(&leaves) {
+            Ok(r) => r,
+            Err(_) => unreachable!("canonical_set_root should not fail for single leaf"),
+        };
         assert_eq!(root, leaves[0]);
-        let frontier = canonical_frontier(&leaves).expect("frontier");
+        let frontier = match canonical_frontier(&leaves) {
+            Ok(f) => f,
+            Err(_) => unreachable!("canonical_frontier should not fail for single leaf"),
+        };
         assert!(frontier.is_empty());
     }
 
@@ -141,11 +147,17 @@ mod tests {
     fn canonical_root_even_leaves() {
         let mut leaves = [leaf(1), leaf(2), leaf(3), leaf(4)];
         leaves.sort();
-        let root = canonical_set_root(&leaves).expect("root");
+        let root = match canonical_set_root(&leaves) {
+            Ok(r) => r,
+            Err(_) => unreachable!("canonical_set_root should not fail for even leaves"),
+        };
         let left = hash_node(&leaves[0], &leaves[1]);
         let right = hash_node(&leaves[2], &leaves[3]);
         assert_eq!(root, hash_node(&left, &right));
-        let frontier = canonical_frontier(&leaves).expect("frontier");
+        let frontier = match canonical_frontier(&leaves) {
+            Ok(f) => f,
+            Err(_) => unreachable!("canonical_frontier should not fail for even leaves"),
+        };
         assert!(frontier.is_empty());
     }
 
@@ -153,11 +165,17 @@ mod tests {
     fn canonical_root_odd_leaves() {
         let mut leaves = [leaf(1), leaf(2), leaf(3)];
         leaves.sort();
-        let root = canonical_set_root(&leaves).expect("canonical root");
+        let root = match canonical_set_root(&leaves) {
+            Ok(r) => r,
+            Err(_) => unreachable!("canonical_set_root should not fail for odd leaves"),
+        };
         let pair = hash_node(&leaves[0], &leaves[1]);
         let expected = hash_node(&pair, &leaves[2]);
         assert_eq!(root, expected);
-        let frontier = canonical_frontier(&leaves).expect("canonical frontier");
+        let frontier = match canonical_frontier(&leaves) {
+            Ok(f) => f,
+            Err(_) => unreachable!("canonical_frontier should not fail for odd leaves"),
+        };
         assert_eq!(frontier, vec![leaves[2]]);
     }
 

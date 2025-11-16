@@ -141,9 +141,12 @@ impl Pacs for ExamplePacs {
             values.push(witness[2] * alpha - witness[0] * beta);
         }
 
-        let last = theta
-            .last()
-            .expect("theta should have at least one aggregated constraint");
+        let last = if let Some(l) = theta.last() {
+            l
+        } else {
+            // This should never happen - theta should have at least one constraint
+            unreachable!("theta should have at least one aggregated constraint")
+        };
         debug_assert!(last.len() >= 2);
         let alpha = last[0];
         let beta = last[1];

@@ -112,8 +112,14 @@ proptest! {
     #[test]
     fn serialize_roundtrip(a in poly256_strategy()) {
         let mut buf = Vec::new();
-        a.serialize(&mut buf).expect("serialize poly256");
-        let decoded = Poly256::deserialize(&mut buf.as_slice()).expect("deserialize poly256");
+        match a.serialize(&mut buf) {
+            Ok(_) => {},
+            Err(_) => unreachable!("serialize poly256 should not fail"),
+        }
+        let decoded = match Poly256::deserialize(&mut buf.as_slice()) {
+            Ok(d) => d,
+            Err(_) => unreachable!("deserialize poly256 should not fail"),
+        };
         prop_assert_eq!(decoded.coeff, a.coeff);
     }
 }
@@ -139,12 +145,12 @@ fn test_poly256_inner_prod() {
 }
 
 #[test]
-fn test_poly256_serdes() {
+fn test_poly256_serdes() -> Result<(), Box<dyn std::error::Error>> {
     // zero poly
     let a = Poly256::zero();
     let mut buf: Vec<u8> = vec![];
     assert!(a.serialize(&mut buf).is_ok());
-    let b = Poly256::deserialize(&mut buf[..].as_ref()).expect("deserialize zero poly");
+    let b = Poly256::deserialize(&mut buf[..].as_ref())?;
     assert_eq!(a, b);
 
     // random poly
@@ -152,15 +158,16 @@ fn test_poly256_serdes() {
     let a: Poly256 = PolyArith::uniform_random(&mut rng);
     let mut buf: Vec<u8> = vec![];
     assert!(a.serialize(&mut buf).is_ok());
-    let b = Poly256::deserialize(&mut buf[..].as_ref()).expect("deserialize random poly");
+    let b = Poly256::deserialize(&mut buf[..].as_ref())?;
     assert_eq!(a, b);
 
     // trinary poly
     let a: Poly256 = PolyArith::rand_trinary(&mut rng);
     let mut buf: Vec<u8> = vec![];
     assert!(a.serialize(&mut buf).is_ok());
-    let b = Poly256::deserialize(&mut buf[..].as_ref()).expect("deserialize trinary poly");
+    let b = Poly256::deserialize(&mut buf[..].as_ref())?;
     assert_eq!(a, b);
+    Ok(())
 }
 
 #[test]

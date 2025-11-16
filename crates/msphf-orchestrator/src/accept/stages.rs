@@ -706,7 +706,7 @@ pub(super) fn ensure_kbroad_alg(header: &BTreeMap<u64, Value>) -> Result<(), Acc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::{Result, anyhow};
+    use anyhow::{Result, anyhow, bail};
     use pqcrypto_kyber::kyber768::ciphertext_bytes as ml_kem_ciphertext_bytes;
 
     fn base_header() -> BTreeMap<u64, Value> {
@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_join_payload_kbroad_accepts_well_formed_envelope() {
+    fn verify_join_payload_kbroad_accepts_well_formed_envelope() -> Result<()> {
         let mut header = base_header();
         let envelope = Value::Array(vec![
             Value::Text(KBROAD_MODE.to_string()),
@@ -731,8 +731,8 @@ mod tests {
             None,
             &[0u8; 32],
             &[0u8; 32],
-        )
-        .expect("envelope should be accepted");
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -747,14 +747,16 @@ mod tests {
         ]);
         header.insert(super::HDR_HP_BYTES, envelope);
 
-        let err = verify_join_payload_kbroad(
+        let err = match verify_join_payload_kbroad(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
             &[0u8; 32],
             &[0u8; 32],
-        )
-        .expect_err("expected failure");
+        ) {
+            Ok(_) => bail!("expected failure"),
+            Err(e) => e,
+        };
         let AcceptanceError::Freeze(code) = err else {
             return Err(anyhow!("unexpected error"));
         };
@@ -767,7 +769,10 @@ mod tests {
         let mut header = base_header();
         header.insert(super::HDR_HP_BYTES, Value::Bytes(vec![]));
 
-        let err = ensure_merge_join_keys_absent(&header).expect_err("join keys must be rejected");
+        let err = match ensure_merge_join_keys_absent(&header) {
+            Ok(_) => bail!("join keys must be rejected"),
+            Err(e) => e,
+        };
         let AcceptanceError::Freeze(code) = err else {
             return Err(anyhow!("unexpected error"));
         };
@@ -783,7 +788,10 @@ mod tests {
             Value::Integer(Integer::from(u64::from(TSWE_ALG_CODE) + 1)),
         );
 
-        let err = ensure_tswe_alg(&header).expect_err("wrong algorithm code should freeze");
+        let err = match ensure_tswe_alg(&header) {
+            Ok(_) => bail!("wrong algorithm code should freeze"),
+            Err(e) => e,
+        };
         let AcceptanceError::Freeze(code) = err else {
             return Err(anyhow!("unexpected error"));
         };
@@ -808,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_srx_relations_allows_absent_when_optional() {
+    fn ensure_srx_relations_allows_absent_when_optional() -> Result<()> {
         let header = base_header();
         let mut cache = VckCache::new(Duration::from_secs(60));
         ensure_srx_relations(
@@ -828,15 +836,15 @@ mod tests {
             AcceptInstant::from_ticks(0),
             &mut cache,
             &dummy_proofs(),
-        )
-        .expect("optional SRX should allow absence");
+        )?;
+        Ok(())
     }
 
     #[test]
     fn ensure_srx_relations_requires_payload_when_mandatory() -> Result<()> {
         let header = base_header();
         let mut cache = VckCache::new(Duration::from_secs(60));
-        let err = ensure_srx_relations(
+        let err = match ensure_srx_relations(
             &header,
             &[0u8; 32],
             &[0u8; 32],
@@ -853,8 +861,10 @@ mod tests {
             AcceptInstant::from_ticks(0),
             &mut cache,
             &dummy_proofs(),
-        )
-        .expect_err("required SRX should freeze when missing");
+        ) {
+            Ok(_) => bail!("required SRX should freeze when missing"),
+            Err(e) => e,
+        };
         let AcceptanceError::Freeze(code) = err else {
             return Err(anyhow!("unexpected error"));
         };
@@ -867,7 +877,7 @@ mod tests {
         let mut header = base_header();
         header.insert(super::HDR_SRX_HINT_COUNTS, Value::Bytes(Vec::new()));
         let mut cache = VckCache::new(Duration::from_secs(60));
-        let err = ensure_srx_relations(
+        let err = match ensure_srx_relations(
             &header,
             &[0u8; 32],
             &[0u8; 32],
@@ -884,8 +894,10 @@ mod tests {
             AcceptInstant::from_ticks(0),
             &mut cache,
             &dummy_proofs(),
-        )
-        .expect_err("orphaned hints should freeze");
+        ) {
+            Ok(_) => bail!("orphaned hints should freeze"),
+            Err(e) => e,
+        };
         let AcceptanceError::Freeze(code) = err else {
             return Err(anyhow!("unexpected error"));
         };

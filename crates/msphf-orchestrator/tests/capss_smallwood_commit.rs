@@ -6,24 +6,24 @@ fn bf(value: u64) -> BaseField {
 }
 
 #[test]
-fn hash_commit_roundtrip() {
+fn hash_commit_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let polynomials = vec![vec![bf(1), bf(2), bf(3)], vec![bf(4), bf(5)]];
     let salt = b"commit-roundtrip";
-    let (digest, state) = commit(salt, &polynomials).expect("commit");
+    let (digest, state) = commit(salt, &polynomials)?;
     let queries = vec![bf(2), bf(3)];
-    let (responses, proof) = open(&state, &[], &[], &[], &queries, b"").expect("open");
-    let recomputed = recompute_commitment(salt, &[], &[], &[], &queries, &responses, &proof, b"")
-        .expect("recompute");
+    let (responses, proof) = open(&state, &[], &[], &[], &queries, b"")?;
+    let recomputed = recompute_commitment(salt, &[], &[], &[], &queries, &responses, &proof, b"")?;
     assert_eq!(digest, recomputed);
+    Ok(())
 }
 
 #[test]
-fn recompute_commitment_catches_length_mismatch() {
+fn recompute_commitment_catches_length_mismatch() -> Result<(), Box<dyn std::error::Error>> {
     let polynomials = vec![vec![bf(1), bf(0)]];
-    let (_digest, state) = commit(b"salt", &polynomials).expect("commit");
+    let (_digest, state) = commit(b"salt", &polynomials)?;
     let queries = vec![bf(1), bf(2)];
-    let (responses, proof) = open(&state, &[], &[], &[], &queries, b"bind").expect("open");
-    let err = recompute_commitment(
+    let (responses, proof) = open(&state, &[], &[], &[], &queries, b"bind")?;
+    let err = match recompute_commitment(
         b"salt",
         &[],
         &[],
@@ -32,19 +32,22 @@ fn recompute_commitment_catches_length_mismatch() {
         &responses,
         &proof,
         b"bind",
-    )
-    .expect_err("length mismatch");
+    ) {
+        Err(e) => e,
+        Ok(_) => return Err("expected length mismatch error".into()),
+    };
     assert!(err.to_string().contains("length mismatch"));
+    Ok(())
 }
 
 #[test]
-fn recompute_commitment_detects_truncated_proof() {
+fn recompute_commitment_detects_truncated_proof() -> Result<(), Box<dyn std::error::Error>> {
     let polynomials = vec![vec![bf(5), bf(6)]];
-    let (_digest, state) = commit(b"salt", &polynomials).expect("commit");
+    let (_digest, state) = commit(b"salt", &polynomials)?;
     let queries = vec![bf(3)];
-    let (responses, proof) = open(&state, &[], &[], &[], &queries, b"bind").expect("open");
+    let (responses, proof) = open(&state, &[], &[], &[], &queries, b"bind")?;
     let truncated = &proof[..proof.len() - 1];
-    let err = recompute_commitment(
+    let err = match recompute_commitment(
         b"salt",
         &[],
         &[],
@@ -53,19 +56,22 @@ fn recompute_commitment_detects_truncated_proof() {
         &responses,
         truncated,
         b"bind",
-    )
-    .expect_err("truncated");
+    ) {
+        Err(e) => e,
+        Ok(_) => return Err("expected truncated proof error".into()),
+    };
     assert!(err.to_string().contains("truncated"));
+    Ok(())
 }
 
 #[test]
-fn recompute_commitment_detects_bad_evaluations() {
+fn recompute_commitment_detects_bad_evaluations() -> Result<(), Box<dyn std::error::Error>> {
     let polynomials = vec![vec![bf(1), bf(1)]]; // x + 1
-    let (_digest, state) = commit(b"salt", &polynomials).expect("commit");
+    let (_digest, state) = commit(b"salt", &polynomials)?;
     let queries = vec![bf(0)];
-    let (mut responses, proof) = open(&state, &[], &[], &[], &queries, b"bind").expect("open");
+    let (mut responses, proof) = open(&state, &[], &[], &[], &queries, b"bind")?;
     responses[0][0] += bf(1); // corrupt evaluation
-    let err = recompute_commitment(
+    let err = match recompute_commitment(
         b"salt",
         &[],
         &[],
@@ -74,20 +80,22 @@ fn recompute_commitment_detects_bad_evaluations() {
         &responses,
         &proof,
         b"bind",
-    )
-    .expect_err("evaluation mismatch");
+    ) {
+        Err(e) => e,
+        Ok(_) => return Err("expected evaluation mismatch error".into()),
+    };
     assert!(err.to_string().contains("evaluation mismatch"));
+    Ok(())
 }
 
 #[test]
-fn recompute_commitment_changes_with_binding() {
+fn recompute_commitment_changes_with_binding() -> Result<(), Box<dyn std::error::Error>> {
     let polynomials = vec![vec![bf(1), bf(1)]]; // x + 1
-    let (digest, state) = commit(b"salt", &polynomials).expect("commit");
+    let (digest, state) = commit(b"salt", &polynomials)?;
     let queries = vec![bf(2)];
-    let (responses, proof) = open(&state, &[], &[], &[], &queries, b"").expect("open");
+    let (responses, proof) = open(&state, &[], &[], &[], &queries, b"")?;
     let recomputed =
-        recompute_commitment(b"salt", &[], &[], &[], &queries, &responses, &proof, b"")
-            .expect("recompute");
+        recompute_commitment(b"salt", &[], &[], &[], &queries, &responses, &proof, b"")?;
     assert_eq!(digest, recomputed);
 
     let recomputed_with_binding = recompute_commitment(
@@ -99,7 +107,7 @@ fn recompute_commitment_changes_with_binding() {
         &responses,
         &proof,
         b"binding",
-    )
-    .expect("recompute alt binding");
+    )?;
     assert_ne!(digest, recomputed_with_binding);
+    Ok(())
 }

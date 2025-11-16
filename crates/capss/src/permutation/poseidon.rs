@@ -97,8 +97,8 @@ mod tests {
     use core::str::FromStr;
 
     #[test]
-    fn poseidon_width_three_sample() {
-        let perm = PoseidonPermutation::new(2).expect("params");
+    fn poseidon_width_three_sample() -> Result<(), Box<dyn std::error::Error>> {
+        let perm = PoseidonPermutation::new(2)?;
         assert_eq!(perm.width(), 3);
         let mut state = vec![
             FieldElement::from_base(BaseField::from(1u64)),
@@ -112,19 +112,24 @@ mod tests {
             "19484191902595336660794804167147433811406035260799267340256254867788422538388",
         ];
         for (elem, exp) in state.iter().zip(expected.iter()) {
-            assert_eq!(
-                elem.as_base(),
-                BaseField::from_str(exp).expect("BaseField::from_str")
-            );
+            let expected_val = match BaseField::from_str(exp) {
+                Ok(v) => v,
+                Err(_) => unreachable!(),
+            };
+            assert_eq!(elem.as_base(), expected_val);
         }
+        Ok(())
     }
 
     #[test]
     fn poseidon_rejects_unsupported_rate() {
-        let err = PoseidonPermutation::new(3).expect_err("rate 3 unsupported");
-        assert!(
-            err.to_string()
-                .contains("poseidon parameters currently only available for rate=2")
-        );
+        let result = PoseidonPermutation::new(3);
+        assert!(result.is_err(), "rate 3 unsupported");
+        if let Err(err) = result {
+            assert!(
+                err.to_string()
+                    .contains("poseidon parameters currently only available for rate=2")
+            );
+        }
     }
 }

@@ -50,7 +50,7 @@ fn write_output(output: &KatOutput, args: &Args) -> Result<(), MsphfError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::{Context, Result};
+    use anyhow::{Context, Result, anyhow};
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -102,7 +102,7 @@ mod tests {
             out: Some(out_path.clone()),
             pretty: false,
         };
-        run(args).expect("run succeeds");
+        run(args)?;
         let written = fs::read_to_string(&out_path)?;
         assert!(written.contains("\"cases\""));
 
@@ -120,7 +120,10 @@ mod tests {
             out: None,
             pretty: true,
         };
-        let err = run(args).expect_err("run should fail");
+        let err = match run(args) {
+            Err(e) => e,
+            Ok(_) => return Err(anyhow!("expected run to fail")),
+        };
         assert!(err.to_string().contains("serialization"));
         let _ = fs::remove_file(plan_path);
         Ok(())

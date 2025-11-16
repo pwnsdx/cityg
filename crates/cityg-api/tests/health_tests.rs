@@ -45,18 +45,20 @@ fn test_health_state_default() {
 }
 
 #[test]
-fn test_health_status_serialization() {
+fn test_health_status_serialization() -> Result<(), Box<dyn std::error::Error>> {
     use serde_json;
 
     let healthy = HealthStatus::Healthy;
-    let json = serde_json::to_string(&healthy).expect("serialize healthy status");
+    let json = serde_json::to_string(&healthy)?;
     assert_eq!(json, "\"healthy\"");
 
     let degraded = HealthStatus::Degraded;
-    let json = serde_json::to_string(&degraded).expect("serialize degraded status");
+    let json = serde_json::to_string(&degraded)?;
     assert_eq!(json, "\"degraded\"");
 
     let unhealthy = HealthStatus::Unhealthy;
-    let json = serde_json::to_string(&unhealthy).expect("serialize unhealthy status");
+    let json = serde_json::to_string(&unhealthy)?;
     assert_eq!(json, "\"unhealthy\"");
+
+    Ok(())
 }

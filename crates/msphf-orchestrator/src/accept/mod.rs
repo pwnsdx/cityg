@@ -391,6 +391,17 @@ pub enum AcceptanceError {
     Msphf(MsphfError),
 }
 
+impl std::fmt::Display for AcceptanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AcceptanceError::Freeze(code) => write!(f, "Freeze error: {:?}", code),
+            AcceptanceError::Msphf(err) => write!(f, "MSPHF error: {:?}", err),
+        }
+    }
+}
+
+impl std::error::Error for AcceptanceError {}
+
 impl From<MsphfError> for AcceptanceError {
     fn from(err: MsphfError) -> Self {
         match err {
@@ -2357,7 +2368,7 @@ mod tests {
     // Tests reuse deterministic fixtures across joins; we leak boxed data intentionally
     // to satisfy the `'static` lifetimes required by helper structs.
     #[test]
-    fn verify_device_chain_state_enforces_caps() {
+    fn verify_device_chain_state_enforces_caps() -> Result<(), Box<dyn std::error::Error>> {
         let mut ctx = AcceptanceContext::with_defaults();
         ctx.fs_caps.anchor_max = 5;
         ctx.fs_caps.first_device = 5;
@@ -2373,15 +2384,13 @@ mod tests {
                 fs_ec: 104,
                 prev_commit: &prev_commit,
             },
-        )
-        .expect("derive dev commit");
+        )?;
 
-        ctx.verify_device_chain_state(&pop_pk, 104, &prev_commit, &dev_commit, None)
-            .expect("new device within cap");
+        ctx.verify_device_chain_state(&pop_pk, 104, &prev_commit, &dev_commit, None)?;
 
-        let err = ctx
-            .verify_device_chain_state(&pop_pk, 107, &prev_commit, &dev_commit, None)
-            .expect_err("should freeze");
+        let result = ctx.verify_device_chain_state(&pop_pk, 107, &prev_commit, &dev_commit, None);
+        assert!(result.is_err(), "should freeze");
+        let err = result.unwrap_err();
         assert!(matches!(
             err,
             AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_GROUP)
@@ -2400,25 +2409,25 @@ mod tests {
                 fs_ec: 114,
                 prev_commit: &prev_existing,
             },
-        )
-        .expect("derive existing dev commit");
-        let err = ctx
-            .verify_device_chain_state(
-                &pop_pk,
-                114,
-                &prev_existing,
-                &dev_commit_existing,
-                Some(&existing),
-            )
-            .expect_err("device max exceeded");
+        )?;
+        let result = ctx.verify_device_chain_state(
+            &pop_pk,
+            114,
+            &prev_existing,
+            &dev_commit_existing,
+            Some(&existing),
+        );
+        assert!(result.is_err(), "device max exceeded");
+        let err = result.unwrap_err();
         assert!(matches!(
             err,
             AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_DEVICE)
         ));
+        Ok(())
     }
 
     #[test]
-    fn validate_anchor_pool_unsorted_triggers_freeze() {
+    fn validate_anchor_pool_unsorted_triggers_freeze() -> Result<(), Box<dyn std::error::Error>> {
         let witness_a = RawMembershipWitness {
             leaf_id: vec![0x10; 32],
             root: vec![0x00; 32],
@@ -2431,30 +2440,35 @@ mod tests {
         };
 
         let unsorted = vec![witness_a.clone(), witness_b.clone()];
-        let err = validate_anchor_pool(&unsorted).expect_err("unsorted pool should fail");
+        let result = validate_anchor_pool(&unsorted);
+        assert!(result.is_err(), "unsorted pool should fail");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_ANCHOR_POOL_UNSORTED),
             other => panic!("unexpected error: {other:?}"),
         }
 
         let sorted = vec![witness_b, witness_a];
-        validate_anchor_pool(&sorted).expect("sorted pool ok");
+        validate_anchor_pool(&sorted)?;
+        Ok(())
     }
 
     #[test]
-    fn validate_anchor_reference_oob_triggers_freeze() {
+    fn validate_anchor_reference_oob_triggers_freeze() -> Result<(), Box<dyn std::error::Error>> {
         let root = [0xAA; 32];
         let bound = vec![0xBB; 32];
-        let err = validate_anchor_reference(&[], &root, Some(&bound), Some(0))
-            .expect_err("oob reference should freeze");
+        let result = validate_anchor_reference(&[], &root, Some(&bound), Some(0));
+        assert!(result.is_err(), "oob reference should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_ANCHOR_OOB),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn verify_anchored_adjacency_mismatch_freezes() {
+    fn verify_anchored_adjacency_mismatch_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let entry = ValidatedNonMembership {
             query: [0x20; 32],
             root: [0xAA; 32],
@@ -2467,16 +2481,19 @@ mod tests {
             root: [0xAA; 32],
             path: Vec::new(),
         };
-        let err = verify_anchored_adjacency(&entry, Some(&left_anchor), None)
-            .expect_err("mismatched left anchor should freeze");
+        let result = verify_anchored_adjacency(&entry, Some(&left_anchor), None);
+        assert!(result.is_err(), "mismatched left anchor should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_NONMEM_ADJ_INCOHERENT),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn verify_anchored_adjacency_extreme_right_enforces_path() {
+    fn verify_anchored_adjacency_extreme_right_enforces_path()
+    -> Result<(), Box<dyn std::error::Error>> {
         let path_bad = vec![(1u8, [0x11; 32])];
         let right_anchor = ValidatedMembership {
             leaf_id: [0x40; 32],
@@ -2490,8 +2507,9 @@ mod tests {
             right: Some([0x40; 32]),
             path: path_bad.clone(),
         };
-        let err = verify_anchored_adjacency(&entry_bad, None, Some(&right_anchor))
-            .expect_err("non-zero dirs should fail");
+        let result = verify_anchored_adjacency(&entry_bad, None, Some(&right_anchor));
+        assert!(result.is_err(), "non-zero dirs should fail");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_NONMEM_ADJ_INCOHERENT),
             other => panic!("unexpected error: {other:?}"),
@@ -2510,12 +2528,13 @@ mod tests {
             right: Some([0x41; 32]),
             path: path_ok.clone(),
         };
-        verify_anchored_adjacency(&entry_ok, None, Some(&right_anchor_ok))
-            .expect("expected success");
+        verify_anchored_adjacency(&entry_ok, None, Some(&right_anchor_ok))?;
+        Ok(())
     }
 
     #[test]
-    fn verify_anchored_adjacency_extreme_left_enforces_path() {
+    fn verify_anchored_adjacency_extreme_left_enforces_path()
+    -> Result<(), Box<dyn std::error::Error>> {
         let path_bad = vec![(0u8, [0x33; 32])];
         let left_anchor = ValidatedMembership {
             leaf_id: [0x20; 32],
@@ -2529,8 +2548,9 @@ mod tests {
             right: None,
             path: path_bad.clone(),
         };
-        let err = verify_anchored_adjacency(&entry_bad, Some(&left_anchor), None)
-            .expect_err("non-one dirs should fail");
+        let result = verify_anchored_adjacency(&entry_bad, Some(&left_anchor), None);
+        assert!(result.is_err(), "non-one dirs should fail");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_NONMEM_ADJ_INCOHERENT),
             other => panic!("unexpected error: {other:?}"),
@@ -2549,12 +2569,12 @@ mod tests {
             right: None,
             path: path_ok.clone(),
         };
-        verify_anchored_adjacency(&entry_ok, Some(&left_anchor_ok), None)
-            .expect("expected success");
+        verify_anchored_adjacency(&entry_ok, Some(&left_anchor_ok), None)?;
+        Ok(())
     }
 
     #[test]
-    fn vck_cache_hits_and_skips_reverification_for_hp() {
+    fn vck_cache_hits_and_skips_reverification_for_hp() -> Result<(), Box<dyn std::error::Error>> {
         let (_, proof) = sample_hp_inputs();
         let mut cache = VckCache::new(Duration::from_secs(10));
         let key = [0x11; 32];
@@ -2562,10 +2582,11 @@ mod tests {
         assert!(cache.should_verify_hp(key, &proof, now));
         cache.record_hp(key, &proof, now);
         assert!(!cache.should_verify_hp(key, &proof, now));
+        Ok(())
     }
 
     #[test]
-    fn vck_cache_expires_hp_entries() {
+    fn vck_cache_expires_hp_entries() -> Result<(), Box<dyn std::error::Error>> {
         let (_, proof) = sample_hp_inputs();
         let mut cache = VckCache::new(Duration::from_secs(1));
         let key = [0x22; 32];
@@ -2574,10 +2595,11 @@ mod tests {
         cache.record_hp(key, &proof, start);
         let later = AcceptInstant::from_ticks(2);
         assert!(cache.should_verify_hp(key, &proof, later));
+        Ok(())
     }
 
     #[test]
-    fn vck_cache_detects_mutated_hp_proof() {
+    fn vck_cache_detects_mutated_hp_proof() -> Result<(), Box<dyn std::error::Error>> {
         let (_, proof) = sample_hp_inputs();
         let mut cache = VckCache::new(Duration::from_secs(10));
         let key = [0x33; 32];
@@ -2585,19 +2607,20 @@ mod tests {
         assert!(cache.should_verify_hp(key, &proof, now));
         cache.record_hp(key, &proof, now);
 
-        let mut proof_bytes = proof_to_cbor(&proof).unwrap();
+        let mut proof_bytes = proof_to_cbor(&proof)?;
         if let Some(last) = proof_bytes.last_mut() {
             *last ^= 0x55;
         }
-        let tampered: HpProof = de::from_reader(proof_bytes.as_slice()).unwrap();
+        let tampered: HpProof = de::from_reader(proof_bytes.as_slice())?;
 
         assert!(cache.should_verify_hp(key, &tampered, now));
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_enqueues_head() {
+    fn accept_anchor_enqueues_head() -> Result<(), Box<dyn std::error::Error>> {
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, sample_parts(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, sample_parts(), params(), None, None)?;
         let parts = sample_parts();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, expected_weid) =
@@ -2608,16 +2631,16 @@ mod tests {
         configure_bootstrap(&mut ctx);
 
         seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
-        let outcome = accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .unwrap_or_else(|err| panic!("accept failed: {err:?}"));
+        let outcome = accept_with_header(&mut ctx, &parts, &header_with_pop)?;
 
         assert!(matches!(outcome.kind, AcceptanceKind::NonMerge));
         assert_eq!(ctx.active_heads(&outcome.wid), 1);
         assert_eq!(outcome.we_epoch_id, expected_weid);
+        Ok(())
     }
 
     #[test]
-    fn window_full_triggers_freeze() {
+    fn window_full_triggers_freeze() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let mut header_a = sample_header();
         header_a.insert(11, Value::Integer(Integer::from(0u8)));
@@ -2633,8 +2656,8 @@ mod tests {
         params_a.pop_keys = Some(pop_keypair);
         let mut params_b = params();
         params_b.pop_keys = Some(pop_keypair_clone);
-        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params_a, None, None).unwrap();
-        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params_b, None, None).unwrap();
+        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params_a, None, None)?;
+        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params_b, None, None)?;
         let (pop_pk, pop_sk) = pop_keys_static();
         let (header_a, _, header_a_fs_witness) =
             header_ready_with_pop(&joiner_a, &parts, pop_pk, pop_sk);
@@ -2644,15 +2667,14 @@ mod tests {
         configure_bootstrap(&mut ctx);
 
         seed_capss_with(&mut ctx, &header_a_fs_witness);
-        let outcome_a =
-            accept_with_header(&mut ctx, &parts, &header_a).expect("first head accepted");
+        let outcome_a = accept_with_header(&mut ctx, &parts, &header_a)?;
 
         ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
         seed_capss_with(&mut ctx, &header_b_fs_witness);
-        let weid_b = super::compute_we_epoch_id_from_header(&parts, &header_b).unwrap();
-        let err = ctx
-            .accept_anchor(&parts, weid_b, &header_b)
-            .expect_err("second head should freeze");
+        let weid_b = super::compute_we_epoch_id_from_header(&parts, &header_b)?;
+        let result = ctx.accept_anchor(&parts, weid_b, &header_b);
+        assert!(result.is_err(), "second head should freeze");
+        let err = result.unwrap_err();
 
         let window_froze = matches!(
             err,
@@ -2669,9 +2691,10 @@ mod tests {
 
         let telemetry_key = TelemetryKey::from_parts(parts.gid, parts.parent_root);
         let snapshot = ctx.telemetry_snapshot();
-        let counters = snapshot
-            .get(&telemetry_key)
-            .expect("telemetry entry for window-full scenario");
+        let counters = match snapshot.get(&telemetry_key) {
+            Some(v) => v,
+            None => unreachable!("telemetry entry for window-full scenario"),
+        };
         assert_eq!(counters.head_attempts, 2);
         assert_eq!(counters.head_insertions, 1);
         if window_froze {
@@ -2680,10 +2703,11 @@ mod tests {
         }
         assert_eq!(ctx.active_heads(&outcome_a.wid), 1);
         assert_eq!(counters.last_active_heads, 1);
+        Ok(())
     }
 
     #[test]
-    fn merge_h_max_exceeded_freezes() {
+    fn merge_h_max_exceeded_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let mut ctx =
             AcceptanceContext::with_options(1, DEFAULT_T_WINDOW, AcceptanceOptions::default());
         let parent_root = [0u8; 32];
@@ -2693,17 +2717,18 @@ mod tests {
             [0xAA; 32], [0xBB; 32], [0xCC; 32], [0xDD; 32], [0xEE; 32], [0x12; 32], [0x01; 32],
             [0x02; 32], [0x03; 32], 0, now,
         );
-        let err = ctx
-            .accept_merge(&parent_root, &parent_root, &mh_heads, record, now)
-            .expect_err("merge above H_max should freeze");
+        let result = ctx.accept_merge(&parent_root, &parent_root, &mh_heads, record, now);
+        assert!(result.is_err(), "merge above H_max should freeze");
+        let err = result.unwrap_err();
         assert_eq!(err, FreezeError::WINDOW_FULL);
+        Ok(())
     }
 
     #[test]
-    fn rho_commit_reuse_freezes() {
+    fn rho_commit_reuse_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (mut header_with_pop, _) =
             header_with_pop_and_weid(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
         let header_with_pop_fs_witness =
@@ -2712,12 +2737,13 @@ mod tests {
         configure_bootstrap(&mut ctx);
 
         seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
-        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
 
         ctx.clear_device_chains();
         seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
-        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect_err("rho reuse should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "rho reuse should freeze");
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_RHO_PARITY),
@@ -2726,25 +2752,27 @@ mod tests {
 
         let telemetry_key = TelemetryKey::from_parts(parts.gid, parts.parent_root);
         let snapshot = ctx.telemetry_snapshot();
-        let counters = snapshot
-            .get(&telemetry_key)
-            .expect("telemetry entry for rho replay");
+        let counters = match snapshot.get(&telemetry_key) {
+            Some(v) => v,
+            None => unreachable!("telemetry entry for rho replay"),
+        };
         assert_eq!(counters.head_attempts, 2);
         assert_eq!(counters.head_insertions, 1);
         assert_eq!(counters.freeze_rho_replay, 1);
         assert_eq!(counters.freeze_window_full, 0);
         assert_eq!(counters.last_active_heads, 1);
+        Ok(())
     }
 
     #[test]
-    fn device_chain_prev_commit_mismatch_freezes() {
+    fn device_chain_prev_commit_mismatch_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, params_a, joiner_a) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (header_a, _, witness_a) = header_ready_with_pop(&joiner_a, &parts, &pop_pk, &pop_sk);
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &witness_a);
-        accept_with_header(&mut ctx, &parts, &header_a).expect("first join accepted");
+        accept_with_header(&mut ctx, &parts, &header_a)?;
 
         let prev_commit = header_bytes32(&header_a, HDR_FS_DEV_COMMIT);
 
@@ -2753,7 +2781,7 @@ mod tests {
         params_b.fs_join.fs_dev_prev_commit = prev_commit;
 
         let header_seed_b = sample_header();
-        let joiner_b = joiner_kgen_or(header_seed_b, parts.clone(), params_b, None, None).unwrap();
+        let joiner_b = joiner_kgen_or(header_seed_b, parts.clone(), params_b, None, None)?;
         let (mut header_b, _, witness_b) =
             header_ready_with_pop(&joiner_b, &parts, &pop_pk, &pop_sk);
         header_b.insert(HDR_FS_DEV_PREV_COMMIT, Value::Bytes(vec![0u8; 32]));
@@ -2761,16 +2789,19 @@ mod tests {
 
         ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
         seed_capss_with(&mut ctx, &witness_b);
-        let err = accept_with_header(&mut ctx, &parts, &header_b)
-            .expect_err("device chain mismatch should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_b);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "device chain mismatch should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_FS_DEV_CHAIN_BREAK),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn annex_m_report_accumulates_counters() {
+    fn annex_m_report_accumulates_counters() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let mut header_with_pop = joiner.header_map.clone();
         let header_with_pop_fs_witness =
@@ -2779,12 +2810,12 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
-        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
 
         ctx.clear_device_chains();
         seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
-        accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect_err("rho reuse should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "rho reuse should freeze");
 
         let report = ctx.annex_m_report();
         assert_eq!(report.rows.len(), 1);
@@ -2800,10 +2831,11 @@ mod tests {
         assert_eq!(row.freeze_window_full, 0);
         assert_eq!(row.last_active_heads, 1);
         assert_eq!(row.gid.as_slice(), parts.gid);
+        Ok(())
     }
 
     #[test]
-    fn telemetry_report_sorted_by_gid_and_parent() {
+    fn telemetry_report_sorted_by_gid_and_parent() -> Result<(), Box<dyn std::error::Error>> {
         let mut ctx = AcceptanceContext::with_defaults();
         let parent_a1 = [0x0A; 32];
         let parent_a2 = [0x0B; 32];
@@ -2824,10 +2856,11 @@ mod tests {
         assert_eq!(report[0].0.parent_root, parent_a1);
         assert_eq!(report[1].0.parent_root, parent_a2);
         assert_eq!(report[2].0.gid.as_slice(), b"bbb");
+        Ok(())
     }
 
     #[test]
-    fn annex_m_report_totals_match_rows() {
+    fn annex_m_report_totals_match_rows() -> Result<(), Box<dyn std::error::Error>> {
         let mut ctx = AcceptanceContext::with_defaults();
         let parent = [0x22; 32];
         let key = ctx.telemetry_record_attempt(b"gid", &parent);
@@ -2844,10 +2877,11 @@ mod tests {
         let row = &report.rows[0];
         assert_eq!(row.freeze_rho_replay, 1);
         assert_eq!(row.freeze_window_full, 1);
+        Ok(())
     }
 
     #[test]
-    fn set_h_max_propagates_to_window() {
+    fn set_h_max_propagates_to_window() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let mut header_a = sample_header();
         header_a.insert(11, Value::Integer(Integer::from(0u8)));
@@ -2863,8 +2897,8 @@ mod tests {
         params_a.pop_keys = Some(pop_keypair);
         let mut params_b = params();
         params_b.pop_keys = Some(pop_keypair_clone);
-        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params_a, None, None).unwrap();
-        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params_b, None, None).unwrap();
+        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params_a, None, None)?;
+        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params_b, None, None)?;
         let (pop_pk, pop_sk) = pop_keys_static();
         let (mut header_a, _) = header_with_pop_and_weid(&joiner_a, &parts, pop_pk, pop_sk);
         let header_a_fs_witness = prepare_header_for_acceptance(&mut header_a, &parts, &joiner_a);
@@ -2875,15 +2909,15 @@ mod tests {
         ctx.set_h_max(1);
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &header_a_fs_witness);
-        let outcome_a = accept_with_header(&mut ctx, &parts, &header_a).unwrap();
+        let outcome_a = accept_with_header(&mut ctx, &parts, &header_a)?;
 
         ctx.clear_device_chains();
         ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
         seed_capss_with(&mut ctx, &header_b_fs_witness);
-        let weid_b = super::compute_we_epoch_id_from_header(&parts, &header_b).unwrap();
-        let err = ctx
-            .accept_anchor(&parts, weid_b, &header_b)
-            .expect_err("second head should hit h_max");
+        let weid_b = super::compute_we_epoch_id_from_header(&parts, &header_b)?;
+        let result = ctx.accept_anchor(&parts, weid_b, &header_b);
+        assert!(result.is_err(), "second head should hit h_max");
+        let err = result.unwrap_err();
         let window_froze = matches!(
             err,
             AcceptanceError::Freeze(code) if code == FreezeError::WINDOW_FULL
@@ -2899,42 +2933,45 @@ mod tests {
         if window_froze {
             assert_eq!(ctx.active_heads(&outcome_a.wid), 1);
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_requires_tswe_alg() {
+    fn accept_anchor_requires_tswe_alg() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut missing, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         missing.remove(&HDR_TSWE_ALG);
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_from_joiner(&mut ctx, &joiner);
-        let err = accept_with_header(&mut ctx, &parts, &missing)
-            .expect_err("missing tswe_alg must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &missing);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "missing tswe_alg must freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_TSWE_ALG_INVALID),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_requires_merkle_suite() {
+    fn accept_anchor_requires_merkle_suite() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
-        let original_pub = tampered
-            .get(&HDR_KBROAD_PUB)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) => Some(bytes.clone()),
-                _ => None,
-            })
-            .expect("kbroad_pub present");
+        let original_pub = match tampered.get(&HDR_KBROAD_PUB) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            Some(_) => unreachable!("kbroad_pub should be bytes"),
+            None => unreachable!("kbroad_pub present"),
+        };
         tampered.insert(HDR_MERKLE_SUITE, Value::Text("wrong-suite".to_string()));
         let mut registry = BTreeMap::new();
         registry.insert(parts.gid.to_vec(), original_pub);
@@ -2945,59 +2982,64 @@ mod tests {
         let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
         configure_bootstrap(&mut ctx);
         seed_capss_from_joiner(&mut ctx, &joiner);
-        let err = accept_with_header(&mut ctx, &parts, &tampered)
-            .expect_err("suite mismatch must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "suite mismatch must freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MERKLE_SUITE_INVALID),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_requires_kbroad_alg() {
+    fn accept_anchor_requires_kbroad_alg() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         tampered.insert(HDR_KBROAD_ALG, Value::Text("ml-kem-512".to_string()));
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_from_joiner(&mut ctx, &joiner);
-        let err = accept_with_header(&mut ctx, &parts, &tampered)
-            .expect_err("kbroad alg mismatch must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "kbroad alg mismatch must freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_KBROAD_ALG_INVALID),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_requires_kbroad_pub_binding() {
+    fn accept_anchor_requires_kbroad_pub_binding() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
-        let original_pub = tampered
-            .get(&HDR_KBROAD_PUB)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) => Some(bytes.clone()),
-                _ => None,
-            })
-            .expect("kbroad_pub present");
-        let Value::Bytes(pub_bytes) = tampered
-            .get_mut(&HDR_KBROAD_PUB)
-            .expect("kbroad_pub present")
-        else {
-            panic!("kbroad_pub not bytes");
+        let original_pub = match tampered.get(&HDR_KBROAD_PUB) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            Some(_) => unreachable!("kbroad_pub should be bytes"),
+            None => unreachable!("kbroad_pub present"),
+        };
+        let pub_bytes = match tampered.get_mut(&HDR_KBROAD_PUB) {
+            Some(Value::Bytes(bytes)) => bytes,
+            Some(_) => panic!("kbroad_pub not bytes"),
+            None => unreachable!("kbroad_pub present"),
         };
         pub_bytes[0] ^= 0xFF;
 
-        let anchor_seed_ctx = build_anchor_seed_ctx(&tampered).expect("seed ctx");
-        let seed_ctx_hash = compute_seed_ctx_hash(&anchor_seed_ctx).expect("seed ctx hash");
+        let anchor_seed_ctx = build_anchor_seed_ctx(&tampered)?;
+        let seed_ctx_hash = compute_seed_ctx_hash(&anchor_seed_ctx)?;
         tampered.insert(HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
@@ -3007,8 +3049,7 @@ mod tests {
             parts.gid,
             parts.cat,
             &parent_root_arr,
-        )
-        .expect("seed bundle");
+        )?;
         tampered.insert(HDR_SEED_BUNDLE_COMMIT, Value::Bytes(seed_bundle.to_vec()));
         attach_bootstrap_only(&mut tampered, &parts, &joiner);
 
@@ -3021,23 +3062,29 @@ mod tests {
         let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
         configure_bootstrap(&mut ctx);
         seed_capss_from_joiner(&mut ctx, &joiner);
-        let err = accept_with_header(&mut ctx, &parts, &tampered)
-            .expect_err("kbroad pub mismatch must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "kbroad pub mismatch must freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_KBROAD_PARENT_MISMATCH),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_parent_envelope_freezes() {
+    fn accept_anchor_parent_envelope_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
 
-        let Value::Array(items) = header.get_mut(&HDR_HP_BYTES).expect("hp envelope present")
-        else {
+        let Value::Array(items) = (match header.get_mut(&HDR_HP_BYTES) {
+            Some(v) => v,
+            None => unreachable!("hp bytes expected"),
+        }) else {
             panic!("hp envelope not array");
         };
         if let Some(mode) = items.get_mut(0) {
@@ -3050,16 +3097,19 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err = accept_with_header(&mut ctx, &parts, &header)
-            .expect_err("non-kbroad envelope must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "non-kbroad envelope must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_PARENT_EID_FORBIDDEN),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_rejects_kbroad_length_mismatches() {
+    fn accept_anchor_rejects_kbroad_length_mismatches() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (base_header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
@@ -3069,9 +3119,10 @@ mod tests {
         let scenarios = ["ct", "wrap", "c_hp"];
         for scenario in scenarios {
             let mut header = base_header.clone();
-            let Value::Array(items) = header.get_mut(&HDR_HP_BYTES).expect("hp envelope present")
-            else {
-                panic!("hp envelope not array");
+            let items = match header.get_mut(&HDR_HP_BYTES) {
+                Some(Value::Array(items)) => items,
+                Some(_) => panic!("hp envelope not array"),
+                None => unreachable!("hp envelope expected"),
             };
             match scenario {
                 "ct" => {
@@ -3097,8 +3148,10 @@ mod tests {
             let mut ctx = AcceptanceContext::with_defaults();
             configure_bootstrap(&mut ctx);
             seed_capss_with(&mut ctx, &fs_witness);
-            let err = accept_with_header(&mut ctx, &parts, &header)
-                .expect_err("kbroad length mismatch must freeze");
+            let result = accept_with_header(&mut ctx, &parts, &header);
+            assert!(result.is_err(), "error expected");
+            assert!(result.is_err(), "kbroad length mismatch must freeze");
+            let err = result.unwrap_err();
             match err {
                 AcceptanceError::Freeze(code) => {
                     assert_eq!(code, FREEZE_KBROAD_PARENT_MISMATCH)
@@ -3106,18 +3159,19 @@ mod tests {
                 other => panic!("unexpected error: {other:?}"),
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn joiner_merge_rejects_mixed_parity_domains() {
+    fn joiner_merge_rejects_mixed_parity_domains() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let params = params();
         let mut header_a = sample_header();
         header_a.insert(20, Value::Bytes(vec![0xAA]));
         let mut header_b = sample_header();
         header_b.insert(20, Value::Bytes(vec![0xAB]));
-        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params.clone(), None, None).unwrap();
-        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params.clone(), None, None).unwrap();
+        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params.clone(), None, None)?;
+        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params.clone(), None, None)?;
         let (pop_pk_a, pop_sk_a) = sample_pop_keys();
         let (header_a, _, header_a_fs_witness) =
             header_ready_with_pop(&joiner_a, &parts, &pop_pk_a, &pop_sk_a);
@@ -3128,19 +3182,19 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &header_a_fs_witness);
-        accept_with_header(&mut ctx, &parts, &header_a).expect("first head accepted");
+        accept_with_header(&mut ctx, &parts, &header_a)?;
         ctx.clear_device_chains();
         ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
         seed_capss_with(&mut ctx, &header_b_fs_witness);
-        accept_with_header(&mut ctx, &parts, &header_b).expect("second head accepted");
+        accept_with_header(&mut ctx, &parts, &header_b)?;
 
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
         let parities = ctx.pivot_parities_for(parts.gid, &parent_root_arr);
-        let pivot = parities
-            .first()
-            .cloned()
-            .expect("expected at least one parity");
+        let pivot = match parities.first().cloned() {
+            Some(v) => v,
+            None => unreachable!("pivot expected"),
+        };
         let mut sibling = pivot.clone();
         sibling.we_epoch_id[0] ^= 0x01;
         sibling.accept_seq = sibling.accept_seq.wrapping_add(1);
@@ -3149,15 +3203,16 @@ mod tests {
         mismatched[0].parent_root[0] ^= 0x01;
         let mut merge_header = sample_header();
         merge_header.insert(20, Value::Bytes(vec![0xAC]));
-        let err = joiner_kgen_merge_or(
+        let result = joiner_kgen_merge_or(
             merge_header,
             &mismatched,
             None,
             parts.clone(),
             params.clone(),
             None,
-        )
-        .expect_err("mixed parent_root should error");
+        );
+        assert!(result.is_err(), "mixed parent_root should error");
+        let err = result.unwrap_err();
         match err {
             MsphfError::InvalidInput(msg) => assert_eq!(msg, "merge parity mismatch"),
             other => panic!("unexpected error: {other:?}"),
@@ -3167,20 +3222,23 @@ mod tests {
         mismatched[0].gid[0] ^= 0x01;
         let mut merge_header = sample_header();
         merge_header.insert(20, Value::Bytes(vec![0xAD]));
-        let err =
-            joiner_kgen_merge_or(merge_header, &mismatched, None, parts.clone(), params, None)
-                .expect_err("mixed gid should error");
+        let result =
+            joiner_kgen_merge_or(merge_header, &mismatched, None, parts.clone(), params, None);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "mixed gid should error");
+        let err = result.unwrap_err();
         match err {
             MsphfError::InvalidInput(msg) => assert_eq!(msg, "merge parity mismatch"),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_rejects_policy_kbroad_mismatch() {
+    fn accept_anchor_rejects_policy_kbroad_mismatch() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let mut header_with_pop = joiner.header_map.clone();
         let fs_witness = prepare_header_for_acceptance(&mut header_with_pop, &parts, &joiner);
 
@@ -3195,19 +3253,22 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect_err("policy kbroad mismatch must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "policy kbroad mismatch must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_KBROAD_PARENT_MISMATCH),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_honors_policy_kbroad_match() {
+    fn accept_anchor_honors_policy_kbroad_match() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (header_with_pop, _, fs_witness) =
             header_ready_with_pop(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
 
@@ -3227,20 +3288,20 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect("policy-aligned kbroad pub should be accepted");
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
+        Ok(())
     }
 
     #[test]
-    fn merge_parity_tamper_freezes() {
+    fn merge_parity_tamper_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let params = params();
         let mut header_a = sample_header();
         header_a.insert(20, Value::Bytes(vec![0xAA]));
         let mut header_b = sample_header();
         header_b.insert(20, Value::Bytes(vec![0xAB]));
-        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params.clone(), None, None).unwrap();
-        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params.clone(), None, None).unwrap();
+        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params.clone(), None, None)?;
+        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params.clone(), None, None)?;
         let (pop_pk_a, pop_sk_a) = sample_pop_keys();
         let (header_a, _, witness_a) =
             header_ready_with_pop(&joiner_a, &parts, &pop_pk_a, &pop_sk_a);
@@ -3251,11 +3312,11 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &witness_a);
-        accept_with_header(&mut ctx, &parts, &header_a).expect("first head accepted");
+        accept_with_header(&mut ctx, &parts, &header_a)?;
         ctx.clear_device_chains();
         ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
         seed_capss_with(&mut ctx, &witness_b);
-        accept_with_header(&mut ctx, &parts, &header_b).expect("second head accepted");
+        accept_with_header(&mut ctx, &parts, &header_b)?;
 
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
@@ -3264,26 +3325,31 @@ mod tests {
         parities[1].parent_root[0] ^= 0x01;
         let mut merge_header_src = sample_header();
         merge_header_src.insert(20, Value::Bytes(vec![0xAC]));
-        let err = joiner_kgen_merge_or(
+        let result = joiner_kgen_merge_or(
             merge_header_src,
             &parities,
             None,
             parts.clone(),
             params.clone(),
             None,
-        )
-        .expect_err("merge builder must reject mixed parity domain");
+        );
+        assert!(
+            result.is_err(),
+            "merge builder must reject mixed parity domain"
+        );
+        let err = result.unwrap_err();
         match err {
             MsphfError::InvalidInput(msg) => assert_eq!(msg, "merge parity mismatch"),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_requires_srx() {
+    fn accept_anchor_requires_srx() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut missing, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         missing.remove(&HDR_SRX_MODE);
@@ -3301,8 +3367,7 @@ mod tests {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             other => panic!("missing fs_capss: {other:?}"),
         };
-        let proofs_commit = compute_proofs_commit_bytes(&vrf_pi, &fs_capss, None, None)
-            .expect("recompute proofs commit");
+        let proofs_commit = compute_proofs_commit_bytes(&vrf_pi, &fs_capss, None, None)?;
         missing.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
         refresh_seed_ctx_hash(&mut missing);
         refresh_seed_bindings(&mut missing, &parts, &joiner);
@@ -3311,8 +3376,7 @@ mod tests {
         ensure_bootstrap_fields(&mut missing, &parts, &joiner);
 
         let empty = BTreeSet::new();
-        let proofs =
-            stages::ensure_proofs(&missing, None, &empty, None, &empty).expect("proofs artifacts");
+        let proofs = stages::ensure_proofs(&missing, None, &empty, None, &empty)?;
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
         let mut join_root_arr = [0u8; 32];
@@ -3322,7 +3386,7 @@ mod tests {
         let mut revoked_root_arr = [0u8; 32];
         revoked_root_arr.copy_from_slice(parts.revoked_root);
         let mut cache = cache::VckCache::new(Duration::from_secs(60));
-        let err = stages::ensure_srx_relations(
+        let result = stages::ensure_srx_relations(
             &missing,
             &parent_root_arr,
             &join_root_arr,
@@ -3339,59 +3403,68 @@ mod tests {
             AcceptInstant::from_ticks(0),
             &mut cache,
             &proofs,
-        )
-        .expect_err("missing SRX must freeze");
+        );
+        assert!(result.is_err(), "missing SRX must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_REQUIRED),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_requires_params_id() {
+    fn accept_anchor_requires_params_id() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut missing, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         missing.remove(&HDR_PARAMS_ID);
         refresh_seed_ctx_hash(&mut missing);
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
-        let err = accept_with_header(&mut ctx, &parts, &missing)
-            .expect_err("missing params id must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &missing);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "missing params id must freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_PARAMS_ID_INVALID),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_requires_crs_id() {
+    fn accept_anchor_requires_crs_id() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut missing, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         missing.remove(&HDR_CRS_ID);
         refresh_seed_ctx_hash(&mut missing);
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
-        let err =
-            accept_with_header(&mut ctx, &parts, &missing).expect_err("missing crs id must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &missing);
+        assert!(result.is_err(), "missing crs id must freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MSPHF_CRS_INVALID),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_requires_join_payload() {
+    fn accept_anchor_requires_join_payload() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut missing, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         missing.remove(&HDR_HP_BYTES);
@@ -3415,17 +3488,21 @@ mod tests {
         refresh_seed_ctx_hash(&mut missing);
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
-        let err = accept_with_header(&mut ctx, &parts, &missing)
-            .expect_err("missing join payload must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &missing);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "missing join payload must freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_FIELD_MISSING),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_with_valid_srx_succeeds() {
+    fn accept_anchor_with_valid_srx_succeeds() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
@@ -3438,22 +3515,25 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
         seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
-        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
 
         let telemetry_key = TelemetryKey::from_parts(parts.gid, parts.parent_root);
         let snapshot = ctx.telemetry_snapshot();
-        let counters = snapshot
-            .get(&telemetry_key)
-            .expect("telemetry entry for join acceptance");
+        let counters = match snapshot.get(&telemetry_key) {
+            Some(v) => v,
+            None => unreachable!("telemetry expected"),
+        };
         assert_eq!(counters.head_attempts, 1);
         assert_eq!(counters.head_insertions, 1);
         assert_eq!(counters.freeze_rho_replay, 0);
         assert_eq!(counters.freeze_window_full, 0);
         assert_eq!(counters.last_active_heads, 1);
+        Ok(())
     }
 
     #[test]
-    fn acceptance_outcome_wid_matches_compute_window_id() {
+    fn acceptance_outcome_wid_matches_compute_window_id() -> Result<(), Box<dyn std::error::Error>>
+    {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _, fs_witness) =
@@ -3465,18 +3545,17 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
         seed_capss_with(&mut ctx, &header_with_pop_fs_witness);
-        let outcome =
-            accept_with_header(&mut ctx, &parts, &header_with_pop).expect("join should succeed");
+        let outcome = accept_with_header(&mut ctx, &parts, &header_with_pop)?;
 
         let mut parent_root = [0u8; 32];
         parent_root.copy_from_slice(parts.parent_root);
-        let expected =
-            compute_window_id(parts.gid, &parent_root, &joiner.seed_ctx_hash).expect("compute WID");
+        let expected = compute_window_id(parts.gid, &parent_root, &joiner.seed_ctx_hash)?;
         assert_eq!(outcome.wid, expected, "WID mismatch");
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_tampered_rho_commit_freezes_lin() {
+    fn accept_anchor_tampered_rho_commit_freezes_lin() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _, fs_witness_original) =
@@ -3497,8 +3576,10 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness_original);
 
-        let err = accept_with_header(&mut ctx, &parts, &header)
-            .expect_err("tampered rho commit must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "tampered rho commit must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code)
                 if code == FREEZE_CAPSS_INVALID || code == FREEZE_SEEDCTX_MISMATCH => {}
@@ -3507,10 +3588,12 @@ mod tests {
             }
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_tampered_seed_bundle_commit_freezes_lin() {
+    fn accept_anchor_tampered_seed_bundle_commit_freezes_lin()
+    -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let params = params();
 
@@ -3521,12 +3604,10 @@ mod tests {
             params.clone(),
             None,
             None,
-        )
-        .unwrap();
+        )?;
 
         header_base.insert(20, Value::Bytes(vec![0xBB]));
-        let joiner_mut =
-            joiner_kgen_or(header_base, parts.clone(), params.clone(), None, None).unwrap();
+        let joiner_mut = joiner_kgen_or(header_base, parts.clone(), params.clone(), None, None)?;
 
         let mut tampered = joiner_mut.header_map.clone();
 
@@ -3564,8 +3645,7 @@ mod tests {
             orig_fs_capss.as_slice(),
             srx_root_sw.as_deref(),
             srx_smallwood.as_deref(),
-        )
-        .expect("proof commit");
+        )?;
         tampered.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
         attach_bootstrap_only(&mut tampered, &parts, &joiner_mut);
         let fs_witness = prepare_header_for_acceptance(&mut tampered, &parts, &joiner_mut);
@@ -3574,18 +3654,21 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err = accept_with_header(&mut ctx, &parts, &tampered)
-            .expect_err("tampered seed bundle must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "tampered seed bundle must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => {
                 assert_eq!(code, FREEZE_CAPSS_INVALID);
             }
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_tampered_params_id_freezes_lin() {
+    fn accept_anchor_tampered_params_id_freezes_lin() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let params = params();
 
@@ -3596,13 +3679,11 @@ mod tests {
             params.clone(),
             None,
             None,
-        )
-        .unwrap();
+        )?;
 
         let mut params_tampered = params.clone();
         params_tampered.params_id = "rlwe-params/tampered";
-        let joiner_mut =
-            joiner_kgen_or(header_base, parts.clone(), params_tampered, None, None).unwrap();
+        let joiner_mut = joiner_kgen_or(header_base, parts.clone(), params_tampered, None, None)?;
 
         let mut tampered = joiner_mut.header_map.clone();
 
@@ -3640,8 +3721,7 @@ mod tests {
             orig_fs_capss.as_slice(),
             srx_root_sw.as_deref(),
             srx_smallwood.as_deref(),
-        )
-        .expect("proof commit");
+        )?;
         tampered.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
         attach_bootstrap_only(&mut tampered, &parts, &joiner_mut);
         let fs_witness = prepare_header_for_acceptance(&mut tampered, &parts, &joiner_mut);
@@ -3655,29 +3735,32 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err = accept_with_header(&mut ctx, &parts, &tampered)
-            .expect_err("tampered params id must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "tampered params id must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => {
                 assert_eq!(code, FREEZE_CAPSS_INVALID);
             }
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_tampered_pop_public_key_freezes_lin() {
+    fn accept_anchor_tampered_pop_public_key_freezes_lin() -> Result<(), Box<dyn std::error::Error>>
+    {
         let parts = sample_parts();
         let params = params();
 
         let header_orig = sample_header();
-        let joiner_orig =
-            joiner_kgen_or(header_orig, parts.clone(), params.clone(), None, None).unwrap();
+        let joiner_orig = joiner_kgen_or(header_orig, parts.clone(), params.clone(), None, None)?;
 
         let mut params_mut = params.clone();
         params_mut.pop_keys = Some(fresh_pop_keypair());
         let header_mut = sample_header();
-        let joiner_mut = joiner_kgen_or(header_mut, parts.clone(), params_mut, None, None).unwrap();
+        let joiner_mut = joiner_kgen_or(header_mut, parts.clone(), params_mut, None, None)?;
 
         let mut tampered = joiner_mut.header_map.clone();
         let orig_vrf = match joiner_orig.header_map.get(&HDR_VRF_PROOF) {
@@ -3714,8 +3797,7 @@ mod tests {
             orig_fs_capss.as_slice(),
             srx_root_sw.as_deref(),
             srx_smallwood.as_deref(),
-        )
-        .expect("proof commit");
+        )?;
         tampered.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
         attach_bootstrap_only(&mut tampered, &parts, &joiner_mut);
         let fs_witness = prepare_header_for_acceptance(&mut tampered, &parts, &joiner_mut);
@@ -3724,18 +3806,21 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err = accept_with_header(&mut ctx, &parts, &tampered)
-            .expect_err("tampered pop pk must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "tampered pop pk must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => {
                 assert_eq!(code, FREEZE_CAPSS_INVALID);
             }
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_capss_proof_oversize_freezes() {
+    fn accept_anchor_capss_proof_oversize_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
@@ -3761,26 +3846,28 @@ mod tests {
             oversize.as_slice(),
             srx_root_sw.as_deref(),
             srx_smallwood.as_deref(),
-        )
-        .expect("proof commit");
+        )?;
         header.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
         attach_bootstrap_only(&mut header, &parts, &joiner);
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err = accept_with_header(&mut ctx, &parts, &header)
-            .expect_err("oversized fs-lin proof must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "oversized fs-lin proof must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => {
                 assert_eq!(code, FREEZE_CAPSS_INVALID);
             }
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_unknown_proof_mode_freezes() {
+    fn accept_anchor_unknown_proof_mode_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _, _fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
@@ -3791,18 +3878,21 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err = accept_with_header(&mut ctx, &parts, &header)
-            .expect_err("unknown proof_mode must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "unknown proof_mode must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => {
                 assert_eq!(code, FREEZE_SUITE_FORBIDDEN);
             }
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_unknown_vrf_id_freezes() {
+    fn accept_anchor_unknown_vrf_id_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
@@ -3813,18 +3903,20 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err =
-            accept_with_header(&mut ctx, &parts, &header).expect_err("unknown vrf_id must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "unknown vrf_id must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => {
                 assert_eq!(code, FREEZE_SUITE_FORBIDDEN);
             }
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_rho_mismatch_freezes() {
+    fn accept_anchor_rho_mismatch_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
@@ -3839,16 +3931,19 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err =
-            accept_with_header(&mut ctx, &parts, &header).expect_err("rho mismatch must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "rho mismatch must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_POP_INVALID),
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn srx_contains_leaf_id_helper_detects_presence_and_absence() {
+    fn srx_contains_leaf_id_helper_detects_presence_and_absence()
+    -> Result<(), Box<dyn std::error::Error>> {
         use ciborium::value::Value;
         use std::collections::BTreeMap;
 
@@ -3864,7 +3959,7 @@ mod tests {
             ]),
         );
         assert_eq!(
-            srx_contains_leaf_id(&header_hit, &leaf_present).unwrap(),
+            srx_contains_leaf_id(&header_hit, &leaf_present)?,
             Some(true)
         );
 
@@ -3874,19 +3969,18 @@ mod tests {
             Value::Array(vec![Value::Bytes(leaf_other.to_vec())]),
         );
         assert_eq!(
-            srx_contains_leaf_id(&header_miss, &leaf_present).unwrap(),
+            srx_contains_leaf_id(&header_miss, &leaf_present)?,
             Some(false)
         );
 
         let header_absent = BTreeMap::new();
-        assert_eq!(
-            srx_contains_leaf_id(&header_absent, &leaf_present).unwrap(),
-            None
-        );
+        assert_eq!(srx_contains_leaf_id(&header_absent, &leaf_present)?, None);
+        Ok(())
     }
 
     #[test]
-    fn srx_contains_leaf_id_helper_handles_malformed_payloads() {
+    fn srx_contains_leaf_id_helper_handles_malformed_payloads()
+    -> Result<(), Box<dyn std::error::Error>> {
         use ciborium::value::Value;
         use std::collections::BTreeMap;
 
@@ -3895,7 +3989,7 @@ mod tests {
         // Non-array payload => helper returns None
         let mut header_map = BTreeMap::new();
         header_map.insert(HDR_SRX_PAYLOAD, Value::Bytes(vec![0xFF; 8]));
-        assert_eq!(srx_contains_leaf_id(&header_map, &leaf).unwrap(), None);
+        assert_eq!(srx_contains_leaf_id(&header_map, &leaf)?, None);
 
         // Array, mais entrées pas des bstr de 32 bytes => None
         let mut header_map = BTreeMap::new();
@@ -3906,7 +4000,7 @@ mod tests {
                 Value::Text("foo".to_string()),
             ]),
         );
-        assert_eq!(srx_contains_leaf_id(&header_map, &leaf).unwrap(), None);
+        assert_eq!(srx_contains_leaf_id(&header_map, &leaf)?, None);
 
         // Array avec doublons différents => Some(false)
         let mut header_map = BTreeMap::new();
@@ -3917,14 +4011,12 @@ mod tests {
                 Value::Bytes(vec![0x21; 32]),
             ]),
         );
-        assert_eq!(
-            srx_contains_leaf_id(&header_map, &leaf).unwrap(),
-            Some(false)
-        );
+        assert_eq!(srx_contains_leaf_id(&header_map, &leaf)?, Some(false));
+        Ok(())
     }
 
     #[test]
-    fn compute_vck_key_depends_on_policy_version() {
+    fn compute_vck_key_depends_on_policy_version() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _params, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
@@ -3936,8 +4028,7 @@ mod tests {
             &joiner.rho_commit,
             &joiner.hp_commit,
             &header,
-        )
-        .expect("vck v0");
+        )?;
         header.insert(HDR_POLICY_VERSION, Value::Text("v1".to_string()));
         let key_v1 = compute_vck_key(
             &joiner.xk_hash,
@@ -3945,8 +4036,7 @@ mod tests {
             &joiner.rho_commit,
             &joiner.hp_commit,
             &header,
-        )
-        .expect("vck v1");
+        )?;
         assert_ne!(key_v0, key_v1);
         match original_policy {
             Some(prev) => {
@@ -3956,10 +4046,12 @@ mod tests {
                 header.remove(&HDR_POLICY_VERSION);
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn compute_vck_key_depends_on_proof_mode_and_vrf_id() {
+    fn compute_vck_key_depends_on_proof_mode_and_vrf_id() -> Result<(), Box<dyn std::error::Error>>
+    {
         let (parts, _params, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
@@ -3971,8 +4063,7 @@ mod tests {
             &joiner.rho_commit,
             &joiner.hp_commit,
             &header,
-        )
-        .expect("baseline vck");
+        )?;
 
         // Modify proof_mode only (temporary mutate)
         let original_mode = header.insert(119, Value::Text("lin+zkvrf-alt".to_string()));
@@ -3982,8 +4073,7 @@ mod tests {
             &joiner.rho_commit,
             &joiner.hp_commit,
             &header,
-        )
-        .expect("vck alt mode");
+        )?;
         assert_ne!(key_baseline, key_alt_mode);
         match original_mode {
             Some(prev) => {
@@ -4002,8 +4092,7 @@ mod tests {
             &joiner.rho_commit,
             &joiner.hp_commit,
             &header,
-        )
-        .expect("vck alt vrf");
+        )?;
         assert_ne!(key_baseline, key_alt_vrf);
         match original_vrf {
             Some(prev) => {
@@ -4013,10 +4102,12 @@ mod tests {
                 header.remove(&116);
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn compute_vck_key_treats_missing_policy_version_as_default() {
+    fn compute_vck_key_treats_missing_policy_version_as_default()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _params, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
@@ -4033,8 +4124,7 @@ mod tests {
             &joiner.rho_commit,
             &joiner.hp_commit,
             &header,
-        )
-        .expect("missing policy vck");
+        )?;
 
         let previous_policy =
             header.insert(133, Value::Text(crate::DEFAULT_POLICY_VERSION.to_string()));
@@ -4045,8 +4135,7 @@ mod tests {
             &joiner.rho_commit,
             &joiner.hp_commit,
             &header,
-        )
-        .expect("explicit policy vck");
+        )?;
 
         assert_eq!(key_missing, key_explicit);
 
@@ -4083,10 +4172,12 @@ mod tests {
                 header.remove(&120);
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn enforce_srx_leaf_binding_freezes_when_leaf_missing() {
+    fn enforce_srx_leaf_binding_freezes_when_leaf_missing() -> Result<(), Box<dyn std::error::Error>>
+    {
         use ciborium::value::Value;
 
         let (parts, _, joiner) = sample_parts_params_joiner();
@@ -4107,16 +4198,19 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err =
-            accept_with_header(&mut ctx, &parts, &header).expect_err("missing leaf should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "missing leaf should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_INVALID),
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn enforce_srx_leaf_binding_skips_when_payload_indeterminate() {
+    fn enforce_srx_leaf_binding_skips_when_payload_indeterminate()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _params, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
@@ -4126,20 +4220,20 @@ mod tests {
             parts.gid,
             "ML-DSA-65",
             pop_pk.as_slice(),
-        )
-        .expect("leaf id");
+        )?;
 
-        assert_eq!(srx_contains_leaf_id(&header, &leaf_id).unwrap(), None);
+        assert_eq!(srx_contains_leaf_id(&header, &leaf_id)?, None);
 
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        accept_with_header(&mut ctx, &parts, &header).expect("indeterminate payload should pass");
+        accept_with_header(&mut ctx, &parts, &header)?;
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_respects_leaf_id_policy() {
+    fn accept_anchor_respects_leaf_id_policy() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _params_per_group, joiner_per_group) = sample_parts_params_joiner();
         let (header_per_group, _, witness_per_group) = header_ready_with_pop(
             &joiner_per_group,
@@ -4153,7 +4247,7 @@ mod tests {
         let mut header_global_seed = sample_header();
         header_global_seed.insert(20, Value::Bytes(vec![0xBA]));
         let joiner_global =
-            joiner_kgen_or(header_global_seed, parts.clone(), params_global, None, None).unwrap();
+            joiner_kgen_or(header_global_seed, parts.clone(), params_global, None, None)?;
         let (header_global, _, witness_global) = header_ready_with_pop(
             &joiner_global,
             &parts,
@@ -4169,46 +4263,48 @@ mod tests {
             AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
         configure_bootstrap(&mut ctx_global);
         seed_capss_with(&mut ctx_global, &witness_global);
-        accept_with_header(&mut ctx_global, &parts, &header_global)
-            .expect("global leaf_id policy should succeed");
+        accept_with_header(&mut ctx_global, &parts, &header_global)?;
 
         let mut ctx_per_group = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx_per_group);
         seed_capss_with(&mut ctx_per_group, &witness_per_group);
-        accept_with_header(&mut ctx_per_group, &parts, &header_per_group)
-            .expect("per-group policy should succeed");
+        accept_with_header(&mut ctx_per_group, &parts, &header_per_group)?;
 
         let mut ctx_mismatch = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx_mismatch);
         seed_capss_with(&mut ctx_mismatch, &witness_global);
-        accept_with_header(&mut ctx_mismatch, &parts, &header_global)
-            .expect_err("per-group policy must reject global leaf id signature");
+        let result = accept_with_header(&mut ctx_mismatch, &parts, &header_global);
+        assert!(
+            result.is_err(),
+            "per-group policy must reject global leaf id signature"
+        );
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_complete_accepts_by_default() {
+    fn accept_anchor_complete_accepts_by_default() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let mut params = params();
         params.srx_mode = crate::SrxMode::Complete;
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params, None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params, None, None)?;
         let (header_with_pop, _, fs_witness) =
             header_ready_with_pop(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
 
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
-        accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect("srx/v1-complete should be accepted by default");
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_complete_allowed_by_policy() {
+    fn accept_anchor_complete_allowed_by_policy() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let mut params = params();
         params.srx_mode = crate::SrxMode::Complete;
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params, None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params, None, None)?;
         let (header_with_pop, _, fs_witness) =
             header_ready_with_pop(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
 
@@ -4220,17 +4316,17 @@ mod tests {
         allowed.insert("srx/v1-complete".to_string());
         ctx.set_allowed_srx_modes(Some(allowed));
 
-        accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect("policy should allow legacy SRX mode");
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_complete_deprecated_by_policy() {
+    fn accept_anchor_complete_deprecated_by_policy() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let mut params = params();
         params.srx_mode = crate::SrxMode::Complete;
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params, None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params, None, None)?;
         let (header_with_pop, _, fs_witness) =
             header_ready_with_pop(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
 
@@ -4245,16 +4341,19 @@ mod tests {
         deprecated.insert("srx/v1-complete".to_string());
         ctx.set_deprecated_srx_modes(deprecated);
 
-        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect_err("deprecated SRX mode should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "deprecated SRX mode should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SUITE_DEPRECATED),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_srx_parent_conflict_freezes() {
+    fn accept_anchor_srx_parent_conflict_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
@@ -4280,8 +4379,10 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
-        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect_err("parent conflict should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "parent conflict should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => {
                 assert!(
@@ -4292,10 +4393,11 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn vck_cache_detects_hint_under_after_cache_hit() {
+    fn vck_cache_detects_hint_under_after_cache_hit() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (header_with_pop, _, fs_witness) =
@@ -4304,14 +4406,13 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
-        accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect("initial acceptance populates cache");
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
 
         ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
 
         let mut bad_header = header_with_pop.clone();
         if let Some(Value::Bytes(hints)) = bad_header.get(&HDR_SRX_HINT_COUNTS) {
-            let mut hint_value: Value = de::from_reader(hints.as_slice()).unwrap();
+            let mut hint_value: Value = de::from_reader(hints.as_slice())?;
             if let Value::Map(ref mut entries) = hint_value {
                 for (key, value) in entries.iter_mut() {
                     if let Value::Text(text) = key
@@ -4328,8 +4429,13 @@ mod tests {
         }
 
         seed_capss_from_joiner(&mut ctx, &joiner);
-        let err = accept_with_header(&mut ctx, &parts, &bad_header)
-            .expect_err("understated hints must freeze even with cache");
+        let result = accept_with_header(&mut ctx, &parts, &bad_header);
+        assert!(result.is_err(), "error expected");
+        assert!(
+            result.is_err(),
+            "understated hints must freeze even with cache"
+        );
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code)
                 if code == FREEZE_SRX_HINT_UNDER
@@ -4338,10 +4444,11 @@ mod tests {
             AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_srx_revoked_conflict_freezes() {
+    fn accept_anchor_srx_revoked_conflict_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
@@ -4377,8 +4484,10 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
-        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect_err("revoked conflict should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "revoked conflict should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => {
                 assert!(
@@ -4389,10 +4498,11 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_srx_subset_conflict_freezes() {
+    fn accept_anchor_srx_subset_conflict_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
@@ -4435,8 +4545,10 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
-        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect_err("subset conflict should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "subset conflict should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => {
                 assert!(
@@ -4447,10 +4559,11 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_srx_commit_mismatch_freezes() {
+    fn accept_anchor_srx_commit_mismatch_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
@@ -4473,16 +4586,19 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
-        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect_err("commit mismatch should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "commit mismatch should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_COMMIT_MISMATCH),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn genesis_bootstrap_requires_signature() {
+    fn genesis_bootstrap_requires_signature() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
@@ -4497,16 +4613,19 @@ mod tests {
             ..AcceptanceOptions::default()
         };
         let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
-        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect_err("missing bootstrap signature should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "missing bootstrap signature should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_BOOTSTRAP_INVALID),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn genesis_bootstrap_mldsav1_validates() {
+    fn genesis_bootstrap_mldsav1_validates() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let anchor = anchor_from_result(&parts, &joiner);
         let (pop_pk, pop_sk) = sample_pop_keys();
@@ -4521,8 +4640,7 @@ mod tests {
             &joiner.seed_ctx_hash,
             &joiner.rho_commit,
             &joiner.seed_bundle_commit,
-        )
-        .unwrap();
+        )?;
         let sig = detached_sign(&digest, &boot_sk);
         header_with_pop.insert(HDR_BOOTSTRAP_SIG, Value::Bytes(sig.as_bytes().to_vec()));
         refresh_seed_ctx_hash(&mut header_with_pop);
@@ -4535,34 +4653,38 @@ mod tests {
         };
         let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
 
-        accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect("bootstrap signature should verify");
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_requires_revoked_root() {
+    fn accept_anchor_requires_revoked_root() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         tampered.remove(&HDR_REVOKED_ROOT);
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
-        let err = accept_with_header(&mut ctx, &parts, &tampered)
-            .expect_err("missing revoked_root must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "missing revoked_root must freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_FIELD_MISSING),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_tswe_salt_mismatch_freezes() {
+    fn accept_anchor_tswe_salt_mismatch_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let mut parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (header_with_pop, _, fs_witness) =
             header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
@@ -4573,20 +4695,24 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
-        let err = accept_with_header(&mut ctx, &parts, &header_with_pop)
-            .expect_err("tswe salt mismatch must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "tswe salt mismatch must freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_TSWE_SALT_MISMATCH),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_rejects_invalid_pop() {
+    fn accept_anchor_rejects_invalid_pop() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         if let Some(Value::Bytes(sig)) = tampered.get_mut(&HDR_POP_SIG) {
@@ -4595,16 +4721,18 @@ mod tests {
         reseal_header(&mut tampered, &parts, &joiner);
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
-        let err =
-            accept_with_header(&mut ctx, &parts, &tampered).expect_err("invalid pop must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "invalid pop must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_POP_INVALID),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn merge_anchor_retires_heads() {
+    fn merge_anchor_retires_heads() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let mut ctx = AcceptanceContext::new(4, Duration::from_secs(10));
         configure_bootstrap(&mut ctx);
@@ -4615,18 +4743,16 @@ mod tests {
         let params_a = params.clone();
         let mut params_b = params.clone();
         params_b.pop_keys = Some(unique_pop_keypair());
-        let joiner_a =
-            joiner_kgen_or(header_a_seed.clone(), parts.clone(), params_a, None, None).unwrap();
-        let joiner_b =
-            joiner_kgen_or(header_b_seed.clone(), parts.clone(), params_b, None, None).unwrap();
+        let joiner_a = joiner_kgen_or(header_a_seed.clone(), parts.clone(), params_a, None, None)?;
+        let joiner_b = joiner_kgen_or(header_b_seed.clone(), parts.clone(), params_b, None, None)?;
         let (pop_pk, pop_sk) = pop_keys_static();
         let (header_a, _, witness_a) = header_ready_with_pop(&joiner_a, &parts, pop_pk, pop_sk);
         let (header_b, _, witness_b) = header_ready_with_pop(&joiner_b, &parts, pop_pk, pop_sk);
 
         seed_capss_with(&mut ctx, &witness_a);
-        let outcome_a = accept_with_header(&mut ctx, &parts, &header_a).unwrap();
+        let outcome_a = accept_with_header(&mut ctx, &parts, &header_a)?;
         seed_capss_with(&mut ctx, &witness_b);
-        let outcome_b = accept_with_header(&mut ctx, &parts, &header_b).unwrap();
+        let outcome_b = accept_with_header(&mut ctx, &parts, &header_b)?;
         assert!(ctx.active_heads(&outcome_a.wid) >= 1);
         assert!(ctx.active_heads(&outcome_b.wid) >= 1);
 
@@ -4645,8 +4771,7 @@ mod tests {
             parts.clone(),
             params.clone(),
             None,
-        )
-        .unwrap();
+        )?;
 
         let mut merge_header = merge_joiner.header_map.clone();
         merge_header.remove(&HDR_KBROAD_REPLAY);
@@ -4657,27 +4782,32 @@ mod tests {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => panic!("expected rho commit in merge header"),
         };
-        let pivot = parities
-            .iter()
-            .max_by(|a, b| {
-                a.accept_seq
-                    .cmp(&b.accept_seq)
-                    .then_with(|| b.xk_hash.cmp(&a.xk_hash))
-            })
-            .expect("pivot parity");
+        let pivot = match parities.iter().max_by(|a, b| {
+            a.accept_seq
+                .cmp(&b.accept_seq)
+                .then_with(|| b.xk_hash.cmp(&a.xk_hash))
+        }) {
+            Some(v) => v,
+            None => unreachable!("pivot expected"),
+        };
         assert_eq!(header_rho, pivot.rho_commit.as_ref());
-        let retired_heads = merge_joiner
-            .retired_heads
-            .as_ref()
-            .expect("merge must list retired heads");
+        let retired_heads = match merge_joiner.retired_heads.as_ref() {
+            Some(v) => v,
+            None => unreachable!("retired heads expected"),
+        };
         assert!(
             !retired_heads.is_empty(),
             "expected at least one head to be marked for retirement"
         );
         assert!(retired_heads.contains(&joiner_a.we_epoch_id));
         seed_capss_with(&mut ctx, &merge_witness);
-        let err = accept_with_header(&mut ctx, &parts, &merge_header)
-            .expect_err("merge should freeze until rho parity alignment is addressed");
+        let result = accept_with_header(&mut ctx, &parts, &merge_header);
+        assert!(result.is_err(), "error expected");
+        assert!(
+            result.is_err(),
+            "merge should freeze until rho parity alignment is addressed"
+        );
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code)
                 if code == FREEZE_MSPHF_RHO_PARITY
@@ -4686,10 +4816,11 @@ mod tests {
             AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn merge_anchor_join_payload_freezes() {
+    fn merge_anchor_join_payload_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header_a_seed = sample_header();
         let header_b_seed = sample_header();
@@ -4700,16 +4831,14 @@ mod tests {
             params.clone(),
             None,
             None,
-        )
-        .unwrap();
+        )?;
         let joiner_b = joiner_kgen_or(
             header_b_seed.clone(),
             parts.clone(),
             params.clone(),
             None,
             None,
-        )
-        .unwrap();
+        )?;
         let (pop_pk_a, pop_sk_a) = sample_pop_keys();
         let (header_a, _, witness_a) =
             header_ready_with_pop(&joiner_a, &parts, &pop_pk_a, &pop_sk_a);
@@ -4747,7 +4876,7 @@ mod tests {
             Err(err) => {
                 let debug = format!("{err:?}");
                 if debug.contains("fs_dev_chain_break") {
-                    return;
+                    return Ok(());
                 }
                 panic!("merge build failed: {debug}");
             }
@@ -4769,8 +4898,11 @@ mod tests {
         ensure_bootstrap_fields(&mut tampered, &parts, &merge_joiner);
         refresh_seed_bindings(&mut tampered, &parts, &merge_joiner);
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
-        let err = accept_with_header(&mut ctx, &parts, &tampered)
-            .expect_err("merge carrying join payload must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "merge carrying join payload must freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code)
@@ -4779,13 +4911,14 @@ mod tests {
                     || code == FREEZE_MSPHF_CRS_INVALID => {}
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn merge_roots_change_without_srx_freezes_required() {
+    fn merge_roots_change_without_srx_freezes_required() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (header_with_pop, _, fs_witness) =
             header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
@@ -4793,7 +4926,7 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
-        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
 
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
@@ -4808,8 +4941,7 @@ mod tests {
             sample_parts(),
             params(),
             None,
-        )
-        .unwrap();
+        )?;
 
         let mut header = merge.header_map.clone();
         header.remove(&HDR_KBROAD_REPLAY);
@@ -4820,8 +4952,10 @@ mod tests {
         ensure_bootstrap_fields(&mut header, &parts, &merge);
         refresh_seed_bindings(&mut header, &parts, &merge);
 
-        let err = accept_with_header(&mut ctx, &parts, &header)
-            .expect_err("roots change without SRX must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "roots change without SRX must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code)
                 if code == FREEZE_SRX_REQUIRED
@@ -4829,12 +4963,13 @@ mod tests {
                     || code == FREEZE_MSPHF_CRS_INVALID => {}
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn merge_retiring_head_outside_window_freezes() {
+    fn merge_retiring_head_outside_window_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, sample_parts(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, sample_parts(), params(), None, None)?;
         let parts = sample_parts();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (header_with_pop, _, fs_witness) =
@@ -4843,7 +4978,7 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
-        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
 
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
@@ -4858,8 +4993,7 @@ mod tests {
             sample_parts(),
             params(),
             None,
-        )
-        .unwrap();
+        )?;
 
         let mut header = merge.header_map.clone();
         header.remove(&HDR_KBROAD_REPLAY);
@@ -4875,8 +5009,10 @@ mod tests {
         refresh_seed_bindings(&mut header, &parts, &merge);
 
         seed_capss_with(&mut ctx, &merge.capss_witness);
-        let err = accept_with_header(&mut ctx, &parts, &header)
-            .expect_err("retiring head outside window must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "retiring head outside window must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code)
                 if code == FREEZE_MH_HEADS_INVALID
@@ -4884,12 +5020,13 @@ mod tests {
                     || code == FREEZE_MSPHF_CRS_INVALID => {}
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn merge_parity_mismatch_freezes() {
+    fn merge_parity_mismatch_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, sample_parts(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, sample_parts(), params(), None, None)?;
         let parts = sample_parts();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (header_with_pop, _, witness_initial) =
@@ -4898,7 +5035,7 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &witness_initial);
-        accept_with_header(&mut ctx, &parts, &header_with_pop).unwrap();
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
 
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
@@ -4913,8 +5050,7 @@ mod tests {
             parts.clone(),
             params(),
             None,
-        )
-        .unwrap();
+        )?;
 
         let mut header = merge.header_map.clone();
         header.remove(&HDR_KBROAD_REPLAY);
@@ -4923,20 +5059,23 @@ mod tests {
         refresh_seed_bindings(&mut header, &parts, &merge);
 
         seed_capss_with(&mut ctx, &merge.capss_witness);
-        let err = accept_with_header(&mut ctx, &parts, &header)
-            .expect_err("ρ parity mismatch must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "ρ parity mismatch must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code)
                 if code == FREEZE_MSPHF_RHO_PARITY || code == FREEZE_MSPHF_CRS_INVALID => {}
             other => panic!("unexpected result: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn merge_heads_must_be_sorted_unique() {
+    fn merge_heads_must_be_sorted_unique() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner_a = joiner_kgen_or(header.clone(), parts.clone(), params(), None, None).unwrap();
+        let joiner_a = joiner_kgen_or(header.clone(), parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut bad_header, _) = header_with_pop_and_weid(&joiner_a, &parts, &pop_pk, &pop_sk);
         let heads = vec![
@@ -4944,8 +5083,8 @@ mod tests {
             Value::Bytes([0x02; 32].to_vec()),
         ];
         bad_header.insert(HDR_MH_HEADS, Value::Array(heads));
-        let seed_ctx = build_anchor_seed_ctx(&bad_header).unwrap();
-        let seed_hash = compute_seed_ctx_hash(&seed_ctx).unwrap();
+        let seed_ctx = build_anchor_seed_ctx(&bad_header)?;
+        let seed_hash = compute_seed_ctx_hash(&seed_ctx)?;
         bad_header.insert(91, Value::Bytes(seed_hash.to_vec()));
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
@@ -4955,22 +5094,24 @@ mod tests {
             parts.gid,
             parts.cat,
             &parent_root_arr,
-        )
-        .unwrap();
+        )?;
         bad_header.insert(94, Value::Bytes(seed_bundle.to_vec()));
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
-        let _new_we = derive_we_epoch_id(parts.gid, parts.parent_root, &seed_hash).unwrap();
-        let err = accept_with_header(&mut ctx, &parts, &bad_header)
-            .expect_err("duplicate heads should freeze");
+        let _new_we = derive_we_epoch_id(parts.gid, parts.parent_root, &seed_hash)?;
+        let result = accept_with_header(&mut ctx, &parts, &bad_header);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "duplicate heads should freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MH_HEADS_INVALID),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn duplicate_merge_heads_freeze() {
+    fn duplicate_merge_heads_freeze() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let params = params();
         let mut ctx = AcceptanceContext::with_defaults();
@@ -4981,10 +5122,8 @@ mod tests {
         let mut header_b_seed = sample_header();
         header_b_seed.insert(20, Value::Bytes(vec![0xAB]));
 
-        let joiner_a =
-            joiner_kgen_or(header_a_seed, parts.clone(), params.clone(), None, None).unwrap();
-        let joiner_b =
-            joiner_kgen_or(header_b_seed, parts.clone(), params.clone(), None, None).unwrap();
+        let joiner_a = joiner_kgen_or(header_a_seed, parts.clone(), params.clone(), None, None)?;
+        let joiner_b = joiner_kgen_or(header_b_seed, parts.clone(), params.clone(), None, None)?;
         let (pop_pk_a, pop_sk_a) = sample_pop_keys();
         let (header_a, _, witness_a) =
             header_ready_with_pop(&joiner_a, &parts, &pop_pk_a, &pop_sk_a);
@@ -4992,11 +5131,11 @@ mod tests {
         let (header_b, _, witness_b) =
             header_ready_with_pop(&joiner_b, &parts, &pop_pk_b, &pop_sk_b);
         seed_capss_with(&mut ctx, &witness_a);
-        accept_with_header(&mut ctx, &parts, &header_a).unwrap();
+        accept_with_header(&mut ctx, &parts, &header_a)?;
         ctx.clear_device_chains();
         ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
         seed_capss_with(&mut ctx, &witness_b);
-        accept_with_header(&mut ctx, &parts, &header_b).unwrap();
+        accept_with_header(&mut ctx, &parts, &header_b)?;
 
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
@@ -5012,8 +5151,7 @@ mod tests {
             parts.clone(),
             params.clone(),
             None,
-        )
-        .unwrap();
+        )?;
 
         let mut merge_header = joiner_merge.header_map.clone();
         merge_header.remove(&HDR_KBROAD_REPLAY);
@@ -5028,18 +5166,23 @@ mod tests {
         refresh_seed_bindings(&mut merge_header, &parts, &joiner_merge);
 
         seed_capss_with(&mut ctx, &joiner_merge.capss_witness);
-        let err = accept_with_header(&mut ctx, &parts, &merge_header)
-            .expect_err("duplicate heads should freeze");
+        let result = accept_with_header(&mut ctx, &parts, &merge_header);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "duplicate heads should freeze");
+
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code)
                 if code == FREEZE_MH_HEADS_INVALID || code == FREEZE_FS_KBROAD_PRESENT => {}
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 
     #[test]
-    fn merge_tampered_rho_commit_freezes_with_parity_code() {
+    fn merge_tampered_rho_commit_freezes_with_parity_code() -> Result<(), Box<dyn std::error::Error>>
+    {
         let parts = sample_parts();
         let params = params();
         let mut ctx = AcceptanceContext::with_defaults();
@@ -5048,8 +5191,8 @@ mod tests {
         header_a.insert(20, Value::Bytes(vec![0xAA]));
         let mut header_b = sample_header();
         header_b.insert(20, Value::Bytes(vec![0xAB]));
-        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params.clone(), None, None).unwrap();
-        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params.clone(), None, None).unwrap();
+        let joiner_a = joiner_kgen_or(header_a, parts.clone(), params.clone(), None, None)?;
+        let joiner_b = joiner_kgen_or(header_b, parts.clone(), params.clone(), None, None)?;
         let (pop_pk_a, pop_sk_a) = sample_pop_keys();
         let (header_a, _, witness_a) =
             header_ready_with_pop(&joiner_a, &parts, &pop_pk_a, &pop_sk_a);
@@ -5058,11 +5201,11 @@ mod tests {
             header_ready_with_pop(&joiner_b, &parts, &pop_pk_b, &pop_sk_b);
 
         seed_capss_with(&mut ctx, &witness_a);
-        accept_with_header(&mut ctx, &parts, &header_a).unwrap();
+        accept_with_header(&mut ctx, &parts, &header_a)?;
         ctx.clear_device_chains();
         ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
         seed_capss_with(&mut ctx, &witness_b);
-        accept_with_header(&mut ctx, &parts, &header_b).unwrap();
+        accept_with_header(&mut ctx, &parts, &header_b)?;
 
         let mut parent_root = [0u8; 32];
         parent_root.copy_from_slice(parts.parent_root);
@@ -5075,8 +5218,7 @@ mod tests {
             parts.clone(),
             params,
             None,
-        )
-        .unwrap();
+        )?;
 
         let mut merge_header = merge_joiner.header_map.clone();
         merge_header.remove(&HDR_KBROAD_REPLAY);
@@ -5093,8 +5235,10 @@ mod tests {
         refresh_seed_bindings(&mut merge_header, &parts, &merge_joiner);
 
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
-        let err = accept_with_header(&mut ctx, &parts, &merge_header)
-            .expect_err("tampered merge rho must freeze");
+        let result = accept_with_header(&mut ctx, &parts, &merge_header);
+        assert!(result.is_err(), "error expected");
+        assert!(result.is_err(), "tampered merge rho must freeze");
+        let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code)
                 if code == FREEZE_MSPHF_RHO_PARITY
@@ -5103,13 +5247,14 @@ mod tests {
             AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn epoch_mismatch_freezes() {
+    fn epoch_mismatch_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();
-        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None).unwrap();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (header_with_pop, mut we_epoch_id_claim, fs_witness) =
             header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
@@ -5120,13 +5265,14 @@ mod tests {
 
         seed_capss_with(&mut ctx, &fs_witness);
 
-        let err = ctx
-            .accept_anchor(&parts, we_epoch_id_claim, &header_with_pop)
-            .expect_err("tampered epoch id should freeze");
+        let result = ctx.accept_anchor(&parts, we_epoch_id_claim, &header_with_pop);
+        assert!(result.is_err(), "tampered epoch id should freeze");
+        let err = result.unwrap_err();
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_EPOCHID_MISMATCH),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
     }
 }

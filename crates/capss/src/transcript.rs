@@ -38,16 +38,17 @@ mod tests {
     };
 
     #[test]
-    fn roundtrip_encode_decode() {
+    fn roundtrip_encode_decode() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = CapssConfig::default();
         let smallwood_cfg = cfg.smallwood_config();
         let statement = CapssStatement {
             public_key: CapssPublicKey::default(),
             message: b"testing-capss".to_vec(),
         };
-        let proof = smallwood::prove(&smallwood_cfg, &statement).expect("prove");
-        let encoded = encode_proof(&proof).expect("encode");
-        let decoded = decode_proof(&encoded).expect("decode");
+        let proof = smallwood::prove(&smallwood_cfg, &statement)?;
+        let encoded = encode_proof(&proof)?;
+        let decoded = decode_proof(&encoded)?;
         assert_eq!(decoded, proof);
+        Ok(())
     }
 }

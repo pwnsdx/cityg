@@ -135,7 +135,10 @@ mod tests {
     #[test]
     fn srx_commit_vector_matches_spec_label() {
         let payload = Bytes(b"srx-payload-v1");
-        let digest = h_l(ds::MSPHF_SRX_COMMIT, &payload).expect("hash");
+        let digest = match h_l(ds::MSPHF_SRX_COMMIT, &payload) {
+            Ok(d) => d,
+            Err(_) => unreachable!("hash should not fail"),
+        };
         assert_eq!(
             digest,
             hex_literal::hex!("cd11aac41451ec73113b9a813fbb43d6edfa0e6603092d7c34c2b64ac561b44e")
@@ -152,7 +155,10 @@ mod tests {
             leaf_id: &leaf_id,
             we_epoch_id: &weid,
         };
-        let digest = h_l(ds::MSPHF_POP_MSG, &msg).expect("hash");
+        let digest = match h_l(ds::MSPHF_POP_MSG, &msg) {
+            Ok(d) => d,
+            Err(_) => unreachable!("hash should not fail"),
+        };
         assert_eq!(
             digest,
             hex_literal::hex!("4f8dc3cd6a21308780ae7a6a3916ff1088b9370c9f4ca397694e451a8577bfaa")

@@ -183,8 +183,14 @@ mod tests {
         assert_eq!(input.len(), 64);
         let mut out = [0u8; 32];
         for (i, chunk) in input.as_bytes().chunks(2).enumerate() {
-            let chunk_str = core::str::from_utf8(chunk).expect("hex chunk");
-            out[i] = u8::from_str_radix(chunk_str, 16).expect("hex decode");
+            let chunk_str = match core::str::from_utf8(chunk) {
+                Ok(s) => s,
+                Err(_) => unreachable!("hex chunk should be valid UTF-8"),
+            };
+            out[i] = match u8::from_str_radix(chunk_str, 16) {
+                Ok(b) => b,
+                Err(_) => unreachable!("hex decode should succeed for valid hex"),
+            };
         }
         out
     }
@@ -241,17 +247,26 @@ mod tests {
             ),
             (
                 "set-empty",
-                set_hash(&[]).expect("set hash empty"),
+                match set_hash(&[]) {
+                    Ok(h) => h,
+                    Err(_) => unreachable!("set hash empty should not fail"),
+                },
                 "b544a8eb62fc5c4d587453ed33ab34c748daa52b91ad73ad6f83611da299f5e3",
             ),
             (
                 "set-single",
-                set_hash(&[zero32]).expect("set hash single"),
+                match set_hash(&[zero32]) {
+                    Ok(h) => h,
+                    Err(_) => unreachable!("set hash single should not fail"),
+                },
                 "ba2f0508a1d23aef220c8ae91655711cdffe7af29ba53023b7be79e4912badba",
             ),
             (
                 "set-three",
-                set_hash(&[zero32, item1, item2]).expect("set hash triple"),
+                match set_hash(&[zero32, item1, item2]) {
+                    Ok(h) => h,
+                    Err(_) => unreachable!("set hash triple should not fail"),
+                },
                 "dc6c0bfb2c6ece179747b95b8e6b5ed49462069f0db6510dc2fad2bb50c6305e",
             ),
         ];
@@ -274,10 +289,16 @@ mod tests {
         let node_zero = node(&zero32, &zero32);
         let node_mix = node(&zero32, &ff32);
         let set_empty = hash_with_tag(DS_SET_HASH_U64, b"");
-        let set_single = set_hash(&[zero32]).expect("set hash single");
+        let set_single = match set_hash(&[zero32]) {
+            Ok(h) => h,
+            Err(_) => unreachable!("set hash single should not fail"),
+        };
         let item1 = [0x01u8; 32];
         let item2 = [0x02u8; 32];
-        let set_three = set_hash(&[zero32, item1, item2]).expect("set hash triple");
+        let set_three = match set_hash(&[zero32, item1, item2]) {
+            Ok(h) => h,
+            Err(_) => unreachable!("set hash triple should not fail"),
+        };
 
         let cases = [
             (

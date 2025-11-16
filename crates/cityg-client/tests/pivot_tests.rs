@@ -1,7 +1,7 @@
 use cityg_client::pivot::pivot_parity_from_cbor;
 
 #[test]
-fn test_pivot_parity_from_cbor_roundtrip() {
+fn test_pivot_parity_from_cbor_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     // Create a minimal CBOR structure that can be deserialized into PivotParity
     // This tests the deserialization path
     let mut cbor_map = std::collections::BTreeMap::new();
@@ -67,13 +67,14 @@ fn test_pivot_parity_from_cbor_roundtrip() {
     );
 
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&value, &mut bytes).expect("serialize");
+    ciborium::ser::into_writer(&value, &mut bytes)?;
 
     // Deserialize using our function
-    let result = pivot_parity_from_cbor(&bytes).expect("deserialize");
+    let result = pivot_parity_from_cbor(&bytes)?;
 
     assert_eq!(result.we_epoch_id, [0x42; 32]);
     assert_eq!(result.rho_commit, [0x43; 32]);
+    Ok(())
 }
 
 #[test]
@@ -91,7 +92,7 @@ fn test_pivot_parity_from_cbor_empty() {
 }
 
 #[test]
-fn test_pivot_parity_from_cbor_truncated() {
+fn test_pivot_parity_from_cbor_truncated() -> Result<(), Box<dyn std::error::Error>> {
     // Create valid CBOR and truncate it
     let mut cbor_map = std::collections::BTreeMap::new();
     cbor_map.insert("gid", ciborium::value::Value::Bytes(vec![0x01; 16]));
@@ -105,10 +106,11 @@ fn test_pivot_parity_from_cbor_truncated() {
     );
 
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&value, &mut bytes).expect("serialize");
+    ciborium::ser::into_writer(&value, &mut bytes)?;
 
     // Truncate the bytes
     let truncated = &bytes[..bytes.len() / 2];
     let result = pivot_parity_from_cbor(truncated);
     assert!(result.is_err(), "Should fail with truncated data");
+    Ok(())
 }

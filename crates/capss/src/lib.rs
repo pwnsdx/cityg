@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn smallwood_prove_verify() {
+    fn smallwood_prove_verify() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = CapssConfig::default();
         let pk = CapssPublicKey::default();
         let ctx = CapssContext::new(cfg.clone(), pk.clone());
@@ -125,7 +125,8 @@ mod tests {
             message: b"real smallwood".to_vec(),
         };
 
-        let sig = prover.prove(&statement).expect("prove");
-        verifier.verify(&statement, &sig).expect("verify");
+        let sig = prover.prove(&statement)?;
+        verifier.verify(&statement, &sig)?;
+        Ok(())
     }
 }

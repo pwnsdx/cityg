@@ -102,8 +102,11 @@ mod tests {
             pox_r_commit: None,
             msphf_hp_commit: None,
         };
-        let hash_via_instance = inst.xk_hash().expect("instance hash");
-        let manual = hash::h_l(
+        let hash_via_instance = match inst.xk_hash() {
+            Ok(hash) => hash,
+            Err(_) => unreachable!("instance hash should not fail in test"),
+        };
+        let manual = match hash::h_l(
             ds::MSPHF_XK,
             &super::AnchorArray(
                 inst.gid,
@@ -117,8 +120,10 @@ mod tests {
                 inst.revoked_root,
                 inst.pox_r_commit,
             ),
-        )
-        .expect("manual hash");
+        ) {
+            Ok(hash) => hash,
+            Err(_) => unreachable!("manual hash should not fail in test"),
+        };
         assert_eq!(hash_via_instance, manual);
     }
 }

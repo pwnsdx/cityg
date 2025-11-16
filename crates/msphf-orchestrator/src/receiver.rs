@@ -28,6 +28,19 @@ pub enum ReceiverError {
     Msphf(MsphfError),
 }
 
+impl std::fmt::Display for ReceiverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReceiverError::Freeze(code) => write!(f, "Freeze error: {:?}", code),
+            ReceiverError::EpochExpired => write!(f, "Epoch expired"),
+            ReceiverError::UnknownHead => write!(f, "Unknown head"),
+            ReceiverError::Msphf(err) => write!(f, "MSPHF error: {:?}", err),
+        }
+    }
+}
+
+impl std::error::Error for ReceiverError {}
+
 impl From<MsphfError> for ReceiverError {
     fn from(err: MsphfError) -> Self {
         ReceiverError::Msphf(err)
@@ -214,24 +227,23 @@ mod tests {
     }
 
     #[test]
-    fn stores_and_returns_parities() {
+    fn stores_and_returns_parities() -> Result<(), Box<dyn std::error::Error>> {
         let mut cache = ReceiverCache::with_defaults();
         let acceptance = acceptance(AcceptanceKind::NonMerge, 0x11, 0x01, 0x90);
         cache.apply_acceptance(&acceptance);
 
-        let parities = cache
-            .parities_for_heads(
-                &acceptance.pivot_parity.parent_root,
-                &[acceptance.outcome.we_epoch_id],
-                AcceptInstant::from_ticks(0),
-            )
-            .expect("parity");
+        let parities = cache.parities_for_heads(
+            &acceptance.pivot_parity.parent_root,
+            &[acceptance.outcome.we_epoch_id],
+            AcceptInstant::from_ticks(0),
+        )?;
         assert_eq!(parities.len(), 1);
         assert_eq!(parities[0].we_epoch_id, acceptance.outcome.we_epoch_id);
+        Ok(())
     }
 
     #[test]
-    fn merge_retires_previous_heads() {
+    fn merge_retires_previous_heads() -> Result<(), Box<dyn std::error::Error>> {
         let mut cache = ReceiverCache::with_defaults();
         let parent = [0x10; 32];
         let head_a = acceptance(AcceptanceKind::NonMerge, 0x11, 0x01, 0x80);
@@ -251,14 +263,13 @@ mod tests {
         cache.apply_acceptance(&merge);
         assert_eq!(cache.len(), 1);
 
-        let parities = cache
-            .parities_for_heads(
-                &parent,
-                &[merge.outcome.we_epoch_id],
-                AcceptInstant::from_ticks(0),
-            )
-            .expect("merge parity");
+        let parities = cache.parities_for_heads(
+            &parent,
+            &[merge.outcome.we_epoch_id],
+            AcceptInstant::from_ticks(0),
+        )?;
         assert_eq!(parities[0].we_epoch_id, merge.outcome.we_epoch_id);
+        Ok(())
     }
 
     #[test]
@@ -266,12 +277,13 @@ mod tests {
         let mut cache = ReceiverCache::with_defaults();
         let acceptance = acceptance(AcceptanceKind::NonMerge, 0x44, 0x04, 0xF0);
         cache.apply_acceptance(&acceptance);
-        let wid = cache
-            .wid_for_head(
-                &acceptance.outcome.we_epoch_id,
-                AcceptInstant::from_ticks(0),
-            )
-            .expect("wid");
+        let wid = match cache.wid_for_head(
+            &acceptance.outcome.we_epoch_id,
+            AcceptInstant::from_ticks(0),
+        ) {
+            Some(wid) => wid,
+            None => unreachable!("wid"),
+        };
         assert_eq!(wid, [0xF0; 32]);
     }
 

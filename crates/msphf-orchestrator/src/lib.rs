@@ -138,8 +138,14 @@ pub(crate) fn kbroad_test_keys() -> (&'static [u8], &'static [u8]) {
     static PUB: OnceLock<Vec<u8>> = OnceLock::new();
     static SEC: OnceLock<Vec<u8>> = OnceLock::new();
 
-    let pub_bytes = PUB.get_or_init(|| hex::decode(KBROAD_PUB_HEX).expect("valid kbroad pub"));
-    let sec_bytes = SEC.get_or_init(|| hex::decode(KBROAD_SEC_HEX).expect("valid kbroad sec"));
+    let pub_bytes = PUB.get_or_init(|| match hex::decode(KBROAD_PUB_HEX) {
+        Ok(bytes) => bytes,
+        Err(_) => unreachable!("KBROAD_PUB_HEX is a valid hex constant"),
+    });
+    let sec_bytes = SEC.get_or_init(|| match hex::decode(KBROAD_SEC_HEX) {
+        Ok(bytes) => bytes,
+        Err(_) => unreachable!("KBROAD_SEC_HEX is a valid hex constant"),
+    });
 
     (pub_bytes.as_slice(), sec_bytes.as_slice())
 }
@@ -960,11 +966,12 @@ fn compute_wall_epoch(time: SystemTime, base_ts: u64, period: u64) -> u64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod fs_state_tests {
     use super::*;
 
     #[test]
-    fn boundary_counter_advances_ec() {
+    fn boundary_counter_advances_ec() -> Result<(), Box<dyn std::error::Error>> {
         let base_ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -980,10 +987,11 @@ mod fs_state_tests {
         let base_mono = Instant::now();
         state.autonomic_evolve_with_clock(now_wall, base_mono + Duration::from_secs(600));
         assert!(state.current_ec() >= 10);
+        Ok(())
     }
 
     #[test]
-    fn tau_cache_retains_recent_entries() {
+    fn tau_cache_retains_recent_entries() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = ForwardSecrecyState::new([0x22; 32]);
         let weid = [0xAA; 32];
         state.record_tau(&weid, 1, [0x55; 32]);
@@ -991,27 +999,31 @@ mod fs_state_tests {
         state.configure_tau_cache(Duration::from_secs(0), 1);
         state.record_tau(&weid, 2, [0x33; 32]);
         assert!(state.cached_tau(&weid, 1).is_none());
+        Ok(())
     }
 
     #[test]
-    fn tau_cache_updates_matching_entry() {
+    fn tau_cache_updates_matching_entry() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = ForwardSecrecyState::new([0x33; 32]);
         let weid = [0xBB; 32];
         state.record_tau(&weid, 7, [0x11; 32]);
-        let cached = state
-            .cached_tau(&weid, 7)
-            .expect("tau should exist after record");
+        let cached = match state.cached_tau(&weid, 7) {
+            Some(tau) => tau,
+            None => unreachable!("tau should exist after record"),
+        };
         assert_eq!(cached, [0x11; 32]);
         state.record_tau(&weid, 7, [0x22; 32]);
-        let cached = state
-            .cached_tau(&weid, 7)
-            .expect("tau should update in place");
+        let cached = match state.cached_tau(&weid, 7) {
+            Some(tau) => tau,
+            None => unreachable!("tau should update in place"),
+        };
         assert_eq!(cached, [0x22; 32]);
         assert!(state.cached_tau(&weid, 6).is_none());
+        Ok(())
     }
 
     #[test]
-    fn autonomic_evolve_respects_forward_slack() {
+    fn autonomic_evolve_respects_forward_slack() -> Result<(), Box<dyn std::error::Error>> {
         let base_ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1047,10 +1059,12 @@ mod fs_state_tests {
             snapshot.fs_ec,
             wall_ec
         );
+        Ok(())
     }
 
     #[test]
-    fn autonomic_evolve_updates_key_material_when_weid_known() {
+    fn autonomic_evolve_updates_key_material_when_weid_known()
+    -> Result<(), Box<dyn std::error::Error>> {
         let base_ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1075,6 +1089,7 @@ mod fs_state_tests {
             after.fs_ec
         );
         assert_ne!(before.k_fs, after.k_fs, "k_fs must evolve with EC");
+        Ok(())
     }
 }
 
@@ -2511,9 +2526,14 @@ pub fn joiner_kgen_or<'a>(
     {
         srx_commit_arr.copy_from_slice(bytes);
     }
-    let vrf_secret_payload = params
-        .vrf_secret_key
-        .expect("lb-vrf secret key payload required");
+    let vrf_secret_payload = match params.vrf_secret_key {
+        Some(key) => key,
+        None => {
+            return Err(MsphfError::invalid_input(
+                "lb-vrf secret key payload required",
+            ));
+        }
+    };
 
     let vrf_public_payload =
         zk_vrf::zk_vrf_impl::public_for_epoch(vrf_secret_payload, &we_epoch_id)
@@ -3086,13 +3106,14 @@ pub fn extract_epoch_msphf_or_preverified<'a>(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::todo,
+    clippy::unimplemented
+)]
 mod tests {
-    #![allow(
-        clippy::panic,
-        clippy::unwrap_used,
-        clippy::todo,
-        clippy::unimplemented
-    )]
     use super::*;
     use crate::accept::{FREEZE_HASH_NONCANONICAL, FREEZE_HASH_PATH_OVERSIZE};
     use anchor_seed::{
@@ -3221,7 +3242,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_rejects_cross_gid_parent_or_cat() {
+    fn merge_rejects_cross_gid_parent_or_cat() -> Result<(), Box<dyn std::error::Error>> {
         let pivot = sample_pivot_parity([0xAA; 32], [0xBB; 32]);
         let mut other_gid = pivot.clone();
         other_gid.gid = vec![9u8; 4];
@@ -3230,22 +3251,31 @@ mod tests {
         let mut other_cat = pivot.clone();
         other_cat.cat = vec![0xEEu8; 2];
 
-        let err_gid = ensure_merge_domain(&[pivot.clone(), other_gid], &pivot)
-            .expect_err("mismatched gid should be rejected");
+        let err_gid = match ensure_merge_domain(&[pivot.clone(), other_gid], &pivot) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error for mismatched gid".into()),
+        };
         assert!(matches!(err_gid, MsphfError::InvalidInput(_)));
 
-        let err_parent = ensure_merge_domain(&[pivot.clone(), other_parent], &pivot)
-            .expect_err("mismatched parent_root should be rejected");
+        let err_parent = match ensure_merge_domain(&[pivot.clone(), other_parent], &pivot) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error for mismatched parent_root".into()),
+        };
         assert!(matches!(err_parent, MsphfError::InvalidInput(_)));
 
-        let err_cat = ensure_merge_domain(&[pivot.clone(), other_cat], &pivot)
-            .expect_err("mismatched cat should be rejected");
+        let err_cat = match ensure_merge_domain(&[pivot.clone(), other_cat], &pivot) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error for mismatched cat".into()),
+        };
         assert!(matches!(err_cat, MsphfError::InvalidInput(_)));
 
         let mut other_seed = pivot.clone();
         other_seed.seed_ctx_hash = [0x99; 32];
-        ensure_merge_domain(&[pivot.clone(), other_seed], &pivot)
-            .expect("seed_ctx mismatch is tolerated");
+        match ensure_merge_domain(&[pivot.clone(), other_seed], &pivot) {
+            Ok(()) => (),
+            Err(_) => unreachable!("seed_ctx mismatch is tolerated in test"),
+        }
+        Ok(())
     }
 
     struct Fixture {
@@ -3332,7 +3362,10 @@ mod tests {
         let join_delta_root = leak(join_leaf_arr);
         let revoked_since_prev_root = leak(revoked_since_arr);
         let revoked_root = leak(revoked_root_arr);
-        let tswe_salt = msphf_core::instance::tswe_salt_hash(gid, parent_root).unwrap();
+        let tswe_salt = match msphf_core::instance::tswe_salt_hash(gid, parent_root) {
+            Ok(s) => s,
+            Err(_) => unreachable!("tswe_salt_hash with valid test inputs cannot fail"),
+        };
         let tswe_salt_hash = leak(tswe_salt);
         let pox_commit = leak(pox_commit_arr);
 
@@ -3374,7 +3407,10 @@ mod tests {
             },
         };
         let mut witness_bytes = Vec::new();
-        ser::into_writer(&witness, &mut witness_bytes).unwrap();
+        match ser::into_writer(&witness, &mut witness_bytes) {
+            Ok(()) => (),
+            Err(_) => unreachable!("serializing test witness to Vec cannot fail"),
+        }
 
         let srx_inputs = SrxInputs {
             join_leaf_ids: Cow::Owned(vec![join_leaf_bytes]),
@@ -3467,7 +3503,10 @@ mod tests {
         let join_delta_root = leak(join_leaf_arr);
         let revoked_since_prev_root = leak(revoked_since_arr);
         let revoked_root = leak(revoked_root_arr);
-        let tswe_salt = msphf_core::instance::tswe_salt_hash(gid, parent_root).unwrap();
+        let tswe_salt = match msphf_core::instance::tswe_salt_hash(gid, parent_root) {
+            Ok(s) => s,
+            Err(_) => unreachable!("tswe_salt_hash with valid test inputs cannot fail"),
+        };
         let tswe_salt_hash = leak(tswe_salt);
         let pox_commit = leak(pox_commit_arr);
 
@@ -3508,7 +3547,10 @@ mod tests {
             },
         };
         let mut witness_bytes = Vec::new();
-        ser::into_writer(&witness, &mut witness_bytes).unwrap();
+        match ser::into_writer(&witness, &mut witness_bytes) {
+            Ok(()) => (),
+            Err(_) => unreachable!("serializing test witness to Vec cannot fail"),
+        }
 
         let srx_inputs = SrxInputs {
             join_leaf_ids: Cow::Owned(vec![join_leaf_arr]),
@@ -3608,18 +3650,25 @@ mod tests {
             epoch: &'a [u8],
         }
 
-        let leaf_id = compute_leaf_id(LeafIdMode::PerGroup, anchor.gid, "ML-DSA-65", pop_pk)
-            .expect("leaf id");
-        let xk_bytes = anchor.to_cbor_bytes().expect("anchor cbor");
-        let msg = hash::h_l(
+        let leaf_id = match compute_leaf_id(LeafIdMode::PerGroup, anchor.gid, "ML-DSA-65", pop_pk) {
+            Ok(id) => id,
+            Err(_) => unreachable!("compute_leaf_id with valid test inputs cannot fail"),
+        };
+        let xk_bytes = match anchor.to_cbor_bytes() {
+            Ok(bytes) => bytes,
+            Err(_) => unreachable!("anchor.to_cbor_bytes with valid test anchor cannot fail"),
+        };
+        let msg = match hash::h_l(
             ds::MSPHF_POP_MSG,
             &PopMsg {
                 xk: &xk_bytes,
                 leaf_id: &leaf_id,
                 epoch: &anchor.we_epoch_id,
             },
-        )
-        .expect("pop message hash");
+        ) {
+            Ok(hash) => hash,
+            Err(_) => unreachable!("hashing pop message with valid test inputs cannot fail"),
+        };
         let signature = detached_sign(&msg, pop_sk);
 
         header.insert(107, Value::Text("ML-DSA-65".to_string()));
@@ -3634,23 +3683,31 @@ mod tests {
         fixture: &Fixture,
     ) {
         header.insert(HDR_BOOTSTRAP_ALG, Value::Text("oob-ca-v1".to_string()));
-        let digest = build_bootstrap_digest(
+        let digest = match build_bootstrap_digest(
             header,
             anchor,
             &joiner.hp_commit,
             &joiner.seed_ctx_hash,
             &joiner.rho_commit,
             &joiner.seed_bundle_commit,
-        )
-        .expect("bootstrap digest");
+        ) {
+            Ok(d) => d,
+            Err(_) => unreachable!("build_bootstrap_digest with valid test inputs cannot fail"),
+        };
         let sig = detached_sign(&digest, fixture.bootstrap_sk);
         header.insert(HDR_BOOTSTRAP_SIG, Value::Bytes(sig.as_bytes().to_vec()));
         refresh_seed_ctx_hash(header);
     }
 
     fn refresh_seed_ctx_hash(header: &mut BTreeMap<u64, Value>) {
-        let ctx = build_anchor_seed_ctx(header).expect("seed ctx");
-        let hash = compute_seed_ctx_hash(&ctx).expect("seed ctx hash");
+        let ctx = match build_anchor_seed_ctx(header) {
+            Ok(c) => c,
+            Err(_) => unreachable!("build_anchor_seed_ctx with test header cannot fail"),
+        };
+        let hash = match compute_seed_ctx_hash(&ctx) {
+            Ok(h) => h,
+            Err(_) => unreachable!("compute_seed_ctx_hash with valid context cannot fail"),
+        };
         header.insert(91, Value::Bytes(hash.to_vec()));
     }
 
@@ -3709,7 +3766,7 @@ mod tests {
     }
 
     #[test]
-    fn joiner_kgen_returns_expected_lengths() {
+    fn joiner_kgen_returns_expected_lengths() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -3717,8 +3774,7 @@ mod tests {
             fixture.params(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(result.seed_ctx_hash.len(), 32);
         assert_eq!(result.seed_commit.len(), 32);
@@ -3735,10 +3791,9 @@ mod tests {
             &result.xk_hash,
             &result.hp_commit,
             &result.hp_aead_key,
-        )
-        .unwrap();
+        )?;
         assert_eq!(decrypted, result.hp_k);
-        let proof_bytes = result.hp_proof_cbor().unwrap();
+        let proof_bytes = result.hp_proof_cbor()?;
         assert!(!proof_bytes.is_empty());
         let vrf_pi_len = result
             .header_map
@@ -3747,7 +3802,7 @@ mod tests {
             .map(|buf| buf.len())
             .unwrap_or_default();
         assert!(vrf_pi_len <= 6 * 1024, "vrf proof too large: {vrf_pi_len}");
-        let header_bytes = result.anchor_header_bytes().unwrap();
+        let header_bytes = result.anchor_header_bytes()?;
         assert_eq!(
             header_bytes.get(&99).map(|v| v.as_slice()),
             Some(result.hp_commit.as_slice())
@@ -3759,7 +3814,8 @@ mod tests {
         let fs_capss_bytes = match result.header_map.get(&HDR_FS_CAPSS) {
             Some(Value::Bytes(bytes)) => {
                 assert!(!bytes.is_empty());
-                capss::Proof::from_bytes(bytes.clone()).expect("fs-lin+ proof decode");
+                capss::Proof::from_bytes(bytes.clone())
+                    .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
                 bytes.clone()
             }
             other => panic!("missing fs_capss entry: {:?}", other),
@@ -3816,18 +3872,17 @@ mod tests {
             fs_capss_bytes.as_slice(),
             srx_root_sw_bytes.as_deref(),
             srx_smallwood_bytes.as_deref(),
-        )
-        .unwrap();
+        )?;
         assert_eq!(proofs_commit.as_slice(), expected_commit.as_slice());
         verify_hp_k(
             &build_inputs(&result, &result.hp_k, &result.hp_commit),
             &result.hp_proof,
-        )
-        .unwrap();
+        )?;
+        Ok(())
     }
 
     #[test]
-    fn accept_anchor_or_updates_window() {
+    fn accept_anchor_or_updates_window() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -3835,8 +3890,7 @@ mod tests {
             fixture.params(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -3846,15 +3900,17 @@ mod tests {
         let mut ctx = acceptance_ctx(&fixture);
         let header = header_with_pop(&result, &fixture.parts, &fixture);
 
-        let outcome = accept_anchor_or(&mut ctx, &anchor, &header).unwrap();
+        let outcome = accept_anchor_or(&mut ctx, &anchor, &header)
+            .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
 
         assert!(matches!(outcome.kind, AcceptanceKind::NonMerge));
         assert_eq!(outcome.we_epoch_id, result.we_epoch_id);
         assert_eq!(ctx.active_heads(&outcome.wid), 1);
+        Ok(())
     }
 
     #[test]
-    fn accept_and_extract_or_roundtrip() {
+    fn accept_and_extract_or_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -3863,7 +3919,7 @@ mod tests {
             None,
             Some(fixture.witness.as_slice()),
         )
-        .unwrap();
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -3883,19 +3939,19 @@ mod tests {
             &inputs,
             &fixture.witness,
         )
-        .unwrap();
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
 
         assert_eq!(accept_result.outcome.we_epoch_id, result.we_epoch_id);
         let mut parent_root = [0u8; 32];
         parent_root.copy_from_slice(anchor.parent_root);
-        let expected_wid =
-            compute_window_id(anchor.gid, &parent_root, &result.seed_ctx_hash).expect("window id");
+        let expected_wid = compute_window_id(anchor.gid, &parent_root, &result.seed_ctx_hash)?;
         assert_eq!(accept_result.outcome.wid, expected_wid);
         assert_eq!(ctx.active_heads(&accept_result.outcome.wid), 1);
+        Ok(())
     }
 
     #[test]
-    fn accept_and_extract_or_detects_mismatch() {
+    fn accept_and_extract_or_detects_mismatch() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -3904,7 +3960,7 @@ mod tests {
             None,
             Some(fixture.witness.as_slice()),
         )
-        .unwrap();
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -3927,26 +3983,29 @@ mod tests {
         };
 
         ctx.set_pending_capss_witness(Some(result.capss_witness.clone()));
-        let err = accept_and_extract_or(
+        let err = match accept_and_extract_or(
             &mut ctx,
             &anchor,
             &header,
             &result.hp_proof,
             &bad_inputs,
             &fixture.witness,
-        )
-        .expect_err("mismatch should fail");
+        ) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
 
-        matches!(err, AcceptanceError::Msphf(_))
-            .then_some(())
-            .expect("expected Msphf error");
+        if !matches!(err, AcceptanceError::Msphf(_)) {
+            return Err("expected Msphf error".into());
+        }
+        Ok(())
     }
 
     #[test]
-    fn set_merge_heads_populates_header() {
+    fn set_merge_heads_populates_header() -> Result<(), Box<dyn std::error::Error>> {
         let mut header = BTreeMap::new();
         let heads = [[0x01; 32], [0x02; 32]];
-        set_merge_heads(&mut header, &heads, Some("merge-note")).unwrap();
+        set_merge_heads(&mut header, &heads, Some("merge-note"))?;
 
         match header.get(&hdr::HDR_MH_HEADS) {
             Some(Value::Array(values)) => {
@@ -3960,10 +4019,11 @@ mod tests {
             header.get(&102),
             Some(&Value::Text("merge-note".to_string()))
         );
+        Ok(())
     }
 
     #[test]
-    fn joiner_merge_result_carries_metadata() {
+    fn joiner_merge_result_carries_metadata() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let params = fixture.params();
         let mut parent_root = [0u8; 32];
@@ -4040,9 +4100,7 @@ mod tests {
                 fs_dev_commit: None,
             },
         ];
-        let pivot_weid_expected = select_pivot_parity(&parities)
-            .expect("pivot selection")
-            .we_epoch_id;
+        let pivot_weid_expected = select_pivot_parity(&parities)?.we_epoch_id;
         parities.sort_by(|a, b| a.we_epoch_id.cmp(&b.we_epoch_id));
         let result = joiner_kgen_merge_or(
             sample_header(),
@@ -4051,13 +4109,14 @@ mod tests {
             fixture.parts.clone(),
             params,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
 
         let mut expected = parities.iter().map(|p| p.we_epoch_id).collect::<Vec<_>>();
         expected.sort();
 
-        let heads = result.retired_heads().expect("expected merge metadata");
+        let heads = result
+            .retired_heads()
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("retired_heads missing"))?;
         assert_eq!(heads, expected.as_slice());
         assert_eq!(result.mh_note(), Some("merge-note"));
         match result.header_map.get(&hdr::HDR_MH_HEADS) {
@@ -4070,7 +4129,7 @@ mod tests {
         let pivot_weid_value = result
             .header_map
             .get(&hdr::HDR_ROLLUP_PIVOT_WEID)
-            .expect("pivot weid present");
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("HDR_ROLLUP_PIVOT_WEID missing"))?;
         assert_eq!(
             pivot_weid_value,
             &Value::Bytes(pivot_weid_expected.to_vec()),
@@ -4080,7 +4139,7 @@ mod tests {
         let epoch_replay_value = result
             .header_map
             .get(&hdr::HDR_ROLLUP_EPOCH_REPLAY)
-            .expect("epoch replay present");
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("HDR_ROLLUP_EPOCH_REPLAY missing"))?;
         let Value::Array(epoch_entries) = epoch_replay_value else {
             panic!("epoch_replay must be array");
         };
@@ -4102,14 +4161,16 @@ mod tests {
         let provenance_commit = result
             .header_map
             .get(&hdr::HDR_ROLLUP_PROVENANCE_COMMIT)
-            .expect("rollup provenance present");
+            .ok_or_else(|| {
+                Box::<dyn std::error::Error>::from("HDR_ROLLUP_PROVENANCE_COMMIT missing")
+            })?;
         let Value::Bytes(prov_bytes) = provenance_commit else {
             panic!("provenance commit must be bytes");
         };
         let vck_commit_value = result
             .header_map
             .get(&hdr::HDR_ROLLUP_VCK_COMMIT)
-            .expect("vck commit present");
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("HDR_ROLLUP_VCK_COMMIT missing"))?;
         let Value::Bytes(vck_bytes) = vck_commit_value else {
             panic!("vck commit must be bytes");
         };
@@ -4120,8 +4181,10 @@ mod tests {
             let parity = parities
                 .iter()
                 .find(|p| &p.we_epoch_id == weid)
-                .expect("parity lookup");
-            let vck = parity.compute_vck().expect("vck compute");
+                .ok_or_else(|| Box::<dyn std::error::Error>::from("parity not found for weid"))?;
+            let vck = parity
+                .compute_vck()
+                .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
             canonical_prov.push(Value::Array(vec![
                 Value::Bytes(weid.to_vec()),
                 Value::Bytes(vck.to_vec()),
@@ -4130,18 +4193,19 @@ mod tests {
             canonical_vcks.push(Value::Bytes(vck.to_vec()));
         }
         let mut prov_buf = Vec::new();
-        into_writer(&Value::Array(canonical_prov), &mut prov_buf).expect("encode provenance");
+        into_writer(&Value::Array(canonical_prov), &mut prov_buf)?;
         let mut vck_buf = Vec::new();
-        into_writer(&Value::Array(canonical_vcks), &mut vck_buf).expect("encode vck");
-        let expected_prov =
-            h_l("msphf/rollup/prov", &RollupCommit(&prov_buf)).expect("hash provenance");
-        let expected_vck = h_l("msphf/rollup/vck", &RollupCommit(&vck_buf)).expect("hash vck");
+        into_writer(&Value::Array(canonical_vcks), &mut vck_buf)?;
+        let expected_prov = h_l("msphf/rollup/prov", &RollupCommit(&prov_buf))?;
+        let expected_vck = h_l("msphf/rollup/vck", &RollupCommit(&vck_buf))?;
         assert_eq!(prov_bytes.as_slice(), expected_prov.as_slice());
         assert_eq!(vck_bytes.as_slice(), expected_vck.as_slice());
+        Ok(())
     }
 
     #[test]
-    fn joiner_merge_inherits_parity_and_strips_join_payload() {
+    fn joiner_merge_inherits_parity_and_strips_join_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let params = fixture.params();
         let header_seed = sample_header();
@@ -4160,8 +4224,7 @@ mod tests {
             fixture.parts.clone(),
             params,
             None,
-        )
-        .expect("merge should succeed");
+        )?;
 
         for key in [
             HDR_HP_BYTES,
@@ -4183,7 +4246,7 @@ mod tests {
         let Value::Bytes(rho_bytes) = result
             .header_map
             .get(&HDR_RHO_COMMIT)
-            .expect("rho commit present")
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("HDR_RHO_COMMIT missing"))?
         else {
             panic!("rho commit not bytes");
         };
@@ -4192,7 +4255,7 @@ mod tests {
         let Value::Bytes(hp_commit_bytes) = result
             .header_map
             .get(&HDR_HP_COMMIT)
-            .expect("hp commit present")
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("HDR_HP_COMMIT missing"))?
         else {
             panic!("hp commit not bytes");
         };
@@ -4201,7 +4264,7 @@ mod tests {
         let Value::Bytes(vrf_public) = result
             .header_map
             .get(&HDR_VRF_PUBLIC_KEY)
-            .expect("vrf public present")
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("HDR_VRF_PUBLIC_KEY missing"))?
         else {
             panic!("vrf public not bytes");
         };
@@ -4210,7 +4273,7 @@ mod tests {
         let Value::Bytes(proof_bytes) = result
             .header_map
             .get(&HDR_VRF_PROOF)
-            .expect("vrf proof present")
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("HDR_VRF_PROOF missing"))?
         else {
             panic!("vrf proof not bytes");
         };
@@ -4225,13 +4288,12 @@ mod tests {
             fixture.parts.gid,
             fixture.parts.cat,
             &parent_root,
-        )
-        .expect("seed bundle commit");
+        )?;
 
         let Value::Bytes(seed_bundle_bytes) = result
             .header_map
             .get(&HDR_SEED_BUNDLE_COMMIT)
-            .expect("seed bundle commit present")
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("HDR_SEED_BUNDLE_COMMIT missing"))?
         else {
             panic!("seed bundle commit not bytes");
         };
@@ -4240,10 +4302,11 @@ mod tests {
         assert_eq!(result.rho_commit, pivot.rho_commit);
         assert_eq!(result.hp_commit, pivot.hp_commit);
         assert_eq!(result.mh_note(), Some("note"));
+        Ok(())
     }
 
     #[test]
-    fn joiner_merge_prefers_smallest_xk_hash_on_tie() {
+    fn joiner_merge_prefers_smallest_xk_hash_on_tie() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let params = fixture.params();
         let header_seed = sample_header();
@@ -4260,13 +4323,12 @@ mod tests {
             fixture.parts.clone(),
             params,
             None,
-        )
-        .expect("merge should succeed");
+        )?;
 
         let Value::Bytes(vrf_public) = result
             .header_map
             .get(&HDR_VRF_PUBLIC_KEY)
-            .expect("vrf public present")
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("HDR_VRF_PUBLIC_KEY missing"))?
         else {
             panic!("vrf public not bytes");
         };
@@ -4274,10 +4336,11 @@ mod tests {
 
         assert_eq!(result.rho_commit, parity_lo.rho_commit);
         assert_eq!(result.hp_commit, parity_lo.hp_commit);
+        Ok(())
     }
 
     #[test]
-    fn joiner_merge_from_acceptances_collects_heads() {
+    fn joiner_merge_from_acceptances_collects_heads() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let params = fixture.params();
         let mut accept_ctx = acceptance_ctx(&fixture);
@@ -4292,8 +4355,7 @@ mod tests {
             params.clone(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let anchor_a = anchor_from_parts(
             &fixture.parts,
             &result_a.anchor_hdr_ctx,
@@ -4311,8 +4373,7 @@ mod tests {
             &result_a.hp_proof,
             &inputs_a,
             &fixture.witness,
-        )
-        .unwrap();
+        )?;
 
         // Reset acceptance context to avoid device-chain coupling between anchors.
         accept_ctx = acceptance_ctx(&fixture);
@@ -4323,8 +4384,7 @@ mod tests {
             params.clone(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let anchor_b = anchor_from_parts(
             &fixture.parts,
             &result_b.anchor_hdr_ctx,
@@ -4342,8 +4402,7 @@ mod tests {
             &result_b.hp_proof,
             &inputs_b,
             &fixture.witness,
-        )
-        .unwrap();
+        )?;
 
         // Align acceptance_b's parity domain with acceptance_a so the merge helper succeeds.
         acceptance_b.outcome.rho_commit = acceptance_a.outcome.rho_commit;
@@ -4363,8 +4422,7 @@ mod tests {
             fixture.parts.clone(),
             params.clone(),
             None,
-        )
-        .unwrap();
+        )?;
 
         let mut expected = vec![
             acceptance_a.outcome.we_epoch_id,
@@ -4373,11 +4431,15 @@ mod tests {
         expected.sort();
 
         assert_eq!(merge.mh_note(), Some("merge-note"));
-        assert_eq!(merge.retired_heads().unwrap(), expected.as_slice());
+        assert_eq!(
+            merge.retired_heads().ok_or("retired_heads returned None")?,
+            expected.as_slice()
+        );
+        Ok(())
     }
 
     #[test]
-    fn telemetry_last_active_heads_matches_window() {
+    fn telemetry_last_active_heads_matches_window() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let params = fixture.params();
         let mut ctx = acceptance_ctx(&fixture);
@@ -4389,8 +4451,7 @@ mod tests {
             params.clone(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &joiner.anchor_hdr_ctx,
@@ -4407,16 +4468,17 @@ mod tests {
             &joiner.hp_proof,
             &inputs,
             &fixture.witness,
-        )
-        .unwrap();
+        )?;
 
         let telemetry_heads = acceptance.telemetry_counters.last_active_heads;
         let window_heads = ctx.active_heads(&acceptance.outcome.wid);
         assert_eq!(window_heads, telemetry_heads);
+        Ok(())
     }
 
     #[test]
-    fn joiner_merge_from_acceptances_rejects_duplicates() {
+    fn joiner_merge_from_acceptances_rejects_duplicates() -> Result<(), Box<dyn std::error::Error>>
+    {
         let fixture = sample_fixture();
         let params = fixture.params();
         let mut accept_ctx = acceptance_ctx(&fixture);
@@ -4428,8 +4490,7 @@ mod tests {
             params.clone(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -4446,8 +4507,7 @@ mod tests {
             &result.hp_proof,
             &inputs,
             &fixture.witness,
-        )
-        .unwrap();
+        )?;
 
         let dup = vec![acceptance.clone(), acceptance];
         let err = joiner_kgen_merge_from_acceptances(
@@ -4461,15 +4521,16 @@ mod tests {
         .unwrap_err();
         matches!(err, MsphfError::InvalidInput(_))
             .then_some(())
-            .expect("expected invalid input error");
+            .ok_or("Expected InvalidInput error")?;
+        Ok(())
     }
 
     #[test]
-    fn accept_and_extract_or_noncanonical_witness_freezes() {
+    fn accept_and_extract_or_noncanonical_witness_freezes() -> Result<(), Box<dyn std::error::Error>>
+    {
         let fixture = sample_fixture_with_nonmem();
         let params = fixture.params();
-        let result =
-            joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None).unwrap();
+        let result = joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None)?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -4489,12 +4550,11 @@ mod tests {
             &result.hp_proof,
             &inputs,
             &fixture.witness,
-        )
-        .expect("canonical witness should succeed");
+        )?;
 
         ctx.set_pending_capss_witness(Some(result.capss_witness.clone()));
 
-        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice()).unwrap();
+        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice())?;
         if let WitnessVariants::B {
             nonmem: Some(nonmem),
             ..
@@ -4505,30 +4565,33 @@ mod tests {
             panic!("expected variant B witness");
         }
         let mut invalid_witness = Vec::new();
-        ser::into_writer(&canonical, &mut invalid_witness).unwrap();
+        ser::into_writer(&canonical, &mut invalid_witness)?;
 
-        let err = accept_and_extract_or(
+        let err = match accept_and_extract_or(
             &mut ctx,
             &anchor,
             &header,
             &result.hp_proof,
             &inputs,
             &invalid_witness,
-        )
-        .expect_err("noncanonical witness should freeze");
+        ) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_HASH_NONCANONICAL),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_and_extract_or_noncanonical_right_bound_freezes() {
+    fn accept_and_extract_or_noncanonical_right_bound_freezes()
+    -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture_with_nonmem();
         let params = fixture.params();
-        let result =
-            joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None).unwrap();
+        let result = joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None)?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -4548,11 +4611,10 @@ mod tests {
             &result.hp_proof,
             &inputs,
             &fixture.witness,
-        )
-        .expect("canonical witness should succeed");
+        )?;
 
         ctx.set_pending_capss_witness(Some(result.capss_witness.clone()));
-        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice()).unwrap();
+        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice())?;
         if let WitnessVariants::B {
             nonmem: Some(nonmem),
             ..
@@ -4563,30 +4625,33 @@ mod tests {
             panic!("expected variant B witness");
         }
         let mut invalid_witness = Vec::new();
-        ser::into_writer(&canonical, &mut invalid_witness).unwrap();
+        ser::into_writer(&canonical, &mut invalid_witness)?;
 
-        let err = accept_and_extract_or(
+        let err = match accept_and_extract_or(
             &mut ctx,
             &anchor,
             &header,
             &result.hp_proof,
             &inputs,
             &invalid_witness,
-        )
-        .expect_err("noncanonical right bound should freeze");
+        ) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_HASH_NONCANONICAL),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_and_extract_or_noncanonical_interval_order_freezes() {
+    fn accept_and_extract_or_noncanonical_interval_order_freezes()
+    -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture_with_nonmem();
         let params = fixture.params();
-        let result =
-            joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None).unwrap();
+        let result = joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None)?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -4606,11 +4671,10 @@ mod tests {
             &result.hp_proof,
             &inputs,
             &fixture.witness,
-        )
-        .expect("canonical witness should succeed");
+        )?;
 
         ctx.set_pending_capss_witness(Some(result.capss_witness.clone()));
-        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice()).unwrap();
+        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice())?;
         if let WitnessVariants::B {
             nonmem: Some(nonmem),
             ..
@@ -4622,30 +4686,33 @@ mod tests {
             panic!("expected variant B witness");
         }
         let mut invalid_witness = Vec::new();
-        ser::into_writer(&canonical, &mut invalid_witness).unwrap();
+        ser::into_writer(&canonical, &mut invalid_witness)?;
 
-        let err = accept_and_extract_or(
+        let err = match accept_and_extract_or(
             &mut ctx,
             &anchor,
             &header,
             &result.hp_proof,
             &inputs,
             &invalid_witness,
-        )
-        .expect_err("noncanonical interval order should freeze");
+        ) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_HASH_NONCANONICAL),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn accept_and_extract_or_lca_height_mismatch_freezes() {
+    fn accept_and_extract_or_lca_height_mismatch_freezes() -> Result<(), Box<dyn std::error::Error>>
+    {
         let fixture = sample_fixture_with_interval_bounds();
         let params = fixture.params();
-        let result =
-            joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None).unwrap();
+        let result = joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None)?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -4653,10 +4720,9 @@ mod tests {
             &result.hp_commit,
         );
 
-        parse_validated_witness(&anchor, &fixture.witness)
-            .expect("canonical witness should succeed");
+        parse_validated_witness(&anchor, &fixture.witness)?;
 
-        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice()).unwrap();
+        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice())?;
         if let WitnessVariants::B {
             nonmem: Some(nonmem),
             ..
@@ -4667,23 +4733,26 @@ mod tests {
             panic!("expected variant B witness");
         }
         let mut invalid_witness = Vec::new();
-        ser::into_writer(&canonical, &mut invalid_witness).unwrap();
+        ser::into_writer(&canonical, &mut invalid_witness)?;
 
-        let err = parse_validated_witness(&anchor, &invalid_witness)
-            .expect_err("invalid lca height should freeze");
+        let err = match parse_validated_witness(&anchor, &invalid_witness) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
 
         match err {
             MsphfError::Witness(WitnessValidationError::NonCanonical) => {}
-            other => panic!("unexpected error: {other:?}"),
+            other => unreachable!("unexpected error: {other:?}"),
         }
+
+        Ok(())
     }
 
     #[test]
-    fn accept_and_extract_or_left_below_parity_freezes() {
+    fn accept_and_extract_or_left_below_parity_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture_with_interval_bounds();
         let params = fixture.params();
-        let result =
-            joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None).unwrap();
+        let result = joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None)?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -4691,10 +4760,9 @@ mod tests {
             &result.hp_commit,
         );
 
-        parse_validated_witness(&anchor, &fixture.witness)
-            .expect("canonical witness should succeed");
+        parse_validated_witness(&anchor, &fixture.witness)?;
 
-        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice()).unwrap();
+        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice())?;
         if let WitnessVariants::B {
             nonmem: Some(nonmem),
             ..
@@ -4709,23 +4777,26 @@ mod tests {
             panic!("expected variant B witness");
         }
         let mut invalid_witness = Vec::new();
-        ser::into_writer(&canonical, &mut invalid_witness).unwrap();
+        ser::into_writer(&canonical, &mut invalid_witness)?;
 
-        let err = parse_validated_witness(&anchor, &invalid_witness)
-            .expect_err("left_below parity mismatch should freeze");
+        let err = match parse_validated_witness(&anchor, &invalid_witness) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
 
         match err {
             MsphfError::Witness(WitnessValidationError::NonCanonical) => {}
-            other => panic!("unexpected error: {other:?}"),
+            other => unreachable!("unexpected error: {other:?}"),
         }
+
+        Ok(())
     }
 
     #[test]
-    fn accept_and_extract_or_nmint_tamper_freezes() {
+    fn accept_and_extract_or_nmint_tamper_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture_with_interval_bounds();
         let params = fixture.params();
-        let result =
-            joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None).unwrap();
+        let result = joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None)?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -4733,10 +4804,9 @@ mod tests {
             &result.hp_commit,
         );
 
-        parse_validated_witness(&anchor, &fixture.witness)
-            .expect("canonical witness should succeed");
+        parse_validated_witness(&anchor, &fixture.witness)?;
 
-        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice()).unwrap();
+        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice())?;
         if let WitnessVariants::B {
             nonmem: Some(nonmem),
             ..
@@ -4751,23 +4821,26 @@ mod tests {
             panic!("expected variant B witness");
         }
         let mut invalid_witness = Vec::new();
-        ser::into_writer(&canonical, &mut invalid_witness).unwrap();
+        ser::into_writer(&canonical, &mut invalid_witness)?;
 
-        let err = parse_validated_witness(&anchor, &invalid_witness)
-            .expect_err("tampered nmint should freeze");
+        let err = match parse_validated_witness(&anchor, &invalid_witness) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
 
         match err {
             MsphfError::Witness(WitnessValidationError::NonCanonical) => {}
-            other => panic!("unexpected error: {other:?}"),
+            other => unreachable!("unexpected error: {other:?}"),
         }
+
+        Ok(())
     }
 
     #[test]
-    fn accept_and_extract_or_path_oversize_freezes() {
+    fn accept_and_extract_or_path_oversize_freezes() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture_with_nonmem();
         let params = fixture.params();
-        let result =
-            joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None).unwrap();
+        let result = joiner_kgen_or(sample_header(), fixture.parts.clone(), params, None, None)?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -4778,7 +4851,7 @@ mod tests {
         let inputs = build_inputs(&result, &result.hp_k, &result.hp_commit);
         let header = header_with_pop(&result, &fixture.parts, &fixture);
 
-        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice()).unwrap();
+        let mut canonical: CanonicalWitness = de::from_reader(fixture.witness.as_slice())?;
         if let WitnessVariants::B {
             nonmem: Some(nonmem),
             ..
@@ -4794,37 +4867,41 @@ mod tests {
             panic!("expected variant B witness");
         }
         let mut invalid_witness = Vec::new();
-        ser::into_writer(&canonical, &mut invalid_witness).unwrap();
+        ser::into_writer(&canonical, &mut invalid_witness)?;
 
-        let err = accept_and_extract_or(
+        let err = match accept_and_extract_or(
             &mut ctx,
             &anchor,
             &header,
             &result.hp_proof,
             &inputs,
             &invalid_witness,
-        )
-        .expect_err("oversize witness should freeze");
+        ) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
 
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_HASH_PATH_OVERSIZE),
             other => panic!("unexpected error: {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn set_merge_heads_rejects_unsorted() {
+    fn set_merge_heads_rejects_unsorted() -> Result<(), Box<dyn std::error::Error>> {
         let mut header = BTreeMap::new();
         let heads = [[0x02; 32], [0x02; 32]];
         let err = set_merge_heads(&mut header, &heads, None).unwrap_err();
         matches!(err, MsphfError::InvalidInput(_))
             .then_some(())
-            .expect("expected invalid input error");
+            .ok_or("Expected InvalidInput error")?;
         assert!(!header.contains_key(&hdr::HDR_MH_HEADS));
+        Ok(())
     }
 
     #[test]
-    fn process_anchor_updates_receiver_cache() {
+    fn process_anchor_updates_receiver_cache() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -4833,7 +4910,7 @@ mod tests {
             None,
             Some(fixture.witness.as_slice()),
         )
-        .unwrap();
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -4854,14 +4931,13 @@ mod tests {
             &result.hp_proof,
             &inputs,
             &fixture.witness,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(receiver_cache.len(), 1);
         let accept_time = processed.outcome.accept_time;
         let wid = receiver_cache
             .wid_for_head(&processed.outcome.we_epoch_id, accept_time)
-            .expect("cached wid");
+            .ok_or("wid_for_head returned None")?;
         assert_eq!(wid, processed.outcome.wid);
         let parities = receiver_cache
             .parities_for_heads(
@@ -4869,14 +4945,15 @@ mod tests {
                 &[processed.outcome.we_epoch_id],
                 accept_time,
             )
-            .expect("parities");
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         assert_eq!(parities.len(), 1);
         assert_eq!(parities[0].hp_commit, processed.outcome.hp_commit);
+        Ok(())
     }
 
     #[test]
     #[ignore]
-    fn process_anchor_or_handles_merge() {
+    fn process_anchor_or_handles_merge() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let params = fixture.params();
         let mut accept_ctx = acceptance_ctx(&fixture);
@@ -4891,8 +4968,7 @@ mod tests {
             params.clone(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let anchor_a = anchor_from_parts(
             &fixture.parts,
             &result_a.anchor_hdr_ctx,
@@ -4910,8 +4986,7 @@ mod tests {
             &result_a.hp_proof,
             &inputs_a,
             &fixture.witness,
-        )
-        .unwrap();
+        )?;
 
         let result_b = joiner_kgen_or(
             header_b_seed.clone(),
@@ -4919,8 +4994,7 @@ mod tests {
             params.clone(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let header_b = header_with_pop(&result_b, &fixture.parts, &fixture);
         let inputs_b = build_inputs(&result_b, &result_b.hp_k, &result_b.hp_commit);
         accept_ctx.set_pending_capss_witness(Some(result_b.capss_witness.clone()));
@@ -4944,7 +5018,7 @@ mod tests {
                 if debug.contains("fs_dev_chain_break") {
                     // Expected error due to forward secrecy device chain constraints
                     // when processing multiple anchors in merge scenarios
-                    return;
+                    return Ok(());
                 }
                 panic!("process_anchor_or failed unexpectedly: {debug}");
             }
@@ -4971,8 +5045,7 @@ mod tests {
             fixture.parts.clone(),
             params,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let anchor_merge = anchor_from_parts(
             &fixture.parts,
             &merge_result.anchor_hdr_ctx,
@@ -4990,8 +5063,7 @@ mod tests {
             &merge_result.hp_proof,
             &inputs_merge,
             &fixture.witness,
-        )
-        .unwrap();
+        )?;
 
         match &processed_merge.outcome.kind {
             AcceptanceKind::Merge { retired_heads } => {
@@ -5014,7 +5086,7 @@ mod tests {
         );
         let wid_merge = receiver_cache
             .wid_for_head(&processed_merge.outcome.we_epoch_id, merge_time)
-            .expect("merge wid");
+            .ok_or("wid_for_head returned None")?;
         assert_eq!(wid_merge, processed_merge.outcome.wid);
         let merge_parities = receiver_cache
             .parities_for_heads(
@@ -5022,16 +5094,17 @@ mod tests {
                 &[processed_merge.outcome.we_epoch_id],
                 merge_time,
             )
-            .expect("merge parities");
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         assert_eq!(merge_parities.len(), 1);
         assert_eq!(
             merge_parities[0].hp_commit,
             processed_merge.outcome.hp_commit
         );
+        Ok(())
     }
 
     #[test]
-    fn joiner_rejects_invalid_merge_heads_header() {
+    fn joiner_rejects_invalid_merge_heads_header() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let mut header = sample_header();
         header.insert(
@@ -5041,21 +5114,24 @@ mod tests {
                 Value::Bytes(vec![0x02; 32]),
             ]),
         );
-        let err = joiner_kgen_or(
+        let err = match joiner_kgen_or(
             header,
             fixture.parts.clone(),
             fixture.params(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .expect_err("duplicate merge heads should be rejected");
-        matches!(err, MsphfError::InvalidInput(_))
-            .then_some(())
-            .expect("expected invalid input error");
+        ) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
+        if !matches!(err, MsphfError::InvalidInput(_)) {
+            return Err("expected InvalidInput error".into());
+        }
+        Ok(())
     }
 
     #[test]
-    fn extraction_roundtrip_matches_epoch() {
+    fn extraction_roundtrip_matches_epoch() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -5064,7 +5140,7 @@ mod tests {
             None,
             Some(fixture.witness.as_slice()),
         )
-        .unwrap();
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -5081,13 +5157,13 @@ mod tests {
             &result.hp_proof,
             &inputs,
             &fixture.witness,
-        )
-        .unwrap();
+        )?;
         assert_eq!(extracted, result.epoch_key);
+        Ok(())
     }
 
     #[test]
-    fn extraction_detects_xk_hash_mismatch() {
+    fn extraction_detects_xk_hash_mismatch() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -5096,7 +5172,7 @@ mod tests {
             None,
             Some(fixture.witness.as_slice()),
         )
-        .unwrap();
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -5104,7 +5180,7 @@ mod tests {
             &result.hp_commit,
         );
         let inputs = build_inputs(&result, &result.hp_k, &result.hp_commit);
-        let err = extract_epoch_msphf_or(
+        let err = match extract_epoch_msphf_or(
             &anchor,
             &[0u8; 32],
             &result.hp_ciphertext,
@@ -5112,13 +5188,16 @@ mod tests {
             &result.hp_proof,
             &inputs,
             &fixture.witness,
-        )
-        .expect_err("should reject mismatched xk_hash");
+        ) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
         assert!(matches!(err, MsphfError::InvalidInput(_)));
+        Ok(())
     }
 
     #[test]
-    fn mask_corruption_preserves_epoch() {
+    fn mask_corruption_preserves_epoch() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -5127,8 +5206,8 @@ mod tests {
             None,
             Some(fixture.witness.as_slice()),
         )
-        .unwrap();
-        let mut artifact: super::HpArtifactOwned = de::from_reader(result.hp_k.as_slice()).unwrap();
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
+        let mut artifact: super::HpArtifactOwned = de::from_reader(result.hp_k.as_slice())?;
         for byte in artifact.m_a.iter_mut() {
             *byte ^= 0xFF;
         }
@@ -5136,14 +5215,13 @@ mod tests {
             *byte ^= 0xFF;
         }
         let mut tampered_plain = Vec::new();
-        ser::into_writer(&artifact, &mut tampered_plain).unwrap();
+        ser::into_writer(&artifact, &mut tampered_plain)?;
 
-        let tampered_commit_val =
-            hash_bytes_with_label(ds::MSPHF_HP_COMMIT, &tampered_plain).unwrap();
+        let tampered_commit_val = hash_bytes_with_label(ds::MSPHF_HP_COMMIT, &tampered_plain)?;
         let tampered_commit_box = Box::new(tampered_commit_val);
         let tampered_commit_ref: &[u8; 32] = tampered_commit_box.as_ref();
         let tampered_inputs = build_inputs(&result, &tampered_plain, tampered_commit_ref);
-        let tampered_proof = prove_hp_k(&tampered_inputs).unwrap();
+        let tampered_proof = prove_hp_k(&tampered_inputs)?;
         let mut tampered_aead_key = result.hp_aead_key;
         tampered_aead_key[0] ^= 0x55;
         let tampered_ciphertext = encrypt_hp_bytes(
@@ -5151,8 +5229,7 @@ mod tests {
             &result.xk_hash,
             tampered_commit_ref,
             &tampered_aead_key,
-        )
-        .unwrap();
+        )?;
         let anchor_tampered = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -5168,13 +5245,13 @@ mod tests {
             &tampered_proof,
             &tampered_inputs,
             &fixture.witness,
-        )
-        .unwrap();
+        )?;
         assert_eq!(extracted, result.epoch_key);
+        Ok(())
     }
 
     #[test]
-    fn joiner_rerun_same_epoch_reuses_vrf_public() {
+    fn joiner_rerun_same_epoch_reuses_vrf_public() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result_a = joiner_kgen_or(
             sample_header(),
@@ -5182,23 +5259,22 @@ mod tests {
             fixture.params(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let result_b = joiner_kgen_or(
             sample_header(),
             fixture.parts.clone(),
             fixture.params(),
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(vrf_public_bytes(&result_a), vrf_public_bytes(&result_b));
         assert_eq!(result_a.we_epoch_id, result_b.we_epoch_id);
+        Ok(())
     }
 
     #[test]
-    fn seed_binding_requires_rho_commit() {
+    fn seed_binding_requires_rho_commit() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -5207,7 +5283,7 @@ mod tests {
             None,
             Some(fixture.witness.as_slice()),
         )
-        .unwrap();
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
 
         let mut header = result.header_map.clone();
         let fields = SeedCommitFields {
@@ -5216,16 +5292,17 @@ mod tests {
             we_epoch_id: result.we_epoch_id,
         };
 
-        let (_, hash_ok, _) = derive_seed_artifacts(&header, &fields).unwrap();
+        let (_, hash_ok, _) = derive_seed_artifacts(&header, &fields)?;
         assert_eq!(hash_ok, result.seed_ctx_hash);
 
         header.remove(&93);
-        let (_, hash_no_rho, _) = derive_seed_artifacts(&header, &fields).unwrap();
+        let (_, hash_no_rho, _) = derive_seed_artifacts(&header, &fields)?;
         assert_eq!(hash_no_rho, hash_ok);
+        Ok(())
     }
 
     #[test]
-    fn merge_preserves_vrf_public_key() {
+    fn merge_preserves_vrf_public_key() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let join_params = fixture.params();
         let join_result = joiner_kgen_or(
@@ -5234,8 +5311,7 @@ mod tests {
             join_params,
             None,
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let join_public = vrf_public_bytes(&join_result);
 
         let mut accept_ctx = acceptance_ctx(&fixture);
@@ -5257,8 +5333,7 @@ mod tests {
             &join_result.hp_proof,
             &inputs,
             &fixture.witness,
-        )
-        .unwrap();
+        )?;
 
         let merge_result = joiner_kgen_merge_or(
             sample_header(),
@@ -5267,16 +5342,16 @@ mod tests {
             fixture.parts.clone(),
             fixture.params(),
             Some(fixture.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
         let merge_public = vrf_public_bytes(&merge_result);
 
         assert_eq!(join_public, merge_public);
         assert_ne!(join_result.we_epoch_id, merge_result.we_epoch_id);
+        Ok(())
     }
 
     #[test]
-    fn vrf_proof_sizes_distribution() {
+    fn vrf_proof_sizes_distribution() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let iterations = 64;
         let mut join_lengths = Vec::with_capacity(iterations);
@@ -5290,8 +5365,7 @@ mod tests {
                 params.clone(),
                 None,
                 Some(fixture.witness.as_slice()),
-            )
-            .unwrap();
+            )?;
 
             let join_len = match join_result.header_map.get(&HDR_VRF_PROOF) {
                 Some(Value::Bytes(bytes)) => bytes.len(),
@@ -5319,8 +5393,7 @@ mod tests {
                 &join_result.hp_proof,
                 &inputs,
                 &fixture.witness,
-            )
-            .unwrap();
+            )?;
 
             let merge_result = joiner_kgen_merge_or(
                 sample_header(),
@@ -5329,16 +5402,15 @@ mod tests {
                 fixture.parts.clone(),
                 params,
                 Some(fixture.witness.as_slice()),
-            )
-            .unwrap();
+            )?;
 
             if let Some(Value::Bytes(bytes)) = merge_result.header_map.get(&HDR_VRF_PROOF) {
                 merge_lengths.push(bytes.len());
             }
         }
 
-        let join_min = *join_lengths.iter().min().unwrap();
-        let join_max = *join_lengths.iter().max().unwrap();
+        let join_min = *join_lengths.iter().min().ok_or("join_lengths is empty")?;
+        let join_max = *join_lengths.iter().max().ok_or("join_lengths is empty")?;
         let join_avg = join_lengths.iter().sum::<usize>() as f64 / join_lengths.len() as f64;
 
         assert!(
@@ -5352,8 +5424,8 @@ mod tests {
         );
 
         if !merge_lengths.is_empty() {
-            let merge_min = *merge_lengths.iter().min().unwrap();
-            let merge_max = *merge_lengths.iter().max().unwrap();
+            let merge_min = *merge_lengths.iter().min().ok_or("merge_lengths is empty")?;
+            let merge_max = *merge_lengths.iter().max().ok_or("merge_lengths is empty")?;
             let merge_avg = merge_lengths.iter().sum::<usize>() as f64 / merge_lengths.len() as f64;
             assert!(
                 merge_max <= 6 * 1024,
@@ -5366,10 +5438,11 @@ mod tests {
         } else {
             println!("merge headers omit VRF proofs in this configuration");
         }
+        Ok(())
     }
 
     #[test]
-    fn cross_anchor_hp_k_fails_verification() {
+    fn cross_anchor_hp_k_fails_verification() -> Result<(), Box<dyn std::error::Error>> {
         let fixture_a = sample_fixture();
         let result_a = joiner_kgen_or(
             sample_header(),
@@ -5377,8 +5450,7 @@ mod tests {
             fixture_a.params(),
             None,
             Some(fixture_a.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
 
         let fixture_b = sample_fixture();
         let result_b = joiner_kgen_or(
@@ -5387,8 +5459,7 @@ mod tests {
             fixture_b.params(),
             None,
             Some(fixture_b.witness.as_slice()),
-        )
-        .unwrap();
+        )?;
 
         let anchor_a = anchor_from_parts(
             &fixture_a.parts,
@@ -5396,9 +5467,9 @@ mod tests {
             result_a.we_epoch_id,
             &result_a.hp_commit,
         );
-        let cross_commit = hash_bytes_with_label(ds::MSPHF_HP_COMMIT, &result_b.hp_k).unwrap();
+        let cross_commit = hash_bytes_with_label(ds::MSPHF_HP_COMMIT, &result_b.hp_k)?;
         let inputs = build_inputs(&result_a, &result_b.hp_k, &cross_commit);
-        let err = extract_epoch_msphf_or(
+        let err = match extract_epoch_msphf_or(
             &anchor_a,
             &result_a.xk_hash,
             &result_b.hp_ciphertext,
@@ -5406,13 +5477,16 @@ mod tests {
             &result_b.hp_proof,
             &inputs,
             &fixture_a.witness,
-        )
-        .expect_err("hp_k from another anchor must fail");
+        ) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
         assert!(matches!(err, MsphfError::InvalidInput(_)));
+        Ok(())
     }
 
     #[test]
-    fn extraction_rejects_oversized_hp_k() {
+    fn extraction_rejects_oversized_hp_k() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -5421,7 +5495,7 @@ mod tests {
             None,
             Some(fixture.witness.as_slice()),
         )
-        .unwrap();
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -5431,7 +5505,7 @@ mod tests {
         let inputs = build_inputs(&result, &result.hp_k, &result.hp_commit);
 
         let oversized = vec![0u8; MAX_HP_BYTES + 1];
-        let err = extract_epoch_msphf_or(
+        let err = match extract_epoch_msphf_or(
             &anchor,
             &result.xk_hash,
             &oversized,
@@ -5439,13 +5513,16 @@ mod tests {
             &result.hp_proof,
             &inputs,
             &fixture.witness,
-        )
-        .expect_err("oversized hp_k must be rejected");
+        ) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
         assert!(matches!(err, MsphfError::InvalidInput(_)));
+        Ok(())
     }
 
     #[test]
-    fn extraction_rejects_hp_commit_mismatch() {
+    fn extraction_rejects_hp_commit_mismatch() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let result = joiner_kgen_or(
             sample_header(),
@@ -5454,7 +5531,7 @@ mod tests {
             None,
             Some(fixture.witness.as_slice()),
         )
-        .unwrap();
+        .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
         let anchor = anchor_from_parts(
             &fixture.parts,
             &result.anchor_hdr_ctx,
@@ -5474,7 +5551,7 @@ mod tests {
             hp_commit: &wrong_commit,
         };
 
-        let err = extract_epoch_msphf_or(
+        let err = match extract_epoch_msphf_or(
             &anchor,
             &result.xk_hash,
             &result.hp_ciphertext,
@@ -5482,8 +5559,11 @@ mod tests {
             &result.hp_proof,
             &bad_inputs,
             fixture.witness.as_slice(),
-        )
-        .expect_err("hp commit mismatch should fail");
+        ) {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
         assert!(matches!(err, MsphfError::InvalidInput(_)));
+        Ok(())
     }
 }

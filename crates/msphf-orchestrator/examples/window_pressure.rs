@@ -14,9 +14,10 @@ fn main() {
     for idx in 0..3 {
         let accept_time = AcceptInstant::from_ticks(idx as u64);
         let record = head_record(idx as usize, accept_time);
-        window
-            .accept_head(wid, record, accept_time)
-            .expect("head fits window");
+        match window.accept_head(wid, record, accept_time) {
+            Ok(_) => {}
+            Err(_) => unreachable!("head should fit window"),
+        }
         println!("  inserted head #{idx}");
     }
 
@@ -36,9 +37,10 @@ fn main() {
 
     let later = AcceptInstant::from_ticks(4);
     let pruned = head_record(4, later);
-    window
-        .accept_head(wid, pruned, later)
-        .expect("expired heads pruned");
+    match window.accept_head(wid, pruned, later) {
+        Ok(_) => {}
+        Err(_) => unreachable!("expired heads should be pruned"),
+    }
     println!("  after ttl expiry the head window accepts new insertions");
 }
 

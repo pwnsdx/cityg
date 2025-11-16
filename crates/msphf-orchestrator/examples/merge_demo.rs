@@ -53,15 +53,15 @@ fn main() -> Result<()> {
     report_window(&ctx);
 
     // Build a merge bundle that retires both heads.
-    let (pivot_bundle, _) = branch_acceptances
-        .iter()
-        .max_by(|(_, a), (_, b)| {
-            a.outcome
-                .accept_seq
-                .cmp(&b.outcome.accept_seq)
-                .then(a.outcome.xk_hash.cmp(&b.outcome.xk_hash))
-        })
-        .expect("pivot bundle");
+    let (pivot_bundle, _) = match branch_acceptances.iter().max_by(|(_, a), (_, b)| {
+        a.outcome
+            .accept_seq
+            .cmp(&b.outcome.accept_seq)
+            .then(a.outcome.xk_hash.cmp(&b.outcome.xk_hash))
+    }) {
+        Some(pb) => pb,
+        None => unreachable!("pivot bundle should exist"),
+    };
     let merge_header = pivot_bundle.header_map.clone();
     let anchor_parts = AnchorPartsOwned::from_bundle(pivot_bundle);
     let params = merge_params();

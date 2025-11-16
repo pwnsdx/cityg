@@ -132,8 +132,14 @@ mod tests {
         let mut out2 = [0i16; N];
         let buf = vec![0x42u8; N / 2 + 10];
 
-        cbd_eta2_poly(&mut out1, &buf).expect("cbd_eta2_poly should succeed");
-        cbd_eta2_poly(&mut out2, &buf).expect("cbd_eta2_poly should succeed");
+        match cbd_eta2_poly(&mut out1, &buf) {
+            Ok(()) => (),
+            Err(_) => unreachable!("cbd_eta2_poly should succeed"),
+        }
+        match cbd_eta2_poly(&mut out2, &buf) {
+            Ok(()) => (),
+            Err(_) => unreachable!("cbd_eta2_poly should succeed"),
+        }
 
         assert_eq!(out1, out2, "Same randomness should produce same output");
     }
@@ -145,8 +151,14 @@ mod tests {
         let buf1 = vec![0x42u8; N / 2 + 10];
         let buf2 = vec![0x24u8; N / 2 + 10];
 
-        cbd_eta2_poly(&mut out1, &buf1).expect("cbd_eta2_poly should succeed");
-        cbd_eta2_poly(&mut out2, &buf2).expect("cbd_eta2_poly should succeed");
+        match cbd_eta2_poly(&mut out1, &buf1) {
+            Ok(()) => (),
+            Err(_) => unreachable!("cbd_eta2_poly should succeed"),
+        }
+        match cbd_eta2_poly(&mut out2, &buf2) {
+            Ok(()) => (),
+            Err(_) => unreachable!("cbd_eta2_poly should succeed"),
+        }
 
         assert_ne!(
             out1, out2,
@@ -259,7 +271,10 @@ mod tests {
         // Test with various patterns
         for pattern in [0x00, 0xFF, 0x55, 0xAA, 0x0F, 0xF0] {
             buf.fill(pattern);
-            cbd_eta2_poly(&mut out, &buf).expect("cbd_eta2_poly should succeed");
+            match cbd_eta2_poly(&mut out, &buf) {
+                Ok(()) => (),
+                Err(_) => unreachable!("cbd_eta2_poly should succeed"),
+            }
 
             for (i, &coeff) in out.iter().enumerate() {
                 // Valid CBD-eta2 outputs after modulo Q
@@ -288,8 +303,14 @@ mod tests {
         for pattern in [0x00, 0x12, 0x34, 0x56, 0x78, 0x9A] {
             let buf = vec![pattern; N / 2 + 10];
 
-            cbd_eta2_poly(&mut out1, &buf).expect("cbd_eta2_poly should succeed");
-            cbd_eta2_poly(&mut out2, &buf).expect("cbd_eta2_poly should succeed");
+            match cbd_eta2_poly(&mut out1, &buf) {
+                Ok(()) => (),
+                Err(_) => unreachable!("cbd_eta2_poly should succeed"),
+            }
+            match cbd_eta2_poly(&mut out2, &buf) {
+                Ok(()) => (),
+                Err(_) => unreachable!("cbd_eta2_poly should succeed"),
+            }
 
             assert_eq!(
                 out1, out2,
@@ -309,7 +330,10 @@ mod tests {
             let pattern = nibble | (nibble << 4); // Repeat nibble in both halves
             let buf = vec![pattern; N / 2 + 10];
 
-            cbd_eta2_poly(&mut out, &buf).expect("cbd_eta2_poly should succeed");
+            match cbd_eta2_poly(&mut out, &buf) {
+                Ok(()) => (),
+                Err(_) => unreachable!("cbd_eta2_poly should succeed"),
+            }
 
             // Verify all coefficients are valid CBD-eta2 outputs
             for &coeff in &out {

@@ -137,15 +137,27 @@ mod tests {
             coef_endian: "le16",
             hp_version: 1,
         };
-        let c1 = pack.commitment().expect("pack commitment");
-        let c2 = pack.commitment().expect("pack commitment");
+        let c1 = match pack.commitment() {
+            Ok(c) => c,
+            Err(_) => unreachable!("pack commitment should not fail"),
+        };
+        let c2 = match pack.commitment() {
+            Ok(c) => c,
+            Err(_) => unreachable!("pack commitment should not fail"),
+        };
         assert_eq!(c1, c2);
     }
 
     #[test]
     fn default_pack_has_deterministic_commitment() {
-        let c1 = default_commitment().expect("default commitment");
-        let c2 = default_commitment().expect("default commitment");
+        let c1 = match default_commitment() {
+            Ok(c) => c,
+            Err(_) => unreachable!("default commitment should not fail"),
+        };
+        let c2 = match default_commitment() {
+            Ok(c) => c,
+            Err(_) => unreachable!("default commitment should not fail"),
+        };
         assert_eq!(c1, c2);
     }
 }

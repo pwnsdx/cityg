@@ -261,9 +261,10 @@ fn take_length_prefixed<'a>(bytes: &'a [u8], cursor: &mut usize) -> Result<&'a [
     if *cursor + 4 > bytes.len() {
         return Err(Error::InvalidKey("truncated length prefix"));
     }
-    let len_bytes: [u8; 4] = bytes[*cursor..*cursor + 4]
-        .try_into()
-        .expect("slice with exact length");
+    let len_bytes: [u8; 4] = match bytes[*cursor..*cursor + 4].try_into() {
+        Ok(arr) => arr,
+        Err(_) => unreachable!("slice length already validated to be exactly 4 bytes"),
+    };
     let len = u32::from_le_bytes(len_bytes) as usize;
     *cursor += 4;
     if *cursor + len > bytes.len() {
@@ -278,10 +279,23 @@ fn take_length_prefixed<'a>(bytes: &'a [u8], cursor: &mut usize) -> Result<&'a [
 pub fn deterministic_key_material() -> (&'static [u8], &'static [u8]) {
     static MATERIAL: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
     MATERIAL.get_or_init(|| {
-        let params = generate_parameters([0u8; 32]).expect("lb-vrf params");
-        generate_keypair(&params, [1u8; 32]).expect("lb-vrf keypair")
+        let params = match generate_parameters([0u8; 32]) {
+            Ok(p) => p,
+            Err(_) => {
+                unreachable!("deterministic parameter generation with fixed seed cannot fail")
+            }
+        };
+        match generate_keypair(&params, [1u8; 32]) {
+            Ok(pair) => pair,
+            Err(_) => unreachable!(
+                "deterministic keypair generation with valid params and fixed seed cannot fail"
+            ),
+        }
     });
-    let pair = MATERIAL.get().expect("lb-vrf key material initialized");
+    let pair = match MATERIAL.get() {
+        Some(p) => p,
+        None => unreachable!("OnceLock was just initialized above"),
+    };
     (&pair.0, &pair.1)
 }
 

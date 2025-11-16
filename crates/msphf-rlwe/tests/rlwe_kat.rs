@@ -1,5 +1,5 @@
 use msphf_core::{
-    ds,
+    MsphfError, ds,
     hash::h_l,
     instance::AnchorInstance,
     merkle::{hash_leaf, hash_node},
@@ -19,7 +19,8 @@ fn leak(bytes: [u8; 32]) -> &'static [u8] {
     Box::leak(Box::new(bytes)).as_slice()
 }
 
-fn anchor_and_witness() -> (AnchorInstance<'static>, CanonicalWitness, [u8; 32]) {
+fn anchor_and_witness() -> Result<(AnchorInstance<'static>, CanonicalWitness, [u8; 32]), MsphfError>
+{
     let leaf = hash_leaf(b"leaf0");
     let sibling = hash_leaf(b"leaf1");
     let root = hash_node(&leaf, &sibling);
@@ -51,12 +52,12 @@ fn anchor_and_witness() -> (AnchorInstance<'static>, CanonicalWitness, [u8; 32])
         pox_r_commit: None,
         msphf_hp_commit: None,
     };
-    let xk_hash = anchor.xk_hash().expect("xk_hash");
-    (anchor, witness, xk_hash)
+    let xk_hash = anchor.xk_hash()?;
+    Ok((anchor, witness, xk_hash))
 }
 
-fn derive_branch_seed(drbg: &[u8; 32]) -> [u8; 32] {
-    h_l(ds::MSPHF_KGEN_A, &SeedRef(drbg)).expect("derive branch seed")
+fn derive_branch_seed(drbg: &[u8; 32]) -> Result<[u8; 32], MsphfError> {
+    h_l(ds::MSPHF_KGEN_A, &SeedRef(drbg))
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -64,15 +65,13 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn kat_eqroot_projection_matches_full() {
-    let (anchor, canonical, xk_hash) = anchor_and_witness();
+fn kat_eqroot_projection_matches_full() -> Result<(), MsphfError> {
+    let (anchor, canonical, xk_hash) = anchor_and_witness()?;
     let seed_drbg = [0x21u8; 32];
-    let seed_a = derive_branch_seed(&seed_drbg);
-    let (sk_a, _) = derive_branch_material(&seed_a, "branch-a").expect("derive branch material");
-    let full = hash_full(&sk_a, "A", CRS_ID, PARAMS_ID, &anchor, &xk_hash).expect("hash_full");
-    let witness = canonical
-        .validate_against(&anchor)
-        .expect("canonical witness validates");
+    let seed_a = derive_branch_seed(&seed_drbg)?;
+    let (sk_a, _) = derive_branch_material(&seed_a, "branch-a")?;
+    let full = hash_full(&sk_a, "A", CRS_ID, PARAMS_ID, &anchor, &xk_hash)?;
+    let witness = canonical.validate_against(&anchor)?;
     let proj = hash_proj(
         &full.projective,
         "A",
@@ -80,23 +79,21 @@ fn kat_eqroot_projection_matches_full() {
         PARAMS_ID,
         &anchor,
         Some(&witness),
-    )
-    .expect("hash_proj");
+    )?;
     let expected = "d838cb926100bc8b4ae5aaa65b68332f5e6844c398d5f0673e5ad7e5ee1ee2ad";
     assert_eq!(to_hex(&full.y_full), expected);
     assert_eq!(full.y_full, proj);
+    Ok(())
 }
 
 #[test]
-fn kat_rootflip_detects_change() {
-    let (anchor, canonical, xk_hash) = anchor_and_witness();
+fn kat_rootflip_detects_change() -> Result<(), MsphfError> {
+    let (anchor, canonical, xk_hash) = anchor_and_witness()?;
     let seed_drbg = [0x33u8; 32];
-    let seed_a = derive_branch_seed(&seed_drbg);
-    let (sk_a, _) = derive_branch_material(&seed_a, "branch-a").expect("derive branch material");
-    let full = hash_full(&sk_a, "A", CRS_ID, PARAMS_ID, &anchor, &xk_hash).expect("hash_full");
-    let mut tampered = canonical
-        .validate_against(&anchor)
-        .expect("canonical witness validates");
+    let seed_a = derive_branch_seed(&seed_drbg)?;
+    let (sk_a, _) = derive_branch_material(&seed_a, "branch-a")?;
+    let full = hash_full(&sk_a, "A", CRS_ID, PARAMS_ID, &anchor, &xk_hash)?;
+    let mut tampered = canonical.validate_against(&anchor)?;
     tampered.membership.root[0] ^= 0x80;
     let proj = hash_proj(
         &full.projective,
@@ -105,19 +102,19 @@ fn kat_rootflip_detects_change() {
         PARAMS_ID,
         &anchor,
         Some(&tampered),
-    )
-    .expect("hash_proj with tampered witness");
+    )?;
     assert_ne!(full.y_full, proj);
+    Ok(())
 }
 
 #[test]
-fn kat_missing_witness_is_smooth() {
-    let (anchor, _, xk_hash) = anchor_and_witness();
+fn kat_missing_witness_is_smooth() -> Result<(), MsphfError> {
+    let (anchor, _, xk_hash) = anchor_and_witness()?;
     let seed_drbg = [0x44u8; 32];
-    let seed_a = derive_branch_seed(&seed_drbg);
-    let (sk_a, _) = derive_branch_material(&seed_a, "branch-a").expect("derive branch material");
-    let full = hash_full(&sk_a, "A", CRS_ID, PARAMS_ID, &anchor, &xk_hash).expect("hash_full");
-    let proj = hash_proj(&full.projective, "A", CRS_ID, PARAMS_ID, &anchor, None)
-        .expect("hash_proj without witness");
+    let seed_a = derive_branch_seed(&seed_drbg)?;
+    let (sk_a, _) = derive_branch_material(&seed_a, "branch-a")?;
+    let full = hash_full(&sk_a, "A", CRS_ID, PARAMS_ID, &anchor, &xk_hash)?;
+    let proj = hash_proj(&full.projective, "A", CRS_ID, PARAMS_ID, &anchor, None)?;
     assert_eq!(full.y_full, proj);
+    Ok(())
 }

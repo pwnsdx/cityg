@@ -44,24 +44,37 @@ fn demo_ctx<'a>() -> VrfCtx<'a> {
 }
 
 fn vrf_verify_ct(runner: &mut CtRunner, bench_rng: &mut BenchRng) {
-    let params = lb::generate_parameters([0x42; 32]).expect("param generation");
-    let (secret_payload, _public_payload) =
-        lb::generate_keypair(&params, [0x24; 32]).expect("keypair");
+    let params = match lb::generate_parameters([0x42; 32]) {
+        Ok(p) => p,
+        Err(_) => unreachable!("param generation should succeed"),
+    };
+    let (secret_payload, _public_payload) = match lb::generate_keypair(&params, [0x24; 32]) {
+        Ok(kp) => kp,
+        Err(_) => unreachable!("keypair generation should succeed"),
+    };
     let ctx = demo_ctx();
 
     let masks_valid: (MaskDigest, MaskDigest) = ([0u8; 32], [0u8; 32]);
-    let proof = zk_vrf_impl::prove_result(&secret_payload, &ctx, (&masks_valid.0, &masks_valid.1))
-        .expect("prove");
-    let public_payload = lb::public_for_epoch(&secret_payload, ctx.we_epoch_id).expect("public");
+    let proof =
+        match zk_vrf_impl::prove_result(&secret_payload, &ctx, (&masks_valid.0, &masks_valid.1)) {
+            Ok(p) => p,
+            Err(_) => unreachable!("prove should succeed"),
+        };
+    let public_payload = match lb::public_for_epoch(&secret_payload, ctx.we_epoch_id) {
+        Ok(p) => p,
+        Err(_) => unreachable!("public_for_epoch should succeed"),
+    };
 
     assert!(
-        zk_vrf_impl::verify_result(
+        match zk_vrf_impl::verify_result(
             &public_payload,
             &ctx,
             (&masks_valid.0, &masks_valid.1),
             &proof
-        )
-        .expect("verify baseline"),
+        ) {
+            Ok(r) => r,
+            Err(_) => unreachable!("verify baseline should succeed"),
+        },
         "baseline verify must succeed"
     );
 

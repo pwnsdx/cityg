@@ -20,32 +20,51 @@ fn ot_lbvrf(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("paramgen", "chaos"), |b| {
         b.iter(|| {
             rng.fill_bytes(&mut seed);
-            LBVRF::paramgen(seed).expect("paramgen");
+            match LBVRF::paramgen(seed) {
+                Ok(_) => {}
+                Err(_) => unreachable!(),
+            }
         });
     });
 
-    let param: Param = LBVRF::paramgen(seed).expect("paramgen");
+    let param: Param = match LBVRF::paramgen(seed) {
+        Ok(p) => p,
+        Err(_) => unreachable!(),
+    };
     group.bench_function(BenchmarkId::new("keygen", "chaos"), |b| {
         b.iter(|| {
             rng.fill_bytes(&mut seed);
-            LBVRF::keygen(seed, param).expect("keygen");
+            match LBVRF::keygen(seed, param) {
+                Ok(_) => {}
+                Err(_) => unreachable!(),
+            }
         });
     });
 
-    let (pk, sk) = LBVRF::keygen(seed, param).expect("keygen");
+    let (pk, sk) = match LBVRF::keygen(seed, param) {
+        Ok(keys) => keys,
+        Err(_) => unreachable!(),
+    };
     let message = "this is a message that vrf signs";
 
     group.bench_function(BenchmarkId::new("prove", "chaos"), |b| {
         b.iter(|| {
             rng.fill_bytes(&mut seed);
-            LBVRF::prove(message, param, pk, sk.clone(), seed).expect("prove");
+            match LBVRF::prove(message, param, pk, sk.clone(), seed) {
+                Ok(_) => {}
+                Err(_) => unreachable!(),
+            }
         });
     });
 
-    let proof = LBVRF::prove(message, param, pk, sk, seed).expect("prove");
+    let proof = match LBVRF::prove(message, param, pk, sk, seed) {
+        Ok(p) => p,
+        Err(_) => unreachable!(),
+    };
     group.bench_function(BenchmarkId::new("verify", "chaos"), |b| {
-        b.iter(|| {
-            LBVRF::verify(message, param, pk, proof).expect("verify");
+        b.iter(|| match LBVRF::verify(message, param, pk, proof) {
+            Ok(_) => {}
+            Err(_) => unreachable!(),
         });
     });
 

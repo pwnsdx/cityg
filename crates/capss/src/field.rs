@@ -120,11 +120,12 @@ mod tests {
     }
 
     #[test]
-    fn serde_roundtrip() {
+    fn serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let elem = FieldElement::from_base(super::BaseField::from(123456u64));
-        let json = serde_json::to_string(&elem).expect("serialize");
-        let parsed: FieldElement = serde_json::from_str(&json).expect("deserialize");
+        let json = serde_json::to_string(&elem)?;
+        let parsed: FieldElement = serde_json::from_str(&json)?;
         assert_eq!(elem, parsed);
+        Ok(())
     }
 
     #[test]

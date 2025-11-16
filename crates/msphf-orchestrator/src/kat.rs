@@ -1557,7 +1557,7 @@ mod tests {
     #[test]
     fn generate_plan_produces_success_case() -> Result<()> {
         let plan = basic_plan(None);
-        let output = generate(plan).expect("generate");
+        let output = generate(plan)?;
         assert_eq!(output.cases.len(), 1);
         let case = &output.cases[0];
         assert_eq!(case.id, "case-ok");
@@ -1613,7 +1613,7 @@ mod tests {
         };
         let json_bytes = serde_json::to_vec(&json_plan)?;
         fs::write(&temp_path, json_bytes)?;
-        let output = generate_from_plan_file(&temp_path).expect("generate_from_plan_file");
+        let output = generate_from_plan_file(&temp_path)?;
         fs::remove_file(&temp_path).context("remove temporary KAT plan")?;
 
         assert_eq!(output.cases.len(), 1);
@@ -1625,7 +1625,7 @@ mod tests {
     fn generate_plan_reports_hp_commit_mismatch() -> Result<()> {
         let mut plan = basic_plan(None);
         plan.cases[0].hp_commit_mismatch = true;
-        let output = generate(plan).expect("generate");
+        let output = generate(plan)?;
         let status = &output.cases[0].status;
         let KatCaseStatus::Error(err) = status else {
             return Err(anyhow!("expected hp_commit mismatch error"));
@@ -1642,7 +1642,7 @@ mod tests {
     fn generate_plan_rho_replay_scenario() -> Result<()> {
         let mut plan = basic_plan(None);
         plan.cases[0].scenario = Some(ScenarioPlan::RhoReplay);
-        let output = generate(plan).expect("generate");
+        let output = generate(plan)?;
         let status = &output.cases[0].status;
         let KatCaseStatus::Scenario(KatCaseScenario::RhoReplay {
             expected_freeze, ..

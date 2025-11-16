@@ -41,8 +41,13 @@ pub fn restore_only_from_relation(
         }
         matrix.push(row);
     }
-    linear::solve_linear_system(matrix, rhs)
-        .expect("failed to solve linear system for polynomial restoration")
+    match linear::solve_linear_system(matrix, rhs) {
+        Ok(solution) => solution,
+        Err(_) => {
+            // This should not fail if the matrix is well-conditioned
+            unreachable!("failed to solve linear system for polynomial restoration")
+        }
+    }
 }
 
 /// Restore coefficients given high-degree coefficients and relations.

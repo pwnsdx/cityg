@@ -115,22 +115,24 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_matrix() {
+    fn roundtrip_matrix() -> Result<(), Box<dyn std::error::Error>> {
         let matrix = vec![vec![bf(1), bf(2)], vec![bf(3)]];
         let encoded = serialize_field_matrix(&matrix);
-        let decoded = deserialize_field_matrix(&encoded).expect("decode");
+        let decoded = deserialize_field_matrix(&encoded)?;
         assert_eq!(decoded, matrix);
 
-        let (prefixed, rest) = deserialize_field_matrix_prefix(&encoded).expect("prefix");
+        let (prefixed, rest) = deserialize_field_matrix_prefix(&encoded)?;
         assert_eq!(prefixed, matrix);
         assert!(rest.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn roundtrip_vector() {
+    fn roundtrip_vector() -> Result<(), Box<dyn std::error::Error>> {
         let vector = vec![bf(7), bf(8), bf(9)];
         let encoded = serialize_field_vector(&vector);
-        let decoded = deserialize_field_vector(&encoded).expect("decode");
+        let decoded = deserialize_field_vector(&encoded)?;
         assert_eq!(decoded, vector);
+        Ok(())
     }
 }

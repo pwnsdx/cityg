@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn prove_verify_roundtrip() {
+    fn prove_verify_roundtrip() -> Result<()> {
         let (parent, join, revoked_since, revoked_root, commit) = sample_roots();
         let payload = vec![0xAA, 0xBB, 0xCC, 0xDD];
         let hint_counts = vec![0x01, 0x02];
@@ -292,11 +292,12 @@ mod tests {
         };
 
         let mut rng = ChaCha20Rng::from_seed([0u8; 32]);
-        let proof = prove(&mut rng, &inputs).expect("prove");
-        verify(&inputs, &proof).expect("verify");
+        let proof = prove(&mut rng, &inputs)?;
+        verify(&inputs, &proof)?;
 
-        let parsed = Proof::from_bytes(proof.as_bytes().to_vec()).expect("parse");
+        let parsed = Proof::from_bytes(proof.as_bytes().to_vec())?;
         assert_eq!(parsed.as_bytes(), proof.as_bytes());
+        Ok(())
     }
 
     #[test]
@@ -336,7 +337,7 @@ mod tests {
         };
 
         let mut rng = ChaCha20Rng::from_seed([1u8; 32]);
-        let proof = prove(&mut rng, &inputs).expect("prove");
+        let proof = prove(&mut rng, &inputs)?;
 
         let mut tampered_payload = payload.clone();
         tampered_payload.push(0xFF);
@@ -357,7 +358,10 @@ mod tests {
             hint_sizes_cbor: &hint_sizes,
         };
 
-        let err = verify(&tampered_inputs, &proof).expect_err("verify should fail");
+        let err = match verify(&tampered_inputs, &proof) {
+            Ok(_) => bail!("verify should fail"),
+            Err(e) => e,
+        };
         match err {
             AcceptanceError::Freeze(code) => {
                 assert_eq!(code, FREEZE_SRX_SMALLWOOD_INVALID);
@@ -369,7 +373,10 @@ mod tests {
 
     #[test]
     fn proof_from_bytes_rejects_garbage() -> Result<()> {
-        let err = Proof::from_bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]).expect_err("should fail");
+        let err = match Proof::from_bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]) {
+            Ok(_) => bail!("should fail"),
+            Err(e) => e,
+        };
         match err {
             AcceptanceError::Freeze(code) => {
                 assert_eq!(code, FREEZE_SRX_SMALLWOOD_INVALID);

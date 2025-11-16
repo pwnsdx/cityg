@@ -718,8 +718,11 @@ mod tests {
 
     #[test]
     fn slice_to_array_rejects_short_input() {
-        let err = slice_to_array(&[0u8; 31]).expect_err("short slice should fail");
-        assert!(matches!(err, CityGError::InvalidInput(_)));
+        let result = slice_to_array(&[0u8; 31]);
+        assert!(result.is_err(), "short slice should fail");
+        if let Err(err) = result {
+            assert!(matches!(err, CityGError::InvalidInput(_)));
+        }
     }
 
     #[test]
@@ -747,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn anchor_bundle_from_parts_handles_missing_pox() {
+    fn anchor_bundle_from_parts_handles_missing_pox() -> Result<(), Box<dyn std::error::Error>> {
         let parts = AnchorInstanceParts {
             gid: b"gid",
             cat: b"cat",
@@ -758,54 +761,61 @@ mod tests {
             revoked_root: &[0x44; 32],
             pox_r_commit: None,
         };
-        let bundle = AnchorBundle::try_from_parts(&parts).expect("bundle");
+        let bundle = AnchorBundle::try_from_parts(&parts)?;
         assert_eq!(bundle.parent_root, [0x11; 32]);
         assert!(bundle.pox_r_commit.is_none());
+        Ok(())
     }
 
     #[test]
-    fn membership_delta_extracts_demo_micro() {
-        let bundle = demo_bundle_alice().expect("alice bundle");
-        let delta = bundle.membership_delta().expect("delta");
+    fn membership_delta_extracts_demo_micro() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = demo_bundle_alice()?;
+        let delta = bundle.membership_delta()?;
         assert_eq!(delta.joined.len(), 1);
         assert!(delta.revoked.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn membership_delta_handles_non_genesis_parent() {
-        let genesis = demo_bundle("alice").expect("genesis");
-        let bundle = demo_bundle_bob().expect("bob bundle");
+    fn membership_delta_handles_non_genesis_parent() -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = demo_bundle("alice")?;
+        let bundle = demo_bundle_bob()?;
         assert_ne!(bundle.anchor.parent_root, [0u8; 32]);
         assert_eq!(bundle.anchor.parent_root, genesis.anchor.join_delta_root);
-        let delta = bundle.membership_delta().expect("delta");
+        let delta = bundle.membership_delta()?;
         assert_eq!(delta.joined.len(), 1);
         assert!(delta.revoked.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn membership_delta_rejects_invalid_payload_type() {
-        let mut bundle = demo_bundle_alice().expect("bundle");
+    fn membership_delta_rejects_invalid_payload_type() -> Result<(), Box<dyn std::error::Error>> {
+        let mut bundle = demo_bundle_alice()?;
         bundle.header_map.insert(
             msphf_orchestrator::hdr::HDR_SRX_PAYLOAD,
             Value::Text("bad".to_string()),
         );
-        let err = bundle
-            .membership_delta()
-            .expect_err("invalid payload type should fail");
-        assert!(matches!(err, CityGError::InvalidInput(_)));
+        let result = bundle.membership_delta();
+        assert!(result.is_err(), "invalid payload type should fail");
+        if let Err(err) = result {
+            assert!(matches!(err, CityGError::InvalidInput(_)));
+        }
+        Ok(())
     }
 
     #[test]
-    fn membership_delta_rejects_unknown_mode() {
-        let mut bundle = demo_bundle_alice().expect("bundle");
+    fn membership_delta_rejects_unknown_mode() -> Result<(), Box<dyn std::error::Error>> {
+        let mut bundle = demo_bundle_alice()?;
         bundle.header_map.insert(
             msphf_orchestrator::hdr::HDR_SRX_MODE,
             Value::Text("srx/vX".to_string()),
         );
-        let err = bundle
-            .membership_delta()
-            .expect_err("unknown mode should fail");
-        assert!(matches!(err, CityGError::InvalidInput(_)));
+        let result = bundle.membership_delta();
+        assert!(result.is_err(), "unknown mode should fail");
+        if let Err(err) = result {
+            assert!(matches!(err, CityGError::InvalidInput(_)));
+        }
+        Ok(())
     }
 
     #[test]

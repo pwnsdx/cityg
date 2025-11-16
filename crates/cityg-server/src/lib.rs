@@ -308,7 +308,7 @@ impl CityGServer {
         let journal = config
             .state_path
             .as_ref()
-            .map(|path| ServerJournal::open(path).expect("open server state"));
+            .and_then(|path| ServerJournal::open(path).ok());
         let mut server = Self {
             ctx: AcceptanceContext::with_options(h_max, ttl, options.clone()),
             receiver: ReceiverCache::new(ttl),
@@ -872,10 +872,11 @@ mod tests {
     }
 
     #[test]
-    fn server_config_defaults() {
+    fn server_config_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = ServerConfig::new();
         assert!(cfg.h_max.is_none());
         assert!(cfg.window_ttl.is_none());
+        Ok(())
     }
 
     #[test]
@@ -883,7 +884,7 @@ mod tests {
         let mut server = super::demo::demo_server();
         server.update_window_limits(Some(1), None);
 
-        let bundle = cityg_client::demo::demo_bundle("alice").expect("demo bundle");
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
         #[derive(Serialize)]
         struct WindowInputs<'a> {
             #[serde(with = "serde_bytes")]
@@ -900,8 +901,7 @@ mod tests {
                 parent_root: &bundle.anchor.parent_root,
                 seed_ctx_hash: &bundle.hp_binding.seed_ctx_hash,
             },
-        )
-        .expect("compute wid");
+        )?;
 
         let accept_time = server.context_mut().next_accept_instant();
         let record = HeadRecord::new(
@@ -921,11 +921,12 @@ mod tests {
             .context_mut()
             .mh_window
             .accept_head(&wid, record, accept_time)
-            .expect("insert head");
+            .map_err(|e| CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(e)))?;
 
-        let err = server
-            .accept_epoch(&bundle)
-            .expect_err("window full freeze");
+        let err = match server.accept_epoch(&bundle) {
+            Err(e) => e,
+            Ok(_) => unreachable!("expected error"),
+        };
         match err {
             CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(code)) => {
                 assert_eq!(code, msphf_orchestrator::mhw::FreezeError::WINDOW_FULL);
@@ -936,7 +937,7 @@ mod tests {
                         key.gid.as_slice() == bundle.gid()
                             && key.parent_root == bundle.anchor.parent_root
                     })
-                    .expect("telemetry entry for failed head");
+                    .ok_or(CityGError::InvalidInput("telemetry entry not found"))?;
                 assert_eq!(entry.1.freeze_window_full, 1);
                 Ok(())
             }
@@ -957,18 +958,17 @@ mod tests {
                 .roster
                 .groups
                 .get_mut(&gid_key)
-                .expect("group state present");
+                .ok_or(CityGError::InvalidInput("group not found"))?;
             state.snapshots.remove(&outcome.new_root);
             state.latest_root = None;
         }
 
         let bundle_bob = cityg_client::demo::demo_bundle("bob")?;
-        let err = server
-            .accept_epoch(&bundle_bob)
-            .expect_err("roster failure must bubble");
-        matches!(err, CityGError::InvalidInput(_))
-            .then_some(())
-            .expect("expected invalid input error");
+        let err = match server.accept_epoch(&bundle_bob) {
+            Err(e) => e,
+            Ok(_) => unreachable!("expected error"),
+        };
+        assert!(matches!(err, CityGError::InvalidInput(_)));
 
         assert_eq!(server.context().active_heads(&outcome.wid), 1);
         assert_eq!(server.receiver.len(), 1);
@@ -978,17 +978,16 @@ mod tests {
     #[test]
     fn journal_failure_aborts_single_accept() -> Result<(), CityGError> {
         let _serial = super::journal_serial_guard();
-        let dir = tempdir().expect("create temp dir");
+        let dir = tempdir()?;
         let journal = dir.path().join("single.journal");
         let mut server = demo_server_with_journal(&journal);
         let bundle = cityg_client::demo::demo_bundle("alice")?;
         let _guard = super::fail_journal_after(0);
-        let err = server
-            .accept_epoch(&bundle)
-            .expect_err("forced journal failure must abort accept");
-        matches!(err, CityGError::Io(_))
-            .then_some(())
-            .expect("io error");
+        let err = match server.accept_epoch(&bundle) {
+            Err(e) => e,
+            Ok(_) => unreachable!("expected error"),
+        };
+        assert!(matches!(err, CityGError::Io(_)));
         assert!(server.members(&cityg_client::demo::DEMO_GID).is_empty());
         let bundle_retry = cityg_client::demo::demo_bundle("alice")?;
         server.accept_epoch(&bundle_retry)?;
@@ -999,7 +998,7 @@ mod tests {
     #[test]
     fn crash_recovery_replays_state_journal() -> Result<(), CityGError> {
         let _guard = super::journal_serial_guard();
-        let dir = tempdir().expect("create temp dir");
+        let dir = tempdir()?;
         let journal_path = dir.path().join("cityg-server.journal");
         {
             let mut server = demo_server_with_journal(&journal_path);
@@ -1018,7 +1017,7 @@ mod tests {
     #[test]
     fn chaos_replay_matches_reference_server() -> Result<(), CityGError> {
         let _serial = super::journal_serial_guard();
-        let dir = tempdir().expect("create temp dir");
+        let dir = tempdir()?;
         let journal_path = dir.path().join("chaos.journal");
         let base_config = demo_acceptance_config();
 
@@ -1056,7 +1055,7 @@ mod tests {
     #[test]
     fn chaos_replay_survives_journal_failures() -> Result<(), CityGError> {
         let _serial = super::journal_serial_guard();
-        let dir = tempdir().expect("create temp dir");
+        let dir = tempdir()?;
         let journal_path = dir.path().join("chaos-fail.journal");
         let base_config = demo_acceptance_config();
 
@@ -1180,7 +1179,7 @@ mod roster_tests {
     }
 
     #[test]
-    fn apply_delta_tracks_multiple_roots() {
+    fn apply_delta_tracks_multiple_roots() -> Result<(), Box<dyn std::error::Error>> {
         let mut roster = GroupRoster::default();
         let gid = b"gid";
         let zero = [0u8; 32];
@@ -1189,13 +1188,13 @@ mod roster_tests {
             joined: vec![leaf(1)],
             revoked: Vec::new(),
         };
-        let root1 = roster.apply_delta(gid, &zero, &delta1).expect("root1");
-        let expected_root1 = canonical_set_root(&[leaf(1)]).expect("canonical");
+        let root1 = roster.apply_delta(gid, &zero, &delta1)?;
+        let expected_root1 = canonical_set_root(&[leaf(1)])?;
         assert_eq!(root1, expected_root1);
         assert_eq!(
             roster
                 .members_for_root(gid, &root1)
-                .expect("first root")
+                .ok_or("members not found")?
                 .len(),
             1
         );
@@ -1204,20 +1203,20 @@ mod roster_tests {
             joined: vec![leaf(2)],
             revoked: Vec::new(),
         };
-        let root2 = roster.apply_delta(gid, &root1, &delta2).expect("root2");
-        let expected_root2 = canonical_set_root(&[leaf(1), leaf(2)]).expect("canonical");
+        let root2 = roster.apply_delta(gid, &root1, &delta2)?;
+        let expected_root2 = canonical_set_root(&[leaf(1), leaf(2)])?;
         assert_eq!(root2, expected_root2);
         assert_eq!(
             roster
                 .members_for_root(gid, &root1)
-                .expect("root1 members")
+                .ok_or("members not found")?
                 .len(),
             1
         );
         assert_eq!(
             roster
                 .members_for_root(gid, &root2)
-                .expect("root2 members")
+                .ok_or("members not found")?
                 .len(),
             2
         );
@@ -1226,21 +1225,20 @@ mod roster_tests {
             joined: vec![leaf(3)],
             revoked: Vec::new(),
         };
-        let root3 = roster
-            .apply_delta(gid, &root1, &delta_branch)
-            .expect("root3");
+        let root3 = roster.apply_delta(gid, &root1, &delta_branch)?;
         assert_ne!(root2, root3);
         assert_eq!(
             roster
                 .members_for_root(gid, &root3)
-                .expect("root3 members")
+                .ok_or("members not found")?
                 .len(),
             2
         );
+        Ok(())
     }
 
     #[test]
-    fn unknown_base_root_is_rejected() {
+    fn unknown_base_root_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let mut roster = GroupRoster::default();
         let gid = b"gid";
         let bad_root = [0xAA; 32];
@@ -1248,14 +1246,16 @@ mod roster_tests {
             joined: vec![leaf(1)],
             revoked: Vec::new(),
         };
-        let err = roster
-            .apply_delta(gid, &bad_root, &delta)
-            .expect_err("bad root should fail");
+        let err = match roster.apply_delta(gid, &bad_root, &delta) {
+            Err(e) => e,
+            Ok(_) => unreachable!("expected error"),
+        };
         matches!(err, CityGError::InvalidInput(_));
+        Ok(())
     }
 
     #[test]
-    fn revoking_unknown_member_is_error() {
+    fn revoking_unknown_member_is_error() -> Result<(), Box<dyn std::error::Error>> {
         let mut roster = GroupRoster::default();
         let gid = b"gid";
         let zero = [0u8; 32];
@@ -1263,14 +1263,16 @@ mod roster_tests {
             joined: Vec::new(),
             revoked: vec![leaf(10)],
         };
-        let err = roster
-            .apply_delta(gid, &zero, &delta)
-            .expect_err("zero root delta should fail");
+        let err = match roster.apply_delta(gid, &zero, &delta) {
+            Err(e) => e,
+            Ok(_) => unreachable!("expected error"),
+        };
         matches!(err, CityGError::InvalidInput(_));
+        Ok(())
     }
 
     #[test]
-    fn duplicate_join_is_error() {
+    fn duplicate_join_is_error() -> Result<(), Box<dyn std::error::Error>> {
         let mut roster = GroupRoster::default();
         let gid = b"gid";
         let zero = [0u8; 32];
@@ -1278,19 +1280,21 @@ mod roster_tests {
             joined: vec![leaf(1)],
             revoked: Vec::new(),
         };
-        let root1 = roster.apply_delta(gid, &zero, &delta1).expect("root1");
+        let root1 = roster.apply_delta(gid, &zero, &delta1)?;
         let delta_dup = MembershipDelta {
             joined: vec![leaf(1)],
             revoked: Vec::new(),
         };
-        let err = roster
-            .apply_delta(gid, &root1, &delta_dup)
-            .expect_err("duplicate join should fail");
+        let err = match roster.apply_delta(gid, &root1, &delta_dup) {
+            Err(e) => e,
+            Ok(_) => unreachable!("expected error"),
+        };
         matches!(err, CityGError::InvalidInput(_));
+        Ok(())
     }
 
     #[test]
-    fn revoked_member_cannot_rejoin_in_same_delta() {
+    fn revoked_member_cannot_rejoin_in_same_delta() -> Result<(), Box<dyn std::error::Error>> {
         let mut roster = GroupRoster::default();
         let gid = b"gid";
         let zero = [0u8; 32];
@@ -1299,16 +1303,18 @@ mod roster_tests {
             joined: vec![leaf(1)],
             revoked: Vec::new(),
         };
-        let root1 = roster.apply_delta(gid, &zero, &delta1).expect("root1");
+        let root1 = roster.apply_delta(gid, &zero, &delta1)?;
 
         let conflicting = MembershipDelta {
             joined: vec![leaf(1)],
             revoked: vec![leaf(1)],
         };
-        let err = roster
-            .apply_delta(gid, &root1, &conflicting)
-            .expect_err("conflicting delta should fail");
+        let err = match roster.apply_delta(gid, &root1, &conflicting) {
+            Err(e) => e,
+            Ok(_) => unreachable!("expected error"),
+        };
         matches!(err, CityGError::InvalidInput(_));
+        Ok(())
     }
 }
 
@@ -1474,19 +1480,19 @@ impl Drop for JournalFailureGuard {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 pub(crate) fn fail_journal_after(countdown: usize) -> JournalFailureGuard {
     let lock = journal_failure_lock()
         .lock()
-        .expect("journal failure guard poisoned");
+        .expect("Failed to acquire journal failure lock");
     JOURNAL_FAIL_ON_APPEND.store(countdown as isize, Ordering::SeqCst);
     JournalFailureGuard { _lock: lock }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 pub(crate) fn journal_serial_guard() -> MutexGuard<'static, ()> {
-    journal_serial_lock()
-        .lock()
-        .expect("journal serial guard poisoned")
+    journal_serial_lock().lock().unwrap()
 }
 
 impl ServerJournal {
@@ -1543,7 +1549,7 @@ impl ServerJournal {
             let len = u32::from_le_bytes(
                 len_bytes
                     .try_into()
-                    .expect("entry length prefix must be 4 bytes"),
+                    .map_err(|_| CityGError::InvalidInput("Invalid journal entry length"))?,
             );
             if rest.len() < len as usize {
                 break;

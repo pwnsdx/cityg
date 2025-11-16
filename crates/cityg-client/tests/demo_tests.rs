@@ -18,21 +18,22 @@ fn test_demo_member_leaf_uniqueness() {
 }
 
 #[test]
-fn test_demo_bundle_alice() {
+fn test_demo_bundle_alice() -> Result<(), Box<dyn std::error::Error>> {
     let result = demo_bundle_alice();
     assert!(
         result.is_ok(),
         "Alice demo bundle should generate successfully"
     );
 
-    let bundle = result.expect("demo bundle for Alice");
+    let bundle = result?;
     assert_eq!(bundle.gid(), &DEMO_GID);
+    Ok(())
 }
 
 #[test]
-fn test_demo_bundle_bob() {
+fn test_demo_bundle_bob() -> Result<(), Box<dyn std::error::Error>> {
     // Generate Alice first (as she's the genesis)
-    let _alice = demo_bundle_alice().expect("alice");
+    let _alice = demo_bundle_alice()?;
 
     let result = demo_bundle_bob();
     assert!(
@@ -40,8 +41,9 @@ fn test_demo_bundle_bob() {
         "Bob demo bundle should generate successfully"
     );
 
-    let bundle = result.expect("demo bundle for Bob");
+    let bundle = result?;
     assert_eq!(bundle.gid(), &DEMO_GID);
+    Ok(())
 }
 
 #[test]
@@ -70,7 +72,7 @@ fn test_bootstrap_public_not_empty() {
 }
 
 #[test]
-fn test_serialize_witness_produces_bytes() {
+fn test_serialize_witness_produces_bytes() -> Result<(), Box<dyn std::error::Error>> {
     use msphf_core::witness::{CanonicalWitness, RawMembershipWitness, WitnessVariants};
 
     // Create a minimal witness for testing
@@ -87,11 +89,12 @@ fn test_serialize_witness_produces_bytes() {
 
     let result = serialize_witness(&witness);
     assert!(result.is_ok(), "Serialization should succeed");
-    let serialized = result.expect("serialize witness");
+    let serialized = result?;
     assert!(
         !serialized.is_empty(),
         "Serialized bytes should not be empty"
     );
+    Ok(())
 }
 
 #[test]
@@ -107,11 +110,12 @@ fn test_witness_branch_b_structure() {
 }
 
 #[test]
-fn test_attach_bootstrap_to_bundle() {
-    let mut bundle = demo_bundle_alice().expect("alice bundle");
+fn test_attach_bootstrap_to_bundle() -> Result<(), Box<dyn std::error::Error>> {
+    let mut bundle = demo_bundle_alice()?;
     let _result = attach_bootstrap(&mut bundle);
 
     // Should succeed or fail gracefully
     // We can't assert success as it depends on keys being set up correctly
     // But we can verify it doesn't panic
+    Ok(())
 }

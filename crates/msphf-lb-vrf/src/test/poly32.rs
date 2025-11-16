@@ -75,8 +75,14 @@ proptest! {
     #[test]
     fn serialize_roundtrip(a in poly32_strategy()) {
         let mut buf = Vec::new();
-        a.serialize(&mut buf).expect("serialize poly32");
-        let decoded = Poly32::deserialize(&mut buf.as_slice()).expect("deserialize poly32");
+        match a.serialize(&mut buf) {
+            Ok(_) => {},
+            Err(_) => unreachable!("serialize poly32 should not fail"),
+        }
+        let decoded = match Poly32::deserialize(&mut buf.as_slice()) {
+            Ok(d) => d,
+            Err(_) => unreachable!("deserialize poly32 should not fail"),
+        };
         prop_assert_eq!(decoded.coeff, a.coeff);
     }
 }
@@ -103,12 +109,12 @@ fn test_poly32_inner_prod() {
 }
 
 #[test]
-fn test_poly32_serdes() {
+fn test_poly32_serdes() -> Result<(), Box<dyn std::error::Error>> {
     // zero poly
     let a = Poly32::zero();
     let mut buf: Vec<u8> = vec![];
     assert!(a.serialize(&mut buf).is_ok());
-    let b = Poly32::deserialize(&mut buf[..].as_ref()).expect("deserialize zero poly");
+    let b = Poly32::deserialize(&mut buf[..].as_ref())?;
     assert_eq!(a, b);
 
     // random poly
@@ -116,8 +122,9 @@ fn test_poly32_serdes() {
     let a: Poly32 = PolyArith::uniform_random(&mut rng);
     let mut buf: Vec<u8> = vec![];
     assert!(a.serialize(&mut buf).is_ok());
-    let b = Poly32::deserialize(&mut buf[..].as_ref()).expect("deserialize random poly");
+    let b = Poly32::deserialize(&mut buf[..].as_ref())?;
     assert_eq!(a, b);
+    Ok(())
 }
 
 #[test]

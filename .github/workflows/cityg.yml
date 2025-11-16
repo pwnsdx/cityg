@@ -20,7 +20,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy (workspace)
-        run: cargo clippy --workspace --all-targets --no-deps -- -A clippy::never_loop -D clippy::panic -D clippy::unwrap_used -D clippy::todo -D clippy::unimplemented -D warnings
+        run: cargo clippy --workspace --all-features --all-targets --no-deps -- -D warnings -A clippy::never_loop -D clippy::panic -D clippy::unwrap_used -D clippy::expect_used -D clippy::todo -D clippy::unimplemented
       - name: Cargo check (workspace)
         run: cargo check --workspace --all-targets
       - name: Cargo nextest (workspace)

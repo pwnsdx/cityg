@@ -173,7 +173,7 @@ mod tests {
     use ark_std::test_rng;
 
     #[test]
-    fn constant_time_solver_matches_gaussian() {
+    fn constant_time_solver_matches_gaussian() -> Result<(), Box<dyn std::error::Error>> {
         let mut rng = test_rng();
         for dimension in 1..=5 {
             for _ in 0..16 {
@@ -193,12 +193,11 @@ mod tests {
                     row[i] += BaseField::one();
                 }
 
-                let gaussian =
-                    GaussianSolver::solve(matrix.clone(), rhs.clone()).expect("gaussian solver");
-                let constant =
-                    ConstantTimeSolver::solve(matrix, rhs).expect("constant-time solver");
+                let gaussian = GaussianSolver::solve(matrix.clone(), rhs.clone())?;
+                let constant = ConstantTimeSolver::solve(matrix, rhs)?;
                 assert_eq!(gaussian, constant);
             }
         }
+        Ok(())
     }
 }

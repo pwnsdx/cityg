@@ -545,10 +545,20 @@ fn merge_columns(
     let mut next_pivot = fullrank_cols.iter().copied().peekable();
     for (idx, slot) in out.iter_mut().enumerate() {
         if matches!(next_pivot.peek(), Some(&col) if col == idx) {
-            *slot = *pivot_iter.next().expect("pivot length mismatch");
+            *slot = if let Some(val) = pivot_iter.next() {
+                *val
+            } else {
+                // This is a programming error - lengths should match
+                unreachable!("pivot length mismatch")
+            };
             next_pivot.next();
         } else {
-            *slot = *remainder_iter.next().expect("remainder length mismatch");
+            *slot = if let Some(val) = remainder_iter.next() {
+                *val
+            } else {
+                // This is a programming error - lengths should match
+                unreachable!("remainder length mismatch")
+            };
         }
     }
     out

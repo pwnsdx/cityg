@@ -645,7 +645,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_default_config() {
+    fn test_default_config() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let config = CityGConfig::default();
         assert_eq!(config.server.address, "0.0.0.0:8080");
         assert_eq!(config.client.default_server_url, "http://127.0.0.1:8080");
@@ -654,10 +654,11 @@ mod tests {
         assert_eq!(config.protocol.fs_policy_version, "fs-demo-policy");
         assert_eq!(config.protocol.fs_policy.h_seconds, 300);
         assert_eq!(config.gui.default_window_width, 1160.0);
+        Ok(())
     }
 
     #[test]
-    fn test_load_from_toml() {
+    fn test_load_from_toml() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let toml_content = r#"
 [server]
 address = "0.0.0.0:9000"
@@ -676,22 +677,21 @@ default_window_width = 1920.0
 default_window_height = 1080.0
 "#;
 
-        let mut temp_file = NamedTempFile::new().expect("create temp TOML file");
-        temp_file
-            .write_all(toml_content.as_bytes())
-            .expect("write TOML contents");
-        temp_file.flush().expect("flush TOML temp file");
+        let mut temp_file = NamedTempFile::new()?;
+        temp_file.write_all(toml_content.as_bytes())?;
+        temp_file.flush()?;
 
-        let config = CityGConfig::from_file(temp_file.path()).expect("load TOML config");
+        let config = CityGConfig::from_file(temp_file.path())?;
         assert_eq!(config.server.address, "0.0.0.0:9000");
         assert_eq!(config.server.websocket_capacity, 2000);
         assert_eq!(config.client.default_server_url, "http://example.com:8080");
         assert_eq!(config.protocol.window_duration_secs, 20);
         assert_eq!(config.gui.default_window_width, 1920.0);
+        Ok(())
     }
 
     #[test]
-    fn test_load_from_json() {
+    fn test_load_from_json() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let json_content = r#"{
   "server": {
     "address": "0.0.0.0:9000",
@@ -707,19 +707,18 @@ default_window_height = 1080.0
   }
 }"#;
 
-        let mut temp_file = NamedTempFile::with_suffix(".json").expect("create temp JSON file");
-        temp_file
-            .write_all(json_content.as_bytes())
-            .expect("write JSON contents");
-        temp_file.flush().expect("flush JSON temp file");
+        let mut temp_file = NamedTempFile::with_suffix(".json")?;
+        temp_file.write_all(json_content.as_bytes())?;
+        temp_file.flush()?;
 
-        let config = CityGConfig::from_file(temp_file.path()).expect("load JSON config");
+        let config = CityGConfig::from_file(temp_file.path())?;
         assert_eq!(config.server.address, "0.0.0.0:9000");
         assert_eq!(config.client.default_server_url, "http://example.com:8080");
+        Ok(())
     }
 
     #[test]
-    fn test_validation() {
+    fn test_validation() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut config = CityGConfig::default();
         assert!(config.validate().is_ok());
 
@@ -730,39 +729,44 @@ default_window_height = 1080.0
         config.protocol.default_srx_max_bytes = 100;
         config.protocol.min_srx_max_bytes = 200;
         assert!(config.validate().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_env_overrides() {
+    fn test_env_overrides() -> std::result::Result<(), Box<dyn std::error::Error>> {
         use ahash::AHashMap;
         let mut overrides = AHashMap::new();
         overrides.insert("CITYG_SERVER_ADDRESS", "0.0.0.0:9999".to_string());
         overrides.insert("CITYG_CLIENT_FETCH_POLL_INTERVAL_SECS", "7".to_string());
 
-        let config = CityGConfig::default()
-            .apply_env_overrides_with(|key| overrides.get(key).cloned().ok_or(VarError::NotPresent))
-            .expect("apply env overrides");
+        let config = CityGConfig::default().apply_env_overrides_with(|key| {
+            overrides.get(key).cloned().ok_or(VarError::NotPresent)
+        })?;
         assert_eq!(config.server.address, "0.0.0.0:9999");
         assert_eq!(config.client.fetch_poll_interval_secs, 7);
+        Ok(())
     }
 
     #[test]
-    fn test_duration_conversions() {
+    fn test_duration_conversions() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let config = CityGConfig::default();
         assert_eq!(config.client.fetch_poll_interval(), Duration::from_secs(3));
         assert_eq!(config.protocol.window_duration(), Duration::from_secs(120));
+        Ok(())
     }
 
     // Additional comprehensive tests for coverage
 
     #[test]
-    fn test_config_error_display() {
+    fn test_config_error_display() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let err = ConfigError::Validation("test error".to_string());
         assert_eq!(err.to_string(), "Validation error: test error");
+        Ok(())
     }
 
     #[test]
-    fn test_server_config_duration_helpers() {
+    fn test_server_config_duration_helpers() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         let server = ServerConfig::default();
         assert_eq!(server.window_ttl(), Duration::from_secs(120));
 
@@ -771,71 +775,80 @@ default_window_height = 1080.0
             ..Default::default()
         };
         assert_eq!(custom_server.window_ttl(), Duration::from_secs(3600));
+        Ok(())
     }
 
     #[test]
-    fn test_client_config_all_duration_helpers() {
+    fn test_client_config_all_duration_helpers()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let client = ClientConfig::default();
         assert_eq!(client.fetch_poll_interval(), Duration::from_secs(3));
         assert_eq!(client.fetch_retry_interval(), Duration::from_secs(10));
         assert_eq!(client.websocket_reconnect_delay(), Duration::from_secs(5));
         assert_eq!(client.api_timeout(), Duration::from_secs(30));
+        Ok(())
     }
 
     #[test]
-    fn test_protocol_config_all_duration_helpers() {
+    fn test_protocol_config_all_duration_helpers()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let protocol = ProtocolConfig::default();
         assert_eq!(protocol.window_duration(), Duration::from_secs(120));
         assert_eq!(protocol.epoch_rotation_interval(), Duration::from_secs(300));
         assert_eq!(protocol.receiver_cache_ttl(), Duration::from_secs(10));
+        Ok(())
     }
 
     #[test]
-    fn test_gui_config_duration_helpers() {
+    fn test_gui_config_duration_helpers() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let gui = GuiConfig::default();
         assert_eq!(gui.members_refresh_interval(), Duration::from_secs(30));
+        Ok(())
     }
 
     #[test]
-    fn test_fs_policy_validation_success() {
+    fn test_fs_policy_validation_success() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let policy = FsPolicySettings::default();
         assert!(policy.validate().is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_fs_policy_validation_h_seconds_zero() {
+    fn test_fs_policy_validation_h_seconds_zero()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let policy = FsPolicySettings {
             h_seconds: 0,
             ..Default::default()
         };
         let result = policy.validate();
         assert!(result.is_err());
-        assert!(
-            result
-                .expect_err("validation should fail")
-                .to_string()
-                .contains("h_seconds must be > 0")
-        );
+        if let Err(err) = result {
+            assert!(err.to_string().contains("h_seconds must be > 0"));
+        }
+        Ok(())
     }
 
     #[test]
-    fn test_fs_policy_validation_checkpoint_interval_zero() {
+    fn test_fs_policy_validation_checkpoint_interval_zero()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let policy = FsPolicySettings {
             checkpoint_interval_seconds: 0,
             ..Default::default()
         };
         let result = policy.validate();
         assert!(result.is_err());
-        assert!(
-            result
-                .expect_err("validation should fail")
-                .to_string()
-                .contains("checkpoint_interval_seconds must be > 0")
-        );
+        if let Err(err) = result {
+            assert!(
+                err.to_string()
+                    .contains("checkpoint_interval_seconds must be > 0")
+            );
+        }
+        Ok(())
     }
 
     #[test]
-    fn test_fs_policy_validation_checkpoint_less_than_h() {
+    fn test_fs_policy_validation_checkpoint_less_than_h()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let policy = FsPolicySettings {
             h_seconds: 1000,
             checkpoint_interval_seconds: 500,
@@ -843,16 +856,14 @@ default_window_height = 1080.0
         };
         let result = policy.validate();
         assert!(result.is_err());
-        assert!(
-            result
-                .expect_err("validation should fail")
-                .to_string()
-                .contains("must be >= h_seconds")
-        );
+        if let Err(err) = result {
+            assert!(err.to_string().contains("must be >= h_seconds"));
+        }
+        Ok(())
     }
 
     #[test]
-    fn test_validation_all_server_fields() {
+    fn test_validation_all_server_fields() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut config = CityGConfig::default();
 
         config.server.websocket_capacity = 0;
@@ -861,10 +872,11 @@ default_window_height = 1080.0
         config = CityGConfig::default();
         config.server.window_ttl_secs = 0;
         assert!(config.validate().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_validation_all_client_fields() {
+    fn test_validation_all_client_fields() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut config = CityGConfig::default();
 
         config.client.fetch_poll_interval_secs = 0;
@@ -873,10 +885,12 @@ default_window_height = 1080.0
         config = CityGConfig::default();
         config.client.fetch_retry_interval_secs = 0;
         assert!(config.validate().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_validation_all_protocol_fields() {
+    fn test_validation_all_protocol_fields() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         let mut config = CityGConfig::default();
 
         config.protocol.window_duration_secs = 0;
@@ -897,10 +911,11 @@ default_window_height = 1080.0
         config = CityGConfig::default();
         config.protocol.fs_policy_version = "   ".to_string();
         assert!(config.validate().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_validation_all_gui_fields() {
+    fn test_validation_all_gui_fields() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut config = CityGConfig::default();
 
         config.gui.default_window_width = 0.0;
@@ -921,15 +936,16 @@ default_window_height = 1080.0
         config = CityGConfig::default();
         config.gui.members_refresh_interval_secs = 0;
         assert!(config.validate().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_save_and_load_toml() {
+    fn test_save_and_load_toml() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let original = CityGConfig::default();
-        let temp_file = NamedTempFile::with_suffix(".toml").expect("create temp TOML file");
+        let temp_file = NamedTempFile::with_suffix(".toml")?;
 
-        original.save(temp_file.path()).expect("save TOML config");
-        let loaded = CityGConfig::from_file(temp_file.path()).expect("load TOML config");
+        original.save(temp_file.path())?;
+        let loaded = CityGConfig::from_file(temp_file.path())?;
 
         assert_eq!(original.server.address, loaded.server.address);
         assert_eq!(
@@ -940,25 +956,27 @@ default_window_height = 1080.0
             original.protocol.window_duration_secs,
             loaded.protocol.window_duration_secs
         );
+        Ok(())
     }
 
     #[test]
-    fn test_save_and_load_json() {
+    fn test_save_and_load_json() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let original = CityGConfig::default();
-        let temp_file = NamedTempFile::with_suffix(".json").expect("create temp JSON file");
+        let temp_file = NamedTempFile::with_suffix(".json")?;
 
-        original.save(temp_file.path()).expect("save JSON config");
-        let loaded = CityGConfig::from_file(temp_file.path()).expect("load JSON config");
+        original.save(temp_file.path())?;
+        let loaded = CityGConfig::from_file(temp_file.path())?;
 
         assert_eq!(original.server.address, loaded.server.address);
         assert_eq!(
             original.client.default_server_url,
             loaded.client.default_server_url
         );
+        Ok(())
     }
 
     #[test]
-    fn test_comprehensive_env_overrides() {
+    fn test_comprehensive_env_overrides() -> std::result::Result<(), Box<dyn std::error::Error>> {
         use ahash::AHashMap;
         let mut overrides = AHashMap::new();
 
@@ -1021,9 +1039,9 @@ default_window_height = 1080.0
         overrides.insert("CITYG_GUI_MEMBERS_PAGE_LIMIT", "500".to_string());
         overrides.insert("CITYG_GUI_MEMBERS_REFRESH_INTERVAL_SECS", "60".to_string());
 
-        let config = CityGConfig::default()
-            .apply_env_overrides_with(|key| overrides.get(key).cloned().ok_or(VarError::NotPresent))
-            .expect("apply env overrides");
+        let config = CityGConfig::default().apply_env_overrides_with(|key| {
+            overrides.get(key).cloned().ok_or(VarError::NotPresent)
+        })?;
 
         // Verify all overrides
         assert_eq!(config.server.address, "1.2.3.4:5000");
@@ -1055,10 +1073,11 @@ default_window_height = 1080.0
         assert_eq!(config.gui.default_window_height, 1080.0);
         assert_eq!(config.gui.members_page_limit, 500);
         assert_eq!(config.gui.members_refresh_interval_secs, 60);
+        Ok(())
     }
 
     #[test]
-    fn test_env_override_parse_errors() {
+    fn test_env_override_parse_errors() -> std::result::Result<(), Box<dyn std::error::Error>> {
         use ahash::AHashMap;
         let mut overrides = AHashMap::new();
 
@@ -1072,44 +1091,45 @@ default_window_height = 1080.0
         });
 
         assert!(result.is_err());
-        assert!(
-            result
-                .expect_err("env override should fail")
-                .to_string()
-                .contains("Invalid websocket_capacity")
-        );
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Invalid websocket_capacity"));
+        }
+        Ok(())
     }
 
     #[test]
-    fn test_from_file_missing_file() {
+    fn test_from_file_missing_file() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let result = CityGConfig::from_file("nonexistent_file.toml");
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_from_file_invalid_toml() {
+    fn test_from_file_invalid_toml() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let invalid_toml = "this is not valid toml {{{";
-        let mut temp_file = NamedTempFile::with_suffix(".toml").expect("create temp file");
-        temp_file.write_all(invalid_toml.as_bytes()).expect("write");
-        temp_file.flush().expect("flush");
+        let mut temp_file = NamedTempFile::with_suffix(".toml")?;
+        temp_file.write_all(invalid_toml.as_bytes())?;
+        temp_file.flush()?;
 
         let result = CityGConfig::from_file(temp_file.path());
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_from_file_invalid_json() {
+    fn test_from_file_invalid_json() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let invalid_json = "{ this is not valid json }";
-        let mut temp_file = NamedTempFile::with_suffix(".json").expect("create temp file");
-        temp_file.write_all(invalid_json.as_bytes()).expect("write");
-        temp_file.flush().expect("flush");
+        let mut temp_file = NamedTempFile::with_suffix(".json")?;
+        temp_file.write_all(invalid_json.as_bytes())?;
+        temp_file.flush()?;
 
         let result = CityGConfig::from_file(temp_file.path());
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_clone_and_debug() {
+    fn test_clone_and_debug() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let config = CityGConfig::default();
         let cloned = config.clone();
 
@@ -1117,30 +1137,33 @@ default_window_height = 1080.0
 
         let debug_str = format!("{:?}", config);
         assert!(debug_str.contains("CityGConfig"));
+        Ok(())
     }
 
     #[test]
-    fn test_all_default_impls() {
+    fn test_all_default_impls() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let _server = ServerConfig::default();
         let _client = ClientConfig::default();
         let _protocol = ProtocolConfig::default();
         let _fs_policy = FsPolicySettings::default();
         let _gui = GuiConfig::default();
         let _config = CityGConfig::default();
+        Ok(())
     }
 
     #[test]
-    fn test_serde_roundtrip() {
+    fn test_serde_roundtrip() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let original = CityGConfig::default();
 
         // JSON roundtrip
-        let json = serde_json::to_string(&original).expect("serialize to JSON");
-        let from_json: CityGConfig = serde_json::from_str(&json).expect("deserialize from JSON");
+        let json = serde_json::to_string(&original)?;
+        let from_json: CityGConfig = serde_json::from_str(&json)?;
         assert_eq!(original.server.address, from_json.server.address);
 
         // TOML roundtrip
-        let toml_str = toml::to_string(&original).expect("serialize to TOML");
-        let from_toml: CityGConfig = toml::from_str(&toml_str).expect("deserialize from TOML");
+        let toml_str = toml::to_string(&original)?;
+        let from_toml: CityGConfig = toml::from_str(&toml_str)?;
         assert_eq!(original.server.address, from_toml.server.address);
+        Ok(())
     }
 }

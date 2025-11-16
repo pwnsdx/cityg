@@ -275,7 +275,10 @@ pub fn load_policy_journal_from_reader<R: Read>(
         latest_document = Some(document);
     }
 
-    Ok(latest_document.expect("checked non-empty"))
+    match latest_document {
+        Some(doc) => Ok(doc),
+        None => unreachable!("file.entries is checked non-empty at function start"),
+    }
 }
 
 fn serialize_payload(payload: &PolicyPayloadSer) -> Result<Vec<u8>, PolicyError> {
@@ -463,7 +466,7 @@ pub fn load_policy_journal_from_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::{Context, Result, ensure};
+    use anyhow::{Context, Result, bail, ensure};
     use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, keypair};
     use time::Month;
 
@@ -520,14 +523,14 @@ mod tests {
         payload: &PolicyPayloadSer,
         pk: &MlDsaPublicKey,
         sk: &MlDsaSecretKey,
-    ) -> PolicySignatureSer {
-        let message = serialize_payload(payload).expect("serialize");
+    ) -> Result<PolicySignatureSer> {
+        let message = serialize_payload(payload)?;
         let signature = pqcrypto_dilithium::dilithium5::detached_sign(&message, sk);
-        PolicySignatureSer {
+        Ok(PolicySignatureSer {
             algorithm: "ml-dsa-65".to_string(),
             public_key: BASE64.encode(pk.as_bytes()),
             signature: BASE64.encode(signature.as_bytes()),
-        }
+        })
     }
 
     #[test]
@@ -536,10 +539,10 @@ mod tests {
         payload1.h_max = Some(16);
         let (pk, sk) = keypair();
         let anchors = PolicyTrustAnchors::from_ml_dsa_keys([pk.as_bytes().to_vec()]);
-        let sig1 = sign_payload(&payload1, &pk, &sk);
+        let sig1 = sign_payload(&payload1, &pk, &sk)?;
 
         let payload2 = make_payload("2025-10-01T00:00:00Z", "7465737432");
-        let sig2 = sign_payload(&payload2, &pk, &sk);
+        let sig2 = sign_payload(&payload2, &pk, &sk)?;
         let message = PolicyJournalFile {
             entries: vec![
                 PolicyJournalEntrySer {
@@ -573,8 +576,8 @@ mod tests {
         let payload2 = make_payload("2025-09-01T00:00:00Z", "74657375");
         let (pk, sk) = keypair();
         let anchors = PolicyTrustAnchors::from_ml_dsa_keys([pk.as_bytes().to_vec()]);
-        let sig1 = sign_payload(&payload1, &pk, &sk);
-        let sig2 = sign_payload(&payload2, &pk, &sk);
+        let sig1 = sign_payload(&payload1, &pk, &sk)?;
+        let sig2 = sign_payload(&payload2, &pk, &sk)?;
         let file = PolicyJournalFile {
             entries: vec![
                 PolicyJournalEntrySer {
@@ -588,8 +591,10 @@ mod tests {
             ],
         };
         let json = serde_json::to_vec(&file)?;
-        let err =
-            load_policy_journal_from_bytes(&json, &anchors).expect_err("non monotonic version");
+        let err = match load_policy_journal_from_bytes(&json, &anchors) {
+            Err(e) => e,
+            Ok(_) => bail!("expected non monotonic version error"),
+        };
         assert!(matches!(err, PolicyError::NonMonotonicVersion { .. }));
         Ok(())
     }
@@ -599,7 +604,7 @@ mod tests {
         let payload = make_payload("2025-11-01T00:00:00Z", "74657374");
         let (pk, sk) = keypair();
         let anchors = PolicyTrustAnchors::from_ml_dsa_keys([pk.as_bytes().to_vec()]);
-        let signature = sign_payload(&payload, &pk, &sk);
+        let signature = sign_payload(&payload, &pk, &sk)?;
         let file = PolicyJournalFile {
             entries: vec![PolicyJournalEntrySer {
                 policy: payload,
@@ -626,7 +631,7 @@ mod tests {
         let (authorized_pk, _) = keypair();
         let (unauth_pk, unauth_sk) = keypair();
         let anchors = PolicyTrustAnchors::from_ml_dsa_keys([authorized_pk.as_bytes().to_vec()]);
-        let unauthorized_sig = sign_payload(&payload, &unauth_pk, &unauth_sk);
+        let unauthorized_sig = sign_payload(&payload, &unauth_pk, &unauth_sk)?;
         let file = PolicyJournalFile {
             entries: vec![PolicyJournalEntrySer {
                 policy: payload,
@@ -634,7 +639,10 @@ mod tests {
             }],
         };
         let json = serde_json::to_vec(&file)?;
-        let err = load_policy_journal_from_bytes(&json, &anchors).expect_err("unauthorized signer");
+        let err = match load_policy_journal_from_bytes(&json, &anchors) {
+            Err(e) => e,
+            Ok(_) => bail!("expected unauthorized signer error"),
+        };
         assert!(matches!(err, PolicyError::UnauthorizedSigner));
         Ok(())
     }
@@ -644,7 +652,7 @@ mod tests {
         let payload = payload_with_registry("2025-12-15T00:00:00Z");
         let (pk, sk) = keypair();
         let anchors = PolicyTrustAnchors::from_ml_dsa_keys([pk.as_bytes().to_vec()]);
-        let signature = sign_payload(&payload, &pk, &sk);
+        let signature = sign_payload(&payload, &pk, &sk)?;
         let file = PolicyJournalFile {
             entries: vec![PolicyJournalEntrySer {
                 policy: payload,
@@ -674,12 +682,14 @@ mod tests {
         let mut payload = make_payload("2025-08-01T00:00:00Z", "01");
         payload.h_max = Some(0);
         let (pk, sk) = keypair();
-        let sig = sign_payload(&payload, &pk, &sk);
+        let sig = sign_payload(&payload, &pk, &sk)?;
         let anchors = PolicyTrustAnchors::from_ml_dsa_keys([pk.as_bytes().to_vec()]);
         let file = policy_file(vec![payload], vec![vec![sig]]);
         let json = serde_json::to_vec(&file)?;
-        let err =
-            load_policy_journal_from_bytes(&json, &anchors).expect_err("invalid h_max allowed");
+        let err = match load_policy_journal_from_bytes(&json, &anchors) {
+            Err(e) => e,
+            Ok(_) => bail!("expected invalid h_max error"),
+        };
         assert!(matches!(err, PolicyError::InvalidHMax));
         Ok(())
     }
@@ -689,11 +699,14 @@ mod tests {
         let mut payload = make_payload("2025-08-15T00:00:00Z", "02");
         payload.leaf_id_mode = Some("invalid-mode".to_string());
         let (pk, sk) = keypair();
-        let sig = sign_payload(&payload, &pk, &sk);
+        let sig = sign_payload(&payload, &pk, &sk)?;
         let anchors = PolicyTrustAnchors::from_ml_dsa_keys([pk.as_bytes().to_vec()]);
         let file = policy_file(vec![payload], vec![vec![sig]]);
         let json = serde_json::to_vec(&file)?;
-        let err = load_policy_journal_from_bytes(&json, &anchors).expect_err("invalid leaf mode");
+        let err = match load_policy_journal_from_bytes(&json, &anchors) {
+            Err(e) => e,
+            Ok(_) => bail!("expected invalid leaf mode error"),
+        };
         assert!(matches!(err, PolicyError::InvalidLeafIdMode(_)));
         Ok(())
     }
@@ -703,12 +716,14 @@ mod tests {
         let mut payload = make_payload("2025-08-20T00:00:00Z", "02");
         payload.policy_journal_root = Some("deadbeef".to_string());
         let (pk, sk) = keypair();
-        let sig = sign_payload(&payload, &pk, &sk);
+        let sig = sign_payload(&payload, &pk, &sk)?;
         let anchors = PolicyTrustAnchors::from_ml_dsa_keys([pk.as_bytes().to_vec()]);
         let file = policy_file(vec![payload], vec![vec![sig]]);
         let json = serde_json::to_vec(&file)?;
-        let err =
-            load_policy_journal_from_bytes(&json, &anchors).expect_err("invalid journal root");
+        let err = match load_policy_journal_from_bytes(&json, &anchors) {
+            Err(e) => e,
+            Ok(_) => bail!("expected invalid journal root error"),
+        };
         assert!(matches!(err, PolicyError::InvalidPolicyJournalRoot));
         Ok(())
     }
@@ -727,8 +742,8 @@ mod tests {
 
         let (pk, sk) = keypair();
         let anchors = PolicyTrustAnchors::from_ml_dsa_keys([pk.as_bytes().to_vec()]);
-        let sig1 = sign_payload(&payload1, &pk, &sk);
-        let sig2 = sign_payload(&payload2, &pk, &sk);
+        let sig1 = sign_payload(&payload1, &pk, &sk)?;
+        let sig2 = sign_payload(&payload2, &pk, &sk)?;
         let file = policy_file(
             vec![payload1, payload2],
             vec![vec![sig1.clone()], vec![sig2]],

@@ -172,29 +172,29 @@ mod tests {
     }
 
     #[test]
-    fn anchor_seed_ctx_excludes_reserved_keys() {
+    fn anchor_seed_ctx_excludes_reserved_keys() -> Result<(), Box<dyn std::error::Error>> {
         let header = sample_header();
-        let ctx = build_anchor_seed_ctx(&header).expect("ctx");
+        let ctx = build_anchor_seed_ctx(&header)?;
         // Deserialize back to check keys.
-        let value: BTreeMap<u64, Value> =
-            ciborium::de::from_reader(ctx.as_slice()).expect("decode ctx");
+        let value: BTreeMap<u64, Value> = ciborium::de::from_reader(ctx.as_slice())?;
         let observed: std::collections::BTreeSet<u64> = value.keys().copied().collect();
         let expected: std::collections::BTreeSet<u64> =
             [10_u64, 20_u64, 90_u64, 110_u64].into_iter().collect();
         assert_eq!(observed, expected, "unexpected key set: {:?}", observed);
+        Ok(())
     }
 
     #[test]
-    fn derive_seed_commit_roundtrip() {
+    fn derive_seed_commit_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let header = sample_header();
         let fields = SeedCommitFields {
             gid: b"group-id",
             cat: b"category",
             we_epoch_id: [0x2A; 32],
         };
-        let (_ctx, ctx_hash, seed_commit) =
-            derive_seed_artifacts(&header, &fields).expect("derive seed artifacts");
+        let (_ctx, ctx_hash, seed_commit) = derive_seed_artifacts(&header, &fields)?;
         assert_ne!(ctx_hash, [0u8; 32]);
         assert_ne!(seed_commit, [0u8; 32]);
+        Ok(())
     }
 }

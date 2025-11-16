@@ -36,7 +36,10 @@ impl Blake3MerkleTree {
             .last()
             .and_then(|level| level.first())
             .copied()
-            .expect("merkle tree root available")
+            .unwrap_or_else(|| {
+                // This should never happen if the tree was constructed properly
+                unreachable!("merkle tree root not available")
+            })
     }
 
     /// Return the authentication path for a given leaf index (bottom-up order).

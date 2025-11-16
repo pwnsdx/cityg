@@ -109,10 +109,10 @@ fn witness_branch_b(
     }
 }
 
-fn serialize_witness(witness: &CanonicalWitness) -> Vec<u8> {
+fn serialize_witness(witness: &CanonicalWitness) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut buf = Vec::new();
-    into_writer(witness, &mut buf).expect("serialize witness");
-    buf
+    into_writer(witness, &mut buf)?;
+    Ok(buf)
 }
 
 fn build_noncanonical_witness(membership_root: &[u8; 32], _revoked_root: &[u8; 32]) -> Vec<u8> {
@@ -127,7 +127,7 @@ fn build_noncanonical_witness(membership_root: &[u8; 32], _revoked_root: &[u8; 3
             pop: None,
         },
     };
-    serialize_witness(&invalid)
+    serialize_witness(&invalid).unwrap()
 }
 
 fn sentinel_nonmem(root: [u8; 32], query: [u8; 32]) -> RawNonMembershipWitness {
@@ -166,16 +166,13 @@ fn slice_to_array32(slice: &[u8]) -> [u8; 32] {
     arr
 }
 
-fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Vec<RawPathEntry> {
+fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Option<Vec<RawPathEntry>> {
     if leaves.len() <= 1 {
-        return Vec::new();
+        return Some(Vec::new());
     }
 
     let mut level: Vec<[u8; 32]> = leaves.to_vec();
-    let mut index = level
-        .iter()
-        .position(|leaf| leaf == target)
-        .expect("membership target present");
+    let mut index = level.iter().position(|leaf| leaf == target)?;
     let mut path = Vec::new();
 
     while level.len() > 1 {
@@ -200,7 +197,7 @@ fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Vec<RawP
         }
         let mut new_index = index / 2;
         if len % 2 == 1 {
-            let carry = *level.last().expect("carry exists");
+            let carry = *level.last()?;
             next.push(carry);
             if index == len - 1 {
                 new_index = next.len() - 1;
@@ -210,7 +207,7 @@ fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Vec<RawP
         index = new_index;
     }
 
-    path
+    Some(path)
 }
 
 fn parent_nonmem_witness(
@@ -271,7 +268,7 @@ fn parent_nonmem_witness(
             None,
             Some(r),
         ),
-        (None, None) => (Vec::new(), None, None, None, None),
+        (None, None) => (Some(Vec::new()), None, None, None, None),
         (Some(_), Some(_)) => unreachable!(),
     };
 
@@ -280,7 +277,7 @@ fn parent_nonmem_witness(
         root: parent_root.to_vec(),
         left: left_value,
         right: right_value,
-        path,
+        path: path.unwrap(),
         left_below: Vec::new(),
         right_below: Vec::new(),
         above: Vec::new(),
@@ -300,12 +297,12 @@ fn build_srx_inputs(
     revoked_since_leaves: &[[u8; 32]],
     revoked_leaves: &[[u8; 32]],
     revoked_root: [u8; 32],
-) -> SrxInputs<'static> {
+) -> Option<SrxInputs<'static>> {
     use std::collections::{BTreeMap, HashMap};
 
     let mut parent_sorted = parent_leaves.to_vec();
     parent_sorted.sort();
-    let expected_parent_root = merkle::canonical_set_root(&parent_sorted).expect("parent root");
+    let expected_parent_root = merkle::canonical_set_root(&parent_sorted).ok()?;
     assert_eq!(
         expected_parent_root, parent_root,
         "parent root must match canonical set root"
@@ -326,7 +323,7 @@ fn build_srx_inputs(
                 .or_insert_with(|| RawMembershipWitness {
                     leaf_id: leaf_id.to_vec(),
                     root: root.to_vec(),
-                    path: canonical_membership_path(&parent_sorted, &leaf_id),
+                    path: canonical_membership_path(&parent_sorted, &leaf_id).unwrap(),
                 });
         }
         if let Some((root, leaf_id)) = right_key {
@@ -335,7 +332,7 @@ fn build_srx_inputs(
                 .or_insert_with(|| RawMembershipWitness {
                     leaf_id: leaf_id.to_vec(),
                     root: root.to_vec(),
-                    path: canonical_membership_path(&parent_sorted, &leaf_id),
+                    path: canonical_membership_path(&parent_sorted, &leaf_id).unwrap(),
                 });
         }
 
@@ -369,8 +366,7 @@ fn build_srx_inputs(
 
     let mut revoked_since_sorted = revoked_since_leaves.to_vec();
     revoked_since_sorted.sort();
-    let expected_since_root =
-        merkle::canonical_set_root(&revoked_since_sorted).expect("revoked-since root");
+    let expected_since_root = merkle::canonical_set_root(&revoked_since_sorted).ok()?;
     assert_eq!(
         expected_since_root, revoked_since_root,
         "revoked_since_root must match canonical root of revoked_since_leaves"
@@ -378,7 +374,7 @@ fn build_srx_inputs(
 
     let mut revoked_sorted = revoked_leaves.to_vec();
     revoked_sorted.sort();
-    let expected_revoked_root = merkle::canonical_set_root(&revoked_sorted).expect("revoked root");
+    let expected_revoked_root = merkle::canonical_set_root(&revoked_sorted).ok()?;
     assert_eq!(
         expected_revoked_root, revoked_root,
         "revoked_root must match canonical root of revoked_leaves"
@@ -394,12 +390,12 @@ fn build_srx_inputs(
             RawMembershipWitness {
                 leaf_id: leaf.to_vec(),
                 root: revoked_root.to_vec(),
-                path: canonical_membership_path(&revoked_sorted, leaf),
+                path: canonical_membership_path(&revoked_sorted, leaf).unwrap(),
             }
         })
         .collect();
 
-    SrxInputs {
+    Some(SrxInputs {
         join_leaf_ids: Cow::Owned(join_leaves.to_vec()),
         join_nonmem_parent,
         join_nonmem_revoked_since,
@@ -408,23 +404,23 @@ fn build_srx_inputs(
         anchor_mem_pool,
         join_frontier: None,
         since_frontier: None,
-    }
+    })
 }
 
 fn make_anchor_fixture(
     config: AnchorFixtureConfig,
-) -> (
+) -> Option<(
     AnchorInstanceParts<'static>,
     OrchestrationParams<'static>,
     Vec<[u8; 32]>,
-) {
+)> {
     let mut join_leaves = config.join_leaves.clone();
     join_leaves.sort();
-    let join_root = merkle::canonical_set_root(&join_leaves).expect("join root");
+    let join_root = merkle::canonical_set_root(&join_leaves).ok()?;
 
     let mut parent_leaves = config.parent_leaves.clone();
     parent_leaves.sort();
-    let parent_root_canonical = merkle::canonical_set_root(&parent_leaves).expect("parent root");
+    let parent_root_canonical = merkle::canonical_set_root(&parent_leaves).ok()?;
     assert_eq!(
         parent_root_canonical, config.parent_root,
         "parent_root must match canonical root of parent_leaves",
@@ -432,8 +428,7 @@ fn make_anchor_fixture(
 
     let mut revoked_since_leaves = config.revoked_since_leaves.clone();
     revoked_since_leaves.sort();
-    let revoked_since_root_canonical =
-        merkle::canonical_set_root(&revoked_since_leaves).expect("revoked-since root");
+    let revoked_since_root_canonical = merkle::canonical_set_root(&revoked_since_leaves).ok()?;
     assert_eq!(
         revoked_since_root_canonical, config.revoked_since_root,
         "revoked_since_root must match canonical root of revoked_since_leaves",
@@ -441,7 +436,7 @@ fn make_anchor_fixture(
 
     let mut revoked_leaves = config.revoked_leaves.clone();
     revoked_leaves.sort();
-    let revoked_root_canonical = merkle::canonical_set_root(&revoked_leaves).expect("revoked root");
+    let revoked_root_canonical = merkle::canonical_set_root(&revoked_leaves).ok()?;
     assert_eq!(
         revoked_root_canonical, config.revoked_root,
         "revoked_root must match canonical root of revoked_leaves",
@@ -451,8 +446,8 @@ fn make_anchor_fixture(
         gid: leak_bytes32(config.gid),
         cat: leak_bytes32(config.cat),
         tswe_salt_hash: {
-            let salt = msphf_core::instance::tswe_salt_hash(&config.gid, &config.parent_root)
-                .expect("tswe salt");
+            let salt =
+                msphf_core::instance::tswe_salt_hash(&config.gid, &config.parent_root).ok()?;
             leak_bytes32(salt)
         },
         parent_root: leak_bytes32(config.parent_root),
@@ -470,7 +465,8 @@ fn make_anchor_fixture(
         &revoked_since_leaves,
         &revoked_leaves,
         config.revoked_root,
-    );
+    )
+    .unwrap();
     let (pop_pk, pop_sk) = fixture_pop_keys();
     #[cfg(feature = "zkvrf-pq")]
     let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
@@ -523,28 +519,31 @@ fn make_anchor_fixture(
         fs_merge: FsMergeInputs::default(),
     };
 
-    (parts, params, join_leaves)
+    Some((parts, params, join_leaves))
 }
 
 #[derive(Serialize)]
 struct SrxCommit<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
 
-fn compute_srx_commit(bytes: &[u8]) -> [u8; 32] {
-    h_l(ds::MSPHF_SRX_COMMIT, &SrxCommit(bytes)).expect("srx commit")
+fn compute_srx_commit(bytes: &[u8]) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    Ok(h_l(ds::MSPHF_SRX_COMMIT, &SrxCommit(bytes))?)
 }
 
-fn encode_value(value: &Value) -> Vec<u8> {
+fn encode_value(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut buf = Vec::new();
-    into_writer(value, &mut buf).expect("encode value");
-    buf
+    into_writer(value, &mut buf)?;
+    Ok(buf)
 }
 
-fn update_srx_payload(header: &mut BTreeMap<u64, Value>, mutator: impl FnOnce(&mut Value)) {
+fn update_srx_payload(
+    header: &mut BTreeMap<u64, Value>,
+    mutator: impl FnOnce(&mut Value),
+) -> Result<(), Box<dyn std::error::Error>> {
     let payload_bytes = match header.get(&122) {
         Some(Value::Bytes(bytes)) => bytes.clone(),
         _ => panic!("missing srx payload"),
     };
-    let mut payload_value: Value = from_reader(payload_bytes.as_slice()).expect("decode srx");
+    let mut payload_value: Value = from_reader(payload_bytes.as_slice())?;
     mutator(&mut payload_value);
 
     let Value::Array(items) = &mut payload_value else {
@@ -554,11 +553,17 @@ fn update_srx_payload(header: &mut BTreeMap<u64, Value>, mutator: impl FnOnce(&m
         panic!("unexpected payload length: {}", items.len());
     }
 
-    let join_count = items[4].as_array().expect("join_leaf_ids not array").len();
-    let since_count = items[6].as_array().expect("since_leaf_ids not array").len();
+    let join_count = items[4]
+        .as_array()
+        .ok_or_else(|| Box::<dyn std::error::Error>::from("join_leaves not an array"))?
+        .len();
+    let since_count = items[6]
+        .as_array()
+        .ok_or_else(|| Box::<dyn std::error::Error>::from("since_leaves not an array"))?
+        .len();
     let anchors_count = items[8]
         .as_array()
-        .expect("anchor_mem_pool not array")
+        .ok_or_else(|| Box::<dyn std::error::Error>::from("anchors not an array"))?
         .len();
     let join_frontier_len = items[5].as_array().map(|arr| arr.len()).unwrap_or(0);
     let since_frontier_len = items[7].as_array().map(|arr| arr.len()).unwrap_or(0);
@@ -571,10 +576,10 @@ fn update_srx_payload(header: &mut BTreeMap<u64, Value>, mutator: impl FnOnce(&m
         since_frontier_len,
     );
 
-    let new_payload_bytes = encode_value(&payload_value);
+    let new_payload_bytes = encode_value(&payload_value)?;
     let payload_len = new_payload_bytes.len() as u64;
 
-    let commit = compute_srx_commit(&new_payload_bytes);
+    let commit = compute_srx_commit(&new_payload_bytes)?;
     header.insert(120, Value::Text("srx/v1-complete".to_string()));
     header.insert(121, Value::Bytes(commit.to_vec()));
     header.insert(122, Value::Bytes(new_payload_bytes.clone()));
@@ -593,13 +598,14 @@ fn update_srx_payload(header: &mut BTreeMap<u64, Value>, mutator: impl FnOnce(&m
             Value::Integer(Integer::from(anchors_count as u64)),
         ),
     ]);
-    header.insert(123, Value::Bytes(encode_value(&hint_counts)));
+    header.insert(123, Value::Bytes(encode_value(&hint_counts)?));
 
     let hint_sizes = Value::Map(vec![(
         Value::Text("bytes".to_string()),
         Value::Integer(Integer::from(payload_len)),
     )]);
-    header.insert(124, Value::Bytes(encode_value(&hint_sizes)));
+    header.insert(124, Value::Bytes(encode_value(&hint_sizes)?));
+    Ok(())
 }
 
 fn set_srx_meta(
@@ -699,23 +705,23 @@ struct JoinerFixture {
 }
 
 impl JoinerFixture {
-    fn default() -> Self {
+    fn default() -> Result<Self, Box<dyn std::error::Error>> {
         Self::with_config(AnchorFixtureConfig::default())
     }
 
-    fn new(join_leaves: Vec<[u8; 32]>) -> Self {
+    fn new(join_leaves: Vec<[u8; 32]>) -> Result<Self, Box<dyn std::error::Error>> {
         Self::with_config(AnchorFixtureConfig {
             join_leaves,
             ..AnchorFixtureConfig::default()
         })
     }
 
-    fn with_config(config: AnchorFixtureConfig) -> Self {
+    fn with_config(config: AnchorFixtureConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let is_genesis = config.parent_root.iter().all(|&b| b == 0)
             && config.revoked_since_root.iter().all(|&b| b == 0)
             && config.revoked_root.iter().all(|&b| b == 0);
 
-        let (parts, params, _) = make_anchor_fixture(config);
+        let (parts, params, _) = make_anchor_fixture(config).unwrap();
         let (kbroad_pk, kbroad_sk) = kyber_keypair();
         let kbroad_secret = kbroad_sk.as_bytes().to_vec();
         let kbroad_public = kbroad_pk.as_bytes().to_vec();
@@ -727,7 +733,7 @@ impl JoinerFixture {
         let mut revoked_root = [0u8; 32];
         revoked_root.copy_from_slice(parts.revoked_root);
         let witness = witness_branch_b(&join_root, &parent_root, &revoked_root);
-        let witness_bytes = serialize_witness(&witness);
+        let witness_bytes = serialize_witness(&witness).unwrap();
 
         let joiner = joiner_kgen_or(
             base_header(kbroad_pk.as_bytes()),
@@ -736,7 +742,7 @@ impl JoinerFixture {
             None,
             Some(&witness_bytes),
         )
-        .expect("joiner fixture");
+        .map_err(|e| format!("{:?}", e))?;
 
         let anchor = anchor_from_result(&parts, &joiner);
 
@@ -752,18 +758,18 @@ impl JoinerFixture {
                 &joiner.seed_bundle_commit,
                 bootstrap_pk.as_bytes(),
                 &bootstrap_sk,
-            );
+            )?;
         } else {
             header_with_pop.remove(&HDR_BOOTSTRAP_ALG);
             header_with_pop.remove(&HDR_BOOTSTRAP_SIG);
             header_with_pop.remove(&HDR_BOOTSTRAP_PK);
-            refresh_seed_ctx_hash(&mut header_with_pop);
+            refresh_seed_ctx_hash(&mut header_with_pop)?;
         }
 
         let mut kbroad_registry = BTreeMap::new();
         kbroad_registry.insert(parts.gid.to_vec(), kbroad_public);
 
-        Self {
+        Ok(Self {
             parts,
             params,
             joiner,
@@ -774,7 +780,7 @@ impl JoinerFixture {
             bootstrap_pk: bootstrap_pk.as_bytes().to_vec(),
             bootstrap_sk,
             is_genesis,
-        }
+        })
     }
 
     fn anchor(&self) -> instance::AnchorInstance<'_> {
@@ -817,13 +823,16 @@ impl JoinerFixture {
         &self.kbroad_secret
     }
 
-    fn resign_bootstrap(&self, header: &mut BTreeMap<u64, Value>) {
+    fn resign_bootstrap(
+        &self,
+        header: &mut BTreeMap<u64, Value>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.is_genesis {
             header.remove(&HDR_BOOTSTRAP_ALG);
             header.remove(&HDR_BOOTSTRAP_SIG);
             header.remove(&HDR_BOOTSTRAP_PK);
-            refresh_seed_ctx_hash(header);
-            return;
+            refresh_seed_ctx_hash(header)?;
+            return Ok(());
         }
         let anchor = self.anchor();
         let hp_commit = header
@@ -846,14 +855,18 @@ impl JoinerFixture {
             &self.joiner.seed_bundle_commit,
             &self.bootstrap_pk,
             &self.bootstrap_sk,
-        );
+        )?;
+        Ok(())
     }
 }
 
-fn refresh_seed_ctx_hash(header: &mut BTreeMap<u64, Value>) {
-    let ctx = build_anchor_seed_ctx(header).expect("seed ctx");
-    let hash = compute_seed_ctx_hash(&ctx).expect("seed ctx hash");
+fn refresh_seed_ctx_hash(
+    header: &mut BTreeMap<u64, Value>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = build_anchor_seed_ctx(header)?;
+    let hash = compute_seed_ctx_hash(&ctx)?;
     header.insert(91, Value::Bytes(hash.to_vec()));
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -866,7 +879,7 @@ fn attach_bootstrap(
     seed_bundle_commit: &[u8; 32],
     boot_pk: &[u8],
     boot_sk: &pqcrypto_dilithium::dilithium5::SecretKey,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     header.remove(&HDR_BOOTSTRAP_SIG);
     header.remove(&HDR_BOOTSTRAP_PK);
     header.insert(HDR_BOOTSTRAP_ALG, Value::Text("oob-ca-v1".to_string()));
@@ -878,11 +891,12 @@ fn attach_bootstrap(
         rho_commit,
         seed_bundle_commit,
     )
-    .expect("bootstrap digest");
+    .map_err(|e| Box::<dyn std::error::Error>::from(format!("{:?}", e)))?;
     let sig = detached_sign(&digest, boot_sk);
     header.insert(HDR_BOOTSTRAP_SIG, Value::Bytes(sig.as_bytes().to_vec()));
     header.insert(HDR_BOOTSTRAP_PK, Value::Bytes(boot_pk.to_vec()));
-    refresh_seed_ctx_hash(header);
+    refresh_seed_ctx_hash(header)?;
+    Ok(())
 }
 
 fn base_header(kbroad_pk_bytes: &[u8]) -> BTreeMap<u64, Value> {
@@ -920,11 +934,15 @@ fn hkdf_blake3_local(salt: &[u8; 32], ikm: &[u8], info: &[u8]) -> [u8; 32] {
     out
 }
 
-fn derive_nonce_bytes(label: &str, xk_hash: &[u8; 32], hp_commit: &[u8; 32]) -> [u8; 12] {
-    let digest = h_l(label, &NonceCtx { xk_hash, hp_commit }).expect("nonce derivation");
+fn derive_nonce_bytes(
+    label: &str,
+    xk_hash: &[u8; 32],
+    hp_commit: &[u8; 32],
+) -> Result<[u8; 12], Box<dyn std::error::Error>> {
+    let digest = h_l(label, &NonceCtx { xk_hash, hp_commit })?;
     let mut out = [0u8; 12];
     out.copy_from_slice(&digest[..12]);
-    out
+    Ok(out)
 }
 
 fn decrypt_chacha20_local(
@@ -932,10 +950,10 @@ fn decrypt_chacha20_local(
     nonce_bytes: &[u8; 12],
     aad: &[u8],
     ciphertext: &[u8],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let cipher = ChaCha20Poly1305::new(key.into());
     let nonce = nonce_bytes.into();
-    cipher
+    Ok(cipher
         .decrypt(
             nonce,
             Payload {
@@ -943,7 +961,7 @@ fn decrypt_chacha20_local(
                 aad,
             },
         )
-        .expect("aead decrypt")
+        .map_err(|e| format!("{:?}", e))?)
 }
 
 fn derive_hp_material(
@@ -951,8 +969,8 @@ fn derive_hp_material(
     xk_hash: &[u8; 32],
     hp_commit: &[u8; 32],
     kbroad_sk: &MlKemSecretKey,
-) -> ([u8; 32], Vec<u8>) {
-    let Value::Array(items) = header.get(&97).expect("msphf_hp present") else {
+) -> Result<([u8; 32], Vec<u8>), Box<dyn std::error::Error>> {
+    let Value::Array(items) = header.get(&97).ok_or("msphf_hp not found")? else {
         panic!("msphf_hp not array");
     };
     assert_eq!(items.len(), 5, "msphf_hp length");
@@ -969,31 +987,31 @@ fn derive_hp_material(
         _ => panic!("C_hp bytes"),
     };
 
-    let kem_ct = MlKemCiphertext::from_bytes(ct_bytes.as_slice()).expect("kem ct");
+    let kem_ct = MlKemCiphertext::from_bytes(ct_bytes.as_slice())?;
     let shared = ml_kem_decapsulate(&kem_ct, kbroad_sk);
     let shared_bytes = shared.as_bytes();
 
-    let salt = h_l("hp/kek/salt", &KekSalt { xk_hash }).expect("salt");
+    let salt = h_l("hp/kek/salt", &KekSalt { xk_hash })?;
     let mut info = b"city-g|hp/kek/v1".to_vec();
     info.extend_from_slice(hp_commit);
     let kek = hkdf_blake3_local(&salt, shared_bytes, &info);
 
-    let wrap_nonce = derive_nonce_bytes("hp/kek/nonce", xk_hash, hp_commit);
-    let k_hp_bytes = decrypt_chacha20_local(&kek, &wrap_nonce, hp_commit, &wrap_bytes);
+    let wrap_nonce = derive_nonce_bytes("hp/kek/nonce", xk_hash, hp_commit)?;
+    let k_hp_bytes = decrypt_chacha20_local(&kek, &wrap_nonce, hp_commit, &wrap_bytes)?;
     assert_eq!(k_hp_bytes.len(), 32, "k_hp size");
     let mut k_hp = [0u8; 32];
     k_hp.copy_from_slice(&k_hp_bytes);
 
-    (k_hp, c_hp_bytes)
+    Ok((k_hp, c_hp_bytes))
 }
 
 #[test]
-fn joiner_to_acceptance_roundtrip() {
-    let fixture = JoinerFixture::new(default_join_leaves());
+fn joiner_to_acceptance_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = JoinerFixture::new(default_join_leaves())?;
     let anchor = fixture.anchor();
     let witness_bytes = fixture.witness();
     let mut header_with_pop = fixture.header();
-    fixture.resign_bootstrap(&mut header_with_pop);
+    fixture.resign_bootstrap(&mut header_with_pop)?;
 
     let proof_inputs = HpBindingInputs {
         msphf_crs_id: fixture.params.msphf_crs_id,
@@ -1014,7 +1032,7 @@ fn joiner_to_acceptance_roundtrip() {
         &proof_inputs,
         witness_bytes,
     )
-    .expect("positive acceptance");
+    .map_err(|e| format!("{:?}", e))?;
 
     assert_eq!(positive.outcome.kind, AcceptanceKind::NonMerge);
     assert_eq!(positive.outcome.we_epoch_id, fixture.joiner.we_epoch_id);
@@ -1041,22 +1059,24 @@ fn joiner_to_acceptance_roundtrip() {
             seed_ctx_hash: &fixture.joiner.seed_ctx_hash,
         },
     )
-    .expect("expected wid");
+    .map_err(|e| format!("{:?}", e))?;
     assert_eq!(positive.outcome.wid, expected_wid);
 
     // Provide a non-membership witness that violates the canonical guard.
-    let join_root: [u8; 32] = anchor.join_delta_root.try_into().expect("join root");
-    let revoked_root: [u8; 32] = anchor.revoked_root.try_into().expect("revoked root");
+    let join_root: [u8; 32] = anchor.join_delta_root.try_into()?;
+    let revoked_root: [u8; 32] = anchor.revoked_root.try_into()?;
     let bad_witness_bytes = build_noncanonical_witness(&join_root, &revoked_root);
-    let err = msphf_orchestrator::accept_and_extract_or(
+    let err = match msphf_orchestrator::accept_and_extract_or(
         &mut fixture.acceptance_context(),
         &anchor,
         &header_with_pop,
         &fixture.joiner.hp_proof,
         &proof_inputs,
         &bad_witness_bytes,
-    )
-    .expect_err("noncanonical witness should freeze");
+    ) {
+        Err(e) => e,
+        Ok(_) => unreachable!("noncanonical witness should freeze"),
+    };
     match err {
         AcceptanceError::Freeze(freeze) => {
             assert!(matches!(freeze.code, 9072 | 9074));
@@ -1064,11 +1084,12 @@ fn joiner_to_acceptance_roundtrip() {
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn srx_parent_conflict_freezes() {
-    let (parts, params, _) = make_anchor_fixture(AnchorFixtureConfig::default());
+fn srx_parent_conflict_freezes() -> Result<(), Box<dyn std::error::Error>> {
+    let (parts, params, _) = make_anchor_fixture(AnchorFixtureConfig::default()).unwrap();
 
     let (kbroad_pk, kbroad_sk) = kyber_keypair();
     let _kbroad_secret = kbroad_sk.as_bytes().to_vec();
@@ -1078,9 +1099,9 @@ fn srx_parent_conflict_freezes() {
     let mut revoked_root = [0u8; 32];
     revoked_root.copy_from_slice(parts.revoked_root);
 
-    let parent_root: [u8; 32] = parts.parent_root.try_into().expect("parent root");
+    let parent_root: [u8; 32] = parts.parent_root.try_into()?;
     let witness_bytes =
-        serialize_witness(&witness_branch_b(&join_root, &parent_root, &revoked_root));
+        serialize_witness(&witness_branch_b(&join_root, &parent_root, &revoked_root)).unwrap();
     let joiner = joiner_kgen_or(
         base_header(kbroad_pk.as_bytes()),
         parts.clone(),
@@ -1088,7 +1109,7 @@ fn srx_parent_conflict_freezes() {
         None,
         Some(&witness_bytes),
     )
-    .expect("joiner");
+    .map_err(|e| format!("{:?}", e))?;
 
     let mut header_with_pop = joiner.header_map.clone();
     let anchor = anchor_from_result(&parts, &joiner);
@@ -1100,7 +1121,8 @@ fn srx_parent_conflict_freezes() {
         {
             *first ^= 0xFF;
         }
-    });
+    })
+    .unwrap();
     let (bootstrap_pk, bootstrap_sk) = dsa_keypair();
     attach_bootstrap(
         &mut header_with_pop,
@@ -1111,7 +1133,7 @@ fn srx_parent_conflict_freezes() {
         &joiner.seed_bundle_commit,
         bootstrap_pk.as_bytes(),
         &bootstrap_sk,
-    );
+    )?;
 
     let mut registry = BTreeMap::new();
     registry.insert(parts.gid.to_vec(), kbroad_pk.as_bytes().to_vec());
@@ -1123,9 +1145,10 @@ fn srx_parent_conflict_freezes() {
     ctx.set_bootstrap_policy(BootstrapPolicy::CaMlDsa {
         public_key: bootstrap_pk.as_bytes().to_vec(),
     });
-    let err = ctx
-        .accept_anchor(&parts, joiner.we_epoch_id, &header_with_pop)
-        .expect_err("SRX parent conflict should freeze");
+    let err = match ctx.accept_anchor(&parts, joiner.we_epoch_id, &header_with_pop) {
+        Err(e) => e,
+        Ok(_) => unreachable!("SRX parent conflict should freeze"),
+    };
 
     match err {
         AcceptanceError::Freeze(code) => {
@@ -1139,15 +1162,16 @@ fn srx_parent_conflict_freezes() {
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn pivot_parity_remains_keyed_by_parent_root() {
-    let fixture = JoinerFixture::default();
+fn pivot_parity_remains_keyed_by_parent_root() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = JoinerFixture::default()?;
     let mut ctx = fixture.acceptance_context();
     let anchor = fixture.anchor();
     let mut header = fixture.header();
-    fixture.resign_bootstrap(&mut header);
+    fixture.resign_bootstrap(&mut header)?;
     let proof_inputs = fixture.proof_inputs();
     let witness_bytes = fixture.witness();
     let acceptance = msphf_orchestrator::accept_and_extract_or(
@@ -1158,7 +1182,7 @@ fn pivot_parity_remains_keyed_by_parent_root() {
         &proof_inputs,
         witness_bytes,
     )
-    .expect("genesis anchor accepted");
+    .map_err(|e| format!("{:?}", e))?;
 
     let gid = anchor.gid;
     let parent_root = slice_to_array32(anchor.parent_root);
@@ -1180,15 +1204,16 @@ fn pivot_parity_remains_keyed_by_parent_root() {
         acceptance.pivot_parity.parent_root, parent_root,
         "acceptance parity matches parent root"
     );
+    Ok(())
 }
 
 #[test]
-fn ban_and_reinstate_member_flow() {
-    let fixture = JoinerFixture::default();
+fn ban_and_reinstate_member_flow() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = JoinerFixture::default()?;
     let mut ctx = fixture.acceptance_context();
     let anchor = fixture.anchor();
     let mut header = fixture.header();
-    fixture.resign_bootstrap(&mut header);
+    fixture.resign_bootstrap(&mut header)?;
     let proof_inputs = fixture.proof_inputs();
     let witness_bytes = fixture.witness();
     let kbroad_pub = match header.get(&105) {
@@ -1203,17 +1228,22 @@ fn ban_and_reinstate_member_flow() {
         &proof_inputs,
         witness_bytes,
     )
-    .expect("genesis anchor accepted");
+    .map_err(|e| format!("{:?}", e))?;
     assert_eq!(acceptance.outcome.kind, AcceptanceKind::NonMerge);
     let gid = slice_to_array32(anchor.gid);
     let cat = slice_to_array32(anchor.cat);
     let parent_root = slice_to_array32(anchor.parent_root);
-    let pox_commit = slice_to_array32(fixture.parts.pox_r_commit.expect("pox commit present"));
+    let pox_commit = slice_to_array32(
+        fixture
+            .parts
+            .pox_r_commit
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("missing pox_r_commit"))?,
+    );
 
     let mut join_leaves = default_join_leaves();
     join_leaves.sort();
     let target_leaf = join_leaves[0];
-    let revoked_root = merkle::canonical_set_root(&[target_leaf]).expect("revoked root");
+    let revoked_root = merkle::canonical_set_root(&[target_leaf])?;
 
     let config_ban = AnchorFixtureConfig {
         gid,
@@ -1227,7 +1257,7 @@ fn ban_and_reinstate_member_flow() {
         revoked_leaves: vec![target_leaf],
         pox_commit,
     };
-    let (parts_ban, params_ban, _) = make_anchor_fixture(config_ban);
+    let (parts_ban, params_ban, _) = make_anchor_fixture(config_ban).unwrap();
 
     let mut parities = ctx.pivot_parities_for(anchor.gid, &parent_root);
     parities.sort_by_key(|parity| (parity.accept_seq, parity.xk_hash));
@@ -1244,7 +1274,7 @@ fn ban_and_reinstate_member_flow() {
         params_ban.clone(),
         None,
     )
-    .expect("ban merge generation");
+    .map_err(|e| format!("{:?}", e))?;
     let header_ban = merge_ban.header_map.clone();
     assert!(
         !header_ban.contains_key(&msphf_orchestrator::hdr::HDR_KBROAD_REPLAY),
@@ -1287,7 +1317,7 @@ fn ban_and_reinstate_member_flow() {
         revoked_leaves: Vec::new(),
         pox_commit,
     };
-    let (parts_unban, params_unban, _) = make_anchor_fixture(config_unban);
+    let (parts_unban, params_unban, _) = make_anchor_fixture(config_unban).unwrap();
 
     let merge_unban = joiner_kgen_merge_or(
         base_header(kbroad_pub.as_slice()),
@@ -1297,7 +1327,7 @@ fn ban_and_reinstate_member_flow() {
         params_unban.clone(),
         None,
     )
-    .expect("unban merge generation");
+    .map_err(|e| format!("{:?}", e))?;
 
     let header_unban = merge_unban.header_map.clone();
     assert!(
@@ -1321,11 +1351,12 @@ fn ban_and_reinstate_member_flow() {
         Some(Value::Bytes(bytes)) => assert_eq!(bytes, params_unban.msphf_crs_id.as_bytes()),
         other => panic!("unexpected CRS representation: {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn srx_revoked_subset_conflict_freezes() {
-    let fixture = JoinerFixture::default();
+fn srx_revoked_subset_conflict_freezes() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = JoinerFixture::default()?;
     let mut header_with_pop = fixture.header();
 
     update_srx_payload(&mut header_with_pop, |payload| {
@@ -1335,13 +1366,16 @@ fn srx_revoked_subset_conflict_freezes() {
         {
             since_leaves.push(Value::Bytes(vec![0xAA; 32]));
         }
-    });
-    fixture.resign_bootstrap(&mut header_with_pop);
+    })
+    .unwrap();
+    fixture.resign_bootstrap(&mut header_with_pop)?;
 
     let mut ctx = fixture.acceptance_context();
-    let err = ctx
-        .accept_anchor(&fixture.parts, fixture.joiner.we_epoch_id, &header_with_pop)
-        .expect_err("SRX subset conflict should freeze");
+    let err = match ctx.accept_anchor(&fixture.parts, fixture.joiner.we_epoch_id, &header_with_pop)
+    {
+        Err(e) => e,
+        Ok(_) => unreachable!("SRX subset conflict should freeze"),
+    };
 
     match err {
         AcceptanceError::Freeze(code) => {
@@ -1356,12 +1390,13 @@ fn srx_revoked_subset_conflict_freezes() {
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn acceptance_loop_smoke_performance() {
+fn acceptance_loop_smoke_performance() -> Result<(), Box<dyn std::error::Error>> {
     let iterations = 25;
-    let fixture = JoinerFixture::default();
+    let fixture = JoinerFixture::default()?;
     let anchor = fixture.anchor();
     let proof_inputs = fixture.proof_inputs();
     let witness = fixture.witness();
@@ -1378,7 +1413,7 @@ fn acceptance_loop_smoke_performance() {
             &proof_inputs,
             witness,
         )
-        .expect("loop acceptance");
+        .map_err(|e| format!("{:?}", e))?;
 
         assert_eq!(acceptance.outcome.kind, AcceptanceKind::NonMerge);
     }
@@ -1396,17 +1431,18 @@ fn acceptance_loop_smoke_performance() {
         "acceptance loop took too long: {:?}",
         elapsed
     );
+    Ok(())
 }
 
 #[test]
-fn header_tswe_alg_tamper_freezes() {
-    let fixture = JoinerFixture::default();
+fn header_tswe_alg_tamper_freezes() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = JoinerFixture::default()?;
     let mut header_with_pop = fixture.header();
     header_with_pop.insert(90, Value::Integer(Integer::from(0u8))); // invalid tswe_alg
-    fixture.resign_bootstrap(&mut header_with_pop);
+    fixture.resign_bootstrap(&mut header_with_pop)?;
 
     let mut ctx = fixture.acceptance_context();
-    let err = msphf_orchestrator::accept_and_extract_or(
+    let err = match msphf_orchestrator::accept_and_extract_or(
         &mut ctx,
         &fixture.anchor(),
         &header_with_pop,
@@ -1421,8 +1457,10 @@ fn header_tswe_alg_tamper_freezes() {
             hp_commit: &fixture.joiner.hp_commit,
         },
         fixture.witness(),
-    )
-    .expect_err("tampered tswe_alg must freeze");
+    ) {
+        Err(e) => e,
+        Ok(_) => unreachable!("tampered tswe_alg must freeze"),
+    };
 
     match err {
         AcceptanceError::Msphf(inner) => {
@@ -1431,17 +1469,18 @@ fn header_tswe_alg_tamper_freezes() {
         }
         other => panic!("expected Msphf error, got {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn kbroad_envelope_malformed_rejected() {
-    let fixture = JoinerFixture::default();
+fn kbroad_envelope_malformed_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = JoinerFixture::default()?;
     let mut header_with_pop = fixture.header();
 
     if let Some(Value::Array(items)) = header_with_pop.get_mut(&97) {
         items[2] = Value::Text("not-bytes".into());
     }
-    fixture.resign_bootstrap(&mut header_with_pop);
+    fixture.resign_bootstrap(&mut header_with_pop)?;
 
     let proof_inputs = HpBindingInputs {
         msphf_crs_id: fixture.params.msphf_crs_id,
@@ -1454,15 +1493,17 @@ fn kbroad_envelope_malformed_rejected() {
     };
 
     let mut ctx = fixture.acceptance_context();
-    let err = msphf_orchestrator::accept_and_extract_or(
+    let err = match msphf_orchestrator::accept_and_extract_or(
         &mut ctx,
         &fixture.anchor(),
         &header_with_pop,
         &fixture.joiner.hp_proof,
         &proof_inputs,
         fixture.witness(),
-    )
-    .expect_err("malformed msphf_hp should error");
+    ) {
+        Err(e) => e,
+        Ok(_) => unreachable!("malformed msphf_hp should error"),
+    };
 
     match err {
         AcceptanceError::Freeze(code) => {
@@ -1471,11 +1512,12 @@ fn kbroad_envelope_malformed_rejected() {
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn pop_signature_mismatch_freezes() {
-    let fixture = JoinerFixture::default();
+fn pop_signature_mismatch_freezes() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = JoinerFixture::default()?;
     let mut header_with_pop = fixture.header();
 
     if let Some(Value::Bytes(sig)) = header_with_pop.get_mut(&109)
@@ -1483,18 +1525,20 @@ fn pop_signature_mismatch_freezes() {
     {
         *first ^= 0x01;
     }
-    fixture.resign_bootstrap(&mut header_with_pop);
+    fixture.resign_bootstrap(&mut header_with_pop)?;
 
     let mut ctx = fixture.acceptance_context();
-    let err = msphf_orchestrator::accept_and_extract_or(
+    let err = match msphf_orchestrator::accept_and_extract_or(
         &mut ctx,
         &fixture.anchor(),
         &header_with_pop,
         &fixture.joiner.hp_proof,
         &fixture.proof_inputs(),
         fixture.witness(),
-    )
-    .expect_err("forged pop must freeze");
+    ) {
+        Err(e) => e,
+        Ok(_) => unreachable!("forged pop must freeze"),
+    };
 
     match err {
         AcceptanceError::Freeze(code) => {
@@ -1503,26 +1547,29 @@ fn pop_signature_mismatch_freezes() {
         }
         other => panic!("expected freeze error, got {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn proof_inputs_params_mismatch_fails() {
-    let fixture = JoinerFixture::default();
+fn proof_inputs_params_mismatch_fails() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = JoinerFixture::default()?;
     let header_with_pop = fixture.header();
 
     let mut proof_inputs = fixture.proof_inputs();
     proof_inputs.params_id = "rlwe-params/bad";
 
     let mut ctx = fixture.acceptance_context();
-    let err = msphf_orchestrator::accept_and_extract_or(
+    let err = match msphf_orchestrator::accept_and_extract_or(
         &mut ctx,
         &fixture.anchor(),
         &header_with_pop,
         &fixture.joiner.hp_proof,
         &proof_inputs,
         fixture.witness(),
-    )
-    .expect_err("params mismatch");
+    ) {
+        Err(e) => e,
+        Ok(_) => unreachable!("params mismatch"),
+    };
 
     match err {
         AcceptanceError::Msphf(inner) => {
@@ -1531,11 +1578,12 @@ fn proof_inputs_params_mismatch_fails() {
         }
         other => panic!("expected Msphf error, got {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn rho_replay_guard_blocks_reuse() {
-    let fixture = JoinerFixture::default();
+fn rho_replay_guard_blocks_reuse() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = JoinerFixture::default()?;
     let anchor = fixture.anchor();
     let header_with_pop = fixture.header();
     let witness_bytes = fixture.witness();
@@ -1549,17 +1597,19 @@ fn rho_replay_guard_blocks_reuse() {
         &fixture.proof_inputs(),
         witness_bytes,
     )
-    .expect("first acceptance succeeds");
+    .map_err(|e| format!("{:?}", e))?;
 
-    let err = msphf_orchestrator::accept_and_extract_or(
+    let err = match msphf_orchestrator::accept_and_extract_or(
         &mut ctx,
         &anchor,
         &header_with_pop,
         &fixture.joiner.hp_proof,
         &fixture.proof_inputs(),
         witness_bytes,
-    )
-    .expect_err("rho reuse should freeze");
+    ) {
+        Err(e) => e,
+        Ok(_) => unreachable!("rho reuse should freeze"),
+    };
 
     match err {
         AcceptanceError::Freeze(code) => {
@@ -1568,10 +1618,11 @@ fn rho_replay_guard_blocks_reuse() {
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn stale_witness_rejected_after_new_anchor() {
+fn stale_witness_rejected_after_new_anchor() -> Result<(), Box<dyn std::error::Error>> {
     let gid = [0x51u8; 32];
     let cat = [0x52u8; 32];
     let pox_commit = [0x77u8; 32];
@@ -1592,7 +1643,7 @@ fn stale_witness_rejected_after_new_anchor() {
         revoked_leaves: Vec::new(),
         pox_commit,
     };
-    let fixture_genesis = JoinerFixture::with_config(config_genesis.clone());
+    let fixture_genesis = JoinerFixture::with_config(config_genesis.clone())?;
     let anchor0 = fixture_genesis.anchor();
     let header_with_pop0 = fixture_genesis.header();
     let witness_member_a_join = fixture_genesis.witness().to_vec();
@@ -1607,7 +1658,7 @@ fn stale_witness_rejected_after_new_anchor() {
         &proof_inputs0,
         &witness_member_a_join,
     )
-    .expect("accept anchor0");
+    .map_err(|e| format!("{:?}", e))?;
 
     let config_round1 = AnchorFixtureConfig {
         gid,
@@ -1621,7 +1672,7 @@ fn stale_witness_rejected_after_new_anchor() {
         revoked_leaves: Vec::new(),
         pox_commit,
     };
-    let fixture_round1 = JoinerFixture::with_config(config_round1);
+    let fixture_round1 = JoinerFixture::with_config(config_round1)?;
     let anchor1 = fixture_round1.anchor();
     let header_with_pop1 = fixture_round1.header();
     let witness_member_b_join = fixture_round1.witness();
@@ -1636,18 +1687,17 @@ fn stale_witness_rejected_after_new_anchor() {
         &proof_inputs1,
         witness_member_b_join,
     )
-    .expect("accept anchor1");
+    .map_err(|e| format!("{:?}", e))?;
 
-    let kbroad_sk_round1 =
-        MlKemSecretKey::from_bytes(fixture_round1.kbroad_secret.as_slice()).expect("kbroad sk");
+    let kbroad_sk_round1 = MlKemSecretKey::from_bytes(fixture_round1.kbroad_secret.as_slice())?;
     let (k_hp, c_hp) = derive_hp_material(
         &header_with_pop1,
         &fixture_round1.joiner.xk_hash,
         &fixture_round1.joiner.hp_commit,
         &kbroad_sk_round1,
-    );
+    )?;
 
-    let err = extract_epoch_msphf_or(
+    let err = match extract_epoch_msphf_or(
         &anchor1,
         &fixture_round1.joiner.xk_hash,
         &c_hp,
@@ -1655,15 +1705,18 @@ fn stale_witness_rejected_after_new_anchor() {
         &fixture_round1.joiner.hp_proof,
         &proof_inputs1,
         &witness_member_a_join,
-    )
-    .expect_err("stale witness must be rejected");
+    ) {
+        Err(e) => e,
+        Ok(_) => unreachable!("stale witness must be rejected"),
+    };
 
     let msg = err.to_string();
     assert!(msg.contains("proj_eval_fail"));
+    Ok(())
 }
 
 #[test]
-fn two_anchor_members_converge_on_epoch_key() {
+fn two_anchor_members_converge_on_epoch_key() -> Result<(), Box<dyn std::error::Error>> {
     let gid = [0x31u8; 32];
     let cat = [0x42u8; 32];
     let pox_commit = [0x77u8; 32];
@@ -1685,7 +1738,7 @@ fn two_anchor_members_converge_on_epoch_key() {
         revoked_leaves: Vec::new(),
         pox_commit,
     };
-    let fixture_genesis = JoinerFixture::with_config(config_genesis);
+    let fixture_genesis = JoinerFixture::with_config(config_genesis)?;
     let anchor0 = fixture_genesis.anchor();
     let header_with_pop0 = fixture_genesis.header();
     let witness_member_a_join = fixture_genesis.witness().to_vec();
@@ -1701,7 +1754,7 @@ fn two_anchor_members_converge_on_epoch_key() {
         &proof_inputs0,
         &witness_member_a_join,
     )
-    .expect("accept genesis");
+    .map_err(|e| format!("{:?}", e))?;
     assert_eq!(acceptance0.outcome.kind, AcceptanceKind::NonMerge);
     #[derive(Serialize)]
     struct WindowInputs<'a> {
@@ -1720,7 +1773,7 @@ fn two_anchor_members_converge_on_epoch_key() {
             seed_ctx_hash: &fixture_genesis.joiner.seed_ctx_hash,
         },
     )
-    .expect("wid genesis");
+    .map_err(|e| format!("{:?}", e))?;
     assert_eq!(acceptance0.outcome.wid, expected_wid0);
     let epoch0 = fixture_genesis.joiner.epoch_key;
 
@@ -1736,7 +1789,7 @@ fn two_anchor_members_converge_on_epoch_key() {
         revoked_leaves: Vec::new(),
         pox_commit,
     };
-    let fixture_round1 = JoinerFixture::with_config(config_round1);
+    let fixture_round1 = JoinerFixture::with_config(config_round1)?;
     let anchor1 = fixture_round1.anchor();
     let header_with_pop1 = fixture_round1.header();
     let witness_member_b_join = fixture_round1.witness();
@@ -1751,7 +1804,7 @@ fn two_anchor_members_converge_on_epoch_key() {
         &proof_inputs1,
         witness_member_b_join,
     )
-    .expect("accept round1");
+    .map_err(|e| format!("{:?}", e))?;
     assert_eq!(acceptance1.outcome.kind, AcceptanceKind::NonMerge);
     let expected_wid1 = h_l(
         "mhw/window",
@@ -1761,20 +1814,20 @@ fn two_anchor_members_converge_on_epoch_key() {
             seed_ctx_hash: &fixture_round1.joiner.seed_ctx_hash,
         },
     )
-    .expect("wid round1");
+    .map_err(|e| format!("{:?}", e))?;
     assert_eq!(acceptance1.outcome.wid, expected_wid1);
 
-    let kbroad_sk_round1 =
-        MlKemSecretKey::from_bytes(fixture_round1.kb_secret()).expect("kbroad sk");
+    let kbroad_sk_round1 = MlKemSecretKey::from_bytes(fixture_round1.kb_secret())?;
     let (k_hp, c_hp) = derive_hp_material(
         &header_with_pop1,
         &fixture_round1.joiner.xk_hash,
         &fixture_round1.joiner.hp_commit,
         &kbroad_sk_round1,
-    );
+    )?;
     assert_eq!(k_hp, fixture_round1.joiner.hp_aead_key);
 
-    let witness_member_a_parent = serialize_witness(&witness_branch_a(&join_leaf_member_a));
+    let witness_member_a_parent =
+        serialize_witness(&witness_branch_a(&join_leaf_member_a)).unwrap();
 
     let epoch_member_a = extract_epoch_msphf_or(
         &anchor1,
@@ -1785,7 +1838,7 @@ fn two_anchor_members_converge_on_epoch_key() {
         &proof_inputs1,
         &witness_member_a_parent,
     )
-    .expect("member A extraction");
+    .map_err(|e| format!("{:?}", e))?;
 
     let epoch_member_b = extract_epoch_msphf_or(
         &anchor1,
@@ -1796,7 +1849,7 @@ fn two_anchor_members_converge_on_epoch_key() {
         &proof_inputs1,
         witness_member_b_join,
     )
-    .expect("member B extraction");
+    .map_err(|e| format!("{:?}", e))?;
 
     assert_ne!(
         epoch_member_a, epoch0,
@@ -1804,4 +1857,5 @@ fn two_anchor_members_converge_on_epoch_key() {
     );
     assert_eq!(epoch_member_a, epoch_member_b);
     assert_eq!(epoch_member_a, fixture_round1.joiner.epoch_key);
+    Ok(())
 }

@@ -41,7 +41,10 @@ fn leaf_registry() -> &'static Mutex<BTreeMap<String, [u8; 32]>> {
 
 fn member_leaf(label: &str) -> [u8; 32] {
     let registry = leaf_registry();
-    let mut guard = registry.lock().expect("leaf registry poisoned");
+    let mut guard = match registry.lock() {
+        Ok(g) => g,
+        Err(_) => unreachable!(),
+    };
     if let Some(existing) = guard.get(label) {
         *existing
     } else {
@@ -195,7 +198,10 @@ fn kbroad_keys() -> &'static (Vec<u8>, Vec<u8>) {
 
 fn bootstrap_keys() -> &'static (Vec<u8>, Box<MlDsaSecretKey>) {
     static BOOTSTRAP_KEYS: OnceLock<(Vec<u8>, Box<MlDsaSecretKey>)> = OnceLock::new();
-    BOOTSTRAP_KEYS.get_or_init(|| load_or_generate_bootstrap_keys().expect("bootstrap key setup"))
+    BOOTSTRAP_KEYS.get_or_init(|| match load_or_generate_bootstrap_keys() {
+        Ok(keys) => keys,
+        Err(_) => unreachable!(),
+    })
 }
 
 fn bootstrap_key_path() -> Option<PathBuf> {
@@ -316,7 +322,10 @@ pub fn build_srx_inputs(
 
     let mut parent_sorted = parent_leaves.to_vec();
     parent_sorted.sort();
-    let expected_parent_root = canonical_set_root(&parent_sorted).expect("parent root");
+    let expected_parent_root = match canonical_set_root(&parent_sorted) {
+        Ok(root) => root,
+        Err(_) => unreachable!(),
+    };
     assert_eq!(expected_parent_root, parent_root);
 
     let mut anchor_map: BTreeMap<([u8; 32], [u8; 32]), RawMembershipWitness> = BTreeMap::new();
@@ -430,8 +439,10 @@ pub fn parent_nonmem_witness(
             let left_path = canonical_membership_path(parent_leaves, &l);
             let right_path = canonical_membership_path(parent_leaves, &r);
             let (left_below, right_below, above, lca_left_h, lca_right_h) =
-                split_interval_paths(l, &left_path, r, &right_path, parent_root)
-                    .expect("anchors must be adjacent for interval witness");
+                match split_interval_paths(l, &left_path, r, &right_path, parent_root) {
+                    Ok(result) => result,
+                    Err(_) => unreachable!(),
+                };
 
             let witness = RawNonMembershipWitness {
                 query: query.to_vec(),
@@ -526,10 +537,10 @@ pub fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Vec<
     }
 
     let mut level: Vec<[u8; 32]> = leaves.to_vec();
-    let mut index = level
-        .iter()
-        .position(|leaf| leaf == target)
-        .expect("membership target present");
+    let mut index = match level.iter().position(|leaf| leaf == target) {
+        Some(idx) => idx,
+        None => unreachable!(),
+    };
     let mut path = Vec::new();
 
     while level.len() > 1 {
@@ -553,7 +564,10 @@ pub fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Vec<
             next.push(hash_node(&chunk[0], &chunk[1]));
         }
         if len % 2 == 1 {
-            next.push(*level.last().expect("carry exists"));
+            next.push(*match level.last() {
+                Some(carry) => carry,
+                None => unreachable!(),
+            });
         }
         index /= 2;
         level = next;

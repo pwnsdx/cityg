@@ -26,9 +26,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trait_default_domain_matches_poseidon() {
-        let perm = PoseidonPermutation::new(2).expect("poseidon");
+    fn trait_default_domain_matches_poseidon() -> Result<(), Box<dyn std::error::Error>> {
+        let perm = PoseidonPermutation::new(2)?;
         assert_eq!(perm.domain(), "default");
         assert_eq!(perm.width(), 3);
+        Ok(())
     }
 }

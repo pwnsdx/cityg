@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_multi_head_window_random_sequences() {
+    fn fuzz_multi_head_window_random_sequences() -> Result<(), Box<dyn std::error::Error>> {
         let ttl = Duration::from_secs(1);
         let mut window = MultiHeadWindow::new(4, ttl);
         let wid = [0xAB; 32];
@@ -374,8 +374,10 @@ mod tests {
                 naive_record.accept_time = now;
                 let result = window.accept_head(&wid, head, now);
                 if naive.len() < 4 {
-                    result.expect("head should be accepted");
-                    naive.push(naive_record);
+                    match result {
+                        Ok(()) => naive.push(naive_record),
+                        Err(e) => unreachable!("head should be accepted, got: {e:?}"),
+                    }
                 } else {
                     assert_eq!(result.unwrap_err(), FreezeError::WINDOW_FULL);
                 }
@@ -413,8 +415,10 @@ mod tests {
                 }
                 let result = window.accept_merge(&wid, &wid, &retire, merge_head, now);
                 if valid {
-                    result.expect("merge should succeed");
-                    naive = expected;
+                    match result {
+                        Ok(()) => naive = expected,
+                        Err(e) => unreachable!("merge should succeed, got: {e:?}"),
+                    }
                 } else {
                     assert!(result.is_err());
                 }
@@ -428,5 +432,6 @@ mod tests {
             assert_eq!(actual, expected_ids);
             assert!(actual.len() <= 4);
         }
+        Ok(())
     }
 }

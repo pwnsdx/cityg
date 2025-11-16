@@ -484,10 +484,10 @@ fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Vec<RawP
     }
 
     let mut level: Vec<[u8; 32]> = leaves.to_vec();
-    let mut index = level
-        .iter()
-        .position(|leaf| leaf == target)
-        .expect("membership target present");
+    let mut index = match level.iter().position(|leaf| leaf == target) {
+        Some(idx) => idx,
+        None => unreachable!(),
+    };
     let mut path = Vec::new();
 
     while level.len() > 1 {

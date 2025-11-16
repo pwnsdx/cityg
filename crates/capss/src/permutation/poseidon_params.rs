@@ -1,3 +1,4 @@
+use anyhow::Result;
 use ark_ff::PrimeField;
 use ark_sponge::poseidon::PoseidonConfig;
 use poseidon_bn128::{PoseidonParams, read_constants};
@@ -11,12 +12,19 @@ fn convert_element(elem: Bn128FieldElement) -> BaseField {
     BaseField::from_le_bytes_mod_order(&bytes)
 }
 
-fn params_for_rate(rate: u8) -> PoseidonParams {
-    read_constants(rate).expect("poseidon constants")
+fn params_for_rate(rate: u8) -> Result<PoseidonParams> {
+    read_constants(rate)
 }
 
 pub fn poseidon_config_rate_2() -> PoseidonConfig<BaseField> {
-    let params = params_for_rate(2);
+    let params = match params_for_rate(2) {
+        Ok(p) => p,
+        Err(_) => {
+            // This should never fail for valid rates like 2
+            // If it does, it's a programming error, not a runtime error
+            unreachable!("Failed to read Poseidon constants for rate 2")
+        }
+    };
     let t = (2 + 1) as usize;
     let ark = params
         .c
@@ -59,11 +67,12 @@ mod tests {
     }
 
     #[test]
-    fn params_for_rate_reads_constants() {
-        let params = super::params_for_rate(2);
+    fn params_for_rate_reads_constants() -> Result<(), Box<dyn std::error::Error>> {
+        let params = super::params_for_rate(2)?;
         assert!(params.num_full_rounds > 0);
         assert!(params.num_partial_rounds > 0);
         assert_eq!(params.c.len() % (2 + 1), 0);
         assert_eq!(params.m.len(), 2 + 1);
+        Ok(())
     }
 }

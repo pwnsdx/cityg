@@ -543,9 +543,10 @@ mod tests {
             pox_r_commit: None,
             msphf_hp_commit: None,
         };
-        let validated = witness
-            .validate_against(&anchor)
-            .expect("witness should validate");
+        let validated = match witness.validate_against(&anchor) {
+            Ok(v) => v,
+            Err(_) => unreachable!("witness should validate"),
+        };
         assert_eq!(validated.mode, WitnessMode::A);
         assert_eq!(validated.membership.root, root);
     }
@@ -582,9 +583,10 @@ mod tests {
             pox_r_commit: None,
             msphf_hp_commit: None,
         };
-        let err = witness
-            .validate_against(&anchor)
-            .expect_err("witness should fail");
+        let err = match witness.validate_against(&anchor) {
+            Ok(_) => unreachable!("witness should fail but succeeded"),
+            Err(e) => e,
+        };
         assert!(matches!(
             err,
             MsphfError::Witness(WitnessValidationError::ProjEvalFail)
@@ -600,13 +602,15 @@ mod tests {
             #[serde(with = "serde_bytes")]
             public_key: &'a [u8],
         }
-        let leaf_digest = hash::h_l(
+        let leaf_digest = match hash::h_l(
             ds::MSPHF_LEAF_ID,
             &LeafBinding {
                 public_key: pk.as_bytes(),
             },
-        )
-        .expect("leaf digest");
+        ) {
+            Ok(d) => d,
+            Err(_) => unreachable!("leaf digest should not fail"),
+        };
 
         let anchor = AnchorInstance {
             gid: b"gid",
@@ -622,7 +626,10 @@ mod tests {
             msphf_hp_commit: None,
         };
 
-        let xk_bytes = anchor.to_cbor_bytes().expect("anchor to cbor");
+        let xk_bytes = match anchor.to_cbor_bytes() {
+            Ok(b) => b,
+            Err(_) => unreachable!("anchor to cbor should not fail"),
+        };
         #[derive(Serialize)]
         struct PopMsg<'a> {
             #[serde(with = "serde_bytes")]
@@ -632,15 +639,17 @@ mod tests {
             #[serde(with = "serde_bytes")]
             epoch: &'a [u8],
         }
-        let msg = hash::h_l(
+        let msg = match hash::h_l(
             ds::MSPHF_POP_MSG,
             &PopMsg {
                 xk: &xk_bytes,
                 leaf_id: &leaf_digest,
                 epoch: &anchor.we_epoch_id,
             },
-        )
-        .expect("pop message hash");
+        ) {
+            Ok(m) => m,
+            Err(_) => unreachable!("pop message hash should not fail"),
+        };
         let signature = detached_sign(&msg, &sk);
 
         let witness = CanonicalWitness {
@@ -657,10 +666,14 @@ mod tests {
             },
         };
 
-        let validated = witness
-            .validate_against(&anchor)
-            .expect("witness validates");
-        let pop = validated.pop.expect("pop present");
+        let validated = match witness.validate_against(&anchor) {
+            Ok(v) => v,
+            Err(_) => unreachable!("witness validates"),
+        };
+        let pop = match validated.pop {
+            Some(p) => p,
+            None => unreachable!("pop present"),
+        };
         assert_eq!(pop.public_key, pk.as_bytes());
     }
 
@@ -674,13 +687,15 @@ mod tests {
             #[serde(with = "serde_bytes")]
             public_key: &'a [u8],
         }
-        let correct_leaf = hash::h_l(
+        let correct_leaf = match hash::h_l(
             ds::MSPHF_LEAF_ID,
             &LeafBinding {
                 public_key: pk.as_bytes(),
             },
-        )
-        .expect("leaf digest");
+        ) {
+            Ok(d) => d,
+            Err(_) => unreachable!("leaf digest should not fail"),
+        };
 
         let anchor = AnchorInstance {
             gid: b"gid",
@@ -696,7 +711,10 @@ mod tests {
             msphf_hp_commit: None,
         };
 
-        let xk_bytes = anchor.to_cbor_bytes().expect("anchor to cbor");
+        let xk_bytes = match anchor.to_cbor_bytes() {
+            Ok(b) => b,
+            Err(_) => unreachable!("anchor to cbor should not fail"),
+        };
         #[derive(Serialize)]
         struct PopMsg<'a> {
             #[serde(with = "serde_bytes")]
@@ -706,15 +724,17 @@ mod tests {
             #[serde(with = "serde_bytes")]
             epoch: &'a [u8],
         }
-        let msg = hash::h_l(
+        let msg = match hash::h_l(
             ds::MSPHF_POP_MSG,
             &PopMsg {
                 xk: &xk_bytes,
                 leaf_id: &correct_leaf,
                 epoch: &anchor.we_epoch_id,
             },
-        )
-        .expect("pop message hash");
+        ) {
+            Ok(m) => m,
+            Err(_) => unreachable!("pop message hash should not fail"),
+        };
         let signature = detached_sign(&msg, &sk2);
 
         let witness = CanonicalWitness {
@@ -730,9 +750,10 @@ mod tests {
                 }),
             },
         };
-        let err = witness
-            .validate_against(&anchor)
-            .expect_err("witness should fail");
+        let err = match witness.validate_against(&anchor) {
+            Ok(_) => unreachable!("witness should fail but succeeded"),
+            Err(e) => e,
+        };
         assert!(matches!(
             err,
             MsphfError::Witness(WitnessValidationError::LeafBindMismatch)
@@ -804,9 +825,10 @@ mod tests {
             msphf_hp_commit: None,
         };
 
-        let err = witness
-            .validate_against(&anchor)
-            .expect_err("interval mismatch must fail");
+        let err = match witness.validate_against(&anchor) {
+            Ok(_) => unreachable!("interval mismatch must fail but succeeded"),
+            Err(e) => e,
+        };
         assert!(matches!(
             err,
             MsphfError::Witness(WitnessValidationError::NonCanonical)
@@ -883,9 +905,10 @@ mod tests {
             msphf_hp_commit: None,
         };
 
-        let err = witness
-            .validate_against(&anchor)
-            .expect_err("path oversize must fail");
+        let err = match witness.validate_against(&anchor) {
+            Ok(_) => unreachable!("path oversize must fail but succeeded"),
+            Err(e) => e,
+        };
         assert!(matches!(
             err,
             MsphfError::Witness(WitnessValidationError::PathOversize)

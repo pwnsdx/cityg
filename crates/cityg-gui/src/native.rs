@@ -72,12 +72,13 @@ mod tokio_bridge {
     impl Global for GlobalTokio {}
 
     impl GlobalTokio {
+        #[allow(clippy::expect_used)]
         fn new() -> Self {
             let runtime = Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
                 .build()
-                .expect("failed to initialize Tokio runtime");
+                .expect("Failed to build Tokio runtime");
             Self { runtime }
         }
     }
@@ -3857,7 +3858,7 @@ impl PersistedSession {
             regular_fingerprint_hex: session
                 .regular_fingerprint
                 .as_ref()
-                .map(|bytes| hex_encode(bytes))
+                .map(hex_encode)
                 .unwrap_or_default(),
         }
     }
@@ -4137,7 +4138,7 @@ fn last_session_pointer_path() -> Result<PathBuf> {
 fn session_dir() -> Result<PathBuf> {
     if let Some(path) = CONFIG_DIR_OVERRIDE
         .lock()
-        .expect("config dir lock poisoned")
+        .map_err(|_| anyhow::anyhow!("Failed to acquire config dir lock"))?
         .clone()
     {
         return Ok(path);
@@ -4333,26 +4334,29 @@ fn remove_security_log(server_url: &str, room_id: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 fn set_config_dir_override_for_tests(path: Option<PathBuf>) -> ConfigDirGuard {
     let mut guard = CONFIG_DIR_OVERRIDE
         .lock()
-        .expect("config dir lock poisoned");
+        .expect("CONFIG_DIR_OVERRIDE lock poisoned");
     let previous = guard.clone();
     *guard = path;
     ConfigDirGuard { previous }
 }
 
 #[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 struct ConfigDirGuard {
     previous: Option<PathBuf>,
 }
 
 #[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 impl Drop for ConfigDirGuard {
     fn drop(&mut self) {
         *CONFIG_DIR_OVERRIDE
             .lock()
-            .expect("config dir lock poisoned") = self.previous.clone();
+            .expect("CONFIG_DIR_OVERRIDE lock poisoned") = self.previous.clone();
     }
 }
 
@@ -5257,9 +5261,7 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
             continue;
         }
         // Safe conversion: we verified length == 32 above
-        let leaf_id: [u8; 32] = message.sender[..32]
-            .try_into()
-            .expect("sender is guaranteed to be 32 bytes by length check above");
+        let leaf_id: [u8; 32] = message.sender[..32].try_into()?;
 
         let envelope = match decode_authenticated_message(&authenticated_msg) {
             Ok(env) => env,
@@ -5500,7 +5502,7 @@ fn compute_fs_fingerprint_from_header(header: &BTreeMap<u64, Value>) -> Option<[
     derive_fs_fingerprint_from_fields(policy, fs_ec, &fs_epoch_commit, fs_epoch_base_ts)
 }
 
-fn header_text<'a>(header: &'a BTreeMap<u64, Value>, key: u64) -> Option<&'a str> {
+fn header_text(header: &BTreeMap<u64, Value>, key: u64) -> Option<&str> {
     match header.get(&key)? {
         Value::Text(text) => Some(text.as_str()),
         _ => None,
@@ -5509,7 +5511,7 @@ fn header_text<'a>(header: &'a BTreeMap<u64, Value>, key: u64) -> Option<&'a str
 
 fn header_u64(header: &BTreeMap<u64, Value>, key: u64) -> Option<u64> {
     match header.get(&key)? {
-        Value::Integer(int) => int.clone().try_into().ok(),
+        Value::Integer(int) => (*int).try_into().ok(),
         _ => None,
     }
 }
@@ -5797,6 +5799,7 @@ fn encode_capss_witness(witness: &CapssWitnessBundle) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 fn decode_capss_witness(data: &[u8]) -> Result<CapssWitnessBundle> {
     ciborium::de::from_reader(data).context("failed to decode CAPSS witness")
 }
@@ -5804,6 +5807,7 @@ fn decode_capss_witness(data: &[u8]) -> Result<CapssWitnessBundle> {
 static CONFIG_DIR_OVERRIDE: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
 
 #[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use msphf_rlwe::CapssBranchWitness;
@@ -5811,8 +5815,8 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn session_persistence_roundtrip() {
-        let temp_dir = TempDir::new().expect("temp dir");
+    fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
         let base = temp_dir.path().join("cityg").join("gui");
         let _override_guard = set_config_dir_override_for_tests(Some(base));
 
@@ -5841,8 +5845,7 @@ mod tests {
                 ctx_tag: random_vec(16),
             },
         };
-        let capss_witness_bytes =
-            encode_capss_witness(&capss_witness_bundle).expect("encode witness bundle");
+        let capss_witness_bytes = encode_capss_witness(&capss_witness_bundle)?;
 
         let mut session = AppSession {
             server_url: "https://example.invalid".to_string(),
@@ -5892,10 +5895,9 @@ mod tests {
             session.fs_epoch_base_ts,
         );
 
-        persist_session(&session).expect("persist");
-        let loaded = load_session_at(&session.server_url, &session.room_id)
-            .expect("load result")
-            .expect("session present");
+        persist_session(&session)?;
+        let loaded = load_session_at(&session.server_url, &session.room_id)?
+            .ok_or_else(|| anyhow!("expected persisted session to load"))?;
 
         assert_eq!(loaded.server_url, session.server_url);
         assert_eq!(loaded.room_id, session.room_id);
@@ -5954,65 +5956,72 @@ mod tests {
         );
         assert_eq!(loaded.capss_witness, capss_witness_bytes);
 
-        let decoded = decode_capss_witness(&loaded.capss_witness).expect("decode witness");
+        let decoded = decode_capss_witness(&loaded.capss_witness)?;
         assert_eq!(decoded, capss_witness_bundle);
 
         // Clean up persisted files to avoid leaking into other tests.
-        remove_persisted_session(&session.server_url, &session.room_id).expect("cleanup");
+        remove_persisted_session(&session.server_url, &session.room_id)?;
+        Ok(())
     }
 
     #[test]
-    fn encrypt_decrypt_roundtrip() {
+    fn encrypt_decrypt_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let key = [42u8; 32];
         let plaintext = b"Hello, City-G! This is a test message.";
 
-        let ciphertext = encrypt_message(plaintext, &key).expect("encryption failed");
-        let decrypted = decrypt_message(&ciphertext, &key).expect("decryption failed");
+        let ciphertext = encrypt_message(plaintext, &key)?;
+        let decrypted = decrypt_message(&ciphertext, &key)?;
 
         assert_eq!(decrypted, plaintext);
+        Ok(())
     }
 
     #[test]
-    fn encrypt_produces_different_ciphertexts() {
+    fn encrypt_produces_different_ciphertexts() -> Result<(), Box<dyn std::error::Error>> {
         let key = [42u8; 32];
         let plaintext = b"Same message, different ciphertext";
 
-        let ciphertext1 = encrypt_message(plaintext, &key).expect("encryption failed");
-        let ciphertext2 = encrypt_message(plaintext, &key).expect("encryption failed");
+        let ciphertext1 = encrypt_message(plaintext, &key)?;
+        let ciphertext2 = encrypt_message(plaintext, &key)?;
 
         // Different nonces should produce different ciphertexts
         assert_ne!(ciphertext1, ciphertext2);
 
         // But both should decrypt to the same plaintext
-        let decrypted1 = decrypt_message(&ciphertext1, &key).expect("decryption failed");
-        let decrypted2 = decrypt_message(&ciphertext2, &key).expect("decryption failed");
+        let decrypted1 = decrypt_message(&ciphertext1, &key)?;
+        let decrypted2 = decrypt_message(&ciphertext2, &key)?;
         assert_eq!(decrypted1, plaintext);
         assert_eq!(decrypted2, plaintext);
+        Ok(())
     }
 
     #[test]
-    fn decrypt_with_wrong_key_fails() {
+    fn decrypt_with_wrong_key_fails() -> Result<(), Box<dyn std::error::Error>> {
         let correct_key = [42u8; 32];
         let wrong_key = [99u8; 32];
         let plaintext = b"Secret message";
 
-        let ciphertext = encrypt_message(plaintext, &correct_key).expect("encryption failed");
+        let ciphertext = encrypt_message(plaintext, &correct_key)?;
         let result = decrypt_message(&ciphertext, &wrong_key);
 
         assert!(result.is_err(), "Decryption should fail with wrong key");
-        let err = result.expect_err("expected wrong-key failure");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
         assert!(
             err.to_string().contains("decryption failed"),
             "Error message should indicate decryption failure"
         );
+        Ok(())
     }
 
     #[test]
-    fn decrypt_tampered_ciphertext_fails() {
+    fn decrypt_tampered_ciphertext_fails() -> Result<(), Box<dyn std::error::Error>> {
         let key = [42u8; 32];
         let plaintext = b"Authenticated message";
 
-        let mut ciphertext = encrypt_message(plaintext, &key).expect("encryption failed");
+        let mut ciphertext = encrypt_message(plaintext, &key)?;
 
         // Tamper with the ciphertext (flip a bit in the middle)
         if ciphertext.len() > 20 {
@@ -6022,57 +6031,67 @@ mod tests {
         let result = decrypt_message(&ciphertext, &key);
 
         assert!(result.is_err(), "Decryption should fail for tampered data");
-        let err = result.expect_err("expected tamper failure");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
         assert!(
             err.to_string().contains("decryption failed"),
             "Error message should indicate decryption failure"
         );
+        Ok(())
     }
 
     #[test]
-    fn decrypt_short_ciphertext_fails() {
+    fn decrypt_short_ciphertext_fails() -> Result<(), Box<dyn std::error::Error>> {
         let key = [42u8; 32];
         let short_data = b"short"; // Less than 12 bytes (nonce size)
 
         let result = decrypt_message(short_data, &key);
 
         assert!(result.is_err(), "Decryption should fail for short data");
-        let err = result.expect_err("expected short data failure");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
         assert!(
             err.to_string().contains("too short"),
             "Error should mention data is too short"
         );
+        Ok(())
     }
 
     #[test]
-    fn encrypt_empty_message() {
+    fn encrypt_empty_message() -> Result<(), Box<dyn std::error::Error>> {
         let key = [42u8; 32];
         let plaintext = b"";
 
-        let ciphertext = encrypt_message(plaintext, &key).expect("encryption failed");
-        let decrypted = decrypt_message(&ciphertext, &key).expect("decryption failed");
+        let ciphertext = encrypt_message(plaintext, &key)?;
+        let decrypted = decrypt_message(&ciphertext, &key)?;
 
         assert_eq!(decrypted, plaintext);
         assert_eq!(decrypted.len(), 0);
+        Ok(())
     }
 
     #[test]
-    fn encrypt_large_message() {
+    fn encrypt_large_message() -> Result<(), Box<dyn std::error::Error>> {
         let key = [42u8; 32];
         let plaintext = vec![b'A'; 10_000]; // 10KB message
 
-        let ciphertext = encrypt_message(&plaintext, &key).expect("encryption failed");
-        let decrypted = decrypt_message(&ciphertext, &key).expect("decryption failed");
+        let ciphertext = encrypt_message(&plaintext, &key)?;
+        let decrypted = decrypt_message(&ciphertext, &key)?;
 
         assert_eq!(decrypted, plaintext);
+        Ok(())
     }
 
     #[test]
-    fn ciphertext_format_validation() {
+    fn ciphertext_format_validation() -> Result<(), Box<dyn std::error::Error>> {
         let key = [42u8; 32];
         let plaintext = b"Test message";
 
-        let ciphertext = encrypt_message(plaintext, &key).expect("encryption failed");
+        let ciphertext = encrypt_message(plaintext, &key)?;
 
         // Ciphertext should be: nonce (12) + encrypted_data + tag (16)
         // Minimum size: 12 (nonce) + 16 (tag) = 28 bytes
@@ -6087,16 +6106,17 @@ mod tests {
             12 + plaintext.len() + 16,
             "Ciphertext size should be nonce + plaintext + tag"
         );
+        Ok(())
     }
 
     #[test]
-    fn multiple_keys_independence() {
+    fn multiple_keys_independence() -> Result<(), Box<dyn std::error::Error>> {
         let key1 = [1u8; 32];
         let key2 = [2u8; 32];
         let plaintext = b"Multi-key test";
 
-        let ciphertext1 = encrypt_message(plaintext, &key1).expect("encryption with key1 failed");
-        let ciphertext2 = encrypt_message(plaintext, &key2).expect("encryption with key2 failed");
+        let ciphertext1 = encrypt_message(plaintext, &key1)?;
+        let ciphertext2 = encrypt_message(plaintext, &key2)?;
 
         // Same plaintext with different keys should produce different ciphertexts
         assert_ne!(ciphertext1, ciphertext2);
@@ -6106,6 +6126,7 @@ mod tests {
         assert!(decrypt_message(&ciphertext2, &key2).is_ok());
         assert!(decrypt_message(&ciphertext1, &key2).is_err());
         assert!(decrypt_message(&ciphertext2, &key1).is_err());
+        Ok(())
     }
 
     // ============================================================
@@ -6113,245 +6134,272 @@ mod tests {
     // ============================================================
 
     #[test]
-    fn categorize_error_connection_refused() {
+    fn categorize_error_connection_refused() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("connection refused by server");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Network));
         assert_eq!(result.user_message, "Connection refused");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_timeout() {
+    fn categorize_error_timeout() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("request timeout after 30s");
         let result = categorize_error(&err, "send");
         assert!(matches!(result.category, ErrorCategory::Network));
         assert_eq!(result.user_message, "Connection timeout");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_dns_failure() {
+    fn categorize_error_dns_failure() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("DNS resolution failed");
         let result = categorize_error(&err, "fetch");
         assert!(matches!(result.category, ErrorCategory::Network));
         assert_eq!(result.user_message, "Unable to connect to server");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_network_unreachable() {
+    fn categorize_error_network_unreachable() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("network unreachable");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Network));
         assert_eq!(result.user_message, "Unable to connect to server");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_404_not_found() {
+    fn categorize_error_404_not_found() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("404 not found");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Server));
         assert_eq!(result.user_message, "Resource not found");
         assert!(!result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_401_unauthorized() {
+    fn categorize_error_401_unauthorized() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("401 unauthorized");
         let result = categorize_error(&err, "send");
         assert!(matches!(result.category, ErrorCategory::Policy));
         assert_eq!(result.user_message, "Authentication failed");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_403_forbidden() {
+    fn categorize_error_403_forbidden() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("403 forbidden");
         let result = categorize_error(&err, "leave");
         assert!(matches!(result.category, ErrorCategory::Policy));
         assert_eq!(result.user_message, "Access denied");
         assert!(!result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_crypto_proof_failure() {
+    fn categorize_error_crypto_proof_failure() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("proof generation failed");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Crypto));
         assert_eq!(result.user_message, "Cryptographic operation failed");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_crypto_verification() {
+    fn categorize_error_crypto_verification() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("verification failed");
         let result = categorize_error(&err, "send");
         assert!(matches!(result.category, ErrorCategory::Crypto));
         assert_eq!(result.user_message, "Cryptographic operation failed");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_crypto_witness() {
+    fn categorize_error_crypto_witness() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("witness bundle generation failed");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Crypto));
         assert_eq!(result.user_message, "Cryptographic operation failed");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_crypto_signature() {
+    fn categorize_error_crypto_signature() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("signature validation error");
         let result = categorize_error(&err, "fetch");
         assert!(matches!(result.category, ErrorCategory::Crypto));
         assert_eq!(result.user_message, "Cryptographic operation failed");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_rho_replay() {
+    fn categorize_error_rho_replay() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("rho_replay detected");
         let result = categorize_error(&err, "send");
         assert!(matches!(result.category, ErrorCategory::Policy));
         assert_eq!(result.user_message, "Duplicate message detected");
         assert!(!result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_freeze_violation() {
+    fn categorize_error_freeze_violation() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("freeze policy violated");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Policy));
         assert_eq!(result.user_message, "Room policy violation");
         assert!(!result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_policy_check() {
+    fn categorize_error_policy_check() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("policy check failed");
         let result = categorize_error(&err, "send");
         assert!(matches!(result.category, ErrorCategory::Policy));
         assert_eq!(result.user_message, "Policy check failed");
         assert!(!result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_empty_field() {
+    fn categorize_error_empty_field() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("field must not be empty");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Validation));
         assert_eq!(result.user_message, "Required field missing");
         assert!(!result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_invalid_input() {
+    fn categorize_error_invalid_input() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("invalid room ID format");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Validation));
         assert_eq!(result.user_message, "Invalid input");
         assert!(!result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_not_valid() {
+    fn categorize_error_not_valid() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("room ID is not valid");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Validation));
         assert_eq!(result.user_message, "Invalid input");
         assert!(!result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_required_field() {
+    fn categorize_error_required_field() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("alias is required");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Validation));
         assert_eq!(result.user_message, "Missing required information");
         assert!(!result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_500_internal_server() {
+    fn categorize_error_500_internal_server() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("500 internal server error");
         let result = categorize_error(&err, "send");
         assert!(matches!(result.category, ErrorCategory::Server));
         assert_eq!(result.user_message, "Internal server error");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_502_bad_gateway() {
+    fn categorize_error_502_bad_gateway() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("502 bad gateway");
         let result = categorize_error(&err, "fetch");
         assert!(matches!(result.category, ErrorCategory::Network));
         assert_eq!(result.user_message, "Bad gateway");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_503_service_unavailable() {
+    fn categorize_error_503_service_unavailable() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("503 service unavailable");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Server));
         assert_eq!(result.user_message, "Service temporarily unavailable");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_generic_server_error() {
+    fn categorize_error_generic_server_error() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("server error occurred");
         let result = categorize_error(&err, "send");
         assert!(matches!(result.category, ErrorCategory::Server));
         assert_eq!(result.user_message, "Server error occurred");
         assert!(result.can_retry);
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_default_fallback_join() {
+    fn categorize_error_default_fallback_join() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("some unknown error");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Server));
         assert!(result.user_message.contains("Failed to join room"));
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_default_fallback_send() {
+    fn categorize_error_default_fallback_send() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("some unknown error");
         let result = categorize_error(&err, "send");
         assert!(matches!(result.category, ErrorCategory::Server));
         assert!(result.user_message.contains("Failed to send message"));
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_default_fallback_leave() {
+    fn categorize_error_default_fallback_leave() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("some unknown error");
         let result = categorize_error(&err, "leave");
         assert!(matches!(result.category, ErrorCategory::Server));
         assert!(result.user_message.contains("Failed to leave room"));
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_default_fallback_fetch() {
+    fn categorize_error_default_fallback_fetch() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("some unknown error");
         let result = categorize_error(&err, "fetch");
         assert!(matches!(result.category, ErrorCategory::Server));
         assert!(result.user_message.contains("Failed to fetch messages"));
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_default_fallback_generic() {
+    fn categorize_error_default_fallback_generic() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("some unknown error");
         let result = categorize_error(&err, "unknown_context");
         assert!(matches!(result.category, ErrorCategory::Server));
         assert!(result.user_message.contains("Operation failed"));
+        Ok(())
     }
 
     #[test]
-    fn categorize_error_case_insensitive() {
+    fn categorize_error_case_insensitive() -> Result<(), Box<dyn std::error::Error>> {
         // Test that error matching is case insensitive
         let err1 = anyhow!("CONNECTION REFUSED");
         let result1 = categorize_error(&err1, "join");
@@ -6364,6 +6412,7 @@ mod tests {
         let err3 = anyhow!("PROOF generation failed");
         let result3 = categorize_error(&err3, "join");
         assert!(matches!(result3.category, ErrorCategory::Crypto));
+        Ok(())
     }
 
     // ============================================================
@@ -6371,7 +6420,8 @@ mod tests {
     // ============================================================
 
     #[test]
-    fn encode_decode_authenticated_message_empty_plaintext() {
+    fn encode_decode_authenticated_message_empty_plaintext()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (pk, sk) = dilithium3::keypair();
         let msg_sign_public_key = pk.as_bytes().to_vec();
         let msg_sign_secret_key = sk.as_bytes().to_vec();
@@ -6380,21 +6430,21 @@ mod tests {
         let plaintext = b"";
         let timestamp_ms = 1_234_567_890u64;
 
-        let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)
-            .expect("signing should succeed");
+        let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)?;
         let authenticated_msg =
             encode_authenticated_message(timestamp_ms, plaintext, &msg_sign_public_key, &signature);
 
-        let envelope =
-            decode_authenticated_message(&authenticated_msg).expect("should decode successfully");
+        let envelope = decode_authenticated_message(&authenticated_msg)?;
         assert_eq!(envelope.timestamp_ms, timestamp_ms);
         assert_eq!(envelope.plaintext, plaintext);
         assert_eq!(envelope.public_key, msg_sign_public_key.as_slice());
         assert_eq!(envelope.signature, signature.as_slice());
+        Ok(())
     }
 
     #[test]
-    fn encode_decode_authenticated_message_large_plaintext() {
+    fn encode_decode_authenticated_message_large_plaintext()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (pk, sk) = dilithium3::keypair();
         let msg_sign_public_key = pk.as_bytes().to_vec();
         let msg_sign_secret_key = sk.as_bytes().to_vec();
@@ -6403,8 +6453,7 @@ mod tests {
         let plaintext = vec![b'A'; 5000]; // 5KB message
         let timestamp_ms = 1_234_567_890u64;
 
-        let signature = sign_message(&leaf_id, timestamp_ms, &plaintext, &msg_sign_secret_key)
-            .expect("signing should succeed");
+        let signature = sign_message(&leaf_id, timestamp_ms, &plaintext, &msg_sign_secret_key)?;
         let authenticated_msg = encode_authenticated_message(
             timestamp_ms,
             &plaintext,
@@ -6412,26 +6461,30 @@ mod tests {
             &signature,
         );
 
-        let envelope =
-            decode_authenticated_message(&authenticated_msg).expect("should decode successfully");
+        let envelope = decode_authenticated_message(&authenticated_msg)?;
         assert_eq!(envelope.timestamp_ms, timestamp_ms);
         assert_eq!(envelope.plaintext, plaintext.as_slice());
         assert_eq!(envelope.public_key, msg_sign_public_key.as_slice());
         assert_eq!(envelope.signature, signature.as_slice());
+        Ok(())
     }
 
     #[test]
-    fn decode_authenticated_message_too_short() {
+    fn decode_authenticated_message_too_short() -> Result<(), Box<dyn std::error::Error>> {
         // Message shorter than minimum size should fail
         let short_data = vec![0u8; 10];
         let result = decode_authenticated_message(&short_data);
         assert!(result.is_err());
-        let err = result.expect_err("expected short authenticated message failure");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
         assert!(err.to_string().contains("authenticated message too short"));
+        Ok(())
     }
 
     #[test]
-    fn decode_authenticated_message_wrong_prefix() {
+    fn decode_authenticated_message_wrong_prefix() -> Result<(), Box<dyn std::error::Error>> {
         let (pk, sk) = dilithium3::keypair();
         let msg_sign_public_key = pk.as_bytes().to_vec();
         let msg_sign_secret_key = sk.as_bytes().to_vec();
@@ -6440,8 +6493,7 @@ mod tests {
         let plaintext = b"test";
         let timestamp_ms = 1_234_567_890u64;
 
-        let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)
-            .expect("signing should succeed");
+        let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)?;
         let mut authenticated_msg =
             encode_authenticated_message(timestamp_ms, plaintext, &msg_sign_public_key, &signature);
 
@@ -6450,8 +6502,12 @@ mod tests {
 
         let result = decode_authenticated_message(&authenticated_msg);
         assert!(result.is_err());
-        let err = result.expect_err("expected invalid message prefix failure");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => return Err("expected error".into()),
+        };
         assert!(err.to_string().contains("invalid message prefix"));
+        Ok(())
     }
 
     // ============================================================
@@ -6459,7 +6515,7 @@ mod tests {
     // ============================================================
 
     #[test]
-    fn encode_decode_capss_witness_roundtrip() {
+    fn encode_decode_capss_witness_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         use msphf_rlwe::CapssBranchWitness;
         use rand::{RngCore, SeedableRng, rngs::StdRng};
 
@@ -6481,48 +6537,54 @@ mod tests {
             },
         };
 
-        let encoded = encode_capss_witness(&witness).expect("encoding should succeed");
-        let decoded = decode_capss_witness(&encoded).expect("decoding should succeed");
+        let encoded = encode_capss_witness(&witness)?;
+        let decoded = decode_capss_witness(&encoded)?;
 
         assert_eq!(decoded, witness);
+        Ok(())
     }
 
     #[test]
-    fn decode_capss_witness_invalid_data() {
+    fn decode_capss_witness_invalid_data() -> Result<(), Box<dyn std::error::Error>> {
         // Try to decode garbage data
         let invalid_data = vec![0xFF; 100];
         let result = decode_capss_witness(&invalid_data);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn decode_capss_witness_empty_data() {
+    fn decode_capss_witness_empty_data() -> Result<(), Box<dyn std::error::Error>> {
         let empty_data = vec![];
         let result = decode_capss_witness(&empty_data);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn format_regular_fingerprint_blocks_hex() {
+    fn format_regular_fingerprint_blocks_hex() -> Result<(), Box<dyn std::error::Error>> {
         let mut bytes = [0u8; 32];
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = i as u8;
         }
         let formatted = format_regular_fingerprint(Some(&bytes));
         assert_eq!(formatted, "0001-0203 0405-0607 …");
+        Ok(())
     }
 
     #[test]
-    fn format_fs_fingerprint_includes_epoch() {
+    fn format_fs_fingerprint_includes_epoch() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = [0xABu8; 32];
         let formatted = format_fs_fingerprint(Some(&bytes), 42);
         assert_eq!(formatted, "abab-abab abab-abab … · fs_ec 42");
+        Ok(())
     }
 
     #[test]
-    fn format_fs_fingerprint_reports_missing() {
+    fn format_fs_fingerprint_reports_missing() -> Result<(), Box<dyn std::error::Error>> {
         let formatted = format_fs_fingerprint(None, 99);
         assert_eq!(formatted, "Not available");
+        Ok(())
     }
 
     // ============================================================
@@ -6530,8 +6592,8 @@ mod tests {
     // ============================================================
 
     #[test]
-    fn session_removal_after_persistence() {
-        let temp_dir = TempDir::new().expect("temp dir");
+    fn session_removal_after_persistence() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
         let base = temp_dir.path().join("cityg").join("gui");
         let _override_guard = set_config_dir_override_for_tests(Some(base));
 
@@ -6554,8 +6616,7 @@ mod tests {
                 ctx_tag: random_vec(16),
             },
         };
-        let capss_witness_bytes =
-            encode_capss_witness(&capss_witness_bundle).expect("encode witness");
+        let capss_witness_bytes = encode_capss_witness(&capss_witness_bundle)?;
 
         let mut session = AppSession {
             server_url: "https://remove-test.example.com".to_string(),
@@ -6606,34 +6667,33 @@ mod tests {
         );
 
         // Persist, then remove
-        persist_session(&session).expect("persist");
-        let loaded = load_session_at(&session.server_url, &session.room_id)
-            .expect("load result")
-            .expect("session present");
+        persist_session(&session)?;
+        let loaded = load_session_at(&session.server_url, &session.room_id)?
+            .ok_or_else(|| anyhow!("expected persisted session to load"))?;
         assert_eq!(loaded.room_id, session.room_id);
 
         // Remove and verify it's gone
-        remove_persisted_session(&session.server_url, &session.room_id).expect("remove");
-        let after_removal =
-            load_session_at(&session.server_url, &session.room_id).expect("load should succeed");
+        remove_persisted_session(&session.server_url, &session.room_id)?;
+        let after_removal = load_session_at(&session.server_url, &session.room_id)?;
         assert!(after_removal.is_none(), "session should be removed");
+        Ok(())
     }
 
     #[test]
-    fn session_load_nonexistent() {
-        let temp_dir = TempDir::new().expect("temp dir");
+    fn session_load_nonexistent() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
         let base = temp_dir.path().join("cityg").join("gui");
         let _override_guard = set_config_dir_override_for_tests(Some(base));
 
         // Try to load a session that doesn't exist
-        let result = load_session_at("https://nonexistent.example.com", "nonexistent-room")
-            .expect("load should succeed");
+        let result = load_session_at("https://nonexistent.example.com", "nonexistent-room")?;
         assert!(result.is_none(), "nonexistent session should return None");
+        Ok(())
     }
 }
 
 #[test]
-fn test_message_signing_and_verification() {
+fn test_message_signing_and_verification() -> Result<(), Box<dyn std::error::Error>> {
     // Generate test keys
     let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
     let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
@@ -6645,8 +6705,7 @@ fn test_message_signing_and_verification() {
     let timestamp_ms = 1_234_567_890u64;
 
     // Sign the message
-    let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)
-        .expect("signing should succeed");
+    let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)?;
 
     // Verify the signature - should succeed
     let result = verify_message_signature(
@@ -6714,10 +6773,12 @@ fn test_message_signing_and_verification() {
         result.is_err(),
         "verification should fail with corrupted signature"
     );
+
+    Ok(())
 }
 
 #[test]
-fn test_authenticated_message_format() {
+fn test_authenticated_message_format() -> Result<(), Box<dyn std::error::Error>> {
     let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
     let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
     let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
@@ -6727,18 +6788,15 @@ fn test_authenticated_message_format() {
     let timestamp_ms = 987_654_321u64;
     let epoch_key = [0x55u8; 32];
 
-    let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)
-        .expect("signing should succeed");
+    let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)?;
     let authenticated_msg =
         encode_authenticated_message(timestamp_ms, plaintext, &msg_sign_public_key, &signature);
 
-    let ciphertext =
-        encrypt_message(&authenticated_msg, &epoch_key).expect("encryption should succeed");
-    let decrypted = decrypt_message(&ciphertext, &epoch_key).expect("decryption should succeed");
+    let ciphertext = encrypt_message(&authenticated_msg, &epoch_key)?;
+    let decrypted = decrypt_message(&ciphertext, &epoch_key)?;
     assert_eq!(decrypted, authenticated_msg);
 
-    let envelope =
-        decode_authenticated_message(&decrypted).expect("authenticated message should decode");
+    let envelope = decode_authenticated_message(&decrypted)?;
     assert_eq!(envelope.timestamp_ms, timestamp_ms);
     assert_eq!(envelope.plaintext, plaintext);
     assert_eq!(envelope.public_key, msg_sign_public_key.as_slice());
@@ -6750,12 +6808,13 @@ fn test_authenticated_message_format() {
         envelope.plaintext,
         envelope.signature,
         envelope.public_key,
-    )
-    .expect("verification should succeed");
+    )?;
+
+    Ok(())
 }
 
 #[test]
-fn test_message_authentication_prevents_spoofing() {
+fn test_message_authentication_prevents_spoofing() -> Result<(), Box<dyn std::error::Error>> {
     // Create two different identities
     let (pk_alice, sk_alice) = dilithium3::keypair();
     let (pk_bob, _sk_bob) = dilithium3::keypair();
@@ -6766,8 +6825,7 @@ fn test_message_authentication_prevents_spoofing() {
     let timestamp_ms = 555_555_555u64;
 
     // Alice signs a message
-    let signature = sign_message(&leaf_id_alice, timestamp_ms, plaintext, sk_alice.as_bytes())
-        .expect("signing should succeed");
+    let signature = sign_message(&leaf_id_alice, timestamp_ms, plaintext, sk_alice.as_bytes())?;
 
     // Verify with Alice's public key - should succeed
     let result = verify_message_signature(
@@ -6820,10 +6878,12 @@ fn test_message_authentication_prevents_spoofing() {
         result.is_err(),
         "Verification should fail with wrong timestamp"
     );
+
+    Ok(())
 }
 
 #[test]
-fn test_message_format_size_constraints() {
+fn test_message_format_size_constraints() -> Result<(), Box<dyn std::error::Error>> {
     const MLDSA65_PUBKEY_SIZE: usize = ml_dsa_public_key_bytes();
     const MLDSA65_SIG_SIZE: usize = ml_dsa_signature_bytes();
     const MIN_MSG_SIZE: usize =
@@ -6847,6 +6907,8 @@ fn test_message_format_size_constraints() {
     // Verify signature size
     let leaf_id = [0u8; 32];
     let plaintext = b"test";
-    let sig = sign_message(&leaf_id, 42, plaintext, sk.as_bytes()).expect("sign should work");
+    let sig = sign_message(&leaf_id, 42, plaintext, sk.as_bytes())?;
     assert_eq!(sig.len(), MLDSA65_SIG_SIZE);
+
+    Ok(())
 }

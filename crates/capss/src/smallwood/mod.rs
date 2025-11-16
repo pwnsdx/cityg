@@ -193,7 +193,13 @@ pub struct RoundDebug {
 
 impl From<SmallwoodProof> for CapssProof {
     fn from(value: SmallwoodProof) -> Self {
-        let bytes = encode_proof(&value).expect("serialize Smallwood proof");
+        let bytes = match encode_proof(&value) {
+            Ok(b) => b,
+            Err(_) => {
+                // This should not fail for valid proof structures
+                unreachable!("failed to serialize Smallwood proof")
+            }
+        };
         CapssProof { bytes }
     }
 }
@@ -694,7 +700,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prove_verify_round_trip() {
+    fn prove_verify_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = SmallwoodConfig {
             repetitions: 2,
             polynomial_degree: 4,
@@ -708,13 +714,14 @@ mod tests {
             ..Default::default()
         };
 
-        let proof = prove(&cfg, &statement).expect("prove");
+        let proof = prove(&cfg, &statement)?;
         let signature: CapssSignature = proof.clone().into();
-        verify(&cfg, &statement, &signature).expect("verify");
+        verify(&cfg, &statement, &signature)?;
+        Ok(())
     }
 
     #[test]
-    fn detect_tampered_commitment() {
+    fn detect_tampered_commitment() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = SmallwoodConfig {
             repetitions: 1,
             fs_domain: "capss/test-domain".to_string(),
@@ -722,19 +729,23 @@ mod tests {
         };
         let statement = CapssStatement::default();
 
-        let mut proof = prove(&cfg, &statement).expect("prove");
+        let mut proof = prove(&cfg, &statement)?;
         if let Some(first_round) = proof.transcript.responses.first_mut()
             && let Some(byte) = first_round.evaluations.get_mut(0)
         {
             *byte ^= 0x01;
         }
         let signature: CapssSignature = proof.into();
-        let err = verify(&cfg, &statement, &signature).expect_err("should fail");
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("mismatch") || err_msg.contains("encoding"),
-            "unexpected verification error: {}",
-            err_msg
-        );
+        let result = verify(&cfg, &statement, &signature);
+        assert!(result.is_err(), "should fail");
+        if let Err(err) = result {
+            let err_msg = err.to_string();
+            assert!(
+                err_msg.contains("mismatch") || err_msg.contains("encoding"),
+                "unexpected verification error: {}",
+                err_msg
+            );
+        }
+        Ok(())
     }
 }

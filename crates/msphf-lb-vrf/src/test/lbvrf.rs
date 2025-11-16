@@ -28,31 +28,34 @@ fn test_hash_to_challenge() {
 }
 
 #[test]
-fn test_lbvrf() {
+fn test_lbvrf() -> Result<(), Box<dyn std::error::Error>> {
     let seed = [0u8; 32];
     // let mut rng = rand::thread_rng();
     // let param = Param::init(&mut rng);
 
-    let param: Param = <LBVRF as VRF>::paramgen(seed).expect("paramgen");
-    let (pk, sk) = <LBVRF as VRF>::keygen(seed, param).expect("keygen");
+    let param: Param = <LBVRF as VRF>::paramgen(seed)?;
+    let (pk, sk) = <LBVRF as VRF>::keygen(seed, param)?;
     let message = "this is a message that vrf signs";
     let seed = [0u8; 32];
-    let proof = <LBVRF as VRF>::prove(message, param, pk, sk, seed).expect("prove");
+    let proof = <LBVRF as VRF>::prove(message, param, pk, sk, seed)?;
 
     let mut buf: Vec<u8> = vec![];
     assert!(proof.serialize(&mut buf).is_ok());
     println!("{:?}", buf);
-    let proof2 =
-        <LBVRF as VRF>::Proof::deserialize(&mut buf[..].as_ref()).expect("deserialize proof");
+    let proof2 = <LBVRF as VRF>::Proof::deserialize(&mut buf[..].as_ref())?;
     assert_eq!(proof, proof2);
 
-    let res = <LBVRF as VRF>::verify(message, param, pk, proof).expect("verify");
-    let vrf_output = res.expect("expected VRF output");
+    let res = <LBVRF as VRF>::verify(message, param, pk, proof)?;
+    let vrf_output = match res {
+        Some(output) => output,
+        None => unreachable!("expected VRF output"),
+    };
     assert_eq!(vrf_output, proof.v);
+    Ok(())
 }
 
 #[test]
-fn test_rs() {
+fn test_rs() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = rand::thread_rng();
     let mut pp_seed = [0u8; 32];
     let mut key_seed = [0u8; 32];
@@ -64,17 +67,21 @@ fn test_rs() {
         rng.fill_bytes(&mut pp_seed);
         rng.fill_bytes(&mut key_seed);
         rng.fill_bytes(&mut vrf_seed);
-        let param: Param = <LBVRF as VRF>::paramgen(pp_seed).expect("paramgen");
-        let (pk, sk) = <LBVRF as VRF>::keygen(key_seed, param).expect("keygen");
+        let param: Param = <LBVRF as VRF>::paramgen(pp_seed)?;
+        let (pk, sk) = <LBVRF as VRF>::keygen(key_seed, param)?;
         let message = "this is a message that vrf signs";
-        let (proof, rs) = prove_with_rs(message, param, pk, sk, vrf_seed).expect("prove_with_rs");
+        let (proof, rs) = prove_with_rs(message, param, pk, sk, vrf_seed)?;
         t += rs;
-        let res = <LBVRF as VRF>::verify(message, param, pk, proof).expect("verify");
-        let vrf_output = res.expect("expected VRF output");
+        let res = <LBVRF as VRF>::verify(message, param, pk, proof)?;
+        let vrf_output = match res {
+            Some(output) => output,
+            None => unreachable!("expected VRF output"),
+        };
         assert_eq!(vrf_output, proof.v);
     }
     println!("rs times {} for {} vrfs", t, total);
     // assert!(false)
+    Ok(())
 }
 
 #[test]
@@ -98,17 +105,20 @@ fn check_norm_rejects_out_of_range_coefficients() {
     violating.coeff[42] = BETA_M_KAPPA + 1;
     z[3] = violating;
 
-    let err = check_norm(&z).expect_err("expected norm violation");
-    assert!(matches!(err, Error::NormViolation { .. }));
-    if let Error::NormViolation { poly, coeff } = err {
-        assert_eq!(poly, 3);
-        assert_eq!(coeff, 42);
+    let result = check_norm(&z);
+    assert!(result.is_err(), "expected norm violation");
+    if let Err(err) = result {
+        assert!(matches!(err, Error::NormViolation { .. }));
+        if let Error::NormViolation { poly, coeff } = err {
+            assert_eq!(poly, 3);
+            assert_eq!(coeff, 42);
+        }
     }
 }
 
 #[test]
-fn epoch_derivation_is_deterministic() {
-    let params = LBVRF::paramgen([0xA5; 32]).expect("paramgen");
+fn epoch_derivation_is_deterministic() -> Result<(), Box<dyn std::error::Error>> {
+    let params = LBVRF::paramgen([0xA5; 32])?;
     let mut rng = ChaCha20Rng::from_seed([0x11; 32]);
     let master = LBVRF::master_keygen_with_rng(&mut rng);
     let epoch_id = [0x7Bu8; 32];
@@ -116,11 +126,12 @@ fn epoch_derivation_is_deterministic() {
     let (pk2, sk2) = master.derive_epoch_keypair(&params, &epoch_id);
     assert_eq!(pk1, pk2);
     assert_eq!(sk1, sk2);
+    Ok(())
 }
 
 #[test]
-fn epoch_derivation_differs_by_epoch() {
-    let params = LBVRF::paramgen([0x3Cu8; 32]).expect("paramgen");
+fn epoch_derivation_differs_by_epoch() -> Result<(), Box<dyn std::error::Error>> {
+    let params = LBVRF::paramgen([0x3Cu8; 32])?;
     let mut rng = ChaCha20Rng::from_seed([0x55; 32]);
     let master = LBVRF::master_keygen_with_rng(&mut rng);
     let epoch_a = [0x01u8; 32];
@@ -128,37 +139,40 @@ fn epoch_derivation_differs_by_epoch() {
     let (pk_a, _sk_a) = master.derive_epoch_keypair(&params, &epoch_a);
     let (pk_b, _sk_b) = master.derive_epoch_keypair(&params, &epoch_b);
     assert_ne!(pk_a, pk_b);
+    Ok(())
 }
 
 #[test]
-fn proof_serialized_size_within_budget() {
-    let params = LBVRF::paramgen([0x24u8; 32]).expect("paramgen");
-    let (pk, sk) = LBVRF::keygen([0x42u8; 32], params).expect("keygen");
+fn proof_serialized_size_within_budget() -> Result<(), Box<dyn std::error::Error>> {
+    let params = LBVRF::paramgen([0x24u8; 32])?;
+    let (pk, sk) = LBVRF::keygen([0x42u8; 32], params)?;
     let message = b"msphf/lbvrf/proof-size";
-    let proof = LBVRF::prove(message, params, pk, sk, [0x77u8; 32]).expect("prove");
+    let proof = LBVRF::prove(message, params, pk, sk, [0x77u8; 32])?;
 
     let mut serialized = Vec::new();
-    proof.serialize(&mut serialized).expect("serialize proof");
+    proof.serialize(&mut serialized)?;
     assert!(
         serialized.len() <= 6144,
         "expected proof <= 6144 bytes, got {}",
         serialized.len()
     );
+    Ok(())
 }
 
 #[test]
-fn proof_rejects_param_digest_mutation() {
-    let params = LBVRF::paramgen([0x10u8; 32]).expect("paramgen");
-    let (pk, sk) = LBVRF::keygen([0x99u8; 32], params).expect("keygen");
+fn proof_rejects_param_digest_mutation() -> Result<(), Box<dyn std::error::Error>> {
+    let params = LBVRF::paramgen([0x10u8; 32])?;
+    let (pk, sk) = LBVRF::keygen([0x99u8; 32], params)?;
     let message = b"msphf/lbvrf/transcript-binding";
-    let proof = LBVRF::prove(message, params, pk, sk, [0x33u8; 32]).expect("prove");
+    let proof = LBVRF::prove(message, params, pk, sk, [0x33u8; 32])?;
 
     let mut tampered = params;
     tampered.digest[0] ^= 0xFF;
 
-    let verified = LBVRF::verify(message, tampered, pk, proof).expect("verify");
+    let verified = LBVRF::verify(message, tampered, pk, proof)?;
     assert!(
         verified.is_none(),
         "proof verification must fail when param digest changes"
     );
+    Ok(())
 }

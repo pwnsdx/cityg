@@ -24,7 +24,7 @@ fn smallwood_array_indexing_and_zeros() {
 }
 
 #[test]
-fn smallwood_merkle_verify_paths_and_errors() {
+fn smallwood_merkle_verify_paths_and_errors() -> Result<(), Box<dyn std::error::Error>> {
     let leaves = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()];
     let tree = Blake3MerkleTree::from_leaves(&leaves);
     let root = tree.root();
@@ -34,23 +34,25 @@ fn smallwood_merkle_verify_paths_and_errors() {
         root,
         &[(2, leaves[2].clone())],
         std::slice::from_ref(&path.clone()),
-    )
-    .expect("valid authentication path should verify");
+    )?;
 
-    let err = verify_auth_paths(
+    let err = match verify_auth_paths(
         root,
         &[(2, b"tampered".to_vec())],
         std::slice::from_ref(&path),
-    )
-    .expect_err("tampered leaf should fail verification");
+    ) {
+        Err(e) => e,
+        Ok(_) => return Err("expected error for tampered leaf".into()),
+    };
     assert!(err.to_string().contains("mismatch"));
+    Ok(())
 }
 
 #[test]
-fn smallwood_serializer_roundtrip_and_errors() {
+fn smallwood_serializer_roundtrip_and_errors() -> Result<(), Box<dyn std::error::Error>> {
     let matrix = vec![vec![bf(1), bf(2)], vec![bf(3), bf(4), bf(5)]];
     let bytes = serialize_matrix(&matrix);
-    let (decoded, rest) = deserialize_matrix(&bytes).expect("matrix deserialization");
+    let (decoded, rest) = deserialize_matrix(&bytes)?;
     assert_eq!(matrix, decoded);
     assert!(rest.is_empty());
 
@@ -63,7 +65,7 @@ fn smallwood_serializer_roundtrip_and_errors() {
 
     let vector = vec![bf(7), bf(8), bf(9)];
     let v_bytes = serialize_vector(&vector);
-    let (decoded_vec, rest_vec) = deserialize_vector(&v_bytes).expect("vector deserialization");
+    let (decoded_vec, rest_vec) = deserialize_vector(&v_bytes)?;
     assert_eq!(vector, decoded_vec);
     assert!(rest_vec.is_empty());
 
@@ -71,8 +73,7 @@ fn smallwood_serializer_roundtrip_and_errors() {
     assert!(deserialize_vector(truncated_vec).is_err());
 
     let fixed_bytes = serialize_vector_fixed(&vector);
-    let (fixed_vec, remaining) =
-        deserialize_vector_fixed(&fixed_bytes, 2).expect("fixed vector deserialization");
+    let (fixed_vec, remaining) = deserialize_vector_fixed(&fixed_bytes, 2)?;
     assert_eq!(fixed_vec, vec![bf(7), bf(8)]);
     assert_eq!(remaining, &fixed_bytes[64..]);
 
@@ -81,4 +82,5 @@ fn smallwood_serializer_roundtrip_and_errors() {
     assert!(deserialize_vector_fixed(&fixed_truncated, 3).is_err());
 
     assert!(deserialize_vector_exact(&with_trailing).is_err());
+    Ok(())
 }

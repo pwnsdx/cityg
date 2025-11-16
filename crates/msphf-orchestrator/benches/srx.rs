@@ -16,12 +16,15 @@ use msphf_orchestrator::{
 };
 
 #[cfg(feature = "bench-fixtures")]
-fn prepare_inputs() -> (
+type PreparedInputs = (
     Arc<msphf_orchestrator::AnchorInstanceParts<'static>>,
     Arc<msphf_orchestrator::JoinerKGenResult>,
     Arc<BTreeMap<u64, Value>>,
     Arc<BTreeSet<String>>,
-) {
+);
+
+#[cfg(feature = "bench-fixtures")]
+fn prepare_inputs() -> PreparedInputs {
     let (parts, _params, joiner) = sample_parts_params_joiner();
     let (pop_pk, pop_sk) = sample_pop_keys();
     let (base_header, _, _) = header_ready_with_pop(&joiner, &parts, pop_pk.as_slice(), &pop_sk);
@@ -58,16 +61,17 @@ fn ensure_srx_benchmarks(c: &mut Criterion) {
                 || SrxBenchHarness::new(ttl, srx_max_bytes),
                 move |mut harness| {
                     let now = AcceptInstant::from_ticks(0);
-                    harness
-                        .ensure(
-                            header.as_ref(),
-                            parts.as_ref(),
-                            joiner.as_ref(),
-                            true,
-                            Some(allowed.as_ref()),
-                            now,
-                        )
-                        .expect("srx verification");
+                    match harness.ensure(
+                        header.as_ref(),
+                        parts.as_ref(),
+                        joiner.as_ref(),
+                        true,
+                        Some(allowed.as_ref()),
+                        now,
+                    ) {
+                        Ok(_) => {}
+                        Err(_) => unreachable!("srx verification should succeed"),
+                    }
                 },
                 BatchSize::SmallInput,
             );
@@ -88,30 +92,32 @@ fn ensure_srx_benchmarks(c: &mut Criterion) {
                     let joiner = Arc::clone(&joiner);
                     let allowed = Arc::clone(&allowed);
                     let now = AcceptInstant::from_ticks(0);
-                    harness
-                        .ensure(
-                            header.as_ref(),
-                            parts.as_ref(),
-                            joiner.as_ref(),
-                            true,
-                            Some(allowed.as_ref()),
-                            now,
-                        )
-                        .expect("initial verification");
+                    match harness.ensure(
+                        header.as_ref(),
+                        parts.as_ref(),
+                        joiner.as_ref(),
+                        true,
+                        Some(allowed.as_ref()),
+                        now,
+                    ) {
+                        Ok(_) => {}
+                        Err(_) => unreachable!("initial verification should succeed"),
+                    }
                     (harness, header, parts, joiner, allowed)
                 },
                 move |(mut harness, header, parts, joiner, allowed)| {
                     let now = AcceptInstant::from_ticks(0);
-                    harness
-                        .ensure(
-                            header.as_ref(),
-                            parts.as_ref(),
-                            joiner.as_ref(),
-                            true,
-                            Some(allowed.as_ref()),
-                            now,
-                        )
-                        .expect("cached verification");
+                    match harness.ensure(
+                        header.as_ref(),
+                        parts.as_ref(),
+                        joiner.as_ref(),
+                        true,
+                        Some(allowed.as_ref()),
+                        now,
+                    ) {
+                        Ok(_) => {}
+                        Err(_) => unreachable!("cached verification should succeed"),
+                    }
                 },
                 BatchSize::SmallInput,
             );
@@ -133,16 +139,17 @@ fn ensure_srx_benchmarks(c: &mut Criterion) {
                 move |mut harness| {
                     for tick in 0..4 {
                         let now = AcceptInstant::from_ticks(tick);
-                        harness
-                            .ensure(
-                                header.as_ref(),
-                                parts.as_ref(),
-                                joiner.as_ref(),
-                                true,
-                                Some(allowed.as_ref()),
-                                now,
-                            )
-                            .expect("burst verification");
+                        match harness.ensure(
+                            header.as_ref(),
+                            parts.as_ref(),
+                            joiner.as_ref(),
+                            true,
+                            Some(allowed.as_ref()),
+                            now,
+                        ) {
+                            Ok(_) => {}
+                            Err(_) => unreachable!("burst verification should succeed"),
+                        }
                     }
                 },
                 BatchSize::SmallInput,

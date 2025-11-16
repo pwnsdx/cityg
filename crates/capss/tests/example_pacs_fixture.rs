@@ -7,28 +7,38 @@ use num_bigint::BigUint;
 use serde_json::Value;
 
 fn base_from_dec(value: &str) -> BaseField {
-    let big = BigUint::parse_bytes(value.as_bytes(), 10).expect("invalid decimal");
+    let big = match BigUint::parse_bytes(value.as_bytes(), 10) {
+        Some(b) => b,
+        None => unreachable!("invalid decimal"),
+    };
     let mut bytes = big.to_bytes_le();
     bytes.resize(32, 0);
     BaseField::from_le_bytes_mod_order(&bytes)
 }
 
 #[test]
-fn example_pacs_matches_python_fixture() {
+fn example_pacs_matches_python_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/example_pacs_python.json");
-    let fixture = std::fs::read_to_string(path).expect("read example pacs fixture");
-    let data: Value = serde_json::from_str(&fixture).expect("parse example pacs fixture");
+    let fixture = std::fs::read_to_string(path)?;
+    let data: Value = serde_json::from_str(&fixture)?;
 
-    let y_str = data["y"]
-        .as_str()
-        .expect("fixture y should be decimal string");
+    let y_str = match data["y"].as_str() {
+        Some(s) => s,
+        None => unreachable!("fixture y should be decimal string"),
+    };
     let pacs = ExamplePacs::new(base_from_dec(y_str));
 
-    let witness_vals = data["witness"].as_array().expect("fixture witness array");
+    let witness_vals = match data["witness"].as_array() {
+        Some(arr) => arr,
+        None => unreachable!("fixture witness array"),
+    };
     let witness: Vec<BaseField> = witness_vals
         .iter()
-        .map(|v| base_from_dec(v.as_str().expect("witness entry string")))
+        .map(|v| match v.as_str() {
+            Some(s) => base_from_dec(s),
+            None => unreachable!("witness entry string"),
+        })
         .collect();
 
     assert_eq!(
@@ -85,4 +95,5 @@ fn example_pacs_matches_python_fixture() {
         sums.into_iter().all(|v| v.is_zero()),
         "aggregated constraint failed"
     );
+    Ok(())
 }

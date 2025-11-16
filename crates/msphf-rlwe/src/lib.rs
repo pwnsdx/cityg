@@ -643,7 +643,7 @@ mod tests {
     use pqcrypto_dilithium::dilithium5::{detached_sign, keypair};
     use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
 
-    fn fixture() -> (AnchorInstance<'static>, ValidatedWitness, [u8; 32]) {
+    fn fixture() -> Result<(AnchorInstance<'static>, ValidatedWitness, [u8; 32]), MsphfError> {
         fn leak(bytes: [u8; 32]) -> &'static [u8] {
             Box::leak(Box::new(bytes)).as_slice()
         }
@@ -667,9 +667,9 @@ mod tests {
         };
 
         let mut witness_bytes = Vec::new();
-        ser::into_writer(&witness, &mut witness_bytes).expect("serialize witness");
-        let canonical: CanonicalWitness =
-            ciborium::de::from_reader(witness_bytes.as_slice()).expect("deserialize witness");
+        ser::into_writer(&witness, &mut witness_bytes).map_err(MsphfError::serialization)?;
+        let canonical: CanonicalWitness = ciborium::de::from_reader(witness_bytes.as_slice())
+            .map_err(MsphfError::serialization)?;
 
         let anchor = AnchorInstance {
             gid: leak([0x11; 32]),
@@ -684,11 +684,9 @@ mod tests {
             pox_r_commit: None,
             msphf_hp_commit: None,
         };
-        let validated = canonical
-            .validate_against(&anchor)
-            .expect("validate witness");
-        let xk_hash = anchor.xk_hash().expect("xk hash");
-        (anchor, validated, xk_hash)
+        let validated = canonical.validate_against(&anchor)?;
+        let xk_hash = anchor.xk_hash()?;
+        Ok((anchor, validated, xk_hash))
     }
 
     fn params() -> (&'static str, &'static str) {
@@ -696,12 +694,12 @@ mod tests {
     }
 
     #[test]
-    fn hash_proj_matches_full_with_valid_witness() {
-        let (anchor, witness, xk_hash) = fixture();
+    fn hash_proj_matches_full_with_valid_witness() -> Result<(), MsphfError> {
+        let (anchor, witness, xk_hash) = fixture()?;
         let (crs_id, params_id) = params();
         let sk = RlweSecretKey::new([0xAA; 32]);
 
-        let full = hash_full(&sk, "A", crs_id, params_id, &anchor, &xk_hash).expect("hash_full");
+        let full = hash_full(&sk, "A", crs_id, params_id, &anchor, &xk_hash)?;
         let proj = hash_proj(
             &full.projective,
             "A",
@@ -709,18 +707,18 @@ mod tests {
             params_id,
             &anchor,
             Some(&witness),
-        )
-        .expect("hash_proj with witness");
+        )?;
         assert_eq!(full.y_full, proj);
+        Ok(())
     }
 
     #[test]
-    fn hash_proj_changes_when_witness_root_tampered() {
-        let (anchor, mut witness, xk_hash) = fixture();
+    fn hash_proj_changes_when_witness_root_tampered() -> Result<(), MsphfError> {
+        let (anchor, mut witness, xk_hash) = fixture()?;
         let (crs_id, params_id) = params();
         let sk = RlweSecretKey::new([0x55; 32]);
 
-        let full = hash_full(&sk, "A", crs_id, params_id, &anchor, &xk_hash).expect("hash_full");
+        let full = hash_full(&sk, "A", crs_id, params_id, &anchor, &xk_hash)?;
         witness.membership.root[0] ^= 0x01;
         let proj = hash_proj(
             &full.projective,
@@ -729,28 +727,31 @@ mod tests {
             params_id,
             &anchor,
             Some(&witness),
-        )
-        .expect("hash_proj with witness tamper");
+        )?;
         assert_ne!(full.y_full, proj);
+        Ok(())
     }
 
     #[test]
-    fn hash_proj_allows_missing_witness() {
-        let (anchor, _, xk_hash) = fixture();
+    fn hash_proj_allows_missing_witness() -> Result<(), MsphfError> {
+        let (anchor, _, xk_hash) = fixture()?;
         let (crs_id, params_id) = params();
         let sk = RlweSecretKey::new([0x42; 32]);
 
-        let full = hash_full(&sk, "A", crs_id, params_id, &anchor, &xk_hash).expect("hash_full");
-        let proj = hash_proj(&full.projective, "A", crs_id, params_id, &anchor, None)
-            .expect("hash_proj without witness");
+        let full = hash_full(&sk, "A", crs_id, params_id, &anchor, &xk_hash)?;
+        let proj = hash_proj(&full.projective, "A", crs_id, params_id, &anchor, None)?;
         assert_eq!(full.y_full, proj);
+        Ok(())
     }
 
-    fn strict_inputs_fixture() -> (
-        CapssStrictInputs<'static>,
-        &'static [u8; 32],
-        &'static [u8; 32],
-    ) {
+    fn strict_inputs_fixture() -> Result<
+        (
+            CapssStrictInputs<'static>,
+            &'static [u8; 32],
+            &'static [u8; 32],
+        ),
+        MsphfError,
+    > {
         fn leak_array(arr: [u8; 32]) -> &'static [u8; 32] {
             Box::leak(Box::new(arr))
         }
@@ -759,7 +760,7 @@ mod tests {
             Box::leak(bytes.into_boxed_slice())
         }
 
-        let (anchor_owned, _, xk_hash_val) = fixture();
+        let (anchor_owned, _, xk_hash_val) = fixture()?;
         let anchor_static: &'static AnchorInstance<'static> = Box::leak(Box::new(anchor_owned));
         let xk_hash_ref = leak_array(xk_hash_val);
         let seed_commit = leak_array([0x11; 32]);
@@ -779,7 +780,7 @@ mod tests {
             epoch: &'a [u8],
         }
 
-        let anchor_bytes = anchor_static.to_cbor_bytes().expect("anchor to cbor");
+        let anchor_bytes = anchor_static.to_cbor_bytes()?;
         let pop_msg = h_l(
             ds::MSPHF_POP_MSG,
             &PopMsg {
@@ -787,15 +788,12 @@ mod tests {
                 leaf_id,
                 epoch: &anchor_static.we_epoch_id,
             },
-        )
-        .expect("pop message hash");
+        )?;
         let pop_sig = detached_sign(&pop_msg, &sk);
         let pop_sig_vec = pop_sig.as_bytes().to_vec();
 
-        let rho_raw =
-            derive_rho_raw_from_pop(pop_sig.as_bytes(), xk_hash_ref).expect("rho raw derivation");
-        let rho_commit_val =
-            hash_bytes_with_label(ds::MSPHF_KGEN_RHO, &rho_raw).expect("rho commit");
+        let rho_raw = derive_rho_raw_from_pop(pop_sig.as_bytes(), xk_hash_ref)?;
+        let rho_commit_val = hash_bytes_with_label(ds::MSPHF_KGEN_RHO, &rho_raw)?;
         let rho_commit = leak_array(rho_commit_val);
 
         let inputs = CapssStrictInputs {
@@ -812,13 +810,13 @@ mod tests {
             pop_sig: pop_sig_vec,
         };
 
-        (inputs, xk_hash_ref, rho_commit)
+        Ok((inputs, xk_hash_ref, rho_commit))
     }
 
     #[test]
-    fn recompute_capss_witness_detects_xk_hash_mismatch() {
-        let (inputs, xk_hash_ref, _) = strict_inputs_fixture();
-        let witness = recompute_capss_witness(inputs.clone()).expect("baseline should succeed");
+    fn recompute_capss_witness_detects_xk_hash_mismatch() -> Result<(), MsphfError> {
+        let (inputs, xk_hash_ref, _) = strict_inputs_fixture()?;
+        let witness = recompute_capss_witness(inputs.clone())?;
         assert!(!witness.branch_a.branch_artifact.is_empty());
 
         let mut bad_hash = *xk_hash_ref;
@@ -827,17 +825,21 @@ mod tests {
         let mut bad_inputs = inputs;
         bad_inputs.xk_hash = bad_hash_ref;
 
-        let err = recompute_capss_witness(bad_inputs).expect_err("xk hash tamper should fail");
+        let err = match recompute_capss_witness(bad_inputs) {
+            Ok(_) => unreachable!(),
+            Err(e) => e,
+        };
         assert!(matches!(
             err,
             MsphfError::WitnessReplayMismatch(WitnessReplayField::XkHash)
         ));
+        Ok(())
     }
 
     #[test]
-    fn recompute_capss_witness_detects_rho_commit_mismatch() {
-        let (inputs, _, rho_commit_ref) = strict_inputs_fixture();
-        recompute_capss_witness(inputs.clone()).expect("baseline should succeed");
+    fn recompute_capss_witness_detects_rho_commit_mismatch() -> Result<(), MsphfError> {
+        let (inputs, _, rho_commit_ref) = strict_inputs_fixture()?;
+        recompute_capss_witness(inputs.clone())?;
 
         let mut bad_rho = *rho_commit_ref;
         bad_rho[0] ^= 0x80;
@@ -845,16 +847,20 @@ mod tests {
         let mut bad_inputs = inputs;
         bad_inputs.rho_commit = bad_rho_ref;
 
-        let err = recompute_capss_witness(bad_inputs).expect_err("rho commit tamper should fail");
+        let err = match recompute_capss_witness(bad_inputs) {
+            Ok(_) => unreachable!(),
+            Err(e) => e,
+        };
         assert!(matches!(
             err,
             MsphfError::WitnessReplayMismatch(WitnessReplayField::RhoCommit)
         ));
+        Ok(())
     }
 
     #[test]
-    fn recompute_capss_witness_detects_pop_sig_tamper() {
-        let (inputs, _, _) = strict_inputs_fixture();
+    fn recompute_capss_witness_detects_pop_sig_tamper() -> Result<(), MsphfError> {
+        let (inputs, _, _) = strict_inputs_fixture()?;
         let mut tampered_inputs = inputs.clone();
         let mut sig = tampered_inputs.pop_sig.clone();
         if !sig.is_empty() {
@@ -862,11 +868,14 @@ mod tests {
         }
         tampered_inputs.pop_sig = sig;
 
-        let err =
-            recompute_capss_witness(tampered_inputs).expect_err("pop signature tamper should fail");
+        let err = match recompute_capss_witness(tampered_inputs) {
+            Ok(_) => unreachable!(),
+            Err(e) => e,
+        };
         assert!(matches!(
             err,
             MsphfError::WitnessReplayMismatch(WitnessReplayField::RhoCommit)
         ));
+        Ok(())
     }
 }

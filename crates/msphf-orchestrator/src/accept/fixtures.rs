@@ -76,7 +76,10 @@ pub(crate) fn sample_anchor_fixture() -> (AnchorInstanceParts<'static>, SrxInput
     let cat = leak([0x22; 32]);
 
     let join_leaves = sample_join_leaves();
-    let join_root = canonical_set_root(&join_leaves).expect("join root");
+    let join_root = match canonical_set_root(&join_leaves) {
+        Ok(root) => root,
+        Err(_) => unreachable!("canonical_set_root with valid test leaves cannot fail"),
+    };
     let parent_root_arr = [0u8; 32];
     let revoked_since_root_arr = [0u8; 32];
     let revoked_root_arr = [0u8; 32];
@@ -88,7 +91,10 @@ pub(crate) fn sample_anchor_fixture() -> (AnchorInstanceParts<'static>, SrxInput
     let revoked_root = leak(revoked_root_arr);
     let pox_r_commit = leak(pox_commit_arr);
 
-    let salt = msphf_core::instance::tswe_salt_hash(gid, parent_root).expect("salt hash");
+    let salt = match msphf_core::instance::tswe_salt_hash(gid, parent_root) {
+        Ok(s) => s,
+        Err(_) => unreachable!("tswe_salt_hash with valid test inputs cannot fail"),
+    };
     let tswe_salt_hash = leak(salt);
 
     let parts = AnchorInstanceParts {
@@ -211,8 +217,10 @@ pub fn sample_parts_params_joiner() -> (
     let parts = sample_parts();
     let params = params();
     let header = sample_header();
-    let joiner =
-        joiner_kgen_or(header, parts.clone(), params.clone(), None, None).expect("joiner fixture");
+    let joiner = match joiner_kgen_or(header, parts.clone(), params.clone(), None, None) {
+        Ok(j) => j,
+        Err(_) => unreachable!("joiner_kgen_or with valid test fixtures cannot fail"),
+    };
     (parts, params, joiner)
 }
 
@@ -271,9 +279,14 @@ pub(crate) fn sample_hp_inputs() -> (HpBindingInputs<'static>, HpProof) {
         hp_version: 1,
     };
     let mut hp_bytes = Vec::new();
-    ser::into_writer(&artifact, &mut hp_bytes).expect("serialize HP artifact");
-    let hp_commit_arr =
-        hash_bytes_with_label(ds::MSPHF_HP_COMMIT, &hp_bytes).expect("hash HP commit");
+    match ser::into_writer(&artifact, &mut hp_bytes) {
+        Ok(()) => (),
+        Err(_) => unreachable!("serializing test HP artifact to Vec cannot fail"),
+    }
+    let hp_commit_arr = match hash_bytes_with_label(ds::MSPHF_HP_COMMIT, &hp_bytes) {
+        Ok(arr) => arr,
+        Err(_) => unreachable!("hashing test HP bytes cannot fail"),
+    };
     let inputs = HpBindingInputs {
         msphf_crs_id: RLWE_CRS_ID_DEFAULT,
         params_id: RLWE_PARAMS_ID_MOCK,
@@ -283,7 +296,10 @@ pub(crate) fn sample_hp_inputs() -> (HpBindingInputs<'static>, HpProof) {
         xk_hash: Box::leak(Box::new([0x40; 32])),
         hp_commit: Box::leak(Box::new(hp_commit_arr)),
     };
-    let proof = prove_hp_k(&inputs).expect("hp proof");
+    let proof = match prove_hp_k(&inputs) {
+        Ok(p) => p,
+        Err(_) => unreachable!("proving HP with valid test inputs cannot fail"),
+    };
     (inputs, proof)
 }
 
@@ -339,15 +355,28 @@ pub(crate) fn refresh_seed_bindings(
     parts: &AnchorInstanceParts<'_>,
     joiner: &JoinerKGenResult,
 ) {
-    let ctx = build_anchor_seed_ctx(header).expect("seed ctx");
-    let hash = compute_seed_ctx_hash(&ctx).expect("seed ctx hash");
+    let ctx = match build_anchor_seed_ctx(header) {
+        Ok(c) => c,
+        Err(_) => unreachable!("build_anchor_seed_ctx with test header cannot fail"),
+    };
+    let hash = match compute_seed_ctx_hash(&ctx) {
+        Ok(h) => h,
+        Err(_) => unreachable!("compute_seed_ctx_hash with valid context cannot fail"),
+    };
     header.insert(HDR_SEED_CTX_HASH, Value::Bytes(hash.to_vec()));
 
     let mut parent_root = [0u8; 32];
     parent_root.copy_from_slice(parts.parent_root);
-    let seed_bundle =
-        compute_seed_bundle_commit(&ctx, &joiner.rho_commit, parts.gid, parts.cat, &parent_root)
-            .expect("seed bundle");
+    let seed_bundle = match compute_seed_bundle_commit(
+        &ctx,
+        &joiner.rho_commit,
+        parts.gid,
+        parts.cat,
+        &parent_root,
+    ) {
+        Ok(sb) => sb,
+        Err(_) => unreachable!("compute_seed_bundle_commit with valid test inputs cannot fail"),
+    };
     header.insert(HDR_SEED_BUNDLE_COMMIT, Value::Bytes(seed_bundle.to_vec()));
 }
 
@@ -365,15 +394,17 @@ pub(crate) fn ensure_bootstrap_fields(
     header.insert(HDR_BOOTSTRAP_ALG, Value::Text("oob-ca-v1".to_string()));
     let seed_ctx_hash = header_bytes32(header, HDR_SEED_CTX_HASH);
     let seed_bundle = header_bytes32(header, HDR_SEED_BUNDLE_COMMIT);
-    let digest = build_bootstrap_digest(
+    let digest = match build_bootstrap_digest(
         header,
         &anchor,
         &joiner.hp_commit,
         &seed_ctx_hash,
         &joiner.rho_commit,
         &seed_bundle,
-    )
-    .expect("bootstrap digest");
+    ) {
+        Ok(d) => d,
+        Err(_) => unreachable!("build_bootstrap_digest with valid test inputs cannot fail"),
+    };
     let sig = detached_sign(&digest, bootstrap_sk);
     header.insert(HDR_BOOTSTRAP_SIG, Value::Bytes(sig.as_bytes().to_vec()));
     header.insert(HDR_BOOTSTRAP_PK, Value::Bytes(bootstrap_pk.to_vec()));
@@ -384,9 +415,18 @@ pub(crate) fn recompute_fs_witness_from_header(
     parts: &AnchorInstanceParts<'_>,
     joiner: &JoinerKGenResult,
 ) -> CapssWitnessBundle {
-    let we_epoch_id = compute_we_epoch_id_from_header(parts, header).expect("derive we epoch id");
-    let seed_ctx = build_anchor_seed_ctx(header).expect("anchor seed ctx");
-    let seed_ctx_hash = compute_seed_ctx_hash(&seed_ctx).expect("seed ctx hash");
+    let we_epoch_id = match compute_we_epoch_id_from_header(parts, header) {
+        Ok(id) => id,
+        Err(_) => unreachable!("compute_we_epoch_id_from_header with test fixtures cannot fail"),
+    };
+    let seed_ctx = match build_anchor_seed_ctx(header) {
+        Ok(ctx) => ctx,
+        Err(_) => unreachable!("build_anchor_seed_ctx with test header cannot fail"),
+    };
+    let seed_ctx_hash = match compute_seed_ctx_hash(&seed_ctx) {
+        Ok(hash) => hash,
+        Err(_) => unreachable!("compute_seed_ctx_hash with valid context cannot fail"),
+    };
     let anchor = AnchorInstance {
         gid: parts.gid,
         cat: parts.cat,
@@ -400,33 +440,50 @@ pub(crate) fn recompute_fs_witness_from_header(
         pox_r_commit: parts.pox_r_commit,
         msphf_hp_commit: Some(&joiner.hp_commit),
     };
-    let xk_hash = anchor.xk_hash().expect("xk hash");
-    let pop_alg = header_string_or_freeze(header, HDR_POP_ALG).expect("pop alg");
-    let pop_pk_bytes = header
-        .get(&HDR_POP_PK)
-        .and_then(|value| match value {
-            Value::Bytes(bytes) => Some(bytes.clone()),
-            _ => None,
-        })
-        .expect("missing pop pk");
-    let leaf_id = crate::compute_leaf_id(
+    let xk_hash = match anchor.xk_hash() {
+        Ok(hash) => hash,
+        Err(_) => unreachable!("xk_hash with valid anchor cannot fail"),
+    };
+    let pop_alg = match header_string_or_freeze(header, HDR_POP_ALG) {
+        Ok(alg) => alg,
+        Err(_) => unreachable!("pop_alg must be present in test header"),
+    };
+    let pop_pk_bytes = match header.get(&HDR_POP_PK).and_then(|value| match value {
+        Value::Bytes(bytes) => Some(bytes.clone()),
+        _ => None,
+    }) {
+        Some(bytes) => bytes,
+        None => unreachable!("pop pk must be present in test header"),
+    };
+    let leaf_id = match crate::compute_leaf_id(
         crate::LeafIdMode::PerGroup,
         parts.gid,
         pop_alg.as_str(),
         &pop_pk_bytes,
-    )
-    .expect("leaf id");
-    let pop_sig = header
-        .get(&HDR_POP_SIG)
-        .and_then(|value| match value {
-            Value::Bytes(bytes) => Some(bytes.clone()),
-            _ => None,
-        })
-        .expect("missing pop sig");
+    ) {
+        Ok(id) => id,
+        Err(_) => unreachable!("compute_leaf_id with valid test inputs cannot fail"),
+    };
+    let pop_sig = match header.get(&HDR_POP_SIG).and_then(|value| match value {
+        Value::Bytes(bytes) => Some(bytes.clone()),
+        _ => None,
+    }) {
+        Some(sig) => sig,
+        None => unreachable!("pop sig must be present in test header"),
+    };
+
+    let crs_id = match header_string_or_freeze(header, HDR_CRS_ID) {
+        Ok(id) => id,
+        Err(_) => unreachable!("crs_id must be present in test header"),
+    };
+    let params_id = match header_string_or_freeze(header, HDR_PARAMS_ID) {
+        Ok(id) => id,
+        Err(_) => unreachable!("params_id must be present in test header"),
+    };
 
     let inputs = CapssStrictInputs {
-        crs_id: &header_string_or_freeze(header, HDR_CRS_ID).expect("crs id"),
-        params_id: &header_string_or_freeze(header, HDR_PARAMS_ID).expect("params id"),
+        crs_id: &crs_id,
+        params_id: &params_id,
         seed_commit: &joiner.seed_commit,
         seed_ctx_hash: &seed_ctx_hash,
         xk_hash: &xk_hash,
@@ -438,7 +495,10 @@ pub(crate) fn recompute_fs_witness_from_header(
         pop_sig,
     };
 
-    recompute_capss_witness(inputs).expect("recompute fs lin witness")
+    match recompute_capss_witness(inputs) {
+        Ok(witness) => witness,
+        Err(_) => unreachable!("recompute_capss_witness with valid test inputs cannot fail"),
+    }
 }
 
 pub(crate) fn prepare_header_for_acceptance(
@@ -469,7 +529,10 @@ pub(crate) fn header_with_pop_and_weid(
     pop_sk: &MlDsaSecretKey,
 ) -> (BTreeMap<u64, Value>, [u8; 32]) {
     let header = header_with_pop(joiner, parts, pop_pk, pop_sk);
-    let we_epoch_id = super::compute_we_epoch_id_from_header(parts, &header).expect("derive weid");
+    let we_epoch_id = match super::compute_we_epoch_id_from_header(parts, &header) {
+        Ok(id) => id,
+        Err(_) => unreachable!("compute_we_epoch_id_from_header with test fixtures cannot fail"),
+    };
     (header, we_epoch_id)
 }
 
@@ -483,13 +546,13 @@ pub(crate) fn accept_with_header(
 }
 
 pub(crate) fn header_bytes32(header: &BTreeMap<u64, Value>, key: u64) -> [u8; 32] {
-    let bytes = header
-        .get(&key)
-        .and_then(|value| match value {
-            Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes),
-            _ => None,
-        })
-        .expect("expected 32-byte field");
+    let bytes = match header.get(&key).and_then(|value| match value {
+        Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes),
+        _ => None,
+    }) {
+        Some(b) => b,
+        None => unreachable!("test header must contain 32-byte field at key {}", key),
+    };
     let mut arr = [0u8; 32];
     arr.copy_from_slice(bytes);
     arr
@@ -511,27 +574,41 @@ pub(crate) fn attach_bootstrap_only(
     header.remove(&HDR_BOOTSTRAP_SIG);
     header.remove(&HDR_BOOTSTRAP_PK);
     header.insert(HDR_BOOTSTRAP_ALG, Value::Text("oob-ca-v1".to_string()));
-    let anchor_seed_ctx = build_anchor_seed_ctx(header).expect("seed ctx");
-    let seed_ctx_hash = compute_seed_ctx_hash(&anchor_seed_ctx).expect("seed ctx hash");
+    let anchor_seed_ctx = match build_anchor_seed_ctx(header) {
+        Ok(ctx) => ctx,
+        Err(_) => unreachable!("build_anchor_seed_ctx with test header cannot fail"),
+    };
+    let seed_ctx_hash = match compute_seed_ctx_hash(&anchor_seed_ctx) {
+        Ok(hash) => hash,
+        Err(_) => unreachable!("compute_seed_ctx_hash with valid context cannot fail"),
+    };
     header.insert(HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
 
     let mut parent_root = [0u8; 32];
     parent_root.copy_from_slice(parts.parent_root);
-    let seed_bundle_commit = compute_seed_bundle_commit(
+    let seed_bundle_commit = match compute_seed_bundle_commit(
         &anchor_seed_ctx,
         &joiner.rho_commit,
         parts.gid,
         parts.cat,
         &parent_root,
-    )
-    .expect("seed bundle commit");
+    ) {
+        Ok(commit) => commit,
+        Err(_) => unreachable!("compute_seed_bundle_commit with valid test inputs cannot fail"),
+    };
     header.insert(
         HDR_SEED_BUNDLE_COMMIT,
         Value::Bytes(seed_bundle_commit.to_vec()),
     );
 
-    let verify_ctx = build_anchor_seed_ctx(header).expect("seed ctx verify");
-    let verify_hash = compute_seed_ctx_hash(&verify_ctx).expect("seed hash verify");
+    let verify_ctx = match build_anchor_seed_ctx(header) {
+        Ok(ctx) => ctx,
+        Err(_) => unreachable!("build_anchor_seed_ctx verification with test header cannot fail"),
+    };
+    let verify_hash = match compute_seed_ctx_hash(&verify_ctx) {
+        Ok(hash) => hash,
+        Err(_) => unreachable!("compute_seed_ctx_hash verification with valid context cannot fail"),
+    };
     assert_eq!(
         verify_hash, seed_ctx_hash,
         "attach_bootstrap_only produced inconsistent seed ctx hash"
@@ -552,23 +629,31 @@ pub(crate) fn attach_bootstrap_only(
         msphf_hp_commit: Some(&joiner.hp_commit),
     };
     let (bootstrap_pk, bootstrap_sk) = bootstrap_keys();
-    let digest = build_bootstrap_digest(
+    let digest = match build_bootstrap_digest(
         header,
         &anchor,
         &joiner.hp_commit,
         &seed_ctx_hash,
         &joiner.rho_commit,
         &seed_bundle_commit,
-    )
-    .expect("bootstrap digest");
+    ) {
+        Ok(d) => d,
+        Err(_) => unreachable!("build_bootstrap_digest with valid test inputs cannot fail"),
+    };
     let sig = detached_sign(&digest, bootstrap_sk);
     header.insert(HDR_BOOTSTRAP_SIG, Value::Bytes(sig.as_bytes().to_vec()));
     header.insert(HDR_BOOTSTRAP_PK, Value::Bytes(bootstrap_pk.to_vec()));
 }
 
 pub(crate) fn refresh_seed_ctx_hash(header: &mut BTreeMap<u64, Value>) {
-    let ctx = build_anchor_seed_ctx(header).expect("seed ctx");
-    let hash = compute_seed_ctx_hash(&ctx).expect("seed ctx hash");
+    let ctx = match build_anchor_seed_ctx(header) {
+        Ok(c) => c,
+        Err(_) => unreachable!("build_anchor_seed_ctx with test header cannot fail"),
+    };
+    let hash = match compute_seed_ctx_hash(&ctx) {
+        Ok(h) => h,
+        Err(_) => unreachable!("compute_seed_ctx_hash with valid context cannot fail"),
+    };
     header.insert(HDR_SEED_CTX_HASH, Value::Bytes(hash.to_vec()));
 }
 
@@ -576,38 +661,53 @@ pub(crate) fn refresh_seed_ctx_hash(header: &mut BTreeMap<u64, Value>) {
 struct Commit<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
 
 pub(crate) fn compute_srx_commit(bytes: &[u8]) -> [u8; 32] {
-    hash::h_l(ds::MSPHF_SRX_COMMIT, &Commit(bytes)).expect("hash SRX commit")
+    match hash::h_l(ds::MSPHF_SRX_COMMIT, &Commit(bytes)) {
+        Ok(hash) => hash,
+        Err(_) => unreachable!("hashing SRX commit with valid bytes cannot fail"),
+    }
 }
 
 pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
     let mut buf = Vec::new();
-    ser::into_writer(value, &mut buf).expect("encode value");
+    match ser::into_writer(value, &mut buf) {
+        Ok(()) => (),
+        Err(_) => unreachable!("serializing CBOR value to Vec cannot fail"),
+    }
     buf
 }
 
 pub fn mutate_srx_payload(header: &mut BTreeMap<u64, Value>, mutator: impl FnOnce(&mut Value)) {
-    let payload_bytes = header
-        .get(&HDR_SRX_PAYLOAD)
-        .and_then(|value| match value {
-            Value::Bytes(bytes) => Some(bytes.clone()),
-            _ => None,
-        })
-        .expect("missing srx payload");
-    let mut payload_value: Value =
-        de::from_reader(payload_bytes.as_slice()).expect("decode srx payload");
+    let payload_bytes = match header.get(&HDR_SRX_PAYLOAD).and_then(|value| match value {
+        Value::Bytes(bytes) => Some(bytes.clone()),
+        _ => None,
+    }) {
+        Some(bytes) => bytes,
+        None => unreachable!("test header must contain srx payload"),
+    };
+    let mut payload_value: Value = match de::from_reader(payload_bytes.as_slice()) {
+        Ok(val) => val,
+        Err(_) => unreachable!("decoding test srx payload cannot fail"),
+    };
     mutator(&mut payload_value);
 
-    let items = payload_value
-        .as_array_mut()
-        .expect("unexpected payload structure");
+    let items = match payload_value.as_array_mut() {
+        Some(arr) => arr,
+        None => unreachable!("test payload must be array structure"),
+    };
     assert_eq!(items.len(), 9, "unexpected payload length");
 
-    let join_leaf_ids = items[4].as_array().expect("join_leaf_ids not array").len();
-    let since_leaf_ids = items[6].as_array().expect("since_leaf_ids not array").len();
-    let anchor_pool = items[8]
-        .as_array()
-        .expect("anchor_mem_pool not array")
-        .len();
+    let join_leaf_ids = match items[4].as_array() {
+        Some(arr) => arr.len(),
+        None => unreachable!("join_leaf_ids must be array in test payload"),
+    };
+    let since_leaf_ids = match items[6].as_array() {
+        Some(arr) => arr.len(),
+        None => unreachable!("since_leaf_ids must be array in test payload"),
+    };
+    let anchor_pool = match items[8].as_array() {
+        Some(arr) => arr.len(),
+        None => unreachable!("anchor_mem_pool must be array in test payload"),
+    };
     let join_frontier_len = items[5].as_array().map(|arr| arr.len()).unwrap_or(0);
     let since_frontier_len = items[7].as_array().map(|arr| arr.len()).unwrap_or(0);
 

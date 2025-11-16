@@ -834,13 +834,14 @@ mod tests {
     }
 
     #[test]
-    fn find_index_accepts_domain_points() {
+    fn find_index_accepts_domain_points() -> Result<(), Box<dyn std::error::Error>> {
         let commitment = simple_config();
         for raw in 1..=4 {
             let query = BaseField::from(raw);
-            let idx = commitment.find_index(&query, 4).expect("index");
+            let idx = commitment.find_index(&query, 4)?;
             assert_eq!(idx, (raw - 1) as usize);
         }
+        Ok(())
     }
 
     #[test]
