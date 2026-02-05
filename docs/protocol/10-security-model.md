@@ -259,7 +259,7 @@ ML-DSA-65; CAPSS Smallwood FS proof (ROM soundness); ZK-VRF in QROM.
 **Evidence**:
 - Type-safe: `AcceptanceContext` has no secret fields
 - Functionally verified: No `ml_kem_decapsulate()` in server code
-- Tested: 416 tests presently pass (full `cargo test --all` run), including structural validation
+- Tested: run `cargo test --all` in your target environment; this checkout lists 586 tests on February 5, 2026 (`cargo test --all -- --list | rg ': test$' | wc -l`)
 
 **Implementation**: [crates/msphf-orchestrator/src/accept/mod.rs](../../crates/msphf-orchestrator/src/accept/mod.rs) (struct definition)
 

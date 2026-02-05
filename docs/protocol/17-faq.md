@@ -349,7 +349,7 @@ cargo test --all -- --nocapture
 ./scripts/verify_no_secrets.sh
 ```
 
-**Expected**: 416/416 tests pass, 10/10 security checks pass.
+**Expected**: `cargo test --all` passes and all 10 security checks pass.
 
 **Reference**: [13 — Testing Guide](./13-testing-guide.md)
 
@@ -425,7 +425,7 @@ cargo test --all -- --nocapture
 
 ✅ **Completed**:
 - Security audit completed (all timing side-channels fixed)
-- 416/416 tests pass
+- Comprehensive test inventory (`cargo test --all -- --list | rg ': test$' | wc -l` reports 586 in this checkout on February 5, 2026)
 - Type-safe server blindness (verified)
 - Post-quantum primitives (NIST-standardized)
 

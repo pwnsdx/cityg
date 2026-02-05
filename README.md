@@ -2,7 +2,7 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-576%2F576%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **City‑G** is a research‑grade protocol for end‑to‑end encrypted groups designed for very large audiences (millions of members). The server validates activity cryptographically without ever learning message keys. New members can post and send messages even when everyone else is offline. The shipping profile is `tswe/msphf-we/fs-hybrid`, integrating server blindness, multi-head windows, and minutes-grade forward secrecy by default.

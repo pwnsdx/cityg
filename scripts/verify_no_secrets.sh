@@ -105,23 +105,28 @@ echo ""
 
 # Check 9: Compile-time verification (cargo check)
 echo "✓ Check 9: Code compiles (type safety)..."
-if cargo check --quiet 2>&1 | grep -i "error" > /dev/null; then
-    echo "  ❌ FAILED: Compilation errors"
-    FAILED=1
-else
+CHECK_LOG="$(mktemp)"
+if cargo check --quiet > "$CHECK_LOG" 2>&1; then
     echo "  ✅ PASSED: Code compiles (type-safe)"
+else
+    echo "  ❌ FAILED: Compilation errors"
+    tail -n 40 "$CHECK_LOG"
+    FAILED=1
 fi
+rm -f "$CHECK_LOG"
 echo ""
 
 # Check 10: Tests pass (functional verification)
 echo "✓ Check 10: Tests pass (cargo test --all)..."
-TEST_OUTPUT=$(cargo test --quiet --all 2>&1 || true)
-if echo "$TEST_OUTPUT" | grep "test result: ok" > /dev/null; then
-    echo "  ✅ PASSED: All tests pass"
+TEST_LOG="$(mktemp)"
+if cargo test --quiet --all > "$TEST_LOG" 2>&1; then
+    echo "  ✅ PASSED: All tests pass (exit code 0)"
 else
     echo "  ❌ FAILED: Some tests failed"
+    tail -n 80 "$TEST_LOG"
     FAILED=1
 fi
+rm -f "$TEST_LOG"
 echo ""
 
 # Summary

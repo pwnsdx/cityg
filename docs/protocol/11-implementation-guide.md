@@ -1175,7 +1175,7 @@ crates/msphf-orchestrator/tests/
 | **KBROAD** | Envelope structure, registry |
 | **End-to-end** | Full joiner→server→receiver flow |
 
-**Total**: 416 tests (see [13 — Testing Guide](./13-testing-guide.md) for the current breakdown)
+**Total**: Test count is checkout-dependent (586 tests listed on February 5, 2026 in this repository; see [13 — Testing Guide](./13-testing-guide.md) for how to recalculate).
 
 ### 9.3 Known-Answer Tests (KATs)
 
@@ -1222,8 +1222,8 @@ The City-G `tswe/msphf-we/fs-hybrid` implementation consists of:
 
 **Code Quality**:
 - ~18,000 lines of Rust (excluding tests)
-- 416 tests (100% pass; see Testing Guide)
-- Zero `unsafe` blocks (memory-safe)
+- Workspace currently lists 586 tests in this checkout (February 5, 2026); verify pass/fail with `cargo test --all`
+- No `unsafe` in the acceptance path; optional `unsafe-ntt` exists in `msphf-core` behind a feature flag
 - Constant-time critical operations (NTT, field arithmetic)
 
 **Next**: [12 — Error Reference](./12-error-reference.md)

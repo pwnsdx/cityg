@@ -26,7 +26,7 @@ This document describes the testing strategy for the City-G `tswe/msphf-we/fs-hy
 - **Security tests**: Constant-time verification (DUDECT) and cache-trace analysis
 - **Performance tests**: Benchmark harnesses for proof systems and SRX
 
-**Total**: 416 tests (all passing as of 2025-11-10)
+**Total**: Test count is checkout-dependent. On February 5, 2026 this repository reports 586 tests (`cargo test --all -- --list | rg ': test$' | wc -l`).
 
 **Blueprint Reference**: Alpha (0.1.0) §18 (Known-Answer Tests)
 
@@ -74,7 +74,7 @@ crates/
 | **SRX & Receiver sync** | Shadow-root verification, crash/reload parity, chaos replay | `msphf-orchestrator::receiver`, `cityg-server::tests` |
 | **KBROAD & HP transport** | KBROAD registry enforcement, AEAD nonce derivations, HKDF-BLAKE3 KATs | `msphf-orchestrator::hdr`, `hkdf` module tests |
 
-**Note**: `cargo test --all` currently reports 416 passing tests; counts grow over time as new suites land. Consult `cargo test --all -- --list` for the authoritative breakdown in your checkout.
+**Note**: `cargo test --all` pass/fail status is the authoritative signal; exact counts grow over time. Use `cargo test --all -- --list | rg ': test$' | wc -l` for the current test count in your checkout.
 
 ---
 
@@ -555,7 +555,9 @@ pub struct CaseOutput {
 
 **Usage**:
 ```bash
-cargo run --bin cityg-hps-kat -- --plan tests/kat/plan.json --output kat_output.json
+cargo run -p msphf-orchestrator --bin cityg-hps-kat -- \
+  --plan kat/plan-rlwe-annex-k.json \
+  --out kat_output.json
 ```
 
 ---
@@ -827,7 +829,7 @@ running … tests
 test result: ok. … passed; 0 failed; 0 ignored; 0 measured
 ```
 
-As of 2025-11-10, `cargo test --all` reports 416 passing tests across the workspace.
+As of February 5, 2026, this checkout reports 586 tests via `cargo test --all -- --list | rg ': test$' | wc -l`.
 
 ---
 
@@ -866,7 +868,10 @@ cargo run --release --bin dudect-harness \
   -- --target smallwood-verify --samples 20000 --inner 8
 
 # Side-channel analysis (Cachegrind)
-./scripts/run_cachegrind.sh
+valgrind --tool=cachegrind --branch-sim=yes \
+  --log-file=docs/evidence/cachegrind/ct_vrf.log \
+  cargo +nightly run -p msphf-orchestrator --release --example ct_vrf \
+  -- --filter vrf_verify_ct
 ```
 
 ---
@@ -875,12 +880,12 @@ cargo run --release --bin dudect-harness \
 
 ```bash
 # Generate KAT outputs from plan
-cargo run --bin cityg-hps-kat -- \
-    --plan tests/kat/plan.json \
-    --output kat_output.json
+cargo run -p msphf-orchestrator --bin cityg-hps-kat -- \
+    --plan kat/plan-rlwe-annex-k.json \
+    --out kat_output.json
 
 # Compare with expected outputs
-diff kat_output.json tests/kat/expected.json
+diff kat_output.json kat/kat-rlwe-annex-k.json
 ```
 
 ---
@@ -895,7 +900,7 @@ The City-G `tswe/msphf-we/fs-hybrid` test suite provides comprehensive coverage:
 4. **Security Tests**: Constant-time verification (DUDECT), side-channel analysis (Cachegrind)
 5. **Performance Tests**: Benchmarking framework (Criterion, future work)
 
-**Test Results**: 416/416 tests passing (100%)
+**Test Inventory**: 586 tests listed in this checkout on February 5, 2026 (`cargo test --all -- --list | rg ': test$' | wc -l`)
 
 **Security Verification**: All critical RLWE operations are constant-time (DUDECT verified)
 

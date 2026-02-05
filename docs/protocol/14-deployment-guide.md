@@ -40,7 +40,7 @@ This document provides deployment guidance for City-G `tswe/msphf-we/fs-hybrid` 
 
 **✅ Test Suite**:
 - [ ] Run full test suite: `cargo test --all --release`
-- [ ] Verify 416/416 tests pass
+- [ ] Verify `cargo test --all --release` passes (capture current count with `cargo test --all -- --list | rg ': test$' | wc -l`)
 - [ ] Run Known-Answer Tests (KATs): `cargo run --bin cityg-hps-kat`
 - [ ] Verify KAT outputs match expected values
 

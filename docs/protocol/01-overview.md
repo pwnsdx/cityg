@@ -245,7 +245,7 @@ hp_commit := H_L("msphf/hp/commit", [hp])  — field #99
 3. RLWE parameters / noise bounds hold
 4. `fs_epoch_commit`, `fs_ec`, and device-chain commits match the public header"
 
-**Innovation:** Uses the CAPSS Smallwood transcript to bind the forward-secrecy context while keeping `epoch_sk`/`τₑ` hidden. The proof is compact (<1 KiB) and replayable from deterministic seeds so the server can verify without learning secrets.
+**Innovation:** Uses the CAPSS Smallwood transcript to bind the forward-secrecy context while keeping `epoch_sk`/`τₑ` hidden. Proofs are compact (~9–15.5 KiB in tuned profiles, capped at 16 KiB) and replayable from deterministic seeds so the server can verify without learning secrets.
 
 **Implementation:** [`crates/msphf-orchestrator/src/proofs/capss.rs`](../../crates/msphf-orchestrator/src/proofs/capss.rs)
 

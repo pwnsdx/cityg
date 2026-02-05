@@ -637,7 +637,7 @@ if expected != header[121] {
 
 ### 7.1 CAPSS Smallwood Proof (Field #146)
 
-**Size:** ≤ 24,576 bytes (`FS_CAPSS_MAX_BYTES`)
+**Size:** ≤ 16,384 bytes (`FS_CAPSS_MAX_BYTES`)
 
 **Structure:** CBOR map containing:
 - Seven commitments (`seed_commit`, `rho_commit`, `hp_commit`, branch artifacts, context tags)
@@ -705,7 +705,7 @@ proofs_commit := H_L("msphf/proofs", [vrf_proof, fs_capss])
 |-------|----------------|----------|---------|
 | **#95 (VRF proof)** | 8,192 bytes | `MAX_VRF_PROOF_BYTES` | Hard limit enforced inside the `accept/` module |
 | **#97 (KBROAD envelope)** | 16,400 bytes | `KBROAD_HP_MAX_CIPHERTEXT_BYTES` | `C_hp` ciphertext bound (includes 16-byte tag) |
-| **#146 (CAPSS Smallwood proof)** | 24,576 bytes | `FS_CAPSS_MAX_BYTES` | Binding digest + transcript |
+| **#146 (CAPSS Smallwood proof)** | 16,384 bytes | `FS_CAPSS_MAX_BYTES` | Binding digest + transcript |
 | **#122 (SRX payload)** | Configurable (`srx_max_bytes`, default 1,048,576) | `DEFAULT_SRX_MAX_BYTES` | Tunable via policy |
 
 Field #97 (KBROAD envelope) is now validated for both structure and length (≤ 16,400 bytes for `C_hp`). Oversize envelopes trigger `FREEZE_KBROAD_PARENT_MISMATCH` before any decryption attempt.
