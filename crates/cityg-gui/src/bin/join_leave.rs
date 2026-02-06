@@ -127,6 +127,7 @@ async fn main() -> Result<()> {
     let mut batch_mode = false;
     let mut leave_order_raw: Option<String> = None;
     let mut watch_mode = false;
+    let mut verbose = false;
 
     for arg in args {
         if let Some(rest) = arg.strip_prefix("--count=") {
@@ -147,6 +148,10 @@ async fn main() -> Result<()> {
             batch_mode = true;
             continue;
         }
+        if arg == "--verbose" {
+            verbose = true;
+            continue;
+        }
         if let Some(rest) = arg.strip_prefix("--leave-order=") {
             leave_order_raw = Some(rest.to_string());
             continue;
@@ -157,7 +162,7 @@ async fn main() -> Result<()> {
             (Some(_), Some(_), None) => alias = Some(arg),
             _ => {
                 return Err(anyhow!(
-                    "unexpected extra argument: {arg}. usage: [server] [room] [alias] [--count=N]"
+                    "unexpected extra argument: {arg}. usage: [server] [room] [alias] [--count=N] [--batch|--watch] [--leave-order=...] [--verbose]"
                 ));
             }
         }
@@ -211,6 +216,7 @@ async fn main() -> Result<()> {
             &alias_base,
             count,
             leave_order.clone(),
+            verbose,
         )
         .await?;
         return Ok(());
@@ -243,7 +249,7 @@ async fn main() -> Result<()> {
                 alias_for(&alias_base, count, *idx - 1),
                 hex::encode(session.we_epoch_id)
             );
-            perform_leave(session).await?;
+            perform_leave(session, verbose).await?;
             println!("leave ok");
         }
     } else {
@@ -257,7 +263,7 @@ async fn main() -> Result<()> {
             let session = perform_join(&server_url, &room_id, &alias).await?;
             println!("join ok: weid={}", hex::encode(session.we_epoch_id));
             log_fingerprints(&session);
-            perform_leave(&session).await?;
+            perform_leave(&session, verbose).await?;
             println!("leave ok");
         }
     }
@@ -480,7 +486,7 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
     })
 }
 
-async fn perform_leave(session: &Session) -> Result<()> {
+async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let client = CitygApiClient::new(&session.server_url);
     let ticket = client
         .merge_ticket(&session.room_id, &session.leaf_id)
@@ -494,15 +500,17 @@ async fn perform_leave(session: &Session) -> Result<()> {
         session.fs_dev_prev_commit,
     );
 
-    for (idx, parity) in parities.iter().enumerate() {
-        println!(
-            "parity[{idx}] accept_seq={} is_join={} fs_ec_present={} fs_dev_present={} fs_epoch_present={}",
-            parity.accept_seq,
-            parity.is_join,
-            parity.fs_ec.is_some(),
-            parity.fs_dev_commit.is_some(),
-            parity.fs_epoch_commit.is_some()
-        );
+    if verbose {
+        for (idx, parity) in parities.iter().enumerate() {
+            println!(
+                "parity[{idx}] accept_seq={} is_join={} fs_ec_present={} fs_dev_present={} fs_epoch_present={}",
+                parity.accept_seq,
+                parity.is_join,
+                parity.fs_ec.is_some(),
+                parity.fs_dev_commit.is_some(),
+                parity.fs_epoch_commit.is_some()
+            );
+        }
     }
 
     let pivot = parities
@@ -614,18 +622,20 @@ async fn perform_leave(session: &Session) -> Result<()> {
     let derived_we_epoch_id = derive_we_epoch_id(&session.gid, &parent_root_arr, &seed_ctx_hash)
         .context("derive we_epoch_id")?;
 
-    println!(
-        "seed_ctx_hash_equal={} seed_commit_equal={} seed_bundle_equal={}",
-        seed_ctx_hash == session.seed_ctx_hash,
-        seed_commit == session.seed_commit,
-        seed_bundle_commit == session.seed_bundle_commit
-    );
-    println!(
-        "binding_match={} seed_commit_match={} seed_bundle_match={}",
-        bundle.hp_binding.seed_ctx_hash == seed_ctx_hash,
-        bundle.hp_binding.seed_commit == seed_commit,
-        bundle.hp_binding.seed_bundle_commit == seed_bundle_commit
-    );
+    if verbose {
+        println!(
+            "seed_ctx_hash_equal={} seed_commit_equal={} seed_bundle_equal={}",
+            seed_ctx_hash == session.seed_ctx_hash,
+            seed_commit == session.seed_commit,
+            seed_bundle_commit == session.seed_bundle_commit
+        );
+        println!(
+            "binding_match={} seed_commit_match={} seed_bundle_match={}",
+            bundle.hp_binding.seed_ctx_hash == seed_ctx_hash,
+            bundle.hp_binding.seed_commit == seed_commit,
+            bundle.hp_binding.seed_bundle_commit == seed_bundle_commit
+        );
+    }
 
     bundle.anchor.anchor_hdr_ctx = computed_anchor_ctx.clone();
     bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
@@ -644,78 +654,80 @@ async fn perform_leave(session: &Session) -> Result<()> {
     );
     bundle.we_epoch_id = derived_we_epoch_id;
 
-    println!(
-        "pre-submit roots: parent={} join_delta={} revoked_since={} revoked={}",
-        describe_value(bundle.header_map.get(&110)),
-        describe_value(bundle.header_map.get(&111)),
-        describe_value(bundle.header_map.get(&112)),
-        describe_value(bundle.header_map.get(&hdr::HDR_REVOKED_ROOT)),
-    );
-    if let Some(Value::Bytes(bytes)) = bundle.header_map.get(&110) {
-        println!("pre-submit parent root hex={}", hex::encode(bytes));
-    }
-    if let Some(Value::Bytes(bytes)) = bundle.header_map.get(&111) {
-        println!("pre-submit join root hex={}", hex::encode(bytes));
-    }
-    let stored_ctx_map: BTreeMap<u64, Value> =
-        ciborium::de::from_reader(session.anchor_hdr_ctx.as_slice())
-            .context("decode stored anchor ctx")?;
-    println!(
-        "stored ctx roots: parent={} join_delta={} revoked_since={} revoked={}",
-        describe_value(stored_ctx_map.get(&110)),
-        describe_value(stored_ctx_map.get(&111)),
-        describe_value(stored_ctx_map.get(&112)),
-        describe_value(stored_ctx_map.get(&113)),
-    );
-    if let Some(Value::Bytes(bytes)) = stored_ctx_map.get(&110) {
-        println!("stored ctx parent root hex={}", hex::encode(bytes));
-    }
-    let adjusted: Vec<u64> = Vec::new();
-
-    use std::collections::BTreeSet;
-    let keys: BTreeSet<u64> = session
-        .stored_header_map
-        .keys()
-        .chain(bundle.header_map.keys())
-        .copied()
-        .collect();
-    let mut diff_report = Vec::new();
-    for key in keys {
-        let stored = session.stored_header_map.get(&key);
-        let current = bundle.header_map.get(&key);
-        if stored != current {
-            diff_report.push((key, describe_value(stored), describe_value(current)));
+    if verbose {
+        println!(
+            "pre-submit roots: parent={} join_delta={} revoked_since={} revoked={}",
+            describe_value(bundle.header_map.get(&110)),
+            describe_value(bundle.header_map.get(&111)),
+            describe_value(bundle.header_map.get(&112)),
+            describe_value(bundle.header_map.get(&hdr::HDR_REVOKED_ROOT)),
+        );
+        if let Some(Value::Bytes(bytes)) = bundle.header_map.get(&110) {
+            println!("pre-submit parent root hex={}", hex::encode(bytes));
         }
-    }
-    println!(
-        "anchor_ctx_equal={} adjusted_keys={:?} diff_keys={:?}",
-        computed_anchor_ctx == session.anchor_hdr_ctx,
-        adjusted,
-        diff_report
-            .iter()
-            .map(|(key, _, _)| *key)
-            .collect::<Vec<_>>()
-    );
-    for (key, stored_desc, current_desc) in diff_report.iter() {
+        if let Some(Value::Bytes(bytes)) = bundle.header_map.get(&111) {
+            println!("pre-submit join root hex={}", hex::encode(bytes));
+        }
+        let stored_ctx_map: BTreeMap<u64, Value> =
+            ciborium::de::from_reader(session.anchor_hdr_ctx.as_slice())
+                .context("decode stored anchor ctx")?;
         println!(
-            " key {}: stored={} current={}",
-            key, stored_desc, current_desc
+            "stored ctx roots: parent={} join_delta={} revoked_since={} revoked={}",
+            describe_value(stored_ctx_map.get(&110)),
+            describe_value(stored_ctx_map.get(&111)),
+            describe_value(stored_ctx_map.get(&112)),
+            describe_value(stored_ctx_map.get(&113)),
         );
-    }
+        if let Some(Value::Bytes(bytes)) = stored_ctx_map.get(&110) {
+            println!("stored ctx parent root hex={}", hex::encode(bytes));
+        }
+        let adjusted: Vec<u64> = Vec::new();
 
-    for key in [
-        hdr::HDR_TSWE_ALG,
-        hdr::HDR_MERKLE_SUITE,
-        hdr::HDR_KBROAD_ALG,
-        hdr::HDR_KBROAD_PUB,
-        hdr::HDR_CRS_ID,
-        hdr::HDR_PARAMS_ID,
-    ] {
+        use std::collections::BTreeSet;
+        let keys: BTreeSet<u64> = session
+            .stored_header_map
+            .keys()
+            .chain(bundle.header_map.keys())
+            .copied()
+            .collect();
+        let mut diff_report = Vec::new();
+        for key in keys {
+            let stored = session.stored_header_map.get(&key);
+            let current = bundle.header_map.get(&key);
+            if stored != current {
+                diff_report.push((key, describe_value(stored), describe_value(current)));
+            }
+        }
         println!(
-            " hdr {} => {}",
-            key,
-            describe_value(bundle.header_map.get(&key))
+            "anchor_ctx_equal={} adjusted_keys={:?} diff_keys={:?}",
+            computed_anchor_ctx == session.anchor_hdr_ctx,
+            adjusted,
+            diff_report
+                .iter()
+                .map(|(key, _, _)| *key)
+                .collect::<Vec<_>>()
         );
+        for (key, stored_desc, current_desc) in &diff_report {
+            println!(
+                " key {}: stored={} current={}",
+                key, stored_desc, current_desc
+            );
+        }
+
+        for key in [
+            hdr::HDR_TSWE_ALG,
+            hdr::HDR_MERKLE_SUITE,
+            hdr::HDR_KBROAD_ALG,
+            hdr::HDR_KBROAD_PUB,
+            hdr::HDR_CRS_ID,
+            hdr::HDR_PARAMS_ID,
+        ] {
+            println!(
+                " hdr {} => {}",
+                key,
+                describe_value(bundle.header_map.get(&key))
+            );
+        }
     }
     for key in [
         hdr::HDR_HP_BYTES,
@@ -736,52 +748,60 @@ async fn perform_leave(session: &Session) -> Result<()> {
         .context("bundle missing vrf_proof for comparison")?;
     let has_srx_root = bundle.header_map.contains_key(&hdr::HDR_SRX_ROOT_SW);
     let has_srx_smallwood = bundle.header_map.contains_key(&hdr::HDR_SRX_SMALLWOOD);
-    println!(
-        "fs_capss pivot_len={} bundle_len={} equal={} vrf_equal={}",
-        pivot_fs_len,
-        bundle_fs.len(),
-        if pivot_fs_len == bundle_fs.len() && pivot.fs_capss == bundle_fs {
-            "yes"
-        } else {
-            "no"
-        },
-        if pivot.vrf_proof == vrf_bytes {
-            "yes"
-        } else {
-            "no"
+    if verbose {
+        println!(
+            "fs_capss pivot_len={} bundle_len={} equal={} vrf_equal={}",
+            pivot_fs_len,
+            bundle_fs.len(),
+            if pivot_fs_len == bundle_fs.len() && pivot.fs_capss == bundle_fs {
+                "yes"
+            } else {
+                "no"
+            },
+            if pivot.vrf_proof == vrf_bytes {
+                "yes"
+            } else {
+                "no"
+            }
+        );
+        println!(
+            "srx_root_present={} srx_smallwood_present={}",
+            has_srx_root, has_srx_smallwood
+        );
+        println!(
+            "pivot_has_srx_commit={} pivot_accept_seq={}",
+            pivot.srx_commit.is_some(),
+            pivot.accept_seq
+        );
+        if let Some(Value::Array(items)) = bundle.header_map.get(&hdr::HDR_MH_HEADS) {
+            println!("mh_heads len={}", items.len());
         }
-    );
-    println!(
-        "srx_root_present={} srx_smallwood_present={}",
-        has_srx_root, has_srx_smallwood
-    );
-    println!(
-        "pivot_has_srx_commit={} pivot_accept_seq={}",
-        pivot.srx_commit.is_some(),
-        pivot.accept_seq
-    );
-    if let Some(Value::Array(items)) = bundle.header_map.get(&hdr::HDR_MH_HEADS) {
-        println!("mh_heads len={}", items.len());
     }
 
     let stored_commit = extract_bytes(&bundle.header_map, hdr::HDR_PROOFS_COMMIT)
         .context("bundle missing proofs_commit")?;
     let recomputed_commit =
         recompute_proofs_commit(&bundle.header_map).context("recompute proofs commit")?;
-    println!(
-        "proofs_commit stored={} recomputed={}",
-        hex::encode(&stored_commit),
-        hex::encode(recomputed_commit)
-    );
+    if verbose {
+        println!(
+            "proofs_commit stored={} recomputed={}",
+            hex::encode(&stored_commit),
+            hex::encode(recomputed_commit)
+        );
+    }
     if stored_commit.as_slice() != recomputed_commit {
-        println!("warning: proofs_commit mismatch before submission");
+        if verbose {
+            println!("warning: proofs_commit mismatch before submission");
+        }
         bundle.header_map.insert(
             hdr::HDR_PROOFS_COMMIT,
             Value::Bytes(recomputed_commit.to_vec()),
         );
     }
 
-    log_fs_metadata(pivot, &bundle.header_map);
+    if verbose {
+        log_fs_metadata(pivot, &bundle.header_map);
+    }
 
     client
         .refresh_pivot(&bundle)
@@ -815,6 +835,7 @@ async fn run_watch_mode(
     alias_base: &str,
     count: usize,
     leave_order: Option<Vec<usize>>,
+    verbose: bool,
 ) -> Result<()> {
     println!(
         "watch mode: server={server_url} room={room_id} alias_base={alias_base} count={count}"
@@ -866,7 +887,7 @@ async fn run_watch_mode(
             alias_for(alias_base, sessions.len(), *idx - 1),
             hex::encode(session.we_epoch_id)
         );
-        perform_leave(session).await?;
+        perform_leave(session, verbose).await?;
         expect_membership_event(
             &mut event_rx,
             &session.gid,

@@ -1,0 +1,26 @@
+[Unit]
+Description=City-G API service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cityg
+Group=cityg
+WorkingDirectory=/var/lib/cityg
+EnvironmentFile=/etc/cityg/cityg.env
+ExecStart=/usr/local/bin/cityg-api
+ExecStartPre=/usr/bin/test -f /etc/cityg/cityg.env
+ExecStartPost=/usr/local/bin/healthcheck_api.sh http://127.0.0.1:8080/health/ready 60 2
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=90
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/cityg
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

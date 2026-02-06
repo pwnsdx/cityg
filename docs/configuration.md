@@ -104,6 +104,12 @@ slack_device = 4                                # Device slack
 - `CITYG_PROTOCOL_MAX_CONCURRENT_HEADS` - Maximum concurrent heads
 - `CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS` - Epoch rotation interval
 - `CITYG_PROTOCOL_DEFAULT_SRX_MAX_BYTES` - Default SRX max bytes
+- `CITYG_PROTOCOL_MAX_HP_PROOF_BYTES` - Maximum HP proof size
+- `CITYG_PROTOCOL_MAX_VRF_PROOF_BYTES` - Maximum VRF proof size
+- `CITYG_PROTOCOL_FS_CAPSS_MAX_BYTES` - Maximum FS CAPSS proof size
+- `CITYG_PROTOCOL_SRX_SMALLWOOD_MAX_BYTES` - Maximum SRX Smallwood proof size
+- `CITYG_PROTOCOL_MAX_HP_ENVELOPE_BYTES` - Maximum HP envelope size
+- `CITYG_PROTOCOL_MIN_SRX_MAX_BYTES` - Minimum SRX payload floor
 - `CITYG_PROTOCOL_RECEIVER_CACHE_TTL_SECS` - Receiver cache TTL
 - `CITYG_PROTOCOL_FS_POLICY_VERSION` - FS policy version label
 - `CITYG_PROTOCOL_FS_POLICY_H_SECONDS`
@@ -213,17 +219,19 @@ cargo run -p cityg-api
 
 **Dockerfile:**
 ```dockerfile
-FROM rust:1.83 AS builder
+FROM rust:1.85-bookworm AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release -p cityg-api
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
 COPY --from=builder /app/target/release/cityg-api /usr/local/bin/
 ENV CITYG_SERVER_ADDRESS=0.0.0.0:8080
 ENV CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS=600
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=5 \
+  CMD curl -fsS http://127.0.0.1:8080/health/ready || exit 1
 CMD ["cityg-api"]
 ```
 

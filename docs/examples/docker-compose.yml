@@ -7,9 +7,8 @@
 # - Example configuration volumes
 #
 # Usage:
-#   docker-compose up -d
-
-version: '3.8'
+#   cp cityg.env.example cityg.env
+#   docker compose up -d --build
 
 services:
   # City-G API Server
@@ -21,24 +20,11 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    env_file:
+      - ./cityg.env
     environment:
-      # Logging
-      - LOG_FORMAT=json
-      - RUST_LOG=info
-
-      # Server configuration
+      # Optional overrides. Defaults come from cityg.env.
       - CITYG_SERVER_ADDRESS=0.0.0.0:8080
-      - CITYG_SERVER_WEBSOCKET_CAPACITY=1000
-      - CITYG_SERVER_WINDOW_TTL_SECS=10
-
-      # Protocol configuration
-      - CITYG_PROTOCOL_WINDOW_DURATION_SECS=10
-      - CITYG_PROTOCOL_MAX_CONCURRENT_HEADS=16
-      - CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS=3600
-
-      # Client configuration (for integration tests)
-      - CITYG_CLIENT_DEFAULT_SERVER_URL=http://localhost:8080
-      - CITYG_CLIENT_API_TIMEOUT_SECS=30
     volumes:
       # Persistent state (journal for crash recovery)
       - cityg-data:/var/lib/cityg
@@ -46,7 +32,7 @@ services:
       # Optional: Mount custom configuration
       # - ./config-production.toml:/etc/cityg/config.toml:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -92,7 +78,8 @@ services:
       - GF_INSTALL_PLUGINS=
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./grafana-dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana-dashboards/default.yml:/etc/grafana/provisioning/dashboards/default.yml:ro
+      - ./grafana-dashboards:/var/lib/grafana/dashboards:ro
       - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
     depends_on:
       - prometheus

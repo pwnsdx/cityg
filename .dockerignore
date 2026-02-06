@@ -1,0 +1,10 @@
+target
+.git
+.github
+.claude
+.config
+.DS_Store
+artifacts
+docs/evidence
+kat
+*.log

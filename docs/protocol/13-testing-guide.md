@@ -890,6 +890,19 @@ diff kat_output.json kat/kat-rlwe-annex-k.json
 
 ---
 
+### 8.6 Run Runtime Smoke
+
+```bash
+# Server + GUI join/leave flow + capacity freeze behavior
+./scripts/smoke_membership_capacity.sh
+```
+
+This smoke test starts a local API server, validates join/leave membership events
+with the `join_leave --watch` workflow, and then forces a low-capacity window to
+confirm `freeze 925` (`mh_window_full`) is emitted when expected.
+
+---
+
 ## Summary
 
 The City-G `tswe/msphf-we/fs-hybrid` test suite provides comprehensive coverage:

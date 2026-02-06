@@ -1,194 +1,139 @@
-# City-G Configuration Examples
+# City-G Deployment Examples
 
-This directory contains production-ready configuration examples for deploying City-G in various environments.
+This directory contains runnable deployment examples for `cityg-api`.
 
-## 📁 Contents
+## Contents
 
-### Docker
-- **[docker-compose.yml](./docker-compose.yml)** - Complete Docker Compose stack
-  - City-G API server
-  - Prometheus metrics collection
-  - Grafana dashboards
-  - Persistent volumes for journal storage
+- `docker-compose.yml`: API + Prometheus + Grafana stack.
+- `cityg.env.example`: baseline environment variables for Compose/systemd.
+- `cityg-api.service`: hardened systemd unit example.
+- `kubernetes-deployment.yml`: reference Kubernetes manifest.
+- `prometheus.yml`: Prometheus scrape + alerting baseline.
+- `config-production.toml`: production-oriented config file sample.
+- `grafana-datasources.yml`: Grafana datasource provisioning.
+- `grafana-dashboards/`: Grafana dashboard provisioning files.
 
-### Kubernetes
-- **[kubernetes-deployment.yml](./kubernetes-deployment.yml)** - Production K8s deployment
-  - High-availability deployment (3 replicas)
-  - Horizontal Pod Autoscaler
-  - ConfigMap for configuration
-  - PersistentVolumeClaim for journal
-  - ServiceMonitor for Prometheus Operator
+## Quick Start: Docker Compose
 
-### Monitoring
-- **[prometheus.yml](./prometheus.yml)** - Prometheus scrape configuration
-  - Metrics collection from City-G API
-  - Example alerting rules
-  - Self-monitoring
-
-### Configuration
-- **[config-production.toml](./config-production.toml)** - Production TOML config
-  - Recommended production settings
-  - Performance tuning notes
-  - Security considerations
-
-## 🚀 Quick Start
-
-### Docker Compose
+Run from this directory (`docs/examples`):
 
 ```bash
-# Copy and customize configuration
-cp docs/examples/docker-compose.yml .
-cp docs/examples/prometheus.yml .
-
-# Start the stack
-docker-compose up -d
-
-# View logs
-docker-compose logs -f cityg-api
-
-# Access services
-# - City-G API: http://localhost:8080
-# - Prometheus: http://localhost:9090
-# - Grafana: http://localhost:3000 (admin/admin)
+cp cityg.env.example cityg.env
+docker compose up -d --build
 ```
 
-### Kubernetes
+Check service health:
 
 ```bash
-# Apply configuration
-kubectl apply -f docs/examples/kubernetes-deployment.yml
+curl -fsS http://127.0.0.1:8080/health/ready
+curl -fsS http://127.0.0.1:8080/health/detailed
+```
 
-# Check deployment status
+Open dashboards:
+
+- API: `http://localhost:8080`
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3000` (`admin` / `admin`)
+
+Stop stack:
+
+```bash
+docker compose down
+```
+
+## Quick Start: systemd
+
+1. Install binaries:
+
+```bash
+cargo build --release -p cityg-api
+sudo install -m 0755 target/release/cityg-api /usr/local/bin/cityg-api
+sudo install -m 0755 scripts/healthcheck_api.sh /usr/local/bin/healthcheck_api.sh
+```
+
+2. Install configuration:
+
+```bash
+sudo useradd --system --home /var/lib/cityg --shell /usr/sbin/nologin cityg || true
+sudo mkdir -p /etc/cityg /var/lib/cityg
+sudo cp docs/examples/cityg.env.example /etc/cityg/cityg.env
+sudo chown -R cityg:cityg /var/lib/cityg
+sudo chmod 0640 /etc/cityg/cityg.env
+```
+
+3. Install unit and start service:
+
+```bash
+sudo cp docs/examples/cityg-api.service /etc/systemd/system/cityg-api.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now cityg-api
+```
+
+4. Verify startup:
+
+```bash
+sudo systemctl status cityg-api --no-pager
+./scripts/healthcheck_api.sh http://127.0.0.1:8080/health/ready 60 2
+```
+
+## Quick Start: Kubernetes
+
+```bash
+kubectl apply -f docs/examples/kubernetes-deployment.yml
 kubectl get pods -n cityg
 kubectl get svc -n cityg
-
-# View logs
-kubectl logs -n cityg -l app=cityg-api --tail=100 -f
-
-# Access API (after LoadBalancer assigns external IP)
-kubectl get svc -n cityg cityg-api-service
 ```
 
-### Standalone with Custom Config
+## Runtime Verification Scripts
+
+Use these scripts from the repository root:
 
 ```bash
-# Copy production config
-cp docs/examples/config-production.toml cityg.toml
+# Security baseline (tests + server-blindness checks)
+./scripts/security_review.sh
 
-# Edit configuration
-vim cityg.toml
-
-# Run with custom config
-cargo run --release --bin cityg-api -- --config cityg.toml
+# Runtime smoke (join/leave + capacity freeze behavior)
+./scripts/smoke_membership_capacity.sh
 ```
 
-## 📊 Monitoring
+## Monitoring Queries
 
-### Prometheus Metrics
-
-Access Prometheus at `http://localhost:9090` and run queries:
+Use these Prometheus queries as a baseline:
 
 ```promql
-# Request rate
-rate(http_requests_total[5m])
-
-# Error rate
-rate(http_responses_total{status=~"5.."}[5m])
-
-# P95 latency
-histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
-
-# Window utilization
-mhw_current_heads / mhw_max_heads
+sum(rate(http_requests_total[5m]))
+sum(rate(http_responses_total{status=~"5.."}[5m]))
+histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
 ```
 
-### Grafana Dashboards
+## Security Checklist
 
-1. Access Grafana at `http://localhost:3000`
-2. Login with `admin/admin`
-3. Add Prometheus data source: `http://prometheus:9090`
-4. Import dashboard or create custom panels
+Before production promotion:
 
-**Recommended panels:**
-- Request rate (by endpoint)
-- Error rate (by status code)
-- Latency percentiles (P50, P95, P99)
-- Window utilization
-- Circuit breaker state
-- Active WebSocket connections
+- [ ] `./scripts/verify_no_secrets.sh` passes.
+- [ ] `./scripts/security_review.sh` passes.
+- [ ] Health probes wired to `/health/live` and `/health/ready`.
+- [ ] Service runs as non-root user.
+- [ ] Journal storage is on durable disk and backed up.
 
-## ⚙️ Configuration Tuning
-
-**For detailed configuration tuning guidance**, see:
-- **[Configuration Guide](../configuration.md)** - Complete configuration reference
-- **[config-production.toml](./config-production.toml)** - Production-ready example with tuning notes
-
-## 🔐 Security Checklist
-
-- [ ] Enable TLS (use reverse proxy like nginx)
-- [ ] Set `RUST_LOG=info` (not debug/trace in production)
-- [ ] Run as non-root user
-- [ ] Enable firewall (only necessary ports)
-- [ ] Set resource limits (CPU, memory)
-- [ ] Enable journal for crash recovery
-- [ ] Back up journal regularly
-- [ ] Verify server-blindness: `./scripts/verify_no_secrets.sh`
-- [ ] Monitor metrics and set up alerts
-- [ ] Use strong random values for session keys
-
-## 📈 Performance Tuning
-
-### CPU-Bound (Proof Generation)
-
-- Increase CPU limits in Kubernetes
-- Scale horizontally (more replicas)
-- Consider dedicated validation nodes
-
-### Memory-Bound (Large Rosters)
-
-- Increase memory limits
-- Tune `members_page_limit` and caching TTLs
-- Monitor window utilization
-
-### Network-Bound (High Message Volume)
-
-- Increase `websocket_capacity`
-- Use faster network storage for journal
-- Enable HTTP/2 (via reverse proxy)
-
-## 🐛 Troubleshooting
-
-**Quick Docker/Kubernetes Checks:**
+## Troubleshooting
 
 ```bash
-# Check container logs
-docker-compose logs cityg-api
-kubectl logs -n cityg -l app=cityg-api --tail=100
+# API logs (Compose)
+docker compose logs -f cityg-api
 
-# Check container is running
-docker-compose ps
-kubectl get pods -n cityg
+# API logs (systemd)
+sudo journalctl -u cityg-api -n 200 -f
 
-# Verify port accessibility
-curl http://localhost:8080/health/live
+# Stack status
+docker compose ps
+
+# Metrics endpoint
+curl -fsS http://127.0.0.1:8080/metrics | head
 ```
 
-**For complete troubleshooting guides**, see:
-- **[Troubleshooting Guide](../TROUBLESHOOTING.md)** - Comprehensive solutions for all common issues
-- **[Observability Guide](../OBSERVABILITY.md)** - Monitoring and debugging
+For deeper guidance:
 
-## 📚 Additional Resources
-
-- [Configuration Guide](../configuration.md) - Complete configuration reference
-- [Observability Guide](../OBSERVABILITY.md) - Monitoring and logging
-- [Troubleshooting Guide](../TROUBLESHOOTING.md) - Common issues and solutions
-- [Deployment Guide](../protocol/14-deployment-guide.md) - Production deployment best practices
-
-## 🤝 Contributing
-
-Found an issue with these examples or have improvements? Please open an issue or PR!
-
----
-
-**Last Updated**: 2025-11-12
-**Version**: 0.1.0
+- `docs/protocol/14-deployment-guide.md`
+- `docs/OBSERVABILITY.md`
+- `docs/TROUBLESHOOTING.md`

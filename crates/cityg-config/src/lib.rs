@@ -444,6 +444,36 @@ impl CityGConfig {
                 ConfigError::Validation(format!("Invalid default_srx_max_bytes: {}", e))
             })?;
         }
+        if let Ok(val) = get_var("CITYG_PROTOCOL_MAX_HP_PROOF_BYTES") {
+            self.protocol.max_hp_proof_bytes = val.parse().map_err(|e| {
+                ConfigError::Validation(format!("Invalid max_hp_proof_bytes: {}", e))
+            })?;
+        }
+        if let Ok(val) = get_var("CITYG_PROTOCOL_MAX_VRF_PROOF_BYTES") {
+            self.protocol.max_vrf_proof_bytes = val.parse().map_err(|e| {
+                ConfigError::Validation(format!("Invalid max_vrf_proof_bytes: {}", e))
+            })?;
+        }
+        if let Ok(val) = get_var("CITYG_PROTOCOL_FS_CAPSS_MAX_BYTES") {
+            self.protocol.fs_capss_max_bytes = val.parse().map_err(|e| {
+                ConfigError::Validation(format!("Invalid fs_capss_max_bytes: {}", e))
+            })?;
+        }
+        if let Ok(val) = get_var("CITYG_PROTOCOL_SRX_SMALLWOOD_MAX_BYTES") {
+            self.protocol.srx_smallwood_max_bytes = val.parse().map_err(|e| {
+                ConfigError::Validation(format!("Invalid srx_smallwood_max_bytes: {}", e))
+            })?;
+        }
+        if let Ok(val) = get_var("CITYG_PROTOCOL_MAX_HP_ENVELOPE_BYTES") {
+            self.protocol.max_hp_envelope_bytes = val.parse().map_err(|e| {
+                ConfigError::Validation(format!("Invalid max_hp_envelope_bytes: {}", e))
+            })?;
+        }
+        if let Ok(val) = get_var("CITYG_PROTOCOL_MIN_SRX_MAX_BYTES") {
+            self.protocol.min_srx_max_bytes = val.parse().map_err(|e| {
+                ConfigError::Validation(format!("Invalid min_srx_max_bytes: {}", e))
+            })?;
+        }
         if let Ok(val) = get_var("CITYG_PROTOCOL_RECEIVER_CACHE_TTL_SECS") {
             self.protocol.receiver_cache_ttl_secs = val.parse().map_err(|e| {
                 ConfigError::Validation(format!("Invalid receiver_cache_ttl_secs: {}", e))
@@ -1010,6 +1040,15 @@ default_window_height = 1080.0
             "CITYG_PROTOCOL_DEFAULT_SRX_MAX_BYTES",
             "2048576".to_string(),
         );
+        overrides.insert("CITYG_PROTOCOL_MAX_HP_PROOF_BYTES", "524288".to_string());
+        overrides.insert("CITYG_PROTOCOL_MAX_VRF_PROOF_BYTES", "6144".to_string());
+        overrides.insert("CITYG_PROTOCOL_FS_CAPSS_MAX_BYTES", "16384".to_string());
+        overrides.insert(
+            "CITYG_PROTOCOL_SRX_SMALLWOOD_MAX_BYTES",
+            "16384".to_string(),
+        );
+        overrides.insert("CITYG_PROTOCOL_MAX_HP_ENVELOPE_BYTES", "16384".to_string());
+        overrides.insert("CITYG_PROTOCOL_MIN_SRX_MAX_BYTES", "262144".to_string());
         overrides.insert("CITYG_PROTOCOL_RECEIVER_CACHE_TTL_SECS", "20".to_string());
         overrides.insert(
             "CITYG_PROTOCOL_FS_POLICY_VERSION",
@@ -1059,6 +1098,12 @@ default_window_height = 1080.0
         assert_eq!(config.protocol.max_concurrent_heads, 64);
         assert_eq!(config.protocol.epoch_rotation_interval_secs, 600);
         assert_eq!(config.protocol.default_srx_max_bytes, 2048576);
+        assert_eq!(config.protocol.max_hp_proof_bytes, 524288);
+        assert_eq!(config.protocol.max_vrf_proof_bytes, 6144);
+        assert_eq!(config.protocol.fs_capss_max_bytes, 16384);
+        assert_eq!(config.protocol.srx_smallwood_max_bytes, 16384);
+        assert_eq!(config.protocol.max_hp_envelope_bytes, 16384);
+        assert_eq!(config.protocol.min_srx_max_bytes, 262144);
         assert_eq!(config.protocol.receiver_cache_ttl_secs, 20);
         assert_eq!(config.protocol.fs_policy_version, "custom-policy");
 
