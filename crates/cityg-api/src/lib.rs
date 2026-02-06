@@ -82,6 +82,7 @@ struct ApiState {
     server: Arc<RwLock<CityGServer>>,
     messages: Arc<RwLock<AHashMap<[u8; 32], Vec<StoredMessage>>>>,
     bundles: Arc<RwLock<AHashMap<[u8; 32], Vec<u8>>>>,
+    message_retention: Duration,
     freeze_counts: Arc<RwLock<BTreeMap<(u32, String), u64>>>,
     // Alias registry: alias -> (leaf_id, pop_pk) for TOFU
     alias_registry: Arc<RwLock<AHashMap<String, AliasBinding>>>,
@@ -260,11 +261,32 @@ struct StoredMessage {
     timestamp_ms: u64,
 }
 
+const DEFAULT_FS_MESSAGE_RETENTION_SECS: u64 = 600;
+
 fn current_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn message_retention_from_config(config: &cityg_config::CityGConfig) -> Duration {
+    Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS.max(config.protocol.fs_policy.h_seconds))
+}
+
+fn prune_expired_messages(
+    store: &mut AHashMap<[u8; 32], Vec<StoredMessage>>,
+    now_ms: u64,
+    retention: Duration,
+) {
+    let retention_ms_u128 = retention.as_millis().min(u128::from(u64::MAX));
+    let retention_ms = retention_ms_u128 as u64;
+    let cutoff = now_ms.saturating_sub(retention_ms);
+
+    store.retain(|_, messages| {
+        messages.retain(|msg| msg.timestamp_ms >= cutoff);
+        !messages.is_empty()
+    });
 }
 
 #[derive(Debug, Error)]
@@ -969,10 +991,7 @@ async fn send_message(State(state): State<ApiState>, body: Bytes) -> Result<Resp
     }
 
     let sender = request.sender;
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let timestamp_ms = current_timestamp_ms();
 
     let stored = StoredMessage {
         we_epoch_id: weid,
@@ -984,6 +1003,7 @@ async fn send_message(State(state): State<ApiState>, body: Bytes) -> Result<Resp
     {
         let mut guard = state.messages.write().await;
         guard.entry(weid).or_default().push(stored);
+        prune_expired_messages(&mut guard, timestamp_ms, state.message_retention);
     }
 
     // Broadcast notification to WebSocket clients
@@ -1010,7 +1030,8 @@ async fn fetch_messages(State(state): State<ApiState>, body: Bytes) -> Result<Re
     weid.copy_from_slice(&request.we_epoch_id);
 
     let messages = {
-        let guard = state.messages.read().await;
+        let mut guard = state.messages.write().await;
+        prune_expired_messages(&mut guard, current_timestamp_ms(), state.message_retention);
         guard.get(&weid).cloned().unwrap_or_default()
     };
 
@@ -1570,6 +1591,11 @@ pub async fn run_with_config(
     };
 
     let server = server_from_config(&config);
+    let message_retention = message_retention_from_config(&config);
+    info!(
+        "message retention window set to {}s",
+        message_retention.as_secs()
+    );
     // Create broadcast channel for WebSocket notifications (capacity from config)
     let (notification_tx, _) = broadcast::channel(config.server.websocket_capacity);
 
@@ -1577,6 +1603,7 @@ pub async fn run_with_config(
         server: Arc::new(RwLock::new(server)),
         messages: Arc::new(RwLock::new(AHashMap::new())),
         bundles: Arc::new(RwLock::new(AHashMap::new())),
+        message_retention,
         freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
         alias_registry: Arc::new(RwLock::new(AHashMap::new())),
         member_metadata: Arc::new(RwLock::new(AHashMap::new())),
@@ -1844,6 +1871,7 @@ mod tests {
             server: Arc::new(RwLock::new(server_from_config(&CityGConfig::default()))),
             messages: Arc::new(RwLock::new(AHashMap::new())),
             bundles: Arc::new(RwLock::new(AHashMap::new())),
+            message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
             freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
             alias_registry: Arc::new(RwLock::new(AHashMap::new())),
             member_metadata: Arc::new(RwLock::new(AHashMap::new())),
@@ -1902,5 +1930,89 @@ mod tests {
         assert_eq!(json["failed_index"], 3);
         assert_eq!(json["freeze_code"], 9449);
         assert_eq!(json["freeze_reason"], "fs_burst_non_monotone_ec");
+    }
+
+    #[test]
+    fn prune_expired_messages_removes_old_entries_and_empty_buckets() {
+        let mut store: AHashMap<[u8; 32], Vec<StoredMessage>> = AHashMap::new();
+        let weid_a = [0xAA; 32];
+        let weid_b = [0xBB; 32];
+
+        store.insert(
+            weid_a,
+            vec![
+                StoredMessage {
+                    we_epoch_id: weid_a,
+                    ciphertext: vec![1],
+                    sender: vec![],
+                    timestamp_ms: 1_000,
+                },
+                StoredMessage {
+                    we_epoch_id: weid_a,
+                    ciphertext: vec![2],
+                    sender: vec![],
+                    timestamp_ms: 9_500,
+                },
+                StoredMessage {
+                    we_epoch_id: weid_a,
+                    ciphertext: vec![3],
+                    sender: vec![],
+                    timestamp_ms: 10_000,
+                },
+            ],
+        );
+        store.insert(
+            weid_b,
+            vec![StoredMessage {
+                we_epoch_id: weid_b,
+                ciphertext: vec![4],
+                sender: vec![],
+                timestamp_ms: 500,
+            }],
+        );
+
+        prune_expired_messages(&mut store, 10_000, Duration::from_secs(1));
+
+        let retained = store.get(&weid_a).expect("weid_a should exist");
+        assert_eq!(retained.len(), 2, "old message should be pruned");
+        assert!(
+            retained.iter().all(|m| m.timestamp_ms >= 9_000),
+            "all retained messages should be inside the retention window"
+        );
+        assert!(
+            !store.contains_key(&weid_b),
+            "empty per-epoch buckets should be removed"
+        );
+    }
+
+    #[test]
+    fn prune_expired_messages_zero_retention_keeps_only_current_timestamp() {
+        let mut store: AHashMap<[u8; 32], Vec<StoredMessage>> = AHashMap::new();
+        let weid = [0xCC; 32];
+        let now_ms: u64 = 42_000;
+
+        store.insert(
+            weid,
+            vec![
+                StoredMessage {
+                    we_epoch_id: weid,
+                    ciphertext: vec![1],
+                    sender: vec![],
+                    timestamp_ms: now_ms.saturating_sub(1),
+                },
+                StoredMessage {
+                    we_epoch_id: weid,
+                    ciphertext: vec![2],
+                    sender: vec![],
+                    timestamp_ms: now_ms,
+                },
+            ],
+        );
+
+        prune_expired_messages(&mut store, now_ms, Duration::from_secs(0));
+
+        let retained = store.get(&weid).expect("weid should exist");
+        assert_eq!(retained.len(), 1, "only exact-now message should remain");
+        assert_eq!(retained[0].timestamp_ms, now_ms);
     }
 }

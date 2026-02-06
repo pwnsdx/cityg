@@ -15,9 +15,9 @@ use anyhow::{Context as AnyhowContext, Result, anyhow};
 use blake3::hash as blake3_hash;
 use ciborium::value::{Integer, Value};
 use cityg_api_client::{CitygApiClient, Error as ApiClientError, MergeTicket};
-use cityg_client::CityGClient;
 use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
+use cityg_client::{CityGClient, ClientEpochBundle};
 use cityg_config::CityGConfig;
 use dirs::config_dir;
 use futures::StreamExt;
@@ -221,9 +221,9 @@ struct AppModel {
     members_refresh_task: Option<Task<()>>,
     alias_bindings: AHashMap<String, AliasBindingRecord>,
     leaf_alias_index: AHashMap<[u8; 32], String>,
-    epoch_rotation_task: Option<Task<()>>, // Background task for automatic epoch rotation
-    ws_task: Option<Task<()>>,             // WebSocket connection task
-    ws_connected: bool,                    // WebSocket connection status
+    epoch_sync_task: Option<Task<()>>, // Background task for membership-driven epoch sync
+    ws_task: Option<Task<()>>,         // WebSocket connection task
+    ws_connected: bool,                // WebSocket connection status
     last_retry_action: Option<RetryAction>, // Track what action to retry
     security_events: Vec<SecurityEvent>,
     security_unread: u32,
@@ -647,7 +647,7 @@ impl AppModel {
             members_refresh_task: None,
             alias_bindings: AHashMap::new(),
             leaf_alias_index: AHashMap::new(),
-            epoch_rotation_task: None,
+            epoch_sync_task: None,
             ws_task: None,
             ws_connected: false,
             last_retry_action: None,
@@ -829,7 +829,7 @@ impl JoinFormState {
 impl Render for AppModel {
     fn render(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
         self.ensure_fetch_loop(cx);
-        self.ensure_epoch_rotation_task(cx);
+        self.ensure_epoch_sync_task(cx);
         self.ensure_members_refresh_task(cx);
         self.cleanup_expired_toasts();
 
@@ -1371,7 +1371,6 @@ impl AppModel {
             .as_secs();
 
         let rotation_interval = session.fs_epoch_rotation_interval_secs;
-        let is_stale = epoch_age_secs > rotation_interval + 60; // Consider stale if > interval + 1 min grace period
 
         let age_text = if epoch_age_secs < 60 {
             format!("{} seconds", epoch_age_secs)
@@ -1381,22 +1380,10 @@ impl AppModel {
             format!("{:.1} hours", epoch_age_secs as f64 / 3600.0)
         };
 
-        let status_text = if is_stale {
-            format!(" (STALE - expected rotation every {}s)", rotation_interval)
-        } else {
-            String::new()
-        };
-
         let value_text = format!(
-            "Epoch #{} - Age: {}{}",
-            session.fs_ec, age_text, status_text
+            "Epoch #{} - Age: {} (manual rekey target: {}s)",
+            session.fs_ec, age_text, rotation_interval
         );
-
-        let text_color = if is_stale {
-            rgb(0xff9f68) // Orange/warning color
-        } else {
-            rgb(0xf2f4ff) // Normal white
-        };
 
         div()
             .flex()
@@ -1411,7 +1398,7 @@ impl AppModel {
             .child(
                 div()
                     .text_size(px(15.0))
-                    .text_color(text_color)
+                    .text_color(rgb(0xf2f4ff))
                     .child(value_text),
             )
     }
@@ -1584,14 +1571,10 @@ impl AppModel {
         self.fetch_task = None;
     }
 
-    fn ensure_epoch_rotation_task(&mut self, cx: &mut ViewContext<Self>) {
-        if self.session.is_none() {
-            self.stop_epoch_rotation_task();
-            return;
-        }
-
-        if self.epoch_rotation_task.is_none() {
-            self.start_epoch_rotation_task(cx);
+    fn ensure_epoch_sync_task(&mut self, _cx: &mut ViewContext<Self>) {
+        // Keep the task lifecycle bounded to active sessions.
+        if self.session.is_none() && self.epoch_sync_task.is_some() {
+            self.stop_epoch_sync_task();
         }
     }
 
@@ -1603,6 +1586,91 @@ impl AppModel {
 
         if self.members_refresh_task.is_none() {
             self.start_members_refresh_task(cx);
+        }
+    }
+
+    fn schedule_epoch_sync(&mut self, cx: &mut ViewContext<Self>, reason: &str) {
+        if self.epoch_sync_task.is_some() {
+            return;
+        }
+
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+
+        let expected_server = session.server_url.clone();
+        let expected_room = session.room_id.clone();
+        let expected_leaf = session.leaf_id;
+        let reason_text = reason.to_string();
+
+        info!("Scheduling epoch sync: {}", reason_text);
+
+        let sync_task = Tokio::spawn_result(cx, async move { perform_epoch_sync(session).await });
+
+        let task = cx.spawn(async move |this, cx| {
+            let outcome = sync_task.await;
+            let _ = this.update(cx, |model, cx| {
+                model.epoch_sync_task = None;
+                model.handle_epoch_sync_result(
+                    outcome,
+                    &expected_server,
+                    &expected_room,
+                    expected_leaf,
+                    &reason_text,
+                    cx,
+                );
+            });
+        });
+
+        self.epoch_sync_task = Some(task);
+    }
+
+    fn handle_epoch_sync_result(
+        &mut self,
+        outcome: anyhow::Result<EpochSyncOutcome>,
+        expected_server: &str,
+        expected_room: &str,
+        expected_leaf: [u8; 32],
+        reason: &str,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let matches_session = self
+            .session
+            .as_ref()
+            .map(|session| {
+                session.server_url == expected_server
+                    && session.room_id == expected_room
+                    && session.leaf_id == expected_leaf
+            })
+            .unwrap_or(false);
+
+        if !matches_session {
+            return;
+        }
+
+        match outcome {
+            Ok(sync) => {
+                if !sync.changed {
+                    return;
+                }
+
+                self.session = Some(sync.session);
+                if let Some(session) = self.session.as_mut() {
+                    if let Err(err) = persist_session(session) {
+                        warn!("failed to persist session after epoch sync: {err:?}");
+                    }
+                }
+
+                self.info_message = Some("Adopted latest epoch head.".to_string());
+                self.reset_fetch_state();
+                self.schedule_fetch(cx, Duration::ZERO);
+                cx.notify();
+            }
+            Err(err) => {
+                warn!("epoch sync failed ({reason}): {err:?}");
+                self.last_error = Some(format!("Failed to sync latest epoch: {err}"));
+                cx.notify();
+            }
         }
     }
 
@@ -1730,57 +1798,11 @@ impl AppModel {
         self.messages.sort_by_key(|m| m.timestamp_ms);
     }
 
-    // Start background epoch rotation task
-    fn start_epoch_rotation_task(&mut self, cx: &mut ViewContext<Self>) {
-        let Some(session) = &self.session else {
-            return;
-        };
-        let rotation_interval_secs = session.fs_epoch_rotation_interval_secs;
-        let we_epoch_id = session.we_epoch_id;
-
-        info!(
-            "Starting epoch rotation task (interval: {}s, current epoch: {})",
-            rotation_interval_secs, session.fs_ec
-        );
-
-        let interval_secs = rotation_interval_secs;
-        let task = cx.spawn(async move |this, cx| {
-            loop {
-                sleep(Duration::from_secs(interval_secs)).await;
-
-                let should_rotate = this
-                    .read_with(cx, |model, _| {
-                        model
-                            .session
-                            .as_ref()
-                            .map(|s| s.we_epoch_id == we_epoch_id)
-                            .unwrap_or(false)
-                    })
-                    .ok()
-                    .unwrap_or(false);
-
-                if !should_rotate {
-                    info!("Stopping epoch rotation task (session changed or removed)");
-                    break;
-                }
-
-                info!("Performing automatic epoch rotation");
-                match this.update(cx, |model, cx| model.perform_epoch_rotation(cx)) {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => warn!("Epoch rotation failed: {err:?}"),
-                    Err(err) => warn!("Epoch rotation update failed: {err:?}"),
-                };
-            }
-        });
-
-        self.epoch_rotation_task = Some(task);
-    }
-
-    // Stop background epoch rotation task
-    fn stop_epoch_rotation_task(&mut self) {
-        if self.epoch_rotation_task.is_some() {
-            info!("Stopping epoch rotation task");
-            self.epoch_rotation_task = None;
+    // Stop background epoch sync task
+    fn stop_epoch_sync_task(&mut self) {
+        if self.epoch_sync_task.is_some() {
+            info!("Stopping epoch sync task");
+            self.epoch_sync_task = None;
         }
     }
 
@@ -1846,6 +1868,10 @@ impl AppModel {
                         // Update connection status
                         let _ = this.update(cx, |model, cx| {
                             model.ws_connected = true;
+                            model.schedule_epoch_sync(
+                                cx,
+                                "Syncing latest epoch after WebSocket reconnect…",
+                            );
                             cx.notify();
                         });
 
@@ -1960,47 +1986,6 @@ impl AppModel {
             self.ws_task = None;
             self.ws_connected = false;
         }
-    }
-
-    // Perform epoch rotation
-    fn perform_epoch_rotation(&mut self, cx: &mut ViewContext<Self>) -> Result<()> {
-        let session = self
-            .session
-            .as_mut()
-            .ok_or_else(|| anyhow!("no active session"))?;
-
-        info!(
-            "Rotating epoch from {} to {}",
-            session.fs_ec,
-            session.fs_ec + 1
-        );
-
-        // Prepare new epoch using ForwardSecrecyState
-        let device_pk = &session.pop_public_key;
-        let artifacts = session
-            .forward_state
-            .prepare_join(device_pk, &session.we_epoch_id)
-            .map_err(|e| anyhow!("failed to prepare epoch rotation: {:?}", e))?;
-
-        // Update session with new epoch data
-        session.fs_ec = artifacts.inputs.fs_ec + 1; // prepare_join already incremented internally
-        session.fs_epoch_commit = artifacts.inputs.fs_epoch_commit;
-        session.fs_dev_prev_commit = artifacts.inputs.fs_dev_prev_commit;
-        session.fs_epoch_created_at = SystemTime::now();
-
-        // Persist the updated session
-        persist_session(session).context("failed to persist session after epoch rotation")?;
-
-        info!(
-            "Epoch rotation complete: new epoch = {}, commit = {}",
-            session.fs_ec,
-            hex_encode(session.fs_epoch_commit)
-        );
-
-        // Notify UI to refresh
-        cx.notify();
-
-        Ok(())
     }
 
     fn render_message_panel(&self, _session: &AppSession, cx: &mut ViewContext<Self>) -> Div {
@@ -2834,6 +2819,7 @@ impl AppModel {
             return;
         }
         if matches!(self.members_status, MembersStatus::Loading(_)) {
+            self.schedule_epoch_sync(cx, "Syncing latest epoch after membership change…");
             return;
         }
         let mode = self.members_mode.clone();
@@ -2842,6 +2828,7 @@ impl AppModel {
             MembersMode::Search { query } => format!("Updating search for \"{}\"…", query),
         };
         self.refresh_members_for_mode(cx, mode, true, true, message);
+        self.schedule_epoch_sync(cx, "Syncing latest epoch after membership change…");
     }
 
     fn on_composer_clicked(
@@ -3122,11 +3109,9 @@ impl AppModel {
                 self.schedule_fetch(cx, Duration::from_millis(0));
                 self.refresh_members(cx);
 
-                // Start automatic epoch rotation
-                self.start_epoch_rotation_task(cx);
-
                 // Start WebSocket connection
                 self.start_websocket(cx);
+                self.schedule_epoch_sync(cx, "Syncing latest epoch after join…");
             }
             Err(err) => {
                 self.set_error(&err, "join", Some(RetryAction::Join));
@@ -3168,7 +3153,7 @@ impl AppModel {
         match result {
             Ok(()) => {
                 self.reset_fetch_state();
-                self.stop_epoch_rotation_task();
+                self.stop_epoch_sync_task();
                 self.stop_websocket();
                 self.stop_members_refresh_task();
                 if let Some(session) = self.session.take() {
@@ -3499,6 +3484,7 @@ impl AppModel {
         self.send_status = SendStatus::Idle;
         self.fetch_status = FetchStatus::Idle;
         self.session = None;
+        self.stop_epoch_sync_task();
         self.stop_members_refresh_task();
         self.alias_bindings.clear();
         self.leaf_alias_index.clear();
@@ -3703,6 +3689,11 @@ impl FetchParams {
 struct FetchOutcome {
     messages: Vec<ChatMessageEntry>,
     last_timestamp_ms: Option<u64>,
+}
+
+struct EpochSyncOutcome {
+    session: AppSession,
+    changed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -5338,6 +5329,116 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
     })
 }
 
+async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome> {
+    let client = CitygApiClient::new(&session.server_url);
+    let ticket = client
+        .merge_ticket(&session.room_id, &session.leaf_id)
+        .await
+        .context("failed to fetch merge ticket for epoch sync")?;
+
+    if ticket.we_epoch_id == session.we_epoch_id {
+        return Ok(EpochSyncOutcome {
+            session,
+            changed: false,
+        });
+    }
+
+    let bundle_response = client
+        .get_bundle(&ticket.we_epoch_id)
+        .await
+        .context("failed to fetch latest epoch bundle")?;
+    let mut bundle = ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor)
+        .context("failed to decode latest epoch bundle")?;
+
+    if bundle.we_epoch_id != ticket.we_epoch_id {
+        return Err(anyhow!(
+            "merge ticket/bundle mismatch: ticket={} bundle={}",
+            hex_encode(ticket.we_epoch_id),
+            hex_encode(bundle.we_epoch_id)
+        ));
+    }
+
+    if !ticket.witness_cbor.is_empty() {
+        bundle.witness = Some(ticket.witness_cbor.clone());
+    }
+
+    let (derived_epoch_key, _) = bundle
+        .derive_epoch_secrets()
+        .context("failed to derive epoch key during sync")?;
+
+    let gid = bytes32("gid", &bundle.anchor.gid)?;
+    if gid != session.gid {
+        return Err(anyhow!(
+            "bundle gid mismatch: expected {}, got {}",
+            hex_encode(session.gid),
+            hex_encode(gid)
+        ));
+    }
+
+    session.we_epoch_id = bundle.we_epoch_id;
+    session.epoch_key = derived_epoch_key;
+    session.parent_root = bundle.anchor.parent_root;
+    session.join_delta_root = bundle.anchor.join_delta_root;
+    session.revoked_since_root = bundle.anchor.revoked_since_prev_root;
+    session.revoked_root = bundle.anchor.revoked_root;
+    session.cat = bytes32("cat", &bundle.anchor.cat)?;
+    session.tswe_salt_hash = bytes32("tswe_salt_hash", &bundle.anchor.tswe_salt_hash)?;
+    if let Some(commit) = bundle.anchor.pox_r_commit {
+        session.pox_r_commit = commit;
+    }
+
+    if let Some(fs_ec) = header_u64(&bundle.header_map, hdr::HDR_FS_EC) {
+        session.fs_ec = fs_ec;
+    }
+    if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT) {
+        session.fs_epoch_commit = commit;
+    }
+    if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT) {
+        session.fs_dev_prev_commit = commit;
+    }
+    if let Some(base_ts) = header_u64(&bundle.header_map, hdr::HDR_FS_EPOCH_BASE_TS) {
+        session.fs_epoch_base_ts = base_ts;
+    }
+    if let Some(policy) = header_text(&bundle.header_map, hdr::HDR_FS_POLICY_VERSION) {
+        session.fs_policy_version = policy.to_string();
+    }
+    if let Some(policy) = header_text(&bundle.header_map, hdr::HDR_POLICY_VERSION) {
+        session.policy_version = policy.to_string();
+    }
+    if let Some(vrf_id) = header_text(&bundle.header_map, hdr::HDR_VRF_ID) {
+        session.vrf_id = vrf_id.to_string();
+    }
+    if let Some(proof_mode) = header_text(&bundle.header_map, hdr::HDR_PROOF_MODE) {
+        session.proof_mode = proof_mode.to_string();
+    }
+    if let Some(Value::Bytes(kbroad_pub)) = bundle.header_map.get(&hdr::HDR_KBROAD_PUB) {
+        session.kbroad_public = kbroad_pub.clone();
+    }
+
+    session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
+    session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
+        derive_fs_fingerprint_from_fields(
+            session.fs_policy_version.as_str(),
+            session.fs_ec,
+            &session.fs_epoch_commit,
+            session.fs_epoch_base_ts,
+        )
+    });
+    session.fs_epoch_created_at = SystemTime::now();
+    session.last_fetch_timestamp_ms = None;
+    session
+        .forward_state
+        .set_last_we_epoch_id(session.we_epoch_id);
+    session
+        .forward_state
+        .set_epoch_base_ts(session.fs_epoch_base_ts);
+
+    Ok(EpochSyncOutcome {
+        session,
+        changed: true,
+    })
+}
+
 fn strip_rollup_metadata(header: &mut BTreeMap<u64, Value>) {
     for key in [
         hdr::HDR_ROLLUP_PROVENANCE_COMMIT,
@@ -5810,9 +5911,23 @@ static CONFIG_DIR_OVERRIDE: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| 
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use cityg_api;
     use msphf_rlwe::CapssBranchWitness;
     use rand::{RngCore, SeedableRng, rngs::StdRng};
+    use std::sync::atomic::{AtomicU16, Ordering};
     use tempfile::TempDir;
+    use tokio::{task::JoinHandle, time::sleep};
+
+    static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18400);
+
+    async fn spawn_server_on(port: u16) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            if let Err(err) = cityg_api::run_with_addr(addr).await {
+                eprintln!("server exited with error: {err}");
+            }
+        })
+    }
 
     #[test]
     fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
@@ -5961,6 +6076,71 @@ mod tests {
 
         // Clean up persisted files to avoid leaking into other tests.
         remove_persisted_session(&session.server_url, &session.room_id)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn epoch_sync_adopts_new_member_head() -> Result<(), Box<dyn std::error::Error>> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x44u8; 32]);
+
+        let alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        let bob = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+        assert_ne!(
+            alice.we_epoch_id, bob.we_epoch_id,
+            "second join should advance the epoch head"
+        );
+
+        let sync = perform_epoch_sync(alice.clone()).await?;
+        assert!(sync.changed, "sync should detect and adopt newer head");
+        assert_eq!(sync.session.we_epoch_id, bob.we_epoch_id);
+        assert_eq!(
+            sync.session.epoch_key, bob.epoch_key,
+            "adopted session should derive current epoch key"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn epoch_sync_noop_when_already_current() -> Result<(), Box<dyn std::error::Error>> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x55u8; 32]);
+
+        let alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        let sync = perform_epoch_sync(alice.clone()).await?;
+
+        assert!(!sync.changed, "sync should be a no-op on current head");
+        assert_eq!(sync.session.we_epoch_id, alice.we_epoch_id);
+        assert_eq!(sync.session.epoch_key, alice.epoch_key);
+
+        handle.abort();
+        let _ = handle.await;
         Ok(())
     }
 

@@ -41,6 +41,7 @@ ahash = { version = "0.8", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"
+cityg-api = { path = "../cityg-api" }
 
 [[bin]]
 name = "join_leave"
