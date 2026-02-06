@@ -5070,7 +5070,18 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let capss_witness_bytes = encode_capss_witness(&bundle.capss_witness)?;
 
     if parent_root == [0u8; 32] {
-        demo::attach_bootstrap(&mut bundle).context("failed to attach bootstrap data")?;
+        if bootstrap_public.is_empty() {
+            info!("server bootstrap policy disabled; skipping bootstrap attachment");
+        } else {
+            let local_bootstrap_public = demo::bootstrap_public();
+            if bootstrap_public != local_bootstrap_public {
+                return Err(anyhow!(
+                    "server bootstrap key does not match local demo bootstrap key; \
+                     disable CITYG_SERVER_SEED_DEMO_ROOM or share demo-bootstrap.key"
+                ));
+            }
+            demo::attach_bootstrap(&mut bundle).context("failed to attach bootstrap data")?;
+        }
     }
 
     client
@@ -6246,6 +6257,17 @@ mod tests {
         })
     }
 
+    async fn spawn_server_with_seed_demo_room(port: u16, seed_demo_room: bool) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            let mut config = CityGConfig::default();
+            config.server.seed_demo_room = seed_demo_room;
+            if let Err(err) = cityg_api::run_with_config(addr, config).await {
+                eprintln!("server exited with error: {err}");
+            }
+        })
+    }
+
     #[test]
     fn session_encryption_key_prefers_env_passphrase() -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
@@ -7357,6 +7379,32 @@ mod tests {
                 "since filter must drop already-seen messages"
             );
         }
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_succeeds_with_bootstrap_disabled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_with_seed_demo_room(port, false).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x88u8; 32]);
+
+        let alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        assert!(
+            alice.bootstrap_public.is_empty(),
+            "bootstrap key should be absent when bootstrap policy is disabled"
+        );
 
         handle.abort();
         let _ = handle.await;

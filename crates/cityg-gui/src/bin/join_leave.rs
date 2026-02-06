@@ -418,7 +418,18 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
             .context("generate join bundle")?;
 
     if parent_root == [0u8; 32] {
-        demo::attach_bootstrap(&mut bundle).context("attach bootstrap")?;
+        if ticket.bootstrap_public.is_empty() {
+            println!("bootstrap policy disabled; joining without bootstrap signature");
+        } else {
+            let local_bootstrap_public = demo::bootstrap_public();
+            if ticket.bootstrap_public != local_bootstrap_public {
+                return Err(anyhow!(
+                    "server bootstrap key mismatch; disable CITYG_SERVER_SEED_DEMO_ROOM \
+                     or share demo-bootstrap.key with this client"
+                ));
+            }
+            demo::attach_bootstrap(&mut bundle).context("attach bootstrap")?;
+        }
     }
 
     client

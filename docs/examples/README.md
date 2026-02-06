@@ -29,6 +29,11 @@ curl -fsS http://127.0.0.1:8080/health/ready
 curl -fsS http://127.0.0.1:8080/health/detailed
 ```
 
+Note on membership bootstrap:
+
+- `cityg.env.example` sets `CITYG_SERVER_SEED_DEMO_ROOM=false` so host GUI/CLI clients can join compose/systemd servers without sharing a container-local demo bootstrap key.
+- Set it to `true` only when clients and server share the same `demo-bootstrap.key` file.
+
 Open dashboards:
 
 - API: `http://localhost:8080`

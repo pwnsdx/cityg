@@ -45,7 +45,6 @@ use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use cityg_client::demo::bootstrap_public;
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_server::{CityGServer, MergeTicketBundle, ServerConfig, ServerOutcome};
 use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
@@ -822,7 +821,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         None
     };
 
-    let (ticket, policy_version, fs_policy_version, fs_epoch_base_ts) = {
+    let (ticket, policy_version, fs_policy_version, fs_epoch_base_ts, bootstrap_public) = {
         let mut guard = state.server.write().await;
         let bundle = guard.build_join_ticket(&gid).map_err(ApiError::from)?;
         let policy_version = guard.context().policy_version().to_string();
@@ -832,7 +831,18 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             .map(|s| s.to_string())
             .unwrap_or_else(|| "fs-demo-policy".to_string());
         let fs_epoch_base_ts = guard.context().fs_base_ts().unwrap_or(0);
-        (bundle, policy_version, fs_policy_version, fs_epoch_base_ts)
+        let bootstrap_public = guard
+            .context()
+            .bootstrap_public_key()
+            .map(|key| key.to_vec())
+            .unwrap_or_default();
+        (
+            bundle,
+            policy_version,
+            fs_policy_version,
+            fs_epoch_base_ts,
+            bootstrap_public,
+        )
     };
 
     if let Some(binding) = confirmed_binding.as_ref() {
@@ -865,7 +875,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         fs_policy_version,
         fs_epoch_base_ts,
         kbroad_public: ticket.kbroad_public,
-        bootstrap_public: bootstrap_public().to_vec(),
+        bootstrap_public,
         confirmed_binding,
     };
 

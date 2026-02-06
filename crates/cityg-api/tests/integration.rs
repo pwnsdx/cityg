@@ -5,8 +5,9 @@ use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
 use cityg_api_client::{CitygApiClient, Error};
 use cityg_client::{
     ClientEpochBundle,
-    demo::{DEMO_GID, demo_bundle},
+    demo::{DEMO_GID, bootstrap_public, demo_bundle, kbroad_public},
 };
+use cityg_config::CityGConfig;
 use reqwest::StatusCode;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::sleep;
@@ -15,6 +16,17 @@ async fn spawn_server_on(port: u16) -> JoinHandle<()> {
     tokio::spawn(async move {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         if let Err(err) = cityg_api::run_with_addr(addr).await {
+            eprintln!("server exited with error: {err}");
+        }
+    })
+}
+
+async fn spawn_server_with_seed_demo_room(port: u16, seed_demo_room: bool) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let mut config = CityGConfig::default();
+        config.server.seed_demo_room = seed_demo_room;
+        if let Err(err) = cityg_api::run_with_config(addr, config).await {
             eprintln!("server exited with error: {err}");
         }
     })
@@ -499,6 +511,45 @@ async fn error_invalid_bundle_data() -> Result<()> {
         result.is_err(),
         "expected error when fetching non-existent bundle"
     );
+
+    drop(client);
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn join_ticket_omits_bootstrap_key_when_policy_disabled() -> Result<()> {
+    let port = 8101;
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(200)).await;
+
+    let client = CitygApiClient::new(format!("http://127.0.0.1:{port}"));
+    let room_id = hex::encode([0x33u8; 32]);
+    client.bootstrap_room(&room_id, kbroad_public()).await?;
+    let ticket = client.join_ticket(&room_id, "alice", None).await?;
+    assert!(
+        ticket.bootstrap_public.is_empty(),
+        "bootstrap key should be omitted when policy is disabled"
+    );
+
+    drop(client);
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn join_ticket_includes_bootstrap_key_when_policy_enabled() -> Result<()> {
+    let port = 8102;
+    let handle = spawn_server_with_seed_demo_room(port, true).await;
+    sleep(Duration::from_millis(200)).await;
+
+    let client = CitygApiClient::new(format!("http://127.0.0.1:{port}"));
+    let room_id = hex::encode([0x34u8; 32]);
+    client.bootstrap_room(&room_id, kbroad_public()).await?;
+    let ticket = client.join_ticket(&room_id, "alice", None).await?;
+    assert_eq!(ticket.bootstrap_public, bootstrap_public());
 
     drop(client);
     handle.abort();

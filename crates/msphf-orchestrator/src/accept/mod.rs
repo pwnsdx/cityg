@@ -540,6 +540,13 @@ impl AcceptanceContext {
         self.invalidate_policy_caches();
     }
 
+    pub fn bootstrap_public_key(&self) -> Option<&[u8]> {
+        match &self.bootstrap_policy {
+            BootstrapPolicy::Disabled => None,
+            BootstrapPolicy::CaMlDsa { public_key } => Some(public_key.as_slice()),
+        }
+    }
+
     pub fn set_kbroad_registry(&mut self, registry: Option<BTreeMap<Vec<u8>, Vec<u8>>>) {
         self.kbroad_registry = registry;
     }
@@ -1655,9 +1662,20 @@ fn validate_bootstrap(
     seed_bundle_commit: &[u8; 32],
     policy: BootstrapPolicy,
 ) -> Result<(), AcceptanceError> {
-    let mode_value = header
-        .get(&HDR_BOOTSTRAP_ALG)
-        .ok_or(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
+    let mode_value = match header.get(&HDR_BOOTSTRAP_ALG) {
+        Some(value) => value,
+        None => {
+            if header.contains_key(&HDR_BOOTSTRAP_SIG) || header.contains_key(&HDR_BOOTSTRAP_PK) {
+                return Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID));
+            }
+            return match policy {
+                BootstrapPolicy::Disabled => Ok(()),
+                BootstrapPolicy::CaMlDsa { .. } => {
+                    Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))
+                }
+            };
+        }
+    };
     let mode = match mode_value {
         Value::Text(text) => text.as_str(),
         Value::Bytes(bytes) => std::str::from_utf8(bytes)
@@ -4592,6 +4610,45 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_COMMIT_MISMATCH),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn genesis_without_bootstrap_allowed_when_policy_disabled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let options = AcceptanceOptions {
+            bootstrap_policy: BootstrapPolicy::Disabled,
+            ..AcceptanceOptions::default()
+        };
+        let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
+        Ok(())
+    }
+
+    #[test]
+    fn genesis_bootstrap_rejected_when_policy_disabled() -> Result<(), Box<dyn std::error::Error>> {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        header_with_pop.insert(HDR_BOOTSTRAP_ALG, Value::Text("oob-ca-v1".to_string()));
+        refresh_seed_ctx_hash(&mut header_with_pop);
+
+        let options = AcceptanceOptions {
+            bootstrap_policy: BootstrapPolicy::Disabled,
+            ..AcceptanceOptions::default()
+        };
+        let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(result.is_err(), "bootstrap metadata should be rejected");
+        let err = result.unwrap_err();
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_BOOTSTRAP_UNSUPPORTED),
             other => panic!("unexpected error: {other:?}"),
         }
         Ok(())
