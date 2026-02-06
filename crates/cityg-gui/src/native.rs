@@ -473,6 +473,14 @@ impl MessageComposer {
         self.active = false;
     }
 
+    fn set_text(&mut self, text: String) {
+        self.text = text;
+    }
+
+    fn text(&self) -> &str {
+        self.text.as_str()
+    }
+
     fn handle_keystroke(&mut self, ks: &Keystroke) -> KeyOutcome {
         if !self.active {
             return KeyOutcome::None;
@@ -547,6 +555,14 @@ impl MembersSearchState {
 
     fn clear(&mut self) {
         self.query.clear();
+    }
+
+    fn set_query(&mut self, query: String) {
+        self.query = query;
+    }
+
+    fn query(&self) -> &str {
+        self.query.as_str()
     }
 
     fn handle_keystroke(&mut self, ks: &Keystroke) -> KeyOutcome {
@@ -797,6 +813,39 @@ enum KeyOutcome {
     Submit,
 }
 
+fn is_primary_shortcut(keystroke: &Keystroke, key: &str) -> bool {
+    if keystroke.modifiers.alt || keystroke.modifiers.function {
+        return false;
+    }
+    if !(keystroke.modifiers.platform || keystroke.modifiers.control) {
+        return false;
+    }
+    keystroke.key.eq_ignore_ascii_case(key)
+}
+
+fn sanitize_clipboard_text(raw: &str) -> String {
+    raw.chars()
+        .map(|c| match c {
+            '\r' | '\n' | '\t' => ' ',
+            _ => c,
+        })
+        .collect()
+}
+
+fn apply_join_field_paste(field: ActiveField, existing: &str, pasted: &str) -> String {
+    let sanitized = sanitize_clipboard_text(pasted);
+    if field == ActiveField::Room {
+        let trimmed = sanitized.trim();
+        if JoinFormState::is_valid_room_id(trimmed) {
+            return trimmed.to_string();
+        }
+    }
+
+    let mut updated = existing.to_string();
+    updated.push_str(&sanitized);
+    updated
+}
+
 impl JoinFormState {
     fn is_ready(&self) -> bool {
         let server = self.server.trim();
@@ -815,6 +864,14 @@ impl JoinFormState {
             ActiveField::Server => &mut self.server,
             ActiveField::Room => &mut self.room_id,
             ActiveField::Alias => &mut self.alias,
+        }
+    }
+
+    fn field(&self, field: ActiveField) -> &str {
+        match field {
+            ActiveField::Server => self.server.as_str(),
+            ActiveField::Room => self.room_id.as_str(),
+            ActiveField::Alias => self.alias.as_str(),
         }
     }
 
@@ -1382,7 +1439,12 @@ impl AppModel {
                     .child("Connected to City-G"),
             )
             .child(self.session_row("Server", &session.server_url))
-            .child(self.session_row("Room", &session.room_id))
+            .child(self.render_copyable_session_row(
+                "Room",
+                &session.room_id,
+                Self::on_copy_room_id,
+                cx,
+            ))
             .child(self.session_row("Alias", &session.alias))
             .child(self.session_row("WEID", &hex_encode(session.we_epoch_id)))
             .child(self.session_row("Epoch key", &hex_encode(session.epoch_key)))
@@ -1459,6 +1521,52 @@ impl AppModel {
                     .text_size(px(15.0))
                     .text_color(rgb(0xf2f4ff))
                     .child(value.to_string()),
+            )
+    }
+
+    fn render_copyable_session_row(
+        &self,
+        label: &str,
+        value: &str,
+        handler: fn(&mut Self, &MouseDownEvent, &mut Window, &mut ViewContext<Self>),
+        cx: &mut ViewContext<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(0x9aa5d3))
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_grow()
+                            .text_size(px(15.0))
+                            .text_color(rgb(0xf2f4ff))
+                            .child(value.to_string()),
+                    )
+                    .child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(10.0))
+                            .border(px(1.0))
+                            .border_color(rgb(0x72f88e))
+                            .text_size(px(12.0))
+                            .text_color(rgb(0x72f88e))
+                            .cursor(CursorStyle::PointingHand)
+                            .child("Copy")
+                            .on_mouse_down(MouseButton::Left, cx.listener(handler)),
+                    ),
             )
     }
 
@@ -2997,6 +3105,117 @@ impl AppModel {
         }
     }
 
+    fn on_copy_room_id(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
+        if let Some(session) = &self.session {
+            cx.write_to_clipboard(ClipboardItem::new_string(session.room_id.clone()));
+            self.show_success("Room ID copied", cx);
+        } else {
+            self.show_error_toast("No active session", cx);
+        }
+    }
+
+    fn handle_join_form_clipboard_shortcuts(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut ViewContext<Self>,
+    ) -> KeyOutcome {
+        let Some(active) = self.join_form.active else {
+            return KeyOutcome::None;
+        };
+
+        if is_primary_shortcut(keystroke, "c") {
+            let text = self.join_form.field(active).to_string();
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            return KeyOutcome::Updated;
+        }
+
+        if is_primary_shortcut(keystroke, "x") {
+            let text = self.join_form.field(active).to_string();
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.join_form.field_mut(active).clear();
+            return KeyOutcome::Updated;
+        }
+
+        if is_primary_shortcut(keystroke, "v") {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                let existing = self.join_form.field(active).to_string();
+                let updated = apply_join_field_paste(active, &existing, &text);
+                *self.join_form.field_mut(active) = updated;
+            }
+            return KeyOutcome::Updated;
+        }
+
+        KeyOutcome::None
+    }
+
+    fn handle_composer_clipboard_shortcuts(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut ViewContext<Self>,
+    ) -> KeyOutcome {
+        if !self.composer.active {
+            return KeyOutcome::None;
+        }
+
+        if is_primary_shortcut(keystroke, "c") {
+            cx.write_to_clipboard(ClipboardItem::new_string(self.composer.text().to_string()));
+            return KeyOutcome::Updated;
+        }
+
+        if is_primary_shortcut(keystroke, "x") {
+            cx.write_to_clipboard(ClipboardItem::new_string(self.composer.text().to_string()));
+            self.composer.clear();
+            return KeyOutcome::Updated;
+        }
+
+        if is_primary_shortcut(keystroke, "v") {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                let mut updated = self.composer.text().to_string();
+                updated.push_str(&sanitize_clipboard_text(&text));
+                self.composer.set_text(updated);
+            }
+            return KeyOutcome::Updated;
+        }
+
+        KeyOutcome::None
+    }
+
+    fn handle_members_search_clipboard_shortcuts(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut ViewContext<Self>,
+    ) -> KeyOutcome {
+        if !self.members_search.active {
+            return KeyOutcome::None;
+        }
+
+        if is_primary_shortcut(keystroke, "c") {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.members_search.query().to_string(),
+            ));
+            return KeyOutcome::Updated;
+        }
+
+        if is_primary_shortcut(keystroke, "x") {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.members_search.query().to_string(),
+            ));
+            self.members_search.clear();
+            return KeyOutcome::Updated;
+        }
+
+        if is_primary_shortcut(keystroke, "v") {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                let mut updated = self.members_search.query().to_string();
+                updated.push_str(&sanitize_clipboard_text(&text));
+                self.members_search.set_query(updated);
+            }
+            return KeyOutcome::Updated;
+        }
+
+        KeyOutcome::None
+    }
+
     fn on_report_issue(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
         if let Some(error) = &self.categorized_error {
             let report = format!(
@@ -3580,12 +3799,28 @@ impl AppModel {
     fn on_keystroke(&mut self, keystroke: &Keystroke, cx: &mut ViewContext<Self>) {
         if self.session.is_some() {
             if self.members_search.active {
+                match self.handle_members_search_clipboard_shortcuts(keystroke, cx) {
+                    KeyOutcome::None => {}
+                    KeyOutcome::Updated => {
+                        cx.notify();
+                        return;
+                    }
+                    KeyOutcome::Submit => {}
+                }
                 match self.members_search.handle_keystroke(keystroke) {
                     KeyOutcome::None => {}
                     KeyOutcome::Updated => cx.notify(),
                     KeyOutcome::Submit => self.submit_members_search(cx),
                 }
                 return;
+            }
+            match self.handle_composer_clipboard_shortcuts(keystroke, cx) {
+                KeyOutcome::None => {}
+                KeyOutcome::Updated => {
+                    cx.notify();
+                    return;
+                }
+                KeyOutcome::Submit => {}
             }
             match self.composer.handle_keystroke(keystroke) {
                 KeyOutcome::None => {}
@@ -3596,6 +3831,15 @@ impl AppModel {
         }
         if matches!(self.join_status, JoinStatus::Joining) {
             return;
+        }
+
+        match self.handle_join_form_clipboard_shortcuts(keystroke, cx) {
+            KeyOutcome::None => {}
+            KeyOutcome::Updated => {
+                cx.notify();
+                return;
+            }
+            KeyOutcome::Submit => {}
         }
 
         match self.join_form.handle_keystroke(keystroke) {
@@ -6957,6 +7201,34 @@ mod tests {
             Value::Integer(Integer::from(1u64)),
         );
         assert!(compute_fs_fingerprint_from_header(&header).is_none());
+    }
+
+    #[test]
+    fn primary_shortcut_detection_accepts_cmd_and_ctrl() -> Result<(), Box<dyn std::error::Error>> {
+        let cmd_v = Keystroke::parse("cmd-v")?;
+        let ctrl_c = Keystroke::parse("ctrl-c")?;
+        let alt_v = Keystroke::parse("alt-v")?;
+
+        assert!(is_primary_shortcut(&cmd_v, "v"));
+        assert!(is_primary_shortcut(&ctrl_c, "c"));
+        assert!(!is_primary_shortcut(&alt_v, "v"));
+        Ok(())
+    }
+
+    #[test]
+    fn clipboard_text_sanitization_and_room_paste_rules() {
+        assert_eq!(
+            sanitize_clipboard_text("one\ntwo\tthree\r"),
+            "one two three "
+        );
+
+        let existing = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let pasted_room = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let replaced = apply_join_field_paste(ActiveField::Room, existing, pasted_room);
+        assert_eq!(replaced, pasted_room);
+
+        let appended = apply_join_field_paste(ActiveField::Alias, "alice", "\n bob");
+        assert_eq!(appended, "alice  bob");
     }
 
     #[tokio::test]
