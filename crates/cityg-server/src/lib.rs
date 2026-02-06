@@ -82,9 +82,9 @@ use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
 use msphf_orchestrator::mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW};
 use msphf_orchestrator::process_anchor_or;
 use msphf_orchestrator::{
-    self, AcceptanceContext, AcceptanceKind, AcceptanceOptions, BootstrapPolicy,
-    DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, PivotParity, ReceiverCache,
-    compute_proofs_commit_bytes, hdr,
+    self, AcceptanceContext, AcceptanceOptions, BootstrapPolicy, DEFAULT_POLICY_VERSION,
+    DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes,
+    hdr,
 };
 
 /// Re-export commonly used client-side bundle types for convenience.
@@ -566,15 +566,19 @@ impl CityGServer {
         let delta = bundle.membership_delta()?;
         let new_root = roster.apply_delta(bundle.gid(), &bundle.anchor.parent_root, &delta)?;
 
-        if matches!(acceptance.outcome.kind, AcceptanceKind::NonMerge) {
-            let parities_for_new = ctx.pivot_parities_for(bundle.gid(), &new_root);
-            if parities_for_new.is_empty() {
-                let mut mirrored = acceptance.pivot_parity.clone();
-                if mirrored.parent_root != new_root {
-                    mirrored.parent_root = new_root;
-                }
-                ctx.insert_pivot_parity(mirrored, acceptance.outcome.accept_time);
+        // Keep at least one pivot parity available on the resulting root so members
+        // can always fetch a merge ticket for subsequent membership changes.
+        let parities_for_new = ctx.pivot_parities_for(bundle.gid(), &new_root);
+        if parities_for_new.is_empty() {
+            let mut mirrored = ctx
+                .pivot_parities_for(bundle.gid(), &bundle.anchor.parent_root)
+                .into_iter()
+                .find(|parity| parity.we_epoch_id == acceptance.outcome.we_epoch_id)
+                .unwrap_or_else(|| acceptance.pivot_parity.clone());
+            if mirrored.parent_root != new_root {
+                mirrored.parent_root = new_root;
             }
+            ctx.insert_pivot_parity(mirrored, acceptance.outcome.accept_time);
         }
 
         Ok(ServerOutcome {

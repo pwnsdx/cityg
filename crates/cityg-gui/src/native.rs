@@ -6144,6 +6144,36 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn sequential_member_leaves_succeed() -> Result<(), Box<dyn std::error::Error>> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x66u8; 32]);
+
+        let alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        let bob = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+
+        perform_leave(LeaveRequest::from_session(&alice)).await?;
+        perform_leave(LeaveRequest::from_session(&bob)).await?;
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
     #[test]
     fn encrypt_decrypt_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let key = [42u8; 32];
