@@ -24,7 +24,7 @@ use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
 use cityg_config::CityGConfig;
 use dirs::config_dir;
-use futures::StreamExt;
+use futures::{StreamExt, channel::mpsc as futures_mpsc};
 use gpui::prelude::*;
 use gpui::{
     App, Application, Bounds, ClipboardItem, Context as ViewContext, CursorStyle, Div, ElementId,
@@ -255,6 +255,92 @@ enum FetchStatus {
 enum SendStatus {
     Idle,
     Sending,
+}
+
+enum WebSocketEvent {
+    Connected,
+    Disconnected,
+    Message,
+    Membership([u8; 32]),
+}
+
+async fn run_websocket_worker(
+    ws_url: String,
+    reconnect_delay: Duration,
+    tx: futures_mpsc::UnboundedSender<WebSocketEvent>,
+) -> Result<()> {
+    loop {
+        debug!("Attempting WebSocket connection to {}", ws_url);
+
+        match connect_async(&ws_url).await {
+            Ok((ws_stream, _)) => {
+                info!("WebSocket connected successfully");
+                if tx.unbounded_send(WebSocketEvent::Connected).is_err() {
+                    return Ok(());
+                }
+
+                let (_write, mut read) = ws_stream.split();
+                while let Some(msg_result) = read.next().await {
+                    match msg_result {
+                        Ok(WsMessage::Text(text)) => {
+                            debug!("WebSocket message received: {}", text);
+                            if let Ok(notification) =
+                                serde_json::from_str::<serde_json::Value>(&text)
+                            {
+                                match notification.get("type").and_then(|t| t.as_str()) {
+                                    Some("message") => {
+                                        if tx.unbounded_send(WebSocketEvent::Message).is_err() {
+                                            return Ok(());
+                                        }
+                                    }
+                                    Some("membership") => {
+                                        if let Some(gid_hex) =
+                                            notification.get("gid").and_then(|v| v.as_str())
+                                            && let Some(gid) = decode_hex_32(gid_hex)
+                                            && tx
+                                                .unbounded_send(WebSocketEvent::Membership(gid))
+                                                .is_err()
+                                        {
+                                            return Ok(());
+                                        }
+                                    }
+                                    Some("lag") => {
+                                        warn!("WebSocket lag notification: {}", text);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Ok(WsMessage::Close(_)) => {
+                            info!("WebSocket closed by server");
+                            break;
+                        }
+                        Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) => {
+                            debug!("WebSocket ping/pong");
+                        }
+                        Err(e) => {
+                            warn!("WebSocket error: {}", e);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                info!(
+                    "WebSocket connection closed, will retry in {:?}",
+                    reconnect_delay
+                );
+            }
+            Err(e) => {
+                warn!("WebSocket connection failed: {}", e);
+            }
+        }
+
+        if tx.unbounded_send(WebSocketEvent::Disconnected).is_err() {
+            return Ok(());
+        }
+
+        sleep(reconnect_delay).await;
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -876,9 +962,17 @@ impl AppModel {
         self.toasts.push(toast);
         cx.notify();
 
+        let delay = Tokio::spawn_result(cx, async move {
+            sleep(Duration::from_secs(8)).await;
+            Ok(())
+        });
+
         // Schedule cleanup of expired toasts
         cx.spawn(async move |this, cx| {
-            sleep(Duration::from_secs(8)).await;
+            if let Err(err) = delay.await {
+                warn!("toast cleanup delay task failed: {err}");
+                return;
+            }
             let _ = this.update(cx, |model, cx| {
                 model.cleanup_expired_toasts();
                 cx.notify();
@@ -1814,7 +1908,20 @@ impl AppModel {
         let interval = self.config.gui.members_refresh_interval();
         let task = cx.spawn(async move |this, cx| {
             loop {
-                sleep(interval).await;
+                let delay = match Tokio::spawn_result(cx, async move {
+                    sleep(interval).await;
+                    Ok(())
+                }) {
+                    Ok(task) => task,
+                    Err(err) => {
+                        warn!("failed to schedule members refresh delay: {err}");
+                        break;
+                    }
+                };
+                if let Err(err) = delay.await {
+                    warn!("members refresh delay task failed: {err}");
+                    break;
+                }
 
                 let keep_running = this
                     .update(cx, |model, cx| {
@@ -1856,127 +1963,51 @@ impl AppModel {
             .replace("http://", "ws://")
             .replace("https://", "wss://");
         let ws_url = format!("{}/v1/ws", ws_url);
+        let reconnect_delay = self.config.client.websocket_reconnect_delay();
 
         info!("Starting WebSocket connection to {}", ws_url);
 
         let this = cx.weak_entity();
+        let (event_tx, mut event_rx) = futures_mpsc::unbounded::<WebSocketEvent>();
         let task = cx.spawn(async move |_, cx| {
-            // Attempt to connect with reconnection logic
-            loop {
-                debug!("Attempting WebSocket connection to {}", ws_url);
+            let runner = match Tokio::spawn_result(
+                cx,
+                run_websocket_worker(ws_url.clone(), reconnect_delay, event_tx),
+            ) {
+                Ok(task) => task,
+                Err(err) => {
+                    warn!("failed to schedule websocket worker: {err}");
+                    return;
+                }
+            };
 
-                match connect_async(&ws_url).await {
-                    Ok((ws_stream, _)) => {
-                        info!("WebSocket connected successfully");
-
-                        // Update connection status
-                        let _ = this.update(cx, |model, cx| {
-                            model.ws_connected = true;
-                            model.schedule_epoch_sync(
-                                cx,
-                                "Syncing latest epoch after WebSocket reconnect…",
-                            );
-                            cx.notify();
-                        });
-
-                        let (_write, mut read) = ws_stream.split();
-
-                        // Handle incoming messages
-                        while let Some(msg_result) = read.next().await {
-                            match msg_result {
-                                Ok(WsMessage::Text(text)) => {
-                                    debug!("WebSocket message received: {}", text);
-
-                                    if let Ok(notification) =
-                                        serde_json::from_str::<serde_json::Value>(&text)
-                                    {
-                                        match notification.get("type").and_then(|t| t.as_str()) {
-                                            Some("message") => {
-                                                let _ = this.update(cx, |model, cx| {
-                                                    debug!("Triggering fetch due to message event");
-                                                    if !model.fetch_in_flight {
-                                                        model.schedule_fetch(cx, Duration::ZERO);
-                                                    }
-                                                });
-                                            }
-                                            Some("membership") => {
-                                                if let Some(gid_hex) =
-                                                    notification.get("gid").and_then(|v| v.as_str())
-                                                    && let Some(gid) = decode_hex_32(gid_hex)
-                                                {
-                                                    let _ = this.update(cx, |model, cx| {
-                                                        model.handle_membership_signal(&gid, cx);
-                                                    });
-                                                }
-                                            }
-                                            Some("lag") => {
-                                                warn!("WebSocket lag notification: {}", text);
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                Ok(WsMessage::Close(_)) => {
-                                    info!("WebSocket closed by server");
-                                    break;
-                                }
-                                Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) => {
-                                    debug!("WebSocket ping/pong");
-                                }
-                                Err(e) => {
-                                    warn!("WebSocket error: {}", e);
-                                    break;
-                                }
-                                _ => {}
-                            }
+            while let Some(event) = event_rx.next().await {
+                let _ = this.update(cx, |model, cx| match event {
+                    WebSocketEvent::Connected => {
+                        model.ws_connected = true;
+                        model.schedule_epoch_sync(
+                            cx,
+                            "Syncing latest epoch after WebSocket reconnect…",
+                        );
+                        cx.notify();
+                    }
+                    WebSocketEvent::Disconnected => {
+                        model.ws_connected = false;
+                        cx.notify();
+                    }
+                    WebSocketEvent::Message => {
+                        if !model.fetch_in_flight {
+                            model.schedule_fetch(cx, Duration::ZERO);
                         }
-
-                        // Update connection status
-                        let _ = this.update(cx, |model, cx| {
-                            model.ws_connected = false;
-                            cx.notify();
-                        });
-
-                        info!("WebSocket connection closed, will retry in 5 seconds");
                     }
-                    Err(e) => {
-                        warn!("WebSocket connection failed: {}", e);
-
-                        // Update connection status
-                        let _ = this.update(cx, |model, cx| {
-                            model.ws_connected = false;
-                            cx.notify();
-                        });
+                    WebSocketEvent::Membership(gid) => {
+                        model.handle_membership_signal(&gid, cx);
                     }
-                }
+                });
+            }
 
-                // Wait before reconnecting (using config value)
-                let reconnect_delay = this
-                    .upgrade()
-                    .and_then(|entity| {
-                        entity
-                            .read_with(cx, |model, _| {
-                                model.config.client.websocket_reconnect_delay()
-                            })
-                            .ok()
-                    })
-                    .unwrap_or_else(|| Duration::from_secs(5));
-                sleep(reconnect_delay).await;
-
-                // Check if we should still be connected
-                let should_continue = this
-                    .upgrade()
-                    .and_then(|entity| {
-                        entity
-                            .read_with(cx, |model, _| model.session.is_some())
-                            .ok()
-                    })
-                    .unwrap_or(false);
-
-                if !should_continue {
-                    info!("Stopping WebSocket connection (no active session)");
-                    break;
-                }
+            if let Err(err) = runner.await {
+                warn!("websocket worker task failed: {err}");
             }
         });
 
@@ -6139,13 +6170,72 @@ thread_local! {
 mod tests {
     use super::*;
     use cityg_api;
+    use futures::SinkExt;
     use msphf_rlwe::CapssBranchWitness;
     use rand::{RngCore, SeedableRng, rngs::StdRng};
-    use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU16, Ordering},
+    };
     use tempfile::TempDir;
     use tokio::{task::JoinHandle, time::sleep};
 
     static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18400);
+    static ENV_VAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn sample_pivot_parity() -> PivotParity {
+        PivotParity {
+            gid: vec![0x01; 32],
+            cat: vec![0x02; 32],
+            parent_root: [0x03; 32],
+            we_epoch_id: [0x04; 32],
+            rho_commit: [0x05; 32],
+            seed_ctx_hash: [0x06; 32],
+            seed_commit: [0x07; 32],
+            hp_commit: [0x08; 32],
+            xk_hash: [0x09; 32],
+            join_delta_root: [0x0A; 32],
+            revoked_since_root: [0x0B; 32],
+            revoked_root: [0x0C; 32],
+            accept_seq: 1,
+            crs_id: b"crs-v1".to_vec(),
+            params_id: b"params-v1".to_vec(),
+            policy_version: "policy-v1".to_string(),
+            proof_mode: "lin+zkvrf".to_string(),
+            vrf_id: "lb-vrf".to_string(),
+            vrf_proof: vec![0x11, 0x22],
+            vrf_public: vec![0x33, 0x44],
+            mask_a: [0xAA; 32],
+            mask_b: [0xBB; 32],
+            fs_capss: vec![0x55],
+            proofs_commit: [0x66; 32],
+            srx_commit: Some([0x77; 32]),
+            is_join: true,
+            hp_envelope: Arc::<[u8]>::from(vec![0x99, 0x88]),
+            fs_epoch_commit: Some([0x42; 32]),
+            fs_ec: Some(12),
+            fs_dev_commit: Some([0x24; 32]),
+        }
+    }
+
+    struct EnvVarRestore {
+        original: Option<String>,
+    }
+
+    impl Drop for EnvVarRestore {
+        fn drop(&mut self) {
+            match self.original.as_deref() {
+                Some(value) => {
+                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                    unsafe { std::env::set_var(SESSION_PASSPHRASE_ENV, value) };
+                }
+                None => {
+                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                    unsafe { std::env::remove_var(SESSION_PASSPHRASE_ENV) };
+                }
+            }
+        }
+    }
 
     async fn spawn_server_on(port: u16) -> JoinHandle<()> {
         tokio::spawn(async move {
@@ -6154,6 +6244,771 @@ mod tests {
                 eprintln!("server exited with error: {err}");
             }
         })
+    }
+
+    #[test]
+    fn session_encryption_key_prefers_env_passphrase() -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _restore = EnvVarRestore {
+            original: std::env::var(SESSION_PASSPHRASE_ENV).ok(),
+        };
+
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(SESSION_PASSPHRASE_ENV, "cityg-test-passphrase") };
+
+        let temp_dir = TempDir::new()?;
+        let session_path = temp_dir
+            .path()
+            .join("cityg")
+            .join("gui")
+            .join("session.json");
+        let (key, source) = session_encryption_key(&session_path)?;
+
+        assert_eq!(source.as_str(), SessionKeySource::EnvPassphrase.as_str());
+        assert_eq!(
+            key,
+            blake3::derive_key(SESSION_KEY_DERIVE_CONTEXT, b"cityg-test-passphrase")
+        );
+        assert!(
+            !session_local_key_path(&session_path)?.exists(),
+            "env-derived key path must not create local key file"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn session_encryption_key_uses_local_key_file_when_env_missing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _restore = EnvVarRestore {
+            original: std::env::var(SESSION_PASSPHRASE_ENV).ok(),
+        };
+
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(SESSION_PASSPHRASE_ENV) };
+
+        let temp_dir = TempDir::new()?;
+        let session_path = temp_dir
+            .path()
+            .join("cityg")
+            .join("gui")
+            .join("session.json");
+
+        let (first_key, first_source) = session_encryption_key(&session_path)?;
+        assert_eq!(
+            first_source.as_str(),
+            SessionKeySource::LocalKeyFile.as_str(),
+            "missing env passphrase should use local key file"
+        );
+        let key_path = session_local_key_path(&session_path)?;
+        assert!(key_path.exists(), "local key file should be created");
+        assert_eq!(fs::read(&key_path)?.len(), 32, "local key must be 32 bytes");
+
+        let (second_key, second_source) = session_encryption_key(&session_path)?;
+        assert_eq!(
+            second_source.as_str(),
+            SessionKeySource::LocalKeyFile.as_str()
+        );
+        assert_eq!(
+            first_key, second_key,
+            "local key should be stable across reads"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_or_create_local_session_key_rejects_invalid_file_len()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let session_path = temp_dir
+            .path()
+            .join("cityg")
+            .join("gui")
+            .join("session.json");
+        let key_path = session_local_key_path(&session_path)?;
+        if let Some(parent) = key_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&key_path, vec![0xAB; 31])?;
+
+        let err = load_or_create_local_session_key(&session_path)
+            .expect_err("invalid key length should fail");
+        assert!(
+            err.to_string()
+                .contains("session local key must be 32 bytes"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_last_session_pointer_missing_invalid_and_valid()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base.clone()));
+
+        assert!(
+            read_last_session_pointer()?.is_none(),
+            "missing pointer => None"
+        );
+
+        let pointer_path = last_session_pointer_path()?;
+        if let Some(parent) = pointer_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&pointer_path, b"{not-json")?;
+        assert!(
+            read_last_session_pointer().is_err(),
+            "invalid pointer JSON should error"
+        );
+
+        let pointer = LastSessionPointer {
+            server_url: "http://127.0.0.1:8080".to_string(),
+            room_id: "room-a".to_string(),
+        };
+        fs::write(&pointer_path, serde_json::to_vec(&pointer)?)?;
+        let loaded = read_last_session_pointer()?
+            .ok_or_else(|| anyhow!("expected valid pointer to be loaded"))?;
+        assert_eq!(loaded.server_url, pointer.server_url);
+        assert_eq!(loaded.room_id, pointer.room_id);
+        Ok(())
+    }
+
+    #[test]
+    fn session_dir_respects_cityg_gui_config_dir_env() -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _config_guard = set_config_dir_override_for_tests(None);
+
+        let original = std::env::var("CITYG_GUI_CONFIG_DIR").ok();
+        let override_root = TempDir::new()?;
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe {
+            std::env::set_var(
+                "CITYG_GUI_CONFIG_DIR",
+                override_root.path().to_string_lossy().to_string(),
+            )
+        };
+
+        let resolved = session_dir()?;
+        assert_eq!(
+            resolved,
+            override_root.path().join("cityg").join("gui"),
+            "session dir should respect CITYG_GUI_CONFIG_DIR override"
+        );
+
+        match original {
+            Some(value) => {
+                // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                unsafe { std::env::set_var("CITYG_GUI_CONFIG_DIR", value) };
+            }
+            None => {
+                // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                unsafe { std::env::remove_var("CITYG_GUI_CONFIG_DIR") };
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn load_last_session_removes_dangling_pointer() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base.clone()));
+
+        let pointer = LastSessionPointer {
+            server_url: "http://127.0.0.1:8080".to_string(),
+            room_id: "missing-room".to_string(),
+        };
+        let pointer_path = last_session_pointer_path()?;
+        if let Some(parent) = pointer_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&pointer_path, serde_json::to_vec(&pointer)?)?;
+
+        let session = load_last_session()?;
+        assert!(
+            session.is_none(),
+            "dangling pointer should return no session"
+        );
+        assert!(
+            !pointer_path.exists(),
+            "dangling pointer should be removed automatically"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_last_session_invalid_pointer_json_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base.clone()));
+
+        let pointer_path = last_session_pointer_path()?;
+        if let Some(parent) = pointer_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&pointer_path, b"not-json")?;
+        assert!(
+            load_last_session().is_err(),
+            "invalid pointer JSON should produce an error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_persisted_session_keeps_unrelated_pointer() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base.clone()));
+
+        let pointer = LastSessionPointer {
+            server_url: "http://127.0.0.1:8080".to_string(),
+            room_id: "room-a".to_string(),
+        };
+        let pointer_path = last_session_pointer_path()?;
+        if let Some(parent) = pointer_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&pointer_path, serde_json::to_vec(&pointer)?)?;
+
+        remove_persisted_session("http://127.0.0.1:8080", "room-b")?;
+        assert!(
+            pointer_path.exists(),
+            "pointer should remain when removing unrelated session"
+        );
+        let loaded = read_last_session_pointer()?
+            .ok_or_else(|| anyhow!("expected pointer to remain present"))?;
+        assert_eq!(loaded.server_url, pointer.server_url);
+        assert_eq!(loaded.room_id, pointer.room_id);
+        Ok(())
+    }
+
+    #[test]
+    fn alias_bindings_persist_load_legacy_and_cleanup() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base.clone()));
+        let server = "http://127.0.0.1:8080";
+        let room = "room-alias";
+
+        let mut bindings = AHashMap::new();
+        bindings.insert(
+            "alice".to_string(),
+            AliasBindingRecord {
+                pop_public_key: vec![0x01, 0x02, 0x03],
+                leaf_id: [0xAA; 32],
+            },
+        );
+        persist_alias_bindings(server, room, &bindings)?;
+
+        let loaded = load_alias_bindings(server, room)?;
+        let alice = loaded
+            .get("alice")
+            .ok_or_else(|| anyhow!("alice binding missing"))?;
+        assert_eq!(alice.pop_public_key, vec![0x01, 0x02, 0x03]);
+        assert_eq!(alice.leaf_id, [0xAA; 32]);
+
+        let roster_path = roster_file_path(server, room)?;
+        let legacy: AHashMap<String, String> = [("bob".to_string(), "0a0b".to_string())]
+            .into_iter()
+            .collect();
+        fs::write(&roster_path, serde_json::to_vec(&legacy)?)?;
+        let legacy_loaded = load_alias_bindings(server, room)?;
+        let bob = legacy_loaded
+            .get("bob")
+            .ok_or_else(|| anyhow!("legacy bob binding missing"))?;
+        assert_eq!(bob.pop_public_key, vec![0x0A, 0x0B]);
+        assert_eq!(bob.leaf_id, [0u8; 32], "legacy format has zero leaf id");
+
+        let invalid_store = PersistedAliasStore {
+            version: ALIAS_STORE_VERSION,
+            bindings: [
+                (
+                    "bad_pop".to_string(),
+                    PersistedAliasBinding {
+                        pop_public_key_hex: "zzzz".to_string(),
+                        leaf_id_hex: hex_encode([0x11; 32]),
+                    },
+                ),
+                (
+                    "bad_leaf".to_string(),
+                    PersistedAliasBinding {
+                        pop_public_key_hex: "aa".to_string(),
+                        leaf_id_hex: "not-hex".to_string(),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        fs::write(&roster_path, serde_json::to_vec(&invalid_store)?)?;
+        let invalid_loaded = load_alias_bindings(server, room)?;
+        assert!(
+            !invalid_loaded.contains_key("bad_pop"),
+            "invalid pop key entry should be skipped"
+        );
+        let bad_leaf = invalid_loaded
+            .get("bad_leaf")
+            .ok_or_else(|| anyhow!("bad_leaf binding should remain with zeroed leaf id"))?;
+        assert_eq!(bad_leaf.pop_public_key, vec![0xAA]);
+        assert_eq!(bad_leaf.leaf_id, [0u8; 32]);
+
+        persist_alias_bindings(server, room, &AHashMap::new())?;
+        assert!(
+            !roster_path.exists(),
+            "empty bindings should remove roster file"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_alias_bindings_invalid_json_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base.clone()));
+        let server = "http://127.0.0.1:8080";
+        let room = "room-alias-invalid";
+        let roster_path = roster_file_path(server, room)?;
+        if let Some(parent) = roster_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&roster_path, b"not-json")?;
+        assert!(
+            load_alias_bindings(server, room).is_err(),
+            "invalid alias store JSON should error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn security_log_persist_load_and_remove() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base.clone()));
+        let server = "http://127.0.0.1:8080";
+        let room = "room-sec";
+
+        assert!(
+            load_security_log(server, room)?.is_empty(),
+            "missing security log should return empty vec"
+        );
+
+        let events = vec![
+            SecurityEvent {
+                alias: "alice".to_string(),
+                description: "joined".to_string(),
+                timestamp_ms: 1,
+            },
+            SecurityEvent {
+                alias: "bob".to_string(),
+                description: "revoked".to_string(),
+                timestamp_ms: 2,
+            },
+        ];
+        persist_security_log(server, room, &events)?;
+        let loaded = load_security_log(server, room)?;
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].alias, "alice");
+        assert_eq!(loaded[1].description, "revoked");
+
+        let log_path = security_log_file_path(server, room)?;
+        assert!(
+            log_path.exists(),
+            "security log file should exist after persist"
+        );
+
+        persist_security_log(server, room, &[])?;
+        assert!(!log_path.exists(), "empty security log should remove file");
+
+        persist_security_log(server, room, &events)?;
+        remove_security_log(server, room)?;
+        assert!(!log_path.exists(), "remove_security_log should delete file");
+        Ok(())
+    }
+
+    #[test]
+    fn decode_persisted_session_rejects_bad_envelope_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let session_path = temp_dir
+            .path()
+            .join("cityg")
+            .join("gui")
+            .join("session.json");
+
+        let bad_version = EncryptedSessionEnvelope {
+            version: ENCRYPTED_SESSION_ENVELOPE_VERSION + 1,
+            alg: ENCRYPTED_SESSION_ALG.to_string(),
+            key_source: SessionKeySource::LocalKeyFile.as_str().to_string(),
+            nonce_hex: "000102030405060708090a0b".to_string(),
+            ciphertext_hex: "00".to_string(),
+        };
+        let err = match decode_persisted_session(&serde_json::to_vec(&bad_version)?, &session_path)
+        {
+            Ok(_) => return Err(anyhow!("unsupported envelope version should fail").into()),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("unsupported encrypted session envelope version"),
+            "unexpected error: {err}"
+        );
+
+        let bad_alg = EncryptedSessionEnvelope {
+            version: ENCRYPTED_SESSION_ENVELOPE_VERSION,
+            alg: "aes-gcm".to_string(),
+            key_source: SessionKeySource::LocalKeyFile.as_str().to_string(),
+            nonce_hex: "000102030405060708090a0b".to_string(),
+            ciphertext_hex: "00".to_string(),
+        };
+        let err = match decode_persisted_session(&serde_json::to_vec(&bad_alg)?, &session_path) {
+            Ok(_) => return Err(anyhow!("unsupported envelope algorithm should fail").into()),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("unsupported encrypted session algorithm"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn decode_persisted_session_rejects_bad_nonce_and_ciphertext_hex()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let session_path = temp_dir
+            .path()
+            .join("cityg")
+            .join("gui")
+            .join("session.json");
+
+        let bad_nonce = EncryptedSessionEnvelope {
+            version: ENCRYPTED_SESSION_ENVELOPE_VERSION,
+            alg: ENCRYPTED_SESSION_ALG.to_string(),
+            key_source: SessionKeySource::LocalKeyFile.as_str().to_string(),
+            nonce_hex: "000102".to_string(),
+            ciphertext_hex: "00".to_string(),
+        };
+        let err = match decode_persisted_session(&serde_json::to_vec(&bad_nonce)?, &session_path) {
+            Ok(_) => return Err(anyhow!("invalid nonce length should fail").into()),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("nonce must be 12 bytes"),
+            "unexpected error: {err}"
+        );
+
+        let bad_ciphertext = EncryptedSessionEnvelope {
+            version: ENCRYPTED_SESSION_ENVELOPE_VERSION,
+            alg: ENCRYPTED_SESSION_ALG.to_string(),
+            key_source: SessionKeySource::LocalKeyFile.as_str().to_string(),
+            nonce_hex: "000102030405060708090a0b".to_string(),
+            ciphertext_hex: "zzzz".to_string(),
+        };
+        let err =
+            match decode_persisted_session(&serde_json::to_vec(&bad_ciphertext)?, &session_path) {
+                Ok(_) => return Err(anyhow!("invalid ciphertext hex should fail").into()),
+                Err(err) => err,
+            };
+        assert!(
+            err.to_string()
+                .contains("encrypted session envelope ciphertext is not valid hex"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn decode_hex_helpers_validate_shape() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(decode_hex32("gid", &hex_encode([0xAB; 32]))?, [0xAB; 32]);
+        assert_eq!(decode_hex_vec("vec", "0a0b")?, vec![0x0A, 0x0B]);
+        assert_eq!(decode_hex_vec("empty", "")?, Vec::<u8>::new());
+        assert!(decode_hex32("gid", "zz").is_err());
+        assert!(decode_hex32("gid", "aa").is_err());
+        assert!(decode_hex_vec("vec", "gg").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rollup_strip_and_pivot_selection_rules() {
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_ROLLUP_PROVENANCE_COMMIT, Value::Bytes(vec![1]));
+        header.insert(hdr::HDR_ROLLUP_EPOCH_REPLAY, Value::Bytes(vec![2]));
+        header.insert(hdr::HDR_ROLLUP_VCK_COMMIT, Value::Bytes(vec![3]));
+        header.insert(99, Value::Text("keep".to_string()));
+        strip_rollup_metadata(&mut header);
+        assert!(!header.contains_key(&hdr::HDR_ROLLUP_PROVENANCE_COMMIT));
+        assert!(!header.contains_key(&hdr::HDR_ROLLUP_EPOCH_REPLAY));
+        assert!(!header.contains_key(&hdr::HDR_ROLLUP_VCK_COMMIT));
+        assert!(header.contains_key(&99));
+
+        let mut low = sample_pivot_parity();
+        low.accept_seq = 1;
+        low.xk_hash = [0x10; 32];
+        let mut high = sample_pivot_parity();
+        high.accept_seq = 2;
+        high.xk_hash = [0x20; 32];
+        let mut tie_break = sample_pivot_parity();
+        tie_break.accept_seq = 2;
+        tie_break.xk_hash = [0x01; 32];
+
+        let parities = [low, high, tie_break];
+        let selected = select_pivot_parity(&parities).expect("must select pivot");
+        assert_eq!(selected.accept_seq, 2, "highest accept_seq should win");
+        assert_eq!(
+            selected.xk_hash, [0x01; 32],
+            "ties use lexicographically smallest xk_hash"
+        );
+    }
+
+    #[test]
+    fn header_helpers_and_label_formatting() -> Result<(), Box<dyn std::error::Error>> {
+        let mut header = BTreeMap::new();
+        header.insert(1, Value::Text("hello".to_string()));
+        header.insert(2, Value::Integer(Integer::from(77u64)));
+        header.insert(3, Value::Bytes([0x11; 32].to_vec()));
+        header.insert(4, Value::Bytes(vec![1, 2, 3]));
+        header.insert(5, Value::Null);
+
+        assert_eq!(header_text(&header, 1), Some("hello"));
+        assert_eq!(header_u64(&header, 2), Some(77));
+        assert_eq!(header_bytes32(&header, 3), Some([0x11; 32]));
+        assert_eq!(header_bytes(&header, 4, "field4")?, vec![1, 2, 3]);
+        assert_eq!(header_bytes_opt(&header, 4)?, Some(vec![1, 2, 3]));
+        assert_eq!(header_bytes_opt(&header, 5)?, None);
+        assert_eq!(header_bytes_opt(&header, 99)?, None);
+        assert_eq!(header_bytes32_opt(&header, 3)?, Some([0x11; 32]));
+        assert_eq!(header_bytes32_opt(&header, 5)?, None);
+        assert!(
+            header_bytes32_opt(&header, 4).is_err(),
+            "not 32 bytes must fail"
+        );
+        assert!(
+            header_bytes(&header, 2, "field2").is_err(),
+            "wrong type must fail"
+        );
+        assert!(
+            header_bytes(&header, 99, "missing").is_err(),
+            "missing must fail"
+        );
+
+        let member_with_alias = MemberEntry {
+            leaf_id: [0xAA; 32],
+            alias: Some("alice".to_string()),
+            pop_public_key: None,
+            join_timestamp_ms: None,
+            last_seen_timestamp_ms: None,
+        };
+        let member_without_alias = MemberEntry {
+            alias: None,
+            ..member_with_alias.clone()
+        };
+        assert_eq!(
+            format_alias_display("alice", &[0xAA; 32]),
+            "alice (aaaaaaaa…)"
+        );
+        assert_eq!(format_member_label(&member_with_alias), "alice (aaaaaaaa…)");
+        assert_eq!(
+            format_member_label(&member_without_alias),
+            hex_encode([0xAA; 32])
+        );
+        assert_eq!(hex_encode_prefix(&[0xBB; 32], 8), "bbbbbbbb…");
+        assert_eq!(hex_encode_prefix(&[0xBB; 32], 128), hex_encode([0xBB; 32]));
+        assert_eq!(decode_hex_32(&hex_encode([0xCD; 32])), Some([0xCD; 32]));
+        assert!(decode_hex_32("bad").is_none());
+        assert!(decode_hex_32("aa").is_none());
+        assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");
+        assert_eq!(bytes32("good", &[0xEF; 32])?, [0xEF; 32]);
+        assert!(bytes32("bad", &[0xEF; 31]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn pivot_alignment_and_commit_recomputations() -> Result<(), Box<dyn std::error::Error>> {
+        let mut pivot = sample_pivot_parity();
+        pivot.fs_ec = Some(44);
+        pivot.fs_epoch_commit = Some([0x33; 32]);
+        pivot.fs_dev_commit = Some([0x22; 32]);
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_FS_EC, Value::Integer(Integer::from(7u64)));
+        header.insert(hdr::HDR_FS_EPOCH_COMMIT, Value::Bytes([0x11; 32].to_vec()));
+        apply_pivot_alignment(&mut header, &pivot);
+        assert_eq!(
+            header.get(&hdr::HDR_POLICY_VERSION),
+            Some(&Value::Text("policy-v1".to_string()))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_EC),
+            Some(&Value::Integer(Integer::from(7u64))),
+            "existing fs_ec should not be overwritten"
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_CHECKPOINT_EC),
+            Some(&Value::Integer(Integer::from(44u64)))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_EPOCH_COMMIT),
+            Some(&Value::Bytes([0x11; 32].to_vec())),
+            "existing epoch commit should remain"
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_DEV_PREV_COMMIT),
+            Some(&Value::Bytes([0x22; 32].to_vec()))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_DEV_COMMIT),
+            Some(&Value::Bytes([0x22; 32].to_vec()))
+        );
+
+        let hydrated = hydrate_parities(
+            &[{
+                let mut p = sample_pivot_parity();
+                p.fs_ec = None;
+                p.fs_epoch_commit = None;
+                p.fs_dev_commit = None;
+                p
+            }],
+            88,
+            [0xAB; 32],
+            [0xBC; 32],
+        );
+        assert_eq!(hydrated[0].fs_ec, Some(88));
+        assert_eq!(hydrated[0].fs_epoch_commit, Some([0xAB; 32]));
+        assert_eq!(hydrated[0].fs_dev_commit, Some([0xBC; 32]));
+
+        let mut commit_header = BTreeMap::new();
+        commit_header.insert(hdr::HDR_VRF_PROOF, Value::Bytes(vec![0x01, 0x02]));
+        commit_header.insert(hdr::HDR_FS_CAPSS, Value::Bytes(vec![0x03, 0x04]));
+        let base_commit = recompute_proofs_commit(&commit_header)?;
+        commit_header.insert(hdr::HDR_SRX_ROOT_SW, Value::Bytes([0x10; 32].to_vec()));
+        commit_header.insert(hdr::HDR_SRX_SMALLWOOD, Value::Bytes(vec![0x20, 0x21]));
+        let with_srx_commit = recompute_proofs_commit(&commit_header)?;
+        assert_ne!(base_commit, with_srx_commit);
+        commit_header.insert(hdr::HDR_SRX_ROOT_SW, Value::Bytes(vec![0x10]));
+        assert!(recompute_proofs_commit(&commit_header).is_err());
+        commit_header.insert(hdr::HDR_SRX_ROOT_SW, Value::Bytes([0x10; 32].to_vec()));
+        commit_header.insert(hdr::HDR_VRF_PROOF, Value::Text("bad".to_string()));
+        assert!(recompute_proofs_commit(&commit_header).is_err());
+
+        let mut srx_header = BTreeMap::new();
+        srx_header.insert(hdr::HDR_SRX_PAYLOAD, Value::Bytes(vec![0xAA, 0xBB]));
+        assert!(recompute_srx_commit(&srx_header)?.is_some());
+        srx_header.insert(hdr::HDR_SRX_PAYLOAD, Value::Text("bad".to_string()));
+        assert!(recompute_srx_commit(&srx_header).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn fs_fingerprint_header_helper_roundtrip() {
+        let fs_epoch_commit = [0xAA; 32];
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_FS_POLICY_VERSION,
+            Value::Text("fs-policy-v1".to_string()),
+        );
+        header.insert(hdr::HDR_FS_EC, Value::Integer(Integer::from(21u64)));
+        header.insert(
+            hdr::HDR_FS_EPOCH_COMMIT,
+            Value::Bytes(fs_epoch_commit.to_vec()),
+        );
+        header.insert(
+            hdr::HDR_FS_EPOCH_BASE_TS,
+            Value::Integer(Integer::from(777u64)),
+        );
+
+        let direct = derive_fs_fingerprint_from_fields("fs-policy-v1", 21, &fs_epoch_commit, 777);
+        let from_header = compute_fs_fingerprint_from_header(&header);
+        assert_eq!(from_header, direct);
+
+        header.insert(
+            hdr::HDR_FS_POLICY_VERSION,
+            Value::Integer(Integer::from(1u64)),
+        );
+        assert!(compute_fs_fingerprint_from_header(&header).is_none());
+    }
+
+    #[tokio::test]
+    async fn websocket_worker_emits_membership_and_message_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let membership_gid = [0x42u8; 32];
+        let membership_gid_hex = hex_encode(membership_gid);
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            ws.send(WsMessage::Text(r#"{"type":"message"}"#.to_string().into()))
+                .await?;
+            ws.send(WsMessage::Text(
+                format!(r#"{{"type":"membership","gid":"{membership_gid_hex}"}}"#).into(),
+            ))
+            .await?;
+            ws.send(WsMessage::Text(
+                r#"{"type":"membership","gid":"not-hex"}"#.to_string().into(),
+            ))
+            .await?;
+            ws.send(WsMessage::Text(
+                r#"{"type":"lag","detail":"slow_consumer"}"#.to_string().into(),
+            ))
+            .await?;
+            ws.close(None).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+        let worker = tokio::spawn(run_websocket_worker(
+            format!("ws://{addr}/v1/ws"),
+            Duration::from_millis(20),
+            tx,
+        ));
+
+        let mut saw_connected = false;
+        let mut saw_message = false;
+        let mut saw_membership = false;
+        let mut saw_disconnected = false;
+        for _ in 0..12 {
+            let next = tokio::time::timeout(Duration::from_secs(1), rx.next()).await?;
+            let Some(event) = next else {
+                break;
+            };
+
+            match event {
+                WebSocketEvent::Connected => saw_connected = true,
+                WebSocketEvent::Message => saw_message = true,
+                WebSocketEvent::Membership(gid) => {
+                    if gid == membership_gid {
+                        saw_membership = true;
+                    }
+                }
+                WebSocketEvent::Disconnected => {
+                    saw_disconnected = true;
+                    if saw_connected && saw_message && saw_membership {
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(saw_connected, "expected Connected event");
+        assert!(saw_message, "expected Message event");
+        assert!(saw_membership, "expected Membership event");
+        assert!(saw_disconnected, "expected Disconnected event");
+
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
+        tokio::time::timeout(Duration::from_secs(1), worker).await???;
+        Ok(())
     }
 
     #[test]
@@ -6418,6 +7273,90 @@ mod tests {
 
         perform_leave(LeaveRequest::from_session(&alice)).await?;
         perform_leave(LeaveRequest::from_session(&bob)).await?;
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_fetch_and_members_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x77u8; 32]);
+
+        let _alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        let bob = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+
+        let members =
+            perform_fetch_members(MembersParams::from_session(&bob, 0, 50, MembersMode::Full))
+                .await?;
+        assert!(
+            members.total_count >= members.members.len() as u64,
+            "total_count should bound page length"
+        );
+        assert!(
+            members.next_offset >= members.members.len() as u64 || members.next_offset == 0,
+            "next_offset should be coherent with page size"
+        );
+
+        let search = perform_fetch_members(MembersParams::from_session(
+            &bob,
+            0,
+            50,
+            MembersMode::Search {
+                query: "ali".to_string(),
+            },
+        ))
+        .await?;
+        assert!(
+            search.total_count >= search.members.len() as u64,
+            "search total_count should bound page length"
+        );
+
+        let plaintext = "hello-from-bob".to_string();
+        let sent = perform_send(SendParams::from_session(&bob, plaintext.clone())).await?;
+        assert_eq!(sent.plaintext, plaintext);
+        assert_eq!(sent.sender_leaf, Some(bob.leaf_id));
+
+        let fetched = perform_fetch(FetchParams::from_session(&bob, None)).await?;
+        assert!(
+            !fetched.messages.is_empty(),
+            "fetch should return at least one message"
+        );
+        assert!(
+            fetched
+                .messages
+                .iter()
+                .any(|message| message.plaintext == plaintext
+                    && message.sender_leaf == Some(bob.leaf_id)),
+            "fetch should include sent message"
+        );
+
+        let since = fetched.last_timestamp_ms;
+        let fetched_after = perform_fetch(FetchParams::from_session(&bob, since)).await?;
+        if let Some(threshold) = since {
+            assert!(
+                fetched_after
+                    .messages
+                    .iter()
+                    .all(|message| message.timestamp_ms > threshold),
+                "since filter must drop already-seen messages"
+            );
+        }
 
         handle.abort();
         let _ = handle.await;

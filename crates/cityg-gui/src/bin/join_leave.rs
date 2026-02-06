@@ -1299,3 +1299,548 @@ fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]
         .map_err(|err| anyhow!("compute srx commit: {err}"))?;
     Ok(Some(commit))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::SinkExt;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicU16, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::time::sleep;
+
+    static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18600);
+
+    async fn spawn_server_on(port: u16) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            if let Err(err) = cityg_api::run_with_addr(addr).await {
+                eprintln!("join_leave test server exited with error: {err}");
+            }
+        })
+    }
+
+    fn sample_pivot_parity() -> PivotParity {
+        PivotParity {
+            gid: vec![0x01; 32],
+            cat: vec![0x02; 32],
+            parent_root: [0x03; 32],
+            we_epoch_id: [0x04; 32],
+            rho_commit: [0x05; 32],
+            seed_ctx_hash: [0x06; 32],
+            seed_commit: [0x07; 32],
+            hp_commit: [0x08; 32],
+            xk_hash: [0x09; 32],
+            join_delta_root: [0x0A; 32],
+            revoked_since_root: [0x0B; 32],
+            revoked_root: [0x0C; 32],
+            accept_seq: 1,
+            crs_id: b"crs-v1".to_vec(),
+            params_id: b"params-v1".to_vec(),
+            policy_version: "policy-v1".to_string(),
+            proof_mode: "lin+zkvrf".to_string(),
+            vrf_id: "lb-vrf".to_string(),
+            vrf_proof: vec![0xDD, 0xEE],
+            vrf_public: vec![0x11, 0x22],
+            mask_a: [0xAA; 32],
+            mask_b: [0xBB; 32],
+            fs_capss: vec![0xCC],
+            proofs_commit: [0xDD; 32],
+            srx_commit: Some([0xEE; 32]),
+            is_join: true,
+            hp_envelope: Arc::<[u8]>::from(vec![0x99, 0x88]),
+            fs_epoch_commit: Some([0x44; 32]),
+            fs_ec: Some(77),
+            fs_dev_commit: Some([0x55; 32]),
+        }
+    }
+
+    #[test]
+    fn random_room_id_and_bytes32_validation() -> Result<()> {
+        let room_id = random_room_id();
+        assert_eq!(room_id.len(), 64, "room id must be 32-byte hex");
+        let decoded = hex::decode(&room_id)?;
+        assert_eq!(decoded.len(), 32);
+
+        let good = bytes32("room", &[0xAB; 32])?;
+        assert_eq!(good, [0xAB; 32]);
+
+        let err = bytes32("room", &[0xAB; 31]).expect_err("must reject non-32-byte input");
+        assert!(err.to_string().contains("room must be 32 bytes"));
+        Ok(())
+    }
+
+    #[test]
+    fn fs_fingerprint_helpers_cover_valid_and_invalid_headers() {
+        let fs_epoch_commit = [0x42; 32];
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_FS_POLICY_VERSION,
+            Value::Text("fs-policy-v1".to_string()),
+        );
+        header.insert(hdr::HDR_FS_EC, Value::Integer(Integer::from(9u64)));
+        header.insert(
+            hdr::HDR_FS_EPOCH_COMMIT,
+            Value::Bytes(fs_epoch_commit.to_vec()),
+        );
+        header.insert(
+            hdr::HDR_FS_EPOCH_BASE_TS,
+            Value::Integer(Integer::from(1234u64)),
+        );
+
+        let direct = derive_fs_fingerprint_from_fields("fs-policy-v1", 9, &fs_epoch_commit, 1234);
+        let from_header = compute_fs_fingerprint_from_header(&header);
+        assert_eq!(from_header, direct);
+        assert!(from_header.is_some());
+
+        header.insert(hdr::HDR_FS_EC, Value::Text("bad".to_string()));
+        assert!(
+            compute_fs_fingerprint_from_header(&header).is_none(),
+            "non-integer fs_ec must be rejected"
+        );
+    }
+
+    #[test]
+    fn fingerprint_formatting_helpers() {
+        let bytes = [0xAB; 32];
+        assert_eq!(
+            fingerprint_full_hex(&bytes),
+            "abababababababababababababababababababababababababababababababab"
+        );
+        assert_eq!(fingerprint_preview_hex(&bytes), "abab-abab abab-abab …");
+    }
+
+    #[test]
+    fn websocket_url_converts_schemes() {
+        assert_eq!(
+            websocket_url("http://127.0.0.1:18080"),
+            "ws://127.0.0.1:18080/v1/ws"
+        );
+        assert_eq!(
+            websocket_url("https://example.com"),
+            "wss://example.com/v1/ws"
+        );
+        assert_eq!(websocket_url("localhost:9000"), "ws://localhost:9000/v1/ws");
+    }
+
+    #[test]
+    fn alias_for_formats_single_and_multi() {
+        assert_eq!(alias_for("alice", 1, 0), "alice");
+        assert_eq!(alias_for("alice", 3, 1), "alice-2");
+    }
+
+    #[test]
+    fn parse_hex32_field_accepts_exact_hex32() {
+        let expected = [0xABu8; 32];
+        let value = serde_json::json!({
+            "leaf_id": hex::encode(expected),
+        });
+        assert_eq!(parse_hex32_field(&value, "leaf_id"), Some(expected));
+    }
+
+    #[test]
+    fn parse_hex32_field_rejects_invalid_inputs() {
+        let short = serde_json::json!({ "leaf_id": "aa" });
+        assert!(parse_hex32_field(&short, "leaf_id").is_none());
+
+        let non_hex = serde_json::json!({ "leaf_id": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" });
+        assert!(parse_hex32_field(&non_hex, "leaf_id").is_none());
+    }
+
+    #[test]
+    fn notification_from_json_parses_message_and_membership() {
+        let weid = [0x11u8; 32];
+        let gid = [0x22u8; 32];
+        let leaf_id = [0x33u8; 32];
+
+        let message = serde_json::json!({
+            "type": "message",
+            "we_epoch_id": hex::encode(weid),
+            "timestamp_ms": 42u64
+        });
+        let membership = serde_json::json!({
+            "type": "membership",
+            "gid": hex::encode(gid),
+            "leaf_id": hex::encode(leaf_id),
+            "event": "join",
+            "timestamp_ms": 99u64
+        });
+
+        match Notification::from_json(&message) {
+            Some(Notification::Message {
+                we_epoch_id,
+                timestamp_ms,
+            }) => {
+                assert_eq!(we_epoch_id, weid);
+                assert_eq!(timestamp_ms, 42);
+            }
+            other => panic!("unexpected message parse result: {other:?}"),
+        }
+
+        match Notification::from_json(&membership) {
+            Some(Notification::Membership {
+                gid: parsed_gid,
+                leaf_id: parsed_leaf,
+                event,
+                timestamp_ms,
+            }) => {
+                assert_eq!(parsed_gid, gid);
+                assert_eq!(parsed_leaf, leaf_id);
+                assert_eq!(event, "join");
+                assert_eq!(timestamp_ms, 99);
+            }
+            other => panic!("unexpected membership parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notification_from_json_rejects_invalid_membership_gid() {
+        let membership = serde_json::json!({
+            "type": "membership",
+            "gid": "not-hex",
+            "leaf_id": hex::encode([0x44u8; 32]),
+            "event": "join"
+        });
+        assert!(Notification::from_json(&membership).is_none());
+    }
+
+    #[test]
+    fn notification_from_json_parses_lag_and_other() {
+        let lag = serde_json::json!({
+            "type": "lag",
+            "lagged_messages": 17u64
+        });
+        let unknown = serde_json::json!({
+            "type": "custom",
+            "foo": "bar"
+        });
+
+        match Notification::from_json(&lag) {
+            Some(Notification::Lag { lagged_messages }) => assert_eq!(lagged_messages, 17),
+            other => panic!("unexpected lag parse result: {other:?}"),
+        }
+
+        match Notification::from_json(&unknown) {
+            Some(Notification::Other) => {}
+            other => panic!("unexpected unknown parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn describe_http_failure_includes_freeze_metadata() {
+        let detail =
+            describe_http_failure("500", "acceptance error", Some(925), Some("mh_window_full"));
+        assert!(detail.contains("server error (500): acceptance error"));
+        assert!(detail.contains("[freeze 925 mh_window_full]"));
+    }
+
+    #[test]
+    fn extract_bytes_opt_handles_missing_null_and_bytes() -> Result<()> {
+        let mut header = BTreeMap::new();
+        header.insert(1, Value::Null);
+        header.insert(2, Value::Bytes(vec![1, 2, 3]));
+        assert_eq!(extract_bytes_opt(&header, 0)?, None);
+        assert_eq!(extract_bytes_opt(&header, 1)?, None);
+        assert_eq!(extract_bytes_opt(&header, 2)?, Some(vec![1, 2, 3]));
+        Ok(())
+    }
+
+    #[test]
+    fn extract_bytes_reports_missing_and_wrong_type() {
+        let mut header = BTreeMap::new();
+        header.insert(7, Value::Text("oops".to_string()));
+        assert!(
+            extract_bytes(&header, 8).is_err(),
+            "missing key should error"
+        );
+        assert!(
+            extract_bytes(&header, 7).is_err(),
+            "wrong type should error"
+        );
+    }
+
+    #[test]
+    fn recompute_proofs_commit_changes_with_optional_fields() -> Result<()> {
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_VRF_PROOF, Value::Bytes(vec![0x01, 0x02]));
+        header.insert(hdr::HDR_FS_CAPSS, Value::Bytes(vec![0x03, 0x04]));
+
+        let base = recompute_proofs_commit(&header)?;
+
+        header.insert(hdr::HDR_SRX_ROOT_SW, Value::Bytes([0x10; 32].to_vec()));
+        header.insert(hdr::HDR_SRX_SMALLWOOD, Value::Bytes(vec![0x20, 0x21]));
+        let with_optional = recompute_proofs_commit(&header)?;
+        assert_ne!(
+            base, with_optional,
+            "optional SRX fields must affect commit"
+        );
+
+        header.insert(hdr::HDR_VRF_PROOF, Value::Text("bad".to_string()));
+        assert!(
+            recompute_proofs_commit(&header).is_err(),
+            "wrong type for mandatory proof must error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn describe_value_and_strip_rollup_metadata_behaviour() {
+        assert_eq!(describe_value(None), "None");
+        assert_eq!(describe_value(Some(&Value::Bool(true))), "Bool(true)");
+        assert_eq!(describe_value(Some(&Value::Null)), "Null");
+        assert_eq!(
+            describe_value(Some(&Value::Bytes(vec![1, 2, 3]))),
+            "Bytes(3)"
+        );
+        assert_eq!(
+            describe_value(Some(&Value::Array(vec![Value::Null]))),
+            "Array(len=1)"
+        );
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_ROLLUP_PROVENANCE_COMMIT, Value::Bytes(vec![1]));
+        header.insert(hdr::HDR_ROLLUP_EPOCH_REPLAY, Value::Bytes(vec![2]));
+        header.insert(hdr::HDR_ROLLUP_VCK_COMMIT, Value::Bytes(vec![3]));
+        header.insert(9999, Value::Text("keep".to_string()));
+        strip_srx_and_rollup(&mut header);
+        assert!(!header.contains_key(&hdr::HDR_ROLLUP_PROVENANCE_COMMIT));
+        assert!(!header.contains_key(&hdr::HDR_ROLLUP_EPOCH_REPLAY));
+        assert!(!header.contains_key(&hdr::HDR_ROLLUP_VCK_COMMIT));
+        assert!(header.contains_key(&9999), "unrelated keys must remain");
+    }
+
+    #[test]
+    fn hydrate_parities_and_apply_pivot_alignment_cover_fs_rules() {
+        let mut missing = sample_pivot_parity();
+        missing.fs_ec = None;
+        missing.fs_epoch_commit = None;
+        missing.fs_dev_commit = None;
+
+        let existing = sample_pivot_parity();
+        let hydrated = hydrate_parities(&[missing, existing.clone()], 99, [0xAB; 32], [0xBC; 32]);
+        assert_eq!(hydrated[0].fs_ec, Some(99));
+        assert_eq!(hydrated[0].fs_epoch_commit, Some([0xAB; 32]));
+        assert_eq!(hydrated[0].fs_dev_commit, Some([0xBC; 32]));
+        assert_eq!(
+            hydrated[1].fs_ec, existing.fs_ec,
+            "existing fs values should be preserved"
+        );
+
+        let pivot = sample_pivot_parity();
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_FS_EC, Value::Integer(Integer::from(7u64)));
+        header.insert(hdr::HDR_FS_EPOCH_COMMIT, Value::Bytes([0x11; 32].to_vec()));
+        apply_pivot_alignment(&mut header, &pivot);
+
+        assert_eq!(
+            header.get(&hdr::HDR_POLICY_VERSION),
+            Some(&Value::Text("policy-v1".to_string()))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_PROOF_MODE),
+            Some(&Value::Text("lin+zkvrf".to_string()))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_VRF_ID),
+            Some(&Value::Text("lb-vrf".to_string()))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_EC),
+            Some(&Value::Integer(Integer::from(7u64))),
+            "pre-existing fs_ec must not be overwritten"
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_CHECKPOINT_EC),
+            Some(&Value::Integer(Integer::from(77u64)))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_EPOCH_COMMIT),
+            Some(&Value::Bytes([0x11; 32].to_vec())),
+            "pre-existing fs_epoch_commit must not be overwritten"
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_DEV_PREV_COMMIT),
+            Some(&Value::Bytes([0x55; 32].to_vec()))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_DEV_COMMIT),
+            Some(&Value::Bytes([0x55; 32].to_vec()))
+        );
+    }
+
+    #[test]
+    fn recompute_srx_commit_returns_none_when_missing() -> Result<()> {
+        let header = BTreeMap::new();
+        assert!(recompute_srx_commit(&header)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn recompute_srx_commit_accepts_payload_and_rejects_wrong_type() -> Result<()> {
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_SRX_PAYLOAD, Value::Bytes(vec![0xAA, 0xBB, 0xCC]));
+        let commit = recompute_srx_commit(&header)?;
+        assert!(commit.is_some());
+
+        header.insert(hdr::HDR_SRX_PAYLOAD, Value::Text("bad".to_string()));
+        assert!(recompute_srx_commit(&header).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_leave_roundtrip_and_message_send() -> Result<()> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex::encode([0x91u8; 32]);
+        let alice = perform_join(&server_url, &room_id, "alice").await?;
+        let bob = perform_join(&server_url, &room_id, "bob").await?;
+
+        send_dummy_message(&bob).await?;
+        perform_leave(&alice, false).await?;
+        perform_leave(&bob, false).await?;
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expect_membership_event_matches_target() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(8);
+        let gid = [0x11; 32];
+        let leaf = [0x22; 32];
+
+        tx.send(Notification::Lag { lagged_messages: 3 }).await?;
+        tx.send(Notification::Membership {
+            gid: [0xFF; 32],
+            leaf_id: leaf,
+            event: "join".to_string(),
+            timestamp_ms: 1,
+        })
+        .await?;
+        tx.send(Notification::Membership {
+            gid,
+            leaf_id: leaf,
+            event: "join".to_string(),
+            timestamp_ms: 2,
+        })
+        .await?;
+
+        expect_membership_event(&mut rx, &gid, &leaf, "join", "membership".to_string()).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expect_membership_event_errors_on_closed_channel() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(1);
+        drop(tx);
+        let err = expect_membership_event(
+            &mut rx,
+            &[0u8; 32],
+            &[0u8; 32],
+            "join",
+            "closed".to_string(),
+        )
+        .await
+        .expect_err("closed channel should produce an error");
+        assert!(
+            err.to_string().contains("websocket channel closed"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expect_message_event_matches_target() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(8);
+        let weid = [0x33; 32];
+        tx.send(Notification::Lag { lagged_messages: 1 }).await?;
+        tx.send(Notification::Message {
+            we_epoch_id: [0x44; 32],
+            timestamp_ms: 7,
+        })
+        .await?;
+        tx.send(Notification::Message {
+            we_epoch_id: weid,
+            timestamp_ms: 8,
+        })
+        .await?;
+
+        expect_message_event(&mut rx, &weid, "message".to_string()).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expect_message_event_errors_on_closed_channel() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(1);
+        drop(tx);
+        let err = expect_message_event(&mut rx, &[0u8; 32], "closed".to_string())
+            .await
+            .expect_err("closed channel should produce an error");
+        assert!(
+            err.to_string().contains("websocket channel closed"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn spawn_notification_listener_rejects_unreachable_server() -> Result<()> {
+        let err = spawn_notification_listener("ws://127.0.0.1:9/v1/ws")
+            .await
+            .expect_err("connecting to unreachable websocket endpoint should fail");
+        assert!(
+            err.to_string().contains("failed to connect to websocket"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn spawn_notification_listener_receives_message_notification() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let weid = [0xAB; 32];
+        let weid_hex = hex::encode(weid);
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            ws.send(WsMessage::Text(
+                format!(r#"{{"type":"message","we_epoch_id":"{weid_hex}","timestamp_ms":42}}"#)
+                    .into(),
+            ))
+            .await?;
+            ws.close(None).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (mut rx, handle) = spawn_notification_listener(&format!("ws://{addr}/v1/ws")).await?;
+        let event = timeout(Duration::from_secs(2), rx.recv())
+            .await?
+            .ok_or_else(|| anyhow!("notification channel closed unexpectedly"))?;
+        match event {
+            Notification::Message {
+                we_epoch_id,
+                timestamp_ms,
+            } => {
+                assert_eq!(we_epoch_id, weid);
+                assert_eq!(timestamp_ms, 42);
+            }
+            other => return Err(anyhow!("unexpected notification event: {other:?}")),
+        }
+
+        drop(rx);
+        handle.abort();
+        let _ = handle.await;
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
+        Ok(())
+    }
+}
