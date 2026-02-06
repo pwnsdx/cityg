@@ -46,6 +46,8 @@ Deploying and managing City-G in production:
 - **[Configuration Guide](./configuration.md)** - Server and client configuration
 - **[Observability Guide](./OBSERVABILITY.md)** - Monitoring and troubleshooting
 - **[Deployment Guide](./protocol/14-deployment-guide.md)** - Deployment considerations
+- **[Release QA Checklist](./release-qa-checklist.md)** - End-to-end release gate checks
+- **[Security Review Checklist](./security-review-checklist.md)** - Security verification workflow
 - **[Timing Verification](./timing-verification.md)** - Side-channel analysis and verification
 
 ## 📖 Documentation by Topic
@@ -64,6 +66,8 @@ Deploying and managing City-G in production:
 - [Configuration Guide](./configuration.md) - All configuration options
 - [Examples Directory](./examples/) - Docker, Kubernetes, production configs
 - [Deployment Guide](./protocol/14-deployment-guide.md) - Production deployment
+- [Release QA Checklist](./release-qa-checklist.md) - Release validation gates
+- [Security Review Checklist](./security-review-checklist.md) - Security validation gates
 - [Observability](./OBSERVABILITY.md) - Monitoring and debugging
 
 ### Protocol Details

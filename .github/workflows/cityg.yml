@@ -42,3 +42,33 @@ jobs:
             echo "Running dudect target: $target"
             cargo run -p dudect-harness --release -- --target "$target" --samples 20000 --inner 16 --seed 4242
           done
+
+  release-matrix:
+    name: Release Matrix (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cityg-server
+            command: cargo test -p cityg-server
+            needs_ripgrep: false
+          - name: cityg-api
+            command: cargo test -p cityg-api
+            needs_ripgrep: false
+          - name: cityg-gui-native
+            command: cargo test -p cityg-gui --features native-app
+            needs_ripgrep: false
+          - name: server-blindness
+            command: ./scripts/verify_no_secrets.sh
+            needs_ripgrep: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install ripgrep
+        if: matrix.needs_ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+      - name: Run ${{ matrix.name }}
+        run: ${{ matrix.command }}

@@ -32,6 +32,7 @@ For security properties, guarantees, and verification methods, see:
 - **Security Model:** [`docs/protocol/10-security-model.md`](docs/protocol/10-security-model.md)
 - **Server Acceptance:** [`docs/protocol/07-server-acceptance.md`](docs/protocol/07-server-acceptance.md) (§3 - Publisher Blindness)
 - **Testing Guide:** [`docs/protocol/13-testing-guide.md`](docs/protocol/13-testing-guide.md)
+- **Security Review Checklist:** [`docs/security-review-checklist.md`](docs/security-review-checklist.md)
 
 ---
 
@@ -42,6 +43,9 @@ To verify security properties of the implementation:
 ```bash
 # Run automated security checks
 ./scripts/verify_no_secrets.sh
+
+# Run release-grade security review baseline
+./scripts/security_review.sh
 
 # Run full test suite
 cargo test --all

@@ -36,6 +36,7 @@ This document provides deployment guidance for City-G `tswe/msphf-we/fs-hybrid` 
 **✅ Security Audit**:
 - [ ] Run automated security checks: `./scripts/verify_no_secrets.sh`
 - [ ] Verify all 10 security checks pass
+- [ ] Run release security baseline: `./scripts/security_review.sh`
 - [ ] Review `docs/protocol/10-security-model.md` for latest audit results
 
 **✅ Test Suite**:
@@ -43,6 +44,7 @@ This document provides deployment guidance for City-G `tswe/msphf-we/fs-hybrid` 
 - [ ] Verify `cargo test --all --release` passes (capture current count with `cargo test --all -- --list | rg ': test$' | wc -l`)
 - [ ] Run Known-Answer Tests (KATs): `cargo run --bin cityg-hps-kat`
 - [ ] Verify KAT outputs match expected values
+- [ ] Run runtime smoke (`join/leave + capacity`): `./scripts/smoke_membership_capacity.sh`
 
 **✅ Constant-Time Verification**:
 - [ ] Run DUDECT harness: `cargo run --release --bin dudect-harness`
@@ -54,11 +56,11 @@ This document provides deployment guidance for City-G `tswe/msphf-we/fs-hybrid` 
 cargo build --release --locked
 
 # Verify binary size
-ls -lh target/release/cityg-server
+ls -lh target/release/cityg-api
 # Expected: ~5-10 MB (depends on features)
 
 # Strip debug symbols (optional)
-strip target/release/cityg-server
+strip target/release/cityg-api
 ```
 
 ---
@@ -631,25 +633,28 @@ as “rho replay detected” without scraping every `(gid,parent_root)` row.
 **1. Pre-deployment**:
 ```bash
 # Build release binary
-cargo build --release --locked
+cargo build --release --locked -p cityg-api
 
 # Run tests
 cargo test --all --release
 
 # Run security checks
-./scripts/verify_no_secrets.sh
+./scripts/security_review.sh
+
+# Runtime smoke
+./scripts/smoke_membership_capacity.sh
 
 # Verify binary
-sha256sum target/release/cityg-server
+sha256sum target/release/cityg-api
 ```
 
 **2. Deployment** (blue-green):
 ```bash
 # Deploy to staging (green)
-scp target/release/cityg-server staging:/opt/cityg/bin/
+scp target/release/cityg-api staging:/opt/cityg/bin/
 
 # Smoke test
-curl https://staging.cityg.example.com/health
+curl https://staging.cityg.example.com/health/ready
 
 # Switch traffic (blue → green)
 # (Load balancer configuration)
