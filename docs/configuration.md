@@ -182,6 +182,7 @@ max_card_height = 780.0                         # Max card height (pixels)
 - `CITYG_GUI_DEFAULT_WINDOW_HEIGHT` - Default window height
 - `CITYG_GUI_MEMBERS_PAGE_LIMIT` - Members pagination limit
 - `CITYG_GUI_MEMBERS_REFRESH_INTERVAL_SECS` - Automatic roster refresh cadence
+- `CITYG_GUI_SESSION_PASSPHRASE` - Optional passphrase used to derive GUI session encryption keys
 
 ## Usage Examples
 

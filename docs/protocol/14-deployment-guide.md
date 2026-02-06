@@ -758,7 +758,7 @@ systemctl reload cityg-server
 ### 7.5 Forward-Secrecy Snapshot Restore (GUI & CLI)
 
 City-G clients persist the forward-secrecy snapshot (the tuple
-`{k_fs, fs_ec, fs_dev_commit, last_weid}`) inside their session JSON. The GUI
+`{k_fs, fs_ec, fs_dev_commit, last_weid}`) inside their encrypted session file. The GUI
 stores sessions under:
 
 ```
@@ -768,28 +768,32 @@ Windows %APPDATA%\cityg\gui\session-<hash>.json
 ```
 
 (`CITYG_GUI_CONFIG_DIR` overrides the base directory.) Each file contains a
-`forward_state` block that mirrors `ForwardSecrecyState::snapshot()`, so
-exporting a snapshot is equivalent to copying this JSON to a secure vault.
+`ciphertext_hex` payload that wraps the serialized `forward_state` block. By
+default the encryption key is stored in `session-key-v1.bin` in the same
+directory; if `CITYG_GUI_SESSION_PASSPHRASE` is set, the key is derived from
+that passphrase instead.
 
 **Backup procedure**
 1. Ask the user to quit the GUI so the session flushes (CLI deployments can
    call `ForwardSecrecyState::snapshot()` via their automation before shutdown).
-2. Copy `session-<hash>.json` and `last-session.json` to encrypted storage.
-   Verify the copy contains `forward_state.k_fs_hex`.
+2. Copy `session-<hash>.json` and `last-session.json` to encrypted storage. If
+   no passphrase is configured, also copy `session-key-v1.bin`.
 3. Record the accompanying `fs_policy_version` and `fs_epoch_base_ts`; they must
    match on restore.
 
 **Restore procedure**
 1. Deploy the same client version and policy bundle on the destination host.
-2. Drop the backed-up session JSON into the config directory (or run the CLI
-   import command). File permissions should be user-only (`chmod 600` on Linux).
+2. Drop the backed-up session JSON into the config directory. If passphrase is
+   not used, restore `session-key-v1.bin` as well. File permissions should be
+   user-only (`chmod 600` on Linux).
 3. Launch the client; it will call `ForwardSecrecyState::with_state` with the
    restored snapshot and immediately resume autonomic evolution without replay.
 4. Verify in the GUI (“Forward Secrecy Epoch” panel) that the epoch counter,
    device commit, and base timestamp match the backed-up values.
 
-Treat the session files as sensitive (they contain `k_fs`), but note that they
-exclude KBROAD ciphertexts, so backing them up does not leak message payloads.
+Treat session files and key material as sensitive. Backups do not include
+KBROAD ciphertext payloads, so restoring snapshots does not reveal message
+plaintext by itself.
 
 ---
 

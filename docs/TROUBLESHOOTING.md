@@ -615,14 +615,14 @@ curl -X POST http://localhost:8080/v1/messages \
 let ticket = api.join_ticket(room_id).await?;  // Not bootstrap
 ```
 
-### "Invalid alias"
+### "Invalid room ID"
 
-**Cause**: Alias contains forbidden characters
+**Cause**: Room ID is not a 64-character hexadecimal identifier
 
-**Solution**: Use alphanumeric characters and hyphens only:
+**Solution**: Use a 64-hex room ID (or the GUI "Generate Random" button):
 ```rust
-let alias = "alice-device-1";  // Valid
-// Not: "alice@example.com"  // Invalid
+let room_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; // Valid
+// Not: "my-first-room" // Invalid
 ```
 
 ### "Rate limit exceeded"

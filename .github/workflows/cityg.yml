@@ -72,3 +72,26 @@ jobs:
           tool: ripgrep
       - name: Run ${{ matrix.name }}
         run: ${{ matrix.command }}
+
+  artifact-build:
+    name: Artifact Build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cityg-api-release
+            command: cargo build --release -p cityg-api
+            setup_rust: true
+          - name: cityg-gui-release
+            command: cargo build --release -p cityg-gui --features native-app
+            setup_rust: true
+          - name: docker-image
+            command: docker build -f Dockerfile -t cityg-api:ci .
+            setup_rust: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.setup_rust
+      - name: Build ${{ matrix.name }}
+        run: ${{ matrix.command }}

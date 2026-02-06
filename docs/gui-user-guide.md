@@ -115,7 +115,7 @@ You'll see the join screen:
 
 Fill in the join form:
 
-- **Room ID**: `my-first-room` (or click "Generate Random" for a unique ID)
+- **Room ID**: `8f7c...` (must be 64 hexadecimal characters; click "Generate Random" for a valid ID)
 - **Your Alias**: `alice` (your username in the group)
 - **Server URL**: `http://localhost:8080` (default)
 
@@ -137,7 +137,7 @@ The join form has three required fields:
 
 #### Room ID
 - **Purpose**: Identifies which group you're joining
-- **Format**: Alphanumeric string (e.g., `team-alpha`, `project-x`)
+- **Format**: 64 hexadecimal characters (32-byte room identifier)
 - **Tips**:
   - Use the **"Generate Random"** button for unique room IDs
   - Share this ID securely with your group members
@@ -413,25 +413,31 @@ The GUI establishes a WebSocket connection to receive instant message notificati
 
 ### Persistent Configuration
 
-The GUI stores your last session configuration in:
+The GUI stores your last session configuration in the platform config directory:
 ```
-~/.config/cityg-gui/config.json
+macOS:   ~/Library/Application Support/cityg/gui/
+Linux:   ~/.config/cityg/gui/
+Windows: %APPDATA%\\cityg\\gui\\
 ```
 
 **Stored data:**
 - Last room ID
 - Last alias
 - Last server URL
-- Session keypairs and state
+- Encrypted session keypairs and forward-secrecy state (`session-<hash>.json`)
+- Session key material (`session-key-v1.bin`) when no passphrase override is set
 
-**⚠️ Security Note:** The config file contains sensitive cryptographic keys. Protect it accordingly:
+**⚠️ Security Note:** Session files are encrypted at rest, but the local key file is sensitive. Protect the directory accordingly:
 ```bash
-chmod 600 ~/.config/cityg-gui/config.json
+chmod 700 ~/.config/cityg/gui
+chmod 600 ~/.config/cityg/gui/session-key-v1.bin
 ```
+
+For stronger protection, set `CITYG_GUI_SESSION_PASSPHRASE` before launching the GUI so encryption keys derive from your passphrase instead of the local key file.
 
 **To reset configuration:**
 ```bash
-rm -rf ~/.config/cityg-gui/
+rm -rf ~/.config/cityg/gui/
 ```
 
 ### Debug Mode
@@ -540,7 +546,7 @@ Logs will show:
 | Error | Meaning | Solution |
 |-------|---------|----------|
 | "Room already exists" | You're trying to bootstrap an existing room | Join without bootstrap (not first member) |
-| "Invalid alias" | Alias contains forbidden characters | Use alphanumeric characters only |
+| "Invalid room ID" | Room ID is malformed | Use 64 hexadecimal characters (or Generate Random) |
 | "Duplicate epoch ID" | Trying to resubmit same epoch | Generate a fresh epoch |
 | "Window full" | Server h_max exceeded | Wait for eviction or increase h_max |
 | "SPHF verification failed" | Cryptographic proof invalid | Check CRS compatibility, rejoin room |
@@ -602,7 +608,7 @@ Use TLS and verify server authenticity in production.
 
 **Q: How does forward secrecy work?**
 
-A: The GUI rotates epochs hourly. Old epoch keys are discarded, so past messages remain secure even if current keys leak.
+A: The GUI rotates epochs every 5 minutes by default (configurable via policy/config). Old epoch keys are discarded, so past messages remain secure even if current keys leak.
 
 ### Messaging
 
