@@ -28,8 +28,10 @@ curl -fsS http://127.0.0.1:8080/health/detailed
 3. Confirm telemetry/window endpoints respond:
 
 ```bash
-curl -fsS http://127.0.0.1:8080/v1/window
-curl -fsS http://127.0.0.1:8080/v1/telemetry
+curl -fsS -X POST -H 'content-type: application/x-protobuf' --data-binary '' \
+  http://127.0.0.1:8080/v1/window >/dev/null
+curl -fsS -X POST -H 'content-type: application/x-protobuf' --data-binary '' \
+  http://127.0.0.1:8080/v1/telemetry >/dev/null
 ```
 
 ## 3. Membership and Capacity Smoke
