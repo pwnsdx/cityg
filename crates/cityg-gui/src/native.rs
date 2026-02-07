@@ -233,6 +233,7 @@ struct AppModel {
     security_events: Vec<SecurityEvent>,
     security_unread: u32,
     security_panel_expanded: bool,
+    activity_events: Vec<ActivityEvent>,
 }
 
 enum JoinStatus {
@@ -262,7 +263,21 @@ enum WebSocketEvent {
     Connected,
     Disconnected,
     Message,
-    Membership([u8; 32]),
+    Membership(MembershipSignal),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MembershipSignalKind {
+    Join,
+    Revoke,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MembershipSignal {
+    gid: [u8; 32],
+    leaf_id: Option<[u8; 32]>,
+    kind: Option<MembershipSignalKind>,
+    timestamp_ms: Option<u64>,
 }
 
 async fn run_websocket_worker(
@@ -298,11 +313,35 @@ async fn run_websocket_worker(
                                         if let Some(gid_hex) =
                                             notification.get("gid").and_then(|v| v.as_str())
                                             && let Some(gid) = decode_hex_32(gid_hex)
-                                            && tx
-                                                .unbounded_send(WebSocketEvent::Membership(gid))
-                                                .is_err()
                                         {
-                                            return Ok(());
+                                            let signal = MembershipSignal {
+                                                gid,
+                                                leaf_id: notification
+                                                    .get("leaf_id")
+                                                    .and_then(|v| v.as_str())
+                                                    .and_then(decode_hex_32),
+                                                kind: match notification
+                                                    .get("event")
+                                                    .and_then(|v| v.as_str())
+                                                {
+                                                    Some("join") => {
+                                                        Some(MembershipSignalKind::Join)
+                                                    }
+                                                    Some("revoke") => {
+                                                        Some(MembershipSignalKind::Revoke)
+                                                    }
+                                                    _ => None,
+                                                },
+                                                timestamp_ms: notification
+                                                    .get("timestamp_ms")
+                                                    .and_then(|v| v.as_u64()),
+                                            };
+                                            if tx
+                                                .unbounded_send(WebSocketEvent::Membership(signal))
+                                                .is_err()
+                                            {
+                                                return Ok(());
+                                            }
                                         }
                                     }
                                     Some("lag") => {
@@ -643,6 +682,23 @@ struct SecurityEvent {
     timestamp_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivityKind {
+    Connection,
+    Roster,
+    Message,
+    Sync,
+    System,
+}
+
+#[derive(Clone, Debug)]
+struct ActivityEvent {
+    kind: ActivityKind,
+    summary: String,
+    detail: Option<String>,
+    timestamp_ms: u64,
+}
+
 #[derive(Clone)]
 struct ChatMessageEntry {
     sender_leaf: Option<[u8; 32]>,
@@ -770,6 +826,7 @@ impl AppModel {
             security_events: Vec::new(),
             security_unread: 0,
             security_panel_expanded: false,
+            activity_events: Vec::new(),
         };
 
         match load_last_session() {
@@ -1473,6 +1530,7 @@ impl AppModel {
             .child(self.session_row("KBROAD key (hex)", &hex_encode(&session.kbroad_public)))
             .child(self.render_members_panel(cx))
             .child(self.render_security_panel(cx))
+            .child(self.render_activity_panel(cx))
             .child(self.render_message_panel(session, cx))
             .child(self.render_leave_controls(cx));
 
@@ -1891,6 +1949,7 @@ impl AppModel {
                 }
 
                 self.info_message = Some("Adopted latest epoch head.".to_string());
+                self.record_activity(ActivityKind::Sync, "Adopted latest epoch head after sync");
                 self.reset_fetch_state();
                 self.schedule_fetch(cx, Duration::ZERO);
                 self.refresh_members_soft(cx);
@@ -1906,6 +1965,11 @@ impl AppModel {
                 }
                 warn!("epoch sync failed ({reason}): {err:?}");
                 self.last_error = Some(format!("Failed to sync latest epoch: {err}"));
+                self.record_activity_with_detail(
+                    ActivityKind::Sync,
+                    "Epoch sync failed",
+                    Some(err.to_string()),
+                );
                 cx.notify();
             }
         }
@@ -1989,6 +2053,10 @@ impl AppModel {
                     let added = self.append_messages(messages);
                     if added > 0 {
                         self.info_message = Some(format!("Fetched {added} new message(s)."));
+                        self.record_activity(
+                            ActivityKind::Message,
+                            format!("Fetched {added} new message(s)"),
+                        );
                     }
                 }
 
@@ -2020,6 +2088,11 @@ impl AppModel {
                     return;
                 }
                 self.last_error = Some(format!("Failed to fetch messages: {err}"));
+                self.record_activity_with_detail(
+                    ActivityKind::Message,
+                    "Message fetch failed",
+                    Some(err.to_string()),
+                );
                 self.fetch_status = FetchStatus::Idle;
                 self.config.client.fetch_retry_interval()
             }
@@ -2196,6 +2269,10 @@ impl AppModel {
                 let _ = this.update(cx, |model, cx| match event {
                     WebSocketEvent::Connected => {
                         model.ws_connected = true;
+                        model.record_activity(
+                            ActivityKind::Connection,
+                            "WebSocket connected (live updates enabled)",
+                        );
                         model.schedule_epoch_sync(
                             cx,
                             "Syncing latest epoch after WebSocket reconnect…",
@@ -2204,15 +2281,21 @@ impl AppModel {
                     }
                     WebSocketEvent::Disconnected => {
                         model.ws_connected = false;
+                        model.record_activity(
+                            ActivityKind::Connection,
+                            "WebSocket disconnected (falling back to polling)",
+                        );
                         cx.notify();
                     }
                     WebSocketEvent::Message => {
+                        model.record_activity(ActivityKind::Message, "New message notification");
                         if !model.fetch_in_flight {
                             model.schedule_fetch(cx, Duration::ZERO);
                         }
                     }
-                    WebSocketEvent::Membership(gid) => {
-                        model.handle_membership_signal(&gid, cx);
+                    WebSocketEvent::Membership(signal) => {
+                        model.record_membership_activity(&signal);
+                        model.handle_membership_signal(&signal, cx);
                     }
                 });
             }
@@ -2533,6 +2616,47 @@ impl AppModel {
         self.security_panel_expanded = true;
         self.persist_security_events_to_disk();
         cx.notify();
+    }
+
+    fn record_activity(&mut self, kind: ActivityKind, summary: impl Into<String>) {
+        self.record_activity_with_detail(kind, summary, None);
+    }
+
+    fn record_activity_with_detail(
+        &mut self,
+        kind: ActivityKind,
+        summary: impl Into<String>,
+        detail: Option<String>,
+    ) {
+        self.activity_events.push(ActivityEvent {
+            kind,
+            summary: summary.into(),
+            detail,
+            timestamp_ms: current_unix_timestamp_ms(),
+        });
+        if self.activity_events.len() > MAX_ACTIVITY_EVENTS {
+            let drain = self.activity_events.len() - MAX_ACTIVITY_EVENTS;
+            self.activity_events.drain(0..drain);
+        }
+    }
+
+    fn record_membership_activity(&mut self, signal: &MembershipSignal) {
+        let summary = match (signal.kind, signal.leaf_id) {
+            (Some(MembershipSignalKind::Join), Some(leaf)) => {
+                format!("Roster join: {}", short_leaf_display(&leaf))
+            }
+            (Some(MembershipSignalKind::Revoke), Some(leaf)) => {
+                format!("Roster revoke: {}", short_leaf_display(&leaf))
+            }
+            (Some(MembershipSignalKind::Join), None) => "Roster join detected".to_string(),
+            (Some(MembershipSignalKind::Revoke), None) => "Roster revoke detected".to_string(),
+            (None, Some(leaf)) => format!("Roster changed: {}", short_leaf_display(&leaf)),
+            (None, None) => "Roster changed".to_string(),
+        };
+        let detail = signal
+            .timestamp_ms
+            .map(|ts| format!("server timestamp {}", format_timestamp(ts)));
+        self.record_activity_with_detail(ActivityKind::Roster, summary, detail);
     }
 
     fn acknowledge_security_alerts(&mut self) {
@@ -3042,6 +3166,164 @@ impl AppModel {
             .child(list)
     }
 
+    fn render_activity_panel(&self, cx: &mut ViewContext<Self>) -> Div {
+        let count = self.activity_events.len();
+        let title = div()
+            .text_size(px(18.0))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(0xf2f4ff))
+            .child(format!("Live activity ({count})"));
+        let mut header = div().flex().items_center().justify_between().child(title);
+
+        if count > 0 {
+            let clear_button = div()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(8.0))
+                .text_size(px(12.0))
+                .text_color(rgb(0xf2f4ff))
+                .bg(rgb(0x383f56))
+                .cursor(CursorStyle::PointingHand)
+                .child("Clear")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(Self::on_activity_clear_clicked),
+                );
+            header = header.child(clear_button);
+        }
+
+        let ws_status = if self.ws_connected {
+            "WS live"
+        } else {
+            "Polling"
+        };
+        let total_members = self.members_total.max(self.members.len() as u64);
+        let metrics = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(999.0))
+                    .bg(rgb(0x213146))
+                    .text_size(px(11.0))
+                    .text_color(rgb(0x95c7ff))
+                    .child(ws_status),
+            )
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(999.0))
+                    .bg(rgb(0x21382f))
+                    .text_size(px(11.0))
+                    .text_color(rgb(0x95f0b6))
+                    .child(format!("messages {}", self.messages.len())),
+            )
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(999.0))
+                    .bg(rgb(0x39272b))
+                    .text_size(px(11.0))
+                    .text_color(rgb(0xffbf93))
+                    .child(format!("members {}/{}", self.members.len(), total_members)),
+            );
+
+        let mut list = div()
+            .mt(px(8.0))
+            .max_h(px(180.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0));
+        {
+            let interactivity = list.interactivity();
+            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
+        }
+
+        if self.activity_events.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(0xb8bed3))
+                    .child("No live activity yet."),
+            );
+        } else {
+            for event in self.activity_events.iter().rev() {
+                let (label, chip_bg, chip_text, card_bg) = match event.kind {
+                    ActivityKind::Connection => {
+                        ("connection", rgb(0x233553), rgb(0x95c7ff), rgb(0x1f2a3d))
+                    }
+                    ActivityKind::Roster => ("roster", rgb(0x4b2e2e), rgb(0xffbf93), rgb(0x302428)),
+                    ActivityKind::Message => {
+                        ("message", rgb(0x244032), rgb(0x95f0b6), rgb(0x1f2f27))
+                    }
+                    ActivityKind::Sync => ("sync", rgb(0x2a3f46), rgb(0x9fe7f0), rgb(0x212e34)),
+                    ActivityKind::System => ("system", rgb(0x373c4a), rgb(0xd0d6ef), rgb(0x262a36)),
+                };
+                let mut entry = div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .rounded(px(8.0))
+                    .bg(card_bg)
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .px(px(8.0))
+                                    .py(px(2.0))
+                                    .rounded(px(999.0))
+                                    .bg(chip_bg)
+                                    .text_size(px(10.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(chip_text)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0x9aa5d3))
+                                    .child(format_timestamp(event.timestamp_ms)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0xf2f4ff))
+                            .child(event.summary.clone()),
+                    );
+                if let Some(detail) = event.detail.as_ref().filter(|text| !text.is_empty()) {
+                    entry = entry.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x8b92b0))
+                            .child(detail.clone()),
+                    );
+                }
+                list = list.child(entry);
+            }
+        }
+
+        div()
+            .mt(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(header)
+            .child(metrics)
+            .child(list)
+    }
+
     fn focus_members_search(&mut self, cx: &mut ViewContext<Self>) {
         self.members_search.focus();
         self.composer.blur();
@@ -3080,11 +3362,11 @@ impl AppModel {
         }
     }
 
-    fn handle_membership_signal(&mut self, gid: &[u8; 32], cx: &mut ViewContext<Self>) {
+    fn handle_membership_signal(&mut self, signal: &MembershipSignal, cx: &mut ViewContext<Self>) {
         let Some(session) = &self.session else {
             return;
         };
-        if &session.gid != gid {
+        if session.gid != signal.gid {
             return;
         }
         if matches!(self.members_status, MembersStatus::Loading(_)) {
@@ -3481,6 +3763,8 @@ impl AppModel {
                 self.session = Some(session);
                 self.hydrate_alias_bindings_from_disk();
                 self.load_security_events_from_disk();
+                self.activity_events.clear();
+                self.record_activity(ActivityKind::System, "Joined room");
                 self.messages.clear();
                 self.message_keys.clear();
                 self.next_pending_message_id = 1;
@@ -3585,6 +3869,7 @@ impl AppModel {
                 self.security_events.clear();
                 self.security_unread = 0;
                 self.security_panel_expanded = false;
+                self.activity_events.clear();
             }
             Err(err) => {
                 self.set_error(&err, "leave", Some(RetryAction::Leave));
@@ -3730,6 +4015,14 @@ impl AppModel {
                     None
                 };
                 self.members_status = MembersStatus::Idle;
+                self.record_activity(
+                    ActivityKind::Roster,
+                    format!(
+                        "Roster refreshed: {} shown / {} total",
+                        self.members.len(),
+                        self.members_total
+                    ),
+                );
                 if parent_root_changed {
                     self.schedule_epoch_sync(cx, "Syncing latest epoch after roster root update…");
                 }
@@ -3758,6 +4051,11 @@ impl AppModel {
                 }
                 let detail = http_error_detail_from_anyhow(&err).unwrap_or_else(|| err.to_string());
                 warn!("failed to refresh members: {detail}");
+                self.record_activity_with_detail(
+                    ActivityKind::Roster,
+                    "Roster refresh failed",
+                    Some(detail.clone()),
+                );
                 self.members_status = MembersStatus::Error(detail);
                 self.members_auto_page = false;
                 self.members_alias_dirty = false;
@@ -3857,6 +4155,16 @@ impl AppModel {
         cx.notify();
     }
 
+    fn on_activity_clear_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.activity_events.clear();
+        cx.notify();
+    }
+
     fn on_security_panel_toggle_clicked(
         &mut self,
         _: &MouseDownEvent,
@@ -3915,6 +4223,7 @@ impl AppModel {
         self.security_events.clear();
         self.security_unread = 0;
         self.security_panel_expanded = false;
+        self.activity_events.clear();
         self.messages.clear();
         self.message_keys.clear();
         self.next_pending_message_id = 1;
@@ -3939,6 +4248,7 @@ impl AppModel {
                 self.confirm_pending_message(pending_id, entry);
                 self.info_message = Some("Message sent.".to_string());
                 self.show_success("Message sent successfully", cx);
+                self.record_activity(ActivityKind::Message, "You sent a message");
 
                 if let Some(session) = self.session.as_mut() {
                     let needs_update = session
@@ -3966,6 +4276,11 @@ impl AppModel {
                     return;
                 }
                 self.mark_pending_message_failed(pending_id);
+                self.record_activity_with_detail(
+                    ActivityKind::Message,
+                    "Message send failed",
+                    Some(err.to_string()),
+                );
                 self.set_error(&err, "send", Some(RetryAction::Send));
             }
         }
@@ -4202,6 +4517,7 @@ struct PersistedSession {
 const ALIAS_STORE_VERSION: u32 = 2;
 const SECURITY_LOG_VERSION: u32 = 1;
 const MAX_SECURITY_EVENTS: usize = 128;
+const MAX_ACTIVITY_EVENTS: usize = 256;
 const ENCRYPTED_SESSION_ENVELOPE_VERSION: u32 = 1;
 const ENCRYPTED_SESSION_ALG: &str = "chacha20poly1305";
 const SESSION_PASSPHRASE_ENV: &str = "CITYG_GUI_SESSION_PASSPHRASE";
@@ -6435,6 +6751,17 @@ fn format_timestamp(ts_ms: u64) -> String {
     format_rfc3339_seconds(dt).to_string()
 }
 
+fn current_unix_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn short_leaf_display(leaf: &[u8; 32]) -> String {
+    format!("{}…", hex_encode(&leaf[..4]))
+}
+
 fn recompute_proofs_commit(header: &BTreeMap<u64, Value>) -> Result<[u8; 32]> {
     let vrf = header_bytes(header, hdr::HDR_VRF_PROOF, "vrf_proof")?;
     let fs = header_bytes(header, hdr::HDR_FS_CAPSS, "fs_capss")?;
@@ -7519,6 +7846,8 @@ mod tests {
         let addr = listener.local_addr()?;
         let membership_gid = [0x42u8; 32];
         let membership_gid_hex = hex_encode(membership_gid);
+        let membership_leaf = [0xABu8; 32];
+        let membership_leaf_hex = hex_encode(membership_leaf);
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
@@ -7526,7 +7855,10 @@ mod tests {
             ws.send(WsMessage::Text(r#"{"type":"message"}"#.to_string().into()))
                 .await?;
             ws.send(WsMessage::Text(
-                format!(r#"{{"type":"membership","gid":"{membership_gid_hex}"}}"#).into(),
+                format!(
+                    r#"{{"type":"membership","gid":"{membership_gid_hex}","leaf_id":"{membership_leaf_hex}","event":"join","timestamp_ms":12345}}"#
+                )
+                .into(),
             ))
             .await?;
             ws.send(WsMessage::Text(
@@ -7561,8 +7893,11 @@ mod tests {
             match event {
                 WebSocketEvent::Connected => saw_connected = true,
                 WebSocketEvent::Message => saw_message = true,
-                WebSocketEvent::Membership(gid) => {
-                    if gid == membership_gid {
+                WebSocketEvent::Membership(signal) => {
+                    if signal.gid == membership_gid
+                        && signal.leaf_id == Some(membership_leaf)
+                        && signal.kind == Some(MembershipSignalKind::Join)
+                    {
                         saw_membership = true;
                     }
                 }
@@ -8386,6 +8721,27 @@ mod tests {
         assert_eq!(model.append_messages(vec![first]), 1);
         assert_eq!(model.append_messages(vec![second]), 0);
         assert_eq!(model.messages.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn activity_log_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let mut model = AppModel::new(CityGConfig::default());
+
+        for index in 0..(MAX_ACTIVITY_EVENTS + 10) {
+            model.record_activity(ActivityKind::System, format!("event {index}"));
+        }
+
+        assert_eq!(model.activity_events.len(), MAX_ACTIVITY_EVENTS);
+        assert_eq!(model.activity_events[0].summary, "event 10");
+        let expected_last = format!("event {}", MAX_ACTIVITY_EVENTS + 9);
+        assert_eq!(
+            model.activity_events.last().map(|e| e.summary.as_str()),
+            Some(expected_last.as_str())
+        );
         Ok(())
     }
 
