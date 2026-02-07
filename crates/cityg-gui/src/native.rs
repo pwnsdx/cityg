@@ -1886,6 +1886,13 @@ impl AppModel {
                 cx.notify();
             }
             Err(err) => {
+                if is_stale_server_session_error(&err) {
+                    self.handle_stale_server_session(
+                        "Saved session is no longer recognized by the server. Please join again.",
+                        cx,
+                    );
+                    return;
+                }
                 warn!("epoch sync failed ({reason}): {err:?}");
                 self.last_error = Some(format!("Failed to sync latest epoch: {err}"));
                 cx.notify();
@@ -1992,6 +1999,14 @@ impl AppModel {
                 self.config.client.fetch_poll_interval()
             }
             Err(err) => {
+                if is_stale_server_session_error(&err) {
+                    self.fetch_status = FetchStatus::Idle;
+                    self.handle_stale_server_session(
+                        "Saved session is no longer recognized by the server. Please join again.",
+                        cx,
+                    );
+                    return;
+                }
                 self.last_error = Some(format!("Failed to fetch messages: {err}"));
                 self.fetch_status = FetchStatus::Idle;
                 self.config.client.fetch_retry_interval()
@@ -3581,10 +3596,12 @@ impl AppModel {
     ) {
         match result {
             Ok(mut page) => {
+                let mut parent_root_changed = false;
                 if let Some(session) = self.session.as_mut()
                     && session.parent_root != page.root
                 {
                     session.parent_root = page.root;
+                    parent_root_changed = true;
                     if let Err(err) = persist_session(session) {
                         warn!("failed to persist session after members root update: {err:?}");
                     }
@@ -3610,6 +3627,9 @@ impl AppModel {
                     None
                 };
                 self.members_status = MembersStatus::Idle;
+                if parent_root_changed {
+                    self.schedule_epoch_sync(cx, "Syncing latest epoch after roster root update…");
+                }
                 if self.members_auto_page {
                     if self.members_next_offset.is_some() {
                         self.load_more_members_with_mode(cx, true);
@@ -3626,6 +3646,13 @@ impl AppModel {
                 }
             }
             Err(err) => {
+                if is_stale_server_session_error(&err) {
+                    self.handle_stale_server_session(
+                        "Saved session is no longer recognized by the server. Please join again.",
+                        cx,
+                    );
+                    return;
+                }
                 let detail = http_error_detail_from_anyhow(&err).unwrap_or_else(|| err.to_string());
                 warn!("failed to refresh members: {detail}");
                 self.members_status = MembersStatus::Error(detail);
@@ -3647,6 +3674,20 @@ impl AppModel {
                 self.info_message = None;
             }
         }
+        cx.notify();
+    }
+
+    fn handle_stale_server_session(&mut self, reason: &str, cx: &mut ViewContext<Self>) {
+        warn!("stale server session detected: {reason}");
+        if let Err(err) = self.reset_session_state() {
+            warn!("failed to clear stale session state: {err:?}");
+        }
+        self.last_error = Some(reason.to_string());
+        self.info_message = Some(
+            "Saved session cleared because server state changed. Rejoin the room to continue."
+                .to_string(),
+        );
+        self.show_error_toast("Session expired on server. Join room again.", cx);
         cx.notify();
     }
 
@@ -3812,6 +3853,13 @@ impl AppModel {
                 }
             }
             Err(err) => {
+                if is_stale_server_session_error(&err) {
+                    self.handle_stale_server_session(
+                        "Saved session is no longer recognized by the server. Please join again.",
+                        cx,
+                    );
+                    return;
+                }
                 self.set_error(&err, "send", Some(RetryAction::Send));
             }
         }
@@ -4919,6 +4967,32 @@ fn http_error_detail_from_anyhow(err: &anyhow::Error) -> Option<String> {
         }
     }
     None
+}
+
+fn api_http_status_from_anyhow(err: &anyhow::Error) -> Option<(u16, String)> {
+    for cause in err.chain() {
+        if let Some(ApiClientError::HttpStatus {
+            status, message, ..
+        }) = cause.downcast_ref::<ApiClientError>()
+        {
+            return Some((status.as_u16(), message.to_lowercase()));
+        }
+    }
+    None
+}
+
+fn is_stale_server_session_error(err: &anyhow::Error) -> bool {
+    let Some((status, message)) = api_http_status_from_anyhow(err) else {
+        return false;
+    };
+    if status == 404 {
+        return true;
+    }
+    status >= 500
+        && (message.contains("no anchors accepted for group")
+            || message.contains("leaf not present in roster")
+            || message.contains("unknown membership root")
+            || message.contains("resource not found"))
 }
 
 // Categorize errors into user-friendly messages with recovery suggestions
@@ -7658,7 +7732,7 @@ mod tests {
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x77u8; 32]);
 
-        let _alice = perform_join(JoinParams {
+        let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
@@ -7701,6 +7775,41 @@ mod tests {
         let sent = perform_send(SendParams::from_session(&bob, plaintext.clone())).await?;
         assert_eq!(sent.plaintext, plaintext);
         assert_eq!(sent.sender_leaf, Some(bob.leaf_id));
+
+        let stale_fetch = perform_fetch(FetchParams::from_session(&alice, None)).await?;
+        assert!(
+            stale_fetch
+                .messages
+                .iter()
+                .all(|message| message.plaintext != plaintext),
+            "pre-sync fetch should not decrypt messages from a newer epoch"
+        );
+
+        let alice_members = perform_fetch_members(MembersParams::from_session(
+            &alice,
+            0,
+            50,
+            MembersMode::Full,
+        ))
+        .await?;
+        let mut alice_with_latest_root = alice.clone();
+        alice_with_latest_root.parent_root = alice_members.root;
+        let synced_alice = perform_epoch_sync(alice_with_latest_root).await?;
+        assert!(
+            synced_alice.changed,
+            "epoch sync should adopt latest head after another member joins"
+        );
+
+        let synced_fetch =
+            perform_fetch(FetchParams::from_session(&synced_alice.session, None)).await?;
+        assert!(
+            synced_fetch
+                .messages
+                .iter()
+                .any(|message| message.plaintext == plaintext
+                    && message.sender_leaf == Some(bob.leaf_id)),
+            "post-sync fetch should include messages from the latest epoch"
+        );
 
         let fetched = perform_fetch(FetchParams::from_session(&bob, None)).await?;
         assert!(
@@ -8033,6 +8142,36 @@ mod tests {
         assert_eq!(result.user_message, "Resource not found");
         assert!(!result.can_retry);
         Ok(())
+    }
+
+    #[test]
+    fn stale_server_session_detection_matches_expected_http_errors() {
+        let not_found = anyhow!(ApiClientError::HttpStatus {
+            status: "404".parse().expect("parse 404 status"),
+            message: "resource not found".to_string(),
+            freeze_code: None,
+            freeze_reason: None,
+            failed_index: None,
+        });
+        assert!(is_stale_server_session_error(&not_found));
+
+        let missing_group = anyhow!(ApiClientError::HttpStatus {
+            status: "500".parse().expect("parse 500 status"),
+            message: "invalid input: no anchors accepted for group".to_string(),
+            freeze_code: None,
+            freeze_reason: None,
+            failed_index: None,
+        });
+        assert!(is_stale_server_session_error(&missing_group));
+
+        let unrelated = anyhow!(ApiClientError::HttpStatus {
+            status: "500".parse().expect("parse 500 status"),
+            message: "internal error".to_string(),
+            freeze_code: None,
+            freeze_reason: None,
+            failed_index: None,
+        });
+        assert!(!is_stale_server_session_error(&unrelated));
     }
 
     #[test]
