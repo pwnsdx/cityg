@@ -88,7 +88,7 @@ use msphf_core::{MsphfError, hash::eid_from_epoch, instance::AnchorInstance};
 use msphf_orchestrator::{
     AnchorInstanceParts, CapssWitnessBundle, ForwardSecrecyState, HpBindingInputs, HpProof,
     JoinerKGenResult, OrchestrationParams, PivotParity, extract_epoch_msphf_or, hdr::HDR_FS_EC,
-    joiner_kgen_merge_or, joiner_kgen_or,
+    joiner_kgen_merge_or, joiner_kgen_or, recover_hp_material_from_header,
 };
 use serde::{Deserialize, Serialize};
 
@@ -367,12 +367,15 @@ pub struct ClientEpochBundle {
     /// Witness extraction epoch ID (32 bytes)
     pub we_epoch_id: [u8; 32],
     /// Derived epoch key E_k for message encryption (local use only)
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub epoch_key: [u8; 32],
     /// Epoch ID (eid) derived from xk_hash and Y*
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub eid: [u8; 32],
     /// KBROAD ciphertext (encrypted hp)
     pub hp_ciphertext: Vec<u8>,
     /// HP AEAD key (derived, for local decryption)
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub hp_aead_key: [u8; 32],
 }
 
@@ -515,20 +518,54 @@ impl ClientEpochBundle {
     /// ciphertext. This must be called by clients after acceptance to derive
     /// the epoch secrets without relying on the server.
     pub fn derive_epoch_secrets(&self) -> Result<([u8; 32], [u8; 32]), CityGError> {
+        if self.hp_aead_key == [0u8; 32] {
+            return Err(CityGError::InvalidInput(
+                "bundle missing local hp key; use derive_epoch_secrets_with_kbroad_secret",
+            ));
+        }
+        self.derive_epoch_secrets_with_material(&self.hp_ciphertext, &self.hp_aead_key)
+    }
+
+    /// Recompute the epoch key and EID locally from the KBROAD envelope in
+    /// `header_map` using a room's KBROAD secret key.
+    pub fn derive_epoch_secrets_with_kbroad_secret(
+        &self,
+        kbroad_secret: &[u8],
+    ) -> Result<([u8; 32], [u8; 32]), CityGError> {
+        if self.hp_aead_key != [0u8; 32] {
+            return self.derive_epoch_secrets_with_material(&self.hp_ciphertext, &self.hp_aead_key);
+        }
+
+        let (hp_ciphertext, hp_key) = recover_hp_material_from_header(
+            &self.header_map,
+            &self.hp_binding.xk_hash,
+            &self.hp_binding.hp_commit,
+            kbroad_secret,
+        )?;
+        self.derive_epoch_secrets_with_material(&hp_ciphertext, &hp_key)
+    }
+
+    fn derive_epoch_secrets_with_material(
+        &self,
+        hp_ciphertext: &[u8],
+        hp_key: &[u8; 32],
+    ) -> Result<([u8; 32], [u8; 32]), CityGError> {
         let anchor = self.anchor_instance();
         let binding_inputs = self.hp_binding.as_inputs();
         let witness = self.witness_bytes().unwrap_or(&[]);
         let epoch_key = extract_epoch_msphf_or(
             &anchor,
             &self.hp_binding.xk_hash,
-            &self.hp_ciphertext,
-            &self.hp_aead_key,
+            hp_ciphertext,
+            hp_key,
             &self.hp_proof,
             &binding_inputs,
             witness,
         )?;
         let eid = eid_from_epoch(&epoch_key)?;
-        if epoch_key != self.epoch_key || eid != self.eid {
+        if (self.epoch_key != [0u8; 32] && epoch_key != self.epoch_key)
+            || (self.eid != [0u8; 32] && eid != self.eid)
+        {
             return Err(CityGError::InvalidInput("epoch secrets mismatch"));
         }
         Ok((epoch_key, eid))
@@ -711,7 +748,7 @@ impl GroupMembership {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::demo::{demo_bundle, demo_bundle_alice, demo_bundle_bob};
+    use crate::demo::{demo_bundle, demo_bundle_alice, demo_bundle_bob, kbroad_secret};
     use msphf_orchestrator::{
         FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, SrxMode,
     };
@@ -836,6 +873,29 @@ mod tests {
         group.apply_delta(&revoke);
         assert!(!group.contains(&[1; 32]));
         assert!(group.contains(&[2; 32]));
+    }
+
+    #[test]
+    fn wire_bundle_redacts_local_secrets() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = demo_bundle_alice()?;
+        let bytes = bundle.to_cbor()?;
+        let decoded = ClientEpochBundle::from_cbor(&bytes)?;
+        assert_eq!(decoded.epoch_key, [0u8; 32]);
+        assert_eq!(decoded.eid, [0u8; 32]);
+        assert_eq!(decoded.hp_aead_key, [0u8; 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn derive_with_kbroad_secret_works_for_wire_bundle() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = demo_bundle_bob()?;
+        let bytes = bundle.to_cbor()?;
+        let decoded = ClientEpochBundle::from_cbor(&bytes)?;
+
+        let (epoch_key, eid) = decoded.derive_epoch_secrets_with_kbroad_secret(kbroad_secret())?;
+        assert_eq!(epoch_key, bundle.epoch_key);
+        assert_eq!(eid, bundle.eid);
+        Ok(())
     }
 }
 

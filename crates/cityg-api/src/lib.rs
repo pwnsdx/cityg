@@ -488,14 +488,13 @@ async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Resp
         Err(err) => return Err(ApiError::from(err)),
     };
 
-    let response = apply_bundle(&state, &bundle, request.bundle_cbor).await?;
+    let response = apply_bundle(&state, &bundle).await?;
     Ok(protobuf_response(&response))
 }
 
 async fn apply_bundle(
     state: &ApiState,
     bundle: &ClientEpochBundle,
-    bundle_bytes: Vec<u8>,
 ) -> Result<AcceptEpochResponse, ApiError> {
     let mut weid = [0u8; 32];
     weid.copy_from_slice(&bundle.we_epoch_id);
@@ -511,7 +510,10 @@ async fn apply_bundle(
         }
     };
 
-    persist_bundle(state, bundle, weid, bundle_bytes).await?;
+    let sanitized_bundle = bundle
+        .to_cbor()
+        .map_err(|err| ApiError::server_message(format!("failed to sanitize bundle: {err}")))?;
+    persist_bundle(state, bundle, weid, sanitized_bundle).await?;
     Ok(accept_response_from(&outcome))
 }
 

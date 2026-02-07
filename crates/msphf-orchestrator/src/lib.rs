@@ -36,13 +36,14 @@ use msphf_rlwe::{
 };
 use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign};
 use pqcrypto_kyber::kyber768::{
-    PublicKey as MlKemPublicKey, encapsulate as ml_kem_encapsulate,
-    public_key_bytes as ml_kem_public_key_bytes,
+    Ciphertext as MlKemCiphertext, PublicKey as MlKemPublicKey, SecretKey as MlKemSecretKey,
+    ciphertext_bytes as ml_kem_ciphertext_bytes, decapsulate as ml_kem_decapsulate,
+    encapsulate as ml_kem_encapsulate, public_key_bytes as ml_kem_public_key_bytes,
 };
 use pqcrypto_traits::{
     kem::{
         Ciphertext as KemCiphertextTrait, PublicKey as KemPublicKeyTrait,
-        SharedSecret as KemSharedSecretTrait,
+        SecretKey as KemSecretKeyTrait, SharedSecret as KemSharedSecretTrait,
     },
     sign::DetachedSignature,
 };
@@ -593,6 +594,105 @@ pub(crate) fn build_kbroad_envelope(
         c_hp,
         k_hp,
     })
+}
+
+pub fn recover_hp_material_from_header(
+    header_map: &BTreeMap<u64, Value>,
+    xk_hash: &[u8; 32],
+    hp_commit: &[u8; 32],
+    kbroad_secret: &[u8],
+) -> Result<(Vec<u8>, [u8; 32]), MsphfError> {
+    let hp_value = header_map
+        .get(&HDR_HP_BYTES)
+        .ok_or_else(|| MsphfError::invalid_input("missing msphf_hp"))?;
+    let items = match hp_value {
+        Value::Array(items) => items,
+        _ => return Err(MsphfError::invalid_input("msphf_hp must be array")),
+    };
+    if items.len() != 5 {
+        return Err(MsphfError::invalid_input("msphf_hp shape mismatch"));
+    }
+
+    let mode = match &items[0] {
+        Value::Text(text) => text.as_str(),
+        Value::Bytes(bytes) => std::str::from_utf8(bytes)
+            .map_err(|_| MsphfError::invalid_input("kbroad mode invalid utf8"))?,
+        _ => return Err(MsphfError::invalid_input("kbroad mode malformed")),
+    };
+    if mode != KBROAD_MODE {
+        return Err(MsphfError::invalid_input("unsupported kbroad mode"));
+    }
+
+    let ct_bytes = match &items[1] {
+        Value::Bytes(bytes) => bytes.as_slice(),
+        _ => return Err(MsphfError::invalid_input("kbroad ciphertext malformed")),
+    };
+    if ct_bytes.len() != ml_kem_ciphertext_bytes() {
+        return Err(MsphfError::invalid_input(
+            "kbroad ciphertext length mismatch",
+        ));
+    }
+
+    let wrap_bytes = match &items[2] {
+        Value::Bytes(bytes) => bytes.as_slice(),
+        _ => return Err(MsphfError::invalid_input("kbroad wrap malformed")),
+    };
+    if wrap_bytes.len() != (32 + AEAD_TAG_LEN) {
+        return Err(MsphfError::invalid_input("kbroad wrap length mismatch"));
+    }
+
+    let hp_ciphertext = match &items[3] {
+        Value::Bytes(bytes) => bytes.clone(),
+        _ => return Err(MsphfError::invalid_input("msphf_hp ciphertext malformed")),
+    };
+    if hp_ciphertext.is_empty() || hp_ciphertext.len() > (MAX_HP_BYTES + AEAD_TAG_LEN) {
+        return Err(MsphfError::invalid_input(
+            "msphf_hp ciphertext length mismatch",
+        ));
+    }
+
+    let aead = match &items[4] {
+        Value::Text(text) => text.as_str(),
+        Value::Bytes(bytes) => std::str::from_utf8(bytes)
+            .map_err(|_| MsphfError::invalid_input("kbroad aead invalid utf8"))?,
+        _ => return Err(MsphfError::invalid_input("kbroad aead malformed")),
+    };
+    if aead != KBROAD_AEAD_SUITE {
+        return Err(MsphfError::invalid_input("unsupported kbroad aead"));
+    }
+
+    let kem_ct = MlKemCiphertext::from_bytes(ct_bytes)
+        .map_err(|_| MsphfError::invalid_input("kbroad ciphertext malformed"))?;
+    let kem_sk = MlKemSecretKey::from_bytes(kbroad_secret)
+        .map_err(|_| MsphfError::invalid_input("kbroad secret malformed"))?;
+    let kem_ss = ml_kem_decapsulate(&kem_ct, &kem_sk);
+
+    #[derive(Serialize)]
+    struct KekSalt<'a> {
+        #[serde(with = "serde_bytes")]
+        xk_hash: &'a [u8; 32],
+    }
+
+    let salt = h_l("hp/kek/salt", &KekSalt { xk_hash })?;
+    let mut info = Vec::with_capacity(KBROAD_INFO_PREFIX.len() + hp_commit.len());
+    info.extend_from_slice(KBROAD_INFO_PREFIX);
+    info.extend_from_slice(hp_commit);
+    let kek = hkdf_blake3(&salt, kem_ss.as_bytes(), &info);
+
+    let wrap_nonce = derive_kek_nonce(xk_hash, hp_commit)?;
+    let hp_key_bytes = decrypt_chacha20(
+        &kek,
+        &wrap_nonce,
+        hp_commit,
+        wrap_bytes,
+        "msphf_hp_wrap tag mismatch",
+    )?;
+    let hp_key: [u8; 32] = hp_key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| MsphfError::invalid_input("kbroad wrap plaintext malformed"))?;
+
+    Ok((hp_ciphertext, hp_key))
 }
 
 #[derive(Clone)]

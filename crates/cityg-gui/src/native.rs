@@ -6562,9 +6562,31 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
         bundle.witness = Some(ticket.witness_cbor.clone());
     }
 
-    let (derived_epoch_key, _) = bundle
-        .derive_epoch_secrets()
-        .context("failed to derive epoch key during sync")?;
+    let demo_kbroad_secret = bundle
+        .header_map
+        .get(&hdr::HDR_KBROAD_PUB)
+        .and_then(|value| match value {
+            Value::Bytes(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        })
+        .or(Some(session.kbroad_public.as_slice()))
+        .and_then(|public_key| {
+            if public_key == demo::kbroad_public() {
+                Some(demo::kbroad_secret())
+            } else {
+                None
+            }
+        });
+
+    let (derived_epoch_key, _) = if let Some(kbroad_secret) = demo_kbroad_secret {
+        bundle
+            .derive_epoch_secrets_with_kbroad_secret(kbroad_secret)
+            .context("failed to derive epoch key during sync")?
+    } else {
+        bundle
+            .derive_epoch_secrets()
+            .context("failed to derive epoch key during sync")?
+    };
 
     let gid = bytes32("gid", &bundle.anchor.gid)?;
     if gid != session.gid {

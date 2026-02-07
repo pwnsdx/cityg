@@ -24,7 +24,10 @@ use msphf_orchestrator::{
     SrxInputs, SrxMode, SrxNonMembershipAnchor, build_bootstrap_digest, deterministic_lb_vrf_keys,
 };
 use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign, keypair};
-use pqcrypto_kyber::kyber768::keypair as kyber_keypair;
+use pqcrypto_kyber::kyber768::{SecretKey as MlKemSecretKey, keypair as kyber_keypair};
+use pqcrypto_kyber::kyber768::{
+    public_key_bytes as kyber_public_key_bytes, secret_key_bytes as kyber_secret_key_bytes,
+};
 use pqcrypto_traits::{
     kem::{PublicKey as KemPublicKeyTrait, SecretKey as KemSecretKeyTrait},
     sign::{DetachedSignature, PublicKey, SecretKey},
@@ -190,9 +193,9 @@ pub fn bootstrap_public() -> &'static [u8] {
 
 fn kbroad_keys() -> &'static (Vec<u8>, Vec<u8>) {
     static KBROAD_KEYS: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
-    KBROAD_KEYS.get_or_init(|| {
-        let (pk, sk) = kyber_keypair();
-        (pk.as_bytes().to_vec(), sk.as_bytes().to_vec())
+    KBROAD_KEYS.get_or_init(|| match load_or_generate_kbroad_keys() {
+        Ok(keys) => keys,
+        Err(_) => unreachable!(),
     })
 }
 
@@ -206,6 +209,44 @@ fn bootstrap_keys() -> &'static (Vec<u8>, Box<MlDsaSecretKey>) {
 
 fn bootstrap_key_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("cityg").join("demo-bootstrap.key"))
+}
+
+fn kbroad_key_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("cityg").join("demo-kbroad.key"))
+}
+
+fn load_or_generate_kbroad_keys() -> Result<(Vec<u8>, Vec<u8>), CityGError> {
+    let pk_len = kyber_public_key_bytes();
+    let sk_len = kyber_secret_key_bytes();
+
+    if let Some(path) = kbroad_key_path() {
+        if let Ok(bytes) = fs::read(&path)
+            && bytes.len() == pk_len + sk_len
+        {
+            let pk = bytes[..pk_len].to_vec();
+            let sk = bytes[pk_len..].to_vec();
+            <pqcrypto_kyber::kyber768::PublicKey as KemPublicKeyTrait>::from_bytes(pk.as_slice())
+                .map_err(|_| CityGError::InvalidInput("kbroad public malformed"))?;
+            <MlKemSecretKey as KemSecretKeyTrait>::from_bytes(sk.as_slice())
+                .map_err(|_| CityGError::InvalidInput("kbroad secret malformed"))?;
+            return Ok((pk, sk));
+        }
+    }
+
+    let (pk, sk) = kyber_keypair();
+    let pair = (pk.as_bytes().to_vec(), sk.as_bytes().to_vec());
+
+    if let Some(path) = kbroad_key_path() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut payload = Vec::with_capacity(pair.0.len() + pair.1.len());
+        payload.extend_from_slice(pair.0.as_slice());
+        payload.extend_from_slice(pair.1.as_slice());
+        let _ = fs::write(path, payload);
+    }
+
+    Ok(pair)
 }
 
 fn load_or_generate_bootstrap_keys() -> Result<(Vec<u8>, Box<MlDsaSecretKey>), CityGError> {

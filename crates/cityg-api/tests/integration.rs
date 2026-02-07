@@ -5,7 +5,7 @@ use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
 use cityg_api_client::{CitygApiClient, Error};
 use cityg_client::{
     ClientEpochBundle,
-    demo::{DEMO_GID, bootstrap_public, demo_bundle, kbroad_public},
+    demo::{DEMO_GID, bootstrap_public, demo_bundle, kbroad_public, kbroad_secret},
 };
 use cityg_config::CityGConfig;
 use reqwest::StatusCode;
@@ -75,7 +75,19 @@ async fn end_to_end_demo_flow() {
         .expect("get bundle");
     let fetched_bundle =
         ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor).expect("decode bundle");
-    let (bob_epoch_key, _) = fetched_bundle.derive_epoch_secrets().expect("epoch key");
+    assert_eq!(
+        fetched_bundle.hp_aead_key,
+        [0u8; 32],
+        "server bundle must not expose local hp key"
+    );
+    assert_eq!(
+        fetched_bundle.epoch_key,
+        [0u8; 32],
+        "server bundle must not expose derived epoch key"
+    );
+    let (bob_epoch_key, _) = fetched_bundle
+        .derive_epoch_secrets_with_kbroad_secret(kbroad_secret())
+        .expect("epoch key");
     let cipher = ChaCha20Poly1305::new((&bob_epoch_key).into());
     let nonce = (&bob_bundle.we_epoch_id[..12]).into();
     let plaintext = b"secret hello";
@@ -641,7 +653,19 @@ async fn error_recovery_graceful_degradation() -> Result<()> {
         .expect("get bundle");
     let fetched_bundle =
         ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor).expect("decode bundle");
-    let (epoch_key, _) = fetched_bundle.derive_epoch_secrets().expect("epoch key");
+    assert_eq!(
+        fetched_bundle.hp_aead_key,
+        [0u8; 32],
+        "server bundle must not expose local hp key"
+    );
+    assert_eq!(
+        fetched_bundle.epoch_key,
+        [0u8; 32],
+        "server bundle must not expose derived epoch key"
+    );
+    let (epoch_key, _) = fetched_bundle
+        .derive_epoch_secrets_with_kbroad_secret(kbroad_secret())
+        .expect("epoch key");
 
     let key_array: &[u8; 32] = epoch_key
         .as_slice()
