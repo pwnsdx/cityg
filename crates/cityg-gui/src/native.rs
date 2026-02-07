@@ -207,6 +207,7 @@ struct AppModel {
     toasts: Vec<Toast>,
     messages: Vec<ChatMessageEntry>,
     message_keys: HashSet<MessageKey>,
+    next_pending_message_id: u64,
     fetch_status: FetchStatus,
     send_status: SendStatus,
     composer: MessageComposer,
@@ -649,11 +650,19 @@ struct ChatMessageEntry {
     plaintext: String,
     ciphertext_hex: String,
     timestamp_ms: u64,
+    delivery: MessageDelivery,
+    pending_id: Option<u64>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MessageDelivery {
+    Pending,
+    Sent,
+    Failed,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct MessageKey {
-    timestamp_ms: u64,
     ciphertext_hex: String,
     sender_leaf: Option<[u8; 32]>,
 }
@@ -735,6 +744,7 @@ impl AppModel {
             toasts: Vec::new(),
             messages: Vec::new(),
             message_keys: HashSet::new(),
+            next_pending_message_id: 1,
             fetch_status: FetchStatus::Idle,
             send_status: SendStatus::Idle,
             composer: MessageComposer::default(),
@@ -1883,6 +1893,7 @@ impl AppModel {
                 self.info_message = Some("Adopted latest epoch head.".to_string());
                 self.reset_fetch_state();
                 self.schedule_fetch(cx, Duration::ZERO);
+                self.refresh_members_soft(cx);
                 cx.notify();
             }
             Err(err) => {
@@ -1975,9 +1986,10 @@ impl AppModel {
                 } = result;
 
                 if !messages.is_empty() {
-                    let added = messages.len();
-                    self.append_messages(messages);
-                    self.info_message = Some(format!("Fetched {added} new message(s)."));
+                    let added = self.append_messages(messages);
+                    if added > 0 {
+                        self.info_message = Some(format!("Fetched {added} new message(s)."));
+                    }
                 }
 
                 if let Some(ts) = last_timestamp_ms
@@ -2018,18 +2030,81 @@ impl AppModel {
         }
     }
 
-    fn append_messages(&mut self, new_messages: Vec<ChatMessageEntry>) {
-        for message in new_messages {
+    fn append_messages(&mut self, new_messages: Vec<ChatMessageEntry>) -> usize {
+        let mut inserted = 0usize;
+        for mut message in new_messages {
+            if message.ciphertext_hex.is_empty() {
+                continue;
+            }
+            message.delivery = MessageDelivery::Sent;
+            message.pending_id = None;
             let key = MessageKey {
-                timestamp_ms: message.timestamp_ms,
                 ciphertext_hex: message.ciphertext_hex.clone(),
                 sender_leaf: message.sender_leaf,
             };
             if self.message_keys.insert(key) {
                 self.messages.push(message);
+                inserted = inserted.saturating_add(1);
             }
         }
         self.messages.sort_by_key(|m| m.timestamp_ms);
+        inserted
+    }
+
+    fn queue_pending_message(&mut self, session: &AppSession, plaintext: &str) -> u64 {
+        let pending_id = self.next_pending_message_id;
+        self.next_pending_message_id = self.next_pending_message_id.saturating_add(1);
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.messages.push(ChatMessageEntry {
+            sender_leaf: Some(session.leaf_id),
+            fallback_label: session.alias.clone(),
+            plaintext: plaintext.to_string(),
+            ciphertext_hex: String::new(),
+            timestamp_ms,
+            delivery: MessageDelivery::Pending,
+            pending_id: Some(pending_id),
+        });
+        self.messages.sort_by_key(|m| m.timestamp_ms);
+        pending_id
+    }
+
+    fn confirm_pending_message(&mut self, pending_id: u64, mut entry: ChatMessageEntry) {
+        entry.delivery = MessageDelivery::Sent;
+        entry.pending_id = None;
+        let key = MessageKey {
+            ciphertext_hex: entry.ciphertext_hex.clone(),
+            sender_leaf: entry.sender_leaf,
+        };
+
+        if self.message_keys.insert(key) {
+            if let Some(index) = self
+                .messages
+                .iter()
+                .position(|message| message.pending_id == Some(pending_id))
+            {
+                self.messages[index] = entry;
+            } else {
+                self.messages.push(entry);
+            }
+        } else {
+            self.messages
+                .retain(|message| message.pending_id != Some(pending_id));
+        }
+        self.messages.sort_by_key(|m| m.timestamp_ms);
+    }
+
+    fn mark_pending_message_failed(&mut self, pending_id: u64) {
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.pending_id == Some(pending_id))
+        {
+            message.delivery = MessageDelivery::Failed;
+            message.pending_id = None;
+        }
     }
 
     // Stop background epoch sync task
@@ -2248,37 +2323,56 @@ impl AppModel {
             let timestamp =
                 format_rfc3339_seconds(UNIX_EPOCH + Duration::from_millis(message.timestamp_ms));
             let sender = self.resolve_sender_label(message);
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .bg(rgb(0x1b2135))
-                    .rounded(px(10.0))
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .text_size(px(13.0))
-                            .text_color(rgb(0x9aa5d3))
-                            .child(format!("{} • {}", sender, timestamp)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(15.0))
-                            .text_color(rgb(0xf2f4ff))
-                            .child(message.plaintext.clone()),
-                    )
-                    .child(div().text_size(px(11.0)).text_color(rgb(0x5b6584)).child(
-                        if self.show_ciphertext {
-                            format!("ciphertext: {}", message.ciphertext_hex)
-                        } else {
-                            "ciphertext hidden".to_string()
-                        },
-                    )),
-            );
+            let (card_bg, body_color, meta_color, status_line) = match message.delivery {
+                MessageDelivery::Pending => (
+                    rgb(0x1a2131),
+                    rgb(0xb8bed3),
+                    rgb(0x7f89ab),
+                    Some(("sending...", rgb(0x72f88e))),
+                ),
+                MessageDelivery::Failed => (
+                    rgb(0x2b1c27),
+                    rgb(0xffd5e5),
+                    rgb(0xff9f68),
+                    Some(("failed to send", rgb(0xff6b6b))),
+                ),
+                MessageDelivery::Sent => (rgb(0x1b2135), rgb(0xf2f4ff), rgb(0x5b6584), None),
+            };
+            let mut entry = div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .bg(card_bg)
+                .rounded(px(10.0))
+                .px(px(12.0))
+                .py(px(10.0))
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0x9aa5d3))
+                        .child(format!("{} • {}", sender, timestamp)),
+                )
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .text_color(body_color)
+                        .child(message.plaintext.clone()),
+                )
+                .child(div().text_size(px(11.0)).text_color(meta_color).child(
+                    if self.show_ciphertext {
+                        format!("ciphertext: {}", message.ciphertext_hex)
+                    } else {
+                        "ciphertext hidden".to_string()
+                    },
+                ));
+
+            if let Some((label, color)) = status_line {
+                entry = entry.child(div().text_size(px(11.0)).text_color(color).child(label));
+            }
+
+            list = list.child(entry);
         }
 
         list
@@ -3326,7 +3420,7 @@ impl AppModel {
     }
 
     fn start_send(&mut self, cx: &mut ViewContext<Self>) {
-        let Some(session) = self.session.as_ref() else {
+        let Some(session) = self.session.clone() else {
             return;
         };
         if !self.composer.is_ready() {
@@ -3340,6 +3434,7 @@ impl AppModel {
         if plaintext.is_empty() {
             return;
         }
+        let pending_id = self.queue_pending_message(&session, &plaintext);
 
         self.composer.clear();
         self.composer.focus();
@@ -3349,13 +3444,13 @@ impl AppModel {
         self.info_message = None;
         cx.notify();
 
-        let params = SendParams::from_session(session, plaintext);
+        let params = SendParams::from_session(&session, plaintext);
         let task = Tokio::spawn_result(cx, async move { perform_send(params).await });
 
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
             let _ = this.update(cx, |model, cx| {
-                model.on_send_finished(outcome, cx);
+                model.on_send_finished(outcome, pending_id, cx);
             });
         })
         .detach();
@@ -3383,6 +3478,8 @@ impl AppModel {
                 self.hydrate_alias_bindings_from_disk();
                 self.load_security_events_from_disk();
                 self.messages.clear();
+                self.message_keys.clear();
+                self.next_pending_message_id = 1;
                 self.composer.clear();
                 self.composer.blur();
                 self.send_status = SendStatus::Idle;
@@ -3463,6 +3560,8 @@ impl AppModel {
                     self.show_success("Successfully left the room", cx);
                 }
                 self.messages.clear();
+                self.message_keys.clear();
+                self.next_pending_message_id = 1;
                 self.composer.clear();
                 self.composer.blur();
                 self.send_status = SendStatus::Idle;
@@ -3814,6 +3913,7 @@ impl AppModel {
         self.security_panel_expanded = false;
         self.messages.clear();
         self.message_keys.clear();
+        self.next_pending_message_id = 1;
         self.composer.clear();
         self.composer.blur();
         self.show_ciphertext = false;
@@ -3825,13 +3925,14 @@ impl AppModel {
     fn on_send_finished(
         &mut self,
         result: anyhow::Result<ChatMessageEntry>,
+        pending_id: u64,
         cx: &mut ViewContext<Self>,
     ) {
         self.send_status = SendStatus::Idle;
         match result {
             Ok(entry) => {
                 let ts = entry.timestamp_ms;
-                self.append_messages(vec![entry]);
+                self.confirm_pending_message(pending_id, entry);
                 self.info_message = Some("Message sent.".to_string());
                 self.show_success("Message sent successfully", cx);
 
@@ -3860,6 +3961,7 @@ impl AppModel {
                     );
                     return;
                 }
+                self.mark_pending_message_failed(pending_id);
                 self.set_error(&err, "send", Some(RetryAction::Send));
             }
         }
@@ -5847,6 +5949,8 @@ async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
         plaintext,
         ciphertext_hex: hex_encode(&ciphertext),
         timestamp_ms,
+        delivery: MessageDelivery::Sent,
+        pending_id: None,
     })
 }
 
@@ -5960,6 +6064,8 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
                     plaintext,
                     ciphertext_hex: hex_encode(&message.ciphertext),
                     timestamp_ms: message.timestamp_ms,
+                    delivery: MessageDelivery::Sent,
+                    pending_id: None,
                 });
             }
             Err(e) => {
@@ -8172,6 +8278,79 @@ mod tests {
             failed_index: None,
         });
         assert!(!is_stale_server_session_error(&unrelated));
+    }
+
+    #[test]
+    fn append_messages_dedupes_same_ciphertext_across_timestamp_drift()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let mut model = AppModel::new(CityGConfig::default());
+        let leaf = [0x11; 32];
+
+        let first = ChatMessageEntry {
+            sender_leaf: Some(leaf),
+            fallback_label: "alice".to_string(),
+            plaintext: "hello".to_string(),
+            ciphertext_hex: "deadbeef".to_string(),
+            timestamp_ms: 1_000,
+            delivery: MessageDelivery::Sent,
+            pending_id: None,
+        };
+        let second = ChatMessageEntry {
+            sender_leaf: Some(leaf),
+            fallback_label: "alice".to_string(),
+            plaintext: "hello".to_string(),
+            ciphertext_hex: "deadbeef".to_string(),
+            timestamp_ms: 1_350,
+            delivery: MessageDelivery::Sent,
+            pending_id: None,
+        };
+
+        assert_eq!(model.append_messages(vec![first]), 1);
+        assert_eq!(model.append_messages(vec![second]), 0);
+        assert_eq!(model.messages.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn confirm_pending_message_replaces_placeholder() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let mut model = AppModel::new(CityGConfig::default());
+        let pending_id = 42;
+        let leaf = [0x22; 32];
+
+        model.messages.push(ChatMessageEntry {
+            sender_leaf: Some(leaf),
+            fallback_label: "sab".to_string(),
+            plaintext: "Test".to_string(),
+            ciphertext_hex: String::new(),
+            timestamp_ms: 2_000,
+            delivery: MessageDelivery::Pending,
+            pending_id: Some(pending_id),
+        });
+
+        model.confirm_pending_message(
+            pending_id,
+            ChatMessageEntry {
+                sender_leaf: Some(leaf),
+                fallback_label: "sab".to_string(),
+                plaintext: "Test".to_string(),
+                ciphertext_hex: "cafebabe".to_string(),
+                timestamp_ms: 2_010,
+                delivery: MessageDelivery::Sent,
+                pending_id: None,
+            },
+        );
+
+        assert_eq!(model.messages.len(), 1);
+        assert_eq!(model.messages[0].ciphertext_hex, "cafebabe");
+        assert_eq!(model.messages[0].delivery, MessageDelivery::Sent);
+        assert_eq!(model.messages[0].pending_id, None);
+        Ok(())
     }
 
     #[test]
