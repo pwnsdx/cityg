@@ -976,6 +976,7 @@ impl JoinFormState {
 impl Render for AppModel {
     fn render(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
         self.ensure_fetch_loop(cx);
+        self.ensure_websocket_task(cx);
         self.ensure_epoch_sync_task(cx);
         self.ensure_members_refresh_task(cx);
         self.cleanup_expired_toasts();
@@ -1781,6 +1782,18 @@ impl AppModel {
         // Keep the task lifecycle bounded to active sessions.
         if self.session.is_none() && self.epoch_sync_task.is_some() {
             self.stop_epoch_sync_task();
+        }
+    }
+
+    fn ensure_websocket_task(&mut self, cx: &mut ViewContext<Self>) {
+        if self.session.is_none() {
+            self.stop_websocket();
+            return;
+        }
+
+        if self.ws_task.is_none() {
+            self.start_websocket(cx);
+            self.schedule_epoch_sync(cx, "Syncing latest epoch after session restore…");
         }
     }
 
@@ -3568,6 +3581,14 @@ impl AppModel {
     ) {
         match result {
             Ok(mut page) => {
+                if let Some(session) = self.session.as_mut()
+                    && session.parent_root != page.root
+                {
+                    session.parent_root = page.root;
+                    if let Err(err) = persist_session(session) {
+                        warn!("failed to persist session after members root update: {err:?}");
+                    }
+                }
                 page.members.sort_by(|a, b| {
                     let alias_cmp = a.alias.as_ref().cmp(&b.alias.as_ref());
                     if alias_cmp.is_eq() {
@@ -3884,6 +3905,7 @@ struct MembersParams {
 
 struct MembersPage {
     members: Vec<MemberEntry>,
+    root: [u8; 32],
     total_count: u64,
     next_offset: u64,
 }
@@ -5599,20 +5621,44 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
 
 async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
     let client = CitygApiClient::new(&params.server_url);
-    let (raw_members, total_count, next_offset) = match &params.mode {
+    let (raw_members, root, total_count, next_offset) = match &params.mode {
         MembersMode::Full => {
-            let response = client
+            let response = match client
                 .members_with_range(
                     &params.gid,
                     Some(&params.parent_root),
                     Some(params.offset),
                     Some(params.limit),
                 )
-                .await?;
-            (response.members, response.total_count, response.next_offset)
+                .await
+            {
+                Ok(response) => response,
+                Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
+                    info!(
+                        "members root {} not found for gid {}; retrying with latest root",
+                        hex_encode(params.parent_root),
+                        hex_encode(params.gid)
+                    );
+                    client
+                        .members_with_range(
+                            &params.gid,
+                            None,
+                            Some(params.offset),
+                            Some(params.limit),
+                        )
+                        .await?
+                }
+                Err(err) => return Err(err.into()),
+            };
+            (
+                response.members,
+                response.root,
+                response.total_count,
+                response.next_offset,
+            )
         }
         MembersMode::Search { query } => {
-            let response = client
+            let response = match client
                 .search_members(
                     &params.gid,
                     query,
@@ -5620,10 +5666,39 @@ async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
                     Some(params.offset),
                     Some(params.limit),
                 )
-                .await?;
-            (response.members, response.total_count, response.next_offset)
+                .await
+            {
+                Ok(response) => response,
+                Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
+                    info!(
+                        "search root {} not found for gid {}; retrying with latest root",
+                        hex_encode(params.parent_root),
+                        hex_encode(params.gid)
+                    );
+                    client
+                        .search_members(
+                            &params.gid,
+                            query,
+                            None,
+                            Some(params.offset),
+                            Some(params.limit),
+                        )
+                        .await?
+                }
+                Err(err) => return Err(err.into()),
+            };
+            (
+                response.members,
+                response.root,
+                response.total_count,
+                response.next_offset,
+            )
         }
     };
+    let root: [u8; 32] = root
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("members root must be 32 bytes"))?;
     let mut members = Vec::with_capacity(raw_members.len());
     for entry in raw_members {
         let leaf_id: [u8; 32] = entry
@@ -5643,6 +5718,7 @@ async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
     }
     Ok(MembersPage {
         members,
+        root,
         total_count,
         next_offset,
     })
@@ -7651,6 +7727,63 @@ mod tests {
                 "since filter must drop already-seen messages"
             );
         }
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn members_fetch_recovers_from_stale_parent_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x79u8; 32]);
+
+        let _alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        let mut bob = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+
+        // Simulate stale local state (e.g., restored session with outdated parent_root).
+        bob.parent_root = [0xAB; 32];
+
+        let members =
+            perform_fetch_members(MembersParams::from_session(&bob, 0, 50, MembersMode::Full))
+                .await?;
+        assert!(
+            !members.members.is_empty(),
+            "fallback to latest root should return members"
+        );
+        assert_ne!(
+            members.root, [0xAB; 32],
+            "fallback should adopt the server-reported root"
+        );
+
+        let search = perform_fetch_members(MembersParams::from_session(
+            &bob,
+            0,
+            50,
+            MembersMode::Search {
+                query: "ali".to_string(),
+            },
+        ))
+        .await?;
+        assert!(
+            search.total_count >= search.members.len() as u64,
+            "search fallback should produce coherent pagination metadata"
+        );
 
         handle.abort();
         let _ = handle.await;
