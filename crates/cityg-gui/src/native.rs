@@ -8157,6 +8157,124 @@ mod tests {
         assert_eq!(appended, "alice  bob");
     }
 
+    #[test]
+    fn message_composer_keystroke_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let mut composer = MessageComposer::default();
+        let a = Keystroke::parse("a")?;
+        assert!(matches!(
+            composer.handle_keystroke(&a),
+            KeyOutcome::None
+        ));
+
+        composer.focus();
+        composer.set_text("hi".to_string());
+        assert_eq!(composer.text(), "hi");
+
+        let backspace = Keystroke::parse("backspace")?;
+        assert!(matches!(
+            composer.handle_keystroke(&backspace),
+            KeyOutcome::Updated
+        ));
+        assert_eq!(composer.text(), "h");
+
+        let space = Keystroke::parse("space")?;
+        assert!(matches!(
+            composer.handle_keystroke(&space),
+            KeyOutcome::Updated
+        ));
+        assert_eq!(composer.text(), "h ");
+
+        let delete = Keystroke::parse("delete")?;
+        assert!(matches!(
+            composer.handle_keystroke(&delete),
+            KeyOutcome::Updated
+        ));
+        assert_eq!(composer.text(), "");
+
+        composer.set_text("ok".to_string());
+        let enter = Keystroke::parse("enter")?;
+        assert!(matches!(
+            composer.handle_keystroke(&enter),
+            KeyOutcome::Submit
+        ));
+
+        let escape = Keystroke::parse("escape")?;
+        assert!(matches!(
+            composer.handle_keystroke(&escape),
+            KeyOutcome::Updated
+        ));
+        assert!(!composer.active);
+        Ok(())
+    }
+
+    #[test]
+    fn members_search_keystroke_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let mut search = MembersSearchState::default();
+        let a = Keystroke::parse("a")?;
+        assert!(matches!(search.handle_keystroke(&a), KeyOutcome::None));
+
+        search.focus();
+        search.set_query("ab".to_string());
+        assert_eq!(search.query(), "ab");
+
+        let backspace = Keystroke::parse("backspace")?;
+        assert!(matches!(
+            search.handle_keystroke(&backspace),
+            KeyOutcome::Updated
+        ));
+        assert_eq!(search.query(), "a");
+
+        let delete = Keystroke::parse("delete")?;
+        assert!(matches!(
+            search.handle_keystroke(&delete),
+            KeyOutcome::Updated
+        ));
+        assert_eq!(search.query(), "");
+
+        let enter = Keystroke::parse("enter")?;
+        assert!(matches!(search.handle_keystroke(&enter), KeyOutcome::Submit));
+
+        let tab = Keystroke::parse("tab")?;
+        assert!(matches!(search.handle_keystroke(&tab), KeyOutcome::Updated));
+        assert!(!search.active);
+        Ok(())
+    }
+
+    #[test]
+    fn join_form_keystroke_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let mut form = JoinFormState {
+            server: "http://127.0.0.1:18080".to_string(),
+            room_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            alias: "alice".to_string(),
+            active: Some(ActiveField::Server),
+        };
+
+        assert!(JoinFormState::next_field(ActiveField::Server) == ActiveField::Room);
+        assert!(JoinFormState::previous_field(ActiveField::Server) == ActiveField::Alias);
+
+        let tab = Keystroke::parse("tab")?;
+        assert!(matches!(form.handle_keystroke(&tab), KeyOutcome::Updated));
+        assert!(form.active == Some(ActiveField::Room));
+        assert_eq!(form.field(ActiveField::Alias), "alice");
+
+        {
+            let room = form.field_mut(ActiveField::Room);
+            room.truncate(63);
+        }
+        assert!(!form.is_ready());
+        form.field_mut(ActiveField::Room).push('f');
+        assert!(form.is_ready());
+
+        let enter = Keystroke::parse("enter")?;
+        assert!(matches!(form.handle_keystroke(&enter), KeyOutcome::Submit));
+
+        let escape = Keystroke::parse("escape")?;
+        assert!(matches!(form.handle_keystroke(&escape), KeyOutcome::Updated));
+        assert!(form.active.is_none());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn websocket_worker_emits_membership_and_message_events()
     -> Result<(), Box<dyn std::error::Error>> {
