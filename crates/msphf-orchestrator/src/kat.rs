@@ -1653,4 +1653,634 @@ mod tests {
         assert_eq!(expected_freeze, "924");
         Ok(())
     }
+
+    fn scenario_fixture() -> Result<(
+        OwnedAnchor,
+        BTreeMap<u64, Value>,
+        HeadSnapshot,
+        [u8; 32],
+        [u8; 32],
+        Vec<u8>,
+    )> {
+        let plan = basic_plan(None);
+        let base = BaseContext::try_from_plan(&plan)?;
+        let BaseContext {
+            anchor,
+            header,
+            rho: _,
+            seed_drbg: _,
+            witness_bytes: _,
+        } = base;
+        let parts = anchor.parts();
+
+        let we_epoch_id = [0x11; 32];
+        let seed_ctx_hash = [0x22; 32];
+        let seed_commit = [0x33; 32];
+        let rho_commit = [0x44; 32];
+        let hp_commit = [0x55; 32];
+        let hp_ciphertext = vec![0x66; 48];
+        let epoch_key = [0x77; 32];
+        let eid = [0x88; 32];
+        let anchor_hdr_ctx = [0xAB, 0xCD];
+
+        let head = build_head_snapshot(
+            &parts,
+            header_to_hex(&header)?,
+            &anchor_hdr_ctx,
+            we_epoch_id,
+            &seed_ctx_hash,
+            &seed_commit,
+            &rho_commit,
+            &hp_commit,
+            &hp_ciphertext,
+            &epoch_key,
+            &eid,
+        );
+        Ok((anchor, header, head, we_epoch_id, hp_commit, hp_ciphertext))
+    }
+
+    fn anchor_instance_from_owned<'a>(
+        anchor: &'a OwnedAnchor,
+        we_epoch_id: [u8; 32],
+        hp_commit: Option<&'a [u8]>,
+    ) -> AnchorInstance<'a> {
+        let parts = anchor.parts();
+        AnchorInstance {
+            gid: parts.gid,
+            cat: parts.cat,
+            we_epoch_id,
+            anchor_hdr_ctx: b"kat-test-ctx",
+            tswe_salt_hash: parts.tswe_salt_hash,
+            parent_root: parts.parent_root,
+            join_delta_root: parts.join_delta_root,
+            revoked_since_prev_root: parts.revoked_since_prev_root,
+            revoked_root: parts.revoked_root,
+            pox_r_commit: parts.pox_r_commit,
+            msphf_hp_commit: hp_commit,
+        }
+    }
+
+    #[test]
+    fn serde_defaults_apply_for_case_branch_and_window() -> Result<()> {
+        let case: PlanCase = serde_json::from_value(json!({
+            "id": "defaulted"
+        }))?;
+        ensure!(matches!(case.branch, CaseBranch::A), "default branch must be A");
+
+        let scenario: ScenarioPlan = serde_json::from_value(json!({
+            "kind": "mhw-clock",
+            "first_dp_ms": 1,
+            "second_accept_ms": 2,
+            "second_dp_ms": 3
+        }))?;
+        let ScenarioPlan::MhwClock { t_window_secs, .. } = scenario else {
+            return Err(anyhow!("expected mhw-clock scenario"));
+        };
+        assert_eq!(t_window_secs, 10);
+        Ok(())
+    }
+
+    #[test]
+    fn base_context_rejects_invalid_hex_inputs() {
+        let mut plan = basic_plan(None);
+        plan.base.rho = "not-hex".to_string();
+        assert!(BaseContext::try_from_plan(&plan).is_err());
+
+        let mut plan = basic_plan(None);
+        plan.base.anchor.parent_root = "not-hex".to_string();
+        assert!(BaseContext::try_from_plan(&plan).is_err());
+    }
+
+    #[test]
+    fn generate_from_plan_file_reports_io_and_parse_errors() {
+        let missing = env::temp_dir().join("does-not-exist-kat-plan.json");
+        assert!(generate_from_plan_file(&missing).is_err());
+
+        let temp_path = env::temp_dir().join(format!(
+            "kat_plan_invalid_{}.json",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before UNIX epoch")
+                .as_millis()
+        ));
+        fs::write(&temp_path, b"{invalid-json").expect("write invalid json");
+        let result = generate_from_plan_file(&temp_path);
+        let _ = fs::remove_file(&temp_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn helper_parsers_cover_error_paths() {
+        assert!(hex_to_vec("zz").is_err());
+        assert!(hex_to_array::<32>("abcd").is_err());
+        assert!(parse_mask_byte("0001").is_err());
+        assert!(slice_to_array(&[0u8; 31]).is_err());
+
+        let mut header = BTreeMap::new();
+        header.insert("bad".to_string(), "aa".to_string());
+        assert!(parse_header_map(&header).is_err());
+
+        let mut header = BTreeMap::new();
+        header.insert("91".to_string(), "zz".to_string());
+        assert!(parse_header_map(&header).is_err());
+    }
+
+    #[test]
+    fn header_to_hex_serializes_non_bytes_values() -> Result<()> {
+        let mut header = BTreeMap::new();
+        header.insert(1, Value::Bytes(vec![0xAA]));
+        header.insert(2, Value::Text("hello".to_string()));
+        let encoded = header_to_hex(&header)?;
+        assert_eq!(encoded.get(&1), Some(&"aa".to_string()));
+        let text_bytes = hex::decode(encoded.get(&2).context("missing key 2")?)?;
+        assert!(!text_bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn scenario_output_covers_clock_and_locality_variants() -> Result<()> {
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::MhwClock {
+                    t_window_secs: 1,
+                    first_dp_ms: 100,
+                    second_accept_ms: 100,
+                    second_dp_ms: 500,
+                },
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::MhwClock { receivers, .. } = scenario else {
+                return Err(anyhow!("expected mhw-clock scenario output"));
+            };
+            assert_eq!(receivers[0].expected, "ok");
+            assert_eq!(receivers[1].expected, "ok");
+        }
+
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::MhwClock {
+                    t_window_secs: 1,
+                    first_dp_ms: 1000,
+                    second_accept_ms: 100,
+                    second_dp_ms: 1200,
+                },
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::MhwClock { receivers, .. } = scenario else {
+                return Err(anyhow!("expected mhw-clock scenario output"));
+            };
+            assert_eq!(receivers[0].expected, "dp_epoch_expired");
+            assert_eq!(receivers[1].expected, "dp_epoch_expired");
+        }
+
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::AcceptTsLocality {
+                    t_window_secs: 1,
+                    dp_delay_ms: 999,
+                },
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::AcceptTsLocality { expected, .. } = scenario else {
+                return Err(anyhow!("expected accept-ts-locality scenario output"));
+            };
+            assert_eq!(expected, "ok");
+        }
+
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::AcceptTsLocality {
+                    t_window_secs: 1,
+                    dp_delay_ms: 1000,
+                },
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::AcceptTsLocality { expected, .. } = scenario else {
+                return Err(anyhow!("expected accept-ts-locality scenario output"));
+            };
+            assert_eq!(expected, "dp_epoch_expired");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn scenario_output_covers_nonmembership_and_merge_variants() -> Result<()> {
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::PathOversize,
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::PathOversize {
+                witness,
+                expected_freeze,
+                ..
+            } = scenario
+            else {
+                return Err(anyhow!("expected path-oversize scenario output"));
+            };
+            assert!(!witness.is_empty());
+            assert_eq!(expected_freeze, "907.5");
+        }
+
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::NonmemEmptyTree,
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::NonmemEmptyTree {
+                witness, expected, ..
+            } = scenario
+            else {
+                return Err(anyhow!("expected nonmem-empty-tree scenario output"));
+            };
+            assert!(!witness.is_empty());
+            assert_eq!(expected, "ok");
+        }
+
+        for side in [BoundarySide::Left, BoundarySide::Right] {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::NonmemBoundary { side },
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::NonmemBoundary {
+                side: got_side,
+                valid_witness,
+                invalid_witness,
+                expected_invalid_freeze,
+                ..
+            } = scenario
+            else {
+                return Err(anyhow!("expected nonmem-boundary scenario output"));
+            };
+            assert_eq!(got_side as u8, side as u8);
+            assert!(!valid_witness.is_empty());
+            assert!(!invalid_witness.is_empty());
+            assert_eq!(expected_invalid_freeze, "907.2");
+        }
+
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::MergeDedupe,
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::MergeDedupe {
+                expected_freeze,
+                header,
+                ..
+            } = scenario
+            else {
+                return Err(anyhow!("expected merge-dedupe scenario output"));
+            };
+            assert_eq!(expected_freeze, "927");
+            assert!(header.contains_key(&hdr::HDR_MH_HEADS));
+        }
+
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::HeadMetaMismatch,
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::HeadMetaMismatch {
+                expected_freeze,
+                wrong_parent,
+                ..
+            } = scenario
+            else {
+                return Err(anyhow!("expected head-meta-mismatch scenario output"));
+            };
+            assert_eq!(expected_freeze, "926");
+            assert_eq!(wrong_parent, hex::encode([0xFF; 32]));
+        }
+
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::AeadAadTamper,
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::AeadAadTamper {
+                expected_error,
+                hp_commit: commit,
+                tampered_commit,
+                ..
+            } = scenario
+            else {
+                return Err(anyhow!("expected aead-aad-tamper scenario output"));
+            };
+            assert!(expected_error.contains("tag mismatch"));
+            assert_ne!(commit, tampered_commit);
+        }
+
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::MissingRevokedRoot,
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::HeaderMissing { expected_freeze, .. } = scenario else {
+                return Err(anyhow!("expected header-missing scenario output"));
+            };
+            assert_eq!(expected_freeze, "srx_required");
+        }
+
+        {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &ScenarioPlan::MergeCarriesJoin,
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::MergeJoinKeys { expected_freeze, .. } = scenario else {
+                return Err(anyhow!("expected merge-carries-join scenario output"));
+            };
+            assert_eq!(expected_freeze, "921");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn scenario_output_covers_srx_variants() -> Result<()> {
+        let expectations = vec![
+            (ScenarioPlan::SrxValid, "ok"),
+            (ScenarioPlan::SrxConflictParent, "set_conflict_parent"),
+            (ScenarioPlan::SrxConflictRevoke, "set_conflict_revoke"),
+            (ScenarioPlan::SrxConflictSubset, "set_conflict_subset"),
+            (ScenarioPlan::SrxCommitMismatch, "srx_invalid"),
+            (ScenarioPlan::SrxNoncanonical, "nonmem_noncanonical"),
+            (ScenarioPlan::SrxNoncanonicalRightEq, "nonmem_noncanonical"),
+            (ScenarioPlan::SrxNoncanonicalIntervalOrder, "nonmem_noncanonical"),
+        ];
+
+        for (plan, expected_status) in expectations {
+            let (anchor, header_map, head, we_epoch_id, hp_commit, hp_ciphertext) =
+                scenario_fixture()?;
+            let anchor_instance =
+                anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+            let scenario = build_scenario_output(
+                &plan,
+                head,
+                &header_map,
+                &anchor_instance,
+                we_epoch_id,
+                &hp_commit,
+                &hp_ciphertext,
+            )?;
+            let KatCaseScenario::Srx {
+                expected,
+                payload,
+                commit,
+                ..
+            } = scenario
+            else {
+                return Err(anyhow!("expected srx scenario output"));
+            };
+            assert_eq!(expected, expected_status);
+            assert!(!payload.is_empty());
+            assert_eq!(commit.len(), 64);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn witness_and_mask_helpers_cover_success_and_errors() -> Result<()> {
+        let (anchor, _header_map, _head, we_epoch_id, hp_commit, _hp_ciphertext) = scenario_fixture()?;
+        let anchor_instance =
+            anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
+
+        let (validated, witness_hex) = prepare_witness(None, &anchor_instance, None)?;
+        assert!(validated.is_none());
+        assert!(witness_hex.is_none());
+
+        let witness = CanonicalWitness {
+            inner: WitnessVariants::B {
+                witness: RawMembershipWitness {
+                    leaf_id: anchor_instance.join_delta_root.to_vec(),
+                    root: anchor_instance.join_delta_root.to_vec(),
+                    path: Vec::new(),
+                },
+                nonmem: None,
+                pop: None,
+            },
+        };
+        let witness_bytes = encode_witness(&witness)?;
+        let (removed, removed_hex) = prepare_witness(
+            Some(witness_bytes.clone()),
+            &anchor_instance,
+            Some(&WitnessModification::Remove),
+        )?;
+        assert!(removed.is_none());
+        assert_eq!(removed_hex, Some(hex::encode(&witness_bytes)));
+
+        let (mutated, _) = prepare_witness(
+            Some(witness_bytes),
+            &anchor_instance,
+            Some(&WitnessModification::RootXor {
+                byte: 0,
+                mask: "01".to_string(),
+            }),
+        )?;
+        let mutated = mutated.context("missing mutated witness")?;
+        assert_eq!(
+            mutated.membership.root[0],
+            anchor_instance.join_delta_root[0] ^ 0x01
+        );
+
+        assert!(prepare_witness(
+            Some(vec![0xFF, 0x00, 0xAA]),
+            &anchor_instance,
+            None
+        )
+        .is_err());
+
+        let mut m_a = [0u8; 32];
+        let mut m_b = [0u8; 32];
+        apply_mask_mod(
+            &MaskModification::Flip {
+                target: MaskTarget::A,
+                byte: 0,
+                mask: "ff".to_string(),
+            },
+            &mut m_a,
+            &mut m_b,
+        )?;
+        assert_eq!(m_a[0], 0xFF);
+        assert_eq!(m_b[0], 0x00);
+
+        apply_mask_mod(
+            &MaskModification::Flip {
+                target: MaskTarget::B,
+                byte: 1,
+                mask: "01".to_string(),
+            },
+            &mut m_a,
+            &mut m_b,
+        )?;
+        assert_eq!(m_b[1], 0x01);
+
+        apply_mask_mod(
+            &MaskModification::Flip {
+                target: MaskTarget::B,
+                byte: 99,
+                mask: "01".to_string(),
+            },
+            &mut m_a,
+            &mut m_b,
+        )?;
+        assert_eq!(m_b[1], 0x01);
+        assert!(apply_mask_mod(
+            &MaskModification::Flip {
+                target: MaskTarget::A,
+                byte: 0,
+                mask: "0011".to_string(),
+            },
+            &mut m_a,
+            &mut m_b,
+        )
+        .is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn srx_helpers_and_seed_derivations_are_deterministic() -> Result<()> {
+        let parent = [0x11; 32];
+        let since = [0x22; 32];
+        let revoked = [0x33; 32];
+        let payload = build_srx_payload(&parent, &since, &revoked);
+        let bytes = payload_to_bytes(&payload)?;
+        let commit = compute_srx_commit(&bytes)?;
+        assert_ne!(commit, [0u8; 32]);
+
+        let mut header = BTreeMap::new();
+        header.insert(104, Value::Bytes(b"ml-kem-768".to_vec()));
+        header.insert(105, Value::Bytes(vec![0x44; 32]));
+        let (_, attached_commit) = attach_srx_to_header(&mut header, &payload)?;
+        assert_eq!(attached_commit, compute_srx_commit(&bytes)?);
+        refresh_seed_ctx(&mut header)?;
+        assert!(header.contains_key(&91));
+
+        let seed_commit = [0xAA; 32];
+        let rho = [0xBB; 32];
+        let xk_hash = [0xCC; 32];
+        let seed_ctx_hash = [0xDD; 32];
+        let seed_drbg_1 = compute_seed_drbg(&seed_commit, &rho, &xk_hash, &seed_ctx_hash)?;
+        let seed_drbg_2 = compute_seed_drbg(&seed_commit, &rho, &xk_hash, &seed_ctx_hash)?;
+        assert_eq!(seed_drbg_1, seed_drbg_2);
+
+        let branch_a_1 = derive_branch_seed(&seed_drbg_1, ds::MSPHF_KGEN_A)?;
+        let branch_a_2 = derive_branch_seed(&seed_drbg_1, ds::MSPHF_KGEN_A)?;
+        let branch_b = derive_branch_seed(&seed_drbg_1, ds::MSPHF_KGEN_B)?;
+        assert_eq!(branch_a_1, branch_a_2);
+        assert_ne!(branch_a_1, branch_b);
+
+        let xored = xor_arrays(&parent, &revoked);
+        assert_eq!(xored[0], parent[0] ^ revoked[0]);
+        Ok(())
+    }
 }

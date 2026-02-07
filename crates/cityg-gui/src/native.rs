@@ -7313,6 +7313,84 @@ mod tests {
         }
     }
 
+    fn build_test_session(
+        seed: u64,
+        server_url: &str,
+        room_id: &str,
+        alias: &str,
+    ) -> Result<AppSession, Box<dyn std::error::Error>> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut random_vec = |len: usize| {
+            let mut buf = vec![0u8; len];
+            rng.fill_bytes(&mut buf);
+            buf
+        };
+
+        let forward_state =
+            ForwardSecrecyState::with_state([0xAAu8; 32], 17, [0x55u8; 32], [0x99u8; 32]);
+        let capss_witness_bundle = CapssWitnessBundle {
+            branch_a: msphf_rlwe::CapssBranchWitness {
+                branch_artifact: random_vec(24),
+                ctx_tag: random_vec(16),
+            },
+            branch_b: msphf_rlwe::CapssBranchWitness {
+                branch_artifact: random_vec(24),
+                ctx_tag: random_vec(16),
+            },
+        };
+        let capss_witness_bytes = encode_capss_witness(&capss_witness_bundle)?;
+
+        let mut session = AppSession {
+            server_url: server_url.to_string(),
+            room_id: room_id.to_string(),
+            alias: alias.to_string(),
+            gid: [0x01u8; 32],
+            cat: [0x02u8; 32],
+            leaf_id: [0x03u8; 32],
+            parent_root: [0x04u8; 32],
+            join_delta_root: [0x05u8; 32],
+            revoked_since_root: [0x06u8; 32],
+            revoked_root: [0x07u8; 32],
+            regular_fingerprint: Some([0x21u8; 32]),
+            fs_fingerprint: None,
+            tswe_salt_hash: [0x08u8; 32],
+            pox_r_commit: [0x09u8; 32],
+            we_epoch_id: [0x10u8; 32],
+            epoch_key: [0x11u8; 32],
+            forward_state,
+            fs_ec: 17,
+            fs_epoch_commit: [0x12u8; 32],
+            fs_dev_prev_commit: [0x13u8; 32],
+            fs_epoch_created_at: SystemTime::now(),
+            fs_epoch_rotation_interval_secs: 300,
+            pop_public_key: random_vec(48),
+            pop_secret_key: random_vec(96),
+            msg_sign_public_key: random_vec(1952),
+            msg_sign_secret_key: random_vec(4032),
+            vrf_secret_key: random_vec(32),
+            vrf_public_key: random_vec(32),
+            kbroad_public: random_vec(24),
+            kbroad_secret: random_vec(32),
+            bootstrap_public: random_vec(24),
+            proof_mode: "lin+zkvrf".to_string(),
+            vrf_id: "vrf-demo".to_string(),
+            policy_version: "v1".to_string(),
+            msphf_crs_id: "rlwe-merkle/v1".to_string(),
+            msphf_params_id: "rlwe-params/mock".to_string(),
+            fs_policy_version: "fs-policy-v1".to_string(),
+            fs_epoch_base_ts: 42,
+            last_fetch_timestamp_ms: Some(1_234_567),
+            capss_witness: capss_witness_bytes,
+        };
+        session.fs_fingerprint = derive_fs_fingerprint_from_fields(
+            session.fs_policy_version.as_str(),
+            session.fs_ec,
+            &session.fs_epoch_commit,
+            session.fs_epoch_base_ts,
+        );
+        Ok(session)
+    }
+
     struct EnvVarRestore {
         original: Option<String>,
     }
@@ -8272,6 +8350,290 @@ mod tests {
         let escape = Keystroke::parse("escape")?;
         assert!(matches!(form.handle_keystroke(&escape), KeyOutcome::Updated));
         assert!(form.active.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn helper_and_model_state_paths_cover_edge_cases() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let mut model = AppModel::new(CityGConfig::default());
+        let room_id = AppModel::random_room_id();
+        assert_eq!(room_id.len(), 64);
+        assert!(room_id.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let success = Toast::success("ok");
+        let error = Toast::error("err");
+        let info = Toast::info("info");
+        assert_eq!(success.kind, ToastKind::Success);
+        assert_eq!(error.kind, ToastKind::Error);
+        assert_eq!(info.kind, ToastKind::Info);
+        assert!(!success.is_expired());
+
+        let mut expired = Toast::info("expired");
+        expired.created_at = SystemTime::now() - Duration::from_secs(10);
+        expired.duration_secs = 1;
+        model.toasts.push(expired);
+        model.toasts.push(success.clone());
+        model.cleanup_expired_toasts();
+        assert_eq!(model.toasts.len(), 1);
+        assert_eq!(model.toasts[0].kind, ToastKind::Success);
+
+        let err = anyhow!("connection reset by peer");
+        model.set_error(&err, "send", Some(RetryAction::Send));
+        assert!(model.last_error.is_some());
+        assert!(model.categorized_error.is_some());
+        assert_eq!(model.last_retry_action, Some(RetryAction::Send));
+        model.clear_error();
+        assert!(model.last_error.is_none());
+        assert!(model.categorized_error.is_none());
+        assert!(model.last_retry_action.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn app_model_new_restores_saved_session() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let session = build_test_session(
+            4242,
+            "https://restore.example.com",
+            "restore-room-123",
+            "restorer",
+        )?;
+        persist_session(&session)?;
+
+        let model = AppModel::new(CityGConfig::default());
+        let restored = model
+            .session
+            .as_ref()
+            .ok_or_else(|| anyhow!("expected restored session"))?;
+        assert_eq!(restored.server_url, session.server_url);
+        assert_eq!(restored.room_id, session.room_id);
+        assert_eq!(restored.alias, session.alias);
+        assert_eq!(model.join_form.server, session.server_url);
+        assert_eq!(model.join_form.room_id, session.room_id);
+        assert_eq!(model.join_form.alias, session.alias);
+        assert!(model.join_form.active.is_none());
+        assert_eq!(
+            model.info_message.as_deref(),
+            Some("Restored saved session.")
+        );
+        assert!(matches!(model.fetch_status, FetchStatus::Idle));
+        assert!(matches!(model.send_status, SendStatus::Idle));
+        assert!(model.messages.is_empty());
+        assert!(model.message_keys.is_empty());
+        assert!(model.fetch_task.is_none());
+        assert!(!model.fetch_in_flight);
+        assert!(!model.show_ciphertext);
+        assert!(!model.composer.active);
+        Ok(())
+    }
+
+    #[test]
+    fn app_model_new_handles_invalid_saved_session_pointer() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let pointer_path = last_session_pointer_path()?;
+        fs::create_dir_all(
+            pointer_path
+                .parent()
+                .ok_or_else(|| anyhow!("missing pointer parent"))?,
+        )?;
+        fs::write(pointer_path, "{invalid-json")?;
+
+        let model = AppModel::new(CityGConfig::default());
+        assert!(model.session.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn keystroke_helpers_cover_modifier_and_empty_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let mut composer = MessageComposer::default();
+        composer.focus();
+        let backspace = Keystroke::parse("backspace")?;
+        assert!(matches!(
+            composer.handle_keystroke(&backspace),
+            KeyOutcome::None
+        ));
+        let delete = Keystroke::parse("delete")?;
+        assert!(matches!(composer.handle_keystroke(&delete), KeyOutcome::None));
+        composer.set_text("  ".to_string());
+        assert!(!composer.is_ready());
+        composer.clear();
+        assert_eq!(composer.text(), "");
+        let x = Keystroke::parse("x->x")?;
+        assert!(matches!(composer.handle_keystroke(&x), KeyOutcome::Updated));
+        assert_eq!(composer.text(), "x");
+        let ctrl_a = Keystroke::parse("ctrl-a")?;
+        assert!(matches!(composer.handle_keystroke(&ctrl_a), KeyOutcome::None));
+        composer.blur();
+
+        let mut search = MembersSearchState::default();
+        search.focus();
+        assert!(matches!(search.handle_keystroke(&backspace), KeyOutcome::None));
+        assert!(matches!(search.handle_keystroke(&delete), KeyOutcome::None));
+        search.set_query("abc".to_string());
+        search.clear();
+        assert_eq!(search.query(), "");
+        assert!(matches!(search.handle_keystroke(&x), KeyOutcome::Updated));
+        let escape = Keystroke::parse("escape")?;
+        assert!(matches!(search.handle_keystroke(&escape), KeyOutcome::Updated));
+        assert!(!search.active);
+        search.focus();
+        assert!(matches!(search.handle_keystroke(&ctrl_a), KeyOutcome::None));
+        search.blur();
+        Ok(())
+    }
+
+    #[test]
+    fn join_form_and_shortcut_edge_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let mut form = JoinFormState {
+            server: " http://127.0.0.1:18080 ".to_string(),
+            room_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .to_string(),
+            alias: " alice ".to_string(),
+            active: None,
+        };
+        let tab = Keystroke::parse("tab")?;
+        assert!(matches!(form.handle_keystroke(&tab), KeyOutcome::None));
+
+        form.active = Some(ActiveField::Server);
+        let shift_tab = Keystroke::parse("shift-tab")?;
+        assert!(matches!(
+            form.handle_keystroke(&shift_tab),
+            KeyOutcome::Updated
+        ));
+        assert!(form.active == Some(ActiveField::Alias));
+
+        let backspace = Keystroke::parse("backspace")?;
+        form.alias.clear();
+        assert!(matches!(form.handle_keystroke(&backspace), KeyOutcome::None));
+
+        let delete = Keystroke::parse("delete")?;
+        assert!(matches!(form.handle_keystroke(&delete), KeyOutcome::Updated));
+        assert_eq!(form.alias, "");
+
+        let space = Keystroke::parse("space")?;
+        assert!(matches!(form.handle_keystroke(&space), KeyOutcome::Updated));
+        assert_eq!(form.alias, " ");
+
+        let ctrl_a = Keystroke::parse("ctrl-a")?;
+        assert!(matches!(form.handle_keystroke(&ctrl_a), KeyOutcome::None));
+
+        let x = Keystroke::parse("x->x")?;
+        assert!(matches!(form.handle_keystroke(&x), KeyOutcome::Updated));
+        assert_eq!(form.alias, " x");
+
+        form.room_id = "bad-room".to_string();
+        let enter = Keystroke::parse("enter")?;
+        assert!(matches!(form.handle_keystroke(&enter), KeyOutcome::None));
+        form.room_id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            .to_string();
+        form.alias = "zed".to_string();
+        assert!(matches!(form.handle_keystroke(&enter), KeyOutcome::Submit));
+
+        form.active = Some(ActiveField::Alias);
+        form.alias = " zed ".to_string();
+        let params = form.join_params();
+        assert_eq!(params.server_url, "http://127.0.0.1:18080");
+        assert_eq!(params.alias, "zed");
+        assert_eq!(
+            params.room_id,
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        );
+
+        assert!(JoinFormState::is_valid_room_id(&params.room_id));
+        assert!(!JoinFormState::is_valid_room_id("too-short"));
+
+        let plain_v = Keystroke::parse("v")?;
+        assert!(!is_primary_shortcut(&plain_v, "v"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_worker_reports_revoke_membership_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let membership_gid = [0x24u8; 32];
+        let membership_gid_hex = hex_encode(membership_gid);
+        let membership_leaf = [0xCDu8; 32];
+        let membership_leaf_hex = hex_encode(membership_leaf);
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            ws.send(WsMessage::Text(
+                format!(
+                    r#"{{"type":"membership","gid":"{membership_gid_hex}","leaf_id":"{membership_leaf_hex}","event":"revoke","timestamp_ms":55}}"#
+                )
+                .into(),
+            ))
+            .await?;
+            ws.close(None).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+        let worker = tokio::spawn(run_websocket_worker(
+            format!("ws://{addr}/v1/ws"),
+            Duration::from_millis(20),
+            tx,
+        ));
+
+        let mut saw_revoke = false;
+        for _ in 0..8 {
+            let next = tokio::time::timeout(Duration::from_secs(1), rx.next()).await?;
+            let Some(event) = next else {
+                break;
+            };
+            if let WebSocketEvent::Membership(signal) = event
+                && signal.gid == membership_gid
+                && signal.leaf_id == Some(membership_leaf)
+                && signal.kind == Some(MembershipSignalKind::Revoke)
+            {
+                saw_revoke = true;
+                break;
+            }
+        }
+        assert!(saw_revoke, "expected revoke membership event");
+
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
+        tokio::time::timeout(Duration::from_secs(1), worker).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_worker_returns_when_event_channel_is_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            ws.close(None).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (tx, rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+        drop(rx);
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            run_websocket_worker(format!("ws://{addr}/v1/ws"), Duration::from_secs(1), tx),
+        )
+        .await??;
+
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
         Ok(())
     }
 
