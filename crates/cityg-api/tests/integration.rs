@@ -15,7 +15,9 @@ use tokio::time::sleep;
 async fn spawn_server_on(port: u16) -> JoinHandle<()> {
     tokio::spawn(async move {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        if let Err(err) = cityg_api::run_with_addr(addr).await {
+        let mut config = CityGConfig::default();
+        config.server.seed_demo_room = true;
+        if let Err(err) = cityg_api::run_with_config(addr, config).await {
             eprintln!("server exited with error: {err}");
         }
     })
@@ -76,13 +78,11 @@ async fn end_to_end_demo_flow() {
     let fetched_bundle =
         ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor).expect("decode bundle");
     assert_eq!(
-        fetched_bundle.hp_aead_key,
-        [0u8; 32],
+        fetched_bundle.hp_aead_key, [0u8; 32],
         "server bundle must not expose local hp key"
     );
     assert_eq!(
-        fetched_bundle.epoch_key,
-        [0u8; 32],
+        fetched_bundle.epoch_key, [0u8; 32],
         "server bundle must not expose derived epoch key"
     );
     let (bob_epoch_key, _) = fetched_bundle
@@ -654,13 +654,11 @@ async fn error_recovery_graceful_degradation() -> Result<()> {
     let fetched_bundle =
         ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor).expect("decode bundle");
     assert_eq!(
-        fetched_bundle.hp_aead_key,
-        [0u8; 32],
+        fetched_bundle.hp_aead_key, [0u8; 32],
         "server bundle must not expose local hp key"
     );
     assert_eq!(
-        fetched_bundle.epoch_key,
-        [0u8; 32],
+        fetched_bundle.epoch_key, [0u8; 32],
         "server bundle must not expose derived epoch key"
     );
     let (epoch_key, _) = fetched_bundle

@@ -796,28 +796,19 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
     }
     let gid = parse_gid(&request.room_id)?;
 
-    // Verify and register identity binding if provided
+    // Verify identity binding if provided; persist TOFU alias only after ticket succeeds.
     let confirmed_binding = if let Some(binding) = &request.identity_binding {
         // Verify the signature
         verify_identity_binding(binding)?;
 
-        // Compute the leaf_id from the pop_public_key
-        let computed_leaf_id = compute_leaf_id(
+        // Validate POP key material can be converted to a leaf identifier.
+        let _ = compute_leaf_id(
             LeafIdMode::PerGroup,
             &gid,
             "ML-DSA-65",
             &binding.pop_public_key,
         )
         .map_err(|e| ApiError::server_message(format!("failed to compute leaf_id: {}", e)))?;
-
-        // Register the alias using TOFU
-        state
-            .register_alias(
-                &binding.alias,
-                computed_leaf_id,
-                binding.pop_public_key.clone(),
-            )
-            .await?;
 
         Some(binding.clone())
     } else {
@@ -832,7 +823,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             .context()
             .fs_policy_version()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "fs-demo-policy".to_string());
+            .unwrap_or_else(|| "fs-policy-v1".to_string());
         let fs_epoch_base_ts = match guard.context().fs_base_ts() {
             Some(base_ts) => base_ts,
             None => {
@@ -887,7 +878,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         fs_epoch_base_ts,
         kbroad_public: ticket.kbroad_public,
         bootstrap_public,
-        confirmed_binding,
+        confirmed_binding: confirmed_binding.clone(),
     };
 
     Ok(protobuf_response(&response))
@@ -1934,6 +1925,55 @@ mod tests {
         assert_eq!(
             binding.pop_public_key, pop_public_key,
             "alias binding must retain the original pop key"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_ticket_failure_does_not_persist_alias_binding() {
+        let cfg = CityGConfig::default();
+        let state = ApiState {
+            server: Arc::new(RwLock::new(server_from_config(&cfg))),
+            messages: Arc::new(RwLock::new(AHashMap::new())),
+            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
+            fs_epoch_period_seconds: cfg.protocol.fs_policy.h_seconds.max(1),
+            freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
+            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
+            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
+            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+            notification_tx: broadcast::channel(4).0,
+        };
+
+        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let alias = "alice".to_string();
+        let pop_public_key = pop_pk.as_bytes().to_vec();
+        let message_data = (
+            ByteBuf::from(alias.as_bytes().to_vec()),
+            ByteBuf::from(pop_public_key.clone()),
+        );
+        let mut message = Vec::new();
+        ciborium::ser::into_writer(&message_data, &mut message)
+            .expect("encode identity binding message");
+        let signature = dilithium5::detached_sign(&message, &pop_sk);
+
+        let request = JoinTicketRequest {
+            room_id: "ab".repeat(32),
+            alias: alias.clone(),
+            identity_binding: Some(IdentityBinding {
+                alias: alias.clone(),
+                pop_public_key,
+                signature: signature.as_bytes().to_vec(),
+            }),
+        };
+        let mut body = Vec::new();
+        request.encode(&mut body).expect("encode join request");
+        let response = join_ticket(State(state.clone()), Bytes::from(body)).await;
+        assert!(response.is_err(), "join_ticket should fail without KBROAD");
+
+        let registry = state.alias_registry.read().await;
+        assert!(
+            !registry.contains_key(&alias),
+            "failed join_ticket must not persist TOFU alias binding"
         );
     }
 

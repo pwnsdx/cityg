@@ -212,7 +212,7 @@ impl Default for ServerConfig {
             address: "0.0.0.0:8080".to_string(),
             websocket_capacity: 1000,
             window_ttl_secs: 120, // 2 minutes default TTL
-            seed_demo_room: true,
+            seed_demo_room: false,
         }
     }
 }
@@ -244,7 +244,7 @@ impl Default for ProtocolConfig {
             min_srx_max_bytes: 256 * 1024,      // 256 KB
             receiver_cache_ttl_secs: 10,
             fs_policy: FsPolicySettings::default(),
-            fs_policy_version: "fs-demo-policy".to_string(),
+            fs_policy_version: "fs-policy-v1".to_string(),
         }
     }
 }
@@ -680,8 +680,8 @@ mod tests {
         assert_eq!(config.server.address, "0.0.0.0:8080");
         assert_eq!(config.client.default_server_url, "http://127.0.0.1:8080");
         assert_eq!(config.protocol.window_duration_secs, 120);
-        assert!(config.server.seed_demo_room);
-        assert_eq!(config.protocol.fs_policy_version, "fs-demo-policy");
+        assert!(!config.server.seed_demo_room);
+        assert_eq!(config.protocol.fs_policy_version, "fs-policy-v1");
         assert_eq!(config.protocol.fs_policy.h_seconds, 300);
         assert_eq!(config.gui.default_window_width, 1160.0);
         Ok(())

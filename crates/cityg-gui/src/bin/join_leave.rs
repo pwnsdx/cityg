@@ -8,7 +8,9 @@ use anyhow::{Context, Result, anyhow};
 use ciborium::value::{Integer, Value};
 use cityg_api_client::{CitygApiClient, Error as ApiClientError};
 use cityg_client::witness::SrxInputsOwned;
-use cityg_client::{CityGClient, ClientEpochBundle, demo};
+use cityg_client::{CityGClient, ClientEpochBundle};
+#[cfg(test)]
+use cityg_client::demo;
 use futures::StreamExt;
 use hex::decode as hex_decode;
 use msphf_core::{ds, hash::h_l};
@@ -404,23 +406,14 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         Some(ticket.witness_cbor.as_slice())
     };
 
-    let mut bundle =
+    let bundle =
         CityGClient::generate_epoch(header, parts, params, &mut fs_state, witness_bytes)
             .context("generate join bundle")?;
 
-    if parent_root == [0u8; 32] {
-        if ticket.bootstrap_public.is_empty() {
-            println!("bootstrap policy disabled; joining without bootstrap signature");
-        } else {
-            let local_bootstrap_public = demo::bootstrap_public();
-            if ticket.bootstrap_public != local_bootstrap_public {
-                return Err(anyhow!(
-                    "server bootstrap key mismatch; disable CITYG_SERVER_SEED_DEMO_ROOM \
-                     or share demo-bootstrap.key with this client"
-                ));
-            }
-            demo::attach_bootstrap(&mut bundle).context("attach bootstrap")?;
-        }
+    if parent_root == [0u8; 32] && !ticket.bootstrap_public.is_empty() {
+        return Err(anyhow!(
+            "server requires bootstrap signer for first join; join_leave bootstrap signer support is not configured"
+        ));
     }
 
     client
@@ -1322,7 +1315,7 @@ mod tests {
         tokio::spawn(async move {
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             let mut config = CityGConfig::default();
-            config.server.seed_demo_room = true;
+            config.server.seed_demo_room = false;
             if let Err(err) = cityg_api::run_with_config(addr, config).await {
                 eprintln!("join_leave test server exited with error: {err}");
             }

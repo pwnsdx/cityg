@@ -477,7 +477,7 @@ impl CityGServer {
             .ctx
             .fs_policy_version()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "fs-demo-policy".to_string());
+            .unwrap_or_else(|| "fs-policy-v1".to_string());
         let fs_epoch_base_ts = self.ctx.fs_base_ts().unwrap_or(0);
 
         Ok(MergeTicketBundle {

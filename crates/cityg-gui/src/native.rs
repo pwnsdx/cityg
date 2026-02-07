@@ -19,7 +19,6 @@ use anyhow::{Context as AnyhowContext, Result, anyhow};
 use blake3::hash as blake3_hash;
 use ciborium::value::{Integer, Value};
 use cityg_api_client::{CitygApiClient, Error as ApiClientError, MergeTicket};
-use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
 use cityg_config::CityGConfig;
@@ -47,6 +46,8 @@ use pqcrypto_dilithium::{
     },
     dilithium5,
 };
+use pqcrypto_kyber::kyber768;
+use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey};
 use pqcrypto_traits::sign::{
     DetachedSignature, PublicKey as DilithiumPublicKey, SecretKey as DilithiumSecretKey,
 };
@@ -55,6 +56,9 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tracing::{debug, info, warn};
+
+#[cfg(test)]
+use cityg_client::demo;
 
 mod tokio_bridge {
     use anyhow::Error;
@@ -769,6 +773,7 @@ struct AppSession {
     vrf_secret_key: Vec<u8>,
     vrf_public_key: Vec<u8>,
     kbroad_public: Vec<u8>,
+    kbroad_secret: Vec<u8>,
     bootstrap_public: Vec<u8>,
     proof_mode: String,
     vrf_id: String,
@@ -4491,6 +4496,8 @@ struct PersistedSession {
     fs_policy_version: String,
     fs_epoch_base_ts: u64,
     kbroad_public_hex: String,
+    #[serde(default)]
+    kbroad_secret_hex: String,
     bootstrap_public_hex: String,
     pop_public_hex: String,
     pop_secret_hex: String,
@@ -4522,6 +4529,7 @@ const ENCRYPTED_SESSION_ENVELOPE_VERSION: u32 = 1;
 const ENCRYPTED_SESSION_ALG: &str = "chacha20poly1305";
 const SESSION_PASSPHRASE_ENV: &str = "CITYG_GUI_SESSION_PASSPHRASE";
 const KBROAD_SECRET_ENV: &str = "CITYG_GUI_KBROAD_SECRET_HEX";
+const KBROAD_PUBLIC_ENV: &str = "CITYG_GUI_KBROAD_PUBLIC_HEX";
 const SESSION_KEY_DERIVE_CONTEXT: &str = "cityg/gui/session-encryption/v1";
 const SESSION_LOCAL_KEY_FILE: &str = "session-key-v1.bin";
 
@@ -4604,7 +4612,7 @@ impl PersistedSession {
             .as_millis() as u64;
 
         Self {
-            version: 6, // Version 6: FS fingerprint derived from persisted FS fields
+            version: 7, // Version 7: Persist room KBROAD secret for redacted epoch sync.
             server_url: session.server_url.clone(),
             room_id: session.room_id.clone(),
             alias: session.alias.clone(),
@@ -4627,6 +4635,7 @@ impl PersistedSession {
             fs_policy_version: session.fs_policy_version.clone(),
             fs_epoch_base_ts: session.fs_epoch_base_ts,
             kbroad_public_hex: hex_encode(&session.kbroad_public),
+            kbroad_secret_hex: hex_encode(&session.kbroad_secret),
             bootstrap_public_hex: hex_encode(&session.bootstrap_public),
             pop_public_hex: hex_encode(&session.pop_public_key),
             pop_secret_hex: hex_encode(&session.pop_secret_key),
@@ -4680,6 +4689,7 @@ impl PersistedSession {
             fs_policy_version,
             fs_epoch_base_ts,
             kbroad_public_hex,
+            kbroad_secret_hex,
             bootstrap_public_hex,
             pop_public_hex,
             pop_secret_hex,
@@ -4698,9 +4708,9 @@ impl PersistedSession {
             regular_fingerprint_hex,
         } = self;
 
-        if !(version == 4 || version == 5 || version == 6) {
+        if !(version == 4 || version == 5 || version == 6 || version == 7) {
             return Err(anyhow!(
-                "unsupported session file version {version} (expected 4, 5, or 6 with ML-DSA-65 authentication)"
+                "unsupported session file version {version} (expected 4, 5, 6, or 7 with ML-DSA-65 authentication)"
             ));
         }
 
@@ -4717,6 +4727,7 @@ impl PersistedSession {
         let epoch_key = decode_hex32("epoch_key_hex", &epoch_key_hex)?;
 
         let kbroad_public = decode_hex_vec("kbroad_public_hex", &kbroad_public_hex)?;
+        let kbroad_secret = decode_hex_vec("kbroad_secret_hex", &kbroad_secret_hex)?;
         let bootstrap_public = decode_hex_vec("bootstrap_public_hex", &bootstrap_public_hex)?;
         let pop_public_key = decode_hex_vec("pop_public_hex", &pop_public_hex)?;
         let pop_secret_key = decode_hex_vec("pop_secret_hex", &pop_secret_hex)?;
@@ -4789,6 +4800,7 @@ impl PersistedSession {
             vrf_secret_key,
             vrf_public_key,
             kbroad_public,
+            kbroad_secret,
             bootstrap_public,
             proof_mode,
             vrf_id,
@@ -5675,33 +5687,83 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         })
     };
 
+    let configured_kbroad_public = configured_kbroad_public_from_env()?;
+    let configured_kbroad_secret = configured_kbroad_secret_from_env()?;
+    let mut generated_kbroad_keypair: Option<(Vec<u8>, Vec<u8>)> = None;
+    let mut bootstrap_attempted = false;
+
     let client = CitygApiClient::new(&server_url);
-    let ticket = match client
-        .join_ticket(&room_id, &alias, identity_binding.clone())
-        .await
-    {
-        Ok(ticket) => ticket,
-        Err(ApiClientError::HttpStatus {
-            status,
-            message,
-            freeze_code,
-            freeze_reason,
-            ..
-        }) => {
-            let mut detail = describe_http_failure(
-                status.as_str(),
-                &message,
+    let ticket = loop {
+        match client
+            .join_ticket(&room_id, &alias, identity_binding.clone())
+            .await
+        {
+            Ok(ticket) => break ticket,
+            Err(ApiClientError::HttpStatus {
+                status,
+                message,
                 freeze_code,
-                freeze_reason.as_deref(),
-            );
-            if status.is_server_error() && message.contains("kbroad key missing") {
-                detail.push_str(
-                    " (room is not KBROAD-provisioned; bootstrap it first with a room-specific public key)",
+                freeze_reason,
+                ..
+            }) => {
+                if status.is_server_error()
+                    && message.contains("kbroad key missing")
+                    && !bootstrap_attempted
+                {
+                    bootstrap_attempted = true;
+
+                    let provisioning_public = if let Some(public) =
+                        configured_kbroad_public.as_ref()
+                    {
+                        public.clone()
+                    } else if let Some((public, _)) = generated_kbroad_keypair.as_ref() {
+                        public.clone()
+                    } else {
+                        if configured_kbroad_secret.is_some() {
+                            return Err(anyhow!(
+                                "{} is set but {} is missing; cannot bootstrap an unprovisioned room",
+                                KBROAD_SECRET_ENV,
+                                KBROAD_PUBLIC_ENV
+                            ));
+                        }
+                        let pair = generate_kbroad_keypair();
+                        let public = pair.0.clone();
+                        generated_kbroad_keypair = Some(pair);
+                        public
+                    };
+
+                    match client.bootstrap_room(&room_id, &provisioning_public).await {
+                        Ok(_) => continue,
+                        Err(ApiClientError::HttpStatus {
+                            status: bootstrap_status,
+                            message: bootstrap_message,
+                            ..
+                        }) if bootstrap_status.is_server_error()
+                            && bootstrap_message.contains("kbroad key already registered") =>
+                        {
+                            continue;
+                        }
+                        Err(err) => {
+                            return Err(anyhow!("failed to bootstrap room KBROAD key: {}", err));
+                        }
+                    }
+                }
+
+                let mut detail = describe_http_failure(
+                    status.as_str(),
+                    &message,
+                    freeze_code,
+                    freeze_reason.as_deref(),
                 );
+                if status.is_server_error() && message.contains("kbroad key missing") {
+                    detail.push_str(
+                        " (room is not KBROAD-provisioned; set CITYG_GUI_KBROAD_PUBLIC_HEX or allow local key generation)",
+                    );
+                }
+                return Err(anyhow!(detail));
             }
-            return Err(anyhow!(detail));
+            Err(err) => return Err(err.into()),
         }
-        Err(err) => return Err(err.into()),
     };
 
     let gid = bytes32("gid", &ticket.gid)?;
@@ -5717,6 +5779,25 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         return Err(anyhow!("server returned empty KBROAD public key"));
     } else {
         ticket.kbroad_public.clone()
+    };
+    if let Some(expected_public) = configured_kbroad_public.as_ref()
+        && expected_public != &kbroad_public
+    {
+        return Err(anyhow!(
+            "{} does not match server room key for this room",
+            KBROAD_PUBLIC_ENV
+        ));
+    }
+    let kbroad_secret = if let Some(secret) = configured_kbroad_secret {
+        secret
+    } else if let Some((generated_public, generated_secret)) = generated_kbroad_keypair.as_ref() {
+        if generated_public == &kbroad_public {
+            generated_secret.clone()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
     };
     let bootstrap_public = ticket.bootstrap_public.clone();
 
@@ -5773,7 +5854,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         ticket.policy_version
     };
     let fs_policy_version = if ticket.fs_policy_version.is_empty() {
-        "fs-demo-policy".to_string()
+        "fs-policy-v1".to_string()
     } else {
         ticket.fs_policy_version
     };
@@ -5812,7 +5893,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         pox_r_commit: Some(&pox_r_commit),
     };
 
-    let mut bundle = CityGClient::generate_epoch(
+    let bundle = CityGClient::generate_epoch(
         header_map,
         parts,
         params,
@@ -5823,19 +5904,10 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
 
     let capss_witness_bytes = encode_capss_witness(&bundle.capss_witness)?;
 
-    if parent_root == [0u8; 32] {
-        if bootstrap_public.is_empty() {
-            info!("server bootstrap policy disabled; skipping bootstrap attachment");
-        } else {
-            let local_bootstrap_public = demo::bootstrap_public();
-            if bootstrap_public != local_bootstrap_public {
-                return Err(anyhow!(
-                    "server bootstrap key does not match local demo bootstrap key; \
-                     disable CITYG_SERVER_SEED_DEMO_ROOM or share demo-bootstrap.key"
-                ));
-            }
-            demo::attach_bootstrap(&mut bundle).context("failed to attach bootstrap data")?;
-        }
+    if parent_root == [0u8; 32] && !bootstrap_public.is_empty() {
+        return Err(anyhow!(
+            "server requires bootstrap signer for first join; GUI bootstrap signer support is not configured"
+        ));
     }
 
     client
@@ -5906,6 +5978,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         vrf_secret_key: vrf_secret_key.to_vec(),
         vrf_public_key: vrf_public_key.to_vec(),
         kbroad_public,
+        kbroad_secret,
         bootstrap_public,
         proof_mode,
         vrf_id,
@@ -6554,7 +6627,16 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
         bundle.witness = Some(ticket.witness_cbor.clone());
     }
 
-    let (derived_epoch_key, _) = if let Some(kbroad_secret) = configured_kbroad_secret_from_env()? {
+    let mut active_kbroad_secret = if session.kbroad_secret.is_empty() {
+        None
+    } else {
+        Some(session.kbroad_secret.clone())
+    };
+    if active_kbroad_secret.is_none() {
+        active_kbroad_secret = configured_kbroad_secret_from_env()?;
+    }
+
+    let (derived_epoch_key, _) = if let Some(kbroad_secret) = active_kbroad_secret.as_ref() {
         bundle
             .derive_epoch_secrets_with_kbroad_secret(kbroad_secret.as_slice())
             .context("failed to derive epoch key during sync")?
@@ -6564,7 +6646,7 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
                 .contains("bundle missing local hp key; use derive_epoch_secrets_with_kbroad_secret")
             {
                 anyhow!(
-                    "failed to derive epoch key during sync: bundle is redacted; set {} with the room KBROAD secret key (hex)",
+                    "failed to derive epoch key during sync: bundle is redacted; provide room KBROAD secret via {}",
                     KBROAD_SECRET_ENV
                 )
             } else {
@@ -6620,6 +6702,9 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     }
     if let Some(Value::Bytes(kbroad_pub)) = bundle.header_map.get(&hdr::HDR_KBROAD_PUB) {
         session.kbroad_public = kbroad_pub.clone();
+    }
+    if let Some(secret) = active_kbroad_secret {
+        session.kbroad_secret = secret;
     }
 
     session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
@@ -6841,12 +6926,12 @@ fn decode_hex_32(input: &str) -> Option<[u8; 32]> {
     Some(result)
 }
 
-fn configured_kbroad_secret_from_env() -> Result<Option<Vec<u8>>> {
-    let raw = match std::env::var(KBROAD_SECRET_ENV) {
+fn configured_hex_from_env(var_name: &str) -> Result<Option<Vec<u8>>> {
+    let raw = match std::env::var(var_name) {
         Ok(value) => value,
         Err(std::env::VarError::NotPresent) => return Ok(None),
         Err(err) => {
-            return Err(anyhow!("failed reading {}: {}", KBROAD_SECRET_ENV, err));
+            return Err(anyhow!("failed reading {}: {}", var_name, err));
         }
     };
     let trimmed = raw.trim();
@@ -6861,12 +6946,28 @@ fn configured_kbroad_secret_from_env() -> Result<Option<Vec<u8>>> {
         return Ok(None);
     }
 
-    let bytes = hex_decode(normalized)
-        .with_context(|| format!("{KBROAD_SECRET_ENV} must contain hex bytes"))?;
+    let bytes =
+        hex_decode(normalized).with_context(|| format!("{var_name} must contain hex bytes"))?;
     if bytes.is_empty() {
         return Ok(None);
     }
     Ok(Some(bytes))
+}
+
+fn configured_kbroad_secret_from_env() -> Result<Option<Vec<u8>>> {
+    configured_hex_from_env(KBROAD_SECRET_ENV)
+}
+
+fn configured_kbroad_public_from_env() -> Result<Option<Vec<u8>>> {
+    configured_hex_from_env(KBROAD_PUBLIC_ENV)
+}
+
+fn generate_kbroad_keypair() -> (Vec<u8>, Vec<u8>) {
+    let (public, secret) = kyber768::keypair();
+    (
+        KemPublicKey::as_bytes(&public).to_vec(),
+        KemSecretKey::as_bytes(&secret).to_vec(),
+    )
 }
 
 fn format_member_label(member: &MemberEntry) -> String {
@@ -7250,11 +7351,30 @@ mod tests {
         }
     }
 
+    struct KbroadPublicEnvVarRestore {
+        original: Option<String>,
+    }
+
+    impl Drop for KbroadPublicEnvVarRestore {
+        fn drop(&mut self) {
+            match self.original.as_deref() {
+                Some(value) => {
+                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                    unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, value) };
+                }
+                None => {
+                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                    unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+                }
+            }
+        }
+    }
+
     async fn spawn_server_on(port: u16) -> JoinHandle<()> {
         tokio::spawn(async move {
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             let mut config = CityGConfig::default();
-            config.server.seed_demo_room = true;
+            config.server.seed_demo_room = false;
             if let Err(err) = cityg_api::run_with_config(addr, config).await {
                 eprintln!("server exited with error: {err}");
             }
@@ -8182,13 +8302,14 @@ mod tests {
             vrf_secret_key: random_vec(32),
             vrf_public_key: random_vec(32),
             kbroad_public: random_vec(24),
+            kbroad_secret: random_vec(32),
             bootstrap_public: random_vec(24),
             proof_mode: "lin+zkvrf".to_string(),
             vrf_id: "vrf-demo".to_string(),
             policy_version: "v1".to_string(),
             msphf_crs_id: "rlwe-merkle/v1".to_string(),
             msphf_params_id: "rlwe-params/mock".to_string(),
-            fs_policy_version: "fs-demo-policy".to_string(),
+            fs_policy_version: "fs-policy-v1".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
             capss_witness: capss_witness_bytes.clone(),
@@ -8244,6 +8365,7 @@ mod tests {
         assert_eq!(loaded.we_epoch_id, session.we_epoch_id);
         assert_eq!(loaded.epoch_key, session.epoch_key);
         assert_eq!(loaded.kbroad_public, session.kbroad_public);
+        assert_eq!(loaded.kbroad_secret, session.kbroad_secret);
         assert_eq!(loaded.bootstrap_public, session.bootstrap_public);
         assert_eq!(loaded.pop_public_key, session.pop_public_key);
         assert_eq!(loaded.pop_secret_key, session.pop_secret_key);
@@ -8659,6 +8781,50 @@ mod tests {
         assert!(
             alice.bootstrap_public.is_empty(),
             "bootstrap key should be absent when bootstrap policy is disabled"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_bootstraps_unprovisioned_room() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_with_seed_demo_room(port, false).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x89u8; 32]);
+
+        let session = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        assert!(
+            !session.kbroad_public.is_empty(),
+            "auto-bootstrap join should persist room KBROAD public key"
+        );
+        assert!(
+            !session.kbroad_secret.is_empty(),
+            "auto-bootstrap join should persist generated KBROAD secret"
         );
 
         handle.abort();
@@ -9495,13 +9661,14 @@ mod tests {
             vrf_secret_key: random_vec(32),
             vrf_public_key: random_vec(32),
             kbroad_public: random_vec(24),
+            kbroad_secret: random_vec(32),
             bootstrap_public: random_vec(24),
             proof_mode: "lin+zkvrf".to_string(),
             vrf_id: "vrf-demo".to_string(),
             policy_version: "v1".to_string(),
             msphf_crs_id: "rlwe-merkle/v1".to_string(),
             msphf_params_id: "rlwe-params/mock".to_string(),
-            fs_policy_version: "fs-demo-policy".to_string(),
+            fs_policy_version: "fs-policy-v1".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
             capss_witness: capss_witness_bytes,

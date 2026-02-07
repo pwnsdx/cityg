@@ -145,7 +145,7 @@ fn demo_bundle_inner(
         policy_version: DEFAULT_POLICY_VERSION,
         vrf_secret_key: Some(vrf_secret_key),
         vrf_public_key: Some(vrf_public_key),
-        fs_policy_version: "fs-demo-policy",
+        fs_policy_version: "fs-policy-v1",
         fs_epoch_base_ts: 0,
         fs_join: FsJoinInputs::default(),
         fs_merge: FsMergeInputs::default(),

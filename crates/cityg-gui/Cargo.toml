@@ -27,6 +27,7 @@ futures = "0.3"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 rand = "0.8"
 pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
+pqcrypto-kyber = { version = "0.8", default-features = false, features = ["std"] }
 pqcrypto-traits = "0.3"
 hex = "0.4"
 ciborium = "0.2"
