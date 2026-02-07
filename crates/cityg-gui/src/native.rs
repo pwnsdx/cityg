@@ -2309,6 +2309,10 @@ impl AppModel {
 
     fn render_message_list(&self) -> Div {
         let mut list = div().flex().flex_col().gap(px(10.0)).max_h(px(240.0));
+        {
+            let interactivity = list.interactivity();
+            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
+        }
 
         if self.messages.is_empty() {
             return list.child(
@@ -5799,32 +5803,40 @@ async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
     let client = CitygApiClient::new(&params.server_url);
     let (raw_members, root, total_count, next_offset) = match &params.mode {
         MembersMode::Full => {
-            let response = match client
-                .members_with_range(
-                    &params.gid,
-                    Some(&params.parent_root),
-                    Some(params.offset),
-                    Some(params.limit),
-                )
-                .await
-            {
-                Ok(response) => response,
-                Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
-                    info!(
-                        "members root {} not found for gid {}; retrying with latest root",
-                        hex_encode(params.parent_root),
-                        hex_encode(params.gid)
-                    );
-                    client
-                        .members_with_range(
-                            &params.gid,
-                            None,
-                            Some(params.offset),
-                            Some(params.limit),
-                        )
-                        .await?
+            // Always resolve the first page against latest server root to avoid
+            // sticking to an old-but-still-valid parent_root after missed events.
+            let response = if params.offset == 0 {
+                client
+                    .members_with_range(&params.gid, None, Some(params.offset), Some(params.limit))
+                    .await?
+            } else {
+                match client
+                    .members_with_range(
+                        &params.gid,
+                        Some(&params.parent_root),
+                        Some(params.offset),
+                        Some(params.limit),
+                    )
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
+                        info!(
+                            "members root {} not found for gid {}; retrying with latest root",
+                            hex_encode(params.parent_root),
+                            hex_encode(params.gid)
+                        );
+                        client
+                            .members_with_range(
+                                &params.gid,
+                                None,
+                                Some(params.offset),
+                                Some(params.limit),
+                            )
+                            .await?
+                    }
+                    Err(err) => return Err(err.into()),
                 }
-                Err(err) => return Err(err.into()),
             };
             (
                 response.members,
@@ -5834,34 +5846,47 @@ async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
             )
         }
         MembersMode::Search { query } => {
-            let response = match client
-                .search_members(
-                    &params.gid,
-                    query,
-                    Some(&params.parent_root),
-                    Some(params.offset),
-                    Some(params.limit),
-                )
-                .await
-            {
-                Ok(response) => response,
-                Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
-                    info!(
-                        "search root {} not found for gid {}; retrying with latest root",
-                        hex_encode(params.parent_root),
-                        hex_encode(params.gid)
-                    );
-                    client
-                        .search_members(
-                            &params.gid,
-                            query,
-                            None,
-                            Some(params.offset),
-                            Some(params.limit),
-                        )
-                        .await?
+            // Same latest-root bootstrap for search mode first page.
+            let response = if params.offset == 0 {
+                client
+                    .search_members(
+                        &params.gid,
+                        query,
+                        None,
+                        Some(params.offset),
+                        Some(params.limit),
+                    )
+                    .await?
+            } else {
+                match client
+                    .search_members(
+                        &params.gid,
+                        query,
+                        Some(&params.parent_root),
+                        Some(params.offset),
+                        Some(params.limit),
+                    )
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
+                        info!(
+                            "search root {} not found for gid {}; retrying with latest root",
+                            hex_encode(params.parent_root),
+                            hex_encode(params.gid)
+                        );
+                        client
+                            .search_members(
+                                &params.gid,
+                                query,
+                                None,
+                                Some(params.offset),
+                                Some(params.limit),
+                            )
+                            .await?
+                    }
+                    Err(err) => return Err(err.into()),
                 }
-                Err(err) => return Err(err.into()),
             };
             (
                 response.members,
@@ -7998,6 +8023,56 @@ mod tests {
         assert!(
             search.total_count >= search.members.len() as u64,
             "search fallback should produce coherent pagination metadata"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn members_fetch_prefers_latest_root_when_old_root_is_still_valid()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x7Au8; 32]);
+
+        let alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        let bob = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+        assert_ne!(
+            alice.parent_root, bob.parent_root,
+            "second join should advance parent root"
+        );
+
+        // Alice's root is still valid, but stale. Members fetch should now resolve
+        // against latest server root for page 0.
+        let page = perform_fetch_members(MembersParams::from_session(
+            &alice,
+            0,
+            50,
+            MembersMode::Full,
+        ))
+        .await?;
+        assert!(
+            page.total_count >= 2,
+            "latest-root roster should include both members"
+        );
+        assert_ne!(
+            page.root, alice.parent_root,
+            "page 0 should not remain on stale local root"
         );
 
         handle.abort();
