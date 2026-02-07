@@ -7,10 +7,10 @@ use anchor_seed::{
 use anyhow::{Context, Result, anyhow};
 use ciborium::value::{Integer, Value};
 use cityg_api_client::{CitygApiClient, Error as ApiClientError};
-use cityg_client::witness::SrxInputsOwned;
-use cityg_client::{CityGClient, ClientEpochBundle};
 #[cfg(test)]
 use cityg_client::demo;
+use cityg_client::witness::SrxInputsOwned;
+use cityg_client::{CityGClient, ClientEpochBundle};
 use futures::StreamExt;
 use hex::decode as hex_decode;
 use msphf_core::{ds, hash::h_l};
@@ -119,9 +119,19 @@ fn log_fingerprints(session: &Session) {
     );
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = env::args().skip(1);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CliOptions {
+    server_url: String,
+    room_id: String,
+    alias_base: String,
+    count: usize,
+    batch_mode: bool,
+    watch_mode: bool,
+    verbose: bool,
+    leave_order: Option<Vec<usize>>,
+}
+
+fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> {
     let mut server_url = None;
     let mut room_id = None;
     let mut alias = None;
@@ -210,6 +220,36 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+
+    if watch_mode && leave_order.is_some() {
+        return Err(anyhow!("--leave-order is not supported with --watch"));
+    }
+
+    Ok(CliOptions {
+        server_url,
+        room_id,
+        alias_base,
+        count,
+        batch_mode,
+        watch_mode,
+        verbose,
+        leave_order,
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let options = parse_cli_args(env::args().skip(1))?;
+    let CliOptions {
+        server_url,
+        room_id,
+        alias_base,
+        count,
+        batch_mode,
+        watch_mode,
+        verbose,
+        leave_order,
+    } = options;
 
     if watch_mode {
         run_watch_mode(
@@ -406,9 +446,8 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         Some(ticket.witness_cbor.as_slice())
     };
 
-    let bundle =
-        CityGClient::generate_epoch(header, parts, params, &mut fs_state, witness_bytes)
-            .context("generate join bundle")?;
+    let bundle = CityGClient::generate_epoch(header, parts, params, &mut fs_state, witness_bytes)
+        .context("generate join bundle")?;
 
     if parent_root == [0u8; 32] && !ticket.bootstrap_public.is_empty() {
         return Err(anyhow!(
@@ -585,6 +624,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let mut bundle =
         CityGClient::generate_merge(header, parts, params, &parities, None, witness_bytes)
             .context("generate merge bundle")?;
+    let pristine_bundle = bundle.clone();
     strip_srx_and_rollup(&mut bundle.header_map);
     apply_pivot_alignment(&mut bundle.header_map, pivot);
     if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
@@ -798,13 +838,37 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         log_fs_metadata(pivot, &bundle.header_map);
     }
 
-    client
-        .refresh_pivot(&bundle)
-        .await
-        .context("refresh pivot parity")?;
+    match client.refresh_pivot(&bundle).await {
+        Ok(_) => {}
+        Err(ApiClientError::HttpStatus {
+            status, message, ..
+        }) if status.is_server_error() && message.contains("pivot head missing") => {
+            if verbose {
+                println!("refresh pivot skipped due to stale head set: {message}");
+            }
+        }
+        Err(err) => return Err(err).context("refresh pivot parity"),
+    }
 
     match client.accept_epoch_bundle(&bundle).await {
         Ok(_) => Ok(()),
+        Err(ApiClientError::HttpStatus {
+            message,
+            freeze_reason,
+            ..
+        }) if message.contains("mh_heads_invalid")
+            || freeze_reason.as_deref() == Some("mh_heads_invalid") =>
+        {
+            if verbose {
+                println!("retrying leave with pristine merge bundle after mh_heads_invalid");
+            }
+            let _ = client.refresh_pivot(&pristine_bundle).await;
+            client
+                .accept_epoch_bundle(&pristine_bundle)
+                .await
+                .context("server rejected pristine merge bundle")?;
+            Ok(())
+        }
         Err(ApiClientError::HttpStatus {
             status,
             message,
@@ -1439,6 +1503,79 @@ mod tests {
     }
 
     #[test]
+    fn parse_cli_args_defaults_and_flags() -> Result<()> {
+        let opts = parse_cli_args(vec!["--batch".to_string(), "--count=2".to_string()])?;
+        assert_eq!(opts.server_url, "http://127.0.0.1:8080");
+        assert_eq!(opts.count, 2);
+        assert!(opts.batch_mode);
+        assert!(!opts.watch_mode);
+        assert!(!opts.verbose);
+        assert!(opts.leave_order.is_none());
+        assert_eq!(opts.alias_base, "cli-joiner");
+        assert_eq!(opts.room_id.len(), 64);
+
+        let opts = parse_cli_args(vec![
+            "http://127.0.0.1:19090".to_string(),
+            "abcd".repeat(16),
+            "operator".to_string(),
+            "--watch".to_string(),
+            "--count=2".to_string(),
+            "--verbose".to_string(),
+        ])?;
+        assert_eq!(opts.server_url, "http://127.0.0.1:19090");
+        assert_eq!(opts.alias_base, "operator");
+        assert_eq!(opts.room_id, "abcd".repeat(16));
+        assert!(opts.leave_order.is_none());
+        assert!(opts.watch_mode);
+        assert!(opts.batch_mode);
+        assert!(opts.verbose);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_cli_args_rejects_invalid_combinations() {
+        let err =
+            parse_cli_args(vec!["--count=0".to_string()]).expect_err("count=0 should be rejected");
+        assert!(err.to_string().contains("--count must be at least 1"));
+
+        let err = parse_cli_args(vec!["--watch".to_string()])
+            .expect_err("watch with default count should be rejected");
+        assert!(err.to_string().contains("--watch requires --count >= 2"));
+
+        let err = parse_cli_args(vec!["--leave-order=1".to_string()])
+            .expect_err("leave-order without batch should fail");
+        assert!(err.to_string().contains("--leave-order requires --batch"));
+
+        let err = parse_cli_args(vec![
+            "--batch".to_string(),
+            "--count=2".to_string(),
+            "--leave-order=1,3".to_string(),
+        ])
+        .expect_err("out-of-range leave order should fail");
+        assert!(err.to_string().contains("out of range"));
+
+        let err = parse_cli_args(vec![
+            "--watch".to_string(),
+            "--count=2".to_string(),
+            "--leave-order=2,1".to_string(),
+        ])
+        .expect_err("watch mode should reject explicit leave-order");
+        assert!(
+            err.to_string()
+                .contains("--leave-order is not supported with --watch")
+        );
+
+        let err = parse_cli_args(vec![
+            "http://127.0.0.1:18080".to_string(),
+            "room".to_string(),
+            "alias".to_string(),
+            "extra".to_string(),
+        ])
+        .expect_err("extra positional arg should fail");
+        assert!(err.to_string().contains("unexpected extra argument"));
+    }
+
+    #[test]
     fn parse_hex32_field_accepts_exact_hex32() {
         let expected = [0xABu8; 32];
         let value = serde_json::json!({
@@ -1709,8 +1846,25 @@ mod tests {
         let bob = perform_join(&server_url, &room_id, "bob").await?;
 
         send_dummy_message(&bob).await?;
-        perform_leave(&alice, false).await?;
-        perform_leave(&bob, false).await?;
+        perform_leave(&alice, true).await?;
+        perform_leave(&bob, true).await?;
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_mode_roundtrip() -> Result<()> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex::encode([0xA1u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        run_watch_mode(&server_url, &room_id, "watcher", 2, None, true).await?;
 
         handle.abort();
         let _ = handle.await;
