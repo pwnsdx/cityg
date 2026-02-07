@@ -7,7 +7,18 @@ fn main() {
 #[cfg(feature = "native-app")]
 mod native;
 
-#[cfg(feature = "native-app")]
+#[cfg(all(feature = "native-app", not(test)))]
 fn main() {
     native::main();
+}
+
+#[cfg(all(feature = "native-app", test))]
+fn main() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_main_stub_runs() {
+        super::main();
+    }
 }
