@@ -177,18 +177,14 @@ fn measure(args: &Args, cls: u8, rng: &mut StdRng, stats: &mut Stats) {
                 }
             }
             let start = Instant::now();
-            match args.target {
-                Target::MontgomeryAdd => {
-                    for &(a, b) in &inputs {
-                        black_box(montgomery_add(black_box(a), black_box(b)));
-                    }
+            if matches!(args.target, Target::MontgomeryAdd) {
+                for &(a, b) in &inputs {
+                    black_box(montgomery_add(black_box(a), black_box(b)));
                 }
-                Target::MontgomerySub => {
-                    for &(a, b) in &inputs {
-                        black_box(montgomery_sub(black_box(a), black_box(b)));
-                    }
+            } else {
+                for &(a, b) in &inputs {
+                    black_box(montgomery_sub(black_box(a), black_box(b)));
                 }
-                _ => {}
             }
             start.elapsed()
         }
@@ -211,20 +207,16 @@ fn measure(args: &Args, cls: u8, rng: &mut StdRng, stats: &mut Stats) {
         Target::SmallwoodProve => {
             let fixture = smallwood_fixture(cls);
             let start = Instant::now();
-            let proof = match smallwood::prove(&fixture.config, &fixture.statement) {
-                Ok(p) => p,
-                Err(_) => unreachable!(),
-            };
+            let proof = smallwood::prove(&fixture.config, &fixture.statement)
+                .expect("smallwood prove should succeed in dudect fixture");
             black_box(proof);
             start.elapsed()
         }
         Target::SmallwoodVerify => {
             let fixture = smallwood_fixture(cls);
             let start = Instant::now();
-            match smallwood::verify(&fixture.config, &fixture.statement, &fixture.signature) {
-                Ok(_) => {}
-                Err(_) => unreachable!(),
-            }
+            smallwood::verify(&fixture.config, &fixture.statement, &fixture.signature)
+                .expect("smallwood verify should succeed in dudect fixture");
             start.elapsed()
         }
     };
@@ -245,10 +237,8 @@ impl SmallwoodFixture {
     fn new(cls: u8) -> Self {
         let config = smallwood_config();
         let statement = smallwood_statement(cls);
-        let proof = match smallwood::prove(&config, &statement) {
-            Ok(p) => p,
-            Err(_) => unreachable!(),
-        };
+        let proof = smallwood::prove(&config, &statement)
+            .expect("smallwood prove should succeed for static fixture");
         let signature = CapssSignature::from(proof);
         Self {
             config,
@@ -361,7 +351,18 @@ mod tests {
         let f0 = smallwood_fixture(0);
         let f1 = smallwood_fixture(1);
         assert_ne!(f0.statement.message, f1.statement.message);
-        assert_eq!(format!("{}", Target::SmallwoodVerify), "smallwood_verify");
+        let displays = [
+            (Target::BarrettReduce, "barrett_reduce"),
+            (Target::MontgomeryReduce, "montgomery_reduce"),
+            (Target::MontgomeryAdd, "montgomery_add"),
+            (Target::MontgomerySub, "montgomery_sub"),
+            (Target::ExpandA, "expand_a"),
+            (Target::SmallwoodProve, "smallwood_prove"),
+            (Target::SmallwoodVerify, "smallwood_verify"),
+        ];
+        for (target, label) in displays {
+            assert_eq!(format!("{target}"), label);
+        }
     }
 
     #[test]

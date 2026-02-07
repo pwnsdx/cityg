@@ -6,6 +6,9 @@ authors = ["Sabri Haddouche"]
 edition.workspace = true
 build = "build.rs"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+
 [features]
 default = []
 debug-api = ["cityg-server/debug-api"]

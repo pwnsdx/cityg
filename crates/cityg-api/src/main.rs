@@ -1,10 +1,10 @@
-#[cfg(not(test))]
+#[cfg(all(not(test), not(coverage)))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     cityg_api::run().await
 }
 
-#[cfg(test)]
+#[cfg(any(test, coverage))]
 fn main() {}
 
 #[cfg(test)]

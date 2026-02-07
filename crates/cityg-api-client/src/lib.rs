@@ -1241,6 +1241,14 @@ mod tests {
         "ok"
     }
 
+    async fn unavailable_health() -> impl IntoResponse {
+        (
+            HttpStatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "application/json")],
+            br#"{"message":"service unavailable"}"#.to_vec(),
+        )
+    }
+
     async fn mock_post(uri: Uri) -> Response {
         let payload = match uri.path() {
             "/v1/rooms/bootstrap" => encode_proto(BootstrapRoomResponse::default()),
@@ -1283,9 +1291,19 @@ mod tests {
         let addr: SocketAddr = listener.local_addr()?;
         let base = format!("http://{}", addr);
         let handle = tokio::spawn(async move {
-            if let Err(err) = axum::serve(listener, app).await {
-                panic!("mock server failed: {err}");
-            }
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((base, handle))
+    }
+
+    async fn start_unavailable_health_server()
+    -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn StdError>> {
+        let app = Router::new().route("/health", get(unavailable_health));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
         });
         Ok((base, handle))
     }
@@ -1344,7 +1362,7 @@ mod tests {
     #[tokio::test]
     async fn wrappers_roundtrip_against_mock_server() -> Result<(), Box<dyn StdError>> {
         let (base_url, handle) = start_mock_server().await?;
-        let client = CitygApiClient::new(base_url);
+        let client = CitygApiClient::with_http_client(base_url, Client::new());
 
         client.health().await?;
         client.bootstrap_room("room-1", &[0xAB; 32]).await?;
@@ -1377,6 +1395,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_returns_http_status_error_for_non_success() -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_unavailable_health_server().await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .health()
+            .await
+            .expect_err("non-success health response should fail");
+
+        assert!(matches!(
+            err,
+            Error::HttpStatus {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                ..
+            }
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn post_proto_with_retry_returns_http_status_error() -> Result<(), Box<dyn StdError>> {
         let (base_url, handle) = start_mock_server().await?;
         let client = CitygApiClient::new(base_url);
@@ -1392,17 +1431,14 @@ mod tests {
             .await
             .expect_err("missing endpoint should return HttpStatus");
 
-        match err {
+        assert!(matches!(
+            err,
             Error::HttpStatus {
-                status,
-                freeze_code,
+                status: StatusCode::NOT_FOUND,
+                freeze_code: Some(404),
                 ..
-            } => {
-                assert_eq!(status, StatusCode::NOT_FOUND);
-                assert_eq!(freeze_code, Some(404));
             }
-            other => panic!("expected HttpStatus, got {other:?}"),
-        }
+        ));
 
         handle.abort();
         Ok(())
@@ -1436,11 +1472,8 @@ mod tests {
         }"#
         .to_vec();
         let err = build_http_error(StatusCode::BAD_REQUEST, body);
-        let failed_index = match err {
-            Error::HttpStatus { failed_index, .. } => failed_index,
-            other => {
-                return Err(format!("expected HttpStatus error, got {other:?}"));
-            }
+        let Error::HttpStatus { failed_index, .. } = err else {
+            return Err("expected HttpStatus error".to_string());
         };
         assert_eq!(failed_index, Some(5));
         Ok(())

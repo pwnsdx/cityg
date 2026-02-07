@@ -53,11 +53,9 @@ pub async fn request_tracing_middleware(mut request: Request, next: Next) -> Res
 
         // Add request ID to response headers
         let (mut parts, body) = response.into_parts();
-        parts.headers.insert(
-            X_REQUEST_ID,
-            HeaderValue::from_str(&request_id.to_string())
-                .unwrap_or_else(|_| HeaderValue::from_static("invalid")),
-        );
+        let request_id_header =
+            HeaderValue::from_str(&request_id.to_string()).expect("uuid is a valid header value");
+        parts.headers.insert(X_REQUEST_ID, request_id_header);
 
         Response::from_parts(parts, body)
     }
@@ -123,9 +121,7 @@ mod tests {
             .expect("bind listener");
         let addr: SocketAddr = listener.local_addr().expect("listener addr");
         let handle = tokio::spawn(async move {
-            if let Err(err) = axum::serve(listener, app).await {
-                panic!("test server failed: {err}");
-            }
+            let _ = axum::serve(listener, app).await;
         });
 
         let id = Uuid::new_v4();
@@ -157,9 +153,7 @@ mod tests {
             .expect("bind listener");
         let addr: SocketAddr = listener.local_addr().expect("listener addr");
         let handle = tokio::spawn(async move {
-            if let Err(err) = axum::serve(listener, app).await {
-                panic!("test server failed: {err}");
-            }
+            let _ = axum::serve(listener, app).await;
         });
 
         let response = reqwest::Client::new()
