@@ -33,7 +33,7 @@ use gpui::{
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
-use msphf_core::{ds, hash::h_l};
+use msphf_core::{ds, hash::h_l, merkle::canonical_set_root};
 use msphf_orchestrator::CapssWitnessBundle;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
@@ -6115,6 +6115,101 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
     Ok(())
 }
 
+const MEMBERS_ROOT_VERIFY_PAGE_LIMIT: u32 = 2_000;
+
+fn parse_member_leaf_id(bytes: &[u8]) -> Result<[u8; 32]> {
+    bytes
+        .try_into()
+        .map_err(|_| anyhow!("member leaf id must be 32 bytes"))
+}
+
+fn validate_members_root_from_leaves(
+    root: [u8; 32],
+    mut leaves: Vec<[u8; 32]>,
+    total_count: u64,
+) -> Result<()> {
+    if leaves.len() as u64 != total_count {
+        return Err(anyhow!(
+            "members root validation failed: expected {total_count} leaves, received {}",
+            leaves.len()
+        ));
+    }
+    leaves.sort_unstable();
+    let computed = canonical_set_root(&leaves)
+        .map_err(|err| anyhow!("members root validation failed: unable to compute root: {err}"))?;
+    if computed != root {
+        return Err(anyhow!(
+            "members root validation failed: computed {} but server reported {}",
+            hex_encode(computed),
+            hex_encode(root)
+        ));
+    }
+    Ok(())
+}
+
+async fn verify_members_root_consistency(
+    client: &CitygApiClient,
+    gid: &[u8; 32],
+    root: &[u8; 32],
+) -> Result<()> {
+    let mut offset = 0u64;
+    let mut expected_total: Option<u64> = None;
+    let mut leaves: Vec<[u8; 32]> = Vec::new();
+
+    loop {
+        let response = client
+            .members_with_range(
+                gid,
+                Some(root),
+                Some(offset),
+                Some(MEMBERS_ROOT_VERIFY_PAGE_LIMIT),
+            )
+            .await?;
+
+        let response_root: [u8; 32] = response
+            .root
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("members root must be 32 bytes"))?;
+        if response_root != *root {
+            return Err(anyhow!(
+                "members root validation failed: page root {} did not match expected {}",
+                hex_encode(response_root),
+                hex_encode(*root)
+            ));
+        }
+
+        match expected_total {
+            Some(total) if total != response.total_count => {
+                return Err(anyhow!(
+                    "members root validation failed: inconsistent total_count ({total} vs {})",
+                    response.total_count
+                ));
+            }
+            None => expected_total = Some(response.total_count),
+            _ => {}
+        }
+
+        for entry in response.members {
+            leaves.push(parse_member_leaf_id(entry.leaf_id.as_slice())?);
+        }
+
+        if response.next_offset >= response.total_count {
+            break;
+        }
+        if response.next_offset <= offset {
+            return Err(anyhow!(
+                "members root validation failed: non-increasing pagination offset {} -> {}",
+                offset,
+                response.next_offset
+            ));
+        }
+        offset = response.next_offset;
+    }
+
+    validate_members_root_from_leaves(*root, leaves, expected_total.unwrap_or(0))
+}
+
 async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
     let client = CitygApiClient::new(&params.server_url);
     let (raw_members, root, total_count, next_offset) = match &params.mode {
@@ -6216,13 +6311,14 @@ async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
         .as_slice()
         .try_into()
         .map_err(|_| anyhow!("members root must be 32 bytes"))?;
+    if params.offset == 0 {
+        verify_members_root_consistency(&client, &params.gid, &root)
+            .await
+            .context("failed to verify member roster root")?;
+    }
     let mut members = Vec::with_capacity(raw_members.len());
     for entry in raw_members {
-        let leaf_id: [u8; 32] = entry
-            .leaf_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow!("member leaf id must be 32 bytes"))?;
+        let leaf_id = parse_member_leaf_id(entry.leaf_id.as_slice())?;
         let alias = entry.alias.filter(|alias| !alias.trim().is_empty());
         let pop_public_key = entry.pop_public_key.filter(|pk| !pk.is_empty());
         members.push(MemberEntry {
@@ -8721,6 +8817,24 @@ mod tests {
         assert_eq!(model.append_messages(vec![first]), 1);
         assert_eq!(model.append_messages(vec![second]), 0);
         assert_eq!(model.messages.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn validate_members_root_from_leaves_accepts_matching_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let leaves = vec![[0x01; 32], [0x02; 32]];
+        let root = canonical_set_root(&leaves)?;
+        validate_members_root_from_leaves(root, vec![leaves[1], leaves[0]], 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn validate_members_root_from_leaves_rejects_duplicates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let leaf = [0xAA; 32];
+        let result = validate_members_root_from_leaves(leaf, vec![leaf, leaf], 2);
+        assert!(result.is_err(), "duplicate leaves should fail root validation");
         Ok(())
     }
 

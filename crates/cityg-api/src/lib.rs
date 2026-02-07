@@ -82,6 +82,7 @@ struct ApiState {
     messages: Arc<RwLock<AHashMap<[u8; 32], Vec<StoredMessage>>>>,
     bundles: Arc<RwLock<AHashMap<[u8; 32], Vec<u8>>>>,
     message_retention: Duration,
+    fs_epoch_period_seconds: u64,
     freeze_counts: Arc<RwLock<BTreeMap<(u32, String), u64>>>,
     // Alias registry: alias -> (leaf_id, pop_pk) for TOFU
     alias_registry: Arc<RwLock<AHashMap<String, AliasBinding>>>,
@@ -830,7 +831,15 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             .fs_policy_version()
             .map(|s| s.to_string())
             .unwrap_or_else(|| "fs-demo-policy".to_string());
-        let fs_epoch_base_ts = guard.context().fs_base_ts().unwrap_or(0);
+        let fs_epoch_base_ts = match guard.context().fs_base_ts() {
+            Some(base_ts) => base_ts,
+            None => {
+                let base_ts =
+                    aligned_fs_epoch_base_ts(SystemTime::now(), state.fs_epoch_period_seconds);
+                guard.context_mut().set_fs_base_ts(Some(base_ts));
+                base_ts
+            }
+        };
         let bootstrap_public = guard
             .context()
             .bootstrap_public_key()
@@ -1573,6 +1582,12 @@ fn server_from_config(cfg: &cityg_config::CityGConfig) -> CityGServer {
     server
 }
 
+fn aligned_fs_epoch_base_ts(now: SystemTime, period_seconds: u64) -> u64 {
+    let period = period_seconds.max(1);
+    let now_secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    now_secs - (now_secs % period)
+}
+
 fn fs_policy_from_settings(settings: &cityg_config::FsPolicySettings) -> FsPolicyConfig {
     FsPolicyConfig {
         h_seconds: settings.h_seconds,
@@ -1614,6 +1629,7 @@ pub async fn run_with_config(
         messages: Arc::new(RwLock::new(AHashMap::new())),
         bundles: Arc::new(RwLock::new(AHashMap::new())),
         message_retention,
+        fs_epoch_period_seconds: config.protocol.fs_policy.h_seconds.max(1),
         freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
         alias_registry: Arc::new(RwLock::new(AHashMap::new())),
         member_metadata: Arc::new(RwLock::new(AHashMap::new())),
@@ -1882,6 +1898,7 @@ mod tests {
             messages: Arc::new(RwLock::new(AHashMap::new())),
             bundles: Arc::new(RwLock::new(AHashMap::new())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
+            fs_epoch_period_seconds: CityGConfig::default().protocol.fs_policy.h_seconds.max(1),
             freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
             alias_registry: Arc::new(RwLock::new(AHashMap::new())),
             member_metadata: Arc::new(RwLock::new(AHashMap::new())),
@@ -2024,5 +2041,21 @@ mod tests {
         let retained = store.get(&weid).expect("weid should exist");
         assert_eq!(retained.len(), 1, "only exact-now message should remain");
         assert_eq!(retained[0].timestamp_ms, now_ms);
+    }
+
+    #[test]
+    fn aligned_fs_epoch_base_ts_rounds_down_to_period() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_001);
+        assert_eq!(aligned_fs_epoch_base_ts(now, 300), 900);
+    }
+
+    #[test]
+    fn server_from_config_leaves_fs_base_ts_unset() {
+        let config = CityGConfig::default();
+        let server = server_from_config(&config);
+        assert!(
+            server.context().fs_base_ts().is_none(),
+            "server should not pre-seed fs base timestamp before first accepted/join ticket flow"
+        );
     }
 }
