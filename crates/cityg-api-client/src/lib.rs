@@ -1194,6 +1194,236 @@ fn build_http_error(status: StatusCode, body: Vec<u8>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Router,
+        http::{StatusCode as HttpStatusCode, Uri, header},
+        response::{IntoResponse, Response},
+        routing::{get, post},
+    };
+    use pb::{
+        BootstrapRoomResponse, ConfigureWindowResponse, FetchMessagesResponse, GetBundleResponse,
+        GetTelemetryResponse, GetWindowResponse, JoinTicketResponse, MembersResponse,
+        MergeTicketResponse, SearchMembersResponse, SendMessageResponse,
+    };
+    use prost::Message;
+    use std::{error::Error as StdError, net::SocketAddr};
+    use tokio::net::TcpListener;
+
+    fn encode_proto<T: Message>(msg: T) -> Vec<u8> {
+        msg.encode_to_vec()
+    }
+
+    fn merge_ticket_ok_payload() -> MergeTicketResponse {
+        MergeTicketResponse {
+            we_epoch_id: vec![0x01; 32],
+            pivot_parity_cbor: Vec::new(),
+            witness_cbor: Vec::new(),
+            srx_cbor: Vec::new(),
+            proof_mode: "smallwood".to_string(),
+            vrf_id: "lb-vrf-v1".to_string(),
+            policy_version: "v0".to_string(),
+            cat: vec![0x02; 32],
+            parent_root: vec![0x03; 32],
+            join_delta_root: vec![0x04; 32],
+            revoked_since_root: vec![0x00; 32],
+            revoked_root: vec![0x00; 32],
+            tswe_salt_hash: vec![0x05; 32],
+            pox_r_commit: vec![0x06; 32],
+            kbroad_public: vec![0x07; 32],
+            msphf_crs_id: "rlwe-crs-v1".to_string(),
+            msphf_params_id: "rlwe-hps2048509".to_string(),
+            fs_policy_version: "fs-policy-v1".to_string(),
+            fs_epoch_base_ts: 0,
+        }
+    }
+
+    async fn mock_health() -> &'static str {
+        "ok"
+    }
+
+    async fn mock_post(uri: Uri) -> Response {
+        let payload = match uri.path() {
+            "/v1/rooms/bootstrap" => encode_proto(BootstrapRoomResponse::default()),
+            "/v1/members" => encode_proto(MembersResponse::default()),
+            "/v1/members/search" => encode_proto(SearchMembersResponse::default()),
+            "/v1/rooms/join_ticket" => encode_proto(JoinTicketResponse::default()),
+            "/v1/rooms/merge_ticket" => encode_proto(merge_ticket_ok_payload()),
+            "/v1/send_message" => encode_proto(SendMessageResponse::default()),
+            "/v1/messages" => encode_proto(FetchMessagesResponse::default()),
+            "/v1/bundle" => encode_proto(GetBundleResponse::default()),
+            "/v1/config/window" => encode_proto(ConfigureWindowResponse::default()),
+            "/v1/telemetry" => encode_proto(GetTelemetryResponse::default()),
+            "/v1/window" => encode_proto(GetWindowResponse::default()),
+            _ => {
+                let body = br#"{"message":"resource not found","freeze_code":404}"#.to_vec();
+                return (
+                    HttpStatusCode::NOT_FOUND,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+                    .into_response();
+            }
+        };
+
+        (
+            HttpStatusCode::OK,
+            [(header::CONTENT_TYPE, "application/x-protobuf")],
+            payload,
+        )
+            .into_response()
+    }
+
+    async fn start_mock_server() -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn StdError>>
+    {
+        let app = Router::new()
+            .route("/health", get(mock_health))
+            .route("/*path", post(mock_post));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            if let Err(err) = axum::serve(listener, app).await {
+                panic!("mock server failed: {err}");
+            }
+        });
+        Ok((base, handle))
+    }
+
+    #[test]
+    fn array32_parses_exact_length() -> Result<(), String> {
+        let input = [0x11u8; 32];
+        let parsed = array32(&input).map_err(|e| e.to_string())?;
+        assert_eq!(parsed, input);
+        Ok(())
+    }
+
+    #[test]
+    fn array32_rejects_short_input() {
+        let err = array32(&[0x11; 31]).expect_err("short array should fail");
+        match err {
+            Error::Parse(msg) => assert!(msg.contains("invalid 32-byte field")),
+            other => panic!("expected parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_envelope_falls_back_to_raw_body() {
+        let (message, freeze_code, freeze_reason, failed_index) =
+            parse_error_envelope(b"plain text body");
+        assert_eq!(message, "plain text body");
+        assert_eq!(freeze_code, None);
+        assert_eq!(freeze_reason, None);
+        assert_eq!(failed_index, None);
+    }
+
+    #[test]
+    fn build_http_error_uses_payload_message_and_code() {
+        let err = build_http_error(
+            StatusCode::BAD_REQUEST,
+            br#"{"message":"invalid input","freeze_code":17,"freeze_reason":"bad_field"}"#.to_vec(),
+        );
+        match err {
+            Error::HttpStatus {
+                status,
+                message,
+                freeze_code,
+                freeze_reason,
+                failed_index,
+            } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(message, "invalid input");
+                assert_eq!(freeze_code, Some(17));
+                assert_eq!(freeze_reason.as_deref(), Some("bad_field"));
+                assert_eq!(failed_index, None);
+            }
+            other => panic!("expected HttpStatus error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wrappers_roundtrip_against_mock_server() -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_mock_server().await?;
+        let client = CitygApiClient::new(base_url);
+
+        client.health().await?;
+        client.bootstrap_room("room-1", &[0xAB; 32]).await?;
+
+        let gid = [0x33u8; 32];
+        let _ = client.members(&gid, None).await?;
+        let _ = client
+            .members_with_range(&gid, Some(&[0x44; 32]), Some(1), Some(16))
+            .await?;
+        let _ = client
+            .search_members(&gid, "alice", Some(&[0x55; 32]), Some(0), Some(10))
+            .await?;
+        let _ = client.join_ticket("room-1", "alice", None).await?;
+
+        let merge = client.merge_ticket("room-1", &[0x01; 32]).await?;
+        assert_eq!(merge.we_epoch_id, [0x01; 32]);
+        assert_eq!(merge.parent_root, [0x03; 32]);
+
+        let _ = client
+            .send_message(&[0x22; 32], b"ciphertext", Some(b"sender"))
+            .await?;
+        let _ = client.fetch_messages(&[0x22; 32]).await?;
+        let _ = client.get_bundle(&[0x22; 32]).await?;
+        let _ = client.window().await?;
+        let _ = client.telemetry().await?;
+        let _ = client.configure_window(Some(8), Some(120_000)).await?;
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_proto_with_retry_returns_http_status_error() -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_mock_server().await?;
+        let client = CitygApiClient::new(base_url);
+        let req = MembersRequest {
+            gid: vec![0x01; 32],
+            parent_root: Vec::new(),
+            offset: None,
+            limit: None,
+        };
+
+        let err = client
+            .post_proto_with_retry::<MembersResponse>("/v1/not-found", req, 0)
+            .await
+            .expect_err("missing endpoint should return HttpStatus");
+
+        match err {
+            Error::HttpStatus {
+                status,
+                freeze_code,
+                ..
+            } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(freeze_code, Some(404));
+            }
+            other => panic!("expected HttpStatus, got {other:?}"),
+        }
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_proto_with_retry_returns_http_error_after_retries() {
+        let client = CitygApiClient::new("http://127.0.0.1:1");
+        let req = MembersRequest {
+            gid: vec![0x01; 32],
+            parent_root: Vec::new(),
+            offset: None,
+            limit: None,
+        };
+
+        let err = client
+            .post_proto_with_retry::<MembersResponse>("/v1/members", req, 1)
+            .await
+            .expect_err("unreachable host should return Http");
+        assert!(matches!(err, Error::Http(_)));
+    }
 
     #[test]
     fn parses_failed_index_from_error_payload() -> Result<(), String> {

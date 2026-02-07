@@ -208,11 +208,21 @@ fn bootstrap_keys() -> &'static (Vec<u8>, Box<MlDsaSecretKey>) {
 }
 
 fn bootstrap_key_path() -> Option<PathBuf> {
-    config_dir().map(|dir| dir.join("cityg").join("demo-bootstrap.key"))
+    demo_config_root().map(|dir| dir.join("demo-bootstrap.key"))
 }
 
 fn kbroad_key_path() -> Option<PathBuf> {
-    config_dir().map(|dir| dir.join("cityg").join("demo-kbroad.key"))
+    demo_config_root().map(|dir| dir.join("demo-kbroad.key"))
+}
+
+fn demo_config_root() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("CITYG_DEMO_CONFIG_DIR") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    config_dir().map(|dir| dir.join("cityg"))
 }
 
 fn load_or_generate_kbroad_keys() -> Result<(Vec<u8>, Vec<u8>), CityGError> {
@@ -737,4 +747,187 @@ pub fn split_interval_paths(
         .map_err(|_| CityGError::InvalidInput("lca depth overflow"))?;
 
     Ok((left_below, right_below, above, l_h, r_h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::witness::sequential_leaf;
+    use std::{
+        ffi::OsString,
+        fs,
+        path::PathBuf,
+        sync::{Mutex, OnceLock},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn setup_demo_config_dir(label: &str) -> Result<(PathBuf, Option<OsString>), CityGError> {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| CityGError::InvalidInput("time went backwards"))?
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("cityg-demo-tests-{label}-{ts}"));
+        fs::create_dir_all(&dir)?;
+        let previous = std::env::var_os("CITYG_DEMO_CONFIG_DIR");
+        // SAFETY: tests are serialized via `env_lock`, so mutating process env is race-free.
+        unsafe { std::env::set_var("CITYG_DEMO_CONFIG_DIR", &dir) };
+        Ok((dir, previous))
+    }
+
+    fn teardown_demo_config_dir(dir: &PathBuf, previous: Option<OsString>) {
+        match previous {
+            // SAFETY: tests are serialized via `env_lock`, so mutating process env is race-free.
+            Some(value) => unsafe { std::env::set_var("CITYG_DEMO_CONFIG_DIR", value) },
+            // SAFETY: tests are serialized via `env_lock`, so mutating process env is race-free.
+            None => unsafe { std::env::remove_var("CITYG_DEMO_CONFIG_DIR") },
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn demo_config_root_respects_env_override() -> Result<(), CityGError> {
+        let _guard = env_lock()
+            .lock()
+            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let (dir, previous) = setup_demo_config_dir("root")?;
+        let root = demo_config_root().expect("config root should resolve");
+        assert_eq!(root, dir);
+        teardown_demo_config_dir(&dir, previous);
+        Ok(())
+    }
+
+    #[test]
+    fn load_or_generate_kbroad_keys_roundtrips_on_disk() -> Result<(), CityGError> {
+        let _guard = env_lock()
+            .lock()
+            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let (dir, previous) = setup_demo_config_dir("kbroad-roundtrip")?;
+
+        let (pk_first, sk_first) = load_or_generate_kbroad_keys()?;
+        let stored = fs::read(dir.join("demo-kbroad.key"))?;
+        assert_eq!(stored.len(), pk_first.len() + sk_first.len());
+
+        let (pk_second, sk_second) = load_or_generate_kbroad_keys()?;
+        assert_eq!(pk_first, pk_second);
+        assert_eq!(sk_first, sk_second);
+
+        teardown_demo_config_dir(&dir, previous);
+        Ok(())
+    }
+
+    #[test]
+    fn load_or_generate_kbroad_keys_replaces_malformed_file() -> Result<(), CityGError> {
+        let _guard = env_lock()
+            .lock()
+            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let (dir, previous) = setup_demo_config_dir("kbroad-malformed")?;
+
+        fs::write(dir.join("demo-kbroad.key"), [0xAA, 0xBB, 0xCC])?;
+        let (pk, sk) = load_or_generate_kbroad_keys()?;
+        assert!(!pk.is_empty());
+        assert!(!sk.is_empty());
+
+        let rewritten = fs::read(dir.join("demo-kbroad.key"))?;
+        assert_eq!(rewritten.len(), pk.len() + sk.len());
+
+        teardown_demo_config_dir(&dir, previous);
+        Ok(())
+    }
+
+    #[test]
+    fn load_or_generate_bootstrap_keys_roundtrips_on_disk() -> Result<(), CityGError> {
+        let _guard = env_lock()
+            .lock()
+            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let (dir, previous) = setup_demo_config_dir("bootstrap-roundtrip")?;
+
+        let (pk_first, sk_first) = load_or_generate_bootstrap_keys()?;
+        let stored = fs::read(dir.join("demo-bootstrap.key"))?;
+        assert_eq!(stored.len(), pk_first.len() + sk_first.as_bytes().len());
+
+        let (pk_second, sk_second) = load_or_generate_bootstrap_keys()?;
+        assert_eq!(pk_first, pk_second);
+        assert_eq!(sk_first.as_bytes(), sk_second.as_bytes());
+
+        teardown_demo_config_dir(&dir, previous);
+        Ok(())
+    }
+
+    #[test]
+    fn load_or_generate_bootstrap_keys_replaces_malformed_file() -> Result<(), CityGError> {
+        let _guard = env_lock()
+            .lock()
+            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let (dir, previous) = setup_demo_config_dir("bootstrap-malformed")?;
+
+        fs::write(dir.join("demo-bootstrap.key"), [0xAA, 0xBB])?;
+        let (pk, sk) = load_or_generate_bootstrap_keys()?;
+        assert!(!pk.is_empty());
+        assert!(!sk.as_bytes().is_empty());
+
+        let rewritten = fs::read(dir.join("demo-bootstrap.key"))?;
+        assert_eq!(rewritten.len(), pk.len() + sk.as_bytes().len());
+
+        teardown_demo_config_dir(&dir, previous);
+        Ok(())
+    }
+
+    #[test]
+    fn fold_step_into_rejects_invalid_inputs() {
+        let mut acc = [0u8; 32];
+        let bad_len = RawPathEntry {
+            dir: 0,
+            sibling: vec![0u8; 31],
+        };
+        let bad_dir = RawPathEntry {
+            dir: 3,
+            sibling: vec![0u8; 32],
+        };
+
+        assert!(fold_step_into(&mut acc, &bad_len).is_err());
+        assert!(fold_step_into(&mut acc, &bad_dir).is_err());
+    }
+
+    #[test]
+    fn split_interval_paths_rejects_inconsistent_roots() {
+        let leaf_left = [0x11; 32];
+        let leaf_right = [0x22; 32];
+        let err = split_interval_paths(leaf_left, &[], leaf_right, &[], [0xFF; 32])
+            .expect_err("mismatched root should fail");
+        assert!(
+            err.to_string()
+                .contains("membership path inconsistent with root")
+        );
+    }
+
+    #[test]
+    fn build_srx_inputs_populates_anchor_refs_for_interval_join() -> Result<(), CityGError> {
+        let parent_leaves = vec![[0x10; 32], [0x30; 32], [0x50; 32]];
+        let parent_root = canonical_set_root(&parent_leaves)?;
+        let join_leaves = vec![[0x40; 32]];
+
+        let srx = build_srx_inputs(&join_leaves, &parent_leaves, parent_root, [0u8; 32]);
+        assert_eq!(srx.join_nonmem_parent.len(), 1);
+        let item = &srx.join_nonmem_parent[0];
+        assert!(item.left_ref.is_some());
+        assert!(item.right_ref.is_some());
+        assert!(item.witness.left.is_some());
+        assert!(item.witness.right.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn attach_bootstrap_sets_expected_headers() -> Result<(), CityGError> {
+        let mut bundle = demo_bundle_with_parent_leaves(&[], sequential_leaf(1))?;
+        attach_bootstrap(&mut bundle)?;
+        assert!(bundle.header_map.contains_key(&hdr::HDR_BOOTSTRAP_ALG));
+        assert!(bundle.header_map.contains_key(&hdr::HDR_BOOTSTRAP_PK));
+        assert!(bundle.header_map.contains_key(&hdr::HDR_BOOTSTRAP_SIG));
+        Ok(())
+    }
 }

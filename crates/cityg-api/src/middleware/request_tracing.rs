@@ -84,3 +84,98 @@ pub fn get_request_id(headers: &HeaderMap) -> Option<RequestId> {
         .and_then(|s| Uuid::parse_str(s).ok())
         .map(RequestId)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, middleware, routing::get};
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+    use uuid::Uuid;
+
+    #[test]
+    fn get_request_id_accepts_valid_uuid_header() {
+        let id = Uuid::new_v4();
+        let mut headers = HeaderMap::new();
+        let value = HeaderValue::from_str(&id.to_string()).expect("valid header value");
+        headers.insert(X_REQUEST_ID, value);
+
+        let parsed = get_request_id(&headers).expect("request id should parse");
+        assert_eq!(parsed.0, id);
+        assert_eq!(parsed.to_string(), id.to_string());
+    }
+
+    #[test]
+    fn get_request_id_rejects_invalid_header_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_REQUEST_ID, HeaderValue::from_static("not-a-uuid"));
+        assert!(get_request_id(&headers).is_none());
+    }
+
+    #[tokio::test]
+    async fn middleware_propagates_valid_request_id() {
+        let app = Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .layer(middleware::from_fn(request_tracing_middleware));
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr: SocketAddr = listener.local_addr().expect("listener addr");
+        let handle = tokio::spawn(async move {
+            if let Err(err) = axum::serve(listener, app).await {
+                panic!("test server failed: {err}");
+            }
+        });
+
+        let id = Uuid::new_v4();
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/health"))
+            .header(X_REQUEST_ID, id.to_string())
+            .send()
+            .await
+            .expect("request should succeed");
+        assert!(response.status().is_success());
+        let echoed = response
+            .headers()
+            .get(X_REQUEST_ID)
+            .expect("response should include request id")
+            .to_str()
+            .expect("request id header should be utf8");
+        assert_eq!(echoed, id.to_string());
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn middleware_generates_request_id_for_invalid_input() {
+        let app = Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .layer(middleware::from_fn(request_tracing_middleware));
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr: SocketAddr = listener.local_addr().expect("listener addr");
+        let handle = tokio::spawn(async move {
+            if let Err(err) = axum::serve(listener, app).await {
+                panic!("test server failed: {err}");
+            }
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/health"))
+            .header(X_REQUEST_ID, "definitely-not-a-uuid")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert!(response.status().is_success());
+        let generated = response
+            .headers()
+            .get(X_REQUEST_ID)
+            .expect("response should include generated request id")
+            .to_str()
+            .expect("request id header should be utf8");
+        assert!(Uuid::parse_str(generated).is_ok());
+        handle.abort();
+    }
+}

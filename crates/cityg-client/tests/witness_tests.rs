@@ -163,3 +163,118 @@ fn test_srx_inputs_cbor_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(decoded.join_leaf_ids, srx_owned.join_leaf_ids);
     Ok(())
 }
+
+#[test]
+fn test_build_branch_b_artifacts_rejects_parent_root_mismatch() {
+    let parent_leaves = vec![[0x10; 32], [0x20; 32]];
+    let join_leaves = vec![[0x30; 32]];
+    let bad_parent_root = [0xFF; 32];
+
+    let err = build_branch_b_artifacts(&parent_leaves, &join_leaves, bad_parent_root, [0u8; 32])
+        .expect_err("mismatched parent root must fail");
+    assert!(err.to_string().contains("parent root mismatch"));
+}
+
+#[test]
+fn test_build_merge_srx_inputs_rejects_nonzero_revoked_root_when_empty() {
+    let parent_leaves = vec![[0x10; 32]];
+    let join_leaves = vec![[0x20; 32]];
+    let parent_root =
+        msphf_core::merkle::canonical_set_root(&parent_leaves).expect("parent root should compute");
+    let revoked_since_leaves: Vec<[u8; 32]> = Vec::new();
+    let revoked_leaves: Vec<[u8; 32]> = Vec::new();
+
+    let err = build_merge_srx_inputs(
+        &parent_leaves,
+        &join_leaves,
+        parent_root,
+        &revoked_since_leaves,
+        &revoked_leaves,
+        [0x99; 32],
+    )
+    .expect_err("non-zero revoked root with empty revoked set must fail");
+
+    assert!(err.to_string().contains("revoked_root mismatch"));
+}
+
+#[test]
+fn test_build_merge_srx_inputs_rejects_revoked_since_not_in_revoked_set() {
+    let parent_leaves = vec![[0x10; 32]];
+    let join_leaves = vec![[0x20; 32]];
+    let parent_root =
+        msphf_core::merkle::canonical_set_root(&parent_leaves).expect("parent root should compute");
+    let revoked_since_leaves = vec![[0xA5; 32]];
+    let revoked_leaves: Vec<[u8; 32]> = Vec::new();
+
+    let err = build_merge_srx_inputs(
+        &parent_leaves,
+        &join_leaves,
+        parent_root,
+        &revoked_since_leaves,
+        &revoked_leaves,
+        [0u8; 32],
+    )
+    .expect_err("revoked_since entries must belong to revoked set");
+
+    assert!(
+        err.to_string()
+            .contains("revoked leaf missing from revoked set")
+    );
+}
+
+#[test]
+fn test_build_branch_b_artifacts_interval_nonmembership_includes_anchors()
+-> Result<(), Box<dyn std::error::Error>> {
+    let parent_leaves = vec![[0x10; 32], [0x30; 32], [0x50; 32]];
+    let parent_root = msphf_core::merkle::canonical_set_root(&parent_leaves)?;
+    let join_leaves = vec![[0x40; 32]];
+
+    let (_witness, srx) =
+        build_branch_b_artifacts(&parent_leaves, &join_leaves, parent_root, [0u8; 32])?;
+    assert_eq!(srx.join_nonmem_parent.len(), 1);
+    let interval = &srx.join_nonmem_parent[0];
+    assert!(interval.witness.left.is_some());
+    assert!(interval.witness.right.is_some());
+    assert!(interval.left_ref.is_some());
+    assert!(interval.right_ref.is_some());
+    assert!(interval.witness.nmint.is_some());
+    Ok(())
+}
+
+#[test]
+fn test_build_branch_b_artifacts_left_boundary_nonmembership()
+-> Result<(), Box<dyn std::error::Error>> {
+    let parent_leaves = vec![[0x20; 32], [0x30; 32]];
+    let parent_root = msphf_core::merkle::canonical_set_root(&parent_leaves)?;
+    let join_leaves = vec![[0x10; 32]];
+
+    let (_witness, srx) =
+        build_branch_b_artifacts(&parent_leaves, &join_leaves, parent_root, [0u8; 32])?;
+    let nm = &srx.join_nonmem_parent[0].witness;
+    assert!(nm.left.is_none());
+    assert!(nm.right.is_some());
+    assert!(!nm.path.is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_build_branch_b_artifacts_right_boundary_nonmembership()
+-> Result<(), Box<dyn std::error::Error>> {
+    let parent_leaves = vec![[0x20; 32], [0x30; 32]];
+    let parent_root = msphf_core::merkle::canonical_set_root(&parent_leaves)?;
+    let join_leaves = vec![[0x40; 32]];
+
+    let (_witness, srx) =
+        build_branch_b_artifacts(&parent_leaves, &join_leaves, parent_root, [0u8; 32])?;
+    let nm = &srx.join_nonmem_parent[0].witness;
+    assert!(nm.left.is_some());
+    assert!(nm.right.is_none());
+    assert!(!nm.path.is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_srx_inputs_from_cbor_invalid() {
+    let err = SrxInputsOwned::from_cbor(&[0xFF, 0x00]).expect_err("invalid cbor should fail");
+    assert!(err.to_string().contains("unable to parse SRX inputs"));
+}
