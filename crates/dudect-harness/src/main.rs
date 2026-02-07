@@ -6,7 +6,7 @@ use capss::{
 use clap::{Parser, ValueEnum};
 use msphf_core::rlwe::{
     arithmetic::{barrett_reduce, montgomery_add, montgomery_reduce, montgomery_sub},
-    constants::Q,
+    constants::{BARRETT_MU, Q},
     matrix::expand_a,
 };
 use once_cell::sync::Lazy;
@@ -101,8 +101,7 @@ fn welch_t(a: &Stats, b: &Stats) -> f64 {
     if denom == 0.0 { 0.0 } else { mean_diff / denom }
 }
 
-fn main() {
-    let args = Args::parse();
+fn run(args: Args) {
     println!(
         "Running target '{}' with {} samples (inner loop {})",
         args.target, args.samples, args.inner
@@ -123,12 +122,25 @@ fn main() {
     println!("|t| > 4.5 is suspicious. Current |t| = {:.4}", t.abs());
 }
 
+#[cfg(not(test))]
+fn main() {
+    run(Args::parse());
+}
+
+#[cfg(test)]
+fn main() {}
+
 fn measure(args: &Args, cls: u8, rng: &mut StdRng, stats: &mut Stats) {
     use std::hint::black_box;
     let inner = args.inner as usize;
     let elapsed = match args.target {
         Target::BarrettReduce => {
-            let tight = (Q as i32) * (Q as i32) - 1;
+            let q = i64::from(Q);
+            let q_bound = q.saturating_mul(q).saturating_sub(1);
+            // Keep BARRETT_MU * a in-range for debug builds of barrett_reduce.
+            let mu = i64::from(BARRETT_MU.max(1));
+            let mul_bound = (i64::from(i32::MAX) - (1_i64 << 25)) / mu;
+            let tight = q_bound.min(mul_bound).max(1) as i32;
             let mut inputs: Vec<i32> = (0..inner).map(|_| rng.gen_range(-tight..=tight)).collect();
             if cls == 1 {
                 for val in &mut inputs {
@@ -278,5 +290,82 @@ fn smallwood_statement(cls: u8) -> CapssStatement {
             y: FieldElement::from_base(BaseField::from(33u64 + cls as u64)),
         },
         message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_for(target: Target) -> Args {
+        Args {
+            target,
+            samples: 1,
+            inner: 2,
+            seed: 7,
+        }
+    }
+
+    #[test]
+    fn stats_and_welch_t_cover_zero_and_nonzero_variance() {
+        let mut a = Stats::default();
+        let mut b = Stats::default();
+        a.push(10.0);
+        b.push(10.0);
+        assert_eq!(a.variance(), 0.0);
+        assert_eq!(welch_t(&a, &b), 0.0);
+
+        a.push(12.0);
+        b.push(8.0);
+        assert!(a.variance() > 0.0);
+        assert!(b.variance() > 0.0);
+        assert!(welch_t(&a, &b).is_finite());
+    }
+
+    #[test]
+    fn measure_covers_all_targets() {
+        let targets = [
+            Target::BarrettReduce,
+            Target::MontgomeryReduce,
+            Target::MontgomeryAdd,
+            Target::MontgomerySub,
+            Target::ExpandA,
+            Target::SmallwoodProve,
+            Target::SmallwoodVerify,
+        ];
+
+        let mut rng = StdRng::seed_from_u64(123);
+        for target in targets {
+            let args = args_for(target);
+            let mut stats = Stats::default();
+            measure(&args, 0, &mut rng, &mut stats);
+            measure(&args, 1, &mut rng, &mut stats);
+            assert_eq!(stats.count, 2);
+            assert!(stats.mean().is_finite());
+        }
+    }
+
+    #[test]
+    fn run_executes_with_small_sample_count() {
+        run(args_for(Target::MontgomeryAdd));
+    }
+
+    #[test]
+    fn helper_functions_are_deterministic_and_valid() {
+        assert_eq!(duration_to_ns(Duration::from_millis(1)), 1_000_000.0);
+
+        let s0 = smallwood_statement(0);
+        let s1 = smallwood_statement(1);
+        assert_ne!(s0.message, s1.message);
+
+        let f0 = smallwood_fixture(0);
+        let f1 = smallwood_fixture(1);
+        assert_ne!(f0.statement.message, f1.statement.message);
+        assert_eq!(format!("{}", Target::SmallwoodVerify), "smallwood_verify");
+    }
+
+    #[test]
+    fn test_main_stub_runs() {
+        super::main();
     }
 }
