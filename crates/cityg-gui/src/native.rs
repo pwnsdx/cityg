@@ -3473,10 +3473,10 @@ impl AppModel {
                 error.recovery_suggestion
             );
 
-            // Log the details for now (clipboard API would require platform-specific code)
+            cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
             info!("Error details copied to logs:\n{}", details);
             warn!("Error Report:\n{}", details);
-            self.show_success("Error details logged to console", cx);
+            self.show_success("Error details copied to clipboard", cx);
         }
     }
 
