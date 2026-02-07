@@ -4521,6 +4521,7 @@ const MAX_ACTIVITY_EVENTS: usize = 256;
 const ENCRYPTED_SESSION_ENVELOPE_VERSION: u32 = 1;
 const ENCRYPTED_SESSION_ALG: &str = "chacha20poly1305";
 const SESSION_PASSPHRASE_ENV: &str = "CITYG_GUI_SESSION_PASSPHRASE";
+const KBROAD_SECRET_ENV: &str = "CITYG_GUI_KBROAD_SECRET_HEX";
 const SESSION_KEY_DERIVE_CONTEXT: &str = "cityg/gui/session-encryption/v1";
 const SESSION_LOCAL_KEY_FILE: &str = "session-key-v1.bin";
 
@@ -5675,41 +5676,32 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     };
 
     let client = CitygApiClient::new(&server_url);
-    let mut bootstrap_attempted = false;
-    let ticket = loop {
-        match client
-            .join_ticket(&room_id, &alias, identity_binding.clone())
-            .await
-        {
-            Ok(ticket) => break ticket,
-            Err(ApiClientError::HttpStatus {
-                status,
-                message,
+    let ticket = match client
+        .join_ticket(&room_id, &alias, identity_binding.clone())
+        .await
+    {
+        Ok(ticket) => ticket,
+        Err(ApiClientError::HttpStatus {
+            status,
+            message,
+            freeze_code,
+            freeze_reason,
+            ..
+        }) => {
+            let mut detail = describe_http_failure(
+                status.as_str(),
+                &message,
                 freeze_code,
-                freeze_reason,
-                ..
-            }) => {
-                if !bootstrap_attempted
-                    && status.is_server_error()
-                    && message.contains("kbroad key missing")
-                {
-                    bootstrap_attempted = true;
-                    client
-                        .bootstrap_room(&room_id, demo::kbroad_public())
-                        .await
-                        .context("failed to bootstrap room")?;
-                    continue;
-                }
-                let detail = describe_http_failure(
-                    status.as_str(),
-                    &message,
-                    freeze_code,
-                    freeze_reason.as_deref(),
+                freeze_reason.as_deref(),
+            );
+            if status.is_server_error() && message.contains("kbroad key missing") {
+                detail.push_str(
+                    " (room is not KBROAD-provisioned; bootstrap it first with a room-specific public key)",
                 );
-                return Err(anyhow!(detail));
             }
-            Err(err) => return Err(err.into()),
+            return Err(anyhow!(detail));
         }
+        Err(err) => return Err(err.into()),
     };
 
     let gid = bytes32("gid", &ticket.gid)?;
@@ -6562,30 +6554,23 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
         bundle.witness = Some(ticket.witness_cbor.clone());
     }
 
-    let demo_kbroad_secret = bundle
-        .header_map
-        .get(&hdr::HDR_KBROAD_PUB)
-        .and_then(|value| match value {
-            Value::Bytes(bytes) => Some(bytes.as_slice()),
-            _ => None,
-        })
-        .or(Some(session.kbroad_public.as_slice()))
-        .and_then(|public_key| {
-            if public_key == demo::kbroad_public() {
-                Some(demo::kbroad_secret())
-            } else {
-                None
-            }
-        });
-
-    let (derived_epoch_key, _) = if let Some(kbroad_secret) = demo_kbroad_secret {
+    let (derived_epoch_key, _) = if let Some(kbroad_secret) = configured_kbroad_secret_from_env()? {
         bundle
-            .derive_epoch_secrets_with_kbroad_secret(kbroad_secret)
+            .derive_epoch_secrets_with_kbroad_secret(kbroad_secret.as_slice())
             .context("failed to derive epoch key during sync")?
     } else {
-        bundle
-            .derive_epoch_secrets()
-            .context("failed to derive epoch key during sync")?
+        bundle.derive_epoch_secrets().map_err(|err| {
+            if err.to_string()
+                .contains("bundle missing local hp key; use derive_epoch_secrets_with_kbroad_secret")
+            {
+                anyhow!(
+                    "failed to derive epoch key during sync: bundle is redacted; set {} with the room KBROAD secret key (hex)",
+                    KBROAD_SECRET_ENV
+                )
+            } else {
+                anyhow!("failed to derive epoch key during sync: {err}")
+            }
+        })?
     };
 
     let gid = bytes32("gid", &bundle.anchor.gid)?;
@@ -6854,6 +6839,34 @@ fn decode_hex_32(input: &str) -> Option<[u8; 32]> {
     let mut result = [0u8; 32];
     result.copy_from_slice(&bytes);
     Some(result)
+}
+
+fn configured_kbroad_secret_from_env() -> Result<Option<Vec<u8>>> {
+    let raw = match std::env::var(KBROAD_SECRET_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(err) => {
+            return Err(anyhow!("failed reading {}: {}", KBROAD_SECRET_ENV, err));
+        }
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let normalized = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    let bytes = hex_decode(normalized)
+        .with_context(|| format!("{KBROAD_SECRET_ENV} must contain hex bytes"))?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
 }
 
 fn format_member_label(member: &MemberEntry) -> String {
@@ -7218,10 +7231,31 @@ mod tests {
         }
     }
 
+    struct KbroadEnvVarRestore {
+        original: Option<String>,
+    }
+
+    impl Drop for KbroadEnvVarRestore {
+        fn drop(&mut self) {
+            match self.original.as_deref() {
+                Some(value) => {
+                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                    unsafe { std::env::set_var(KBROAD_SECRET_ENV, value) };
+                }
+                None => {
+                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                    unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+                }
+            }
+        }
+    }
+
     async fn spawn_server_on(port: u16) -> JoinHandle<()> {
         tokio::spawn(async move {
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-            if let Err(err) = cityg_api::run_with_addr(addr).await {
+            let mut config = CityGConfig::default();
+            config.server.seed_demo_room = true;
+            if let Err(err) = cityg_api::run_with_config(addr, config).await {
                 eprintln!("server exited with error: {err}");
             }
         })
@@ -7236,6 +7270,13 @@ mod tests {
                 eprintln!("server exited with error: {err}");
             }
         })
+    }
+
+    async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<(), anyhow::Error> {
+        CitygApiClient::new(server_url)
+            .bootstrap_room(room_id, demo::kbroad_public())
+            .await
+            .map_err(anyhow::Error::from)
     }
 
     #[test]
@@ -7266,6 +7307,45 @@ mod tests {
         assert!(
             !session_local_key_path(&session_path)?.exists(),
             "env-derived key path must not create local key file"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn configured_kbroad_secret_env_parses_prefixed_hex() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_SECRET_ENV, " 0x0a0B0c ") };
+
+        let parsed = configured_kbroad_secret_from_env()?
+            .ok_or_else(|| anyhow!("expected configured secret bytes"))?;
+        assert_eq!(parsed, vec![0x0a, 0x0b, 0x0c]);
+        Ok(())
+    }
+
+    #[test]
+    fn configured_kbroad_secret_env_rejects_bad_hex() -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_SECRET_ENV, "not-hex") };
+
+        let err = configured_kbroad_secret_from_env().expect_err("invalid hex should fail");
+        assert!(
+            err.to_string().contains(KBROAD_SECRET_ENV),
+            "error should reference env var: {err}"
         );
         Ok(())
     }
@@ -8214,12 +8294,22 @@ mod tests {
 
     #[tokio::test]
     async fn epoch_sync_adopts_new_member_head() -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x44u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
 
         let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
@@ -8259,6 +8349,7 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x55u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
 
         let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
@@ -8285,6 +8376,7 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x66u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
 
         let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
@@ -8309,12 +8401,22 @@ mod tests {
 
     #[tokio::test]
     async fn send_fetch_and_members_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x77u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
 
         let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
@@ -8435,6 +8537,7 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x79u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
 
         let _alice = perform_join(JoinParams {
             server_url: server_url.clone(),
@@ -8492,6 +8595,7 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x7Au8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
 
         let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
@@ -8542,6 +8646,9 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x88u8; 32]);
+        CitygApiClient::new(&server_url)
+            .bootstrap_room(&room_id, demo::kbroad_public())
+            .await?;
 
         let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
@@ -8856,7 +8963,10 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let leaf = [0xAA; 32];
         let result = validate_members_root_from_leaves(leaf, vec![leaf, leaf], 2);
-        assert!(result.is_err(), "duplicate leaves should fail root validation");
+        assert!(
+            result.is_err(),
+            "duplicate leaves should fail root validation"
+        );
         Ok(())
     }
 

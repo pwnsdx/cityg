@@ -304,38 +304,29 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
     let client = CitygApiClient::new(server_url);
-    let mut bootstrap_attempted = false;
-    let ticket = loop {
-        match client.join_ticket(room_id, alias, None).await {
-            Ok(t) => break t,
-            Err(ApiClientError::HttpStatus {
-                status,
-                message,
+    let ticket = match client.join_ticket(room_id, alias, None).await {
+        Ok(t) => t,
+        Err(ApiClientError::HttpStatus {
+            status,
+            message,
+            freeze_code,
+            freeze_reason,
+            ..
+        }) => {
+            let mut detail = describe_http_failure(
+                status.as_str(),
+                &message,
                 freeze_code,
-                freeze_reason,
-                ..
-            }) => {
-                if !bootstrap_attempted
-                    && status.is_server_error()
-                    && message.contains("kbroad key missing")
-                {
-                    bootstrap_attempted = true;
-                    client
-                        .bootstrap_room(room_id, demo::kbroad_public())
-                        .await
-                        .context("bootstrap room")?;
-                    continue;
-                }
-                let detail = describe_http_failure(
-                    status.as_str(),
-                    &message,
-                    freeze_code,
-                    freeze_reason.as_deref(),
+                freeze_reason.as_deref(),
+            );
+            if status.is_server_error() && message.contains("kbroad key missing") {
+                detail.push_str(
+                    " (room is not KBROAD-provisioned; bootstrap it first with a room-specific public key)",
                 );
-                return Err(anyhow!(detail));
             }
-            Err(err) => return Err(err.into()),
+            return Err(anyhow!(detail));
         }
+        Err(err) => return Err(err.into()),
     };
 
     let gid = bytes32("gid", &ticket.gid)?;
@@ -1314,6 +1305,7 @@ fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cityg_config::CityGConfig;
     use futures::SinkExt;
     use std::{
         sync::{
@@ -1329,10 +1321,19 @@ mod tests {
     async fn spawn_server_on(port: u16) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-            if let Err(err) = cityg_api::run_with_addr(addr).await {
+            let mut config = CityGConfig::default();
+            config.server.seed_demo_room = true;
+            if let Err(err) = cityg_api::run_with_config(addr, config).await {
                 eprintln!("join_leave test server exited with error: {err}");
             }
         })
+    }
+
+    async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<()> {
+        CitygApiClient::new(server_url)
+            .bootstrap_room(room_id, demo::kbroad_public())
+            .await
+            .map_err(anyhow::Error::from)
     }
 
     fn sample_pivot_parity() -> PivotParity {
@@ -1710,6 +1711,7 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex::encode([0x91u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
         let alice = perform_join(&server_url, &room_id, "alice").await?;
         let bob = perform_join(&server_url, &room_id, "bob").await?;
 
