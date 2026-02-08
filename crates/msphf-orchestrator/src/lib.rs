@@ -464,6 +464,24 @@ fn serialize_nonmem_anchor(anchor: &SrxNonMembershipAnchor) -> Result<Value, Msp
         .iter()
         .map(serialize_path_entry)
         .collect();
+    let left_below_values: Vec<Value> = anchor
+        .witness
+        .left_below
+        .iter()
+        .map(serialize_path_entry)
+        .collect();
+    let right_below_values: Vec<Value> = anchor
+        .witness
+        .right_below
+        .iter()
+        .map(serialize_path_entry)
+        .collect();
+    let above_values: Vec<Value> = anchor
+        .witness
+        .above
+        .iter()
+        .map(serialize_path_entry)
+        .collect();
     let left_ref_value = anchor
         .left_ref
         .map(|idx| Value::Integer(Integer::from(idx as u64)))
@@ -471,6 +489,16 @@ fn serialize_nonmem_anchor(anchor: &SrxNonMembershipAnchor) -> Result<Value, Msp
     let right_ref_value = anchor
         .right_ref
         .map(|idx| Value::Integer(Integer::from(idx as u64)))
+        .unwrap_or(Value::Null);
+    let lca_left_height_value = anchor
+        .witness
+        .lca_left_height
+        .map(|height| Value::Integer(Integer::from(height as u64)))
+        .unwrap_or(Value::Null);
+    let lca_right_height_value = anchor
+        .witness
+        .lca_right_height
+        .map(|height| Value::Integer(Integer::from(height as u64)))
         .unwrap_or(Value::Null);
 
     Ok(Value::Map(vec![
@@ -493,6 +521,21 @@ fn serialize_nonmem_anchor(anchor: &SrxNonMembershipAnchor) -> Result<Value, Msp
         (Value::Integer(Integer::from(5)), Value::Array(path_values)),
         (Value::Integer(Integer::from(6)), left_ref_value),
         (Value::Integer(Integer::from(7)), right_ref_value),
+        (
+            Value::Integer(Integer::from(8)),
+            Value::Array(left_below_values),
+        ),
+        (
+            Value::Integer(Integer::from(9)),
+            Value::Array(right_below_values),
+        ),
+        (Value::Integer(Integer::from(10)), Value::Array(above_values)),
+        (
+            Value::Integer(Integer::from(11)),
+            optional_bytes_value(&anchor.witness.nmint),
+        ),
+        (Value::Integer(Integer::from(12)), lca_left_height_value),
+        (Value::Integer(Integer::from(13)), lca_right_height_value),
     ]))
 }
 
@@ -595,13 +638,13 @@ pub(crate) fn build_kbroad_envelope(
     OsRng.fill_bytes(k_hp.as_mut());
     let wrap_nonce = derive_kek_nonce(xk_hash, hp_commit)?;
     let wrap = encrypt_chacha20(
-        &*kek,
+        &kek,
         &wrap_nonce,
         hp_commit,
-        &*k_hp,
+        k_hp.as_slice(),
         "msphf_hp_wrap encrypt failure",
     )?;
-    let c_hp = encrypt_hp_bytes(hp_k, xk_hash, hp_commit, &*k_hp)?;
+    let c_hp = encrypt_hp_bytes(hp_k, xk_hash, hp_commit, &k_hp)?;
     let k_hp = *k_hp;
 
     let envelope = Value::Array(vec![
@@ -705,7 +748,7 @@ pub fn recover_hp_material_from_header(
 
     let wrap_nonce = derive_kek_nonce(xk_hash, hp_commit)?;
     let hp_key_bytes = Zeroizing::new(decrypt_chacha20(
-        &*kek,
+        &kek,
         &wrap_nonce,
         hp_commit,
         wrap_bytes,
@@ -3581,13 +3624,25 @@ mod tests {
 
     fn sample_fixture() -> Fixture {
         let parent_root_arr = [0u8; 32];
-        let join_leaf_arr = hash_leaf(b"join-leaf");
         let revoked_since_arr = [0u8; 32];
         let revoked_root_arr = [0u8; 32];
         let pox_commit_arr = hash_leaf(b"pox");
 
+        let (pop_pk_obj, pop_sk_obj) = keypair();
+        let pop_pk: &'static [u8] = Box::leak(pop_pk_obj.as_bytes().to_vec().into_boxed_slice());
+        let pop_sk: &'static MlDsaSecretKey = Box::leak(Box::new(pop_sk_obj));
+
         let gid = leak([0x10; 32]);
         let cat = leak([0x11; 32]);
+        let join_leaf_arr = {
+            let leaf = match compute_leaf_id(LeafIdMode::PerGroup, gid, "ML-DSA-65", pop_pk) {
+                Ok(value) => value,
+                Err(_) => unreachable!("compute_leaf_id with valid test inputs cannot fail"),
+            };
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(leaf.as_slice());
+            arr
+        };
         let parent_root = leak(parent_root_arr);
         let join_delta_root = leak(join_leaf_arr);
         let revoked_since_prev_root = leak(revoked_since_arr);
@@ -3684,10 +3739,6 @@ mod tests {
             join_frontier: None,
             since_frontier: None,
         };
-
-        let (pop_pk_obj, pop_sk_obj) = keypair();
-        let pop_pk: &'static [u8] = Box::leak(pop_pk_obj.as_bytes().to_vec().into_boxed_slice());
-        let pop_sk: &'static MlDsaSecretKey = Box::leak(Box::new(pop_sk_obj));
 
         let (bootstrap_pk_obj, bootstrap_sk_obj) = keypair();
         let bootstrap_pk: &'static [u8] =

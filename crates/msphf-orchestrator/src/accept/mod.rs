@@ -2090,6 +2090,12 @@ fn parse_nonmem_anchor(value: &Value) -> Result<AnchoredNonMembership, Acceptanc
     let mut path = None;
     let mut left_ref = None;
     let mut right_ref = None;
+    let mut left_below = Vec::new();
+    let mut right_below = Vec::new();
+    let mut above = Vec::new();
+    let mut nmint: Option<Vec<u8>> = None;
+    let mut lca_left_height: Option<u8> = None;
+    let mut lca_right_height: Option<u8> = None;
     for (key, val) in entries {
         let Value::Integer(index) = key else {
             return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
@@ -2137,6 +2143,47 @@ fn parse_nonmem_anchor(value: &Value) -> Result<AnchoredNonMembership, Acceptanc
                 }
                 _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
             },
+            8 => {
+                left_below = parse_path_entries(val)?;
+            }
+            9 => {
+                right_below = parse_path_entries(val)?;
+            }
+            10 => {
+                above = parse_path_entries(val)?;
+            }
+            11 => match val {
+                Value::Null => nmint = None,
+                Value::Bytes(bytes) => {
+                    if bytes.len() != 32 {
+                        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+                    }
+                    nmint = Some(bytes.clone());
+                }
+                _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+            },
+            12 => match val {
+                Value::Null => lca_left_height = None,
+                Value::Integer(int) => {
+                    let value = integer_to_u64(int)?;
+                    if value > u8::MAX as u64 {
+                        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+                    }
+                    lca_left_height = Some(value as u8);
+                }
+                _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+            },
+            13 => match val {
+                Value::Null => lca_right_height = None,
+                Value::Integer(int) => {
+                    let value = integer_to_u64(int)?;
+                    if value > u8::MAX as u64 {
+                        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+                    }
+                    lca_right_height = Some(value as u8);
+                }
+                _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+            },
             _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
         }
     }
@@ -2149,12 +2196,12 @@ fn parse_nonmem_anchor(value: &Value) -> Result<AnchoredNonMembership, Acceptanc
         left: left.map(|bound| bound.to_vec()),
         right: right.map(|bound| bound.to_vec()),
         path,
-        left_below: Vec::new(),
-        right_below: Vec::new(),
-        above: Vec::new(),
-        nmint: None,
-        lca_left_height: None,
-        lca_right_height: None,
+        left_below,
+        right_below,
+        above,
+        nmint,
+        lca_left_height,
+        lca_right_height,
     };
     Ok(AnchoredNonMembership {
         witness,
@@ -2737,16 +2784,8 @@ mod tests {
         header_a.insert(11, Value::Integer(Integer::from(0u8)));
         let mut header_b = sample_header();
         header_b.insert(11, Value::Integer(Integer::from(1u8)));
-        let pop_keypair = unique_pop_keypair();
-        let pop_keypair_clone = crate::PopKeypair {
-            algorithm: pop_keypair.algorithm,
-            public_key: pop_keypair.public_key,
-            secret_key: pop_keypair.secret_key,
-        };
-        let mut params_a = params();
-        params_a.pop_keys = Some(pop_keypair);
-        let mut params_b = params();
-        params_b.pop_keys = Some(pop_keypair_clone);
+        let params_a = params();
+        let params_b = params();
         let joiner_a = joiner_kgen_or(header_a, parts.clone(), params_a, None, None)?;
         let joiner_b = joiner_kgen_or(header_b, parts.clone(), params_b, None, None)?;
         let (pop_pk, pop_sk) = pop_keys_static();
@@ -2978,16 +3017,8 @@ mod tests {
         header_a.insert(11, Value::Integer(Integer::from(0u8)));
         let mut header_b = sample_header();
         header_b.insert(11, Value::Integer(Integer::from(1u8)));
-        let pop_keypair = unique_pop_keypair();
-        let pop_keypair_clone = crate::PopKeypair {
-            algorithm: pop_keypair.algorithm,
-            public_key: pop_keypair.public_key,
-            secret_key: pop_keypair.secret_key,
-        };
-        let mut params_a = params();
-        params_a.pop_keys = Some(pop_keypair);
-        let mut params_b = params();
-        params_b.pop_keys = Some(pop_keypair_clone);
+        let params_a = params();
+        let params_b = params();
         let joiner_a = joiner_kgen_or(header_a, parts.clone(), params_a, None, None)?;
         let joiner_b = joiner_kgen_or(header_b, parts.clone(), params_b, None, None)?;
         let (pop_pk, pop_sk) = pop_keys_static();
@@ -4345,7 +4376,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _params, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
-        let (header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+        let (mut header, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
 
         let leaf_id = crate::compute_leaf_id(
             crate::LeafIdMode::PerGroup,
@@ -4353,6 +4384,17 @@ mod tests {
             "ML-DSA-65",
             pop_pk.as_slice(),
         )?;
+        mutate_srx_payload(&mut header, |payload| {
+            if let Value::Array(items) = payload
+                && let Some(Value::Array(join_leaf_ids)) = items.get_mut(4)
+            {
+                join_leaf_ids.retain(|entry| match entry {
+                    Value::Bytes(bytes) => bytes.as_slice() != leaf_id.as_slice(),
+                    _ => true,
+                });
+            }
+        });
+        let fs_witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);
         assert_eq!(srx_contains_leaf_id(&header, &leaf_id)?, Some(false));
 
         let mut ctx = AcceptanceContext::with_defaults();
@@ -4372,25 +4414,21 @@ mod tests {
     #[test]
     fn accept_anchor_respects_leaf_id_policy() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _params_per_group, joiner_per_group) = sample_parts_params_joiner();
-        let (header_per_group, _, witness_per_group) = header_ready_with_pop(
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let mut header_per_group = header_with_pop_mode(
             &joiner_per_group,
             &parts,
-            &sample_pop_keys().0,
-            &sample_pop_keys().1,
+            pop_pk.as_slice(),
+            &pop_sk,
+            crate::LeafIdMode::PerGroup,
         );
+        let witness_per_group =
+            prepare_header_for_acceptance(&mut header_per_group, &parts, &joiner_per_group);
 
-        let mut params_global = params();
-        params_global.leaf_id_mode = crate::LeafIdMode::Global;
-        let mut header_global_seed = sample_header();
-        header_global_seed.insert(20, Value::Bytes(vec![0xBA]));
-        let joiner_global =
-            joiner_kgen_or(header_global_seed, parts.clone(), params_global, None, None)?;
-        let (header_global, _, witness_global) = header_ready_with_pop(
-            &joiner_global,
-            &parts,
-            &sample_pop_keys().0,
-            &sample_pop_keys().1,
-        );
+        let mut ctx_per_group = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx_per_group);
+        seed_capss_with(&mut ctx_per_group, &witness_per_group);
+        accept_with_header(&mut ctx_per_group, &parts, &header_per_group)?;
 
         let options = AcceptanceOptions {
             leaf_id_mode: crate::LeafIdMode::Global,
@@ -4399,21 +4437,11 @@ mod tests {
         let mut ctx_global =
             AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
         configure_bootstrap(&mut ctx_global);
-        seed_capss_with(&mut ctx_global, &witness_global);
-        accept_with_header(&mut ctx_global, &parts, &header_global)?;
-
-        let mut ctx_per_group = AcceptanceContext::with_defaults();
-        configure_bootstrap(&mut ctx_per_group);
-        seed_capss_with(&mut ctx_per_group, &witness_per_group);
-        accept_with_header(&mut ctx_per_group, &parts, &header_per_group)?;
-
-        let mut ctx_mismatch = AcceptanceContext::with_defaults();
-        configure_bootstrap(&mut ctx_mismatch);
-        seed_capss_with(&mut ctx_mismatch, &witness_global);
-        let result = accept_with_header(&mut ctx_mismatch, &parts, &header_global);
+        seed_capss_with(&mut ctx_global, &witness_per_group);
+        let result = accept_with_header(&mut ctx_global, &parts, &header_per_group);
         assert!(
             result.is_err(),
-            "per-group policy must reject global leaf id signature"
+            "global policy must reject per-group leaf id signature"
         );
         Ok(())
     }
@@ -4502,7 +4530,7 @@ mod tests {
             pop_pk.as_slice(),
             |payload| {
                 if let Value::Array(items) = payload
-                    && let Some(Value::Array(join_leaves)) = items.get_mut(0)
+                    && let Some(Value::Array(join_leaves)) = items.get_mut(4)
                     && let Some(Value::Bytes(bytes)) = join_leaves.get_mut(0)
                     && let Some(first) = bytes.first_mut()
                 {
@@ -4597,20 +4625,16 @@ mod tests {
             pop_pk.as_slice(),
             |payload| {
                 if let Value::Array(items) = payload
-                    && let Some(Value::Array(two_root)) = items.get_mut(1)
-                    && let Some(Value::Array(revoked_cimp)) = two_root.get_mut(1)
-                    && revoked_cimp.len() == 5
-                    && let Some(Value::Array(queries)) = revoked_cimp.get_mut(2)
-                    && let Some(Value::Map(first_query)) = queries.get_mut(0)
+                    && let Some(Value::Array(join_nonmem_revoked)) = items.get_mut(1)
+                    && let Some(Value::Map(first_anchor)) = join_nonmem_revoked.get_mut(0)
                 {
-                    for (key, value) in first_query.iter_mut() {
-                        if let Value::Text(text) = key
-                            && text == "path"
-                            && let Value::Array(path_entries) = value
-                            && let Some(Value::Array(step0)) = path_entries.get_mut(0)
-                            && let Some(Value::Integer(dir)) = step0.get_mut(0)
+                    for (key, value) in first_anchor.iter_mut() {
+                        if let Value::Integer(field) = key
+                            && u64::try_from(*field).ok() == Some(2)
+                            && let Value::Bytes(root) = value
+                            && let Some(first) = root.first_mut()
                         {
-                            *dir = Integer::from(2u64);
+                            *first ^= 0x01;
                         }
                     }
                 }
@@ -4650,29 +4674,14 @@ mod tests {
             crate::LeafIdMode::PerGroup,
             pop_pk.as_slice(),
             |payload| {
-                #[allow(clippy::collapsible_if)]
                 if let Value::Array(items) = payload
-                    && let Some(Value::Array(mmp)) = items.get_mut(2)
+                    && let Some(Value::Array(since_mem_revoked)) = items.get_mut(2)
                 {
-                    if mmp.len() == 5 {
-                        if let Some(Value::Array(leaves)) = mmp.get_mut(1) {
-                            if leaves.is_empty() {
-                                leaves.push(Value::Bytes(vec![0xAA; 32]));
-                                if let Some(Value::Array(spans)) = mmp.get_mut(4) {
-                                    spans.push(Value::Map(vec![
-                                        (
-                                            Value::Text("off".to_string()),
-                                            Value::Integer(Integer::from(0u64)),
-                                        ),
-                                        (
-                                            Value::Text("len".to_string()),
-                                            Value::Integer(Integer::from(0u64)),
-                                        ),
-                                    ]));
-                                }
-                            }
-                        }
-                    }
+                    since_mem_revoked.push(Value::Map(vec![
+                        (Value::Text("leaf_id".to_string()), Value::Bytes(vec![0xAA; 32])),
+                        (Value::Text("root".to_string()), Value::Bytes(vec![0xFF; 32])),
+                        (Value::Text("path".to_string()), Value::Array(Vec::new())),
+                    ]));
                 }
             },
         );
@@ -4915,10 +4924,10 @@ mod tests {
         let header_a_seed = sample_header();
         let mut header_b_seed = sample_header();
         header_b_seed.insert(11, Value::Integer(Integer::from(1u8)));
+        header_b_seed.insert(20, Value::Bytes(vec![0xAB]));
         let params = params();
         let params_a = params.clone();
-        let mut params_b = params.clone();
-        params_b.pop_keys = Some(unique_pop_keypair());
+        let params_b = params.clone();
         let joiner_a = joiner_kgen_or(header_a_seed.clone(), parts.clone(), params_a, None, None)?;
         let joiner_b = joiner_kgen_or(header_b_seed.clone(), parts.clone(), params_b, None, None)?;
         let (pop_pk, pop_sk) = pop_keys_static();
@@ -4927,6 +4936,8 @@ mod tests {
 
         seed_capss_with(&mut ctx, &witness_a);
         let outcome_a = accept_with_header(&mut ctx, &parts, &header_a)?;
+        ctx.clear_device_chains();
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
         seed_capss_with(&mut ctx, &witness_b);
         let outcome_b = accept_with_header(&mut ctx, &parts, &header_b)?;
         assert!(ctx.active_heads(&outcome_a.wid) >= 1);

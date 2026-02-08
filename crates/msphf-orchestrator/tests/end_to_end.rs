@@ -194,13 +194,13 @@ fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Option<V
         if index % 2 == 0 {
             if index + 1 < len {
                 path.push(RawPathEntry {
-                    dir: 1,
+                    dir: 0,
                     sibling: level[index + 1].to_vec(),
                 });
             }
         } else {
             path.push(RawPathEntry {
-                dir: 0,
+                dir: 1,
                 sibling: level[index - 1].to_vec(),
             });
         }
@@ -222,6 +222,98 @@ fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Option<V
     }
 
     Some(path)
+}
+
+fn fold_step_into(acc: &mut [u8; 32], entry: &RawPathEntry) -> Option<()> {
+    if entry.sibling.len() != 32 {
+        return None;
+    }
+    let sibling: [u8; 32] = entry.sibling.as_slice().try_into().ok()?;
+    match entry.dir {
+        0 => {
+            *acc = merkle::hash_node(acc, &sibling);
+            Some(())
+        }
+        1 => {
+            *acc = merkle::hash_node(&sibling, acc);
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+fn build_chain(leaf: [u8; 32], path: &[RawPathEntry]) -> Option<Vec<[u8; 32]>> {
+    let mut chain = Vec::with_capacity(path.len() + 1);
+    let mut acc = leaf;
+    chain.push(acc);
+    for entry in path {
+        fold_step_into(&mut acc, entry)?;
+        chain.push(acc);
+    }
+    Some(chain)
+}
+
+type SplitIntervalPaths = (Vec<RawPathEntry>, Vec<RawPathEntry>, Vec<RawPathEntry>, u8, u8);
+
+fn split_interval_paths(
+    left_leaf: [u8; 32],
+    left_path: &[RawPathEntry],
+    right_leaf: [u8; 32],
+    right_path: &[RawPathEntry],
+    parent_root: [u8; 32],
+) -> Option<SplitIntervalPaths> {
+    let left_chain = build_chain(left_leaf, left_path)?;
+    let right_chain = build_chain(right_leaf, right_path)?;
+    if *left_chain.last()? != parent_root || *right_chain.last()? != parent_root {
+        return None;
+    }
+
+    let mut common = 0usize;
+    while common < left_chain.len() && common < right_chain.len() {
+        let l = left_chain[left_chain.len() - 1 - common];
+        let r = right_chain[right_chain.len() - 1 - common];
+        if l == r {
+            common += 1;
+        } else {
+            break;
+        }
+    }
+    if common == 0 {
+        return None;
+    }
+
+    let left_len = left_path.len();
+    let right_len = right_path.len();
+    if common > left_len || common > right_len {
+        return None;
+    }
+    let lca_step_left = left_len - common;
+    let lca_step_right = right_len - common;
+    let left_below = left_path[..lca_step_left].to_vec();
+    let right_below = right_path[..lca_step_right].to_vec();
+
+    let shared_suffix_len = common.saturating_sub(1);
+    let above = if shared_suffix_len > 0 {
+        let start_left = left_len - shared_suffix_len;
+        let start_right = right_len - shared_suffix_len;
+        let suffix_left = &left_path[start_left..];
+        let suffix_right = &right_path[start_right..];
+        if suffix_left.len() != suffix_right.len() {
+            return None;
+        }
+        for (l_entry, r_entry) in suffix_left.iter().zip(suffix_right.iter()) {
+            if l_entry.dir != r_entry.dir || l_entry.sibling != r_entry.sibling {
+                return None;
+            }
+        }
+        suffix_left.to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let l_h = u8::try_from(left_below.len() + 1).ok()?;
+    let r_h = u8::try_from(right_below.len() + 1).ok()?;
+    Some((left_below, right_below, above, l_h, r_h))
 }
 
 fn parent_nonmem_witness(
@@ -262,45 +354,79 @@ fn parent_nonmem_witness(
         None
     };
 
-    assert!(
-        left.is_none() || right.is_none(),
-        "interval witnesses not yet implemented"
-    );
-
-    let (path, left_value, right_value, left_anchor, right_anchor) = match (left, right) {
-        (Some(l), None) => (
-            canonical_membership_path(parent_leaves, &l),
-            Some(l.to_vec()),
-            None,
-            Some(l),
-            None,
-        ),
-        (None, Some(r)) => (
-            canonical_membership_path(parent_leaves, &r),
-            None,
-            Some(r.to_vec()),
-            None,
-            Some(r),
-        ),
-        (None, None) => (Some(Vec::new()), None, None, None, None),
-        (Some(_), Some(_)) => unreachable!(),
-    };
-
-    let witness = RawNonMembershipWitness {
-        query: query.to_vec(),
-        root: parent_root.to_vec(),
-        left: left_value,
-        right: right_value,
-        path: path.unwrap(),
-        left_below: Vec::new(),
-        right_below: Vec::new(),
-        above: Vec::new(),
-        nmint: None,
-        lca_left_height: None,
-        lca_right_height: None,
-    };
-
-    (witness, left_anchor, right_anchor)
+    match (left, right) {
+        (Some(l), Some(r)) => {
+            let left_path = canonical_membership_path(parent_leaves, &l).unwrap();
+            let right_path = canonical_membership_path(parent_leaves, &r).unwrap();
+            let (left_below, right_below, above, lca_left_h, lca_right_h) =
+                split_interval_paths(l, &left_path, r, &right_path, parent_root).unwrap();
+            let witness = RawNonMembershipWitness {
+                query: query.to_vec(),
+                root: parent_root.to_vec(),
+                left: Some(l.to_vec()),
+                right: Some(r.to_vec()),
+                path: Vec::new(),
+                left_below,
+                right_below,
+                above,
+                nmint: Some(
+                    merkle::hash_interval_binding(&l, &l, &r, &r, lca_left_h, lca_right_h)
+                        .to_vec(),
+                ),
+                lca_left_height: Some(lca_left_h),
+                lca_right_height: Some(lca_right_h),
+            };
+            (witness, Some(l), Some(r))
+        }
+        (Some(l), None) => {
+            let witness = RawNonMembershipWitness {
+                query: query.to_vec(),
+                root: parent_root.to_vec(),
+                left: Some(l.to_vec()),
+                right: None,
+                path: canonical_membership_path(parent_leaves, &l).unwrap(),
+                left_below: Vec::new(),
+                right_below: Vec::new(),
+                above: Vec::new(),
+                nmint: None,
+                lca_left_height: None,
+                lca_right_height: None,
+            };
+            (witness, Some(l), None)
+        }
+        (None, Some(r)) => {
+            let witness = RawNonMembershipWitness {
+                query: query.to_vec(),
+                root: parent_root.to_vec(),
+                left: None,
+                right: Some(r.to_vec()),
+                path: canonical_membership_path(parent_leaves, &r).unwrap(),
+                left_below: Vec::new(),
+                right_below: Vec::new(),
+                above: Vec::new(),
+                nmint: None,
+                lca_left_height: None,
+                lca_right_height: None,
+            };
+            (witness, None, Some(r))
+        }
+        (None, None) => {
+            let witness = RawNonMembershipWitness {
+                query: query.to_vec(),
+                root: parent_root.to_vec(),
+                left: None,
+                right: None,
+                path: Vec::new(),
+                left_below: Vec::new(),
+                right_below: Vec::new(),
+                above: Vec::new(),
+                nmint: None,
+                lca_left_height: None,
+                lca_right_height: None,
+            };
+            (witness, None, None)
+        }
+    }
 }
 
 fn build_srx_inputs(
@@ -428,8 +554,15 @@ fn make_anchor_fixture(
     OrchestrationParams<'static>,
     Vec<[u8; 32]>,
 )> {
+    let (pop_pk, pop_sk) = fixture_pop_keys();
     let mut join_leaves = config.join_leaves.clone();
+    if let Ok(pop_leaf) =
+        msphf_orchestrator::compute_leaf_id(LeafIdMode::PerGroup, &config.gid, "ML-DSA-65", pop_pk)
+    {
+        join_leaves.push(pop_leaf);
+    }
     join_leaves.sort();
+    join_leaves.dedup();
     let join_root = merkle::canonical_set_root(&join_leaves).ok()?;
 
     let mut parent_leaves = config.parent_leaves.clone();
@@ -481,7 +614,6 @@ fn make_anchor_fixture(
         config.revoked_root,
     )
     .unwrap();
-    let (pop_pk, pop_sk) = fixture_pop_keys();
     #[cfg(feature = "zkvrf-pq")]
     let (vrf_secret_key, vrf_public_key) = fixture_vrf_keys();
     let mut fs_epoch_commit = [0u8; 32];

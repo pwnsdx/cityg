@@ -75,7 +75,20 @@ pub(crate) fn sample_anchor_fixture() -> (AnchorInstanceParts<'static>, SrxInput
     let gid = leak([0x11; 32]);
     let cat = leak([0x22; 32]);
 
-    let join_leaves = sample_join_leaves();
+    let mut join_leaves = sample_join_leaves();
+    if let Ok(pop_leaf) = crate::compute_leaf_id(
+        crate::LeafIdMode::PerGroup,
+        gid,
+        "ML-DSA-65",
+        pop_keys_static().0,
+    ) && pop_leaf.len() == 32
+    {
+        let mut leaf = [0u8; 32];
+        leaf.copy_from_slice(pop_leaf.as_slice());
+        join_leaves.push(leaf);
+    }
+    join_leaves.sort();
+    join_leaves.dedup();
     let join_root = match canonical_set_root(&join_leaves) {
         Ok(root) => root,
         Err(_) => unreachable!("canonical_set_root with valid test leaves cannot fail"),
@@ -325,12 +338,26 @@ pub(crate) fn anchor_from_result<'a>(
 pub(crate) fn header_with_pop_mode(
     joiner: &JoinerKGenResult,
     parts: &AnchorInstanceParts<'_>,
-    _pop_pk: &[u8],
+    pop_pk: &[u8],
     _pop_sk: &MlDsaSecretKey,
-    _mode: crate::LeafIdMode,
+    mode: crate::LeafIdMode,
 ) -> BTreeMap<u64, Value> {
-    let _ = parts;
-    joiner.header_map.clone()
+    let mut header = joiner.header_map.clone();
+    let effective_pop_pk = header
+        .get(&HDR_POP_PK)
+        .and_then(|value| match value {
+            Value::Bytes(bytes) => Some(bytes.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| pop_pk.to_vec());
+    mutate_srx_payload_preserving_leaf_auto(
+        &mut header,
+        parts.gid,
+        mode,
+        effective_pop_pk.as_slice(),
+        |_| {},
+    );
+    header
 }
 
 pub(crate) fn header_with_pop(
