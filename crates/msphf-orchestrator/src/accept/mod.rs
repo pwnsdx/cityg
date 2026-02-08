@@ -74,10 +74,11 @@ pub use telemetry::*;
 const MAX_HP_PROOF_BYTES: usize = 512 * 1024;
 /// Maximum VRF proof size per Section 12 (field #95 ≤ 8,192 bytes)
 const MAX_VRF_PROOF_BYTES: usize = 8_192;
-/// Default capacity for the per-(gid, parent_root) replay guard.
+/// Default maximum number of distinct rho_commit values tracked per (gid, parent_root).
 ///
-/// When the guard is full, new `rho_commit` values are **rejected** (not evicted).
-/// Use [`AcceptanceContext::clear_rho_guard_for`] to reclaim capacity after epoch rotation.
+/// When the guard is full, new anchors are rejected (frozen) rather than evicting
+/// old entries, preventing an attacker from flushing the guard to replay a
+/// previously seen rho_commit.
 pub const RHO_GUARD_CAPACITY: usize = 64;
 const MIN_SRX_MAX_BYTES: usize = 256 * 1024;
 const DEFAULT_SRX_MAX_BYTES: usize = 1024 * 1024;
@@ -204,12 +205,12 @@ pub const FREEZE_SRX_SET_CONFLICT_PARENT: FreezeError = FreezeError {
 };
 
 pub const FREEZE_SRX_SET_CONFLICT_REVOKE: FreezeError = FreezeError {
-    code: 9076,
+    code: 9077,
     reason: "set_conflict_revoke",
 };
 
 pub const FREEZE_SRX_SET_CONFLICT_SUBSET: FreezeError = FreezeError {
-    code: 9076,
+    code: 9078,
     reason: "set_conflict_subset",
 };
 
@@ -325,8 +326,9 @@ pub struct AcceptanceOptions {
     pub leaf_id_mode: crate::LeafIdMode,
     pub kbroad_registry: Option<BTreeMap<Vec<u8>, Vec<u8>>>,
     pub fs_policy_config: FsPolicyConfig,
-    /// Maximum number of `rho_commit` values tracked per (gid, parent_root) pair.
-    /// Once full, new values are **rejected** instead of evicting old entries.
+    /// Maximum distinct `rho_commit` values tracked per `(gid, parent_root)`.
+    /// When full, new anchors are rejected rather than evicting old entries.
+    /// Default: [`RHO_GUARD_CAPACITY`].
     pub rho_guard_capacity: usize,
 }
 
@@ -866,10 +868,14 @@ impl AcceptanceContext {
         self.allowed_params_ids.as_ref()
     }
 
-    pub fn set_rho_guard_capacity(&mut self, cap: usize) {
-        self.rho_guard.limit = cap.max(1);
+    /// Update the rho replay guard capacity.  Values below 1 are clamped to 1.
+    pub fn set_rho_guard_capacity(&mut self, capacity: usize) {
+        self.rho_guard = RhoReplayGuard::new(capacity.max(1));
     }
 
+    /// Clear replay-guard entries for a specific `(gid, parent_root)` pair.
+    ///
+    /// Call this when a group/window is torn down to reclaim guard capacity.
     pub fn clear_rho_guard_for(&mut self, gid: &[u8], parent_root: &[u8]) {
         self.rho_guard.clear_for(gid, parent_root);
     }
@@ -1179,16 +1185,15 @@ impl RhoReplayGuard {
         }
     }
 
-    /// Record a `rho_commit` value.
+    /// Record a new `rho_commit` for the given `(gid, parent_root)` pair.
     ///
-    /// Returns `true` if the value was freshly recorded.
-    /// Returns `false` if:
-    /// - The value is a duplicate of one already tracked, **or**
-    /// - The per-key deque has reached its capacity limit.
+    /// Returns `true` if the value was recorded (unique and capacity available).
+    /// Returns `false` if the value is a duplicate (replay) **or** if the guard
+    /// is full for this key.  Callers should treat both cases as a freeze.
     ///
-    /// Unlike the previous (eviction-based) design, this version never
-    /// silently drops old entries; the caller must explicitly reclaim
-    /// capacity via [`clear_for`](Self::clear_for).
+    /// Unlike the previous implementation, this does **not** evict old entries
+    /// when the limit is reached, preventing an attacker from flushing the
+    /// guard by submitting many distinct rho values.
     fn record(&mut self, gid: &[u8], parent_root: &[u8], rho_commit: &[u8; 32]) -> bool {
         let key = Self::make_key(gid, parent_root);
         let deque = self.entries.entry(key).or_default();
@@ -1202,11 +1207,15 @@ impl RhoReplayGuard {
         true
     }
 
+    /// Remove all entries for a specific `(gid, parent_root)` pair.
+    ///
+    /// Call this when a window/group is torn down to reclaim capacity.
     fn clear_for(&mut self, gid: &[u8], parent_root: &[u8]) {
         let key = Self::make_key(gid, parent_root);
         self.entries.remove(&key);
     }
 
+    /// Number of tracked rho_commit values for a given key.
     #[cfg(test)]
     fn count_for(&self, gid: &[u8], parent_root: &[u8]) -> usize {
         let key = Self::make_key(gid, parent_root);
@@ -5371,6 +5380,27 @@ mod tests {
             other => panic!("unexpected error: {:?}", other),
         }
         Ok(())
+    }
+
+    // ── Freeze code uniqueness ──────────────────────────────────────
+
+    #[test]
+    fn srx_set_conflict_codes_are_distinct() {
+        assert_ne!(
+            FREEZE_SRX_SET_CONFLICT_PARENT.code,
+            FREEZE_SRX_SET_CONFLICT_REVOKE.code,
+            "parent vs revoke must have distinct codes"
+        );
+        assert_ne!(
+            FREEZE_SRX_SET_CONFLICT_PARENT.code,
+            FREEZE_SRX_SET_CONFLICT_SUBSET.code,
+            "parent vs subset must have distinct codes"
+        );
+        assert_ne!(
+            FREEZE_SRX_SET_CONFLICT_REVOKE.code,
+            FREEZE_SRX_SET_CONFLICT_SUBSET.code,
+            "revoke vs subset must have distinct codes"
+        );
     }
 
     // ── RhoReplayGuard unit tests ─────────────────────────────────────
