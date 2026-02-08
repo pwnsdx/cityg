@@ -329,6 +329,14 @@ impl CityGServer {
     }
 
     pub fn build_join_ticket(&mut self, gid: &[u8; 32]) -> Result<JoinTicketBundle, CityGError> {
+        self.build_join_ticket_with_leaf(gid, None)
+    }
+
+    pub fn build_join_ticket_with_leaf(
+        &mut self,
+        gid: &[u8; 32],
+        leaf_id_override: Option<[u8; 32]>,
+    ) -> Result<JoinTicketBundle, CityGError> {
         let revoked_root = [0u8; 32];
         let revoked_since_root = [0u8; 32];
         let pox_r_commit = witness::demo_pox_commit();
@@ -342,15 +350,25 @@ impl CityGServer {
             parent_leaves.sort();
             parent_leaves.dedup();
 
+            let leaf_id = if let Some(explicit_leaf_id) = leaf_id_override {
+                if parent_leaves
+                    .iter()
+                    .any(|member_leaf| *member_leaf == explicit_leaf_id)
+                {
+                    return Err(CityGError::InvalidInput("leaf already present in roster"));
+                }
+                explicit_leaf_id
+            } else {
+                state.sync_next_index();
+                let index = state.allocate_leaf();
+                witness::sequential_leaf(index)
+            };
+
             let parent_root = if parent_leaves.is_empty() {
                 [0u8; 32]
             } else {
                 canonical_set_root(&parent_leaves)?
             };
-
-            state.sync_next_index();
-            let index = state.allocate_leaf();
-            let leaf_id = witness::sequential_leaf(index);
             let join_leaves = [leaf_id];
 
             let join_delta_root = witness::join_delta_root(&join_leaves)?;
@@ -940,6 +958,38 @@ mod tests {
             demo_ticket.parent_root, [0u8; 32],
             "join ticket on non-empty roster should reference non-zero root"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn build_join_ticket_with_leaf_uses_requested_leaf_and_rejects_duplicates()
+    -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let gid = cityg_client::demo::DEMO_GID;
+        let requested_leaf = cityg_client::demo::demo_member_leaf("bound-leaf");
+
+        let ticket = server.build_join_ticket_with_leaf(&gid, Some(requested_leaf))?;
+        assert_eq!(ticket.leaf_id, requested_leaf);
+
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![requested_leaf],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[requested_leaf])?;
+        let mut state = super::GroupState::default();
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        server.roster.groups.insert(gid.to_vec(), state);
+
+        let err = match server.build_join_ticket_with_leaf(&gid, Some(requested_leaf)) {
+            Err(e) => e,
+            Ok(_) => unreachable!("duplicate requested leaf must fail"),
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("leaf already present in roster")
+        ));
         Ok(())
     }
 

@@ -797,18 +797,20 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
     let gid = parse_gid(&request.room_id)?;
 
     // Verify identity binding if provided; persist TOFU alias only after ticket succeeds.
+    let mut requested_leaf_id: Option<[u8; 32]> = None;
     let confirmed_binding = if let Some(binding) = &request.identity_binding {
         // Verify the signature
         verify_identity_binding(binding)?;
 
-        // Validate POP key material can be converted to a leaf identifier.
-        let _ = compute_leaf_id(
+        // Bind the join ticket leaf to the provided PoP public key.
+        let computed_leaf = compute_leaf_id(
             LeafIdMode::PerGroup,
             &gid,
             "ML-DSA-65",
             &binding.pop_public_key,
         )
         .map_err(|e| ApiError::server_message(format!("failed to compute leaf_id: {}", e)))?;
+        requested_leaf_id = Some(computed_leaf);
 
         Some(binding.clone())
     } else {
@@ -817,7 +819,9 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
 
     let (ticket, policy_version, fs_policy_version, fs_epoch_base_ts, bootstrap_public) = {
         let mut guard = state.server.write().await;
-        let bundle = guard.build_join_ticket(&gid).map_err(ApiError::from)?;
+        let bundle = guard
+            .build_join_ticket_with_leaf(&gid, requested_leaf_id)
+            .map_err(ApiError::from)?;
         let policy_version = guard.context().policy_version().to_string();
         let fs_policy_version = guard
             .context()
@@ -2462,7 +2466,7 @@ mod tests {
                 alias: alias.clone(),
                 identity_binding: Some(IdentityBinding {
                     alias: alias.clone(),
-                    pop_public_key,
+                    pop_public_key: pop_public_key.clone(),
                     signature: signature.as_bytes().to_vec(),
                 }),
             }),
@@ -2472,6 +2476,11 @@ mod tests {
         let decoded: JoinTicketResponse = decode_proto_response(response).await;
         assert_eq!(decoded.gid.len(), 32);
         assert_eq!(decoded.leaf_id.len(), 32);
+        let gid: [u8; 32] = decoded.gid.as_slice().try_into().expect("join ticket gid");
+        let expected_leaf =
+            compute_leaf_id(LeafIdMode::PerGroup, &gid, "ML-DSA-65", &pop_public_key)
+                .expect("compute leaf from binding pop key");
+        assert_eq!(decoded.leaf_id, expected_leaf.to_vec());
 
         let registry = state.alias_registry.read().await;
         let binding = registry.get(&alias).expect("alias must be persisted");

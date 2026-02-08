@@ -8,7 +8,7 @@ use anchor_seed::{
 };
 use anyhow::{Context, Result, anyhow};
 use ciborium::value::{Integer, Value};
-use cityg_api_client::{CitygApiClient, Error as ApiClientError};
+use cityg_api_client::{CitygApiClient, Error as ApiClientError, IdentityBinding};
 #[cfg(test)]
 use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
@@ -22,7 +22,9 @@ use msphf_orchestrator::{
     deterministic_lb_vrf_keys, hdr,
 };
 use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
-use pqcrypto_traits::sign::PublicKey as DilithiumPublicKeyTrait;
+use pqcrypto_traits::sign::{
+    DetachedSignature as DilithiumDetachedSignatureTrait, PublicKey as DilithiumPublicKeyTrait,
+};
 use rand::{RngCore, thread_rng};
 use serde::Serialize;
 use serde_bytes::ByteBuf;
@@ -350,7 +352,28 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
     let client = CitygApiClient::new(server_url);
-    let ticket = match client.join_ticket(room_id, alias, None).await {
+    let (pop_pk, pop_sk) = dilithium5::keypair();
+    let pop_public_key = DilithiumPublicKeyTrait::as_bytes(&pop_pk).to_vec();
+    let pop_secret = Box::new(pop_sk);
+
+    let binding_message = (
+        ByteBuf::from(alias.as_bytes().to_vec()),
+        ByteBuf::from(pop_public_key.clone()),
+    );
+    let mut binding_message_bytes = Vec::new();
+    ciborium::ser::into_writer(&binding_message, &mut binding_message_bytes)
+        .context("encode identity binding message")?;
+    let binding_signature = dilithium5::detached_sign(&binding_message_bytes, pop_secret.as_ref());
+    let identity_binding = IdentityBinding {
+        alias: alias.to_string(),
+        pop_public_key: pop_public_key.clone(),
+        signature: binding_signature.as_bytes().to_vec(),
+    };
+
+    let ticket = match client
+        .join_ticket(room_id, alias, Some(identity_binding))
+        .await
+    {
         Ok(t) => t,
         Err(ApiClientError::HttpStatus {
             status,
@@ -400,10 +423,6 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         thread_rng().fill_bytes(&mut seed);
         seed
     });
-
-    let (pop_pk, pop_sk) = dilithium5::keypair();
-    let pop_public_key = DilithiumPublicKeyTrait::as_bytes(&pop_pk).to_vec();
-    let pop_secret = Box::new(pop_sk);
 
     let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
 

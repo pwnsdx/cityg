@@ -1588,28 +1588,19 @@ fn srx_contains_leaf_id(
     let Some(payload) = header.get(&HDR_SRX_PAYLOAD) else {
         return Ok(None);
     };
-    match payload {
-        Value::Array(items) => {
-            let mut saw_candidate = false;
-            for item in items {
-                match item {
-                    Value::Bytes(bytes) if bytes.len() == 32 => {
-                        saw_candidate = true;
-                        if bytes.as_slice() == leaf_id {
-                            return Ok(Some(true));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if saw_candidate {
-                Ok(Some(false))
-            } else {
-                Ok(None)
-            }
-        }
-        _ => Ok(None),
-    }
+    let payload_value = match payload {
+        Value::Bytes(bytes) => de::from_reader(bytes.as_slice())
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))?,
+        Value::Array(_) => payload.clone(),
+        _ => return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID)),
+    };
+    let parsed = parse_srx_payload(&payload_value)?;
+    Ok(Some(
+        parsed
+            .join_leaf_ids
+            .iter()
+            .any(|candidate| candidate == leaf_id),
+    ))
 }
 
 pub(crate) fn parse_srx_payload(value: &Value) -> Result<SrxPayload, AcceptanceError> {
@@ -3967,14 +3958,30 @@ mod tests {
 
         let leaf_present = [0xABu8; 32];
         let leaf_other = [0xCDu8; 32];
+        let encode_payload = |join_leaf_ids: Vec<[u8; 32]>| -> Result<Vec<u8>, AcceptanceError> {
+            let payload = Value::Array(vec![
+                Value::Array(vec![]),
+                Value::Array(vec![]),
+                Value::Array(vec![]),
+                Value::Null,
+                Value::Array(
+                    join_leaf_ids
+                        .into_iter()
+                        .map(|leaf| Value::Bytes(leaf.to_vec()))
+                        .collect(),
+                ),
+                Value::Null,
+                Value::Array(vec![]),
+                Value::Null,
+                Value::Array(vec![]),
+            ]);
+            Ok(to_cbor_vec(&payload)?)
+        };
 
         let mut header_hit = BTreeMap::new();
         header_hit.insert(
             HDR_SRX_PAYLOAD,
-            Value::Array(vec![
-                Value::Bytes(leaf_other.to_vec()),
-                Value::Bytes(leaf_present.to_vec()),
-            ]),
+            Value::Bytes(encode_payload(vec![leaf_other, leaf_present])?),
         );
         assert_eq!(
             srx_contains_leaf_id(&header_hit, &leaf_present)?,
@@ -3984,7 +3991,7 @@ mod tests {
         let mut header_miss = BTreeMap::new();
         header_miss.insert(
             HDR_SRX_PAYLOAD,
-            Value::Array(vec![Value::Bytes(leaf_other.to_vec())]),
+            Value::Bytes(encode_payload(vec![leaf_other])?),
         );
         assert_eq!(
             srx_contains_leaf_id(&header_miss, &leaf_present)?,
@@ -4004,32 +4011,23 @@ mod tests {
 
         let leaf = [0x10u8; 32];
 
-        // Non-array payload => helper returns None
+        // Malformed CBOR payload bytes must freeze.
         let mut header_map = BTreeMap::new();
         header_map.insert(HDR_SRX_PAYLOAD, Value::Bytes(vec![0xFF; 8]));
-        assert_eq!(srx_contains_leaf_id(&header_map, &leaf)?, None);
+        let err = srx_contains_leaf_id(&header_map, &leaf).expect_err("malformed payload");
+        assert!(matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_SRX_INVALID));
 
-        // Array, mais entrées pas des bstr de 32 bytes => None
+        // Structurally invalid decoded payload must freeze.
         let mut header_map = BTreeMap::new();
         header_map.insert(
             HDR_SRX_PAYLOAD,
-            Value::Array(vec![
-                Value::Integer(5.into()),
-                Value::Text("foo".to_string()),
-            ]),
+            Value::Bytes(to_cbor_vec(&Value::Array(vec![
+                Value::Array(vec![]),
+                Value::Array(vec![]),
+            ]))?),
         );
-        assert_eq!(srx_contains_leaf_id(&header_map, &leaf)?, None);
-
-        // Array avec doublons différents => Some(false)
-        let mut header_map = BTreeMap::new();
-        header_map.insert(
-            HDR_SRX_PAYLOAD,
-            Value::Array(vec![
-                Value::Bytes(vec![0x20; 32]),
-                Value::Bytes(vec![0x21; 32]),
-            ]),
-        );
-        assert_eq!(srx_contains_leaf_id(&header_map, &leaf)?, Some(false));
+        let err = srx_contains_leaf_id(&header_map, &leaf).expect_err("invalid payload shape");
+        assert!(matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_SRX_INVALID));
         Ok(())
     }
 
@@ -4204,7 +4202,7 @@ mod tests {
 
         mutate_srx_payload(&mut header, |payload| {
             if let Value::Array(items) = payload
-                && let Some(Value::Array(join)) = items.get_mut(0)
+                && let Some(Value::Array(join)) = items.get_mut(4)
             {
                 join.clear();
                 join.push(Value::Bytes(vec![0x55; 32]));
@@ -4227,7 +4225,7 @@ mod tests {
     }
 
     #[test]
-    fn enforce_srx_leaf_binding_skips_when_payload_indeterminate()
+    fn enforce_srx_leaf_binding_rejects_bytes_payload_mismatch()
     -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _params, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
@@ -4239,14 +4237,19 @@ mod tests {
             "ML-DSA-65",
             pop_pk.as_slice(),
         )?;
-
-        assert_eq!(srx_contains_leaf_id(&header, &leaf_id)?, None);
+        assert_eq!(srx_contains_leaf_id(&header, &leaf_id)?, Some(false));
 
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &fs_witness);
 
-        accept_with_header(&mut ctx, &parts, &header)?;
+        let result = accept_with_header(&mut ctx, &parts, &header);
+        assert!(result.is_err(), "leaf mismatch should freeze");
+        let err = result.unwrap_err();
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_INVALID),
+            other => panic!("unexpected result: {other:?}"),
+        }
         Ok(())
     }
 
