@@ -271,11 +271,12 @@ D_device_max := W + S_device                   // REQUIRED
 Maintain `A := GroupState.last_accepted_ec` (monotone; init: `last_checkpoint_ec`).
 Maintain `GroupState.srx_root_sw` as durable SRX shadow state.
 At genesis, `GroupState.srx_root_sw` MUST be `SRX_EMPTY_ROOT_SW` (Annex F/Annex N).
-If persisted `srx_root_sw` is missing at startup, the server MUST fail closed with `934` unless an explicit migration root is provided by policy.
+If persisted `srx_root_sw` is missing at startup: use `srx_migration_root_sw` (policy key, optional `bstr32`) exactly once to initialize and persist `GroupState.srx_root_sw`; if absent, fail closed with `934`.
 
 0. **Pre‑filters & maxima** — canonical CBOR, no duplicate keys, no unknown keys, respect size limits.
 1. **Structure/presence** — require FS (`139,141,142,143,146`) and device‑chain (`152–153`) fields; **if SRX applies**, require `160,161`.
-   Under this profile, in non-merge join mode `160/161` MUST be absent; presence is `930`.
+   Define `is_merge :=` header contains any merge-only key in `{130,131,132,133,134,135,136,138,144,145,148}`.
+   If `is_merge == false` (join mode), `160/161` MUST be absent; presence is `930`.
 2. **Gates** — suite & `fs_policy_version` MUST be allow‑listed (Annex N).
 
 **(2a) FS base constant (join & merge; REQUIRED):**
@@ -311,7 +312,9 @@ Lookup `(stored_last_commit, stored_last_ec)` by device key `108`.
 ```text
 DeviceState[(gid, device_pk)] := (last_commit := 153, last_ec := 141)
 A := max(A, 141)
-if SRX applies: GroupState.srx_root_sw := 160
+if SRX applies:
+  require GroupState.srx_root_sw == srx_root_sw_before   // else 930 (concurrent SRX update)
+  GroupState.srx_root_sw := 160
 ```
 
 Atomicity failure → no ack/visibility. Persist `last_checkpoint_ec`, `last_accepted_ec (A)`, `srx_root_sw`, and per‑device map.
@@ -456,6 +459,9 @@ State: ~64 B per active device; group state maintains two counters.
   – `125` mismatch when `160/161` present → `923`.
   – VRF bind mismatch (tamper `160`) → `944.3`.
   – Invalid SRX proof → `930`.
+  – Join anchor carrying `160/161` → `930`.
+  – Startup with missing persisted `srx_root_sw`: no `srx_migration_root_sw` → startup fails `934`; with `srx_migration_root_sw` → initialize once and proceed.
+  – Genesis initialization: `GroupState.srx_root_sw == SRX_EMPTY_ROOT_SW` for configured `srx_smallwood_profile`.
 * **Publisher‑blindness negative:** Supplying `kbroad_sk` (or any KBROAD private material) in server config MUST fail at startup with `934`.
 
 ---
@@ -508,7 +514,7 @@ require 148 ≤ GroupState.last_accepted_ec    // implied by definition of max_e
 ```
 
 * **SRX/Smallwood‑v1 (if required):** set `srx_root_sw_before := GroupState.srx_root_sw`, then verify `161` under the Annex F statement (including `srx_bridge_ctx` derived from `110–113`, `121`, `122`, and `160`); `125` must include `160/161`.
-* **Atomic commit:** persist merge, set `last_checkpoint_ec := 148`, and if SRX applies set `GroupState.srx_root_sw := 160`.
+* **Atomic commit:** persist merge, set `last_checkpoint_ec := 148`, and if SRX applies conditionally update `GroupState.srx_root_sw := 160` only when current state still equals verified `srx_root_sw_before` (else `930`).
 
 ## 24) Client Behavior & FS‑Equivalence *(normative)*
 
@@ -584,7 +590,8 @@ Labels include `"msphf/xk"`, `"hp/kek/salt"`, `"hp/kek/nonce"`, `"hp/nonce"`, `"
 * On‑wire roots `112/113` remain canonical and normative.
 * `SRX_EMPTY_ROOT_SW := H_L("srx/root_sw/empty",[srx_smallwood_profile])`.
 * At genesis, `GroupState.srx_root_sw` MUST be initialized to `SRX_EMPTY_ROOT_SW`.
-* If a deployment upgrades from state without persisted `srx_root_sw`, startup MUST fail with `934` unless policy provides an explicit migration root. `ZERO32` MAY be used only when policy explicitly sets `SRX_EMPTY_ROOT_SW == ZERO32`.
+* If a deployment upgrades from state without persisted `srx_root_sw`, startup MUST fail with `934` unless policy key `srx_migration_root_sw` provides a one-time initialization value.
+* `ZERO32` MAY be used only when policy explicitly sets `SRX_EMPTY_ROOT_SW == ZERO32`.
 * Define bridge inputs and context:
 
 ```text
@@ -705,6 +712,7 @@ D_local: 12              # Local forward cap for adoption
 # Suites & versions
 allow_suites: ["rlwe-merkle/v1"]
 fs_policy_version: 7
+srx_migration_root_sw: null      # OPTIONAL bstr32; one-time init only when persisted srx_root_sw is missing
 ```
 
 **Presets:**
@@ -733,7 +741,7 @@ smallwood:
 
 ```yaml
 srx_smallwood_profile: srx-anemoi-128
-srx_empty_root_sw: H_L("srx/root_sw/empty",[srx_smallwood_profile])
+srx_empty_root_sw: <bstr32>      # MUST equal H_L("srx/root_sw/empty",[srx_smallwood_profile])
 srx_smallwood:
   security: 128
   permutation: anemoi
@@ -747,6 +755,7 @@ max_proof_bytes_for_161: 16384
 ```
 
 *(These knobs track CAPSS for ~9–15.5 KB proofs at 128‑bit security and reduced verifier work.)* 
+Policy load MUST verify `srx_empty_root_sw == H_L("srx/root_sw/empty",[srx_smallwood_profile])`; mismatch is `934`.
 
 **Merkle-arity interpretation (normative).**
 
