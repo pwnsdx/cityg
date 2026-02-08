@@ -1058,6 +1058,7 @@ impl Render for AppModel {
         self.cleanup_expired_toasts();
 
         let background = rgb(0x0f1118);
+        let has_session = self.session.is_some();
         let body: Div = if let Some(session) = &self.session {
             self.render_session(window, session, cx)
         } else {
@@ -1068,12 +1069,15 @@ impl Render for AppModel {
             .key_context("cityg-root")
             .flex()
             .flex_col()
-            .items_center()
-            .justify_center()
             .w_full()
             .h_full()
-            .bg(background)
-            .child(body);
+            .bg(background);
+
+        if has_session {
+            root = root.child(body);
+        } else {
+            root = root.items_center().justify_center().child(body);
+        }
 
         // Add toast notifications overlay
         if let Some(toasts) = self.render_toasts() {
@@ -1506,14 +1510,27 @@ impl AppModel {
     ) -> Div {
         let window_size = window.bounds().size;
         let window_width = f32::from(window_size.width);
-        let sidebar_width = if window_width >= 1360.0 { 248.0 } else { 214.0 };
-        let details_width = if window_width >= 1460.0 { 392.0 } else { 332.0 };
+        let sidebar_width = if window_width >= 1360.0 {
+            248.0
+        } else if window_width >= 1100.0 {
+            214.0
+        } else {
+            176.0
+        };
+        let details_width = if window_width >= 1460.0 {
+            392.0
+        } else if window_width >= 1180.0 {
+            332.0
+        } else {
+            284.0
+        };
 
         let mut center_column = div()
             .flex()
             .flex_col()
             .flex_grow()
-            .min_w(px(420.0))
+            .min_w(px(280.0))
+            .min_h(px(0.0))
             .h_full()
             .gap(px(12.0))
             .child(self.render_chat_header(session, cx))
@@ -1544,6 +1561,7 @@ impl AppModel {
             .flex_col()
             .min_w(px(sidebar_width))
             .max_w(px(sidebar_width))
+            .min_h(px(0.0))
             .h_full()
             .gap(px(12.0))
             .child(self.render_workspace_sidebar(session, cx))
@@ -1552,6 +1570,8 @@ impl AppModel {
         let mut details_scroll = div()
             .flex()
             .flex_col()
+            .flex_grow()
+            .min_h(px(0.0))
             .h_full()
             .gap(px(12.0))
             .child(self.render_overview_panel(session, cx))
@@ -1570,13 +1590,15 @@ impl AppModel {
             .flex_col()
             .min_w(px(details_width))
             .max_w(px(details_width))
+            .min_h(px(0.0))
             .h_full()
             .child(details_scroll);
 
-        let mut shell = div()
+        div()
             .flex()
             .w_full()
             .h_full()
+            .min_w(px(0.0))
             .min_h(px(420.0))
             .px(px(16.0))
             .py(px(16.0))
@@ -1584,17 +1606,7 @@ impl AppModel {
             .bg(rgb(UI_CANVAS_BG))
             .child(left_column)
             .child(center_column)
-            .child(right_column);
-
-        {
-            let interactivity = shell.interactivity();
-            interactivity.base_style.overflow.x = Some(Overflow::Scroll);
-            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
-            interactivity.element_id = Some(ElementId::Name("session-scroll".into()));
-            interactivity.block_mouse_except_scroll();
-        }
-
-        shell
+            .child(right_column)
     }
 
     fn render_workspace_sidebar(&self, session: &AppSession, cx: &mut ViewContext<Self>) -> Div {
@@ -2592,6 +2604,8 @@ impl AppModel {
             .flex()
             .flex_col()
             .flex_grow()
+            .min_h(px(0.0))
+            .h_full()
             .gap(px(14.0))
             .border(px(1.0))
             .border_color(rgb(UI_PANEL_BORDER))
@@ -2608,13 +2622,15 @@ impl AppModel {
             .flex()
             .flex_col()
             .flex_grow()
+            .min_h(px(0.0))
             .gap(px(8.0))
-            .max_h(px(620.0))
             .px(px(2.0))
             .py(px(2.0));
         {
             let interactivity = list.interactivity();
             interactivity.base_style.overflow.y = Some(Overflow::Scroll);
+            interactivity.element_id = Some(ElementId::Name("chat-message-list".into()));
+            interactivity.block_mouse_except_scroll();
         }
 
         if self.messages.is_empty() {
