@@ -814,7 +814,7 @@ fn null_digest(len: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field::BaseField;
+    use crate::{field::BaseField, smallwood::rng::SmallwoodSeeder};
 
     fn simple_config() -> DecsCommitment {
         DecsCommitment::new(DecsConfig {
@@ -828,6 +828,23 @@ mod tests {
             use_commitment_tapes: false,
             digest_bytes: 32,
             salt_bytes: 16,
+            tree_arity: vec![2, 2],
+            tree_truncation: None,
+        })
+    }
+
+    fn richer_config(format: DecsChallengeFormat, use_tapes: bool) -> DecsCommitment {
+        DecsCommitment::new(DecsConfig {
+            nb_polys: 2,
+            degree: 2,
+            eta: 1,
+            nb_queries: 1,
+            nb_evals: 4,
+            format_challenge: format,
+            pow_opening_bits: 0,
+            use_commitment_tapes: use_tapes,
+            digest_bytes: 16,
+            salt_bytes: 8,
             tree_arity: vec![2, 2],
             tree_truncation: None,
         })
@@ -852,6 +869,193 @@ mod tests {
 
         let too_large = BaseField::from(5u64);
         assert!(commitment.find_index(&too_large, 4).is_err());
+    }
+
+    #[test]
+    fn commit_open_and_recompute_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let decs = richer_config(DecsChallengeFormat::Uniform, true);
+        let seeder = SmallwoodSeeder::new("decs/test", b"stmt");
+        let round = seeder.round(0);
+        let salt = round.salt(decs.config.salt_bytes);
+        let polynomials = vec![
+            vec![
+                BaseField::from(1u64),
+                BaseField::from(2u64),
+                BaseField::from(3u64),
+            ],
+            vec![
+                BaseField::from(4u64),
+                BaseField::from(5u64),
+                BaseField::from(6u64),
+            ],
+        ];
+
+        let (commitment, state) = decs.commit(&salt, &polynomials, Some(&round))?;
+        let queries = decs.sample_query_points("decs/test", b"stmt", &commitment, 1);
+        let (opened, proof) = decs.open(&state, &queries)?;
+        let recomputed = decs.recompute_commitment(&salt, &queries, &opened, &proof)?;
+        assert_eq!(recomputed, commitment);
+
+        let binding = b"binding";
+        let (rand_queries, aux) = decs.get_random_opening(binding);
+        let recomputed_queries = decs.recompute_random_opening(&aux, binding)?;
+        assert_eq!(rand_queries, recomputed_queries);
+        assert!(decs.recompute_random_opening(&aux[..3], binding).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn commit_input_validation_errors() {
+        let decs = richer_config(DecsChallengeFormat::Uniform, false);
+        let seeder = SmallwoodSeeder::new("decs/test", b"stmt");
+        let round = seeder.round(0);
+        let salt = round.salt(decs.config.salt_bytes);
+        let poly = vec![vec![BaseField::from(1u64), BaseField::from(2u64)]];
+
+        assert!(decs.commit(&salt[..2], &poly, Some(&round)).is_err());
+        assert!(decs.commit(&salt, &poly, Some(&round)).is_err()); // wrong poly count
+
+        let over_degree = vec![
+            vec![
+                BaseField::from(1u64),
+                BaseField::from(2u64),
+                BaseField::from(3u64),
+                BaseField::from(4u64),
+            ],
+            vec![BaseField::from(5u64)],
+        ];
+        assert!(decs.commit(&salt, &over_degree, Some(&round)).is_err());
+
+        let valid = vec![
+            vec![
+                BaseField::from(1u64),
+                BaseField::from(2u64),
+                BaseField::from(3u64),
+            ],
+            vec![
+                BaseField::from(4u64),
+                BaseField::from(5u64),
+                BaseField::from(6u64),
+            ],
+        ];
+        assert!(decs.commit(&salt, &valid, None).is_err());
+    }
+
+    #[test]
+    fn recompute_commitment_validation_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let decs = richer_config(DecsChallengeFormat::Uniform, false);
+        let seeder = SmallwoodSeeder::new("decs/test", b"stmt");
+        let round = seeder.round(0);
+        let salt = round.salt(decs.config.salt_bytes);
+        let polynomials = vec![
+            vec![
+                BaseField::from(1u64),
+                BaseField::from(2u64),
+                BaseField::from(3u64),
+            ],
+            vec![
+                BaseField::from(4u64),
+                BaseField::from(5u64),
+                BaseField::from(6u64),
+            ],
+        ];
+        let (commitment, state) = decs.commit(&salt, &polynomials, Some(&round))?;
+        let queries = decs.sample_query_points("decs/test", b"stmt", &commitment, 1);
+        let (opened, proof) = decs.open(&state, &queries)?;
+
+        assert!(
+            decs.recompute_commitment(&salt, &queries, &[], &proof)
+                .is_err()
+        );
+        assert!(
+            decs.recompute_commitment(&salt[..2], &queries, &opened, &proof)
+                .is_err()
+        );
+        assert!(
+            decs.recompute_commitment(&salt, &queries, &opened, &[])
+                .is_err()
+        );
+
+        let mut with_trailing = proof.clone();
+        with_trailing.push(0xFF);
+        assert!(
+            decs.recompute_commitment(&salt, &queries, &opened, &with_trailing)
+                .is_err()
+        );
+
+        let mut bad_opened = opened.clone();
+        bad_opened[0].pop();
+        assert!(
+            decs.recompute_commitment(&salt, &queries, &bad_opened, &proof)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gamma_pack_and_random_opening_helpers_cover_variants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seed = b"seed";
+        for format in [
+            DecsChallengeFormat::Uniform,
+            DecsChallengeFormat::Powers,
+            DecsChallengeFormat::Hybrid,
+        ] {
+            let decs = richer_config(format, false);
+            let gamma = decs.derive_gamma(seed);
+            assert_eq!(gamma.len(), decs.config.eta);
+            assert!(gamma.iter().all(|row| row.len() == decs.config.nb_polys));
+        }
+
+        let values = vec![BaseField::from(7u64), BaseField::from(8u64)];
+        let packed = pack_field_values(&values);
+        let unpacked = unpack_field_values(&packed, values.len())?;
+        assert_eq!(values, unpacked);
+        assert!(unpack_field_values(&packed[..1], values.len()).is_err());
+
+        let decs = DecsCommitment::new(DecsConfig {
+            nb_polys: 1,
+            degree: 1,
+            eta: 0,
+            nb_queries: 5, // impossible to sample unique columns in a domain of 4
+            nb_evals: 4,
+            format_challenge: DecsChallengeFormat::Uniform,
+            pow_opening_bits: 0,
+            use_commitment_tapes: false,
+            digest_bytes: 16,
+            salt_bytes: 8,
+            tree_arity: vec![2, 2],
+            tree_truncation: None,
+        });
+        assert!(decs.sample_open_columns(b"binding", 0).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn shake_merkle_tree_helpers_validate_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let digest_len = 8;
+        let leaves = vec![
+            vec![1u8; digest_len],
+            vec![2u8; digest_len],
+            vec![3u8; digest_len],
+        ];
+        let tree = ShakeMerkleTree::from_leaves(vec![2, 2], None, digest_len, 3, leaves);
+        let root = tree.root().to_vec();
+        for index in 0..3usize {
+            let path = tree.authentication_path(index);
+            let leaf = tree.levels.last().expect("leaf level exists")[index].clone();
+            let reconstructed =
+                ShakeMerkleTree::verify_path(&[2, 2], digest_len, index, leaf, &path)?;
+            assert_eq!(reconstructed, root);
+        }
+        assert!(
+            ShakeMerkleTree::verify_path(&[2], digest_len, 0, vec![0; digest_len], &[]).is_err()
+        );
+        assert!(
+            ShakeMerkleTree::verify_path(&[2, 2], digest_len, 0, vec![0; digest_len], &[vec![]])
+                .is_err()
+        );
+        Ok(())
     }
 }
 

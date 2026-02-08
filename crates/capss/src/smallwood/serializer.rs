@@ -119,3 +119,70 @@ pub fn deserialize_vector_exact(bytes: &[u8]) -> Result<Vec<BaseField>> {
     }
     Ok(vector)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bf(v: u64) -> BaseField {
+        BaseField::from(v)
+    }
+
+    #[test]
+    fn matrix_roundtrip_and_exact_validation() {
+        let matrix = vec![vec![bf(1), bf(2)], vec![bf(3)]];
+        let bytes = serialize_matrix(&matrix);
+        let (decoded, rest) = deserialize_matrix(&bytes).expect("matrix decode");
+        assert_eq!(decoded, matrix);
+        assert!(rest.is_empty());
+        let exact = deserialize_matrix_exact(&bytes).expect("matrix exact decode");
+        assert_eq!(exact, matrix);
+
+        let mut with_trailing = bytes.clone();
+        with_trailing.push(0xFF);
+        assert!(deserialize_matrix_exact(&with_trailing).is_err());
+    }
+
+    #[test]
+    fn matrix_decode_rejects_truncated_forms() {
+        assert!(deserialize_matrix(&[]).is_err());
+
+        let mut bytes = serialize_matrix(&[vec![bf(1)]]);
+        bytes.truncate(8);
+        assert!(deserialize_matrix(&bytes).is_err());
+
+        let mut bytes = serialize_matrix(&[vec![bf(1), bf(2)]]);
+        bytes.truncate(bytes.len().saturating_sub(1));
+        assert!(deserialize_matrix(&bytes).is_err());
+    }
+
+    #[test]
+    fn vector_roundtrip_fixed_and_exact_validation() {
+        let vector = vec![bf(9), bf(10), bf(11)];
+        let bytes = serialize_vector(&vector);
+        let (decoded, rest) = deserialize_vector(&bytes).expect("vector decode");
+        assert_eq!(decoded, vector);
+        assert!(rest.is_empty());
+        let exact = deserialize_vector_exact(&bytes).expect("vector exact decode");
+        assert_eq!(exact, vector);
+
+        let fixed = serialize_vector_fixed(&vector);
+        let (decoded_fixed, fixed_rest) =
+            deserialize_vector_fixed(&fixed, vector.len()).expect("fixed decode");
+        assert_eq!(decoded_fixed, vector);
+        assert!(fixed_rest.is_empty());
+
+        let mut with_trailing = bytes.clone();
+        with_trailing.push(0xEE);
+        assert!(deserialize_vector_exact(&with_trailing).is_err());
+    }
+
+    #[test]
+    fn vector_decode_rejects_truncated_forms() {
+        assert!(deserialize_vector(&[]).is_err());
+
+        let bytes = serialize_vector(&[bf(1), bf(2)]);
+        assert!(deserialize_vector(&bytes[..8]).is_err());
+        assert!(deserialize_vector_fixed(&bytes[..31], 1).is_err());
+    }
+}

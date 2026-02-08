@@ -51,4 +51,25 @@ mod tests {
         assert_eq!(decoded, proof);
         Ok(())
     }
+
+    #[test]
+    fn proof_to_signature_preserves_canonical_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = CapssConfig::default();
+        let smallwood_cfg = cfg.smallwood_config();
+        let statement = CapssStatement {
+            public_key: CapssPublicKey::default(),
+            message: b"capss-signature".to_vec(),
+        };
+        let proof = smallwood::prove(&smallwood_cfg, &statement)?;
+        let signature = proof_to_signature(proof.clone())?;
+        let decoded = decode_proof(&signature.proof.bytes)?;
+        assert_eq!(decoded, proof);
+        Ok(())
+    }
+
+    #[test]
+    fn decode_proof_rejects_invalid_bytes() {
+        let err = decode_proof(b"not-a-valid-proof");
+        assert!(err.is_err(), "garbage proof bytes should fail decoding");
+    }
 }

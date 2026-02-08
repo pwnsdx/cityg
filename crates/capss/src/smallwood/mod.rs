@@ -699,20 +699,27 @@ fn hash_leaf_debug(
 mod tests {
     use super::*;
 
-    #[test]
-    fn prove_verify_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-        let cfg = SmallwoodConfig {
+    fn test_cfg() -> SmallwoodConfig {
+        SmallwoodConfig {
             repetitions: 2,
             polynomial_degree: 4,
             security_level: 128,
             fs_domain: "capss/test-domain".to_string(),
             ..Default::default()
-        };
+        }
+    }
 
-        let statement = CapssStatement {
+    fn test_statement() -> CapssStatement {
+        CapssStatement {
             message: b"hello smallwood".to_vec(),
             ..Default::default()
-        };
+        }
+    }
+
+    #[test]
+    fn prove_verify_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = test_cfg();
+        let statement = test_statement();
 
         let proof = prove(&cfg, &statement)?;
         let signature: CapssSignature = proof.clone().into();
@@ -724,10 +731,9 @@ mod tests {
     fn detect_tampered_commitment() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = SmallwoodConfig {
             repetitions: 1,
-            fs_domain: "capss/test-domain".to_string(),
-            ..Default::default()
+            ..test_cfg()
         };
-        let statement = CapssStatement::default();
+        let statement = test_statement();
 
         let mut proof = prove(&cfg, &statement)?;
         if let Some(first_round) = proof.transcript.responses.first_mut()
@@ -745,6 +751,195 @@ mod tests {
                 "unexpected verification error: {}",
                 err_msg
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn proof_builder_and_capss_signature_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let statement = test_statement();
+        let mut builder = ProofBuilder::new(test_cfg(), statement);
+        builder.push_commitment(RoundCommitment {
+            commitment: vec![1, 2, 3],
+            metadata: vec![4, 5],
+        });
+        builder.push_response(RoundResponse {
+            evaluations: vec![6, 7],
+            opening_proof: vec![8, 9],
+        });
+        builder.transcript.challenge = vec![0xAA, 0xBB];
+        let proof = builder.finish();
+        let signature: CapssSignature = proof.clone().into();
+        let decoded = SmallwoodProof::try_from(&signature)?;
+        assert_eq!(decoded, proof);
+
+        let bad_signature = CapssSignature {
+            proof: CapssProof {
+                bytes: vec![0x00, 0x01, 0x02],
+            },
+        };
+        assert!(SmallwoodProof::try_from(&bad_signature).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_rejects_config_and_transcript_shape_errors() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cfg = test_cfg();
+        let statement = test_statement();
+        let proof = prove(&cfg, &statement)?;
+
+        let mut wrong_cfg = cfg.clone();
+        wrong_cfg.fs_domain.push_str("/different");
+        let signature: CapssSignature = proof.clone().into();
+        let err =
+            verify(&wrong_cfg, &statement, &signature).expect_err("config mismatch should fail");
+        assert!(err.to_string().contains("config mismatch"));
+
+        let mut missing_commitment = proof.clone();
+        missing_commitment.transcript.commitments.pop();
+        let err = verify(&cfg, &statement, &missing_commitment.into())
+            .expect_err("missing commitment should fail");
+        assert!(err.to_string().contains("commitment count mismatch"));
+
+        let mut missing_response = proof;
+        missing_response.transcript.responses.pop();
+        let err = verify(&cfg, &statement, &missing_response.into())
+            .expect_err("missing response should fail");
+        assert!(err.to_string().contains("response count mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_rejects_round_length_and_challenge_mismatch() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cfg = test_cfg();
+        let statement = test_statement();
+        let proof = prove(&cfg, &statement)?;
+
+        let mut tampered = proof.clone();
+        tampered.transcript.commitments[0].commitment.pop();
+        let err =
+            verify(&cfg, &statement, &tampered.into()).expect_err("commitment length should fail");
+        assert!(err.to_string().contains("commitment length mismatch"));
+
+        let mut tampered = proof.clone();
+        tampered.transcript.commitments[0].metadata.pop();
+        let err =
+            verify(&cfg, &statement, &tampered.into()).expect_err("metadata length should fail");
+        assert!(err.to_string().contains("metadata length mismatch"));
+
+        let mut tampered = proof.clone();
+        tampered.transcript.responses[0].evaluations.pop();
+        let err = verify(&cfg, &statement, &tampered.into())
+            .expect_err("evaluation length mismatch should fail");
+        assert!(
+            err.to_string()
+                .contains("evaluation payload length mismatch")
+        );
+
+        let mut tampered = proof.clone();
+        tampered.transcript.responses[0].opening_proof.pop();
+        let err = verify(&cfg, &statement, &tampered.into())
+            .expect_err("opening length mismatch should fail");
+        assert!(err.to_string().contains("opening proof length mismatch"));
+
+        let mut tampered = proof;
+        tampered.transcript.challenge[0] ^= 0x01;
+        let err =
+            verify(&cfg, &statement, &tampered.into()).expect_err("challenge mismatch should fail");
+        assert!(err.to_string().contains("challenge mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn helper_derivations_are_deterministic_and_consistent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = test_cfg();
+        let statement = test_statement();
+        let statement_a = statement_bytes(&statement);
+        let statement_b = statement_bytes(&statement);
+        assert_eq!(statement_a, statement_b);
+
+        let digest_a = statement_digest(&statement);
+        let digest_b = statement_digest(&statement);
+        assert_eq!(digest_a, digest_b);
+
+        let seed_a = master_seed_bytes(&cfg, &statement);
+        let seed_b = master_seed_bytes(&cfg, &statement);
+        assert_eq!(seed_a, seed_b);
+
+        let salt_0 = round_salt_bytes(&cfg, &statement, 0, 16);
+        let salt_0_repeat = round_salt_bytes(&cfg, &statement, 0, 16);
+        let salt_1 = round_salt_bytes(&cfg, &statement, 1, 16);
+        assert_eq!(salt_0, salt_0_repeat);
+        assert_ne!(salt_0, salt_1);
+
+        let rows = example_pacs_witness_rows(&statement);
+        let flat = example_pacs_witness_flat(&statement);
+        let row_cells: usize = rows.iter().map(Vec::len).sum();
+        assert_eq!(row_cells, flat.len());
+        Ok(())
+    }
+
+    #[test]
+    fn challenge_and_leaf_hash_helpers_cover_variants() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = test_cfg();
+        let statement = test_statement();
+        let stmt_bytes = statement_bytes(&statement);
+        let commitment = RoundCommitment {
+            commitment: vec![1, 2, 3],
+            metadata: vec![4, 5, 6],
+        };
+        let response = RoundResponse {
+            evaluations: vec![7, 8],
+            opening_proof: vec![9, 10],
+        };
+        let challenge_a = derive_challenge(
+            &cfg,
+            &stmt_bytes,
+            std::slice::from_ref(&commitment),
+            std::slice::from_ref(&response),
+        )?;
+        let challenge_b = derive_challenge(
+            &cfg,
+            &stmt_bytes,
+            std::slice::from_ref(&commitment),
+            std::slice::from_ref(&response),
+        )?;
+        assert_eq!(challenge_a, challenge_b);
+
+        let mut response_tampered = response.clone();
+        response_tampered.evaluations.push(0xFF);
+        let challenge_c = derive_challenge(
+            &cfg,
+            &stmt_bytes,
+            std::slice::from_ref(&commitment),
+            std::slice::from_ref(&response_tampered),
+        )?;
+        assert_ne!(challenge_a, challenge_c);
+
+        let leaf_with_tape = hash_leaf_debug(&[1, 2], 3, &[4, 5], &[6], 16);
+        let leaf_no_tape = hash_leaf_debug(&[1, 2], 3, &[4, 5], &[], 16);
+        assert_eq!(leaf_with_tape.len(), 16);
+        assert_eq!(leaf_no_tape.len(), 16);
+        assert_ne!(leaf_with_tape, leaf_no_tape);
+        Ok(())
+    }
+
+    #[test]
+    fn round_debug_exposes_expected_shapes() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = test_cfg();
+        let statement = test_statement();
+        let proof = prove(&cfg, &statement)?;
+        let debug = round_debug(&cfg, &statement, &proof)?;
+        assert_eq!(debug.len(), cfg.repetitions.max(1));
+        for round in debug {
+            assert!(!round.piop_queries.is_empty());
+            assert!(!round.lvcs_responses.is_empty());
+            assert!(!round.dec_proof.is_empty());
+            assert!(!round.leaf_hashes.is_empty());
+            assert!(!round.layout_rows.is_empty());
         }
         Ok(())
     }

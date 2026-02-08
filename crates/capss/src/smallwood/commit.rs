@@ -327,3 +327,168 @@ pub fn recompute_commitment(
         binding,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::smallwood::decs::DecsChallengeFormat;
+    use crate::smallwood::rng::SmallwoodSeeder;
+
+    fn sample_polynomials() -> Vec<Vec<BaseField>> {
+        vec![
+            vec![
+                BaseField::from(1u64),
+                BaseField::from(2u64),
+                BaseField::from(3u64),
+            ],
+            vec![
+                BaseField::from(4u64),
+                BaseField::from(5u64),
+                BaseField::from(6u64),
+            ],
+        ]
+    }
+
+    #[test]
+    fn field_encoding_roundtrip() {
+        let value = BaseField::from(123_456u64);
+        let encoded = field_to_bytes(&value);
+        let decoded = bytes_to_field(&encoded);
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn hash_commitment_roundtrip_and_binding_effect() -> Result<()> {
+        let salt = b"fixed-salt";
+        let polynomials = sample_polynomials();
+        let (commitment, state) = commit(salt, &polynomials)?;
+        let queries = vec![BaseField::from(0u64), BaseField::from(1u64)];
+        let (responses, opening) = open(&state, &[], &[], &[], &queries, b"unused")?;
+
+        let recomputed =
+            recompute_commitment(salt, &[], &[], &[], &queries, &responses, &opening, &[])?;
+        assert_eq!(commitment, recomputed);
+
+        let rebound = recompute_commitment(
+            salt,
+            &[],
+            &[],
+            &[],
+            &queries,
+            &responses,
+            &opening,
+            b"binding",
+        )?;
+        assert_ne!(
+            commitment, rebound,
+            "binding should domain-separate commitment recomputation"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recompute_commitment_reports_truncation_and_mismatch_errors() -> Result<()> {
+        let salt = b"fixed-salt";
+        let polynomials = sample_polynomials();
+        let (_commitment, state) = commit(salt, &polynomials)?;
+        let queries = vec![BaseField::from(0u64), BaseField::from(1u64)];
+        let (responses, opening) = open(&state, &[], &[], &[], &queries, &[])?;
+
+        let err = recompute_commitment(salt, &[], &[], &[], &queries, &responses, &[], &[])
+            .expect_err("empty proof must fail");
+        assert!(err.to_string().contains("truncated"));
+
+        let mut truncated_poly_len = opening.clone();
+        truncated_poly_len.truncate(8);
+        let err = recompute_commitment(
+            salt,
+            &[],
+            &[],
+            &[],
+            &queries,
+            &responses,
+            &truncated_poly_len,
+            &[],
+        )
+        .expect_err("proof without poly lengths must fail");
+        assert!(err.to_string().contains("truncated"));
+
+        let mut truncated_coeffs = opening.clone();
+        truncated_coeffs.pop();
+        let err = recompute_commitment(
+            salt,
+            &[],
+            &[],
+            &[],
+            &queries,
+            &responses,
+            &truncated_coeffs,
+            &[],
+        )
+        .expect_err("proof without coefficients must fail");
+        assert!(err.to_string().contains("truncated"));
+
+        let err = recompute_commitment(
+            salt,
+            &[],
+            &[],
+            &[],
+            &queries[..1],
+            &responses,
+            &opening,
+            &[],
+        )
+        .expect_err("query/response mismatch must fail");
+        assert!(err.to_string().contains("response/query length mismatch"));
+
+        let mut bad_responses = responses.clone();
+        bad_responses[0][0] += BaseField::from(1u64);
+        let err =
+            recompute_commitment(salt, &[], &[], &[], &queries, &bad_responses, &opening, &[])
+                .expect_err("evaluation mismatch must fail");
+        assert!(err.to_string().contains("evaluation mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn decs_commitment_wrapper_accessors_and_roundtrip() -> Result<()> {
+        let config = DecsConfig {
+            nb_polys: 1,
+            degree: 2,
+            eta: 1,
+            nb_queries: 1,
+            nb_evals: 4,
+            format_challenge: DecsChallengeFormat::Uniform,
+            pow_opening_bits: 0,
+            use_commitment_tapes: false,
+            digest_bytes: 16,
+            salt_bytes: 8,
+            tree_arity: vec![2, 2],
+            tree_truncation: None,
+        };
+        let pcs = DecsCommitment::new(config.clone());
+        assert_eq!(pcs.config().nb_polys, 1);
+
+        let seeder = SmallwoodSeeder::new("decs/test", b"statement");
+        let round = seeder.round(0);
+        let salt = round.salt(config.salt_bytes);
+        let polynomials = vec![vec![
+            BaseField::from(1u64),
+            BaseField::from(2u64),
+            BaseField::from(3u64),
+        ]];
+
+        let err = pcs
+            .commit(&salt, &polynomials, None)
+            .expect_err("missing round seeder should fail");
+        assert!(err.to_string().contains("round seeder"));
+
+        let (commitment, state) = pcs.commit(&salt, &polynomials, Some(&round))?;
+        let queries = pcs.sample_query_points("decs/test", b"statement", &commitment, 1);
+        let (responses, opening) = pcs.open(&state, &[], &[], &[], &queries, &[])?;
+        let recomputed =
+            pcs.recompute_commitment(&salt, &[], &[], &[], &queries, &responses, &opening, &[])?;
+        assert_eq!(recomputed, commitment);
+        Ok(())
+    }
+}
