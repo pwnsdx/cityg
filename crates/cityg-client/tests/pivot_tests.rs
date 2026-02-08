@@ -92,6 +92,14 @@ fn test_pivot_parity_from_cbor_empty() {
 }
 
 #[test]
+fn test_pivot_parity_from_cbor_rejects_oversized_payload() {
+    let oversized = vec![0u8; (2 * 1024 * 1024) + 1];
+    let err =
+        pivot_parity_from_cbor(&oversized).expect_err("oversized pivot parity payload must fail");
+    assert!(err.to_string().contains("pivot parity payload too large"));
+}
+
+#[test]
 fn test_pivot_parity_from_cbor_truncated() -> Result<(), Box<dyn std::error::Error>> {
     // Create valid CBOR and truncate it
     let mut cbor_map = std::collections::BTreeMap::new();

@@ -7,6 +7,8 @@ use serde_bytes::ByteBuf;
 
 use crate::CityGError;
 
+const MAX_PIVOT_PARITY_CBOR_BYTES: usize = 2 * 1024 * 1024;
+
 #[derive(Deserialize)]
 struct PivotParitySerializable {
     gid: ByteBuf,
@@ -43,6 +45,9 @@ struct PivotParitySerializable {
 }
 
 pub fn pivot_parity_from_cbor(bytes: &[u8]) -> Result<PivotParity, CityGError> {
+    if bytes.len() > MAX_PIVOT_PARITY_CBOR_BYTES {
+        return Err(CityGError::InvalidInput("pivot parity payload too large"));
+    }
     let serializable: PivotParitySerializable =
         from_reader(bytes).map_err(|_| CityGError::InvalidInput("invalid pivot parity"))?;
 
