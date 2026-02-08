@@ -1,5 +1,10 @@
 # Data Structures & Wire Formats
 
+> [!IMPORTANT]
+> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs-unified-fs.md`](../specs-unified-fs.md).
+> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
+
+
 **Specification:** Alpha (0.1.0)
 **Blueprint:** §12.0, Appendix A, D, E
 

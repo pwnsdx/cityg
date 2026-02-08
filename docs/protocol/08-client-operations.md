@@ -1,5 +1,10 @@
 # 08 — Client Operations (Joiner Workflow & Key Derivation)
 
+> [!IMPORTANT]
+> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs-unified-fs.md`](../specs-unified-fs.md).
+> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
+
+
 **Blueprint**: Alpha (0.1.0) §10, §12.3, Annex I (Client)
 **Implementation**: [`crates/cityg-client/src/lib.rs`](../../crates/cityg-client/src/lib.rs), [`crates/msphf-orchestrator/src/lib.rs`](../../crates/msphf-orchestrator/src/lib.rs)
 

@@ -2,6 +2,10 @@
 
 Welcome to the City-G documentation! This index helps you find the right documentation for your needs.
 
+> [!IMPORTANT]
+> For `tswe/msphf-we/fs-hybrid`, the authoritative normative spec is [`./specs-unified-fs.md`](./specs-unified-fs.md).
+> The `docs/protocol/*` chapters are legacy companion material; if there is any conflict, follow the unified spec and implementation behavior/tests.
+
 ## 📚 Documentation by Audience
 
 ### For New Users
@@ -21,7 +25,8 @@ Building applications with City-G:
 ### For Protocol Implementers
 Implementing the City-G protocol:
 
-- **[Protocol Documentation](./protocol/00-README.md)** - Complete protocol specification
+- **[Unified Specification](./specs-unified-fs.md)** - Authoritative normative source
+- **[Protocol Companion Docs](./protocol/00-README.md)** - Legacy chapterized companion material
   - [01 - Overview](./protocol/01-overview.md) - Protocol architecture and design
   - [02 - Cryptographic Primitives](./protocol/02-cryptographic-primitives.md)
   - [03 - Data Structures](./protocol/03-data-structures.md)
@@ -58,8 +63,9 @@ Deploying and managing City-G in production:
 - [Workflows](./workflows.md) - Common operation flows
 
 ### Core Concepts
-- [Protocol Overview](./protocol/01-overview.md) - High-level architecture
-- [Security Model](./protocol/10-security-model.md) - Threat model and guarantees
+- [Unified Specification](./specs-unified-fs.md) - Normative protocol behavior
+- [Protocol Overview](./protocol/01-overview.md) - High-level architecture (legacy companion)
+- [Security Model](./protocol/10-security-model.md) - Threat model and guarantees (legacy companion)
 - [FAQ](./protocol/17-faq.md) - Frequently asked questions
 
 ### Configuration & Deployment
@@ -71,16 +77,17 @@ Deploying and managing City-G in production:
 - [Observability](./OBSERVABILITY.md) - Monitoring and debugging
 
 ### Protocol Details
-- [Cryptographic Primitives](./protocol/02-cryptographic-primitives.md) - Crypto building blocks
-- [SPHF & ME-OR](./protocol/05-sphf-meor.md) - Smooth projective hash functions
-- [Proof Systems](./protocol/06-proof-systems.md) - Zero-knowledge proofs
-- [Multi-Head Window](./protocol/09-multi-head-window.md) - Concurrency control
+- [Unified Specification](./specs-unified-fs.md) - Full normative protocol definition
+- [Cryptographic Primitives](./protocol/02-cryptographic-primitives.md) - Crypto building blocks (legacy companion)
+- [SPHF & ME-OR](./protocol/05-sphf-meor.md) - Smooth projective hash functions (legacy companion)
+- [Proof Systems](./protocol/06-proof-systems.md) - Zero-knowledge proofs (legacy companion)
+- [Multi-Head Window](./protocol/09-multi-head-window.md) - Concurrency control (legacy companion)
 
 ### Reference
 - [Glossary](./GLOSSARY.md) - Complete terminology reference (A-Z)
-- [Data Structures](./protocol/03-data-structures.md) - CBOR encodings and wire formats
-- [Label Registry](./protocol/15-label-registry.md) - Domain separation labels
-- [Error Reference](./protocol/12-error-reference.md) - All error codes explained
+- [Data Structures](./protocol/03-data-structures.md) - CBOR encodings and wire formats (legacy companion)
+- [Label Registry](./protocol/15-label-registry.md) - Domain separation labels (legacy companion)
+- [Error Reference](./protocol/12-error-reference.md) - All error codes explained (legacy companion)
 - [Constraints & Requirements](./constraints.md) - Canonical security/functional targets
 
 ## 🔍 Quick Links
@@ -98,9 +105,10 @@ Deploying and managing City-G in production:
 - **Error handling**: [API Reference - Error Handling](./api-reference.md#error-handling)
 
 ### Protocol Understanding
-- **How server-blindness works**: [Protocol Overview](./protocol/01-overview.md#31-smooth-projective-hash-functions-sphf)
-- **Join flow details**: [Client Operations](./protocol/08-client-operations.md)
-- **Proof verification**: [Server Acceptance](./protocol/07-server-acceptance.md)
+- **Normative behavior**: [Unified Specification](./specs-unified-fs.md)
+- **How server-blindness works**: [Protocol Overview](./protocol/01-overview.md#31-smooth-projective-hash-functions-sphf) (legacy companion)
+- **Join flow details**: [Client Operations](./protocol/08-client-operations.md) (legacy companion)
+- **Proof verification**: [Server Acceptance](./protocol/07-server-acceptance.md) (legacy companion)
 - **Compare to MLS**: [MLS Comparison](./protocol/16-comparison-mls.md)
 
 ## 📦 Component Documentation
@@ -130,11 +138,12 @@ Verification artifacts and benchmarks:
 ## 🛠️ For Contributors
 
 - See the main [README](../README.md#contributing) for contribution guidelines
-- [Testing Guide](./protocol/13-testing-guide.md) - How to run and write tests
-- [Implementation Guide](./protocol/11-implementation-guide.md) - Code walkthrough
+- [Unified Specification](./specs-unified-fs.md) - Normative rules to implement/test against
+- [Testing Guide](./protocol/13-testing-guide.md) - How to run and write tests (legacy companion)
+- [Implementation Guide](./protocol/11-implementation-guide.md) - Code walkthrough (legacy companion)
 
 ---
 
 **Need help?** Start with the [FAQ](./protocol/17-faq.md), [Glossary](./GLOSSARY.md), or [GUI User Guide](./gui-user-guide.md).
 
-**Last Updated**: 2025-11-12
+**Last Updated**: 2026-02-08

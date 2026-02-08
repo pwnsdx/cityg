@@ -1,5 +1,10 @@
 # 09 — Multi-Head Window (MHW)
 
+> [!IMPORTANT]
+> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs-unified-fs.md`](../specs-unified-fs.md).
+> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
+
+
 **Blueprint**: Alpha (0.1.0) §13, Annex M
 **Implementation**: [`crates/msphf-orchestrator/src/mhw.rs`](../../crates/msphf-orchestrator/src/mhw.rs)
 

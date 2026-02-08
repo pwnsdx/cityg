@@ -1,5 +1,10 @@
 # 05 — SPHF & ME-OR (Smooth Projective Hash Functions with Masked-Equality OR)
 
+> [!IMPORTANT]
+> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs-unified-fs.md`](../specs-unified-fs.md).
+> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
+
+
 **Blueprint**: Alpha (0.1.0) §7, §8, Appendices C & D
 **Implementation**: [`crates/msphf-rlwe/src/lib.rs`](../../crates/msphf-rlwe/src/lib.rs)
 

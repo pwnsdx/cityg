@@ -1,5 +1,10 @@
 # City-G Protocol Documentation
 
+> [!IMPORTANT]
+> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs-unified-fs.md`](../specs-unified-fs.md).
+> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
+
+
 ## tswe/msphf-we/fs-hybrid — Alpha (0.1.0)
 
 **Version:** Alpha (0.1.0)
@@ -10,7 +15,7 @@
 
 ## 📚 Documentation Structure
 
-This directory contains comprehensive, human-readable documentation that bridges the formal specification with the reference implementation.
+This directory contains legacy, chapterized companion material that complements the unified specification and reference implementation.
 
 ### Core Protocol Documents
 

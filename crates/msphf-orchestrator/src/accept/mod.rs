@@ -4390,6 +4390,38 @@ mod tests {
     }
 
     #[test]
+    fn compute_vck_key_rejects_non_uint_legacy_policy_version()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (parts, _params, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+
+        for invalid in [
+            Value::Text("fs-policy-v0".to_string()),
+            Value::Bytes(b"fs-policy-v0".to_vec()),
+        ] {
+            header.insert(HDR_POLICY_VERSION, invalid);
+            let err = compute_vck_key(
+                &joiner.xk_hash,
+                &joiner.seed_commit,
+                &joiner.rho_commit,
+                &joiner.hp_commit,
+                &header,
+            )
+            .expect_err("non-uint legacy policy_version must freeze");
+            assert!(
+                matches!(
+                    err,
+                    AcceptanceError::Freeze(code) if code == FREEZE_FS_POLICY_VERSION_UNSUPPORTED
+                ),
+                "unexpected error for non-uint legacy policy_version: {err:?}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn enforce_srx_leaf_binding_freezes_when_leaf_missing() -> Result<(), Box<dyn std::error::Error>>
     {
         use ciborium::value::Value;

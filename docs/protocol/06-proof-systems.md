@@ -1,5 +1,10 @@
 # 06 — Proof Systems (CAPSS Smallwood & ZK-VRF-for-ME-OR)
 
+> [!IMPORTANT]
+> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs-unified-fs.md`](../specs-unified-fs.md).
+> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
+
+
 **Blueprint**: Alpha (0.1.0) §11, §12.2, Annexes L & V (unified spec)
 **Implementation**: [`crates/msphf-orchestrator/src/proofs/`](../../crates/msphf-orchestrator/src/proofs/)
 
