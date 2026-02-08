@@ -216,8 +216,8 @@ pub(crate) fn sample_header() -> BTreeMap<u64, Value> {
     let (pk, _) = crate::kbroad_test_keys();
     map.insert(HDR_KBROAD_PUB, Value::Bytes(pk.to_vec()));
     map.insert(
-        HDR_POLICY_VERSION,
-        Value::Text(crate::DEFAULT_POLICY_VERSION.to_string()),
+        HDR_FS_POLICY_VERSION,
+        Value::Text("fs-policy-test".to_string()),
     );
     map
 }
@@ -350,13 +350,15 @@ pub(crate) fn header_with_pop_mode(
             _ => None,
         })
         .unwrap_or_else(|| pop_pk.to_vec());
-    mutate_srx_payload_preserving_leaf_auto(
-        &mut header,
-        parts.gid,
-        mode,
-        effective_pop_pk.as_slice(),
-        |_| {},
-    );
+    if header.contains_key(&HDR_SRX_PAYLOAD) {
+        mutate_srx_payload_preserving_leaf_auto(
+            &mut header,
+            parts.gid,
+            mode,
+            effective_pop_pk.as_slice(),
+            |_| {},
+        );
+    }
     header
 }
 

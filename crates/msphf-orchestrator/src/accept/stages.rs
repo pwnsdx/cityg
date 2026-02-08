@@ -1177,7 +1177,7 @@ mod tests {
             Ok(_) => bail!("stray SRX smallwood fields without mode should freeze"),
             Err(err) => err,
         };
-        expect_freeze(err, FREEZE_SRX_INVALID)?;
+        expect_freeze(err, FREEZE_PROOFS_COMMIT_INVALID)?;
 
         let mut header = joiner.header_map.clone();
         header.insert(

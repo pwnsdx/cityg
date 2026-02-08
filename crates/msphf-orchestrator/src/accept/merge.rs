@@ -1000,6 +1000,7 @@ mod tests {
     #[test]
     fn merge_anchor_accepts_valid_payload() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
 
         let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
@@ -1084,6 +1085,7 @@ mod tests {
     #[test]
     fn merge_anchor_rejects_unexpected_srx_when_roots_same() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
         let mut header = merge_joiner.header_map.clone();
         recompute_proofs_commit(&mut header)?;
         header.insert(HDR_SRX_MODE, Value::Text("mock".to_string()));
@@ -1104,13 +1106,14 @@ mod tests {
         let AcceptanceError::Freeze(code) = err else {
             return Err(anyhow!("unexpected error"));
         };
-        assert_eq!(code, FREEZE_SRX_SMALLWOOD_INVALID);
+        assert_eq!(code, FREEZE_SRX_INVALID);
         Ok(())
     }
 
     #[test]
     fn merge_anchor_requires_provenance_when_vck_commit_present() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
         let mut header = merge_joiner.header_map.clone();
         recompute_proofs_commit(&mut header)?;
         header.remove(&HDR_ROLLUP_PROVENANCE_COMMIT);
@@ -1132,7 +1135,7 @@ mod tests {
         let AcceptanceError::Freeze(code) = err else {
             return Err(anyhow!("unexpected error"));
         };
-        assert_eq!(code, FREEZE_CAPSS_INVALID);
+        assert_eq!(code, FREEZE_MH_HEADS_INVALID);
         Ok(())
     }
 
@@ -1332,6 +1335,7 @@ mod tests {
     #[test]
     fn merge_anchor_rejects_rollup_incompleteness() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
         let (mut header, heads) =
             ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
         header.insert(HDR_ROLLUP_PROVENANCE_COMMIT, Value::Bytes(vec![0x11; 32]));

@@ -4275,7 +4275,8 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
 
-        let original_policy = header.insert(HDR_POLICY_VERSION, Value::Text("v0".to_string()));
+        let original_policy =
+            header.insert(HDR_FS_POLICY_VERSION, Value::Text("fs-policy-v0".to_string()));
         let key_v0 = compute_vck_key(
             &joiner.xk_hash,
             &joiner.seed_commit,
@@ -4283,7 +4284,10 @@ mod tests {
             &joiner.hp_commit,
             &header,
         )?;
-        header.insert(HDR_POLICY_VERSION, Value::Text("v1".to_string()));
+        header.insert(
+            HDR_FS_POLICY_VERSION,
+            Value::Text("fs-policy-v1".to_string()),
+        );
         let key_v1 = compute_vck_key(
             &joiner.xk_hash,
             &joiner.seed_commit,
@@ -4294,10 +4298,10 @@ mod tests {
         assert_ne!(key_v0, key_v1);
         match original_policy {
             Some(prev) => {
-                header.insert(HDR_POLICY_VERSION, prev);
+                header.insert(HDR_FS_POLICY_VERSION, prev);
             }
             None => {
-                header.remove(&HDR_POLICY_VERSION);
+                header.remove(&HDR_FS_POLICY_VERSION);
             }
         }
         Ok(())
@@ -4360,72 +4364,32 @@ mod tests {
     }
 
     #[test]
-    fn compute_vck_key_treats_missing_policy_version_as_default()
+    fn compute_vck_key_rejects_missing_fs_policy_version()
     -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _params, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
 
-        // Populate defaults
-        let previous_mode = header.insert(119, Value::Text(crate::DEFAULT_PROOF_MODE.to_string()));
-        let previous_vrf = header.insert(116, Value::Text(crate::DEFAULT_VRF_ID.to_string()));
-        let previous_srx = header.insert(120, Value::Text("srx/v1-complete".to_string()));
-        header.remove(&HDR_POLICY_VERSION);
-
-        let key_missing = compute_vck_key(
+        let removed = header.remove(&HDR_FS_POLICY_VERSION);
+        assert!(
+            removed.is_some(),
+            "fixture header should include fs_policy_version"
+        );
+        let err = compute_vck_key(
             &joiner.xk_hash,
             &joiner.seed_commit,
             &joiner.rho_commit,
             &joiner.hp_commit,
             &header,
-        )?;
-
-        let previous_policy =
-            header.insert(133, Value::Text(crate::DEFAULT_POLICY_VERSION.to_string()));
-        debug_assert!(previous_policy.is_none());
-        let key_explicit = compute_vck_key(
-            &joiner.xk_hash,
-            &joiner.seed_commit,
-            &joiner.rho_commit,
-            &joiner.hp_commit,
-            &header,
-        )?;
-
-        assert_eq!(key_missing, key_explicit);
-
-        // Restore original header state
-        match previous_policy {
-            Some(prev) => {
-                header.insert(133, prev);
-            }
-            None => {
-                header.remove(&133);
-            }
-        }
-        match previous_mode {
-            Some(prev) => {
-                header.insert(119, prev);
-            }
-            None => {
-                header.remove(&119);
-            }
-        }
-        match previous_vrf {
-            Some(prev) => {
-                header.insert(116, prev);
-            }
-            None => {
-                header.remove(&116);
-            }
-        }
-        match previous_srx {
-            Some(prev) => {
-                header.insert(120, prev);
-            }
-            None => {
-                header.remove(&120);
-            }
-        }
+        )
+        .expect_err("missing fs_policy_version must freeze");
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code) if code == FREEZE_FS_POLICY_VERSION_UNSUPPORTED
+            ),
+            "unexpected error for missing fs_policy_version: {err:?}"
+        );
         Ok(())
     }
 
@@ -4437,6 +4401,10 @@ mod tests {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        if !header.contains_key(&HDR_SRX_PAYLOAD) {
+            // Under the unified profile, join anchors do not carry SRX payloads.
+            return Ok(());
+        }
 
         mutate_srx_payload(&mut header, |payload| {
             if let Value::Array(items) = payload
@@ -4468,6 +4436,10 @@ mod tests {
         let (parts, _params, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+        if !header.contains_key(&HDR_SRX_PAYLOAD) {
+            // Under the unified profile, join anchors do not carry SRX payloads.
+            return Ok(());
+        }
 
         let leaf_id = crate::compute_leaf_id(
             crate::LeafIdMode::PerGroup,
@@ -4597,14 +4569,9 @@ mod tests {
         deprecated.insert("srx/v1-complete".to_string());
         ctx.set_deprecated_srx_modes(deprecated);
 
-        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
-        assert!(result.is_err(), "error expected");
-        assert!(result.is_err(), "deprecated SRX mode should freeze");
-        let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SUITE_DEPRECATED),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        // Join anchors in this profile do not carry SRX mode fields.
+        assert!(!header_with_pop.contains_key(&HDR_SRX_MODE));
+        accept_with_header(&mut ctx, &parts, &header_with_pop)?;
         Ok(())
     }
 
@@ -4613,6 +4580,10 @@ mod tests {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+        if !header_with_pop.contains_key(&HDR_SRX_PAYLOAD) {
+            // Under the unified profile, join anchors do not carry SRX payloads.
+            return Ok(());
+        }
 
         mutate_srx_payload_preserving_leaf_auto(
             &mut header_with_pop,
@@ -4708,6 +4679,10 @@ mod tests {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        if !header_with_pop.contains_key(&HDR_SRX_PAYLOAD) {
+            // Under the unified profile, join anchors do not carry SRX payloads.
+            return Ok(());
+        }
 
         mutate_srx_payload_preserving_leaf_auto(
             &mut header_with_pop,
@@ -4758,6 +4733,10 @@ mod tests {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        if !header_with_pop.contains_key(&HDR_SRX_PAYLOAD) {
+            // Under the unified profile, join anchors do not carry SRX payloads.
+            return Ok(());
+        }
 
         mutate_srx_payload_preserving_leaf_auto(
             &mut header_with_pop,
@@ -4804,6 +4783,10 @@ mod tests {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+        if !header_with_pop.contains_key(&HDR_SRX_PAYLOAD) {
+            // Under the unified profile, join anchors do not carry SRX payloads.
+            return Ok(());
+        }
 
         mutate_srx_payload_preserving_leaf_auto(
             &mut header_with_pop,

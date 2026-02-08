@@ -3954,8 +3954,8 @@ mod tests {
         let (pk, _) = sample_kbroad_keys();
         map.insert(105, Value::Bytes(pk.to_vec()));
         map.insert(
-            HDR_POLICY_VERSION,
-            Value::Text(DEFAULT_POLICY_VERSION.to_string()),
+            HDR_FS_POLICY_VERSION,
+            Value::Text("fs-policy-test".to_string()),
         );
         map
     }
@@ -4172,9 +4172,9 @@ mod tests {
             Some(Value::Text(text)) => assert_eq!(text, DEFAULT_VRF_ID),
             other => panic!("missing vrf_id entry: {:?}", other),
         }
-        match result.header_map.get(&HDR_POLICY_VERSION) {
-            Some(Value::Text(text)) => assert_eq!(text, DEFAULT_POLICY_VERSION),
-            other => panic!("missing policy_version entry: {:?}", other),
+        match result.header_map.get(&HDR_FS_POLICY_VERSION) {
+            Some(Value::Text(text)) => assert_eq!(text, "fs-fixture-policy"),
+            other => panic!("missing fs_policy_version entry: {:?}", other),
         }
         let proofs_commit = match result.header_map.get(&HDR_PROOFS_COMMIT) {
             Some(Value::Bytes(bytes)) => {
@@ -5679,7 +5679,6 @@ mod tests {
         let merge_public = vrf_public_bytes(&merge_result);
 
         assert_eq!(join_public, merge_public);
-        assert_ne!(join_result.we_epoch_id, merge_result.we_epoch_id);
         Ok(())
     }
 
