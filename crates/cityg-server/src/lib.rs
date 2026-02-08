@@ -841,12 +841,13 @@ pub struct ServerOutcome {
 #[cfg(test)]
 mod tests {
     use super::{CityGError, CityGServer, ServerConfig};
+    use ciborium::value::Value;
     use cityg_client::ClientEpochBundle;
     use msphf_core::hash::h_l;
     use msphf_orchestrator::{AcceptanceOptions, BootstrapPolicy, mhw::HeadRecord};
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use serde::Serialize;
-    use std::{collections::BTreeMap, path::Path, time::Duration};
+    use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Duration};
     use tempfile::tempdir;
 
     fn demo_server_with_journal(path: impl AsRef<Path>) -> CityGServer {
@@ -880,6 +881,267 @@ mod tests {
         let cfg = ServerConfig::new();
         assert!(cfg.h_max.is_none());
         assert!(cfg.window_ttl.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn server_config_default_impl_matches_new() {
+        let cfg = ServerConfig::default();
+        assert!(cfg.h_max.is_none());
+        assert!(cfg.window_ttl.is_none());
+        assert!(cfg.acceptance_options.is_none());
+        assert!(cfg.state_path.is_none());
+    }
+
+    #[test]
+    fn register_group_rejects_duplicate_gid() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0xA1; 32];
+        let key = vec![0x33; 16];
+
+        server.register_group(&gid, key.clone())?;
+        assert!(server.roster.groups.contains_key(gid.as_slice()));
+
+        let err = match server.register_group(&gid, key) {
+            Err(e) => e,
+            Ok(_) => unreachable!("duplicate gid should fail"),
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("kbroad key already registered")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn build_join_ticket_requires_kbroad_and_advances_leaf_index() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x42; 32];
+
+        let err = match server.build_join_ticket(&gid) {
+            Err(e) => e,
+            Ok(_) => unreachable!("missing kbroad should fail"),
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("kbroad key missing")
+        ));
+
+        server.register_group(&gid, vec![0x55; 16])?;
+        let first = server.build_join_ticket(&gid)?;
+        let second = server.build_join_ticket(&gid)?;
+        assert!(super::leaf_index(&second.leaf_id) > super::leaf_index(&first.leaf_id));
+
+        let mut demo_server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        demo_server.accept_epoch(&bundle)?;
+        let demo_ticket = demo_server.build_join_ticket(&cityg_client::demo::DEMO_GID)?;
+        assert_ne!(
+            demo_ticket.parent_root, [0u8; 32],
+            "join ticket on non-empty roster should reference non-zero root"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_merge_ticket_reports_missing_anchor_leaf_and_parity() -> Result<(), CityGError> {
+        let gid = [0x24; 32];
+        let leaf = cityg_client::demo::demo_member_leaf("merge");
+
+        let mut empty = CityGServer::new(ServerConfig::new());
+        let err = match empty.build_merge_ticket(&gid, &leaf) {
+            Err(e) => e,
+            Ok(_) => unreachable!("empty server should reject merge ticket"),
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("no anchors accepted for group")
+        ));
+
+        let mut server = CityGServer::new(ServerConfig::new());
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![leaf],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[leaf])?;
+        let mut state = super::GroupState::default();
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        server.roster.groups.insert(gid.to_vec(), state);
+        server.register_group(&gid, vec![0x77; 16])?;
+
+        let missing_leaf_err = match server.build_merge_ticket(&gid, &[0xFF; 32]) {
+            Err(e) => e,
+            Ok(_) => unreachable!("unknown leaf should fail before parity lookup"),
+        };
+        assert!(matches!(
+            missing_leaf_err,
+            CityGError::InvalidInput("leaf not present in roster")
+        ));
+
+        let no_parity_err = match server.build_merge_ticket(&gid, &leaf) {
+            Err(e) => e,
+            Ok(_) => unreachable!("missing parity should fail"),
+        };
+        assert!(matches!(
+            no_parity_err,
+            CityGError::InvalidInput("no pivot parity available")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn build_merge_ticket_falls_back_on_invalid_utf8_ids() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let parent_root = server
+            .latest_parent_root(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("latest root missing"))?;
+        let leaf_id = cityg_client::demo::demo_member_leaf("alice");
+        let mut parity = server
+            .context_mut()
+            .pivot_parities_for(gid.as_slice(), &parent_root)
+            .into_iter()
+            .next()
+            .ok_or(CityGError::InvalidInput("pivot parity missing"))?;
+        parity.we_epoch_id = [0u8; 32];
+        parity.crs_id = vec![0xFF];
+        parity.params_id = vec![0xFE];
+        let now = server.context().current_time();
+        server.context_mut().insert_pivot_parity(parity, now);
+
+        let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+        assert_eq!(ticket.msphf_crs_id, msphf_core::params::RLWE_CRS_ID_DEFAULT);
+        assert_eq!(
+            ticket.msphf_params_id,
+            msphf_core::params::RLWE_PARAMS_ID_MOCK
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn header_helpers_cover_defaults_and_type_validation() {
+        let mut map = BTreeMap::new();
+        map.insert(1, Value::Bytes(vec![0x11; 32]));
+        map.insert(2, Value::Bytes(vec![0x22]));
+        map.insert(3, Value::Integer(7.into()));
+        map.insert(4, Value::Null);
+        map.insert(5, Value::Text("ok".to_string()));
+        map.insert(6, Value::Bytes(vec![0x66, 0x67]));
+
+        assert!(super::header_bytes32(&map, 1, "required").is_ok());
+        assert!(matches!(
+            super::header_bytes32(&map, 2, "required"),
+            Err(CityGError::InvalidInput("pivot field wrong length"))
+        ));
+        assert!(matches!(
+            super::header_bytes32(&map, 3, "required"),
+            Err(CityGError::InvalidInput("pivot field wrong type"))
+        ));
+        assert!(matches!(
+            super::header_bytes32(&map, 99, "required"),
+            Err(CityGError::InvalidInput("required"))
+        ));
+
+        assert!(
+            super::header_bytes32_opt(&map, 1)
+                .expect("optional bytes")
+                .is_some()
+        );
+        assert!(
+            super::header_bytes32_opt(&map, 4)
+                .expect("null optional")
+                .is_none()
+        );
+        assert!(matches!(
+            super::header_bytes32_opt(&map, 2),
+            Err(CityGError::InvalidInput("pivot field wrong length"))
+        ));
+
+        assert!(matches!(
+            super::header_bytes(&map, 3, "bytes"),
+            Err(CityGError::InvalidInput("pivot field wrong type"))
+        ));
+        assert!(matches!(
+            super::header_bytes_opt(&map, 3),
+            Err(CityGError::InvalidInput("pivot field wrong type"))
+        ));
+        assert_eq!(
+            super::header_string(&map, 5, None).expect("text value"),
+            "ok".to_string()
+        );
+        assert_eq!(
+            super::header_string(&map, 6, None).expect("bytes utf8 value"),
+            "fg".to_string()
+        );
+        assert_eq!(
+            super::header_string(&map, 4, Some("fallback")).expect("null fallback"),
+            "fallback".to_string()
+        );
+        assert!(matches!(
+            super::header_string(&map, 4, None),
+            Err(CityGError::InvalidInput("pivot field missing"))
+        ));
+    }
+
+    #[test]
+    fn journal_helpers_handle_missing_and_truncated_entries() -> Result<(), CityGError> {
+        let dir = tempdir()?;
+        let missing_path = dir.path().join("missing.journal");
+        let loaded = super::ServerJournal::load_entries(&missing_path)?;
+        assert!(
+            loaded.is_empty(),
+            "missing journal should be treated as empty"
+        );
+
+        let nested_path = dir.path().join("nested").join("server.journal");
+        let _journal = super::ServerJournal::open(&nested_path)?;
+        assert!(
+            nested_path.exists(),
+            "opening a nested journal path should create parent directories"
+        );
+
+        let mut file = File::create(&nested_path)?;
+        file.write_all(&3u32.to_le_bytes())?;
+        file.write_all(&[0xAA, 0xBB, 0xCC])?;
+        file.write_all(&5u32.to_le_bytes())?;
+        file.write_all(&[0x01, 0x02])?;
+        file.flush()?;
+
+        let loaded = super::ServerJournal::load_entries(&nested_path)?;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0], vec![0xAA, 0xBB, 0xCC]);
+        Ok(())
+    }
+
+    #[test]
+    fn update_window_limits_updates_context_and_receiver_ttl() {
+        let mut server = super::demo::demo_server();
+        server.update_window_limits(Some(3), Some(Duration::from_secs(9)));
+        let (h_max, ttl) = server.window_limits();
+        assert_eq!(h_max, 3);
+        assert_eq!(ttl, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn refresh_pivot_requires_pivot_weid_header() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let mut invalid = bundle.clone();
+        invalid
+            .header_map
+            .remove(&msphf_orchestrator::hdr::HDR_ROLLUP_PIVOT_WEID);
+        let err = match server.refresh_pivot(&invalid) {
+            Err(e) => e,
+            Ok(_) => unreachable!("missing pivot_weid header should fail"),
+        };
+        assert!(matches!(err, CityGError::InvalidInput("pivot_weid")));
         Ok(())
     }
 
@@ -1254,7 +1516,7 @@ mod roster_tests {
             Err(e) => e,
             Ok(_) => unreachable!("expected error"),
         };
-        matches!(err, CityGError::InvalidInput(_));
+        assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
 
@@ -1271,7 +1533,7 @@ mod roster_tests {
             Err(e) => e,
             Ok(_) => unreachable!("expected error"),
         };
-        matches!(err, CityGError::InvalidInput(_));
+        assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
 
@@ -1293,7 +1555,7 @@ mod roster_tests {
             Err(e) => e,
             Ok(_) => unreachable!("expected error"),
         };
-        matches!(err, CityGError::InvalidInput(_));
+        assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
 
@@ -1317,7 +1579,7 @@ mod roster_tests {
             Err(e) => e,
             Ok(_) => unreachable!("expected error"),
         };
-        matches!(err, CityGError::InvalidInput(_));
+        assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
 }

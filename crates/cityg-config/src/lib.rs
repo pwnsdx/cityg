@@ -672,7 +672,46 @@ impl GuiConfig {
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempfile::NamedTempFile;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use tempfile::{NamedTempFile, TempDir};
+
+    static LOAD_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct CurrentDirGuard(PathBuf);
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.original.as_deref() {
+                Some(value) => {
+                    // SAFETY: test-scoped environment mutation restored by this guard.
+                    unsafe { std::env::set_var(self.key, value) };
+                }
+                None => {
+                    // SAFETY: test-scoped environment mutation restored by this guard.
+                    unsafe { std::env::remove_var(self.key) };
+                }
+            }
+        }
+    }
+
+    fn set_env_guard(key: &'static str, value: &str) -> EnvVarGuard {
+        let original = std::env::var(key).ok();
+        // SAFETY: test-scoped environment mutation restored by `EnvVarGuard`.
+        unsafe { std::env::set_var(key, value) };
+        EnvVarGuard { key, original }
+    }
 
     #[test]
     fn test_default_config() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -1124,21 +1163,246 @@ default_window_height = 1080.0
     #[test]
     fn test_env_override_parse_errors() -> std::result::Result<(), Box<dyn std::error::Error>> {
         use ahash::AHashMap;
-        let mut overrides = AHashMap::new();
+        let cases = [
+            (
+                "CITYG_SERVER_WEBSOCKET_CAPACITY",
+                "not-a-number",
+                "Invalid websocket_capacity",
+            ),
+            (
+                "CITYG_SERVER_SEED_DEMO_ROOM",
+                "not-bool",
+                "Invalid seed_demo_room flag",
+            ),
+            (
+                "CITYG_CLIENT_FETCH_POLL_INTERVAL_SECS",
+                "bad",
+                "Invalid fetch_poll_interval_secs",
+            ),
+            (
+                "CITYG_CLIENT_FETCH_RETRY_INTERVAL_SECS",
+                "bad",
+                "Invalid fetch_retry_interval_secs",
+            ),
+            (
+                "CITYG_CLIENT_WEBSOCKET_RECONNECT_DELAY_SECS",
+                "bad",
+                "Invalid websocket_reconnect_delay_secs",
+            ),
+            (
+                "CITYG_PROTOCOL_WINDOW_DURATION_SECS",
+                "bad",
+                "Invalid window_duration_secs",
+            ),
+            (
+                "CITYG_PROTOCOL_MAX_CONCURRENT_HEADS",
+                "bad",
+                "Invalid max_concurrent_heads",
+            ),
+            (
+                "CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS",
+                "bad",
+                "Invalid epoch_rotation_interval_secs",
+            ),
+            (
+                "CITYG_PROTOCOL_DEFAULT_SRX_MAX_BYTES",
+                "bad",
+                "Invalid default_srx_max_bytes",
+            ),
+            (
+                "CITYG_PROTOCOL_MAX_HP_PROOF_BYTES",
+                "bad",
+                "Invalid max_hp_proof_bytes",
+            ),
+            (
+                "CITYG_PROTOCOL_MAX_VRF_PROOF_BYTES",
+                "bad",
+                "Invalid max_vrf_proof_bytes",
+            ),
+            (
+                "CITYG_PROTOCOL_FS_CAPSS_MAX_BYTES",
+                "bad",
+                "Invalid fs_capss_max_bytes",
+            ),
+            (
+                "CITYG_PROTOCOL_SRX_SMALLWOOD_MAX_BYTES",
+                "bad",
+                "Invalid srx_smallwood_max_bytes",
+            ),
+            (
+                "CITYG_PROTOCOL_MAX_HP_ENVELOPE_BYTES",
+                "bad",
+                "Invalid max_hp_envelope_bytes",
+            ),
+            (
+                "CITYG_PROTOCOL_MIN_SRX_MAX_BYTES",
+                "bad",
+                "Invalid min_srx_max_bytes",
+            ),
+            (
+                "CITYG_PROTOCOL_RECEIVER_CACHE_TTL_SECS",
+                "bad",
+                "Invalid receiver_cache_ttl_secs",
+            ),
+            (
+                "CITYG_PROTOCOL_FS_POLICY_H_SECONDS",
+                "bad",
+                "Invalid fs_policy.h_seconds",
+            ),
+            (
+                "CITYG_PROTOCOL_FS_POLICY_CHECKPOINT_INTERVAL_SECS",
+                "bad",
+                "Invalid fs_policy.checkpoint_interval_seconds",
+            ),
+            (
+                "CITYG_PROTOCOL_FS_POLICY_CHECKPOINT_HEAD_THRESHOLD",
+                "bad",
+                "Invalid fs_policy.checkpoint_head_threshold",
+            ),
+            (
+                "CITYG_PROTOCOL_FS_POLICY_SLACK_ANCHOR",
+                "bad",
+                "Invalid fs_policy.slack_anchor",
+            ),
+            (
+                "CITYG_PROTOCOL_FS_POLICY_SLACK_FIRST_DEVICE",
+                "bad",
+                "Invalid fs_policy.slack_first_device",
+            ),
+            (
+                "CITYG_PROTOCOL_FS_POLICY_SLACK_DEVICE",
+                "bad",
+                "Invalid fs_policy.slack_device",
+            ),
+            (
+                "CITYG_GUI_DEFAULT_WINDOW_WIDTH",
+                "bad",
+                "Invalid default_window_width",
+            ),
+            (
+                "CITYG_GUI_DEFAULT_WINDOW_HEIGHT",
+                "bad",
+                "Invalid default_window_height",
+            ),
+            (
+                "CITYG_GUI_MEMBERS_PAGE_LIMIT",
+                "bad",
+                "Invalid members_page_limit",
+            ),
+            (
+                "CITYG_GUI_MEMBERS_REFRESH_INTERVAL_SECS",
+                "bad",
+                "Invalid members_refresh_interval_secs",
+            ),
+        ];
 
-        overrides.insert(
-            "CITYG_SERVER_WEBSOCKET_CAPACITY",
-            "not-a-number".to_string(),
+        for (key, value, expected_msg) in cases {
+            let mut overrides = AHashMap::new();
+            overrides.insert(key, value.to_string());
+            let result = CityGConfig::default().apply_env_overrides_with(|lookup| {
+                overrides.get(lookup).cloned().ok_or(VarError::NotPresent)
+            });
+            assert!(result.is_err(), "{key} should fail parsing");
+            let err = result.expect_err("expected parse error");
+            assert!(
+                err.to_string().contains(expected_msg),
+                "unexpected error for {key}: {err}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_prefers_cwd_files_before_other_sources()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = LOAD_ENV_LOCK.lock().expect("lock poisoned");
+        let temp_dir = TempDir::new()?;
+        let original = std::env::current_dir()?;
+        let _cwd_guard = CurrentDirGuard(original);
+        std::env::set_current_dir(temp_dir.path())?;
+
+        let cwd_toml = r#"
+[server]
+address = "10.1.1.1:9001"
+websocket_capacity = 2222
+window_ttl_secs = 500
+
+[client]
+default_server_url = "http://10.1.1.1:9001"
+"#;
+        std::fs::write(temp_dir.path().join("cityg.toml"), cwd_toml)?;
+
+        let loaded = CityGConfig::load()?;
+        assert_eq!(loaded.server.address, "10.1.1.1:9001");
+        assert_eq!(loaded.server.websocket_capacity, 2222);
+
+        std::fs::remove_file(temp_dir.path().join("cityg.toml"))?;
+        let cwd_json = r#"{
+  "server": {
+    "address": "10.2.2.2:9002",
+    "websocket_capacity": 3333,
+    "window_ttl_secs": 600
+  },
+  "client": {
+    "default_server_url": "http://10.2.2.2:9002",
+    "fetch_poll_interval_secs": 9,
+    "fetch_retry_interval_secs": 11,
+    "websocket_reconnect_delay_secs": 7,
+    "api_timeout_secs": 45
+  }
+}"#;
+        std::fs::write(temp_dir.path().join("cityg.json"), cwd_json)?;
+
+        let loaded = CityGConfig::load()?;
+        assert_eq!(loaded.server.address, "10.2.2.2:9002");
+        assert_eq!(loaded.server.websocket_capacity, 3333);
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_reads_user_config_directory_when_cwd_missing()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = LOAD_ENV_LOCK.lock().expect("lock poisoned");
+        let temp_home = TempDir::new()?;
+        let temp_xdg = TempDir::new()?;
+        let _home_guard = set_env_guard("HOME", temp_home.path().to_string_lossy().as_ref());
+        let _xdg_guard = set_env_guard(
+            "XDG_CONFIG_HOME",
+            temp_xdg.path().to_string_lossy().as_ref(),
         );
 
-        let result = CityGConfig::default().apply_env_overrides_with(|key| {
-            overrides.get(key).cloned().ok_or(VarError::NotPresent)
-        });
+        let cwd_temp = TempDir::new()?;
+        let original = std::env::current_dir()?;
+        let _cwd_guard = CurrentDirGuard(original);
+        std::env::set_current_dir(cwd_temp.path())?;
 
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Invalid websocket_capacity"));
-        }
+        let cfg_toml = r#"
+[server]
+address = "10.9.9.9:9090"
+websocket_capacity = 4444
+window_ttl_secs = 777
+
+[protocol]
+window_duration_secs = 123
+"#;
+
+        let xdg_path = temp_xdg.path().join("cityg");
+        std::fs::create_dir_all(&xdg_path)?;
+        std::fs::write(xdg_path.join("config.toml"), cfg_toml)?;
+
+        // Also prepare the macOS-style fallback location for portability.
+        let mac_path = temp_home
+            .path()
+            .join("Library")
+            .join("Application Support")
+            .join("cityg");
+        std::fs::create_dir_all(&mac_path)?;
+        std::fs::write(mac_path.join("config.toml"), cfg_toml)?;
+
+        let loaded = CityGConfig::load()?;
+        assert_eq!(loaded.server.address, "10.9.9.9:9090");
+        assert_eq!(loaded.server.websocket_capacity, 4444);
+        assert_eq!(loaded.protocol.window_duration_secs, 123);
         Ok(())
     }
 
