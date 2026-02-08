@@ -1817,11 +1817,52 @@ async fn refresh_pivot(State(state): State<ApiState>, body: Bytes) -> Result<Res
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+    use axum::routing::get;
+    use cityg_client::demo::{DEMO_GID, demo_bundle};
     use cityg_config::CityGConfig;
+    use futures::{SinkExt, StreamExt};
+    use msphf_core::MsphfError;
     use pqcrypto_dilithium::dilithium5;
     use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+    use prost::Message;
     use serde_bytes::ByteBuf;
     use serde_json::Value;
+
+    fn test_api_state() -> ApiState {
+        let mut cfg = CityGConfig::default();
+        cfg.server.seed_demo_room = true;
+        ApiState {
+            server: Arc::new(RwLock::new(server_from_config(&cfg))),
+            messages: Arc::new(RwLock::new(AHashMap::new())),
+            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
+            fs_epoch_period_seconds: cfg.protocol.fs_policy.h_seconds.max(1),
+            freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
+            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
+            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
+            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+            notification_tx: broadcast::channel(8).0,
+        }
+    }
+
+    async fn decode_proto_response<T>(response: Response) -> T
+    where
+        T: Message + Default,
+    {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        T::decode(body).expect("decode protobuf response")
+    }
+
+    fn encode_proto_request<T>(message: &T) -> Bytes
+    where
+        T: Message,
+    {
+        let mut body = Vec::new();
+        message.encode(&mut body).expect("encode protobuf request");
+        Bytes::from(body)
+    }
 
     #[test]
     #[allow(clippy::expect_used)]
@@ -1882,6 +1923,73 @@ mod tests {
             result.is_err(),
             "Identity binding with wrong signature should fail"
         );
+    }
+
+    #[tokio::test]
+    async fn register_alias_tofu_paths_cover_match_update_and_conflict() {
+        let state = test_api_state();
+        let alias = "alice";
+        let leaf_a = [0x11; 32];
+        let leaf_b = [0x22; 32];
+        let key_a = vec![0xAA; 8];
+        let key_b = vec![0xBB; 8];
+
+        assert!(
+            state
+                .register_alias(alias, leaf_a, key_a.clone())
+                .await
+                .expect("new alias registration"),
+            "first registration should mark alias as new"
+        );
+
+        assert!(
+            !state
+                .register_alias(alias, leaf_a, key_a.clone())
+                .await
+                .expect("matching alias registration"),
+            "same alias/key/leaf should be treated as existing binding"
+        );
+
+        assert!(
+            !state
+                .register_alias(alias, leaf_b, key_a.clone())
+                .await
+                .expect("leaf update for matching key"),
+            "same alias/key with new leaf should update in-place"
+        );
+
+        let err = state
+            .register_alias(alias, leaf_b, key_b)
+            .await
+            .expect_err("different key must violate TOFU");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("alias already bound to a different identity")
+        ));
+    }
+
+    #[tokio::test]
+    async fn record_member_revocations_prunes_metadata_and_weid_map() {
+        let state = test_api_state();
+        let leaf_a = [0xA1; 32];
+        let leaf_b = [0xB2; 32];
+        let weid_a = [0x01; 32];
+        let weid_b = [0x02; 32];
+
+        state.record_member_join(leaf_a, weid_a, 100).await;
+        state.record_member_join(leaf_b, weid_b, 200).await;
+
+        state.record_member_revocations(&[]).await;
+        assert_eq!(state.member_metadata.read().await.len(), 2);
+        assert_eq!(state.weid_to_leaf.read().await.len(), 2);
+
+        state.record_member_revocations(&[leaf_a]).await;
+        let metadata = state.member_metadata.read().await;
+        let weid_map = state.weid_to_leaf.read().await;
+        assert!(!metadata.contains_key(&leaf_a));
+        assert!(metadata.contains_key(&leaf_b));
+        assert!(!weid_map.values().any(|leaf| leaf == &leaf_a));
+        assert!(weid_map.values().any(|leaf| leaf == &leaf_b));
     }
 
     #[tokio::test]
@@ -1999,6 +2107,726 @@ mod tests {
         assert_eq!(json["failed_index"], 3);
         assert_eq!(json["freeze_code"], 9449);
         assert_eq!(json["freeze_reason"], "fs_burst_non_monotone_ec");
+    }
+
+    #[tokio::test]
+    async fn map_accept_error_covers_invalid_input_and_non_freeze_acceptance() {
+        let state = test_api_state();
+
+        let invalid = map_accept_error(
+            &state,
+            ClientError::InvalidInput("bad bundle"),
+            Some("batch_step"),
+            Some(9),
+        )
+        .await;
+        assert!(matches!(
+            invalid,
+            ApiError::InvalidRequest("invalid bundle components")
+        ));
+
+        let acceptance = map_accept_error(
+            &state,
+            ClientError::Acceptance(AcceptanceError::Msphf(MsphfError::invalid_input(
+                "hp mismatch",
+            ))),
+            Some("batch_step"),
+            Some(2),
+        )
+        .await;
+        let response = acceptance.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["error"], "batch_step");
+        assert_eq!(json["failed_index"], 2);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_room_validates_requests_and_registers_group() {
+        let state = test_api_state();
+
+        let encode = |request: BootstrapRoomRequest| -> Bytes {
+            let mut body = Vec::new();
+            request.encode(&mut body).expect("encode bootstrap request");
+            Bytes::from(body)
+        };
+
+        let err = bootstrap_room(
+            State(state.clone()),
+            encode(BootstrapRoomRequest {
+                room_id: String::new(),
+                kbroad_public: vec![0x11; ml_kem_public_key_bytes()],
+            }),
+        )
+        .await
+        .expect_err("missing room id must fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("room_id must be provided")
+        ));
+
+        let err = bootstrap_room(
+            State(state.clone()),
+            encode(BootstrapRoomRequest {
+                room_id: hex::encode([0x44u8; 32]),
+                kbroad_public: Vec::new(),
+            }),
+        )
+        .await
+        .expect_err("missing kbroad key must fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("kbroad_public must be provided")
+        ));
+
+        let err = bootstrap_room(
+            State(state.clone()),
+            encode(BootstrapRoomRequest {
+                room_id: hex::encode([0x55u8; 32]),
+                kbroad_public: vec![0x11; ml_kem_public_key_bytes() - 1],
+            }),
+        )
+        .await
+        .expect_err("wrong kbroad key length must fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("kbroad_public has unexpected length")
+        ));
+
+        let response = bootstrap_room(
+            State(state),
+            encode(BootstrapRoomRequest {
+                room_id: hex::encode([0x66u8; 32]),
+                kbroad_public: vec![0x33; ml_kem_public_key_bytes()],
+            }),
+        )
+        .await
+        .expect("valid bootstrap should succeed");
+        let decoded: BootstrapRoomResponse = decode_proto_response(response).await;
+        assert_eq!(decoded.status, "registered");
+    }
+
+    #[tokio::test]
+    async fn search_members_filters_by_alias_or_leaf_hex_and_validates_inputs() {
+        let state = test_api_state();
+        let alice = demo_bundle("alice").expect("alice demo bundle");
+        let bob = demo_bundle("bob").expect("bob demo bundle");
+
+        let (root, tagged_leaf) = {
+            let mut guard = state.server.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+            guard.accept_epoch(&bob).expect("accept bob");
+            let root = guard
+                .latest_parent_root(DEMO_GID.as_ref())
+                .expect("latest root");
+            let members = guard
+                .members_for_root(DEMO_GID.as_ref(), &root)
+                .expect("members for root");
+            (root, members[0])
+        };
+
+        state
+            .register_alias("special-user", tagged_leaf, vec![0xAB; 8])
+            .await
+            .expect("register alias for search");
+
+        let mut body = Vec::new();
+        pb::SearchMembersRequest {
+            gid: DEMO_GID.to_vec(),
+            query: "special".to_string(),
+            parent_root: Vec::new(),
+            offset: Some(0),
+            limit: Some(10),
+        }
+        .encode(&mut body)
+        .expect("encode alias query request");
+        let response = search_members(State(state.clone()), Bytes::from(body))
+            .await
+            .expect("alias query should succeed");
+        let decoded: pb::SearchMembersResponse = decode_proto_response(response).await;
+        assert_eq!(decoded.total_count, 1);
+        assert_eq!(decoded.members.len(), 1);
+        assert_eq!(
+            decoded.members[0].alias.as_deref(),
+            Some("special-user"),
+            "alias query should return aliased member"
+        );
+
+        let leaf_prefix = hex::encode(tagged_leaf);
+        let mut body = Vec::new();
+        pb::SearchMembersRequest {
+            gid: DEMO_GID.to_vec(),
+            query: leaf_prefix[..12].to_string(),
+            parent_root: root.to_vec(),
+            offset: Some(0),
+            limit: Some(10),
+        }
+        .encode(&mut body)
+        .expect("encode leaf query request");
+        let response = search_members(State(state.clone()), Bytes::from(body))
+            .await
+            .expect("leaf query should succeed");
+        let decoded: pb::SearchMembersResponse = decode_proto_response(response).await;
+        assert!(
+            decoded.total_count >= 1,
+            "leaf hex search should return at least one match"
+        );
+
+        let mut body = Vec::new();
+        pb::SearchMembersRequest {
+            gid: DEMO_GID.to_vec(),
+            query: String::new(),
+            parent_root: Vec::new(),
+            offset: Some(0),
+            limit: Some(10),
+        }
+        .encode(&mut body)
+        .expect("encode missing query request");
+        let err = search_members(State(state.clone()), Bytes::from(body))
+            .await
+            .expect_err("empty query should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("query must be provided")
+        ));
+
+        let mut body = Vec::new();
+        pb::SearchMembersRequest {
+            gid: DEMO_GID.to_vec(),
+            query: "x".to_string(),
+            parent_root: vec![0x01],
+            offset: Some(0),
+            limit: Some(10),
+        }
+        .encode(&mut body)
+        .expect("encode invalid parent root request");
+        let err = search_members(State(state), Bytes::from(body))
+            .await
+            .expect_err("bad parent root should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("parent_root must be 32 bytes")
+        ));
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_validates_inputs_and_returns_ticket_payload() {
+        let state = test_api_state();
+        let alice = demo_bundle("alice").expect("alice demo bundle");
+
+        let leaf_id = {
+            let mut guard = state.server.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+            let root = guard
+                .latest_parent_root(DEMO_GID.as_ref())
+                .expect("latest root");
+            guard
+                .members_for_root(DEMO_GID.as_ref(), &root)
+                .expect("members for root")[0]
+        };
+
+        let mut body = Vec::new();
+        MergeTicketRequest {
+            room_id: String::new(),
+            leaf_id: leaf_id.to_vec(),
+        }
+        .encode(&mut body)
+        .expect("encode missing room id request");
+        let err = merge_ticket(State(state.clone()), Bytes::from(body))
+            .await
+            .expect_err("empty room id should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("room_id must be provided")
+        ));
+
+        let mut body = Vec::new();
+        MergeTicketRequest {
+            room_id: hex::encode(DEMO_GID),
+            leaf_id: vec![0x01; 31],
+        }
+        .encode(&mut body)
+        .expect("encode bad leaf request");
+        let err = merge_ticket(State(state.clone()), Bytes::from(body))
+            .await
+            .expect_err("invalid leaf length should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("leaf_id must be 32 bytes")
+        ));
+
+        let mut body = Vec::new();
+        MergeTicketRequest {
+            room_id: hex::encode(DEMO_GID),
+            leaf_id: leaf_id.to_vec(),
+        }
+        .encode(&mut body)
+        .expect("encode valid merge request");
+        let response = merge_ticket(State(state), Bytes::from(body))
+            .await
+            .expect("valid merge ticket request");
+        let decoded: MergeTicketResponse = decode_proto_response(response).await;
+        assert_eq!(decoded.we_epoch_id.len(), 32);
+        assert_eq!(decoded.parent_root.len(), 32);
+        assert!(
+            !decoded.pivot_parity_cbor.is_empty(),
+            "merge ticket should include at least one pivot parity"
+        );
+    }
+
+    #[test]
+    fn identity_binding_validation_rejects_invalid_field_shapes() {
+        let mut binding = IdentityBinding {
+            alias: "alice".to_string(),
+            pop_public_key: vec![0u8; dilithium5::public_key_bytes().saturating_sub(1)],
+            signature: vec![0u8; dilithium5::signature_bytes()],
+        };
+        assert!(matches!(
+            verify_identity_binding(&binding),
+            Err(ApiError::InvalidRequest("invalid pop_public_key length"))
+        ));
+
+        binding.pop_public_key = vec![0u8; dilithium5::public_key_bytes()];
+        binding.signature = vec![0u8; dilithium5::signature_bytes().saturating_sub(1)];
+        assert!(matches!(
+            verify_identity_binding(&binding),
+            Err(ApiError::InvalidRequest("invalid signature length"))
+        ));
+
+        binding.signature = vec![0u8; dilithium5::signature_bytes()];
+        binding.alias.clear();
+        assert!(matches!(
+            verify_identity_binding(&binding),
+            Err(ApiError::InvalidRequest("alias cannot be empty"))
+        ));
+    }
+
+    #[test]
+    fn client_error_conversion_covers_freeze_acceptance_and_io_paths() {
+        let freeze = FreezeError {
+            code: 9412,
+            reason: "rho_replay",
+        };
+        let converted: ApiError = ClientError::Acceptance(AcceptanceError::Freeze(freeze)).into();
+        match converted {
+            ApiError::Server {
+                message,
+                freeze: Some(inner),
+                ..
+            } => {
+                assert!(message.contains("acceptance error"));
+                assert_eq!(inner.code, 9412);
+                assert_eq!(inner.reason, "rho_replay");
+            }
+            other => panic!("expected frozen server error, got {other:?}"),
+        }
+
+        let converted: ApiError =
+            ClientError::Acceptance(AcceptanceError::Msphf(MsphfError::invalid_input("bad")))
+                .into();
+        assert!(matches!(converted, ApiError::Server { .. }));
+
+        let converted: ApiError = ClientError::Io(std::io::Error::other("disk")).into();
+        match converted {
+            ApiError::Server { message, .. } => assert!(message.contains("io error")),
+            other => panic!("expected server error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn join_ticket_success_persists_confirmed_alias_binding() {
+        let state = test_api_state();
+
+        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let alias = "alice-joined".to_string();
+        let pop_public_key = pop_pk.as_bytes().to_vec();
+        let message_data = (
+            ByteBuf::from(alias.as_bytes().to_vec()),
+            ByteBuf::from(pop_public_key.clone()),
+        );
+        let mut message = Vec::new();
+        ciborium::ser::into_writer(&message_data, &mut message)
+            .expect("encode identity binding message");
+        let signature = dilithium5::detached_sign(&message, &pop_sk);
+
+        let before = state.server.read().await.context().fs_base_ts();
+        assert!(before.is_none(), "fs base ts should start unset");
+
+        let response = join_ticket(
+            State(state.clone()),
+            encode_proto_request(&JoinTicketRequest {
+                room_id: hex::encode(DEMO_GID),
+                alias: alias.clone(),
+                identity_binding: Some(IdentityBinding {
+                    alias: alias.clone(),
+                    pop_public_key,
+                    signature: signature.as_bytes().to_vec(),
+                }),
+            }),
+        )
+        .await
+        .expect("join ticket with valid binding should succeed");
+        let decoded: JoinTicketResponse = decode_proto_response(response).await;
+        assert_eq!(decoded.gid.len(), 32);
+        assert_eq!(decoded.leaf_id.len(), 32);
+
+        let registry = state.alias_registry.read().await;
+        let binding = registry.get(&alias).expect("alias must be persisted");
+        assert_eq!(binding.leaf_id, decoded.leaf_id.as_slice());
+        drop(registry);
+
+        let response = join_ticket(
+            State(state.clone()),
+            encode_proto_request(&JoinTicketRequest {
+                room_id: hex::encode(DEMO_GID),
+                alias: "without-binding".to_string(),
+                identity_binding: None,
+            }),
+        )
+        .await
+        .expect("join ticket without binding should still succeed");
+        let decoded_second: JoinTicketResponse = decode_proto_response(response).await;
+        assert_eq!(decoded_second.fs_epoch_base_ts, decoded.fs_epoch_base_ts);
+    }
+
+    #[tokio::test]
+    async fn members_handler_covers_validation_notfound_and_alias_metadata() {
+        let state = test_api_state();
+        let alice = demo_bundle("alice").expect("alice demo bundle");
+        let (root, leaf) = {
+            let mut guard = state.server.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+            let root = guard
+                .latest_parent_root(DEMO_GID.as_ref())
+                .expect("latest root");
+            let leaf = guard
+                .members_for_root(DEMO_GID.as_ref(), &root)
+                .expect("members for root")[0];
+            (root, leaf)
+        };
+        state
+            .register_alias("member-alias", leaf, vec![0x55; 8])
+            .await
+            .expect("register member alias");
+        state.record_member_join(leaf, [0x88; 32], 777).await;
+
+        let err = members(
+            State(state.clone()),
+            encode_proto_request(&MembersRequest {
+                gid: Vec::new(),
+                parent_root: Vec::new(),
+                offset: Some(0),
+                limit: Some(10),
+            }),
+        )
+        .await
+        .expect_err("missing gid should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("gid must be provided")
+        ));
+
+        let err = members(
+            State(state.clone()),
+            encode_proto_request(&MembersRequest {
+                gid: DEMO_GID.to_vec(),
+                parent_root: vec![0x01],
+                offset: Some(0),
+                limit: Some(10),
+            }),
+        )
+        .await
+        .expect_err("invalid parent root length should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("parent_root must be 32 bytes")
+        ));
+
+        let err = members(
+            State(state.clone()),
+            encode_proto_request(&MembersRequest {
+                gid: DEMO_GID.to_vec(),
+                parent_root: vec![0x99; 32],
+                offset: Some(0),
+                limit: Some(10),
+            }),
+        )
+        .await
+        .expect_err("unknown parent root should fail");
+        assert!(matches!(err, ApiError::NotFound));
+
+        let response = members(
+            State(state.clone()),
+            encode_proto_request(&MembersRequest {
+                gid: DEMO_GID.to_vec(),
+                parent_root: root.to_vec(),
+                offset: Some(0),
+                limit: Some(10),
+            }),
+        )
+        .await
+        .expect("members request should succeed");
+        let decoded: MembersResponse = decode_proto_response(response).await;
+        let returned = decoded
+            .members
+            .iter()
+            .find(|member| member.leaf_id == leaf)
+            .expect("returned members should include accepted leaf");
+        assert_eq!(returned.alias.as_deref(), Some("member-alias"));
+        assert_eq!(returned.join_date, Some(777));
+        assert_eq!(returned.last_seen, Some(777));
+    }
+
+    #[tokio::test]
+    async fn send_and_fetch_messages_cover_validation_touch_and_roundtrip() {
+        let state = test_api_state();
+        let weid = [0x77; 32];
+        let leaf = [0x44; 32];
+        state.record_member_join(leaf, weid, 100).await;
+
+        let err = send_message(
+            State(state.clone()),
+            encode_proto_request(&SendMessageRequest {
+                we_epoch_id: vec![0x01; 31],
+                ciphertext: vec![0xAA],
+                sender: vec![0x01; 32],
+            }),
+        )
+        .await
+        .expect_err("invalid weid length should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("we_epoch_id must be 32 bytes")
+        ));
+
+        let err = send_message(
+            State(state.clone()),
+            encode_proto_request(&SendMessageRequest {
+                we_epoch_id: weid.to_vec(),
+                ciphertext: Vec::new(),
+                sender: vec![0x02; 32],
+            }),
+        )
+        .await
+        .expect_err("empty ciphertext should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("ciphertext must be provided")
+        ));
+
+        let response = send_message(
+            State(state.clone()),
+            encode_proto_request(&SendMessageRequest {
+                we_epoch_id: weid.to_vec(),
+                ciphertext: b"hello".to_vec(),
+                sender: vec![0x03; 32],
+            }),
+        )
+        .await
+        .expect("valid send should succeed");
+        let decoded: SendMessageResponse = decode_proto_response(response).await;
+        assert_eq!(decoded.status, "stored");
+
+        let metadata = state.member_metadata.read().await;
+        let member = metadata.get(&leaf).expect("member metadata");
+        assert!(
+            member.last_seen_timestamp_ms >= 100,
+            "send path should touch member last-seen timestamp"
+        );
+        drop(metadata);
+
+        let err = fetch_messages(
+            State(state.clone()),
+            encode_proto_request(&FetchMessagesRequest {
+                we_epoch_id: vec![0x01; 31],
+            }),
+        )
+        .await
+        .expect_err("invalid fetch weid length should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("we_epoch_id must be 32 bytes")
+        ));
+
+        let response = fetch_messages(
+            State(state.clone()),
+            encode_proto_request(&FetchMessagesRequest {
+                we_epoch_id: weid.to_vec(),
+            }),
+        )
+        .await
+        .expect("fetch should succeed");
+        let decoded: FetchMessagesResponse = decode_proto_response(response).await;
+        assert_eq!(decoded.messages.len(), 1);
+        assert_eq!(decoded.messages[0].ciphertext, b"hello");
+    }
+
+    #[tokio::test]
+    async fn get_bundle_refresh_pivot_and_health_handlers_cover_core_paths() {
+        let state = test_api_state();
+
+        let err = get_bundle(
+            State(state.clone()),
+            encode_proto_request(&GetBundleRequest {
+                we_epoch_id: vec![0x01; 31],
+            }),
+        )
+        .await
+        .expect_err("invalid bundle key length should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("we_epoch_id must be 32 bytes")
+        ));
+
+        let err = get_bundle(
+            State(state.clone()),
+            encode_proto_request(&GetBundleRequest {
+                we_epoch_id: vec![0x02; 32],
+            }),
+        )
+        .await
+        .expect_err("unknown bundle should fail");
+        assert!(matches!(err, ApiError::NotFound));
+
+        let weid = [0x23; 32];
+        store_bundle_bytes(&state, weid, vec![0xAA, 0xBB]).await;
+        let response = get_bundle(
+            State(state.clone()),
+            encode_proto_request(&GetBundleRequest {
+                we_epoch_id: weid.to_vec(),
+            }),
+        )
+        .await
+        .expect("stored bundle should be returned");
+        let decoded: GetBundleResponse = decode_proto_response(response).await;
+        assert_eq!(decoded.bundle_cbor, vec![0xAA, 0xBB]);
+
+        let err = refresh_pivot(
+            State(state.clone()),
+            encode_proto_request(&RefreshPivotRequest {
+                bundle_cbor: Vec::new(),
+            }),
+        )
+        .await
+        .expect_err("empty refresh payload should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("bundle_cbor must be provided")
+        ));
+
+        let err = refresh_pivot(
+            State(state.clone()),
+            encode_proto_request(&RefreshPivotRequest {
+                bundle_cbor: vec![0x01, 0x02],
+            }),
+        )
+        .await
+        .expect_err("invalid cbor payload should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("invalid bundle encoding")
+        ));
+
+        let live_body = to_bytes(
+            health_liveness(State(state.clone())).await.into_body(),
+            usize::MAX,
+        )
+        .await
+        .expect("health live body");
+        let live: Value = serde_json::from_slice(&live_body).expect("health live json");
+        assert_eq!(live["alive"], true);
+
+        let ready_body = to_bytes(
+            health_readiness(State(state.clone())).await.into_body(),
+            usize::MAX,
+        )
+        .await
+        .expect("health ready body");
+        let ready: Value = serde_json::from_slice(&ready_body).expect("health ready json");
+        assert_eq!(ready["ready"], true);
+
+        let detailed_body = to_bytes(
+            health_detailed(State(state.clone())).await.into_body(),
+            usize::MAX,
+        )
+        .await
+        .expect("health detailed body");
+        let detailed: Value = serde_json::from_slice(&detailed_body).expect("health detailed json");
+        assert_eq!(detailed["status"], "healthy");
+
+        let legacy: HealthResponse =
+            decode_proto_response(health_legacy_with_state(State(state)).await).await;
+        assert_eq!(legacy.status, "ok");
+    }
+
+    #[tokio::test]
+    async fn websocket_handler_streams_message_and_membership_notifications() {
+        let state = test_api_state();
+        let app = Router::new()
+            .route("/v1/ws", get(websocket_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve websocket test app");
+        });
+
+        let url = format!("ws://{addr}/v1/ws");
+        let (mut socket, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("connect websocket");
+
+        state.broadcast_message(MessageNotification {
+            we_epoch_id: [0xA5; 32],
+            timestamp_ms: 101,
+        });
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .expect("wait for message notification")
+            .expect("message notification frame")
+            .expect("message notification payload");
+        let first_text = match first {
+            tokio_tungstenite::tungstenite::Message::Text(text) => text,
+            other => panic!("expected text notification frame, got {other:?}"),
+        };
+        let first_json: Value =
+            serde_json::from_str(&first_text).expect("decode message notification JSON");
+        assert_eq!(first_json["type"], "message");
+        assert_eq!(first_json["timestamp_ms"], 101);
+
+        state.broadcast_membership(DEMO_GID, [0xB6; 32], MembershipEventKind::Join, 202);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .expect("wait for membership notification")
+            .expect("membership notification frame")
+            .expect("membership notification payload");
+        let second_text = match second {
+            tokio_tungstenite::tungstenite::Message::Text(text) => text,
+            other => panic!("expected text membership frame, got {other:?}"),
+        };
+        let second_json: Value =
+            serde_json::from_str(&second_text).expect("decode membership notification JSON");
+        assert_eq!(second_json["type"], "membership");
+        assert_eq!(second_json["event"], "join");
+        assert_eq!(second_json["timestamp_ms"], 202);
+
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Ping(vec![1, 2, 3]))
+            .await
+            .expect("send ping");
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await
+            .expect("send close");
+
+        server.abort();
     }
 
     #[test]

@@ -34,6 +34,25 @@ async fn spawn_server_with_seed_demo_room(port: u16, seed_demo_room: bool) -> Jo
     })
 }
 
+fn encode_field1_bytes(payload: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(payload.len() + 8);
+    body.push(0x0A); // field #1, length-delimited bytes
+    let mut n = payload.len() as u64;
+    loop {
+        let mut byte = (n & 0x7F) as u8;
+        n >>= 7;
+        if n != 0 {
+            byte |= 0x80;
+        }
+        body.push(byte);
+        if n == 0 {
+            break;
+        }
+    }
+    body.extend_from_slice(payload);
+    body
+}
+
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn end_to_end_demo_flow() {
@@ -203,6 +222,75 @@ async fn configure_window_rejects_invalid() -> Result<()> {
     drop(client);
     handle.abort();
     Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn debug_seed_window_endpoint_handles_validation_paths() {
+    let port = 8110;
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(200)).await;
+
+    let http = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{port}");
+
+    let response = http
+        .post(format!("{base}/v1/debug/window/seed"))
+        .body(encode_field1_bytes(&[]))
+        .send()
+        .await
+        .expect("seed endpoint request");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = http
+        .post(format!("{base}/v1/debug/window/seed"))
+        .body(encode_field1_bytes(&[0x01, 0x02]))
+        .send()
+        .await
+        .expect("seed endpoint invalid bundle request");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let valid_bundle = demo_bundle("alice").expect("demo bundle");
+    let response = http
+        .post(format!("{base}/v1/debug/window/seed"))
+        .body(encode_field1_bytes(
+            &valid_bundle.to_cbor().expect("bundle cbor"),
+        ))
+        .send()
+        .await
+        .expect("seed endpoint valid bundle request");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    handle.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn refresh_pivot_endpoint_rejects_empty_and_invalid_payloads() {
+    let port = 8111;
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(200)).await;
+
+    let http = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{port}");
+
+    let response = http
+        .post(format!("{base}/v1/pivot/refresh"))
+        .body(encode_field1_bytes(&[]))
+        .send()
+        .await
+        .expect("refresh endpoint empty payload");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = http
+        .post(format!("{base}/v1/pivot/refresh"))
+        .body(encode_field1_bytes(&[0xFF]))
+        .send()
+        .await
+        .expect("refresh endpoint malformed payload");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    handle.abort();
 }
 
 #[tokio::test]

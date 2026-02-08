@@ -48,6 +48,7 @@ ahash = { version = "0.8", features = ["serde"] }
 cityg-api-client = { path = "../cityg-api-client" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
+tokio-tungstenite = "0.24"
 chacha20poly1305 = "0.10"
 reqwest = "0.12"
 
