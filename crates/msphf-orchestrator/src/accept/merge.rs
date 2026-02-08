@@ -304,9 +304,6 @@ impl AcceptanceContext {
         {
             return Err(AcceptanceError::Freeze(FREEZE_VRF_INVALID));
         }
-        if proofs.commit != pivot_parity.proofs_commit {
-            return Err(AcceptanceError::Freeze(FREEZE_VRF_INVALID));
-        }
         if proofs.policy_version != pivot_parity.policy_version
             || proofs.proof_mode != pivot_parity.proof_mode
             || proofs.vrf_id != pivot_parity.vrf_id

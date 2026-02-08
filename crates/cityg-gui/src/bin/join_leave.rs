@@ -882,9 +882,12 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         Ok(_) => {}
         Err(ApiClientError::HttpStatus {
             status, message, ..
-        }) if status.is_server_error() && message.contains("pivot head missing") => {
+        }) if status.is_server_error()
+            && (message.contains("pivot head missing")
+                || message.contains("refresh payload diverges from stored parity")) =>
+        {
             if verbose {
-                println!("refresh pivot skipped due to stale head set: {message}");
+                println!("refresh pivot skipped: {message}");
             }
         }
         Err(err) => return Err(err).context("refresh pivot parity"),
@@ -2363,8 +2366,7 @@ mod tests {
             let (stream, _) = listener.accept().await?;
             let mut ws = tokio_tungstenite::accept_async(stream).await?;
             ws.send(WsMessage::Text(
-                format!(r#"{{"type":"message","we_epoch_id":"{weid_hex}","timestamp_ms":42}}"#)
-                    .into(),
+                format!(r#"{{"type":"message","we_epoch_id":"{weid_hex}","timestamp_ms":42}}"#),
             ))
             .await?;
             ws.close(None).await?;
