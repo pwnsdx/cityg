@@ -8,6 +8,8 @@ use crate::{MsphfError, ds};
 
 const CITY_G_PREFIX: &[u8] = b"city-g|";
 const CITY_G_XOF_PREFIX: &[u8] = b"city-g|xof|";
+const CITY_G_HL_DERIVE_CTX: &str = "city-g|h_l|v1";
+const CITY_G_XOF_DERIVE_CTX: &str = "city-g|xof32|v1";
 
 struct HasherWriter<'a> {
     hasher: &'a mut Hasher,
@@ -50,7 +52,7 @@ fn hash_serialized<T: Serialize>(
     value: &T,
 ) -> Result<[u8; 32], MsphfError> {
     validate_label(label)?;
-    let mut hasher = Hasher::new();
+    let mut hasher = Hasher::new_derive_key(CITY_G_HL_DERIVE_CTX);
     hasher.update(prefix);
     hasher.update(label.as_bytes());
     hasher.update(&[0u8]);
@@ -113,7 +115,7 @@ pub fn xof32(ctx: &str, seed: &[u8]) -> [u8; 32] {
         !ctx.as_bytes().contains(&0u8),
         "xof32 ctx must not contain embedded NUL bytes"
     );
-    let mut hasher = Hasher::new();
+    let mut hasher = Hasher::new_derive_key(CITY_G_XOF_DERIVE_CTX);
     hasher.update(CITY_G_XOF_PREFIX);
     hasher.update(ctx.as_bytes());
     hasher.update(&[0u8]);
@@ -171,7 +173,7 @@ mod tests {
         };
         assert_eq!(
             digest,
-            hex_literal::hex!("cd11aac41451ec73113b9a813fbb43d6edfa0e6603092d7c34c2b64ac561b44e")
+            hex_literal::hex!("f928a6588b48066df20b459d2d652f12eae569aa26b7562558d5f79b2eef4aa4")
         );
     }
 
@@ -230,7 +232,50 @@ mod tests {
         };
         assert_eq!(
             digest,
-            hex_literal::hex!("4f8dc3cd6a21308780ae7a6a3916ff1088b9370c9f4ca397694e451a8577bfaa")
+            hex_literal::hex!("4c113375085ed2fe93883a4d4fb753aeb2fe16f5d5985713fa5963bf8f1348b4")
+        );
+    }
+
+    #[test]
+    fn h_l_uses_derive_key_mode() {
+        let payload = Bytes(b"derive-key-check");
+        let derived = h_l(ds::MSPHF_SRX_COMMIT, &payload).expect("h_l should succeed");
+
+        let mut plain = Hasher::new();
+        plain.update(CITY_G_PREFIX);
+        plain.update(ds::MSPHF_SRX_COMMIT.as_bytes());
+        plain.update(&[0u8]);
+        {
+            let mut writer = HasherWriter { hasher: &mut plain };
+            ciborium::ser::into_writer(&payload, &mut writer).expect("serialize payload");
+        }
+        let mut plain_out = [0u8; 32];
+        plain_out.copy_from_slice(plain.finalize().as_bytes());
+
+        assert_ne!(
+            derived, plain_out,
+            "h_l must use derive_key mode and not plain BLAKE3 mode"
+        );
+    }
+
+    #[test]
+    fn xof32_uses_derive_key_mode() {
+        let ctx = "derive-key-check";
+        let seed = [0xABu8; 32];
+        let derived = xof32(ctx, &seed);
+
+        let mut plain = Hasher::new();
+        plain.update(CITY_G_XOF_PREFIX);
+        plain.update(ctx.as_bytes());
+        plain.update(&[0u8]);
+        plain.update(&seed);
+        let mut reader = plain.finalize_xof();
+        let mut plain_out = [0u8; 32];
+        reader.fill(&mut plain_out);
+
+        assert_ne!(
+            derived, plain_out,
+            "xof32 must use derive_key mode and not plain BLAKE3 mode"
         );
     }
 }

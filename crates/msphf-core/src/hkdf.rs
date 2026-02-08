@@ -49,7 +49,7 @@ mod tests {
         let derived = hkdf_blake3(&salt, kem_ss.as_slice(), &info);
         assert_eq!(
             derived,
-            hex_literal::hex!("bb67b4e885abfcd171b1be95b27f0dc86f303c19317c171d59e6d8b8e2b86657")
+            hex_literal::hex!("8c4f058e9cd0981d5655d483cf5c52177f53a0c747684ec7665a729c238c07ba")
         );
         Ok(())
     }
@@ -73,13 +73,13 @@ mod tests {
         let tau = hkdf_blake3(&epoch_salt, &k_fs, b"city-g|fs/epoch/tau|v1");
         assert_eq!(
             tau,
-            hex_literal::hex!("9b1f09bf75f12c042f7b0b967824220b8f839000ee6dcac0e72e1221c15d048f")
+            hex_literal::hex!("d2e2abb161e81d485e31d3324f52e7c0424d9d496ea12dae37b704e8d5a964d5")
         );
 
         let epoch_sk = hkdf_blake3(&epoch_sk_salt, &k_fs, b"city-g|fs/epoch/sk|v1");
         assert_eq!(
             epoch_sk,
-            hex_literal::hex!("9dbeb1b2f8445d61e6f7f9186cd84008fa338a71d002ffbab44aabb4bcc26b9a")
+            hex_literal::hex!("ff0ee0e1cdd63286b7c097b39da32a1ea6e4e4bb620f72610f8a829c23fa6e26")
         );
         Ok(())
     }
@@ -105,7 +105,7 @@ mod tests {
         )?;
         assert_eq!(
             derived,
-            hex_literal::hex!("3e292f176a4d936907ff598f49e47ca41e385661975059c46b96d7b117409424")
+            hex_literal::hex!("20c5fa555f6061e42e00372f859e5ce4439652c5df706fd9d3ac6a9ba72b780a")
         );
         Ok(())
     }
@@ -131,7 +131,7 @@ mod tests {
         )?;
         assert_eq!(
             derived,
-            hex_literal::hex!("877c755076d1f436280ec251c3ad22c24284e82877a3aff3dd19532fd6cc5d0d")
+            hex_literal::hex!("08c1b76313335b0d125f15765d1712dbb8bc346befaa1e73a6aa5326ea2126cd")
         );
         Ok(())
     }
