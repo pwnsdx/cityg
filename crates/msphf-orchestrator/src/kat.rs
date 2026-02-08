@@ -1654,14 +1654,16 @@ mod tests {
         Ok(())
     }
 
-    fn scenario_fixture() -> Result<(
+    type ScenarioFixture = (
         OwnedAnchor,
         BTreeMap<u64, Value>,
         HeadSnapshot,
         [u8; 32],
         [u8; 32],
         Vec<u8>,
-    )> {
+    );
+
+    fn scenario_fixture() -> Result<ScenarioFixture> {
         let plan = basic_plan(None);
         let base = BaseContext::try_from_plan(&plan)?;
         let BaseContext {

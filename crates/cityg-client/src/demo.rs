@@ -296,18 +296,17 @@ fn load_or_generate_kbroad_keys() -> Result<(Vec<u8>, Vec<u8>), CityGError> {
     let pk_len = kyber_public_key_bytes();
     let sk_len = kyber_secret_key_bytes();
 
-    if let Some(path) = kbroad_key_path() {
-        if let Ok(bytes) = fs::read(&path)
-            && bytes.len() == pk_len + sk_len
-        {
-            let pk = bytes[..pk_len].to_vec();
-            let sk = bytes[pk_len..].to_vec();
-            <pqcrypto_kyber::kyber768::PublicKey as KemPublicKeyTrait>::from_bytes(pk.as_slice())
-                .map_err(|_| CityGError::InvalidInput("kbroad public malformed"))?;
-            <MlKemSecretKey as KemSecretKeyTrait>::from_bytes(sk.as_slice())
-                .map_err(|_| CityGError::InvalidInput("kbroad secret malformed"))?;
-            return Ok((pk, sk));
-        }
+    if let Some(path) = kbroad_key_path()
+        && let Ok(bytes) = fs::read(&path)
+        && bytes.len() == pk_len + sk_len
+    {
+        let pk = bytes[..pk_len].to_vec();
+        let sk = bytes[pk_len..].to_vec();
+        <pqcrypto_kyber::kyber768::PublicKey as KemPublicKeyTrait>::from_bytes(pk.as_slice())
+            .map_err(|_| CityGError::InvalidInput("kbroad public malformed"))?;
+        <MlKemSecretKey as KemSecretKeyTrait>::from_bytes(sk.as_slice())
+            .map_err(|_| CityGError::InvalidInput("kbroad secret malformed"))?;
+        return Ok((pk, sk));
     }
 
     let (pk, sk) = kyber_keypair();
@@ -331,9 +330,7 @@ fn load_or_generate_bootstrap_keys() -> Result<(Vec<u8>, Box<MlDsaSecretKey>), C
     let sk_len = pqcrypto_dilithium::dilithium5::secret_key_bytes();
 
     if let Some(path) = bootstrap_key_path() {
-        if let Ok(bytes) = fs::read(&path)
-            && bytes.len() == pk_len + sk_len
-        {
+        if let Ok(bytes) = fs::read(&path) && bytes.len() == pk_len + sk_len {
             let pk = bytes[..pk_len].to_vec();
             let sk_bytes = &bytes[pk_len..];
             let sk = MlDsaSecretKey::from_bytes(sk_bytes)

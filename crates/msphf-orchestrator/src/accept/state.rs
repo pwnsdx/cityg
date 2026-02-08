@@ -76,24 +76,30 @@ mod tests {
 
     #[test]
     fn synthesize_caps_rejects_zero_and_inverted_windows() {
-        let mut cfg = FsPolicyConfig::default();
-        cfg.h_seconds = 0;
+        let cfg = FsPolicyConfig {
+            h_seconds: 0,
+            ..FsPolicyConfig::default()
+        };
         assert_eq!(
             cfg.synthesize_caps().expect_err("h_seconds=0 must freeze"),
             FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE
         );
 
-        let mut cfg = FsPolicyConfig::default();
-        cfg.checkpoint_interval_seconds = 0;
+        let cfg = FsPolicyConfig {
+            checkpoint_interval_seconds: 0,
+            ..FsPolicyConfig::default()
+        };
         assert_eq!(
             cfg.synthesize_caps()
                 .expect_err("checkpoint_interval_seconds=0 must freeze"),
             FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE
         );
 
-        let mut cfg = FsPolicyConfig::default();
-        cfg.h_seconds = 600;
-        cfg.checkpoint_interval_seconds = 300;
+        let cfg = FsPolicyConfig {
+            h_seconds: 600,
+            checkpoint_interval_seconds: 300,
+            ..FsPolicyConfig::default()
+        };
         assert_eq!(
             cfg.synthesize_caps()
                 .expect_err("checkpoint interval below h must freeze"),

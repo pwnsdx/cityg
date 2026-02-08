@@ -2236,10 +2236,10 @@ impl AppModel {
                 }
 
                 self.session = Some(sync.session);
-                if let Some(session) = self.session.as_mut() {
-                    if let Err(err) = persist_session(session) {
-                        warn!("failed to persist session after epoch sync: {err:?}");
-                    }
+                if let Some(session) = self.session.as_mut()
+                    && let Err(err) = persist_session(session)
+                {
+                    warn!("failed to persist session after epoch sync: {err:?}");
                 }
 
                 self.info_message = Some("Adopted latest epoch head.".to_string());
@@ -7550,10 +7550,15 @@ thread_local! {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::useless_conversion
+)]
 mod tests {
     use super::*;
-    use cityg_api;
     use futures::SinkExt;
     use gpui::{Modifiers, TestAppContext};
     use msphf_rlwe::CapssBranchWitness;
