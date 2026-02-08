@@ -88,14 +88,14 @@ City‑G provides publisher‑blind E2EE for massive groups. In v0.1.0 (alpha), 
 
 ## 3) Threat Model *(informative)*
 
-Adversary controls networks/publishers; excluded devices may collude; devices may be compromised; adversary is PQ‑capable; **store‑now‑decrypt‑later** in scope; DoS/grinding in scope. Security goals: confidentiality of `hp`/`Y*`/`E_k`; **time‑blind FS**; set‑relation correctness; liveness; publisher‑blindness. Assumptions: **ML‑KEM‑768**, **ML‑DSA‑65**, **rpo‑256**, **BLAKE3/HKDF‑BLAKE3**, **chacha20‑poly1305**, **ZK‑VRF in QROM**, **Smallwood‑based FS proof in ROM**, and **SRX/Smallwood‑v1 in ROM** (Smallwood‑ARK straightline‑extractable in the Random‑Oracle Model). 
+Adversary controls networks/publishers; excluded devices may collude; devices may be compromised; adversary is PQ‑capable; **store‑now‑decrypt‑later** in scope; DoS/grinding in scope. Security goals: confidentiality of `hp`/`Y*`/`E_k`; **time‑blind FS**; set‑relation correctness; liveness; publisher‑blindness. Assumptions: **ML‑KEM‑768**, **ML‑DSA‑65**, **rpo‑256**, **BLAKE3/HKDF‑BLAKE3**, **chacha20‑poly1305**, **ZK‑VRF in QROM**, **Smallwood‑based FS proof in ROM**, and **SRX/Smallwood‑v1 in ROM** (Smallwood‑ARK straightline‑extractable in the Random‑Oracle Model). The acceptance server is assumed **keyless for KBROAD** (no `kbroad_sk`, recovered `K_HP`, or `hp_k_bytes` provisioning); if this assumption is violated, publisher‑blindness is out of scope.
 
 ---
 
 ## 4) Public Instance & NP Language *(normative)*
 
 The public language is `MEM ⊕ NONMEM`. FS parameters (`H`, `T_base`) are public and appear in `X_k`.
-`xk_hash := H_L("msphf/xk",[CBOR_det(X_k)])`.
+`xk_hash := H_L("msphf/xk", X_k)` where `X_k` is canonically encoded CBOR.
 
 ---
 
@@ -109,11 +109,21 @@ Witnesses are canonical; depth ≤ 64; **CanonicalInterval** with anchored adj
 
 * All digests: 32 B.
 * Domain‑sep hash: `H_L(label,args[]) := BLAKE3("city-g|" || ASCII(label) || 0x00 || CBOR_det(args[])) → 32 B`.
-* KDFs: HKDF‑BLAKE3.
+* KDFs: HKDF‑BLAKE3 (defined below).
 * Set‑hash: `rpo‑256/v1`.
 * AEAD: `chacha20‑poly1305`.
 * FS labels include: `"fs/epoch/salt"`, `"fs/epoch/sk_salt"`, `"fs/kfs/salt"`, `"fs/epoch/commit"`, `"fs/timegrid/base"`, `"fs/dev/chain"`.
 * WID label: `"mhw/window"`.
+
+**HKDF‑BLAKE3 definition (normative).**
+
+```text
+Extract: PRK := BLAKE3_keyed(salt_32, IKM)
+Expand : OKM_i := BLAKE3_keyed(PRK, info || counter_i), counter_i in {0x01,0x02,...}
+```
+
+For this profile, all specified invocations use `L=32` and therefore a single block (`i=1`).
+`salt_32` is a 32‑byte value (typically from `H_L(...)`); `info` is byte-string domain separated and profile scoped.
 
 ---
 
@@ -148,10 +158,16 @@ fs_epoch_commit := H_L("fs/epoch/commit",[epoch_sk])
 K_fs^(t+1) := HKDF‑BLAKE3(
   ikm  = K_fs^t,
   salt = H_L("fs/kfs/salt",[weid]),
-  info = "city-g|fs/kfs/v1" || to_le_bytes(t+1), L=32)
+  info = "city-g|fs/kfs/v1" || to_le_bytes_u64(t+1), L=32)
 fs_ec := t+1
 zeroize(K_fs^t)
 ```
+
+**Epoch lifecycle (normative).**
+
+* To construct an anchor carrying `141 = t`, the device MUST derive `epoch_sk(t)` and `τ_e(t)` from `K_fs^t`.
+* After constructing that anchor, the device MUST evolve to `K_fs^(t+1)` and zeroize `K_fs^t`.
+* `141` is an epoch index, not a total ordering key; cross-device anchors with equal `141` are unordered unless additional sequencing is applied.
 
 **Smallwood** (Annex L) binds `epoch_sk`/`fs_epoch_commit` to `99/xk_hash` in zero‑knowledge; verifier learns neither `hp` nor τₑ. *(Knowledge soundness in ROM.)* 
 
@@ -163,7 +179,7 @@ Default **RLWE‑HPS** suite **A1**; **σ‑Merkle** MAY be enabled via allow‑
 
 ```text
 [xk_hash,93,94,98,99,106,110,111,112,113,
- proof_mode, policy_version, meor_vrf_id,
+ proof_mode, fs_policy_version /*139*/, meor_vrf_id,
  fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit]
 ```
 
@@ -183,12 +199,14 @@ seed_DRBG := H_L("msphf/drbg",[seed_commit, ρ, xk_hash, 91])
 
 ## 11) ZK‑VRF (FS Bind Context) *(normative)*
 
-`bind_fs := CBOR_det([ xk_hash,93,94,98,99,106,110,111,112,113, proof_mode, policy_version, meor_vrf_id, fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit ])`.
+`bind_fs := CBOR_det([ xk_hash,93,94,98,99,106,110,111,112,113, proof_mode, fs_policy_version /*139*/, meor_vrf_id, fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit ])`.
 **When SRX applies**, include the SRX shadow root:
 
 ```text
 bind_fs := CBOR_det([...above..., srx_root_sw /*160*/])
 ```
+
+Legacy key `140 policy_version` MUST NOT be used for bind tuples in this profile.
 
 The VRF is **output‑hiding**; the server learns no message secrets.
 
@@ -206,7 +224,7 @@ The VRF is **output‑hiding**; the server learns no message secrets.
 
 **FS fields (join; **REQUIRED**):**
 `139 fs_policy_version:uint`, `141 fs_ec:uint`, `142 fs_epoch_commit:bstr32`, `143 fs_epoch_base_ts:uint64`, `146 smallwood:bstr`.
-Key `140` remains the legacy `policy_version` (non‑FS profiles) and MUST NOT collide with the FS namespace.
+Key `140` remains legacy `policy_version` (non‑FS profiles). Under this profile, `140` is OPTIONAL only for migration and, if present, MUST equal `139` (string/int canonical equivalence); mismatch → `944.6`.
 
 **Device‑chain fields (join; **REQUIRED**):**
 `152 fs_dev_prev_commit:bstr32`, `153 fs_dev_commit:bstr32`, with
@@ -218,6 +236,8 @@ Key `140` remains the legacy `policy_version` (non‑FS profiles) and MUST NOT c
 **Proof material & commits:**
 `95 vrf_proof:bstr`, `146 smallwood:bstr`,
 `125 proofs_commit:bstr32 := H_L("msphf/proofs",[95,146,(160,161 if present)])`.
+
+**Closed-world key policy (REQUIRED):** headers using keys outside this profile registry (plus merge-only keys in §21 when in merge mode) MUST be rejected with `907.1`.
 
 **Maxima:** `|97|≤262144`, `|95|≤8192`, `|146|≤16384`, `|161|≤16384`, `|122|≤1048576`.
 *(CAPSS reports ~9–15.5 KB proofs at 128‑bit security for Anemoi‑family instances; a 16 KB cap provides headroom.)* 
@@ -246,7 +266,7 @@ D_device_max := W + S_device                   // REQUIRED
 
 Maintain `A := GroupState.last_accepted_ec` (monotone; init: `last_checkpoint_ec`).
 
-0. **Pre‑filters & maxima** — canonical CBOR, no duplicate keys, respect size limits.
+0. **Pre‑filters & maxima** — canonical CBOR, no duplicate keys, no unknown keys, respect size limits.
 1. **Structure/presence** — require FS (`139,141,142,143,146`) and device‑chain (`152–153`) fields; **if SRX applies**, require `160,161`.
 2. **Gates** — suite & `fs_policy_version` MUST be allow‑listed (Annex N).
 
@@ -261,6 +281,8 @@ Lookup `(stored_last_commit, stored_last_ec)` by device key `108`.
 * New device: `152 == ZERO`.
 * Known device: `152 == stored_last_commit` **and** `141 ≥ stored_last_ec`.
   Violation → **`947.0 fs_dev_chain_break`**.
+* For both cases: `153 == H_L("fs/dev/chain",[108,141,152])`.
+  Violation → **`947.2 fs_dev_chain_bind_mismatch`**.
 
 **(2c) Forward‑Leap Guards (REQUIRED; derived caps):**
 
@@ -270,8 +292,9 @@ Lookup `(stored_last_commit, stored_last_ec)` by device key `108`.
 
 > **Ordering.** Accepted `fs_ec = t+1` cannot precede `t`; within an epoch ciphertexts are unordered. Combine `fs_ec` with per‑device sequence if total order is required.
 
-3. **Proofs (REQUIRED; fail‑fast):** **Smallwood (FS)** → **ZK‑VRF** (bind_fs, include `160` if present) → **SRX/Smallwood‑v1** (Annex F, if SRX applies).
-   `125` **MUST** equal `H_L("msphf/proofs",[95,146,(160,161 if present)])`.
+3. **Proof commit & proofs (REQUIRED; fail‑fast):**
+   1. Verify `125 == H_L("msphf/proofs",[95,146,(160,161 if present)])` **before** expensive proof verification.
+   2. Verify proofs in order: **Smallwood (FS)** → **ZK‑VRF** (bind_fs, include `160` if present) → **SRX/Smallwood‑v1** (Annex F, if SRX applies).
 4. **Defense‑in‑depth** — cross‑field binds across `93/94/98/99/106/110–113/116/139/141/142/143/152/153/(160 if present)`.
 5. **Atomic commit (REQUIRED):**
 
@@ -291,13 +314,18 @@ Atomicity failure → no ack/visibility. Persist `last_checkpoint_ec`, `last_acc
 
 ```text
 KEM.Encap(kbroad_pub) → (ct_kem, ss)
+hp_commit := header[99]  // raw bstr32 bytes
 KEK := HKDF‑BLAKE3(ss,  salt=H_L("hp/kek/salt",[xk_hash]),
-                   info="city-g|hp/kek/v1"||99,  L=32)
+                   info="city-g|hp/kek/v1"||hp_commit,  L=32)
+K_HP := random(32)       // MUST be fresh per KBROAD envelope
 wrap := AEAD_chacha20poly1305(KEK, 
-         nonce=H_L("hp/kek/nonce",[xk_hash,99])[0..11], aad=99, pt=K_HP)
+         nonce=H_L("hp/kek/nonce",[xk_hash,hp_commit])[0..11], aad=hp_commit, pt=K_HP)
 C_hp := AEAD_chacha20poly1305(K_HP, 
-         nonce=H_L("hp/nonce",[xk_hash,99])[0..11], aad=99, pt=hp_k_bytes)
+         nonce=H_L("hp/nonce",[xk_hash,hp_commit])[0..11], aad=hp_commit, pt=hp_k_bytes)
 ```
+
+`aad` is the raw 32-byte `hp_commit` value (field `99`), not the integer key ID.
+Deterministic nonces are safe only under one-time key usage (`KEK` from fresh KEM encapsulation and fresh `K_HP` per envelope).
 
 **Publisher‑blindness guardrails:**
 * *(normative)* Servers MUST NOT be provisioned with any secret (e.g., `kbroad_sk`, recovered `K_HP`, or `hp_k_bytes`) that would allow recovery of `K_HP`/`hp`/`Y*`, and MUST NOT invoke KEM decapsulation on `ct_kem` or AEAD decryption on `wrap`/`C_hp`.
@@ -332,12 +360,21 @@ Pre‑boundary epochs decrypt **only** via cached τₑ (Annex J). Misses are 
 * Checkpoints are time‑blind; no backdating; `148 == max(fs_ec)` across absorbed heads.
 * WID partitions concurrency via public roots/seed context only—no `hp`/`Y*`/`E_k` leakage.
 * **SRX privacy by default:** SRX correctness is proven via **Smallwood ZK** (ROM) without revealing changed leaves on wire. 
+* **Liveness tradeoff (time‑blind FLG):** if no anchor is accepted for more than `D_anchor_max` epochs, honest devices may be blocked by group forward caps until recovery logic or operator action advances `A`. Deployments SHOULD keep at least one heartbeat publisher active per group.
 
 ---
 
 ## 16) Error Semantics & Codes *(normative)*
 
-**Freeze unless stated otherwise.**
+**Action model (normative).**
+
+* `REJECT(code)`: reject this input, do not mutate acceptance state, continue processing later inputs.
+* `DROP`: ignore without a structured code (rate-limit/anti-spam path).
+* `QUARANTINE(device_pk, code)`: optional operational policy; not required by this profile.
+* `FREEZE(group, code)`: reserved for authenticated, persistent state-corruption signals.
+
+All numeric codes listed below are `REJECT(code)` outcomes unless explicitly marked otherwise.
+Implementations MAY keep the historical term “freeze code” for the numeric code while preserving these per-message semantics.
 
 **FS‑specific / time‑blind:**
 
@@ -378,7 +415,7 @@ Pre‑boundary epochs decrypt **only** via cached τₑ (Annex J). Misses are 
 * **Atomicity (REQUIRED):** acceptance + state update commit atomically; else no ack/visibility.
 * **Crash recovery (REQUIRED):** rebuild `last_checkpoint_ec`, `last_accepted_ec (A)`, and `DeviceState` **before** admitting joins; freeze inputs while rehydrating.
 * **No server time:** FS decisions MUST NOT consult clocks.
-* **Proof order (REQUIRED):** **Smallwood (FS) → VRF → SRX/Smallwood‑v1** (fail fast; optimizes early rejection of invalid proofs since VRF verification is typically faster than SRX Smallwood).
+* **Proof path (REQUIRED):** verify `125` first, then **Smallwood (FS) → VRF → SRX/Smallwood‑v1**; keep SRX last so malformed traffic fails before the heaviest SRX checks.
 * **τₑ cache:** encrypt at rest; wipe on eviction; purge per Annex J.
 * **Policy changes:** recompute `W` & derived `D_*` immediately; adaptive checkpoint logic uses the **current** `W`.
 * **AEAD interop/side‑channels:** fix AEAD to `chacha20‑poly1305`; constant‑time ops; no secret‑dependent indexing.
@@ -528,7 +565,16 @@ Labels include `"msphf/xk"`, `"hp/kek/salt"`, `"hp/kek/nonce"`, `"hp/nonce"`, `"
 
 * Include `160/161` in `125 := H_L("msphf/proofs",[95,146,(160,161)])`.
 * Include `160` in the **VRF bind tuple** (see § 11) whenever SRX applies.
-* On‑wire roots `112/113` remain canonical and normative; the proof **binds** `160` to `112/113` via the transcript, avoiding arithmetization of rpo‑256 inside the proof.
+* On‑wire roots `112/113` remain canonical and normative.
+* `160` MUST be recomputed from canonical on-wire roots plus SRX payload material using:
+
+```text
+shadow_before := BLAKE3("city-g|srx/shadow/v1|" || 110 || 111 || 112 || 113 || ZERO32 || ZERO32)
+shadow_after  := BLAKE3("city-g|srx/shadow/v1|" || 110 || 111 || 112 || 113 || 121 || BLAKE3(122))
+require 160 == shadow_after
+```
+
+This explicit bridge avoids arithmetizing rpo‑256 while still constraining the proof to the canonical on-wire roots.
 
 **Statement (public inputs):**
 `(srx_root_sw_before, srx_root_sw_after, rpo256_root_before /*112*/, rpo256_root_after /*113*/, policy_flags, …)`.
@@ -540,7 +586,7 @@ Structured SRX delta (adds/removes; metadata needed for no‑dup and label‑cla
 
 1. Applying the delta transforms `srx_root_sw_before` → `srx_root_sw_after` under a Merkle scheme with **Jive** compression over an Anemoi‑family permutation. 
 2. **No duplicates**; **allowed label classes only**; other SRX invariants as specified by policy.
-3. Transcript binds the shadow roots to the on‑wire rpo‑256 roots `112/113` included in the public inputs and in the VRF tuple (no need to arithmetize rpo‑256).
+3. Verifier recomputes `shadow_before/shadow_after` from `110–113`, `121`, and `122` as defined above; proof verification MUST fail if any bridged value mismatches.
 
 **Security model.** Smallwood‑ARK provides **straightline‑extractable knowledge soundness in the ROM**; SRX ZK claims adopt this model. 
 
@@ -673,6 +719,18 @@ max_proof_bytes_for_161: 16384
 ```
 
 *(These knobs track CAPSS for ~9–15.5 KB proofs at 128‑bit security and reduced verifier work.)* 
+
+**Merkle-arity interpretation (normative).**
+
+Given `N` and `merkle_arity = [a0,a1,...,ak]` (`k>=0`), the effective schedule is:
+`a_eff(i) := a[min(i,k)]` for level `i` from root to leaves.
+Depth `d` is the smallest integer such that `Π_{i=0}^{d-1} a_eff(i) >= N`.
+Leaves are filled left-to-right; any missing right siblings at the last populated layer use deterministic padding as defined by the proof system.
+
+`gamma_mt` defines how many top authentication levels MAY be trimmed by the profile; verifier reconstruction MUST use the same `a_eff` schedule.
+
+**Operational liveness note (REQUIRED to document in deployment policy).**
+For time-blind FLG, deployments MUST specify how `A` is advanced after long idle periods (for example, heartbeat publishers or an explicit recovery procedure) so groups do not stall when `ec_local - A > D_anchor_max`.
 
 **Invariant check (REQUIRED):** compute `W`; verify `H>0`, `checkpoint_interval ≥ H`, `D_anchor_max ≥ W`, `D_first_device ≥ W`; else **`948.0`** and do not admit joins. Policy changes take effect immediately in acceptance and adaptive checkpoint logic.
 
