@@ -19,7 +19,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::ws::{Message as WsMessage, WebSocket},
-    extract::{State, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, State, WebSocketUpgrade},
     http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
     middleware as axum_middleware,
     response::{IntoResponse, Response},
@@ -146,6 +146,7 @@ impl AliasRateLimiter {
 const ALIAS_RATE_LIMIT_BURST: u32 = 10;
 const ALIAS_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const ALIAS_RATE_LIMIT_MAX_BUCKETS: usize = 100_000;
+const API_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone)]
 struct ApiState {
@@ -1769,6 +1770,7 @@ pub async fn run_with_config(
 
     let mut app: Router = router_with_state
         .with_state(state)
+        .layer(DefaultBodyLimit::max(API_MAX_BODY_BYTES))
         .layer(axum_middleware::from_fn(
             middleware::request_tracing_middleware,
         ));

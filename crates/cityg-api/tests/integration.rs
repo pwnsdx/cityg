@@ -55,6 +55,25 @@ fn encode_field1_bytes(payload: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 #[allow(clippy::expect_used)]
+async fn accept_epoch_rejects_oversized_body() {
+    let port = 8122;
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(200)).await;
+
+    let body = vec![0u8; (2 * 1024 * 1024) + 1];
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/accept_epoch"))
+        .body(body)
+        .send()
+        .await
+        .expect("send oversized body");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    handle.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
 async fn end_to_end_demo_flow() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new("error"))
