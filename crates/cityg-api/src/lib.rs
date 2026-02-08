@@ -150,6 +150,8 @@ const ALIAS_RATE_LIMIT_MAX_BUCKETS: usize = 100_000;
 const API_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const WINDOW_CONFIG_ADMIN_HEADER: &str = "x-cityg-admin-token";
 const WINDOW_CONFIG_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_WINDOW_ADMIN_TOKEN";
+const WS_MAX_LAG_ENV: &str = "CITYG_SERVER_WS_MAX_LAG";
+const WS_MAX_LAG_DEFAULT: u64 = 256;
 
 #[derive(Clone)]
 struct ApiState {
@@ -566,6 +568,21 @@ fn enforce_window_config_auth(
     } else {
         Err(ApiError::Unauthorized("missing or invalid admin token"))
     }
+}
+
+fn parse_ws_max_lag(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(WS_MAX_LAG_DEFAULT)
+}
+
+fn configured_ws_max_lag() -> u64 {
+    let raw = std::env::var(WS_MAX_LAG_ENV).ok();
+    parse_ws_max_lag(raw.as_deref())
+}
+
+fn should_disconnect_for_lag(lagged_messages: u64, max_lag: u64) -> bool {
+    lagged_messages > max_lag
 }
 
 /// Verifies an identity binding signature.
@@ -1208,6 +1225,7 @@ async fn handle_websocket(socket: WebSocket, state: ApiState) {
 
     // Subscribe to server notifications
     let mut rx = state.notification_tx.subscribe();
+    let max_lag = configured_ws_max_lag();
 
     debug!("WebSocket client connected");
 
@@ -1308,7 +1326,26 @@ async fn handle_websocket(socket: WebSocket, state: ApiState) {
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!("WebSocket client lagged by {} messages", n);
+                            warn!(
+                                "WebSocket client lagged by {} messages (max allowed: {})",
+                                n, max_lag
+                            );
+                            if should_disconnect_for_lag(n, max_lag) {
+                                let disconnect_notification = serde_json::json!({
+                                    "type": "lag_disconnect",
+                                    "lagged_messages": n,
+                                    "max_lag": max_lag,
+                                });
+                                if let Ok(text) = serde_json::to_string(&disconnect_notification) {
+                                    let _ = sender.send(WsMessage::Text(text)).await;
+                                }
+                                warn!(
+                                    "WebSocket client exceeded lag threshold; disconnecting"
+                                );
+                                connection_healthy
+                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                                break;
+                            }
                             // Send lag notification to client
                             let lag_notification = serde_json::json!({
                                 "type": "lag",
@@ -2046,6 +2083,21 @@ mod tests {
             enforce_window_config_auth(&empty_headers, None).is_ok(),
             "auth should be bypassed when no admin token is configured"
         );
+    }
+
+    #[test]
+    fn parse_ws_max_lag_uses_default_on_invalid_input() {
+        assert_eq!(parse_ws_max_lag(None), WS_MAX_LAG_DEFAULT);
+        assert_eq!(parse_ws_max_lag(Some("0")), WS_MAX_LAG_DEFAULT);
+        assert_eq!(parse_ws_max_lag(Some("not-a-number")), WS_MAX_LAG_DEFAULT);
+        assert_eq!(parse_ws_max_lag(Some("512")), 512);
+    }
+
+    #[test]
+    fn should_disconnect_for_lag_respects_threshold() {
+        assert!(!should_disconnect_for_lag(10, 10));
+        assert!(!should_disconnect_for_lag(9, 10));
+        assert!(should_disconnect_for_lag(11, 10));
     }
 
     #[test]
