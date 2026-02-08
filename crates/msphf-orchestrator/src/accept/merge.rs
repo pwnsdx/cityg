@@ -324,6 +324,7 @@ impl AcceptanceContext {
             max_fs_ec = Some(max_fs_ec.map_or(fs_ec, |current| current.max(fs_ec)));
         }
         let max_fs_ec_value = max_fs_ec.ok_or(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID))?;
+        debug_assert!(self.last_checkpoint_ec() <= self.last_accepted_ec());
         if fs_checkpoint_ec != max_fs_ec_value {
             return Err(AcceptanceError::Freeze(FREEZE_FS_CHECKPOINT_BACKDATE));
         }
