@@ -273,22 +273,18 @@ impl ApiState {
         we_epoch_id: [u8; 32],
         timestamp_ms: u64,
     ) {
-        {
-            let mut metadata = self.member_metadata.write().await;
-            metadata.insert(
-                leaf_id,
-                MemberMetadata {
-                    join_timestamp_ms: timestamp_ms,
-                    last_seen_timestamp_ms: timestamp_ms,
-                },
-            );
-        }
-
-        {
-            let mut map = self.weid_to_leaf.write().await;
-            map.retain(|_, existing| *existing != leaf_id);
-            map.insert(we_epoch_id, leaf_id);
-        }
+        // Keep metadata and reverse index updates in one critical section.
+        let mut metadata = self.member_metadata.write().await;
+        let mut map = self.weid_to_leaf.write().await;
+        metadata.insert(
+            leaf_id,
+            MemberMetadata {
+                join_timestamp_ms: timestamp_ms,
+                last_seen_timestamp_ms: timestamp_ms,
+            },
+        );
+        map.retain(|_, existing| *existing != leaf_id);
+        map.insert(we_epoch_id, leaf_id);
     }
 
     async fn record_member_revocations(&self, leaves: &[[u8; 32]]) {
@@ -296,16 +292,12 @@ impl ApiState {
             return;
         }
         let revoked: HashSet<[u8; 32]> = leaves.iter().copied().collect();
-        {
-            let mut metadata = self.member_metadata.write().await;
-            for leaf in &revoked {
-                metadata.remove(leaf);
-            }
+        let mut metadata = self.member_metadata.write().await;
+        let mut map = self.weid_to_leaf.write().await;
+        for leaf in &revoked {
+            metadata.remove(leaf);
         }
-        {
-            let mut map = self.weid_to_leaf.write().await;
-            map.retain(|_, existing| !revoked.contains(existing));
-        }
+        map.retain(|_, existing| !revoked.contains(existing));
     }
 
     async fn touch_member_for_weid(&self, we_epoch_id: &[u8; 32], timestamp_ms: u64) {
