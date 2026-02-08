@@ -24,11 +24,32 @@ impl Write for HasherWriter<'_> {
     }
 }
 
+/// Validate that a label does not collide with a sibling namespace.
+///
+/// Rejected labels:
+/// - Labels starting with `"xof|"` (would alias the `city-g|xof|` prefix)
+/// - Labels containing embedded NUL bytes (would truncate the label at the
+///   separator)
+fn validate_label(label: &str) -> Result<(), MsphfError> {
+    if label.starts_with("xof|") {
+        return Err(MsphfError::invalid_input(
+            "label must not start with 'xof|' (reserved for XOF namespace)",
+        ));
+    }
+    if label.as_bytes().contains(&0u8) {
+        return Err(MsphfError::invalid_input(
+            "label must not contain embedded NUL bytes",
+        ));
+    }
+    Ok(())
+}
+
 fn hash_serialized<T: Serialize>(
     prefix: &[u8],
     label: &str,
     value: &T,
 ) -> Result<[u8; 32], MsphfError> {
+    validate_label(label)?;
     let mut hasher = Hasher::new();
     hasher.update(prefix);
     hasher.update(label.as_bytes());
@@ -82,7 +103,16 @@ pub fn h_branch_bytes(
 }
 
 /// Compute the normative `XOF(seed, ctx)` function (32-byte output).
+///
+/// # Panics
+///
+/// Panics if `ctx` contains embedded NUL bytes, which would corrupt the
+/// label separator.
 pub fn xof32(ctx: &str, seed: &[u8]) -> [u8; 32] {
+    assert!(
+        !ctx.as_bytes().contains(&0u8),
+        "xof32 ctx must not contain embedded NUL bytes"
+    );
     let mut hasher = Hasher::new();
     hasher.update(CITY_G_XOF_PREFIX);
     hasher.update(ctx.as_bytes());
@@ -142,6 +172,45 @@ mod tests {
         assert_eq!(
             digest,
             hex_literal::hex!("cd11aac41451ec73113b9a813fbb43d6edfa0e6603092d7c34c2b64ac561b44e")
+        );
+    }
+
+    #[test]
+    fn h_l_rejects_xof_prefix_label() {
+        let result = h_l("xof|sneaky", &42u64);
+        assert!(
+            result.is_err(),
+            "labels starting with 'xof|' must be rejected"
+        );
+    }
+
+    #[test]
+    fn h_l_rejects_embedded_nul() {
+        let result = h_l("label\0extra", &42u64);
+        assert!(
+            result.is_err(),
+            "labels with embedded NUL must be rejected"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "NUL")]
+    fn xof32_rejects_nul_ctx() {
+        xof32("ctx\0bad", &[1, 2, 3]);
+    }
+
+    #[test]
+    fn h_l_and_xof32_produce_different_digests() {
+        // Even for the same label suffix and payload, the two functions
+        // must produce distinct outputs because they live in different
+        // prefix namespaces.
+        let label = "test-label";
+        let seed = &[0xAB; 32];
+        let h_l_digest = h_l(label, &Bytes(seed)).expect("h_l should succeed");
+        let xof_digest = xof32(label, seed);
+        assert_ne!(
+            h_l_digest, xof_digest,
+            "h_l and xof32 must be in separate domains"
         );
     }
 
