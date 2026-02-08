@@ -53,15 +53,19 @@ jobs:
           - name: cityg-server
             command: cargo test -p cityg-server
             needs_ripgrep: false
+            needs_native_linux_deps: false
           - name: cityg-api
             command: cargo test -p cityg-api
             needs_ripgrep: false
+            needs_native_linux_deps: false
           - name: cityg-gui-native
             command: cargo test -p cityg-gui --features native-app
             needs_ripgrep: false
+            needs_native_linux_deps: true
           - name: server-blindness
             command: ./scripts/verify_no_secrets.sh
             needs_ripgrep: true
+            needs_native_linux_deps: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -70,6 +74,15 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: ripgrep
+      - name: Install GUI native deps
+        if: matrix.needs_native_linux_deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev
       - name: Run ${{ matrix.name }}
         run: ${{ matrix.command }}
 
@@ -83,15 +96,27 @@ jobs:
           - name: cityg-api-release
             command: cargo build --release -p cityg-api
             setup_rust: true
+            needs_native_linux_deps: false
           - name: cityg-gui-release
             command: cargo build --release -p cityg-gui --features native-app
             setup_rust: true
+            needs_native_linux_deps: true
           - name: docker-image
             command: docker build -f Dockerfile -t cityg-api:ci .
             setup_rust: false
+            needs_native_linux_deps: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         if: matrix.setup_rust
+      - name: Install GUI native deps
+        if: matrix.needs_native_linux_deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev
       - name: Build ${{ matrix.name }}
         run: ${{ matrix.command }}

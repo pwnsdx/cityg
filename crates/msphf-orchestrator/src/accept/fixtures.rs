@@ -215,10 +215,7 @@ pub(crate) fn sample_header() -> BTreeMap<u64, Value> {
     map.insert(HDR_KBROAD_ALG, Value::Text(KBROAD_ML_KEM_ALG.to_string()));
     let (pk, _) = crate::kbroad_test_keys();
     map.insert(HDR_KBROAD_PUB, Value::Bytes(pk.to_vec()));
-    map.insert(
-        HDR_FS_POLICY_VERSION,
-        Value::Integer(Integer::from(7u64)),
-    );
+    map.insert(HDR_FS_POLICY_VERSION, Value::Integer(Integer::from(7u64)));
     map
 }
 

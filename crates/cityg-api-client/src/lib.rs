@@ -134,11 +134,12 @@ use pb::{
     ConfigureWindowRequest, ConfigureWindowResponse, FetchMessagesRequest, FetchMessagesResponse,
     GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetTelemetryResponse,
     GetWindowRequest, GetWindowResponse, JoinTicketRequest, JoinTicketResponse, MembersRequest,
-    MembersResponse, MergeTicketRequest, MergeTicketResponse, SearchMembersRequest,
-    SearchMembersResponse, SendMessageRequest, SendMessageResponse,
+    MembersResponse, MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest,
+    RefreshPivotResponse, SearchMembersRequest, SearchMembersResponse, SendMessageRequest,
+    SendMessageResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
-use pb::{RefreshPivotRequest, RefreshPivotResponse, SeedHeadRequest, SeedHeadResponse};
+use pb::{SeedHeadRequest, SeedHeadResponse};
 use prost::Message;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;

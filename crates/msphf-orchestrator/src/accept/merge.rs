@@ -29,8 +29,9 @@ impl AcceptanceContext {
         }
 
         let fs_policy_version = match header_map.get(&HDR_FS_POLICY_VERSION) {
-            Some(Value::Integer(int)) => u64::try_from(*int)
-                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING))?,
+            Some(Value::Integer(int)) => {
+                u64::try_from(*int).map_err(|_| AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING))?
+            }
             Some(_) => return Err(AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING)),
             None => return Err(AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING)),
         };

@@ -2,11 +2,12 @@ FROM rust:1.91-bookworm AS builder
 
 WORKDIR /app
 
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY crates ./crates
 COPY config ./config
 
-RUN cargo build --release -p cityg-api
+RUN cargo generate-lockfile \
+    && cargo build --release -p cityg-api
 
 FROM debian:bookworm-slim AS runtime
 
