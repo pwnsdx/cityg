@@ -89,14 +89,21 @@ struct AliasRateLimiter {
     burst: u32,
     /// Sliding window duration.
     window: Duration,
+    /// Maximum number of alias buckets to retain at once.
+    max_aliases: usize,
 }
 
 impl AliasRateLimiter {
     fn new(burst: u32, window: Duration) -> Self {
+        Self::with_max_aliases(burst, window, ALIAS_RATE_LIMIT_MAX_BUCKETS)
+    }
+
+    fn with_max_aliases(burst: u32, window: Duration, max_aliases: usize) -> Self {
         Self {
             attempts: Arc::new(RwLock::new(AHashMap::new())),
             burst,
             window,
+            max_aliases: max_aliases.max(1),
         }
     }
 
@@ -113,6 +120,19 @@ impl AliasRateLimiter {
             !entries.is_empty()
         });
 
+        if !guard.contains_key(alias) && guard.len() >= self.max_aliases {
+            let evict_key = guard
+                .iter()
+                .filter_map(|(candidate, entries)| {
+                    entries.last().copied().map(|ts| (candidate.clone(), ts))
+                })
+                .min_by_key(|(_, ts)| *ts)
+                .map(|(candidate, _)| candidate);
+            if let Some(evict_key) = evict_key {
+                guard.remove(&evict_key);
+            }
+        }
+
         let entries = guard.entry(alias.to_string()).or_default();
         if entries.len() >= self.burst as usize {
             return false;
@@ -125,6 +145,7 @@ impl AliasRateLimiter {
 /// Default alias TOFU rate limit: 10 attempts per alias per 60 seconds.
 const ALIAS_RATE_LIMIT_BURST: u32 = 10;
 const ALIAS_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+const ALIAS_RATE_LIMIT_MAX_BUCKETS: usize = 100_000;
 
 #[derive(Clone)]
 struct ApiState {
@@ -3084,5 +3105,24 @@ mod tests {
             guard.contains_key("new-alias"),
             "active alias bucket should remain"
         );
+    }
+
+    #[tokio::test]
+    async fn alias_rate_limiter_caps_bucket_count_with_eviction() {
+        let limiter = AliasRateLimiter::with_max_aliases(10, Duration::from_secs(60), 2);
+        assert!(limiter.check_and_record("alias-a").await);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert!(limiter.check_and_record("alias-b").await);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert!(limiter.check_and_record("alias-c").await);
+
+        let guard = limiter.attempts.read().await;
+        assert_eq!(guard.len(), 2, "bucket map must remain capped");
+        assert!(
+            !guard.contains_key("alias-a"),
+            "oldest bucket should be evicted once cap is reached"
+        );
+        assert!(guard.contains_key("alias-b"));
+        assert!(guard.contains_key("alias-c"));
     }
 }
