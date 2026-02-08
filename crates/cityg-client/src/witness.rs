@@ -12,6 +12,8 @@ use std::borrow::Cow;
 
 use ahash::AHashMap;
 
+const MAX_WITNESS_CBOR_BYTES: usize = 8 * 1024 * 1024;
+
 type NonMemResult =
     Result<(RawNonMembershipWitness, Option<[u8; 32]>, Option<[u8; 32]>), CityGError>;
 
@@ -47,6 +49,9 @@ pub fn witness_to_cbor(witness: &CanonicalWitness) -> Result<Vec<u8>, CityGError
 
 /// Convenience helper to deserialize a canonical witness from CBOR.
 pub fn witness_from_cbor(bytes: &[u8]) -> Result<CanonicalWitness, CityGError> {
+    if bytes.len() > MAX_WITNESS_CBOR_BYTES {
+        return Err(CityGError::InvalidInput("witness payload too large"));
+    }
     ciborium::de::from_reader(bytes)
         .map_err(|_| CityGError::InvalidInput("unable to parse witness"))
 }
@@ -629,6 +634,16 @@ mod tests {
     use super::*;
     use msphf_core::witness::{RawMembershipWitness, RawNonMembershipWitness};
     use std::borrow::Cow;
+
+    #[test]
+    fn witness_from_cbor_rejects_oversized_payload() {
+        let oversized = vec![0u8; MAX_WITNESS_CBOR_BYTES + 1];
+        let err = witness_from_cbor(&oversized).expect_err("oversized witness must fail");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("witness payload too large")
+        ));
+    }
 
     #[test]
     fn srx_inputs_owned_roundtrip_preserves_frontiers() {
