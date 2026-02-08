@@ -651,7 +651,7 @@ impl CityGServer {
         let pivot_weid =
             header_bytes32(&bundle.header_map, hdr::HDR_ROLLUP_PIVOT_WEID, "pivot_weid")?;
         let parent_root = bundle.anchor.parent_root;
-        let mut pivot = self
+        let pivot = self
             .ctx
             .pivot_parities_for(bundle.gid(), &parent_root)
             .into_iter()
@@ -688,6 +688,21 @@ impl CityGServer {
             srx_root.as_ref().map(|arr| arr.as_slice()),
             srx_smallwood.as_deref(),
         )?;
+        if policy_version != pivot.policy_version
+            || proof_mode != pivot.proof_mode
+            || vrf_id != pivot.vrf_id
+            || vrf_proof != pivot.vrf_proof
+            || vrf_public != pivot.vrf_public
+            || mask_a != pivot.mask_a
+            || mask_b != pivot.mask_b
+            || fs_capss != pivot.fs_capss
+            || srx_commit != pivot.srx_commit
+            || proofs_commit != pivot.proofs_commit
+        {
+            return Err(CityGError::InvalidInput(
+                "refresh payload diverges from stored parity",
+            ));
+        }
 
         let wid = self
             .ctx
@@ -714,16 +729,6 @@ impl CityGServer {
             old_record.accept_time(),
         );
 
-        pivot.policy_version = policy_version;
-        pivot.proof_mode = proof_mode;
-        pivot.vrf_id = vrf_id;
-        pivot.vrf_proof = vrf_proof;
-        pivot.vrf_public = vrf_public;
-        pivot.mask_a = mask_a;
-        pivot.mask_b = mask_b;
-        pivot.fs_capss = fs_capss;
-        pivot.proofs_commit = proofs_commit;
-        pivot.srx_commit = srx_commit;
         let accept_time = old_record.accept_time();
         self.ctx
             .mh_window
@@ -865,7 +870,7 @@ mod tests {
     use ciborium::value::Value;
     use cityg_client::ClientEpochBundle;
     use msphf_core::hash::h_l;
-    use msphf_orchestrator::{AcceptanceOptions, BootstrapPolicy, mhw::HeadRecord};
+    use msphf_orchestrator::{AcceptanceOptions, BootstrapPolicy, hdr, mhw::HeadRecord};
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use serde::Serialize;
     use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Duration};
@@ -1186,7 +1191,18 @@ mod tests {
         let bundle = cityg_client::demo::demo_bundle("alice")?;
         server.accept_epoch(&bundle)?;
 
+        let pivot_weid = server
+            .context_mut()
+            .pivot_parities_for(bundle.gid(), &bundle.anchor.parent_root)
+            .into_iter()
+            .next()
+            .ok_or(CityGError::InvalidInput("pivot parity missing"))?
+            .we_epoch_id;
         let mut invalid = bundle.clone();
+        invalid.header_map.insert(
+            hdr::HDR_ROLLUP_PIVOT_WEID,
+            Value::Bytes(pivot_weid.to_vec()),
+        );
         invalid
             .header_map
             .remove(&msphf_orchestrator::hdr::HDR_ROLLUP_PIVOT_WEID);
@@ -1195,6 +1211,47 @@ mod tests {
             Ok(_) => unreachable!("missing pivot_weid header should fail"),
         };
         assert!(matches!(err, CityGError::InvalidInput("pivot_weid")));
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_pivot_rejects_mutated_proof_material() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let mut tampered = bundle.clone();
+        let pivot_weid = server
+            .context_mut()
+            .pivot_parities_for(bundle.gid(), &bundle.anchor.parent_root)
+            .into_iter()
+            .next()
+            .ok_or(CityGError::InvalidInput("pivot parity missing"))?
+            .we_epoch_id;
+        tampered.header_map.insert(
+            hdr::HDR_ROLLUP_PIVOT_WEID,
+            Value::Bytes(pivot_weid.to_vec()),
+        );
+        let proof_field = tampered
+            .header_map
+            .get_mut(&hdr::HDR_VRF_PROOF)
+            .ok_or(CityGError::InvalidInput("vrf proof missing from bundle"))?;
+        if let Value::Bytes(bytes) = proof_field {
+            if let Some(first) = bytes.first_mut() {
+                *first ^= 0x01;
+            }
+        } else {
+            return Err(CityGError::InvalidInput("vrf proof has invalid type"));
+        }
+
+        let err = match server.refresh_pivot(&tampered) {
+            Err(e) => e,
+            Ok(_) => unreachable!("tampered refresh bundle must fail"),
+        };
+        match err {
+            CityGError::InvalidInput("refresh payload diverges from stored parity") => {}
+            other => panic!("unexpected refresh error: {other:?}"),
+        }
         Ok(())
     }
 
