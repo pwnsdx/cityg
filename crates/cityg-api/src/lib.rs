@@ -44,6 +44,7 @@ use thiserror::Error;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use unicode_normalization::UnicodeNormalization;
 
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_server::{CityGServer, MergeTicketBundle, ServerConfig, ServerOutcome};
@@ -212,32 +213,41 @@ impl ApiState {
         leaf_id: [u8; 32],
         pop_public_key: Vec<u8>,
     ) -> Result<bool, ApiError> {
-        if !self.alias_rate_limiter.check_and_record(alias).await {
-            warn!(alias = alias, "alias registration rate-limited");
+        let normalized_alias: String = alias.nfc().collect();
+
+        if !self
+            .alias_rate_limiter
+            .check_and_record(normalized_alias.as_str())
+            .await
+        {
+            warn!(alias = normalized_alias, "alias registration rate-limited");
             return Err(ApiError::RateLimited);
         }
 
         let mut guard = self.alias_registry.write().await;
 
-        if let Some(existing) = guard.get_mut(alias) {
+        if let Some(existing) = guard.get_mut(normalized_alias.as_str()) {
             // TOFU: First binding wins
             if existing.pop_public_key == pop_public_key {
                 if existing.leaf_id != leaf_id {
                     existing.leaf_id = leaf_id;
                     info!(
                         "Alias '{}' verified: updated leaf binding to {}",
-                        alias,
+                        normalized_alias,
                         hex::encode(leaf_id)
                     );
                 } else {
-                    info!("Alias '{}' verified: matches existing binding", alias);
+                    info!(
+                        "Alias '{}' verified: matches existing binding",
+                        normalized_alias
+                    );
                 }
                 return Ok(false);
             } else {
                 // Different device trying to use same alias - TOFU violation
                 error!(
                     "TOFU violation: Alias '{}' already bound to different public key",
-                    alias
+                    normalized_alias
                 );
                 return Err(ApiError::InvalidRequest(
                     "alias already bound to a different identity",
@@ -250,8 +260,8 @@ impl ApiState {
             leaf_id,
             pop_public_key: pop_public_key.clone(),
         };
-        guard.insert(alias.to_string(), binding);
-        info!("Alias '{}' registered with new binding", alias);
+        guard.insert(normalized_alias.clone(), binding);
+        info!("Alias '{}' registered with new binding", normalized_alias);
         Ok(true)
     }
 
@@ -2140,6 +2150,38 @@ mod tests {
             err,
             ApiError::InvalidRequest("alias already bound to a different identity")
         ));
+    }
+
+    #[tokio::test]
+    async fn register_alias_normalizes_unicode_to_nfc() {
+        let state = test_api_state();
+        let alias_nfc = "Café";
+        let alias_nfd = "Cafe\u{301}";
+        assert_ne!(alias_nfc, alias_nfd);
+
+        let leaf = [0x4A; 32];
+        let pop_key = vec![0x9C; 8];
+        assert!(
+            state
+                .register_alias(alias_nfd, leaf, pop_key.clone())
+                .await
+                .expect("first registration should succeed"),
+            "first registration should create a new binding"
+        );
+        assert!(
+            !state
+                .register_alias(alias_nfc, leaf, pop_key)
+                .await
+                .expect("normalized alias should match existing binding"),
+            "canonically equivalent alias should resolve to same binding"
+        );
+
+        let registry = state.alias_registry.read().await;
+        assert_eq!(registry.len(), 1, "equivalent aliases must coalesce");
+        assert!(
+            registry.contains_key(alias_nfc),
+            "stored alias should use NFC canonical form"
+        );
     }
 
     #[tokio::test]
