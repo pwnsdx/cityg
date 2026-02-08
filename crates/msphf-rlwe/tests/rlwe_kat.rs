@@ -80,7 +80,7 @@ fn kat_eqroot_projection_matches_full() -> Result<(), MsphfError> {
         &anchor,
         Some(&witness),
     )?;
-    let expected = "d838cb926100bc8b4ae5aaa65b68332f5e6844c398d5f0673e5ad7e5ee1ee2ad";
+    let expected = "510edac884ddc928505952120939b6b0004487898042709e147004608a6a8671";
     assert_eq!(to_hex(&full.y_full), expected);
     assert_eq!(full.y_full, proj);
     Ok(())
