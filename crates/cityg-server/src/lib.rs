@@ -352,10 +352,7 @@ impl CityGServer {
             parent_leaves.dedup();
 
             let leaf_id = if let Some(explicit_leaf_id) = leaf_id_override {
-                if parent_leaves
-                    .iter()
-                    .any(|member_leaf| *member_leaf == explicit_leaf_id)
-                {
+                if parent_leaves.contains(&explicit_leaf_id) {
                     return Err(CityGError::InvalidInput("leaf already present in roster"));
                 }
                 explicit_leaf_id
@@ -1544,11 +1541,36 @@ mod tests {
         parent_leaves: &[[u8; 32]],
         next_label: &mut u32,
     ) -> Result<(ClientEpochBundle, [u8; 32]), CityGError> {
-        let label = format!("chaos-member-{}", next_label);
-        *next_label = next_label.saturating_add(1);
-        let leaf = cityg_client::demo::demo_member_leaf(&label);
-        let bundle = cityg_client::demo::demo_bundle_with_parent_leaves(parent_leaves, leaf)?;
-        Ok((bundle, leaf))
+        let mut sorted = parent_leaves.to_vec();
+        sorted.sort();
+        sorted.dedup();
+
+        let pool = chaos_leaf_pool();
+        let mut index = *next_label as usize;
+        while index < pool.len() {
+            let leaf = pool[index];
+            index += 1;
+            if sorted.binary_search(&leaf).is_ok() {
+                continue;
+            }
+            *next_label = index as u32;
+            let bundle = cityg_client::demo::demo_bundle_with_parent_leaves(parent_leaves, leaf)?;
+            return Ok((bundle, leaf));
+        }
+
+        Err(CityGError::InvalidInput("chaos leaf pool exhausted"))
+    }
+
+    fn chaos_leaf_pool() -> &'static Vec<[u8; 32]> {
+        static POOL: std::sync::OnceLock<Vec<[u8; 32]>> = std::sync::OnceLock::new();
+        POOL.get_or_init(|| {
+            let mut leaves: Vec<[u8; 32]> = (0..4096)
+                .map(|idx| cityg_client::demo::demo_member_leaf(&format!("chaos-member-{idx}")))
+                .collect();
+            leaves.sort();
+            leaves.dedup();
+            leaves
+        })
     }
 
     fn assert_members_sync(primary: &CityGServer, reference: &CityGServer) {
