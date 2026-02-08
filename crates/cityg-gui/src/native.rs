@@ -6138,12 +6138,12 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         ticket.vrf_id
     };
     let policy_version = if ticket.policy_version.is_empty() {
-        "v0".to_string()
+        "0".to_string()
     } else {
         ticket.policy_version
     };
     let fs_policy_version = if ticket.fs_policy_version.is_empty() {
-        "fs-policy-v1".to_string()
+        "7".to_string()
     } else {
         ticket.fs_policy_version
     };
@@ -6977,8 +6977,8 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     if let Some(base_ts) = header_u64(&bundle.header_map, hdr::HDR_FS_EPOCH_BASE_TS) {
         session.fs_epoch_base_ts = base_ts;
     }
-    if let Some(policy) = header_text(&bundle.header_map, hdr::HDR_FS_POLICY_VERSION) {
-        session.fs_policy_version = policy.to_string();
+    if let Some(policy) = header_policy_version(&bundle.header_map, hdr::HDR_FS_POLICY_VERSION) {
+        session.fs_policy_version = policy;
     }
     session.policy_version = session.fs_policy_version.clone();
     if let Some(vrf_id) = header_text(&bundle.header_map, hdr::HDR_VRF_ID) {
@@ -7053,9 +7053,13 @@ fn hydrate_parities(
 }
 
 fn apply_pivot_alignment(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity) {
+    let fs_policy_version = pivot
+        .policy_version
+        .parse::<u64>()
+        .expect("pivot policy_version must be uint decimal");
     header
         .entry(hdr::HDR_FS_POLICY_VERSION)
-        .or_insert_with(|| Value::Text(pivot.policy_version.clone()));
+        .or_insert_with(|| Value::Integer(Integer::from(fs_policy_version)));
     header
         .entry(hdr::HDR_PROOF_MODE)
         .or_insert_with(|| Value::Text(pivot.proof_mode.clone()));
@@ -7181,11 +7185,19 @@ fn derive_fs_fingerprint_from_fields(
 }
 
 fn compute_fs_fingerprint_from_header(header: &BTreeMap<u64, Value>) -> Option<[u8; 32]> {
-    let policy = header_text(header, hdr::HDR_FS_POLICY_VERSION)?;
+    let policy = header_policy_version(header, hdr::HDR_FS_POLICY_VERSION)?;
     let fs_ec = header_u64(header, hdr::HDR_FS_EC)?;
     let fs_epoch_commit = header_bytes32(header, hdr::HDR_FS_EPOCH_COMMIT)?;
     let fs_epoch_base_ts = header_u64(header, hdr::HDR_FS_EPOCH_BASE_TS)?;
-    derive_fs_fingerprint_from_fields(policy, fs_ec, &fs_epoch_commit, fs_epoch_base_ts)
+    derive_fs_fingerprint_from_fields(policy.as_str(), fs_ec, &fs_epoch_commit, fs_epoch_base_ts)
+}
+
+fn header_policy_version(header: &BTreeMap<u64, Value>, key: u64) -> Option<String> {
+    match header.get(&key)? {
+        Value::Text(text) => Some(text.clone()),
+        Value::Integer(value) => u64::try_from(*value).ok().map(|v| v.to_string()),
+        _ => None,
+    }
 }
 
 fn header_text(header: &BTreeMap<u64, Value>, key: u64) -> Option<&str> {
@@ -7591,7 +7603,7 @@ mod tests {
             accept_seq: 1,
             crs_id: b"crs-v1".to_vec(),
             params_id: b"params-v1".to_vec(),
-            policy_version: "policy-v1".to_string(),
+            policy_version: "7".to_string(),
             proof_mode: "lin+zkvrf".to_string(),
             vrf_id: "lb-vrf".to_string(),
             vrf_proof: vec![0x11, 0x22],
@@ -7674,7 +7686,7 @@ mod tests {
             policy_version: "v1".to_string(),
             msphf_crs_id: "rlwe-merkle/v1".to_string(),
             msphf_params_id: "rlwe-params/mock".to_string(),
-            fs_policy_version: "fs-policy-v1".to_string(),
+            fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
             capss_witness: capss_witness_bytes,
@@ -9639,7 +9651,7 @@ mod tests {
         apply_pivot_alignment(&mut header, &pivot);
         assert_eq!(
             header.get(&hdr::HDR_FS_POLICY_VERSION),
-            Some(&Value::Text("policy-v1".to_string()))
+            Some(&Value::Integer(Integer::from(7u64)))
         );
         assert_eq!(
             header.get(&hdr::HDR_FS_EC),
@@ -9708,7 +9720,7 @@ mod tests {
         let mut header = BTreeMap::new();
         header.insert(
             hdr::HDR_FS_POLICY_VERSION,
-            Value::Text("fs-policy-v1".to_string()),
+            Value::Integer(Integer::from(7u64)),
         );
         header.insert(hdr::HDR_FS_EC, Value::Integer(Integer::from(21u64)));
         header.insert(
@@ -9720,15 +9732,10 @@ mod tests {
             Value::Integer(Integer::from(777u64)),
         );
 
-        let direct = derive_fs_fingerprint_from_fields("fs-policy-v1", 21, &fs_epoch_commit, 777);
+        let direct = derive_fs_fingerprint_from_fields("7", 21, &fs_epoch_commit, 777);
         let from_header = compute_fs_fingerprint_from_header(&header);
         assert_eq!(from_header, direct);
-
-        header.insert(
-            hdr::HDR_FS_POLICY_VERSION,
-            Value::Integer(Integer::from(1u64)),
-        );
-        assert!(compute_fs_fingerprint_from_header(&header).is_none());
+        assert!(compute_fs_fingerprint_from_header(&header).is_some());
     }
 
     #[test]
@@ -9789,7 +9796,7 @@ mod tests {
         let mut header = BTreeMap::new();
         header.insert(
             hdr::HDR_FS_POLICY_VERSION,
-            Value::Text("fs-policy-v1".to_string()),
+            Value::Integer(Integer::from(7u64)),
         );
         assert!(
             compute_fs_fingerprint_from_header(&header).is_none(),
@@ -10761,7 +10768,7 @@ mod tests {
             policy_version: "v1".to_string(),
             msphf_crs_id: "rlwe-merkle/v1".to_string(),
             msphf_params_id: "rlwe-params/mock".to_string(),
-            fs_policy_version: "fs-policy-v1".to_string(),
+            fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
             capss_witness: capss_witness_bytes.clone(),
@@ -12812,7 +12819,7 @@ mod tests {
             policy_version: "v1".to_string(),
             msphf_crs_id: "rlwe-merkle/v1".to_string(),
             msphf_params_id: "rlwe-params/mock".to_string(),
-            fs_policy_version: "fs-policy-v1".to_string(),
+            fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
             capss_witness: capss_witness_bytes,

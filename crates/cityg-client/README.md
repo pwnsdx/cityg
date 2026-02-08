@@ -42,7 +42,7 @@ let params = OrchestrationParams {
     srx_mode: SrxMode::Complete,
     proof_mode: "lin+zkvrf",
     vrf_id: "lb-vrf/v1",
-    fs_policy_version: "fs-demo",
+    fs_policy_version: "7",
     // ... other params
 };
 

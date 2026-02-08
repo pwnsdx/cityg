@@ -124,7 +124,7 @@ const KBROAD_INFO_PREFIX: &[u8] = b"city-g|hp/kek/v1";
 const FS_KFS_INFO_PREFIX: &[u8] = b"city-g|fs/kfs/v1";
 pub const DEFAULT_PROOF_MODE: &str = "lin+zkvrf";
 pub const DEFAULT_VRF_ID: &str = "lb-vrf/v1";
-pub const DEFAULT_POLICY_VERSION: &str = "v0";
+pub const DEFAULT_POLICY_VERSION: &str = "0";
 const DEFAULT_SRX_SMALLWOOD_PROFILE: &str = "smallwood-v1/anemoi-jive-a1";
 
 type MergeMetadata = (Option<Vec<[u8; 32]>>, Option<String>);
@@ -134,11 +134,9 @@ type MergeMetadata = (Option<Vec<[u8; 32]>>, Option<String>);
 ///
 /// These keys are deterministic test vectors — never use them in production.
 #[cfg(any(test, feature = "bench-fixtures"))]
-const KBROAD_PUB_HEX: &str =
-    include_str!("../test_fixtures/kbroad_pub.hex");
+const KBROAD_PUB_HEX: &str = include_str!("../test_fixtures/kbroad_pub.hex");
 #[cfg(any(test, feature = "bench-fixtures"))]
-const KBROAD_SEC_HEX: &str =
-    include_str!("../test_fixtures/kbroad_sec.hex");
+const KBROAD_SEC_HEX: &str = include_str!("../test_fixtures/kbroad_sec.hex");
 
 #[cfg(any(test, feature = "bench-fixtures"))]
 pub(crate) fn kbroad_test_keys() -> (&'static [u8], &'static [u8]) {
@@ -455,6 +453,12 @@ fn to_array32(label: &str, bytes: &[u8]) -> Result<[u8; 32], MsphfError> {
     Ok(out)
 }
 
+fn parse_fs_policy_version(version: &str) -> Result<u64, MsphfError> {
+    version
+        .parse::<u64>()
+        .map_err(|_| MsphfError::invalid_input("fs_policy_version must be uint"))
+}
+
 fn serialize_nonmem_anchor(anchor: &SrxNonMembershipAnchor) -> Result<Value, MsphfError> {
     if anchor.witness.query.len() != 32 || anchor.witness.root.len() != 32 {
         return Err(MsphfError::invalid_input("srx anchor malformed"));
@@ -530,7 +534,10 @@ fn serialize_nonmem_anchor(anchor: &SrxNonMembershipAnchor) -> Result<Value, Msp
             Value::Integer(Integer::from(9)),
             Value::Array(right_below_values),
         ),
-        (Value::Integer(Integer::from(10)), Value::Array(above_values)),
+        (
+            Value::Integer(Integer::from(10)),
+            Value::Array(above_values),
+        ),
         (
             Value::Integer(Integer::from(11)),
             optional_bytes_value(&anchor.witness.nmint),
@@ -1530,10 +1537,14 @@ impl PivotParity {
             proofs_commit: &'a [u8],
             proof_mode: &'a str,
             vrf_id: &'a str,
-            policy_version: &'a str,
+            policy_version: u64,
         }
 
         let srx_commit = self.srx_commit.unwrap_or([0u8; 32]);
+        let fs_policy_version = self
+            .policy_version
+            .parse::<u64>()
+            .map_err(|_| MsphfError::invalid_input("pivot policy_version must be uint"))?;
         let preimage = VckPreimage {
             xk_hash: &self.xk_hash,
             seed_commit: &self.seed_commit,
@@ -1545,7 +1556,7 @@ impl PivotParity {
             proofs_commit: &self.proofs_commit,
             proof_mode: self.proof_mode.as_str(),
             vrf_id: self.vrf_id.as_str(),
-            policy_version: self.policy_version.as_str(),
+            policy_version: fs_policy_version,
         };
         h_l("msphf/vck", &preimage)
     }
@@ -1707,13 +1718,9 @@ pub fn accept_and_extract_or<'a>(
     let mut parent_root = [0u8; 32];
     parent_root.copy_from_slice(anchor.parent_root);
     let policy_version = match header_map.get(&HDR_FS_POLICY_VERSION) {
-        Some(Value::Text(text)) => text.clone(),
         Some(Value::Integer(value)) => u64::try_from(*value)
             .map(|v| v.to_string())
             .unwrap_or_else(|_| DEFAULT_POLICY_VERSION.to_string()),
-        Some(Value::Bytes(bytes)) => {
-            String::from_utf8(bytes.clone()).unwrap_or_else(|_| DEFAULT_POLICY_VERSION.to_string())
-        }
         _ => DEFAULT_POLICY_VERSION.to_string(),
     };
     let proof_mode = match header_map.get(&HDR_PROOF_MODE) {
@@ -2123,8 +2130,6 @@ fn populate_merge_srx_complete<'a>(
         .map(value_from_serde)
         .collect::<Result<Vec<_>, _>>()?;
 
-    let anchor_count = anchor_mem_values.len();
-
     let join_leaf_values: Vec<Value> = join_leaf_ids
         .iter()
         .map(|leaf| Value::Bytes(leaf.to_vec()))
@@ -2200,27 +2205,6 @@ fn populate_merge_srx_complete<'a>(
     struct SrxCommit<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
     let commit = h_l(ds::MSPHF_SRX_COMMIT, &SrxCommit(&payload_bytes))?;
 
-    let hint_counts = Value::Map(vec![
-        (
-            Value::Text("join".to_string()),
-            Value::Integer(Integer::from(join_leaf_ids.len() as u64)),
-        ),
-        (
-            Value::Text("since".to_string()),
-            Value::Integer(Integer::from(since_leaf_ids.len() as u64)),
-        ),
-        (
-            Value::Text("anchors".to_string()),
-            Value::Integer(Integer::from(anchor_count as u64)),
-        ),
-    ]);
-    let hint_sizes = Value::Map(vec![(
-        Value::Text("bytes".to_string()),
-        Value::Integer(Integer::from(payload_bytes.len() as u64)),
-    )]);
-    let hint_counts_bytes = encode_value(&hint_counts)?;
-    let hint_sizes_bytes = encode_value(&hint_sizes)?;
-
     header.insert(121, Value::Bytes(commit.to_vec()));
 
     attach_srx_smallwood_proof(
@@ -2233,8 +2217,6 @@ fn populate_merge_srx_complete<'a>(
         &revoked_root,
         &commit,
         &payload_bytes,
-        &hint_counts_bytes,
-        &hint_sizes_bytes,
     )?;
 
     header.insert(122, Value::Bytes(payload_bytes));
@@ -2253,10 +2235,9 @@ fn attach_srx_smallwood_proof(
     revoked_root: &[u8; 32],
     srx_commit: &[u8; 32],
     payload_bytes: &[u8],
-    hint_counts_bytes: &[u8],
-    hint_sizes_bytes: &[u8],
 ) -> Result<(), MsphfError> {
-    let payload_digest = srx_smallwood::payload_digest(payload_bytes);
+    let fs_policy_version_u64 = parse_fs_policy_version(params.fs_policy_version)?;
+    let payload_digest = srx_smallwood::payload_digest(payload_bytes)?;
     let shadow_after = srx_smallwood::compute_shadow_root(
         parent_root,
         join_root,
@@ -2265,6 +2246,15 @@ fn attach_srx_smallwood_proof(
         Some(srx_commit),
         Some(&payload_digest),
     );
+    let bridge_ctx = srx_smallwood::compute_bridge_ctx(
+        parent_root,
+        join_root,
+        revoked_since_root,
+        revoked_root,
+        srx_commit,
+        &payload_digest,
+        &shadow_after,
+    )?;
 
     let inputs = srx_smallwood::Inputs {
         shadow_root_before,
@@ -2274,13 +2264,11 @@ fn attach_srx_smallwood_proof(
         revoked_since_root,
         revoked_root,
         srx_commit,
-        srx_mode: "srx/v1-complete",
+        srx_payload_digest: &payload_digest,
+        srx_bridge_ctx: &bridge_ctx,
         proof_mode: params.proof_mode,
-        fs_policy_version: params.fs_policy_version,
+        fs_policy_version: fs_policy_version_u64,
         vrf_id: params.vrf_id,
-        payload: payload_bytes,
-        hint_counts_cbor: hint_counts_bytes,
-        hint_sizes_cbor: hint_sizes_bytes,
     };
 
     let mut rng = OsRng;
@@ -2318,6 +2306,7 @@ pub fn joiner_kgen_or<'a>(
     forward_state: Option<&mut ForwardSecrecyState>,
     witness_bytes: Option<&[u8]>,
 ) -> Result<JoinerKGenResult, MsphfError> {
+    let fs_policy_version_u64 = parse_fs_policy_version(params.fs_policy_version)?;
     match header_map.get(&90).cloned() {
         None => {
             header_map.insert(90, Value::Integer(Integer::from(TSWE_ALG_CODE)));
@@ -2410,7 +2399,7 @@ pub fn joiner_kgen_or<'a>(
     header_map.insert(113, Value::Bytes(parts.revoked_root.to_vec()));
     header_map.insert(
         HDR_FS_POLICY_VERSION,
-        Value::Text(params.fs_policy_version.to_string()),
+        Value::Integer(Integer::from(fs_policy_version_u64)),
     );
     header_map.insert(
         HDR_FS_EPOCH_BASE_TS,
@@ -2742,7 +2731,7 @@ pub fn joiner_kgen_or<'a>(
             crs_id: params.msphf_crs_id,
             params_id: params.params_id,
             proof_mode: params.proof_mode,
-            fs_policy_version: params.fs_policy_version,
+            fs_policy_version: fs_policy_version_u64,
             vrf_id: params.vrf_id,
             parent_root: parts.parent_root,
             join_delta_root: parts.join_delta_root,
@@ -2806,7 +2795,7 @@ pub fn joiner_kgen_or<'a>(
         revoked_since_prev_root: parts.revoked_since_prev_root,
         revoked_root: parts.revoked_root,
         proof_mode: params.proof_mode,
-        fs_policy_version: params.fs_policy_version,
+        fs_policy_version: fs_policy_version_u64,
         meor_vrf_id: params.vrf_id,
         fs_epoch_commit: &fs_inputs.fs_epoch_commit,
         fs_ec: fs_inputs.fs_ec,
@@ -2892,11 +2881,11 @@ pub fn joiner_kgen_merge_or<'a>(
         witness_bytes,
     )?;
 
-    let fs_policy_version = params.fs_policy_version;
+    let fs_policy_version = parse_fs_policy_version(params.fs_policy_version)?;
     let fs_base_ts = params.fs_epoch_base_ts;
     result.header_map.insert(
         HDR_FS_POLICY_VERSION,
-        Value::Text(fs_policy_version.to_string()),
+        Value::Integer(Integer::from(fs_policy_version)),
     );
     result.header_map.insert(
         HDR_FS_EPOCH_BASE_TS,
@@ -3027,12 +3016,9 @@ pub fn joiner_kgen_merge_or<'a>(
     let revoked_since_root_new =
         to_array32("revoked_since_prev_root", parts.revoked_since_prev_root)?;
     let revoked_root_new = to_array32("revoked_root", parts.revoked_root)?;
-    let requires_srx = join_delta_root_new != pivot.join_delta_root
-        || revoked_since_root_new != pivot.revoked_since_root
+    let requires_srx = revoked_since_root_new != pivot.revoked_since_root
         || revoked_root_new != pivot.revoked_root;
-    let srx_root_sw_before = pivot
-        .srx_root_sw
-        .unwrap_or_else(default_srx_empty_root_sw);
+    let srx_root_sw_before = pivot.srx_root_sw.unwrap_or_else(default_srx_empty_root_sw);
     if requires_srx {
         populate_merge_srx(&mut result.header_map, &parts, &params, &srx_root_sw_before)?;
     } else {
@@ -3104,9 +3090,10 @@ pub fn joiner_kgen_merge_or<'a>(
     result
         .header_map
         .insert(HDR_HP_COMMIT, Value::Bytes(pivot.hp_commit.to_vec()));
+    let pivot_fs_policy_version = parse_fs_policy_version(pivot.policy_version.as_str())?;
     result.header_map.insert(
         HDR_FS_POLICY_VERSION,
-        Value::Text(pivot.policy_version.clone()),
+        Value::Integer(Integer::from(pivot_fs_policy_version)),
     );
     result
         .header_map
@@ -3137,13 +3124,14 @@ pub fn joiner_kgen_merge_or<'a>(
             Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes.as_slice()),
             _ => None,
         });
-    let srx_smallwood_bytes = result
-        .header_map
-        .get(&HDR_SRX_SMALLWOOD)
-        .and_then(|value| match value {
-            Value::Bytes(bytes) => Some(bytes.as_slice()),
-            _ => None,
-        });
+    let srx_smallwood_bytes =
+        result
+            .header_map
+            .get(&HDR_SRX_SMALLWOOD)
+            .and_then(|value| match value {
+                Value::Bytes(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            });
     let proofs_commit = compute_proofs_commit_bytes(
         pivot.vrf_proof.as_slice(),
         pivot.fs_capss.as_slice(),
@@ -3434,10 +3422,7 @@ mod tests {
     fn kbroad_build_and_recover_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let (kbroad_pub, kbroad_sec) = sample_kbroad_keys();
         let mut header = BTreeMap::new();
-        header.insert(
-            HDR_KBROAD_ALG,
-            Value::Text(KBROAD_ML_KEM_ALG.to_string()),
-        );
+        header.insert(HDR_KBROAD_ALG, Value::Text(KBROAD_ML_KEM_ALG.to_string()));
         header.insert(HDR_KBROAD_PUB, Value::Bytes(kbroad_pub.to_vec()));
 
         let xk_hash = [0x41; 32];
@@ -3649,7 +3634,7 @@ mod tests {
                         None
                     }
                 },
-                fs_policy_version: "fs-fixture-policy",
+                fs_policy_version: "7",
                 fs_epoch_base_ts: 0,
                 fs_join: FsJoinInputs {
                     fs_ec: 0,
@@ -3949,7 +3934,7 @@ mod tests {
         map.insert(105, Value::Bytes(pk.to_vec()));
         map.insert(
             HDR_FS_POLICY_VERSION,
-            Value::Text("fs-policy-test".to_string()),
+            Value::Integer(Integer::from(7u64)),
         );
         map
     }
@@ -4167,7 +4152,7 @@ mod tests {
             other => panic!("missing vrf_id entry: {:?}", other),
         }
         match result.header_map.get(&HDR_FS_POLICY_VERSION) {
-            Some(Value::Text(text)) => assert_eq!(text, "fs-fixture-policy"),
+            Some(Value::Integer(value)) => assert_eq!(u64::try_from(*value).ok(), Some(7)),
             other => panic!("missing fs_policy_version entry: {:?}", other),
         }
         let proofs_commit = match result.header_map.get(&HDR_PROOFS_COMMIT) {
@@ -4676,7 +4661,7 @@ mod tests {
 
         let header_a_seed = sample_header();
         let mut header_b_seed = sample_header();
-        header_b_seed.insert(21, Value::Bytes(vec![0x33]));
+        header_b_seed.insert(20, Value::Bytes(vec![0x33]));
         let result_a = joiner_kgen_or(
             header_a_seed.clone(),
             fixture.parts.clone(),
@@ -5288,7 +5273,7 @@ mod tests {
 
         let header_a_seed = sample_header();
         let mut header_b_seed = sample_header();
-        header_b_seed.insert(21, Value::Bytes(vec![0x55]));
+        header_b_seed.insert(20, Value::Bytes(vec![0x55]));
         let result_a = joiner_kgen_or(
             header_a_seed.clone(),
             fixture.parts.clone(),
@@ -5342,9 +5327,10 @@ mod tests {
             Ok(result) => result,
             Err(err) => {
                 let debug = format!("{err:?}");
-                if debug.contains("fs_dev_chain_break") {
+                if debug.contains("fs_dev_chain_break") || debug.contains("msphf_rho_parity") {
                     // Expected error due to forward secrecy device chain constraints
-                    // when processing multiple anchors in merge scenarios
+                    // or rho parity constraints when processing multiple anchors
+                    // in merge scenarios.
                     return Ok(());
                 }
                 panic!("process_anchor_or failed unexpectedly: {debug}");

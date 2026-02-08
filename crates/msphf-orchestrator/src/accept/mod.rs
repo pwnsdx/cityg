@@ -103,6 +103,7 @@ pub(crate) const SRX_ONLY_KEYS: [u64; 4] = [
     HDR_SRX_ROOT_SW,
     HDR_SRX_SMALLWOOD,
 ];
+pub(crate) const LEGACY_SRX_KEYS: [u64; 3] = [HDR_SRX_MODE, HDR_SRX_HINT_COUNTS, HDR_SRX_HINT_SIZES];
 
 #[derive(Serialize)]
 struct SrxEmptyRootProfile<'a>(&'a str);
@@ -1203,6 +1204,7 @@ impl AcceptanceContext {
         let now = self.next_accept_instant();
         self.mh_window.prune_all(now);
         let is_merge = is_merge_anchor(header_map);
+        ensure_known_header_keys(header_map, is_merge)?;
         debug!(
             "accept_anchor: gid={:?} is_merge={}",
             hex::encode(parts.gid),
@@ -1353,7 +1355,7 @@ struct VckPreimage<'a> {
     proofs_commit: &'a [u8],
     proof_mode: &'a str,
     vrf_id: &'a str,
-    fs_policy_version: &'a str,
+    fs_policy_version: u64,
 }
 
 fn header_value_bytes<'a>(
@@ -1429,26 +1431,28 @@ fn compute_vck_key(
     };
 
     let fs_policy_version = match header.get(&HDR_FS_POLICY_VERSION) {
-        Some(Value::Text(text)) => Cow::Borrowed(text.as_str()),
-        Some(Value::Integer(int)) => Cow::Owned(
-            u64::try_from(*int)
-                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?
-                .to_string(),
-        ),
-        Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes)
-            .map(Cow::Borrowed)
+        Some(Value::Integer(int)) => u64::try_from(*int)
             .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?,
-        _ => return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED)),
+        _ => {
+            return Err(AcceptanceError::Freeze(
+                FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+            ));
+        }
     };
     if let Some(value) = header.get(&HDR_POLICY_VERSION) {
         let legacy = match value {
             Value::Integer(int) => u64::try_from(*int)
-                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?
-                .to_string(),
-            _ => return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED)),
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?,
+            _ => {
+                return Err(AcceptanceError::Freeze(
+                    FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+                ));
+            }
         };
-        if legacy != fs_policy_version.as_ref() {
-            return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED));
+        if legacy != fs_policy_version {
+            return Err(AcceptanceError::Freeze(
+                FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+            ));
         }
     }
 
@@ -1463,7 +1467,7 @@ fn compute_vck_key(
         proofs_commit: &proofs_commit,
         proof_mode: proof_mode.as_ref(),
         vrf_id: vrf_id.as_ref(),
-        fs_policy_version: fs_policy_version.as_ref(),
+        fs_policy_version,
     };
 
     h_l("msphf/vck", &preimage).map_err(AcceptanceError::from)
@@ -1484,7 +1488,12 @@ fn compute_vck_from_parity(parity: &PivotParity) -> Result<[u8; 32], AcceptanceE
     }
     map.insert(
         HDR_FS_POLICY_VERSION,
-        Value::Text(parity.policy_version.clone()),
+        Value::Integer(Integer::from(
+            parity
+                .policy_version
+                .parse::<u64>()
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?,
+        )),
     );
     compute_vck_key(
         &parity.xk_hash,
@@ -1530,6 +1539,73 @@ pub(crate) fn is_merge_anchor(header: &BTreeMap<u64, Value>) -> bool {
     MERGE_ONLY_KEYS
         .into_iter()
         .any(|key| header.contains_key(&key))
+}
+
+fn is_known_header_key(key: u64, is_merge: bool) -> bool {
+    if is_merge && MERGE_ONLY_KEYS.contains(&key) {
+        return true;
+    }
+    matches!(
+        key,
+        20
+            | HDR_TSWE_ALG
+            | HDR_SEED_CTX_HASH
+            | HDR_MERKLE_SUITE
+            | HDR_RHO_COMMIT
+            | HDR_SEED_BUNDLE_COMMIT
+            | HDR_VRF_PROOF
+            | HDR_HP_BYTES
+            | HDR_CRS_ID
+            | HDR_HP_COMMIT
+            | 102
+            | HDR_KBROAD_ALG
+            | HDR_KBROAD_PUB
+            | HDR_PARAMS_ID
+            | HDR_POP_ALG
+            | HDR_POP_PK
+            | HDR_POP_SIG
+            | 110
+            | 111
+            | 112
+            | HDR_REVOKED_ROOT
+            | HDR_VRF_ID
+            | HDR_PROOF_MODE
+            | HDR_SRX_MODE
+            | HDR_SRX_COMMIT
+            | HDR_SRX_PAYLOAD
+            | HDR_SRX_HINT_COUNTS
+            | HDR_SRX_HINT_SIZES
+            | HDR_PROOFS_COMMIT
+            | HDR_POLICY_VERSION
+            | HDR_FS_POLICY_VERSION
+            | HDR_FS_EC
+            | HDR_FS_EPOCH_COMMIT
+            | HDR_FS_EPOCH_BASE_TS
+            | HDR_FS_CAPSS
+            | HDR_FS_DEV_PREV_COMMIT
+            | HDR_FS_DEV_COMMIT
+            | HDR_VRF_MASK_A
+            | HDR_VRF_MASK_B
+            | HDR_VRF_PUBLIC_KEY
+            | HDR_SRX_ROOT_SW
+            | HDR_SRX_SMALLWOOD
+            | HDR_BOOTSTRAP_ALG
+            | HDR_BOOTSTRAP_SIG
+            | HDR_BOOTSTRAP_PK
+    )
+}
+
+fn ensure_known_header_keys(
+    header: &BTreeMap<u64, Value>,
+    is_merge: bool,
+) -> Result<(), AcceptanceError> {
+    for key in header.keys().copied() {
+        if !is_known_header_key(key, is_merge) {
+            debug!("unknown header key {} (is_merge={})", key, is_merge);
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+    }
+    Ok(())
 }
 
 fn is_sorted_unique(heads: &[[u8; 32]]) -> bool {
@@ -2869,9 +2945,9 @@ mod tests {
     fn window_full_triggers_freeze() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let mut header_a = sample_header();
-        header_a.insert(11, Value::Integer(Integer::from(0u8)));
+        header_a.insert(102, Value::Text("head-a".to_string()));
         let mut header_b = sample_header();
-        header_b.insert(11, Value::Integer(Integer::from(1u8)));
+        header_b.insert(102, Value::Text("head-b".to_string()));
         let params_a = params();
         let params_b = params();
         let joiner_a = joiner_kgen_or(header_a, parts.clone(), params_a, None, None)?;
@@ -3102,9 +3178,9 @@ mod tests {
     fn set_h_max_propagates_to_window() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let mut header_a = sample_header();
-        header_a.insert(11, Value::Integer(Integer::from(0u8)));
+        header_a.insert(102, Value::Text("head-a".to_string()));
         let mut header_b = sample_header();
-        header_b.insert(11, Value::Integer(Integer::from(1u8)));
+        header_b.insert(102, Value::Text("head-b".to_string()));
         let params_a = params();
         let params_b = params();
         let joiner_a = joiner_kgen_or(header_a, parts.clone(), params_a, None, None)?;
@@ -4271,8 +4347,10 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
 
-        let original_policy =
-            header.insert(HDR_FS_POLICY_VERSION, Value::Text("fs-policy-v0".to_string()));
+        let original_policy = header.insert(
+            HDR_FS_POLICY_VERSION,
+            Value::Integer(Integer::from(0u64)),
+        );
         let key_v0 = compute_vck_key(
             &joiner.xk_hash,
             &joiner.seed_commit,
@@ -4282,7 +4360,7 @@ mod tests {
         )?;
         header.insert(
             HDR_FS_POLICY_VERSION,
-            Value::Text("fs-policy-v1".to_string()),
+            Value::Integer(Integer::from(1u64)),
         );
         let key_v1 = compute_vck_key(
             &joiner.xk_hash,
@@ -4360,8 +4438,8 @@ mod tests {
     }
 
     #[test]
-    fn compute_vck_key_rejects_missing_fs_policy_version()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn compute_vck_key_rejects_missing_fs_policy_version() -> Result<(), Box<dyn std::error::Error>>
+    {
         let (parts, _params, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
@@ -4776,8 +4854,14 @@ mod tests {
                     && let Some(Value::Array(since_mem_revoked)) = items.get_mut(2)
                 {
                     since_mem_revoked.push(Value::Map(vec![
-                        (Value::Text("leaf_id".to_string()), Value::Bytes(vec![0xAA; 32])),
-                        (Value::Text("root".to_string()), Value::Bytes(vec![0xFF; 32])),
+                        (
+                            Value::Text("leaf_id".to_string()),
+                            Value::Bytes(vec![0xAA; 32]),
+                        ),
+                        (
+                            Value::Text("root".to_string()),
+                            Value::Bytes(vec![0xFF; 32]),
+                        ),
                         (Value::Text("path".to_string()), Value::Array(Vec::new())),
                     ]));
                 }
@@ -5025,8 +5109,7 @@ mod tests {
         configure_bootstrap(&mut ctx);
         let header_a_seed = sample_header();
         let mut header_b_seed = sample_header();
-        header_b_seed.insert(11, Value::Integer(Integer::from(1u8)));
-        header_b_seed.insert(20, Value::Bytes(vec![0xAB]));
+        header_b_seed.insert(102, Value::Text("head-b".to_string()));
         let params = params();
         let params_a = params.clone();
         let params_b = params.clone();

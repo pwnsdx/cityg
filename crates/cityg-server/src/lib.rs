@@ -492,7 +492,7 @@ impl CityGServer {
             .ctx
             .fs_policy_version()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "fs-policy-v1".to_string());
+            .unwrap_or_else(|| "7".to_string());
         let fs_epoch_base_ts = self.ctx.fs_base_ts().unwrap_or(0);
 
         Ok(MergeTicketBundle {
@@ -835,6 +835,9 @@ fn header_string(
 ) -> Result<String, CityGError> {
     match header.get(&key) {
         Some(Value::Text(text)) => Ok(text.clone()),
+        Some(Value::Integer(value)) => u64::try_from(*value)
+            .map(|v| v.to_string())
+            .map_err(|_| CityGError::InvalidInput("pivot field wrong type")),
         Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes)
             .map(|s| s.to_string())
             .map_err(|_| CityGError::InvalidInput("pivot field invalid utf8")),

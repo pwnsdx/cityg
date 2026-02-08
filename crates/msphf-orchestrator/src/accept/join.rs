@@ -111,14 +111,13 @@ impl AcceptanceContext {
                 .get(&HDR_FS_EC)
                 .ok_or(AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING))?;
 
-            let fs_policy_version_str = match header_map.get(&HDR_FS_POLICY_VERSION) {
-                Some(Value::Text(text)) => text.clone(),
+            let fs_policy_version = match header_map.get(&HDR_FS_POLICY_VERSION) {
                 Some(Value::Integer(int)) => u64::try_from(*int)
-                    .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING))?
-                    .to_string(),
+                    .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING))?,
                 Some(_) => return Err(AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING)),
                 None => return Err(AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING)),
             };
+            let fs_policy_version_str = fs_policy_version.to_string();
             self.ensure_fs_policy_version_allowed(&fs_policy_version_str)?;
             if self
                 .fs_policy_version()
@@ -287,7 +286,7 @@ impl AcceptanceContext {
                 crs_id: crs_id.as_str(),
                 params_id: params_id.as_str(),
                 proof_mode: proofs.proof_mode.as_str(),
-                fs_policy_version: proofs.fs_policy_version.as_str(),
+                fs_policy_version: proofs.fs_policy_version,
                 vrf_id: proofs.vrf_id.as_str(),
                 parent_root: parts.parent_root,
                 join_delta_root: parts.join_delta_root,
@@ -361,7 +360,7 @@ impl AcceptanceContext {
             revoked_since_prev_root: parts.revoked_since_prev_root,
             revoked_root: parts.revoked_root,
             proof_mode: proofs.proof_mode.as_str(),
-            fs_policy_version: proofs.fs_policy_version.as_str(),
+            fs_policy_version: proofs.fs_policy_version,
             meor_vrf_id: proofs.vrf_id.as_str(),
             fs_epoch_commit: &fs_epoch_commit,
             fs_ec,
@@ -480,7 +479,7 @@ impl AcceptanceContext {
             accept_seq,
             crs_id,
             params_id,
-            policy_version: proofs.fs_policy_version.clone(),
+            policy_version: proofs.fs_policy_version.to_string(),
             proof_mode: proofs.proof_mode.clone(),
             vrf_id: proofs.vrf_id.clone(),
             vrf_proof: proofs.vrf_pi.clone(),

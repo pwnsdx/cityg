@@ -29,7 +29,7 @@ pub struct BindingInputs<'a> {
     pub crs_id: &'a str,
     pub params_id: &'a str,
     pub proof_mode: &'a str,
-    pub fs_policy_version: &'a str,
+    pub fs_policy_version: u64,
     pub vrf_id: &'a str,
     pub parent_root: &'a [u8],
     pub join_delta_root: &'a [u8],
@@ -148,7 +148,7 @@ struct PublicTupleCbor<'a>(
     #[serde(with = "serde_bytes")] &'a [u8],
     #[serde(with = "serde_bytes")] &'a [u8],
     &'a str,
-    &'a str,
+    u64,
     &'a str,
     #[serde(with = "serde_bytes")] &'a [u8],
     u64,
@@ -169,7 +169,7 @@ fn encode_public_tuple(
     revoked_since_prev_root: &[u8],
     revoked_root: &[u8],
     proof_mode: &str,
-    fs_policy_version: &str,
+    fs_policy_version: u64,
     vrf_id: &str,
     fs_epoch_commit: &[u8],
     fs_ec: u64,
@@ -222,7 +222,7 @@ mod tests {
     const CRS_ID: &str = "crs/test";
     const PARAMS_ID: &str = "params/test";
     const PROOF_MODE: &str = "smallwood/v1";
-    const POLICY_VERSION: &str = "v7";
+    const POLICY_VERSION: u64 = 7;
     const VRF_ID: &str = "vrf/test";
 
     #[allow(clippy::too_many_arguments)]

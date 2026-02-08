@@ -288,10 +288,7 @@ fn rpo_hash_v2(ds_tag: u64, payload: &[u8]) -> [u8; 32] {
 
     // Step 2: byte length (v2 fix: raw byte count, not field-word count → permute).
     let field_words = bytes_to_field_elements(payload);
-    absorb_words(
-        &mut state,
-        &[BaseElement::new(payload.len() as u64)],
-    );
+    absorb_words(&mut state, &[BaseElement::new(payload.len() as u64)]);
 
     // Step 3: payload words (rate-width blocks → permute after each).
     if !field_words.is_empty() {

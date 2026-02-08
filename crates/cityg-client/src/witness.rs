@@ -802,8 +802,9 @@ mod tests {
             .join_nonmem_parent
             .first()
             .expect("one join non-membership witness expected");
-        let validated = CanonicalWitness::validate_nonmembership_witness(&anchored.witness, &parent_root)
-            .expect("two-leaf interval non-membership witness must validate");
+        let validated =
+            CanonicalWitness::validate_nonmembership_witness(&anchored.witness, &parent_root)
+                .expect("two-leaf interval non-membership witness must validate");
         assert_eq!(validated.left, Some(left));
         assert_eq!(validated.right, Some(right));
         let left_ref = anchored.left_ref.expect("left anchor ref must be present") as usize;

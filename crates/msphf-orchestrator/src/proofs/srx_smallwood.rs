@@ -1,4 +1,7 @@
-use crate::accept::{AcceptanceError, FREEZE_SRX_SMALLWOOD_INVALID};
+use crate::{
+    accept::{AcceptanceError, FREEZE_SRX_SMALLWOOD_INVALID},
+    h_l,
+};
 use anyhow::Error;
 use blake3::Hasher;
 use capss::{
@@ -26,13 +29,11 @@ pub struct Inputs<'a> {
     pub revoked_since_root: &'a [u8; 32],
     pub revoked_root: &'a [u8; 32],
     pub srx_commit: &'a [u8; 32],
-    pub srx_mode: &'a str,
+    pub srx_payload_digest: &'a [u8; 32],
+    pub srx_bridge_ctx: &'a [u8; 32],
     pub proof_mode: &'a str,
-    pub fs_policy_version: &'a str,
+    pub fs_policy_version: u64,
     pub vrf_id: &'a str,
-    pub payload: &'a [u8],
-    pub hint_counts_cbor: &'a [u8],
-    pub hint_sizes_cbor: &'a [u8],
 }
 
 #[derive(Clone, Debug)]
@@ -109,10 +110,6 @@ fn signature_from_bytes(bytes: &[u8]) -> CapssSignature {
 }
 
 fn encode_statement_payload(inputs: &Inputs<'_>) -> Result<Vec<u8>, MsphfError> {
-    let payload_digest = digest32(inputs.payload);
-    let hint_counts_digest = digest32(inputs.hint_counts_cbor);
-    let hint_sizes_digest = digest32(inputs.hint_sizes_cbor);
-
     #[derive(Serialize)]
     struct StatementPayload<'a> {
         #[serde(with = "serde_bytes")]
@@ -129,17 +126,13 @@ fn encode_statement_payload(inputs: &Inputs<'_>) -> Result<Vec<u8>, MsphfError> 
         revoked_root: &'a [u8],
         #[serde(with = "serde_bytes")]
         srx_commit: &'a [u8],
-        srx_mode: &'a str,
+        #[serde(with = "serde_bytes")]
+        srx_payload_digest: &'a [u8],
+        #[serde(with = "serde_bytes")]
+        srx_bridge_ctx: &'a [u8],
         proof_mode: &'a str,
-        fs_policy_version: &'a str,
+        fs_policy_version: u64,
         vrf_id: &'a str,
-        payload_len: u64,
-        #[serde(with = "serde_bytes")]
-        payload_digest: &'a [u8],
-        #[serde(with = "serde_bytes")]
-        hint_counts_digest: &'a [u8],
-        #[serde(with = "serde_bytes")]
-        hint_sizes_digest: &'a [u8],
     }
 
     let payload = StatementPayload {
@@ -150,14 +143,11 @@ fn encode_statement_payload(inputs: &Inputs<'_>) -> Result<Vec<u8>, MsphfError> 
         revoked_since_root: &inputs.revoked_since_root[..],
         revoked_root: &inputs.revoked_root[..],
         srx_commit: &inputs.srx_commit[..],
-        srx_mode: inputs.srx_mode,
+        srx_payload_digest: &inputs.srx_payload_digest[..],
+        srx_bridge_ctx: &inputs.srx_bridge_ctx[..],
         proof_mode: inputs.proof_mode,
         fs_policy_version: inputs.fs_policy_version,
         vrf_id: inputs.vrf_id,
-        payload_len: inputs.payload.len() as u64,
-        payload_digest: &payload_digest,
-        hint_counts_digest: &hint_counts_digest,
-        hint_sizes_digest: &hint_sizes_digest,
     };
 
     let mut buf = Vec::new();
@@ -169,6 +159,55 @@ fn digest32(data: &[u8]) -> [u8; 32] {
     let mut hasher = Hasher::new();
     hasher.update(data);
     hasher.finalize().into()
+}
+
+#[derive(Serialize)]
+struct SrxPayloadDigestInput<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+
+pub fn payload_digest(payload: &[u8]) -> Result<[u8; 32], MsphfError> {
+    h_l("srx/payload/digest", &SrxPayloadDigestInput(payload))
+}
+
+#[derive(Serialize)]
+struct SrxBridgeCtxInput<'a> {
+    #[serde(with = "serde_bytes")]
+    parent_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    join_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    revoked_since_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    revoked_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    srx_commit: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    srx_payload_digest: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    srx_root_sw: &'a [u8; 32],
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compute_bridge_ctx(
+    parent_root: &[u8; 32],
+    join_root: &[u8; 32],
+    revoked_since_root: &[u8; 32],
+    revoked_root: &[u8; 32],
+    srx_commit: &[u8; 32],
+    srx_payload_digest: &[u8; 32],
+    srx_root_sw: &[u8; 32],
+) -> Result<[u8; 32], MsphfError> {
+    h_l(
+        "srx/bridge/v1",
+        &SrxBridgeCtxInput {
+            parent_root,
+            join_root,
+            revoked_since_root,
+            revoked_root,
+            srx_commit,
+            srx_payload_digest,
+            srx_root_sw,
+        },
+    )
 }
 
 fn map_smallwood_decode_error(_: Error) -> AcceptanceError {
@@ -214,11 +253,6 @@ pub fn compute_shadow_root(
     hasher.finalize().into()
 }
 
-/// Compute the 32-byte digest of a payload for use in the statement encoding.
-pub fn payload_digest(payload: &[u8]) -> [u8; 32] {
-    digest32(payload)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,9 +293,7 @@ mod tests {
     fn prove_verify_roundtrip() -> Result<()> {
         let (parent, join, revoked_since, revoked_root, commit) = sample_roots();
         let payload = vec![0xAA, 0xBB, 0xCC, 0xDD];
-        let hint_counts = vec![0x01, 0x02];
-        let hint_sizes = vec![0x10, 0x20];
-        let payload_digest = payload_digest(&payload);
+        let payload_digest = payload_digest(&payload)?;
 
         let shadow_before =
             compute_shadow_root(&parent, &join, &revoked_since, &revoked_root, None, None);
@@ -273,6 +305,15 @@ mod tests {
             Some(&commit),
             Some(&payload_digest),
         );
+        let bridge_ctx = compute_bridge_ctx(
+            &parent,
+            &join,
+            &revoked_since,
+            &revoked_root,
+            &commit,
+            &payload_digest,
+            &shadow_after,
+        )?;
 
         let inputs = Inputs {
             shadow_root_before: &shadow_before,
@@ -282,13 +323,11 @@ mod tests {
             revoked_since_root: &revoked_since,
             revoked_root: &revoked_root,
             srx_commit: &commit,
-            srx_mode: "srx/v1-complete",
+            srx_payload_digest: &payload_digest,
+            srx_bridge_ctx: &bridge_ctx,
             proof_mode: "smallwood/v1",
-            fs_policy_version: "policy/v1",
+            fs_policy_version: 1,
             vrf_id: "vrf/test",
-            payload: &payload,
-            hint_counts_cbor: &hint_counts,
-            hint_sizes_cbor: &hint_sizes,
         };
 
         let mut rng = ChaCha20Rng::from_seed([0u8; 32]);
@@ -301,12 +340,10 @@ mod tests {
     }
 
     #[test]
-    fn verify_rejects_tampered_payload() -> Result<()> {
+    fn verify_rejects_tampered_bridge_context() -> Result<()> {
         let (parent, join, revoked_since, revoked_root, commit) = sample_roots();
         let payload = vec![0xAA, 0xBB, 0xCC];
-        let hint_counts = vec![0x01];
-        let hint_sizes = vec![0x10];
-        let payload_digest = payload_digest(&payload);
+        let payload_digest = payload_digest(&payload)?;
 
         let shadow_before =
             compute_shadow_root(&parent, &join, &revoked_since, &revoked_root, None, None);
@@ -318,6 +355,15 @@ mod tests {
             Some(&commit),
             Some(&payload_digest),
         );
+        let bridge_ctx = compute_bridge_ctx(
+            &parent,
+            &join,
+            &revoked_since,
+            &revoked_root,
+            &commit,
+            &payload_digest,
+            &shadow_after,
+        )?;
 
         let inputs = Inputs {
             shadow_root_before: &shadow_before,
@@ -327,20 +373,18 @@ mod tests {
             revoked_since_root: &revoked_since,
             revoked_root: &revoked_root,
             srx_commit: &commit,
-            srx_mode: "srx/v1-complete",
+            srx_payload_digest: &payload_digest,
+            srx_bridge_ctx: &bridge_ctx,
             proof_mode: "smallwood/v1",
-            fs_policy_version: "policy/v1",
+            fs_policy_version: 1,
             vrf_id: "vrf/test",
-            payload: &payload,
-            hint_counts_cbor: &hint_counts,
-            hint_sizes_cbor: &hint_sizes,
         };
 
         let mut rng = ChaCha20Rng::from_seed([1u8; 32]);
         let proof = prove(&mut rng, &inputs)?;
 
-        let mut tampered_payload = payload.clone();
-        tampered_payload.push(0xFF);
+        let mut tampered_bridge = bridge_ctx;
+        tampered_bridge[0] ^= 0xFF;
         let tampered_inputs = Inputs {
             shadow_root_before: &shadow_before,
             shadow_root_after: &shadow_after,
@@ -349,13 +393,11 @@ mod tests {
             revoked_since_root: &revoked_since,
             revoked_root: &revoked_root,
             srx_commit: &commit,
-            srx_mode: "srx/v1-complete",
+            srx_payload_digest: &payload_digest,
+            srx_bridge_ctx: &tampered_bridge,
             proof_mode: "smallwood/v1",
-            fs_policy_version: "policy/v1",
+            fs_policy_version: 1,
             vrf_id: "vrf/test",
-            payload: &tampered_payload,
-            hint_counts_cbor: &hint_counts,
-            hint_sizes_cbor: &hint_sizes,
         };
 
         let err = match verify(&tampered_inputs, &proof) {
@@ -408,5 +450,32 @@ mod tests {
             shadow_after,
             hex_literal::hex!("42b3332a4002263ad346cbfceaf832dd44f4940537662808dcb1124e1e791a30")
         );
+    }
+
+    #[test]
+    fn bridge_ctx_deterministic() -> Result<()> {
+        let (parent, join, revoked_since, revoked_root, commit) = sample_roots();
+        let payload_digest = payload_digest(b"payload")?;
+        let shadow_root = [0x77; 32];
+        let first = compute_bridge_ctx(
+            &parent,
+            &join,
+            &revoked_since,
+            &revoked_root,
+            &commit,
+            &payload_digest,
+            &shadow_root,
+        )?;
+        let second = compute_bridge_ctx(
+            &parent,
+            &join,
+            &revoked_since,
+            &revoked_root,
+            &commit,
+            &payload_digest,
+            &shadow_root,
+        )?;
+        assert_eq!(first, second);
+        Ok(())
     }
 }

@@ -1055,7 +1055,7 @@ fn generate_case(
                 None
             }
         },
-        fs_policy_version: "fs-kat",
+        fs_policy_version: "7",
         fs_epoch_base_ts: 0,
         fs_join: FsJoinInputs::default(),
         fs_merge: FsMergeInputs::default(),
@@ -1154,7 +1154,12 @@ fn generate_case(
     let fs_dev_commit = [0u8; 32];
     header_map.insert(
         hdr::HDR_FS_POLICY_VERSION,
-        Value::Text(params_obj.fs_policy_version.to_string()),
+        Value::Integer(Integer::from(
+            params_obj
+                .fs_policy_version
+                .parse::<u64>()
+                .map_err(|_| MsphfError::invalid_input("fs_policy_version must be uint"))?,
+        )),
     );
     header_map.insert(
         hdr::HDR_FS_EPOCH_BASE_TS,
@@ -1192,7 +1197,10 @@ fn generate_case(
             crs_id: params_obj.msphf_crs_id,
             params_id: params_obj.params_id,
             proof_mode: params_obj.proof_mode,
-            fs_policy_version: params_obj.fs_policy_version,
+            fs_policy_version: params_obj
+                .fs_policy_version
+                .parse::<u64>()
+                .map_err(|_| MsphfError::invalid_input("fs_policy_version must be uint"))?,
             vrf_id: params_obj.vrf_id,
             parent_root: parts.parent_root,
             join_delta_root: parts.join_delta_root,

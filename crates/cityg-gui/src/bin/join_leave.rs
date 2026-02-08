@@ -18,8 +18,7 @@ use hex::decode as hex_decode;
 use msphf_core::{ds, hash::h_l};
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
-    OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id,
-    hdr,
+    OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
 };
 use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
 use pqcrypto_traits::sign::{
@@ -88,6 +87,7 @@ fn derive_fs_fingerprint_from_fields(
 fn compute_fs_fingerprint_from_header(header: &BTreeMap<u64, Value>) -> Option<[u8; 32]> {
     let policy = match header.get(&hdr::HDR_FS_POLICY_VERSION)? {
         Value::Text(text) => text.clone(),
+        Value::Integer(value) => u64::try_from(*value).ok()?.to_string(),
         _ => return None,
     };
     let fs_ec = match header.get(&hdr::HDR_FS_EC)? {
@@ -1342,9 +1342,13 @@ fn log_fs_metadata(pivot: &PivotParity, header: &BTreeMap<u64, Value>) {
 }
 
 fn apply_pivot_alignment(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity) {
+    let fs_policy_version = pivot
+        .policy_version
+        .parse::<u64>()
+        .expect("pivot policy_version must be uint decimal");
     header
         .entry(hdr::HDR_FS_POLICY_VERSION)
-        .or_insert_with(|| Value::Text(pivot.policy_version.clone()));
+        .or_insert_with(|| Value::Integer(Integer::from(fs_policy_version)));
     header
         .entry(hdr::HDR_PROOF_MODE)
         .or_insert_with(|| Value::Text(pivot.proof_mode.clone()));
@@ -1468,7 +1472,7 @@ mod tests {
             accept_seq: 1,
             crs_id: b"crs-v1".to_vec(),
             params_id: b"params-v1".to_vec(),
-            policy_version: "policy-v1".to_string(),
+            policy_version: "7".to_string(),
             proof_mode: "lin+zkvrf".to_string(),
             vrf_id: "lb-vrf".to_string(),
             vrf_proof: vec![0xDD, 0xEE],
@@ -1508,7 +1512,7 @@ mod tests {
         let mut header = BTreeMap::new();
         header.insert(
             hdr::HDR_FS_POLICY_VERSION,
-            Value::Text("fs-policy-v1".to_string()),
+            Value::Integer(Integer::from(7u64)),
         );
         header.insert(hdr::HDR_FS_EC, Value::Integer(Integer::from(9u64)));
         header.insert(
@@ -1520,7 +1524,7 @@ mod tests {
             Value::Integer(Integer::from(1234u64)),
         );
 
-        let direct = derive_fs_fingerprint_from_fields("fs-policy-v1", 9, &fs_epoch_commit, 1234);
+        let direct = derive_fs_fingerprint_from_fields("7", 9, &fs_epoch_commit, 1234);
         let from_header = compute_fs_fingerprint_from_header(&header);
         assert_eq!(from_header, direct);
         assert!(from_header.is_some());
@@ -1536,7 +1540,7 @@ mod tests {
         assert!(compute_fs_fingerprint_from_header(&header).is_none());
         header.insert(
             hdr::HDR_FS_POLICY_VERSION,
-            Value::Text("fs-policy-v1".to_string()),
+            Value::Integer(Integer::from(7u64)),
         );
 
         header.insert(hdr::HDR_FS_EPOCH_COMMIT, Value::Text("bad".to_string()));
@@ -1557,7 +1561,7 @@ mod tests {
 
         header.insert(
             hdr::HDR_FS_POLICY_VERSION,
-            Value::Text("fs-policy-v1".to_string()),
+            Value::Integer(Integer::from(7u64)),
         );
         assert!(compute_fs_fingerprint_from_header(&header).is_none());
 
@@ -1916,7 +1920,7 @@ mod tests {
 
         assert_eq!(
             header.get(&hdr::HDR_FS_POLICY_VERSION),
-            Some(&Value::Text("policy-v1".to_string()))
+            Some(&Value::Integer(Integer::from(7u64)))
         );
         assert_eq!(
             header.get(&hdr::HDR_PROOF_MODE),
@@ -2375,9 +2379,9 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
             let mut ws = tokio_tungstenite::accept_async(stream).await?;
-            ws.send(WsMessage::Text(
-                format!(r#"{{"type":"message","we_epoch_id":"{weid_hex}","timestamp_ms":42}}"#),
-            ))
+            ws.send(WsMessage::Text(format!(
+                r#"{{"type":"message","we_epoch_id":"{weid_hex}","timestamp_ms":42}}"#
+            )))
             .await?;
             ws.close(None).await?;
             Ok::<(), anyhow::Error>(())

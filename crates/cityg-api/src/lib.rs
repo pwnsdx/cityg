@@ -491,13 +491,9 @@ impl IntoResponse for ApiError {
                 None,
                 None,
             ),
-            ApiError::Unauthorized(msg) => (
-                StatusCode::UNAUTHORIZED,
-                msg.to_string(),
-                None,
-                None,
-                None,
-            ),
+            ApiError::Unauthorized(msg) => {
+                (StatusCode::UNAUTHORIZED, msg.to_string(), None, None, None)
+            }
             ApiError::Server {
                 message,
                 freeze,
@@ -977,7 +973,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             .context()
             .fs_policy_version()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "fs-policy-v1".to_string());
+            .unwrap_or_else(|| "7".to_string());
         let fs_epoch_base_ts = match guard.context().fs_base_ts() {
             Some(base_ts) => base_ts,
             None => {
@@ -1605,9 +1601,7 @@ fn pivot_parity_to_cbor(parity: &PivotParity) -> Result<Vec<u8>, ApiError> {
         srx_commit: parity
             .srx_commit
             .map(|commit| ByteBuf::from(commit.to_vec())),
-        srx_root_sw: parity
-            .srx_root_sw
-            .map(|root| ByteBuf::from(root.to_vec())),
+        srx_root_sw: parity.srx_root_sw.map(|root| ByteBuf::from(root.to_vec())),
         is_join: parity.is_join,
         hp_envelope: ByteBuf::from(parity.hp_envelope.as_ref().to_vec()),
         fs_epoch_commit: parity

@@ -1232,7 +1232,7 @@ mod tests {
             kbroad_public: vec![0x07; 32],
             msphf_crs_id: "rlwe-crs-v1".to_string(),
             msphf_params_id: "rlwe-hps2048509".to_string(),
-            fs_policy_version: "fs-policy-v1".to_string(),
+            fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 0,
         }
     }

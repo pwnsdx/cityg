@@ -198,7 +198,7 @@ pub(crate) fn params() -> OrchestrationParams<'static> {
                 None
             }
         },
-        fs_policy_version: "fs-policy-test",
+        fs_policy_version: "7",
         fs_epoch_base_ts: 0,
         fs_join: crate::FsJoinInputs {
             fs_ec: 0,
@@ -217,7 +217,7 @@ pub(crate) fn sample_header() -> BTreeMap<u64, Value> {
     map.insert(HDR_KBROAD_PUB, Value::Bytes(pk.to_vec()));
     map.insert(
         HDR_FS_POLICY_VERSION,
-        Value::Text("fs-policy-test".to_string()),
+        Value::Integer(Integer::from(7u64)),
     );
     map
 }

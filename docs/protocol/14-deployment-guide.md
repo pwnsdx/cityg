@@ -126,7 +126,7 @@ t_window_secs = 120       # TTL for head expiration (default: 120s)
 srx_max_bytes = 1048576   # Max SRX payload size (1 MB, default)
 
 # FS policy configuration
-fs_policy_version = "7"   # Must match header key 139 / allowlist
+fs_policy_version = 7     # Must match header key 139 / allowlist
 fs_period_seconds = 300   # H
 checkpoint_interval_seconds = 3600
 slack_anchor = 0
@@ -710,14 +710,14 @@ curl https://cityg.example.com/metrics | grep cityg_accept_total
 ```bash
 # Update config
 vim config/server.toml
-# Change: fs_policy_version = "8"
+# Change: fs_policy_version = 8
 
 # Graceful reload (no downtime)
 systemctl reload cityg-server
 
 # Verify
 curl https://cityg.example.com/policy
-# Expected: {"fs_policy_version": "8"}
+# Expected: {"fs_policy_version": 8}
 ```
 
 **KBROAD Registry Update**:

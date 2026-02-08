@@ -229,7 +229,8 @@ mod tests {
         let right_id = [0x30u8; 32];
         let right_leaf = [0x40u8; 32];
         let v2 = hash_interval_binding(&left_id, &left_leaf, &right_id, &right_leaf, 1, 2);
-        let v1 = hash_interval_binding_v1_compat(&left_id, &left_leaf, &right_id, &right_leaf, 1, 2);
+        let v1 =
+            hash_interval_binding_v1_compat(&left_id, &left_leaf, &right_id, &right_leaf, 1, 2);
         assert_ne!(v2, v1, "interval binding should route through rpo-256/v2");
     }
 }

@@ -32,7 +32,7 @@ fn demo_ctx<'a>() -> VrfCtx<'a> {
         revoked_since_prev_root: &REVOKED_SINCE_ROOT,
         revoked_root: &REVOKED_ROOT,
         proof_mode: "lin+zkvrf",
-        fs_policy_version: "demo-policy",
+        fs_policy_version: 7,
         meor_vrf_id: "lb-vrf/v1",
         fs_epoch_commit: &FS_EPOCH_COMMIT,
         fs_ec: FS_EC,

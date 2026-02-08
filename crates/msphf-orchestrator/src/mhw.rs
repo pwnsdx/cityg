@@ -409,15 +409,27 @@ mod tests {
                 AcceptInstant::from_ticks(1),
             )
             .unwrap();
-        assert_eq!(window.find_head_window(&[1; 32]), None, "retired head should be removed from index");
+        assert_eq!(
+            window.find_head_window(&[1; 32]),
+            None,
+            "retired head should be removed from index"
+        );
         assert_eq!(window.find_head_window(&[2; 32]), Some(wid.to_vec()));
         assert_eq!(window.find_head_window(&[3; 32]), Some(wid.to_vec()));
 
         // Prune by TTL
         let far_future = AcceptInstant::from_ticks(10);
         window.prune_all(far_future);
-        assert_eq!(window.find_head_window(&[2; 32]), None, "expired head should be removed from index");
-        assert_eq!(window.find_head_window(&[3; 32]), None, "expired head should be removed from index");
+        assert_eq!(
+            window.find_head_window(&[2; 32]),
+            None,
+            "expired head should be removed from index"
+        );
+        assert_eq!(
+            window.find_head_window(&[3; 32]),
+            None,
+            "expired head should be removed from index"
+        );
     }
 
     #[test]

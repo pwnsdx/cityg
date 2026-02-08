@@ -153,7 +153,7 @@ fn encode_bind_fs(ctx: &VrfCtx<'_>) -> Result<Vec<u8>> {
     fields.push(Value::Bytes(ctx.revoked_since_prev_root.to_vec()));
     fields.push(Value::Bytes(ctx.revoked_root.to_vec()));
     fields.push(Value::Text(ctx.proof_mode.to_string()));
-    fields.push(Value::Text(ctx.fs_policy_version.to_string()));
+    fields.push(Value::Integer(Integer::from(ctx.fs_policy_version)));
     fields.push(Value::Text(ctx.meor_vrf_id.to_string()));
     fields.push(Value::Bytes(ctx.fs_epoch_commit.to_vec()));
     fields.push(Value::Integer(Integer::from(ctx.fs_ec)));
@@ -317,7 +317,7 @@ mod tests {
             revoked_since_prev_root: &[6u8; 32],
             revoked_root: &[7u8; 32],
             proof_mode: "test-mode",
-            fs_policy_version: "v1",
+            fs_policy_version: 1,
             meor_vrf_id: "lb-vrf/v1",
             fs_epoch_commit: &[8u8; 32],
             fs_ec: 100,
@@ -653,9 +653,13 @@ mod tests {
         let masks = mask_pair();
 
         // Class 1: InvalidKey — empty public payload
-        let empty_key_err =
-            verify_result(&[], &ctx, (&masks.0, &masks.1), &VrfProof { bytes: vec![0; 64] })
-                .unwrap_err();
+        let empty_key_err = verify_result(
+            &[],
+            &ctx,
+            (&masks.0, &masks.1),
+            &VrfProof { bytes: vec![0; 64] },
+        )
+        .unwrap_err();
         ensure!(
             matches!(empty_key_err, Error::InvalidKey(_)),
             "empty key should return InvalidKey, got: {empty_key_err}"
@@ -668,8 +672,7 @@ mod tests {
         let oversize = VrfProof {
             bytes: vec![0u8; super::MAX_VRF_PROOF_SIZE + 1],
         };
-        let oversize_err =
-            verify_result(&pk, &ctx, (&masks.0, &masks.1), &oversize).unwrap_err();
+        let oversize_err = verify_result(&pk, &ctx, (&masks.0, &masks.1), &oversize).unwrap_err();
         ensure!(
             matches!(oversize_err, Error::ProofSizeExceeded(_, _)),
             "oversized proof should return ProofSizeExceeded, got: {oversize_err}"
@@ -679,8 +682,7 @@ mod tests {
         let malformed = VrfProof {
             bytes: vec![0xDE, 0xAD],
         };
-        let malformed_err =
-            verify_result(&pk, &ctx, (&masks.0, &masks.1), &malformed).unwrap_err();
+        let malformed_err = verify_result(&pk, &ctx, (&masks.0, &masks.1), &malformed).unwrap_err();
         ensure!(
             matches!(malformed_err, Error::MalformedProof(_)),
             "truncated proof should return MalformedProof, got: {malformed_err}"

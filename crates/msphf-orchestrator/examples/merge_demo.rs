@@ -131,7 +131,7 @@ fn merge_params() -> OrchestrationParams<'static> {
         policy_version: DEFAULT_POLICY_VERSION,
         vrf_secret_key: Some(vrf_secret_key),
         vrf_public_key: Some(vrf_public_key),
-        fs_policy_version: "fs-merge-policy",
+        fs_policy_version: "7",
         fs_epoch_base_ts: 0,
         fs_join: FsJoinInputs::default(),
         fs_merge: FsMergeInputs {

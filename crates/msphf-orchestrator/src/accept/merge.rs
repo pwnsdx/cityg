@@ -29,22 +29,21 @@ impl AcceptanceContext {
         }
 
         let fs_policy_version = match header_map.get(&HDR_FS_POLICY_VERSION) {
-            Some(Value::Text(text)) => text.clone(),
             Some(Value::Integer(int)) => u64::try_from(*int)
-                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING))?
-                .to_string(),
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING))?,
             Some(_) => return Err(AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING)),
             None => return Err(AcceptanceError::Freeze(FREEZE_FS_JOIN_MISSING)),
         };
-        self.ensure_fs_policy_version_allowed(&fs_policy_version)?;
+        let fs_policy_version_str = fs_policy_version.to_string();
+        self.ensure_fs_policy_version_allowed(&fs_policy_version_str)?;
         if let Some(existing) = self.fs_policy_version() {
-            if existing != fs_policy_version {
+            if existing != fs_policy_version_str {
                 return Err(AcceptanceError::Freeze(
                     FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
                 ));
             }
         } else {
-            self.set_fs_policy_version(Some(fs_policy_version.clone()));
+            self.set_fs_policy_version(Some(fs_policy_version_str.clone()));
         }
 
         let fs_base_ts_value = header_u64_or_freeze(
@@ -304,7 +303,7 @@ impl AcceptanceContext {
         {
             return Err(AcceptanceError::Freeze(FREEZE_VRF_INVALID));
         }
-        if proofs.fs_policy_version != pivot_parity.policy_version
+        if proofs.fs_policy_version.to_string() != pivot_parity.policy_version
             || proofs.proof_mode != pivot_parity.proof_mode
             || proofs.vrf_id != pivot_parity.vrf_id
         {
@@ -358,7 +357,8 @@ impl AcceptanceContext {
                     Some(Arc::from(bytes.into_boxed_slice()))
                 }
             });
-        let srx_required_for_merge = self.srx_required;
+        let srx_required_for_merge = revoked_since_root_arr != pivot_record.revoked_since_root
+            || revoked_root_arr != pivot_record.revoked_root;
         ensure_merge_srx_keys(header_map, srx_required_for_merge)?;
         let srx_root_sw_before = self.ensure_srx_root_sw()?;
         if srx_required_for_merge {
@@ -606,7 +606,7 @@ impl AcceptanceContext {
             accept_seq,
             crs_id,
             params_id,
-            policy_version: proofs.fs_policy_version.clone(),
+            policy_version: proofs.fs_policy_version.to_string(),
             proof_mode: proofs.proof_mode.clone(),
             vrf_id: proofs.vrf_id.clone(),
             vrf_proof: proofs.vrf_pi.clone(),
@@ -749,9 +749,13 @@ mod tests {
     }
 
     fn align_header_with_pivot(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity) {
+        let fs_policy_version = pivot
+            .policy_version
+            .parse::<u64>()
+            .expect("pivot policy_version must be uint decimal");
         header.insert(
             HDR_FS_POLICY_VERSION,
-            Value::Text(pivot.policy_version.clone()),
+            Value::Integer(Integer::from(fs_policy_version)),
         );
         header.insert(HDR_PROOF_MODE, Value::Text(pivot.proof_mode.clone()));
         header.insert(HDR_VRF_ID, Value::Text(pivot.vrf_id.clone()));
@@ -1300,18 +1304,18 @@ mod tests {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         let (mut header, heads) =
             ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
-        let mut mutated_join_root = [0u8; 32];
-        mutated_join_root.copy_from_slice(parts.join_delta_root);
-        mutated_join_root[0] ^= 0xFF;
-        header.insert(111, Value::Bytes(mutated_join_root.to_vec()));
+        let mut mutated_revoked_root = [0u8; 32];
+        mutated_revoked_root.copy_from_slice(parts.revoked_root);
+        mutated_revoked_root[0] ^= 0xFF;
+        header.insert(113, Value::Bytes(mutated_revoked_root.to_vec()));
         let mutated_parts = AnchorInstanceParts {
             gid: parts.gid,
             cat: parts.cat,
             tswe_salt_hash: parts.tswe_salt_hash,
             parent_root: parts.parent_root,
-            join_delta_root: &mutated_join_root,
+            join_delta_root: parts.join_delta_root,
             revoked_since_prev_root: parts.revoked_since_prev_root,
-            revoked_root: parts.revoked_root,
+            revoked_root: &mutated_revoked_root,
             pox_r_commit: parts.pox_r_commit,
         };
         refresh_seed_bindings(&mut header, &mutated_parts, &merge_joiner);

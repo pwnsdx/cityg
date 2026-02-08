@@ -189,10 +189,7 @@ mod tests {
     #[test]
     fn h_l_rejects_embedded_nul() {
         let result = h_l("label\0extra", &42u64);
-        assert!(
-            result.is_err(),
-            "labels with embedded NUL must be rejected"
-        );
+        assert!(result.is_err(), "labels with embedded NUL must be rejected");
     }
 
     #[test]

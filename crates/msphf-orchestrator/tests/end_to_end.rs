@@ -251,7 +251,13 @@ fn build_chain(leaf: [u8; 32], path: &[RawPathEntry]) -> Option<Vec<[u8; 32]>> {
     Some(chain)
 }
 
-type SplitIntervalPaths = (Vec<RawPathEntry>, Vec<RawPathEntry>, Vec<RawPathEntry>, u8, u8);
+type SplitIntervalPaths = (
+    Vec<RawPathEntry>,
+    Vec<RawPathEntry>,
+    Vec<RawPathEntry>,
+    u8,
+    u8,
+);
 
 fn split_interval_paths(
     left_leaf: [u8; 32],
@@ -368,8 +374,7 @@ fn parent_nonmem_witness(
                 right_below,
                 above,
                 nmint: Some(
-                    merkle::hash_interval_binding(&l, &l, &r, &r, lca_left_h, lca_right_h)
-                        .to_vec(),
+                    merkle::hash_interval_binding(&l, &l, &r, &r, lca_left_h, lca_right_h).to_vec(),
                 ),
                 lca_left_height: Some(lca_left_h),
                 lca_right_height: Some(lca_right_h),
@@ -653,7 +658,7 @@ fn make_anchor_fixture(
                 None
             }
         },
-        fs_policy_version: "fs-test-policy",
+        fs_policy_version: "7",
         fs_epoch_base_ts: 0,
         fs_join: FsJoinInputs {
             fs_ec: 0,
@@ -1169,11 +1174,7 @@ fn srx_parent_conflict_freezes() -> Result<(), Box<dyn std::error::Error>> {
     match err {
         AcceptanceError::Freeze(code) => {
             let expected_invalid = code.code == 930 && code.reason == "srx_invalid";
-            assert!(
-                expected_invalid,
-                "unexpected freeze: {:?}",
-                code
-            );
+            assert!(expected_invalid, "unexpected freeze: {:?}", code);
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
@@ -1387,11 +1388,7 @@ fn srx_revoked_subset_conflict_freezes() -> Result<(), Box<dyn std::error::Error
     match err {
         AcceptanceError::Freeze(code) => {
             let expected_invalid = code.code == 930 && code.reason == "srx_invalid";
-            assert!(
-                expected_invalid,
-                "unexpected freeze: {:?}",
-                code
-            );
+            assert!(expected_invalid, "unexpected freeze: {:?}", code);
         }
         other => panic!("unexpected error variant: {other:?}"),
     }

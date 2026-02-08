@@ -212,7 +212,7 @@ fn demo_bundle_inner(
         policy_version: DEFAULT_POLICY_VERSION,
         vrf_secret_key: Some(vrf_secret_key),
         vrf_public_key: Some(vrf_public_key),
-        fs_policy_version: "fs-policy-v1",
+        fs_policy_version: "7",
         fs_epoch_base_ts: 0,
         fs_join: FsJoinInputs::default(),
         fs_merge: FsMergeInputs::default(),
@@ -330,7 +330,9 @@ fn load_or_generate_bootstrap_keys() -> Result<(Vec<u8>, Box<MlDsaSecretKey>), C
     let sk_len = pqcrypto_dilithium::dilithium5::secret_key_bytes();
 
     if let Some(path) = bootstrap_key_path() {
-        if let Ok(bytes) = fs::read(&path) && bytes.len() == pk_len + sk_len {
+        if let Ok(bytes) = fs::read(&path)
+            && bytes.len() == pk_len + sk_len
+        {
             let pk = bytes[..pk_len].to_vec();
             let sk_bytes = &bytes[pk_len..];
             let sk = MlDsaSecretKey::from_bytes(sk_bytes)

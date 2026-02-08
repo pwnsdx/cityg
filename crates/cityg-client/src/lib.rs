@@ -851,7 +851,7 @@ mod tests {
             policy_version: "v0",
             vrf_secret_key: None,
             vrf_public_key: None,
-            fs_policy_version: "fs-policy",
+            fs_policy_version: "7",
             fs_epoch_base_ts: 0,
             fs_join: FsJoinInputs::default(),
             fs_merge: FsMergeInputs::default(),
@@ -1014,7 +1014,10 @@ mod tests {
         bundle
             .header_map
             .remove(&msphf_orchestrator::hdr::HDR_SRX_PAYLOAD);
-        assert_eq!(bundle.membership_delta()?.joined, vec![demo_member_leaf("alice")]);
+        assert_eq!(
+            bundle.membership_delta()?.joined,
+            vec![demo_member_leaf("alice")]
+        );
 
         bundle.header_map.insert(
             msphf_orchestrator::hdr::HDR_MH_HEADS,
@@ -1239,7 +1242,7 @@ mod tests {
             policy_version: DEFAULT_POLICY_VERSION,
             vrf_secret_key: Some(vrf_secret_key),
             vrf_public_key: Some(vrf_public_key),
-            fs_policy_version: "fs-policy-v1",
+            fs_policy_version: "7",
             fs_epoch_base_ts: 0,
             fs_join: FsJoinInputs::default(),
             fs_merge: FsMergeInputs::default(),
@@ -1338,7 +1341,7 @@ mod tests {
             policy_version: DEFAULT_POLICY_VERSION,
             vrf_secret_key: Some(vrf_secret_key),
             vrf_public_key: Some(vrf_public_key),
-            fs_policy_version: "fs-policy-v1",
+            fs_policy_version: "7",
             fs_epoch_base_ts: 0,
             fs_join: FsJoinInputs::default(),
             fs_merge: FsMergeInputs::default(),

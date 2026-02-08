@@ -5,7 +5,7 @@ use crate::{
     KBROAD_ML_KEM_ALG, KBROAD_MODE, TSWE_ALG_CODE, TSWE_ALG_LABEL,
     proofs::srx_smallwood::{self, SRX_SMALLWOOD_MAX_BYTES},
 };
-use ciborium::{de, ser};
+use ciborium::de;
 use msphf_core::ds::MSPHF_POP_MSG;
 use serde::Serialize;
 use tracing::debug;
@@ -20,7 +20,7 @@ pub(super) struct ProofArtifacts {
     pub(crate) vrf_id: String,
     pub(crate) mask_a: MaskDigest,
     pub(crate) mask_b: MaskDigest,
-    pub(crate) fs_policy_version: String,
+    pub(crate) fs_policy_version: u64,
     pub(crate) vrf_public: Vec<u8>,
 }
 
@@ -55,7 +55,7 @@ fn srx_only_presence(header: &BTreeMap<u64, Value>) -> [bool; 4] {
 }
 
 fn has_legacy_srx_keys(header: &BTreeMap<u64, Value>) -> bool {
-    [super::HDR_SRX_MODE, super::HDR_SRX_HINT_COUNTS, super::HDR_SRX_HINT_SIZES]
+    super::LEGACY_SRX_KEYS
         .into_iter()
         .any(|key| header.contains_key(&key))
 }
@@ -302,19 +302,6 @@ pub(super) fn ensure_srx_relations(
         return Ok(());
     }
 
-    let mode_text = match header.get(&super::HDR_SRX_MODE) {
-        None => "srx/v1-complete",
-        Some(Value::Text(text)) => text.as_str(),
-        Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes).map_err(|_| {
-            debug!("ensure_srx_relations: mode not valid utf8");
-            AcceptanceError::Freeze(FREEZE_SRX_INVALID)
-        })?,
-        Some(_) => {
-            debug!("ensure_srx_relations: mode not text/bytes");
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        }
-    };
-
     let commit = header_bytes32_or_freeze(header, 121, FREEZE_SRX_INVALID, "srx_commit")?;
     let payload_bytes = match header.get(&super::HDR_SRX_PAYLOAD) {
         Some(Value::Bytes(bytes)) => bytes.as_slice(),
@@ -339,67 +326,11 @@ pub(super) fn ensure_srx_relations(
         debug!("ensure_srx_relations: payload CBOR malformed");
         AcceptanceError::Freeze(FREEZE_SRX_INVALID)
     })?;
-    let srx = match mode_text {
-        "srx/v1-complete" => parse_srx_payload(&payload_value)?,
-        _ => {
-            debug!("ensure_srx_relations: unsupported mode {}", mode_text);
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        }
-    };
-    let mut hint_join_count = srx.join_leaf_ids.len() as u64;
-    let mut hint_since_count = srx.since_leaf_ids.len() as u64;
-    let mut hint_anchor_count = srx.anchor_mem_pool.len() as u64;
-    let mut hint_payload_bytes = payload_bytes.len() as u64;
-    let mut hint_counts_bytes_owned = {
-        let value = Value::Map(vec![
-            (
-                Value::Text("join".to_string()),
-                Value::Integer(Integer::from(hint_join_count)),
-            ),
-            (
-                Value::Text("since".to_string()),
-                Value::Integer(Integer::from(hint_since_count)),
-            ),
-            (
-                Value::Text("anchors".to_string()),
-                Value::Integer(Integer::from(hint_anchor_count)),
-            ),
-        ]);
-        let mut buf = Vec::new();
-        ser::into_writer(&value, &mut buf)
-            .map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
-        buf
-    };
-    let mut hint_sizes_bytes_owned = {
-        let value = Value::Map(vec![(
-            Value::Text("bytes".to_string()),
-            Value::Integer(Integer::from(hint_payload_bytes)),
-        )]);
-        let mut buf = Vec::new();
-        ser::into_writer(&value, &mut buf)
-            .map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
-        buf
-    };
-    if let Some(Value::Bytes(bytes)) = header.get(&super::HDR_SRX_HINT_COUNTS) {
-        let hint_counts_value: Value = de::from_reader(bytes.as_slice()).map_err(|_| {
-            debug!("ensure_srx_relations: hint counts CBOR malformed");
-            AcceptanceError::Freeze(FREEZE_SRX_INVALID)
-        })?;
-        (hint_join_count, hint_since_count, hint_anchor_count) = parse_hint_counts(&hint_counts_value)?;
-        hint_counts_bytes_owned = bytes.clone();
-    } else if header.contains_key(&super::HDR_SRX_HINT_COUNTS) {
-        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-    }
-    if let Some(Value::Bytes(bytes)) = header.get(&super::HDR_SRX_HINT_SIZES) {
-        let hint_sizes_value: Value = de::from_reader(bytes.as_slice()).map_err(|_| {
-            debug!("ensure_srx_relations: hint sizes CBOR malformed");
-            AcceptanceError::Freeze(FREEZE_SRX_INVALID)
-        })?;
-        hint_payload_bytes = parse_hint_sizes(&hint_sizes_value)?;
-        hint_sizes_bytes_owned = bytes.clone();
-    } else if header.contains_key(&super::HDR_SRX_HINT_SIZES) {
-        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-    }
+    let srx = parse_srx_payload(&payload_value)?;
+    let hint_join_count = srx.join_leaf_ids.len() as u64;
+    let hint_since_count = srx.since_leaf_ids.len() as u64;
+    let hint_anchor_count = srx.anchor_mem_pool.len() as u64;
+    let hint_payload_bytes = payload_bytes.len() as u64;
     if hint_payload_bytes > max_bytes as u64 {
         return Err(AcceptanceError::Freeze(FREEZE_SRX_OVERSIZE_HINT));
     }
@@ -418,16 +349,6 @@ pub(super) fn ensure_srx_relations(
     }
 
     validate_anchor_pool(&srx.anchor_mem_pool)?;
-
-    if srx.join_leaf_ids.len() as u64 > hint_join_count
-        || srx.since_leaf_ids.len() as u64 > hint_since_count
-    {
-        return Err(AcceptanceError::Freeze(FREEZE_SRX_HINT_UNDER));
-    }
-
-    if srx.anchor_mem_pool.len() as u64 > hint_anchor_count {
-        return Err(AcceptanceError::Freeze(FREEZE_SRX_ANCHORS_OVERBUDGET));
-    }
 
     let join_root_vec = canonical_set_root(&srx.join_leaf_ids)
         .map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
@@ -492,19 +413,18 @@ pub(super) fn ensure_srx_relations(
         .as_ref()
         .ok_or(AcceptanceError::Freeze(FREEZE_SRX_SMALLWOOD_INVALID))?;
 
-    let payload_digest = srx_smallwood::payload_digest(payload_bytes);
-
-    let expected_shadow_after = srx_smallwood::compute_shadow_root(
+    let payload_digest =
+        srx_smallwood::payload_digest(payload_bytes).map_err(AcceptanceError::from)?;
+    let bridge_ctx = srx_smallwood::compute_bridge_ctx(
         parent_root,
         &join_root_arr,
         revoked_since_root,
         revoked_root,
-        Some(&commit),
-        Some(&payload_digest),
-    );
-    if &expected_shadow_after != root_sw {
-        return Err(AcceptanceError::Freeze(FREEZE_SRX_SMALLWOOD_INVALID));
-    }
+        &commit,
+        &payload_digest,
+        root_sw,
+    )
+    .map_err(AcceptanceError::from)?;
 
     let proof = srx_smallwood::Proof::from_bytes(proof_bytes.clone())?;
     let inputs = srx_smallwood::Inputs {
@@ -515,13 +435,11 @@ pub(super) fn ensure_srx_relations(
         revoked_since_root,
         revoked_root,
         srx_commit: &commit,
-        srx_mode: mode_text,
+        srx_payload_digest: &payload_digest,
+        srx_bridge_ctx: &bridge_ctx,
         proof_mode: proofs.proof_mode.as_str(),
-        fs_policy_version: proofs.fs_policy_version.as_str(),
+        fs_policy_version: proofs.fs_policy_version,
         vrf_id: proofs.vrf_id.as_str(),
-        payload: payload_bytes,
-        hint_counts_cbor: hint_counts_bytes_owned.as_slice(),
-        hint_sizes_cbor: hint_sizes_bytes_owned.as_slice(),
     };
     srx_smallwood::verify(&inputs, &proof)?;
 
@@ -568,21 +486,23 @@ pub(super) fn ensure_proofs(
     }
 
     let fs_policy_version_owned = match header.get(&HDR_FS_POLICY_VERSION) {
-        Some(Value::Text(text)) => text.clone(),
         Some(Value::Integer(int)) => u64::try_from(*int)
-            .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?
-            .to_string(),
-        Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes)
-            .map(|s| s.to_string())
             .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?,
-        _ => return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED)),
+        _ => {
+            return Err(AcceptanceError::Freeze(
+                FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+            ));
+        }
     };
     if let Some(value) = header.get(&HDR_POLICY_VERSION) {
         let legacy = match value {
             Value::Integer(int) => u64::try_from(*int)
-                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?
-                .to_string(),
-            _ => return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED)),
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?,
+            _ => {
+                return Err(AcceptanceError::Freeze(
+                    FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+                ));
+            }
         };
         if legacy != fs_policy_version_owned {
             return Err(AcceptanceError::Freeze(
@@ -855,7 +775,7 @@ mod tests {
             vrf_id: String::new(),
             mask_a: [0u8; 32],
             mask_b: [0u8; 32],
-            fs_policy_version: String::new(),
+            fs_policy_version: 0,
             vrf_public: Vec::new(),
         }
     }

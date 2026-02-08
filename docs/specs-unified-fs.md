@@ -220,7 +220,7 @@ The VRF is **output‑hiding**; the server learns no message secrets.
 ### 12.0 Header‑Key Registry (join; **REQUIRED**)
 
 **Core (join & merge):**
-`90,91,92,93,94,95,96,97,98,99,104,105,106,107,108,109,110,111,112,113,116,119,120,123,124,125`.
+`20,90,91,92,93,94,95,96,97,98,99,104,105,106,107,108,109,110,111,112,113,116,119,125`.
 
 **Reserved (legacy pre‑FS transcript):**
 `118 proofs_blob:bstr` (MUST NOT appear under `tswe/msphf-we/fs-hybrid`; retained for interoperability notes).
