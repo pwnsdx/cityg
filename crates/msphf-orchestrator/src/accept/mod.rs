@@ -488,7 +488,7 @@ impl AcceptanceContext {
         let verify_ttl = mh_window.ttl();
         let mut ctx = Self {
             mh_window,
-            rho_guard: RhoReplayGuard::new(options.rho_guard_capacity.max(1)),
+            rho_guard: RhoReplayGuard::new(options.rho_guard_capacity.max(1), verify_ttl),
             vck_cache: VckCache::new(verify_ttl),
             pivot_store: PivotParityStore::new(verify_ttl),
             bootstrap_policy: options.bootstrap_policy,
@@ -870,7 +870,7 @@ impl AcceptanceContext {
 
     /// Update the rho replay guard capacity.  Values below 1 are clamped to 1.
     pub fn set_rho_guard_capacity(&mut self, capacity: usize) {
-        self.rho_guard = RhoReplayGuard::new(capacity.max(1));
+        self.rho_guard = RhoReplayGuard::new(capacity.max(1), self.mh_window.ttl());
     }
 
     /// Clear replay-guard entries for a specific `(gid, parent_root)` pair.
@@ -958,6 +958,7 @@ impl AcceptanceContext {
         if let Some(ttl) = ttl {
             let now = self.current_time();
             self.mh_window.set_ttl(ttl, now);
+            self.rho_guard.set_ttl(ttl, now);
             self.vck_cache.set_ttl(ttl, now);
             self.pivot_store.set_ttl(ttl, now);
         }
@@ -1174,15 +1175,28 @@ impl AcceptanceContext {
 #[derive(Clone)]
 struct RhoReplayGuard {
     limit: usize,
-    entries: AHashMap<Vec<u8>, VecDeque<[u8; 32]>>,
+    ttl: Duration,
+    entries: AHashMap<Vec<u8>, VecDeque<RhoGuardEntry>>,
+}
+
+#[derive(Clone, Copy)]
+struct RhoGuardEntry {
+    rho_commit: [u8; 32],
+    seen_at: AcceptInstant,
 }
 
 impl RhoReplayGuard {
-    fn new(limit: usize) -> Self {
+    fn new(limit: usize, ttl: Duration) -> Self {
         Self {
             limit,
+            ttl,
             entries: AHashMap::new(),
         }
+    }
+
+    fn set_ttl(&mut self, ttl: Duration, now: AcceptInstant) {
+        self.ttl = ttl;
+        self.prune_all(now);
     }
 
     /// Record a new `rho_commit` for the given `(gid, parent_root)` pair.
@@ -1194,16 +1208,30 @@ impl RhoReplayGuard {
     /// Unlike the previous implementation, this does **not** evict old entries
     /// when the limit is reached, preventing an attacker from flushing the
     /// guard by submitting many distinct rho values.
-    fn record(&mut self, gid: &[u8], parent_root: &[u8], rho_commit: &[u8; 32]) -> bool {
+    fn record(
+        &mut self,
+        gid: &[u8],
+        parent_root: &[u8],
+        rho_commit: &[u8; 32],
+        now: AcceptInstant,
+    ) -> bool {
         let key = Self::make_key(gid, parent_root);
+        let ttl = self.ttl;
         let deque = self.entries.entry(key).or_default();
-        if deque.iter().any(|existing| existing == rho_commit) {
+        deque.retain(|entry| now.duration_since(entry.seen_at) <= ttl);
+        if deque
+            .iter()
+            .any(|entry| entry.rho_commit.as_slice() == rho_commit.as_slice())
+        {
             return false;
         }
         if deque.len() >= self.limit {
             return false;
         }
-        deque.push_back(*rho_commit);
+        deque.push_back(RhoGuardEntry {
+            rho_commit: *rho_commit,
+            seen_at: now,
+        });
         true
     }
 
@@ -1213,6 +1241,14 @@ impl RhoReplayGuard {
     fn clear_for(&mut self, gid: &[u8], parent_root: &[u8]) {
         let key = Self::make_key(gid, parent_root);
         self.entries.remove(&key);
+    }
+
+    fn prune_all(&mut self, now: AcceptInstant) {
+        let ttl = self.ttl;
+        self.entries.retain(|_, deque| {
+            deque.retain(|entry| now.duration_since(entry.seen_at) <= ttl);
+            !deque.is_empty()
+        });
     }
 
     /// Number of tracked rho_commit values for a given key.
@@ -2724,7 +2760,7 @@ mod tests {
         seed_capss_with(&mut ctx, &header_a_fs_witness);
         let outcome_a = accept_with_header(&mut ctx, &parts, &header_a)?;
 
-        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
         seed_capss_with(&mut ctx, &header_b_fs_witness);
         let weid_b = super::compute_we_epoch_id_from_header(&parts, &header_b)?;
         let result = ctx.accept_anchor(&parts, weid_b, &header_b);
@@ -2842,7 +2878,7 @@ mod tests {
         header_b.insert(HDR_FS_DEV_PREV_COMMIT, Value::Bytes(vec![0u8; 32]));
         refresh_seed_bindings(&mut header_b, &parts, &joiner_b);
 
-        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
         seed_capss_with(&mut ctx, &witness_b);
         let result = accept_with_header(&mut ctx, &parts, &header_b);
         assert!(result.is_err(), "error expected");
@@ -2967,7 +3003,7 @@ mod tests {
         let outcome_a = accept_with_header(&mut ctx, &parts, &header_a)?;
 
         ctx.clear_device_chains();
-        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
         seed_capss_with(&mut ctx, &header_b_fs_witness);
         let weid_b = super::compute_we_epoch_id_from_header(&parts, &header_b)?;
         let result = ctx.accept_anchor(&parts, weid_b, &header_b);
@@ -3239,7 +3275,7 @@ mod tests {
         seed_capss_with(&mut ctx, &header_a_fs_witness);
         accept_with_header(&mut ctx, &parts, &header_a)?;
         ctx.clear_device_chains();
-        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
         seed_capss_with(&mut ctx, &header_b_fs_witness);
         accept_with_header(&mut ctx, &parts, &header_b)?;
 
@@ -3369,7 +3405,7 @@ mod tests {
         seed_capss_with(&mut ctx, &witness_a);
         accept_with_header(&mut ctx, &parts, &header_a)?;
         ctx.clear_device_chains();
-        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
         seed_capss_with(&mut ctx, &witness_b);
         accept_with_header(&mut ctx, &parts, &header_b)?;
 
@@ -4475,7 +4511,7 @@ mod tests {
         seed_capss_with(&mut ctx, &fs_witness);
         accept_with_header(&mut ctx, &parts, &header_with_pop)?;
 
-        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
 
         let mut bad_header = header_with_pop.clone();
         if let Some(Value::Bytes(hints)) = bad_header.get(&HDR_SRX_HINT_COUNTS) {
@@ -4959,7 +4995,7 @@ mod tests {
             .unwrap_or_else(|err| panic!("first acceptance failed: {err:?}"));
 
         ctx.clear_device_chains();
-        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
         seed_capss_with(&mut ctx, &witness_b);
         accept_with_header(&mut ctx, &parts, &header_b)
             .unwrap_or_else(|err| panic!("second acceptance failed: {err:?}"));
@@ -5239,7 +5275,7 @@ mod tests {
         seed_capss_with(&mut ctx, &witness_a);
         accept_with_header(&mut ctx, &parts, &header_a)?;
         ctx.clear_device_chains();
-        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
         seed_capss_with(&mut ctx, &witness_b);
         accept_with_header(&mut ctx, &parts, &header_b)?;
 
@@ -5309,7 +5345,7 @@ mod tests {
         seed_capss_with(&mut ctx, &witness_a);
         accept_with_header(&mut ctx, &parts, &header_a)?;
         ctx.clear_device_chains();
-        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY);
+        ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
         seed_capss_with(&mut ctx, &witness_b);
         accept_with_header(&mut ctx, &parts, &header_b)?;
 
@@ -5387,18 +5423,15 @@ mod tests {
     #[test]
     fn srx_set_conflict_codes_are_distinct() {
         assert_ne!(
-            FREEZE_SRX_SET_CONFLICT_PARENT.code,
-            FREEZE_SRX_SET_CONFLICT_REVOKE.code,
+            FREEZE_SRX_SET_CONFLICT_PARENT.code, FREEZE_SRX_SET_CONFLICT_REVOKE.code,
             "parent vs revoke must have distinct codes"
         );
         assert_ne!(
-            FREEZE_SRX_SET_CONFLICT_PARENT.code,
-            FREEZE_SRX_SET_CONFLICT_SUBSET.code,
+            FREEZE_SRX_SET_CONFLICT_PARENT.code, FREEZE_SRX_SET_CONFLICT_SUBSET.code,
             "parent vs subset must have distinct codes"
         );
         assert_ne!(
-            FREEZE_SRX_SET_CONFLICT_REVOKE.code,
-            FREEZE_SRX_SET_CONFLICT_SUBSET.code,
+            FREEZE_SRX_SET_CONFLICT_REVOKE.code, FREEZE_SRX_SET_CONFLICT_SUBSET.code,
             "revoke vs subset must have distinct codes"
         );
     }
@@ -5407,30 +5440,34 @@ mod tests {
 
     #[test]
     fn rho_guard_rejects_duplicate() {
-        let mut guard = RhoReplayGuard::new(8);
+        let mut guard = RhoReplayGuard::new(8, Duration::from_secs(10));
         let gid = b"gid";
         let root = &[0xAA; 32];
         let rho = [0x01; 32];
-        assert!(guard.record(gid, root, &rho));
-        assert!(!guard.record(gid, root, &rho), "duplicate must be rejected");
+        let now = AcceptInstant::from_ticks(0);
+        assert!(guard.record(gid, root, &rho, now));
+        assert!(
+            !guard.record(gid, root, &rho, now),
+            "duplicate must be rejected"
+        );
     }
 
     #[test]
     fn rho_guard_rejects_when_full_instead_of_evicting() {
         let capacity = 4;
-        let mut guard = RhoReplayGuard::new(capacity);
+        let mut guard = RhoReplayGuard::new(capacity, Duration::from_secs(10));
         let gid = b"gid";
         let root = &[0xBB; 32];
 
         // Fill to capacity.
         for i in 0u8..capacity as u8 {
-            assert!(guard.record(gid, root, &[i; 32]));
+            assert!(guard.record(gid, root, &[i; 32], AcceptInstant::from_ticks(i as u64)));
         }
         assert_eq!(guard.count_for(gid, root), capacity);
 
         // The next distinct value must be rejected, not evict an old one.
         assert!(
-            !guard.record(gid, root, &[0xFF; 32]),
+            !guard.record(gid, root, &[0xFF; 32], AcceptInstant::from_ticks(4)),
             "overflow must reject, not evict"
         );
         assert_eq!(
@@ -5443,7 +5480,7 @@ mod tests {
         // (proving nothing was evicted).
         for i in 0u8..capacity as u8 {
             assert!(
-                !guard.record(gid, root, &[i; 32]),
+                !guard.record(gid, root, &[i; 32], AcceptInstant::from_ticks(4)),
                 "old rho {i} must still be detected"
             );
         }
@@ -5451,30 +5488,51 @@ mod tests {
 
     #[test]
     fn rho_guard_clear_for_reclaims_capacity() {
-        let mut guard = RhoReplayGuard::new(2);
+        let mut guard = RhoReplayGuard::new(2, Duration::from_secs(10));
         let gid = b"gid";
         let root = &[0xCC; 32];
-        assert!(guard.record(gid, root, &[1; 32]));
-        assert!(guard.record(gid, root, &[2; 32]));
-        assert!(!guard.record(gid, root, &[3; 32]), "must be full");
+        let now = AcceptInstant::from_ticks(0);
+        assert!(guard.record(gid, root, &[1; 32], now));
+        assert!(guard.record(gid, root, &[2; 32], now));
+        assert!(!guard.record(gid, root, &[3; 32], now), "must be full");
 
         guard.clear_for(gid, root);
         assert_eq!(guard.count_for(gid, root), 0);
         assert!(
-            guard.record(gid, root, &[3; 32]),
+            guard.record(gid, root, &[3; 32], now),
             "after clear, capacity is reclaimed"
         );
     }
 
     #[test]
     fn rho_guard_different_keys_are_independent() {
-        let mut guard = RhoReplayGuard::new(1);
+        let mut guard = RhoReplayGuard::new(1, Duration::from_secs(10));
         let gid = b"gid";
         let root_a = &[0x01; 32];
         let root_b = &[0x02; 32];
         let rho = [0xDD; 32];
-        assert!(guard.record(gid, root_a, &rho));
+        let now = AcceptInstant::from_ticks(0);
+        assert!(guard.record(gid, root_a, &rho, now));
         // Same rho under a different parent_root is independent.
-        assert!(guard.record(gid, root_b, &rho));
+        assert!(guard.record(gid, root_b, &rho, now));
+    }
+
+    #[test]
+    fn rho_guard_expires_old_entries_and_reclaims_capacity() {
+        let mut guard = RhoReplayGuard::new(2, Duration::from_secs(2));
+        let gid = b"gid";
+        let root = &[0xEE; 32];
+
+        assert!(guard.record(gid, root, &[1; 32], AcceptInstant::from_ticks(0)));
+        assert!(guard.record(gid, root, &[2; 32], AcceptInstant::from_ticks(1)));
+        assert!(
+            !guard.record(gid, root, &[3; 32], AcceptInstant::from_ticks(1)),
+            "guard should be full before TTL expiration"
+        );
+
+        assert!(
+            guard.record(gid, root, &[3; 32], AcceptInstant::from_ticks(3)),
+            "old entry should expire and free capacity"
+        );
     }
 }

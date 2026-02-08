@@ -57,7 +57,7 @@ impl AcceptanceContext {
             header_bytes32_or_freeze(header_map, 93, FREEZE_RHO_PARITY, "msphf_kgen_rho_commit")?;
         if !self
             .rho_guard
-            .record(parts.gid, parts.parent_root, &rho_commit)
+            .record(parts.gid, parts.parent_root, &rho_commit, now)
         {
             self.telemetry_record_rho_freeze(&telemetry_key);
             return Err(AcceptanceError::Freeze(FREEZE_RHO_PARITY));
