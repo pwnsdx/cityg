@@ -30,8 +30,8 @@ use gpui::{
     App, Application, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, size,
 };
 use gpui::{
-    ClipboardItem, Context as ViewContext, CursorStyle, Div, ElementId, FontWeight, Keystroke,
-    MouseButton, MouseDownEvent, Overflow, Render, Task, Window, div, point, px, rgb,
+    ClipboardItem, Context as ViewContext, CursorStyle, Div, FontWeight, Keystroke, MouseButton,
+    MouseDownEvent, Render, ScrollHandle, Task, Window, div, point, px, rgb,
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
@@ -257,6 +257,8 @@ struct AppModel {
     security_unread: u32,
     security_panel_expanded: bool,
     activity_events: Vec<ActivityEvent>,
+    chat_scroll_handle: ScrollHandle,
+    right_sidebar_scroll_handle: ScrollHandle,
 }
 
 enum JoinStatus {
@@ -851,6 +853,8 @@ impl AppModel {
             security_unread: 0,
             security_panel_expanded: false,
             activity_events: Vec::new(),
+            chat_scroll_handle: ScrollHandle::new(),
+            right_sidebar_scroll_handle: ScrollHandle::new(),
         };
 
         match load_last_session() {
@@ -1582,23 +1586,21 @@ impl AppModel {
             .child(self.render_workspace_sidebar(session, cx))
             .child(self.render_leave_controls(cx));
 
-        let mut details_scroll = div()
+        let details_scroll = div()
             .flex()
             .flex_col()
             .flex_grow()
             .min_h(px(0.0))
             .h_full()
             .gap(px(12.0))
+            .id("session-details-scroll")
+            .track_scroll(&self.right_sidebar_scroll_handle)
+            .overflow_y_scroll()
+            .block_mouse_except_scroll()
             .child(self.render_overview_panel(session, cx))
             .child(self.render_members_panel(cx))
             .child(self.render_security_panel(cx))
             .child(self.render_activity_panel(cx));
-
-        {
-            let interactivity = details_scroll.interactivity();
-            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
-            interactivity.block_mouse_except_scroll();
-        }
 
         let right_column = div()
             .flex()
@@ -2415,6 +2417,9 @@ impl AppModel {
             }
         }
         self.messages.sort_by_key(|m| m.timestamp_ms);
+        if inserted > 0 {
+            self.scroll_chat_to_bottom();
+        }
         inserted
     }
 
@@ -2435,6 +2440,7 @@ impl AppModel {
             pending_id: Some(pending_id),
         });
         self.messages.sort_by_key(|m| m.timestamp_ms);
+        self.scroll_chat_to_bottom();
         pending_id
     }
 
@@ -2461,6 +2467,7 @@ impl AppModel {
                 .retain(|message| message.pending_id != Some(pending_id));
         }
         self.messages.sort_by_key(|m| m.timestamp_ms);
+        self.scroll_chat_to_bottom();
     }
 
     fn mark_pending_message_failed(&mut self, pending_id: u64) {
@@ -2632,7 +2639,7 @@ impl AppModel {
             .child(self.render_message_composer(cx))
     }
 
-    fn render_message_list(&self) -> Div {
+    fn render_message_list(&self) -> impl IntoElement {
         let mut list = div()
             .flex()
             .flex_col()
@@ -2640,13 +2647,10 @@ impl AppModel {
             .min_h(px(0.0))
             .gap(px(8.0))
             .px(px(2.0))
-            .py(px(2.0));
-        {
-            let interactivity = list.interactivity();
-            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
-            interactivity.element_id = Some(ElementId::Name("chat-message-list".into()));
-            interactivity.block_mouse_except_scroll();
-        }
+            .py(px(2.0))
+            .id("chat-message-list")
+            .track_scroll(&self.chat_scroll_handle);
+        list = list.overflow_y_scroll().block_mouse_except_scroll();
 
         if self.messages.is_empty() {
             return list.child(
@@ -2937,6 +2941,10 @@ impl AppModel {
         }
     }
 
+    fn scroll_chat_to_bottom(&self) {
+        self.chat_scroll_handle.scroll_to_bottom();
+    }
+
     fn render_message_composer(&self, cx: &mut ViewContext<Self>) -> Div {
         let border_color = if self.composer.active {
             rgb(0x72f88e)
@@ -3212,12 +3220,7 @@ impl AppModel {
             search_row = search_row.child(clear_button);
         }
 
-        let mut list = div().max_h(px(180.0)).flex().flex_col().gap(px(6.0));
-
-        {
-            let interactivity = list.interactivity();
-            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
-        }
+        let mut list = div().flex().flex_col().gap(px(6.0));
 
         if self.members.is_empty() {
             list = list.child(
@@ -3382,12 +3385,7 @@ impl AppModel {
 
         header = header.child(actions);
 
-        let mut list = div().max_h(px(160.0)).flex().flex_col().gap(px(6.0));
-
-        {
-            let interactivity = list.interactivity();
-            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
-        }
+        let mut list = div().flex().flex_col().gap(px(6.0));
 
         if !self.security_panel_expanded {
             let summary = if count == 0 {
@@ -3519,11 +3517,7 @@ impl AppModel {
                     .child(format!("members {}/{}", self.members.len(), total_members)),
             );
 
-        let mut list = div().max_h(px(220.0)).flex().flex_col().gap(px(6.0));
-        {
-            let interactivity = list.interactivity();
-            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
-        }
+        let mut list = div().flex().flex_col().gap(px(6.0));
 
         if self.activity_events.is_empty() {
             list = list.child(
