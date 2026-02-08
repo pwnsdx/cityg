@@ -156,7 +156,9 @@ impl MultiHeadWindow {
         }
 
         let remove_old_entry = {
-            let entry_old = self.heads.get_mut(&wid_old_key).unwrap();
+            let Some(entry_old) = self.heads.get_mut(&wid_old_key) else {
+                return Err(FreezeError::MERGE_INVALID);
+            };
             for head in mh_heads {
                 if let Some(pos) = entry_old.iter().position(|rec| &rec.we_epoch_id == head) {
                     entry_old.remove(pos);

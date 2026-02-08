@@ -5,7 +5,7 @@ use axum::{
     response::Response,
 };
 use std::time::Instant;
-use tracing::{Instrument, info, info_span};
+use tracing::{Instrument, info, info_span, warn};
 use uuid::Uuid;
 
 /// HTTP header name for request ID
@@ -53,9 +53,15 @@ pub async fn request_tracing_middleware(mut request: Request, next: Next) -> Res
 
         // Add request ID to response headers
         let (mut parts, body) = response.into_parts();
-        let request_id_header =
-            HeaderValue::from_str(&request_id.to_string()).expect("uuid is a valid header value");
-        parts.headers.insert(X_REQUEST_ID, request_id_header);
+        let request_id_text = request_id.to_string();
+        if let Ok(request_id_header) = HeaderValue::from_str(&request_id_text) {
+            parts.headers.insert(X_REQUEST_ID, request_id_header);
+        } else {
+            warn!(
+                request_id = %request_id,
+                "failed to encode request id header"
+            );
+        }
 
         Response::from_parts(parts, body)
     }

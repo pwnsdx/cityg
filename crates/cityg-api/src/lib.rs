@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
 mod pb {
     include!(concat!(env!("OUT_DIR"), "/cityg.api.v1.rs"));
 }

@@ -165,11 +165,17 @@ mod bench {
             parts: &AnchorInstanceParts<'_>,
             joiner: &JoinerKGenResult,
             require: bool,
-            _allowed_modes: Option<&BTreeSet<String>>,
+            allowed_modes: Option<&BTreeSet<String>>,
             now: AcceptInstant,
         ) -> Result<(), AcceptanceError> {
             let empty_set = BTreeSet::new();
-            let proofs = stages::ensure_proofs(header, None, &empty_set, None, &empty_set)?;
+            let proofs = stages::ensure_proofs(
+                header,
+                allowed_modes,
+                &self.deprecated_modes,
+                None,
+                &empty_set,
+            )?;
             let mut parent_root = [0u8; 32];
             parent_root.copy_from_slice(parts.parent_root);
 

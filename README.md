@@ -232,10 +232,8 @@ vim crates/msphf-core/src/rlwe/mod.rs
 vim crates/msphf-core/tests/rlwe_kat.rs
 
 # Verify compliance
-cargo fmt
-cargo clippy
-cargo test --all
-./scripts/verify_no_secrets.sh
+./scripts/setup-git-hooks.sh
+./scripts/ci/local-ci.sh
 
 # Commit with spec references
 git commit -m "Optimize RLWE NTT (§9, Annex C)"

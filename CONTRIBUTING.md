@@ -110,20 +110,16 @@ vim docs/protocol/02-cryptographic-primitives.md
 Before committing, run all checks:
 
 ```bash
-# Format code
-cargo fmt --all
+# One-time setup: block pushes unless local CI parity checks pass
+./scripts/setup-git-hooks.sh
 
-# Check for common mistakes
-cargo clippy --all-targets --all-features
+# Run the same strict checks used by GitHub workflows
+./scripts/ci/local-ci.sh
 
-# Run all tests
-cargo test --all
-
-# Verify server-blindness guarantees (critical for protocol changes)
-./scripts/verify_no_secrets.sh
-
-# Check documentation builds (if applicable)
-cargo doc --no-deps
+# Optional overrides for constrained environments
+CITYG_SKIP_GUI=1 ./scripts/ci/local-ci.sh
+CITYG_SKIP_DOCKER=1 ./scripts/ci/local-ci.sh
+CITYG_SKIP_NEXTEST=1 ./scripts/ci/local-ci.sh
 ```
 
 ### 4. Commit Your Changes
