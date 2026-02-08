@@ -644,4 +644,48 @@ mod tests {
             _ => bail!("expected ProofSizeExceeded error"),
         }
     }
+
+    /// Verify that each VRF error class produces a distinct `Error` variant,
+    /// ensuring `verify_result` callers can distinguish failure modes.
+    #[test]
+    fn error_classification_is_distinct() -> Result<()> {
+        let ctx = demo_ctx();
+        let masks = mask_pair();
+
+        // Class 1: InvalidKey — empty public payload
+        let empty_key_err =
+            verify_result(&[], &ctx, (&masks.0, &masks.1), &VrfProof { bytes: vec![0; 64] })
+                .unwrap_err();
+        ensure!(
+            matches!(empty_key_err, Error::InvalidKey(_)),
+            "empty key should return InvalidKey, got: {empty_key_err}"
+        );
+
+        // Class 2: ProofSizeExceeded — oversized proof
+        let params = generate_parameters([40u8; 32])?;
+        let (secret, _) = generate_keypair(&params, [41u8; 32])?;
+        let pk = public_for_epoch(&secret, ctx.we_epoch_id)?;
+        let oversize = VrfProof {
+            bytes: vec![0u8; super::MAX_VRF_PROOF_SIZE + 1],
+        };
+        let oversize_err =
+            verify_result(&pk, &ctx, (&masks.0, &masks.1), &oversize).unwrap_err();
+        ensure!(
+            matches!(oversize_err, Error::ProofSizeExceeded(_, _)),
+            "oversized proof should return ProofSizeExceeded, got: {oversize_err}"
+        );
+
+        // Class 3: MalformedProof — truncated bytes that can't deserialize
+        let malformed = VrfProof {
+            bytes: vec![0xDE, 0xAD],
+        };
+        let malformed_err =
+            verify_result(&pk, &ctx, (&masks.0, &masks.1), &malformed).unwrap_err();
+        ensure!(
+            matches!(malformed_err, Error::MalformedProof(_)),
+            "truncated proof should return MalformedProof, got: {malformed_err}"
+        );
+
+        Ok(())
+    }
 }

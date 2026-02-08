@@ -387,13 +387,21 @@ impl AcceptanceContext {
         let vrf_proof = VrfProof {
             bytes: proofs.vrf_pi.clone(),
         };
-        if !zk_vrf_impl::verify(
+        match zk_vrf_impl::verify_result(
             vrf_public_payload,
             &vrf_ctx,
             (&proofs.mask_a, &proofs.mask_b),
             &vrf_proof,
         ) {
-            return Err(AcceptanceError::Freeze(FREEZE_VRF_INVALID));
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(target = "accept", "vrf: proof mathematically invalid");
+                return Err(AcceptanceError::Freeze(FREEZE_VRF_INVALID));
+            }
+            Err(err) => {
+                tracing::debug!(target = "accept", vrf_error = %err, "vrf: verification error");
+                return Err(AcceptanceError::Freeze(FREEZE_VRF_INVALID));
+            }
         }
 
         // SRX/Smallwood-v1 verification (ZK set-delta correctness)
