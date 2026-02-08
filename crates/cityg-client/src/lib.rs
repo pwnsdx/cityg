@@ -91,6 +91,7 @@ use msphf_orchestrator::{
     joiner_kgen_merge_or, joiner_kgen_or, recover_hp_material_from_header,
 };
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// Unified error type for City-G client operations.
 ///
@@ -379,7 +380,19 @@ pub struct ClientEpochBundle {
     pub hp_aead_key: [u8; 32],
 }
 
+impl Drop for ClientEpochBundle {
+    fn drop(&mut self) {
+        self.clear_local_secrets();
+    }
+}
+
 impl ClientEpochBundle {
+    fn clear_local_secrets(&mut self) {
+        self.epoch_key.zeroize();
+        self.eid.zeroize();
+        self.hp_aead_key.zeroize();
+    }
+
     fn from_joiner_result(
         mut anchor: AnchorBundle,
         params_snapshot: ParamsSnapshot,
@@ -889,6 +902,20 @@ mod tests {
         assert_eq!(decoded.epoch_key, [0u8; 32]);
         assert_eq!(decoded.eid, [0u8; 32]);
         assert_eq!(decoded.hp_aead_key, [0u8; 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn clear_local_secrets_zeroizes_bundle_material() -> Result<(), Box<dyn std::error::Error>> {
+        let mut bundle = demo_bundle_alice()?;
+        assert_ne!(bundle.epoch_key, [0u8; 32]);
+        assert_ne!(bundle.eid, [0u8; 32]);
+        assert_ne!(bundle.hp_aead_key, [0u8; 32]);
+
+        bundle.clear_local_secrets();
+        assert_eq!(bundle.epoch_key, [0u8; 32]);
+        assert_eq!(bundle.eid, [0u8; 32]);
+        assert_eq!(bundle.hp_aead_key, [0u8; 32]);
         Ok(())
     }
 
