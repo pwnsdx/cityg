@@ -126,7 +126,7 @@ For this profile, all specified invocations use `L=32` and therefore a single bl
 `salt_32` is a 32‑byte value (typically from `H_L(...)`); `info` is byte-string domain separated and profile scoped.
 `BLAKE3_keyed(k, m)` denotes BLAKE3 keyed-hash mode with 32-byte output.
 `counter_i` is a single byte (`0x01`, `0x02`, ...).
-Requests for `L != 32` are outside this profile and MUST be rejected as suite/config mismatch.
+Requests for `L != 32` are outside this profile and MUST be rejected with **`934 suite/config error`**.
 
 ---
 
@@ -268,6 +268,7 @@ D_device_max := W + S_device                   // REQUIRED
 ### 12.2 Acceptance Pipeline *(publisher‑blind, **time‑blind**, DoS‑hardened)*
 
 Maintain `A := GroupState.last_accepted_ec` (monotone; init: `last_checkpoint_ec`).
+Maintain `GroupState.srx_root_sw` as durable SRX shadow state (initialized from genesis state; if no SRX state exists yet, initialize to `ZERO32`).
 
 0. **Pre‑filters & maxima** — canonical CBOR, no duplicate keys, no unknown keys, respect size limits.
 1. **Structure/presence** — require FS (`139,141,142,143,146`) and device‑chain (`152–153`) fields; **if SRX applies**, require `160,161`.
@@ -297,16 +298,18 @@ Lookup `(stored_last_commit, stored_last_ec)` by device key `108`.
 
 3. **Proof commit & proofs (REQUIRED; fail‑fast):**
    1. Verify `125 == H_L("msphf/proofs",[95,146,(160,161 if present)])` **before** expensive proof verification.
-   2. Verify proofs in order: **Smallwood (FS)** → **ZK‑VRF** (bind_fs, include `160` if present) → **SRX/Smallwood‑v1** (Annex F, if SRX applies).
+   2. When SRX applies, set `srx_root_sw_before := GroupState.srx_root_sw` and supply it as the public input `srx_root_sw_before`; the prover MUST NOT choose this value.
+   3. Verify proofs in order: **Smallwood (FS)** → **ZK‑VRF** (bind_fs, include `160` if present) → **SRX/Smallwood‑v1** (Annex F, if SRX applies).
 4. **Defense‑in‑depth** — cross‑field binds across `93/94/98/99/106/110–113/116/139/141/142/143/152/153/(160 if present)`.
 5. **Atomic commit (REQUIRED):**
 
 ```text
 DeviceState[(gid, device_pk)] := (last_commit := 153, last_ec := 141)
 A := max(A, 141)
+if SRX applies: GroupState.srx_root_sw := 160
 ```
 
-Atomicity failure → no ack/visibility. Persist `last_checkpoint_ec`, `last_accepted_ec (A)`, and per‑device map.
+Atomicity failure → no ack/visibility. Persist `last_checkpoint_ec`, `last_accepted_ec (A)`, `srx_root_sw`, and per‑device map.
 
 ### 12.3 HP Transport (KBROAD only; Parent‑EID forbidden) *(normative)*
 
@@ -363,7 +366,7 @@ Pre‑boundary epochs decrypt **only** via cached τₑ (Annex J). Misses are 
 * Rollback/replay prevented by per‑device chains.
 * Checkpoints are time‑blind; no backdating; `148 == max(fs_ec)` across absorbed heads.
 * WID partitions concurrency via public roots/seed context only—no `hp`/`Y*`/`E_k` leakage.
-* **SRX privacy by default:** SRX correctness is proven via **Smallwood ZK** (ROM) without revealing changed leaves on wire. 
+* **SRX privacy by default:** SRX hidden-delta validity is proven in the field-friendly SRX relation via **Smallwood ZK** (ROM), with transcript binding to canonical roots/payload and without revealing changed leaves on wire.
 * **Liveness tradeoff (time‑blind FLG):** if no anchor is accepted for more than `D_anchor_max` epochs, honest devices may be blocked by group forward caps until recovery logic or operator action advances `A`. Deployments SHOULD keep at least one heartbeat publisher active per group.
 
 ---
@@ -417,7 +420,7 @@ Implementations MAY keep the historical term “freeze code” for the numeric c
 ## 17) Implementation Guidance *(normative)*
 
 * **Atomicity (REQUIRED):** acceptance + state update commit atomically; else no ack/visibility.
-* **Crash recovery (REQUIRED):** rebuild `last_checkpoint_ec`, `last_accepted_ec (A)`, and `DeviceState` **before** admitting joins; freeze inputs while rehydrating.
+* **Crash recovery (REQUIRED):** rebuild `last_checkpoint_ec`, `last_accepted_ec (A)`, `srx_root_sw`, and `DeviceState` **before** admitting joins; hold input admission while rehydrating.
 * **No server time:** FS decisions MUST NOT consult clocks.
 * **Proof path (REQUIRED):** verify `125` first, then **Smallwood (FS) → VRF → SRX/Smallwood‑v1**; keep SRX last so malformed traffic fails before the heaviest SRX checks.
 * **τₑ cache:** encrypt at rest; wipe on eviction; purge per Annex J.
@@ -495,8 +498,8 @@ require 148 ≥ GroupState.last_checkpoint_ec  // 947.3
 require 148 ≤ GroupState.last_accepted_ec    // implied by definition of max_ec
 ```
 
-* **SRX/Smallwood‑v1 (if required):** verify `161` under the Annex F statement (including `srx_bridge_ctx` derived from `110–113`, `121`, `122`, and `160`); `125` must include `160/161`.
-* **Atomic commit:** persist merge and set `last_checkpoint_ec := 148`.
+* **SRX/Smallwood‑v1 (if required):** set `srx_root_sw_before := GroupState.srx_root_sw`, then verify `161` under the Annex F statement (including `srx_bridge_ctx` derived from `110–113`, `121`, `122`, and `160`); `125` must include `160/161`.
+* **Atomic commit:** persist merge, set `last_checkpoint_ec := 148`, and if SRX applies set `GroupState.srx_root_sw := 160`.
 
 ## 24) Client Behavior & FS‑Equivalence *(normative)*
 
@@ -573,6 +576,7 @@ Labels include `"msphf/xk"`, `"hp/kek/salt"`, `"hp/kek/nonce"`, `"hp/nonce"`, `"
 * Define bridge inputs and context:
 
 ```text
+raw_srx_payload_bytes(122) := header[122]   // key 122 MUST be bstr; bytes as transmitted
 srx_payload_digest := H_L("srx/payload/digest",[raw_srx_payload_bytes(122)])
 srx_bridge_ctx := H_L("srx/bridge/v1",[
   parent_root(110), join_delta_root(111),
@@ -581,8 +585,10 @@ srx_bridge_ctx := H_L("srx/bridge/v1",[
 ])
 ```
 
+* For SRX verification, `121` MUST be `bstr32` and `122` MUST be `bstr` (otherwise `907.1`).
 * Verifier MUST recompute `srx_bridge_ctx` and pass it as a public input to SRX/Smallwood verification.
 * `srx_bridge_ctx` provides transcript binding without arithmetizing rpo‑256 in-circuit; by itself it is not a claim that canonical rpo‑256 roots are derivable from `160`.
+* `srx_root_sw_before` in the statement MUST be sourced by the verifier from persistent group state (`GroupState.srx_root_sw`), not from prover input bytes.
 
 **Statement (public inputs):**
 `(srx_root_sw_before, srx_root_sw_after /*=160*/, parent_root /*110*/, join_delta_root /*111*/, revoked_since_root /*112*/, revoked_root /*113*/, srx_commit /*121*/, srx_payload_digest, srx_bridge_ctx, policy_flags, …)`.
@@ -747,7 +753,7 @@ For time-blind FLG, deployments MUST specify how `A` is advanced after long idle
 
 ## Annex I — Implementation Binding (Server/Client) *(normative)*
 
-**Server (REQUIRED):** Enforce FS base (`143`), device chain (`152/153`), FLG vs `A`, **SRX/Smallwood‑v1** carve‑outs, Smallwood & VRF binds (incl. `160`), parity, **no `kbroad_replay`**, time‑blind checkpoint rule; maintain durable `last_checkpoint_ec`, `A`, per‑device map; atomicity; crash‑rehydration. Server MUST fail closed (return `934 suite/config error`) if any KBROAD private material (e.g., `kbroad_sk`, injected `K_HP`) is supplied at startup, and SHOULD NOT link a KEM decapsulation entry point on the acceptance path.
+**Server (REQUIRED):** Enforce FS base (`143`), device chain (`152/153`), FLG vs `A`, **SRX/Smallwood‑v1** carve‑outs, Smallwood & VRF binds (incl. `160`), parity, **no `kbroad_replay`**, time‑blind checkpoint rule; maintain durable `last_checkpoint_ec`, `A`, `srx_root_sw`, and per‑device map; atomicity; crash‑rehydration. Server MUST fail closed (return `934 suite/config error`) if any KBROAD private material (e.g., `kbroad_sk`, injected `K_HP`) is supplied at startup, and SHOULD NOT link a KEM decapsulation entry point on the acceptance path.
 **Client (REQUIRED):** Maintain `K_fs^t`, `fs_ec`, encrypted τₑ cache; device‑chain LRU; bounded queues; compute `ec_local(now)` (Annex H); evolve on boundary; zeroize old `K_fs`; enforce device‑chain monotonicity; mirror FLG at **adoption**; adopt checkpoints only when local counter is ready and forward cap allows.
 
 ---
@@ -765,7 +771,7 @@ TLA+ acceptance & merge state machines with invariants:
 **I2:** per‑device chain monotonicity.
 **I3:** all accepted heads satisfy FLG bounds.
 **I4:** checkpoint `148` equals `max(fs_ec)` over absorbed heads.
-Crypto artifacts for Smallwood binds and VRF; SRX lemma: Smallwood proof implies correct root transition and invariant checks under ROM. 
+Crypto artifacts for Smallwood binds and VRF; SRX lemma: Smallwood proof implies valid shadow-root transition and SRX invariant checks under ROM, with verifier-enforced bridge-context binding to canonical roots/payload.
 
 ---
 
@@ -793,7 +799,7 @@ No server‑resident message secrets; immediate send; high concurrency; PQ‑res
 * **Network partitions:** Offline devices evolve locally and, on reconnect, catch up via **stair‑steps** bounded by `D_device_max`; the group guard is keyed to `A`.
 * **`T_base`/time zones:** `T_base` is an absolute Unix‑seconds multiple of `H` (time zones irrelevant).
 * **Adaptive checkpoint uses current `W`:** Triggers evaluate `A − last_checkpoint_ec ≥ W_current(policy)`.
-* **SRX ZK privacy:** deltas are not revealed on wire; SRX correctness is proven via **Smallwood** (ROM). 
+* **SRX ZK privacy:** deltas are not revealed on wire; Smallwood proves hidden-delta validity in the shadow relation with transcript binding to canonical roots/payload (ROM).
 
 ---
 
