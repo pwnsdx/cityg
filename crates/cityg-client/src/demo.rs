@@ -21,7 +21,8 @@ use msphf_orchestrator::hdr;
 use msphf_orchestrator::{
     AnchorInstanceParts, DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
     ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair,
-    SrxInputs, SrxMode, SrxNonMembershipAnchor, build_bootstrap_digest, deterministic_lb_vrf_keys,
+    SrxInputs, SrxMode, SrxNonMembershipAnchor, build_bootstrap_digest, compute_leaf_id,
+    deterministic_lb_vrf_keys,
 };
 use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign, keypair};
 use pqcrypto_kyber::kyber768::{SecretKey as MlKemSecretKey, keypair as kyber_keypair};
@@ -37,25 +38,65 @@ use crate::{CityGClient, CityGError, ClientEpochBundle, witness};
 
 pub const DEMO_GID: [u8; 32] = [0x43; 32];
 
-fn leaf_registry() -> &'static Mutex<BTreeMap<String, [u8; 32]>> {
-    static REGISTRY: OnceLock<Mutex<BTreeMap<String, [u8; 32]>>> = OnceLock::new();
+#[derive(Clone)]
+struct DemoIdentity {
+    leaf: [u8; 32],
+    pop_public_key: Vec<u8>,
+    pop_secret_key: Vec<u8>,
+}
+
+fn identity_registry() -> &'static Mutex<BTreeMap<String, DemoIdentity>> {
+    static REGISTRY: OnceLock<Mutex<BTreeMap<String, DemoIdentity>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-fn member_leaf(label: &str) -> [u8; 32] {
-    let registry = leaf_registry();
+fn member_identity(label: &str) -> DemoIdentity {
+    let registry = identity_registry();
     let mut guard = match registry.lock() {
         Ok(g) => g,
         Err(_) => unreachable!(),
     };
     if let Some(existing) = guard.get(label) {
-        *existing
+        existing.clone()
     } else {
-        let next_index = (guard.len() as u32).saturating_add(1);
-        let leaf = witness::sequential_leaf(next_index);
-        guard.insert(label.to_string(), leaf);
-        leaf
+        let (pop_pk, pop_sk) = keypair();
+        let pop_public_key = pop_pk.as_bytes().to_vec();
+        let pop_secret_key = pop_sk.as_bytes().to_vec();
+        let leaf_id = match compute_leaf_id(
+            LeafIdMode::PerGroup,
+            &DEMO_GID,
+            "ML-DSA-65",
+            pop_public_key.as_slice(),
+        ) {
+            Ok(bytes) => bytes,
+            Err(_) => unreachable!("demo leaf_id derivation must succeed"),
+        };
+        let mut leaf = [0u8; 32];
+        leaf.copy_from_slice(leaf_id.as_slice());
+        let identity = DemoIdentity {
+            leaf,
+            pop_public_key,
+            pop_secret_key,
+        };
+        guard.insert(label.to_string(), identity.clone());
+        identity
     }
+}
+
+fn identity_for_leaf(leaf: &[u8; 32]) -> Option<DemoIdentity> {
+    let registry = identity_registry();
+    let guard = match registry.lock() {
+        Ok(g) => g,
+        Err(_) => unreachable!(),
+    };
+    guard
+        .values()
+        .find(|identity| &identity.leaf == leaf)
+        .cloned()
+}
+
+fn member_leaf(label: &str) -> [u8; 32] {
+    member_identity(label).leaf
 }
 
 pub fn demo_member_leaf(label: &str) -> [u8; 32] {
@@ -122,8 +163,20 @@ fn demo_bundle_inner(
     let witness_bytes = witness::witness_to_cbor(&canonical_witness)?;
     let srx_inputs = srx_owned.into_srx_inputs();
 
-    let (pop_pk_obj, pop_sk_obj) = keypair();
-    let pop_pk_bytes = pop_pk_obj.as_bytes().to_vec();
+    let (pop_pk_bytes, pop_sk_obj) = if join_leaves.len() == 1 {
+        if let Some(identity) = identity_for_leaf(&join_leaves[0]) {
+            let pop_sk =
+                <MlDsaSecretKey as SecretKey>::from_bytes(identity.pop_secret_key.as_slice())
+                    .map_err(|_| CityGError::InvalidInput("demo pop secret malformed"))?;
+            (identity.pop_public_key, pop_sk)
+        } else {
+            let (pop_pk, pop_sk) = keypair();
+            (pop_pk.as_bytes().to_vec(), pop_sk)
+        }
+    } else {
+        let (pop_pk, pop_sk) = keypair();
+        (pop_pk.as_bytes().to_vec(), pop_sk)
+    };
 
     let header = base_header();
 
