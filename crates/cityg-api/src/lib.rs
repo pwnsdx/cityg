@@ -104,8 +104,16 @@ impl AliasRateLimiter {
     async fn check_and_record(&self, alias: &str) -> bool {
         let now = Instant::now();
         let mut guard = self.attempts.write().await;
+
+        // Prune all stale alias buckets first so one-off alias spam does not
+        // accumulate unbounded state in memory.
+        let window = self.window;
+        guard.retain(|_, entries| {
+            entries.retain(|ts| now.duration_since(*ts) <= window);
+            !entries.is_empty()
+        });
+
         let entries = guard.entry(alias.to_string()).or_default();
-        entries.retain(|ts| now.duration_since(*ts) <= self.window);
         if entries.len() >= self.burst as usize {
             return false;
         }
@@ -3056,6 +3064,25 @@ mod tests {
         assert!(
             matches!(result2, Err(ApiError::RateLimited)),
             "second call should be rate-limited, got: {result2:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn alias_rate_limiter_prunes_stale_alias_buckets() {
+        let limiter = AliasRateLimiter::new(10, Duration::from_millis(1));
+        assert!(limiter.check_and_record("old-alias").await);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        assert!(limiter.check_and_record("new-alias").await);
+
+        let guard = limiter.attempts.read().await;
+        assert!(
+            !guard.contains_key("old-alias"),
+            "stale alias bucket should be removed during global prune"
+        );
+        assert!(
+            guard.contains_key("new-alias"),
+            "active alias bucket should remain"
         );
     }
 }
