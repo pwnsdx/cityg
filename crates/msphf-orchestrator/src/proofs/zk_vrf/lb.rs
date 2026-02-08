@@ -276,7 +276,7 @@ fn take_length_prefixed<'a>(bytes: &'a [u8], cursor: &mut usize) -> Result<&'a [
 }
 
 /// Deterministic key material (for tests and fixtures).
-pub fn deterministic_key_material() -> (&'static [u8], &'static [u8]) {
+pub(crate) fn deterministic_key_material() -> (&'static [u8], &'static [u8]) {
     static MATERIAL: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
     MATERIAL.get_or_init(|| {
         let params = match generate_parameters([0u8; 32]) {

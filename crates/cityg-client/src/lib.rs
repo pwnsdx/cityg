@@ -772,10 +772,26 @@ mod tests {
     use msphf_orchestrator::{DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID};
     use msphf_orchestrator::{
         FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PivotParity, PopKeypair,
-        SrxMode, deterministic_lb_vrf_keys,
+        SrxMode,
     };
     use pqcrypto_dilithium::dilithium5::keypair;
     use pqcrypto_traits::sign::PublicKey as _;
+    use std::sync::OnceLock;
+
+    fn test_vrf_keys() -> (&'static [u8], &'static [u8]) {
+        static VRF_KEYS: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
+        let pair = VRF_KEYS.get_or_init(|| {
+            let params = match msphf_orchestrator::lb::generate_parameters([0u8; 32]) {
+                Ok(params) => params,
+                Err(_) => unreachable!("deterministic test VRF params must be derivable"),
+            };
+            match msphf_orchestrator::lb::generate_keypair(&params, [1u8; 32]) {
+                Ok(pair) => pair,
+                Err(_) => unreachable!("deterministic test VRF keypair must be derivable"),
+            }
+        });
+        (&pair.0, &pair.1)
+    }
 
     #[test]
     fn slice_to_array_rejects_short_input() {
@@ -1181,7 +1197,7 @@ mod tests {
         };
 
         let (pop_pk, pop_sk) = keypair();
-        let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
+        let (vrf_secret_key, vrf_public_key) = test_vrf_keys();
         let params = OrchestrationParams {
             msphf_crs_id: RLWE_CRS_ID_DEFAULT,
             params_id: RLWE_PARAMS_ID_MOCK,
@@ -1279,7 +1295,7 @@ mod tests {
         };
 
         let (pop_pk, pop_sk) = keypair();
-        let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
+        let (vrf_secret_key, vrf_public_key) = test_vrf_keys();
         let params = OrchestrationParams {
             msphf_crs_id: RLWE_CRS_ID_DEFAULT,
             params_id: RLWE_PARAMS_ID_MOCK,

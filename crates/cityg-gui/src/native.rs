@@ -40,7 +40,7 @@ use msphf_orchestrator::CapssWitnessBundle;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
     OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_proofs_commit_bytes,
-    derive_we_epoch_id, deterministic_lb_vrf_keys, hdr,
+    derive_we_epoch_id, hdr,
 };
 use pqcrypto_dilithium::{
     dilithium3::{
@@ -62,6 +62,21 @@ use tracing::{debug, info, warn};
 
 #[cfg(test)]
 use cityg_client::demo;
+
+fn demo_vrf_keys() -> (&'static [u8], &'static [u8]) {
+    static VRF_KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    let pair = VRF_KEYS.get_or_init(|| {
+        let params = match msphf_orchestrator::lb::generate_parameters([0u8; 32]) {
+            Ok(params) => params,
+            Err(_) => unreachable!("deterministic GUI VRF params must be derivable"),
+        };
+        match msphf_orchestrator::lb::generate_keypair(&params, [1u8; 32]) {
+            Ok(pair) => pair,
+            Err(_) => unreachable!("deterministic GUI VRF keypair must be derivable"),
+        }
+    });
+    (&pair.0, &pair.1)
+}
 
 mod tokio_bridge {
     use anyhow::Error;
@@ -6106,7 +6121,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
     let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
 
-    let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
+    let (vrf_secret_key, vrf_public_key) = demo_vrf_keys();
 
     let msphf_crs_id = if ticket.msphf_crs_id.is_empty() {
         "rlwe-merkle/v1".to_string()

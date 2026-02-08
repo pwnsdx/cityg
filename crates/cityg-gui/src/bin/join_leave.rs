@@ -19,7 +19,7 @@ use msphf_core::{ds, hash::h_l};
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
     OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id,
-    deterministic_lb_vrf_keys, hdr,
+    hdr,
 };
 use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
 use pqcrypto_traits::sign::{
@@ -32,6 +32,21 @@ use serde_json::Value as JsonValue;
 use tokio::{sync::mpsc, time::timeout};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tracing::warn;
+
+fn demo_vrf_keys() -> (&'static [u8], &'static [u8]) {
+    static VRF_KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    let pair = VRF_KEYS.get_or_init(|| {
+        let params = match msphf_orchestrator::lb::generate_parameters([0u8; 32]) {
+            Ok(params) => params,
+            Err(_) => unreachable!("deterministic join-leave VRF params must be derivable"),
+        };
+        match msphf_orchestrator::lb::generate_keypair(&params, [1u8; 32]) {
+            Ok(pair) => pair,
+            Err(_) => unreachable!("deterministic join-leave VRF keypair must be derivable"),
+        }
+    });
+    (&pair.0, &pair.1)
+}
 
 fn random_room_id() -> String {
     let mut rng = thread_rng();
@@ -424,7 +439,7 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         seed
     });
 
-    let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
+    let (vrf_secret_key, vrf_public_key) = demo_vrf_keys();
 
     let params = OrchestrationParams {
         msphf_crs_id: ticket.msphf_crs_id.as_str(),

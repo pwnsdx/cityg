@@ -76,6 +76,7 @@ pub use proofs::hp_binding::{HpBindingInputs, HpProof, proof_to_cbor, prove_hp_k
 pub use proofs::zk_vrf::lb;
 pub use proofs::zk_vrf::{MaskDigest, VrfCtx, zk_vrf_impl};
 pub mod kat;
+#[cfg(any(test, feature = "bench-fixtures"))]
 pub fn deterministic_lb_vrf_keys() -> (&'static [u8], &'static [u8]) {
     proofs::zk_vrf::lb::deterministic_key_material()
 }

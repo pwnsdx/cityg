@@ -118,7 +118,7 @@ fn accept_bundle(
 }
 
 fn merge_params() -> OrchestrationParams<'static> {
-    let (vrf_secret_key, vrf_public_key) = msphf_orchestrator::deterministic_lb_vrf_keys();
+    let (vrf_secret_key, vrf_public_key) = deterministic_example_vrf_keys();
     OrchestrationParams {
         msphf_crs_id: RLWE_CRS_ID_DEFAULT,
         params_id: RLWE_PARAMS_ID_MOCK,
@@ -138,6 +138,21 @@ fn merge_params() -> OrchestrationParams<'static> {
             fs_purge_times: Some((0, 0)),
         },
     }
+}
+
+fn deterministic_example_vrf_keys() -> (&'static [u8], &'static [u8]) {
+    static VRF_KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    let pair = VRF_KEYS.get_or_init(|| {
+        let params = match msphf_orchestrator::lb::generate_parameters([0u8; 32]) {
+            Ok(params) => params,
+            Err(_) => unreachable!("deterministic example VRF params must be derivable"),
+        };
+        match msphf_orchestrator::lb::generate_keypair(&params, [1u8; 32]) {
+            Ok(pair) => pair,
+            Err(_) => unreachable!("deterministic example VRF keypair must be derivable"),
+        }
+    });
+    (&pair.0, &pair.1)
 }
 
 fn report_window(ctx: &AcceptanceContext) {

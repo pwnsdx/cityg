@@ -29,8 +29,6 @@ use msphf_core::{
     },
 };
 use msphf_orchestrator::HpBindingInputs;
-#[cfg(feature = "zkvrf-pq")]
-use msphf_orchestrator::deterministic_lb_vrf_keys;
 use msphf_orchestrator::hdr::{HDR_BOOTSTRAP_ALG, HDR_BOOTSTRAP_PK, HDR_BOOTSTRAP_SIG, HDR_CRS_ID};
 use msphf_orchestrator::mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW};
 use msphf_orchestrator::{
@@ -64,6 +62,22 @@ fn fixture_pop_keys() -> (&'static [u8], &'static MlDsaSecretKey) {
         let sk_static: &'static MlDsaSecretKey = Box::leak(Box::new(sk));
         (pk_static, sk_static)
     })
+}
+
+#[cfg(feature = "zkvrf-pq")]
+fn fixture_vrf_keys() -> (&'static [u8], &'static [u8]) {
+    static VRF_KEYS: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
+    let pair = VRF_KEYS.get_or_init(|| {
+        let params = match msphf_orchestrator::lb::generate_parameters([0u8; 32]) {
+            Ok(params) => params,
+            Err(_) => unreachable!("deterministic test VRF params must be derivable"),
+        };
+        match msphf_orchestrator::lb::generate_keypair(&params, [1u8; 32]) {
+            Ok(pair) => pair,
+            Err(_) => unreachable!("deterministic test VRF keypair must be derivable"),
+        }
+    });
+    (&pair.0, &pair.1)
 }
 
 fn witness_branch_a(root: &[u8; 32]) -> CanonicalWitness {
@@ -469,7 +483,7 @@ fn make_anchor_fixture(
     .unwrap();
     let (pop_pk, pop_sk) = fixture_pop_keys();
     #[cfg(feature = "zkvrf-pq")]
-    let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
+    let (vrf_secret_key, vrf_public_key) = fixture_vrf_keys();
     let mut fs_epoch_commit = [0u8; 32];
     let mut fs_commit_hasher = Hasher::new();
     fs_commit_hasher.update(b"end-to-end-fs-epoch");

@@ -22,7 +22,6 @@ use msphf_orchestrator::{
     AnchorInstanceParts, DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
     ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair,
     SrxInputs, SrxMode, SrxNonMembershipAnchor, build_bootstrap_digest, compute_leaf_id,
-    deterministic_lb_vrf_keys,
 };
 use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign, keypair};
 use pqcrypto_kyber::kyber768::{SecretKey as MlKemSecretKey, keypair as kyber_keypair};
@@ -93,6 +92,21 @@ fn identity_for_leaf(leaf: &[u8; 32]) -> Option<DemoIdentity> {
         .values()
         .find(|identity| &identity.leaf == leaf)
         .cloned()
+}
+
+fn demo_vrf_keys() -> (&'static [u8], &'static [u8]) {
+    static VRF_KEYS: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
+    let pair = VRF_KEYS.get_or_init(|| {
+        let params = match msphf_orchestrator::lb::generate_parameters([0u8; 32]) {
+            Ok(params) => params,
+            Err(_) => unreachable!("deterministic demo VRF params must be derivable"),
+        };
+        match msphf_orchestrator::lb::generate_keypair(&params, [1u8; 32]) {
+            Ok(pair) => pair,
+            Err(_) => unreachable!("deterministic demo VRF keypair must be derivable"),
+        }
+    });
+    (&pair.0, &pair.1)
 }
 
 fn member_leaf(label: &str) -> [u8; 32] {
@@ -180,7 +194,7 @@ fn demo_bundle_inner(
 
     let header = base_header();
 
-    let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
+    let (vrf_secret_key, vrf_public_key) = demo_vrf_keys();
 
     let params = OrchestrationParams {
         msphf_crs_id: RLWE_CRS_ID_DEFAULT,
