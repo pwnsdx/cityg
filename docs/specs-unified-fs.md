@@ -220,7 +220,7 @@ The VRF is **output‑hiding**; the server learns no message secrets.
 ### 12.0 Header‑Key Registry (join; **REQUIRED**)
 
 **Core (join & merge):**
-`90,91,92,93,94,95,96,97,98,99,104,105,106,107,108,109,110,111,112,113,116,119,120,121,122,123,124,125,160,161`.
+`90,91,92,93,94,95,96,97,98,99,104,105,106,107,108,109,110,111,112,113,116,119,120,123,124,125`.
 
 **Reserved (legacy pre‑FS transcript):**
 `118 proofs_blob:bstr` (MUST NOT appear under `tswe/msphf-we/fs-hybrid`; retained for interoperability notes).
@@ -233,9 +233,9 @@ Key `140` remains legacy `policy_version` (non‑FS profiles). Under this profil
 `152 fs_dev_prev_commit:bstr32`, `153 fs_dev_commit:bstr32`, with
 `fs_dev_commit := H_L("fs/dev/chain",[108 /*device pk*/, 141 /*fs_ec*/, 152])`.
 
-**SRX (Smallwood) fields (when SRX applies; **REQUIRED**):**
+**SRX-only fields (merge mode when SRX applies; **REQUIRED**):**
 *(Under this profile, SRX applies only in merge mode per §22.)*
-`160 srx_root_sw:bstr32`, `161 srx_smallwood:bstr`.
+`121 srx_commit:bstr32`, `122 srx_payload:bstr`, `160 srx_root_sw:bstr32`, `161 srx_smallwood:bstr`.
 
 **Proof material & commits:**
 `95 vrf_proof:bstr`, `146 smallwood:bstr`,
@@ -274,9 +274,10 @@ At genesis, `GroupState.srx_root_sw` MUST be `SRX_EMPTY_ROOT_SW` (Annex F/Anne
 If persisted `srx_root_sw` is missing at startup: use `srx_migration_root_sw` (policy key, optional `bstr32`) exactly once to initialize and persist `GroupState.srx_root_sw`; if absent, fail closed with `934`.
 
 0. **Pre‑filters & maxima** — canonical CBOR, no duplicate keys, no unknown keys, respect size limits.
-1. **Structure/presence** — require FS (`139,141,142,143,146`) and device‑chain (`152–153`) fields; **if SRX applies**, require `160,161`.
+1. **Structure/presence** — require FS (`139,141,142,143,146`) and device‑chain (`152–153`) fields; **if SRX applies**, require `121/122/160/161`.
    Define `is_merge :=` header contains any merge-only key (see §21; `{130,131,132,133,134,135,136,138,144,145,148}` in this profile).
    If `is_merge == false` (join mode), `121/122/160/161` MUST be absent; presence is `930`.
+   If `is_merge == true` (merge mode), SRX-only keys MUST follow §22: all present when SRX is required, all absent when SRX is forbidden.
 2. **Gates** — suite & `fs_policy_version` MUST be allow‑listed (Annex N).
 
 **(2a) FS base constant (join & merge; REQUIRED):**
@@ -455,11 +456,12 @@ State: ~64 B per active device; group state maintains two counters.
 * **Adaptive checkpoint:** publish when `A − last_checkpoint_ec ≥ W` (using **current** `W`) or head count ≥ `K`.
 * **τₑ cache:** hit/miss; at‑rest encryption; checkpoint purge.
 * **SRX/Smallwood‑v1:**
-  – Missing `160/161` when SRX is required → `929`.
+  – Missing any of `121/122/160/161` when SRX is required → `929`.
   – `125` mismatch when `160/161` present → `923`.
   – VRF bind mismatch (tamper `160`) → `944.3`.
   – Invalid SRX proof → `930`.
   – Join anchor carrying any of `121/122/160/161` → `930`.
+  – Merge with SRX forbidden but carrying any of `121/122/160/161` → `930`.
   – Startup with missing persisted `srx_root_sw`: no `srx_migration_root_sw` → startup fails `934`; with `srx_migration_root_sw` → initialize once and proceed.
   – Genesis initialization: `GroupState.srx_root_sw == SRX_EMPTY_ROOT_SW` for configured `srx_smallwood_profile`.
 * **Publisher‑blindness negative:** Supplying `kbroad_sk` (or any KBROAD private material) in server config MUST fail at startup with `934`.
@@ -498,7 +500,8 @@ Join anchors MUST NOT carry SRX-only keys `121/122/160/161` (else `930`).
 Concurrent SRX-bearing heads are out of profile and MUST be rejected (`930`).
 
 **SRX is REQUIRED** iff revocation roots differ from the pivot (`112` or `113` differ); otherwise SRX is **FORBIDDEN**.
-When SRX is required, the merge MUST carry `160 srx_root_sw` and `161 srx_smallwood` and satisfy Annex F.
+When SRX is required, the merge MUST carry SRX-only keys `121/122/160/161` and satisfy Annex F.
+When SRX is forbidden, the merge MUST NOT carry any SRX-only keys `121/122/160/161`.
 
 ## 23) Acceptance Deltas (Merge Mode; time‑blind) *(normative)*
 
@@ -513,7 +516,8 @@ require 148 ≥ GroupState.last_checkpoint_ec  // 947.3
 require 148 ≤ GroupState.last_accepted_ec    // implied by definition of max_ec
 ```
 
-* **SRX/Smallwood‑v1 (if required):** set `srx_root_sw_before := GroupState.srx_root_sw`, then verify `161` under the Annex F statement (including `srx_bridge_ctx` derived from `110–113`, `121`, `122`, and `160`); `125` must include `160/161`.
+* **SRX/Smallwood‑v1 (if required):** require SRX-only keys `121/122/160/161`; set `srx_root_sw_before := GroupState.srx_root_sw`, then verify `161` under the Annex F statement (including `srx_bridge_ctx` derived from `110–113`, `121`, `122`, and `160`); `125` must include `160/161`.
+* **SRX forbidden case:** keys `121/122/160/161` MUST be absent.
 * **Atomic commit:** persist merge, set `last_checkpoint_ec := 148`, and if SRX applies conditionally update `GroupState.srx_root_sw := 160` only when current state still equals verified `srx_root_sw_before` (else `930`).
 
 ## 24) Client Behavior & FS‑Equivalence *(normative)*
