@@ -76,6 +76,48 @@ enum BroadcastNotification {
     Membership(MembershipNotification),
 }
 
+/// Per-alias rate limiter for TOFU registration.
+///
+/// Tracks the number of registration attempts per alias within a sliding
+/// window.  Prevents alias squatting by rejecting bursts that exceed the
+/// configured threshold.
+#[derive(Clone)]
+struct AliasRateLimiter {
+    /// (alias -> list of attempt timestamps)
+    attempts: Arc<RwLock<AHashMap<String, Vec<Instant>>>>,
+    /// Maximum number of registration attempts per alias within `window`.
+    burst: u32,
+    /// Sliding window duration.
+    window: Duration,
+}
+
+impl AliasRateLimiter {
+    fn new(burst: u32, window: Duration) -> Self {
+        Self {
+            attempts: Arc::new(RwLock::new(AHashMap::new())),
+            burst,
+            window,
+        }
+    }
+
+    /// Returns `true` if the attempt is allowed (under the rate limit).
+    async fn check_and_record(&self, alias: &str) -> bool {
+        let now = Instant::now();
+        let mut guard = self.attempts.write().await;
+        let entries = guard.entry(alias.to_string()).or_default();
+        entries.retain(|ts| now.duration_since(*ts) <= self.window);
+        if entries.len() >= self.burst as usize {
+            return false;
+        }
+        entries.push(now);
+        true
+    }
+}
+
+/// Default alias TOFU rate limit: 10 attempts per alias per 60 seconds.
+const ALIAS_RATE_LIMIT_BURST: u32 = 10;
+const ALIAS_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
 #[derive(Clone)]
 struct ApiState {
     server: Arc<RwLock<CityGServer>>,
@@ -90,6 +132,7 @@ struct ApiState {
     weid_to_leaf: Arc<RwLock<AHashMap<[u8; 32], [u8; 32]>>>,
     // Broadcast channel for WebSocket notifications
     notification_tx: broadcast::Sender<BroadcastNotification>,
+    alias_rate_limiter: AliasRateLimiter,
 }
 
 #[derive(Clone, Debug)]
@@ -129,13 +172,19 @@ impl ApiState {
 
     /// Register an alias binding using Trust-On-First-Use (TOFU) semantics.
     /// Returns Ok(true) if this is a new binding, Ok(false) if it matches an existing binding.
-    /// Returns Err if the alias is already bound to a different public key.
+    /// Returns Err if the alias is already bound to a different public key
+    /// or if the per-alias rate limit is exceeded.
     async fn register_alias(
         &self,
         alias: &str,
         leaf_id: [u8; 32],
         pop_public_key: Vec<u8>,
     ) -> Result<bool, ApiError> {
+        if !self.alias_rate_limiter.check_and_record(alias).await {
+            warn!(alias = alias, "alias registration rate-limited");
+            return Err(ApiError::RateLimited);
+        }
+
         let mut guard = self.alias_registry.write().await;
 
         if let Some(existing) = guard.get_mut(alias) {
@@ -304,6 +353,8 @@ enum ApiError {
     },
     #[error("resource not found")]
     NotFound,
+    #[error("rate limited")]
+    RateLimited,
 }
 
 impl ApiError {
@@ -383,6 +434,13 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (
                 StatusCode::NOT_FOUND,
                 "resource not found".to_string(),
+                None,
+                None,
+                None,
+            ),
+            ApiError::RateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate limited".to_string(),
                 None,
                 None,
                 None,
@@ -1632,6 +1690,10 @@ pub async fn run_with_config(
         member_metadata: Arc::new(RwLock::new(AHashMap::new())),
         weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
         notification_tx,
+        alias_rate_limiter: AliasRateLimiter::new(
+            ALIAS_RATE_LIMIT_BURST,
+            Duration::from_secs(ALIAS_RATE_LIMIT_WINDOW_SECS),
+        ),
     };
 
     // Build router with all routes
@@ -1846,6 +1908,10 @@ mod tests {
             member_metadata: Arc::new(RwLock::new(AHashMap::new())),
             weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
             notification_tx: broadcast::channel(8).0,
+            alias_rate_limiter: AliasRateLimiter::new(
+                ALIAS_RATE_LIMIT_BURST,
+                Duration::from_secs(ALIAS_RATE_LIMIT_WINDOW_SECS),
+            ),
         }
     }
 
@@ -2009,6 +2075,7 @@ mod tests {
             member_metadata: Arc::new(RwLock::new(AHashMap::new())),
             weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
             notification_tx: broadcast::channel(4).0,
+            alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
         };
 
         let alias = "alice";
@@ -2054,6 +2121,7 @@ mod tests {
             member_metadata: Arc::new(RwLock::new(AHashMap::new())),
             weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
             notification_tx: broadcast::channel(4).0,
+            alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
         };
 
         let (pop_pk, pop_sk) = dilithium5::keypair();
@@ -2935,6 +3003,59 @@ mod tests {
         assert!(
             server.context().fs_base_ts().is_none(),
             "server should not pre-seed fs base timestamp before first accepted/join ticket flow"
+        );
+    }
+
+    #[tokio::test]
+    async fn alias_rate_limiter_allows_burst_then_rejects() {
+        let burst = 3u32;
+        let limiter = AliasRateLimiter::new(burst, Duration::from_secs(60));
+        let alias = "squatter";
+
+        for i in 0..burst {
+            assert!(
+                limiter.check_and_record(alias).await,
+                "attempt {i} within burst should be allowed"
+            );
+        }
+        assert!(
+            !limiter.check_and_record(alias).await,
+            "attempt past burst should be rejected"
+        );
+
+        // Different alias should still be allowed
+        assert!(
+            limiter.check_and_record("other-alias").await,
+            "different alias should have independent budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn alias_rate_limiter_rejects_produces_429() {
+        let state = ApiState {
+            server: Arc::new(RwLock::new(server_from_config(&CityGConfig::default()))),
+            messages: Arc::new(RwLock::new(AHashMap::new())),
+            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
+            fs_epoch_period_seconds: CityGConfig::default().protocol.fs_policy.h_seconds.max(1),
+            freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
+            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
+            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
+            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+            notification_tx: broadcast::channel(4).0,
+            // Burst of 1 so the second attempt triggers rate limit
+            alias_rate_limiter: AliasRateLimiter::new(1, Duration::from_secs(60)),
+        };
+        let leaf = [0x01u8; 32];
+        let key = vec![0xAB; 8];
+
+        let result1 = state.register_alias("rate-test", leaf, key.clone()).await;
+        assert!(result1.is_ok(), "first call should succeed");
+
+        let result2 = state.register_alias("rate-test", leaf, key).await;
+        assert!(
+            matches!(result2, Err(ApiError::RateLimited)),
+            "second call should be rate-limited, got: {result2:?}"
         );
     }
 }
