@@ -3012,7 +3012,6 @@ pub fn joiner_kgen_merge_or<'a>(
         .header_map
         .insert(HDR_ROLLUP_VCK_COMMIT, Value::Bytes(vck_commit.to_vec()));
 
-    let join_delta_root_new = to_array32("join_delta_root", parts.join_delta_root)?;
     let revoked_since_root_new =
         to_array32("revoked_since_prev_root", parts.revoked_since_prev_root)?;
     let revoked_root_new = to_array32("revoked_root", parts.revoked_root)?;
@@ -3932,10 +3931,7 @@ mod tests {
         map.insert(104, Value::Text(KBROAD_ML_KEM_ALG.to_string()));
         let (pk, _) = sample_kbroad_keys();
         map.insert(105, Value::Bytes(pk.to_vec()));
-        map.insert(
-            HDR_FS_POLICY_VERSION,
-            Value::Integer(Integer::from(7u64)),
-        );
+        map.insert(HDR_FS_POLICY_VERSION, Value::Integer(Integer::from(7u64)));
         map
     }
 

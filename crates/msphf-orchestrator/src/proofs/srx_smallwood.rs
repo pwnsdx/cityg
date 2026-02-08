@@ -155,12 +155,6 @@ fn encode_statement_payload(inputs: &Inputs<'_>) -> Result<Vec<u8>, MsphfError> 
     Ok(buf)
 }
 
-fn digest32(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Hasher::new();
-    hasher.update(data);
-    hasher.finalize().into()
-}
-
 #[derive(Serialize)]
 struct SrxPayloadDigestInput<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
 

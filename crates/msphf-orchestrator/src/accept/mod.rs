@@ -103,7 +103,8 @@ pub(crate) const SRX_ONLY_KEYS: [u64; 4] = [
     HDR_SRX_ROOT_SW,
     HDR_SRX_SMALLWOOD,
 ];
-pub(crate) const LEGACY_SRX_KEYS: [u64; 3] = [HDR_SRX_MODE, HDR_SRX_HINT_COUNTS, HDR_SRX_HINT_SIZES];
+pub(crate) const LEGACY_SRX_KEYS: [u64; 3] =
+    [HDR_SRX_MODE, HDR_SRX_HINT_COUNTS, HDR_SRX_HINT_SIZES];
 
 #[derive(Serialize)]
 struct SrxEmptyRootProfile<'a>(&'a str);
@@ -274,11 +275,6 @@ pub const FREEZE_SRX_ANCHOR_OOB: FreezeError = FreezeError {
 pub const FREEZE_SRX_ANCHOR_POOL_UNSORTED: FreezeError = FreezeError {
     code: 930,
     reason: "srx_anchor_pool_unsorted",
-};
-
-pub const FREEZE_SRX_ANCHORS_OVERBUDGET: FreezeError = FreezeError {
-    code: 930,
-    reason: "srx_anchors_overbudget",
 };
 
 pub const FREEZE_SRX_COMMIT_MISMATCH: FreezeError = FreezeError {
@@ -1547,8 +1543,7 @@ fn is_known_header_key(key: u64, is_merge: bool) -> bool {
     }
     matches!(
         key,
-        20
-            | HDR_TSWE_ALG
+        20 | HDR_TSWE_ALG
             | HDR_SEED_CTX_HASH
             | HDR_MERKLE_SUITE
             | HDR_RHO_COMMIT
@@ -2449,70 +2444,6 @@ fn parse_leaf_array(value: &Value) -> Result<Vec<[u8; 32]>, AcceptanceError> {
         out.push(arr);
     }
     Ok(out)
-}
-
-pub(crate) fn parse_hint_counts(value: &Value) -> Result<(u64, u64, u64), AcceptanceError> {
-    let Value::Map(entries) = value else {
-        debug!("parse_hint_counts: value not map");
-        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-    };
-    let mut join = None;
-    let mut since = None;
-    let mut anchors = None;
-    for (key, val) in entries {
-        let Value::Text(key_text) = key else {
-            debug!("parse_hint_counts: key not text");
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        };
-        let Value::Integer(int) = val else {
-            debug!("parse_hint_counts: value not integer for key {}", key_text);
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        };
-        let count = integer_to_u64(int)?;
-        match key_text.as_str() {
-            "join" => join = Some(count),
-            "since" => since = Some(count),
-            "anchors" => anchors = Some(count),
-            _ => {
-                debug!("parse_hint_counts: unexpected key {}", key_text);
-                return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-            }
-        }
-    }
-    match (join, since, anchors) {
-        (Some(j), Some(s), Some(a)) => Ok((j, s, a)),
-        _ => {
-            debug!(
-                "parse_hint_counts: missing field join={:?} since={:?} anchors={:?}",
-                join, since, anchors
-            );
-            Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID))
-        }
-    }
-}
-
-pub(crate) fn parse_hint_sizes(value: &Value) -> Result<u64, AcceptanceError> {
-    let Value::Map(entries) = value else {
-        debug!("parse_hint_sizes: value not map");
-        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-    };
-    if let Some((key, val)) = entries.iter().next() {
-        let Value::Text(key_text) = key else {
-            debug!("parse_hint_sizes: key not text");
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        };
-        if key_text != "bytes" {
-            debug!("parse_hint_sizes: unexpected key {}", key_text);
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        }
-        let Value::Integer(int) = val else {
-            debug!("parse_hint_sizes: value not integer for bytes key");
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        };
-        return integer_to_u64(int);
-    }
-    debug!("parse_hint_sizes: map empty");
-    Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID))
 }
 
 pub(crate) fn ensure_nonmem_coverage(
@@ -4347,10 +4278,8 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
 
-        let original_policy = header.insert(
-            HDR_FS_POLICY_VERSION,
-            Value::Integer(Integer::from(0u64)),
-        );
+        let original_policy =
+            header.insert(HDR_FS_POLICY_VERSION, Value::Integer(Integer::from(0u64)));
         let key_v0 = compute_vck_key(
             &joiner.xk_hash,
             &joiner.seed_commit,
@@ -4358,10 +4287,7 @@ mod tests {
             &joiner.hp_commit,
             &header,
         )?;
-        header.insert(
-            HDR_FS_POLICY_VERSION,
-            Value::Integer(Integer::from(1u64)),
-        );
+        header.insert(HDR_FS_POLICY_VERSION, Value::Integer(Integer::from(1u64)));
         let key_v1 = compute_vck_key(
             &joiner.xk_hash,
             &joiner.seed_commit,
