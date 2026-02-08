@@ -50,7 +50,7 @@ use pqcrypto_traits::{
 use proofs::{capss, srx_smallwood, zk_vrf};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 mod accept;
 mod time;
@@ -577,7 +577,7 @@ pub(crate) fn build_kbroad_envelope(
     if kem_ct_bytes.len() != expected_ct_len {
         return Err(MsphfError::invalid_input("kbroad ct length"));
     }
-    let kem_ss_bytes = kem_ss.as_bytes();
+    let kem_ss_bytes = Zeroizing::new(kem_ss.as_bytes().to_vec());
 
     #[derive(Serialize)]
     struct KekSalt<'a> {
@@ -588,19 +588,20 @@ pub(crate) fn build_kbroad_envelope(
     let mut info = Vec::with_capacity(KBROAD_INFO_PREFIX.len() + hp_commit.len());
     info.extend_from_slice(KBROAD_INFO_PREFIX);
     info.extend_from_slice(hp_commit);
-    let kek = hkdf_blake3(&salt, kem_ss_bytes, &info);
+    let kek = Zeroizing::new(hkdf_blake3(&salt, kem_ss_bytes.as_slice(), &info));
 
-    let mut k_hp = [0u8; 32];
-    OsRng.fill_bytes(&mut k_hp);
+    let mut k_hp = Zeroizing::new([0u8; 32]);
+    OsRng.fill_bytes(k_hp.as_mut());
     let wrap_nonce = derive_kek_nonce(xk_hash, hp_commit)?;
     let wrap = encrypt_chacha20(
-        &kek,
+        &*kek,
         &wrap_nonce,
         hp_commit,
-        &k_hp,
+        &*k_hp,
         "msphf_hp_wrap encrypt failure",
     )?;
-    let c_hp = encrypt_hp_bytes(hp_k, xk_hash, hp_commit, &k_hp)?;
+    let c_hp = encrypt_hp_bytes(hp_k, xk_hash, hp_commit, &*k_hp)?;
+    let k_hp = *k_hp;
 
     let envelope = Value::Array(vec![
         Value::Text(KBROAD_MODE.to_string()),
@@ -687,6 +688,7 @@ pub fn recover_hp_material_from_header(
     let kem_sk = MlKemSecretKey::from_bytes(kbroad_secret)
         .map_err(|_| MsphfError::invalid_input("kbroad secret malformed"))?;
     let kem_ss = ml_kem_decapsulate(&kem_ct, &kem_sk);
+    let kem_ss_bytes = Zeroizing::new(kem_ss.as_bytes().to_vec());
 
     #[derive(Serialize)]
     struct KekSalt<'a> {
@@ -698,16 +700,16 @@ pub fn recover_hp_material_from_header(
     let mut info = Vec::with_capacity(KBROAD_INFO_PREFIX.len() + hp_commit.len());
     info.extend_from_slice(KBROAD_INFO_PREFIX);
     info.extend_from_slice(hp_commit);
-    let kek = hkdf_blake3(&salt, kem_ss.as_bytes(), &info);
+    let kek = Zeroizing::new(hkdf_blake3(&salt, kem_ss_bytes.as_slice(), &info));
 
     let wrap_nonce = derive_kek_nonce(xk_hash, hp_commit)?;
-    let hp_key_bytes = decrypt_chacha20(
-        &kek,
+    let hp_key_bytes = Zeroizing::new(decrypt_chacha20(
+        &*kek,
         &wrap_nonce,
         hp_commit,
         wrap_bytes,
         "msphf_hp_wrap tag mismatch",
-    )?;
+    )?);
     let hp_key: [u8; 32] = hp_key_bytes
         .as_slice()
         .try_into()
@@ -3321,6 +3323,33 @@ mod tests {
         let (pub2, sec2) = super::kbroad_test_keys();
         assert!(std::ptr::eq(pub_bytes, pub2));
         assert!(std::ptr::eq(sec_bytes, sec2));
+    }
+
+    #[test]
+    fn kbroad_build_and_recover_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let (kbroad_pub, kbroad_sec) = sample_kbroad_keys();
+        let mut header = BTreeMap::new();
+        header.insert(
+            HDR_KBROAD_ALG,
+            Value::Text(KBROAD_ML_KEM_ALG.to_string()),
+        );
+        header.insert(HDR_KBROAD_PUB, Value::Bytes(kbroad_pub.to_vec()));
+
+        let xk_hash = [0x41; 32];
+        let hp_commit = [0x52; 32];
+        let hp_plaintext = b"hp/plaintext/regression";
+
+        let envelope = build_kbroad_envelope(&header, hp_plaintext, &xk_hash, &hp_commit)?;
+        header.insert(HDR_HP_BYTES, envelope.envelope.clone());
+
+        let (hp_ciphertext, hp_key) =
+            recover_hp_material_from_header(&header, &xk_hash, &hp_commit, kbroad_sec)?;
+        assert_eq!(hp_ciphertext, envelope.c_hp);
+        assert_eq!(hp_key, envelope.k_hp);
+
+        let recovered_hp = decrypt_hp_bytes(&hp_ciphertext, &xk_hash, &hp_commit, &hp_key)?;
+        assert_eq!(recovered_hp, hp_plaintext);
+        Ok(())
     }
 
     fn sample_pivot_parity(seed_ctx_hash: [u8; 32], rho_commit: [u8; 32]) -> PivotParity {
