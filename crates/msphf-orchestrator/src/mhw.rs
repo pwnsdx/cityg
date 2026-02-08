@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
+use ahash::AHashMap;
+
 use crate::time::AcceptInstant;
 
 /// Default maximum number of concurrent heads per parent root.
@@ -82,6 +84,8 @@ pub struct MultiHeadWindow {
     h_max: usize,
     ttl: Duration,
     heads: BTreeMap<Vec<u8>, Vec<HeadRecord>>,
+    /// Reverse index: `we_epoch_id -> wid` for O(1) `find_head_window`.
+    weid_index: AHashMap<[u8; 32], Vec<u8>>,
 }
 
 impl MultiHeadWindow {
@@ -90,6 +94,7 @@ impl MultiHeadWindow {
             h_max,
             ttl,
             heads: BTreeMap::new(),
+            weid_index: AHashMap::new(),
         }
     }
 
@@ -107,11 +112,13 @@ impl MultiHeadWindow {
     ) -> Result<(), FreezeError> {
         record.accept_time = now;
         let h_max = self.h_max;
+        let weid = record.we_epoch_id;
         let entry = self.prune(wid, now);
         if entry.len() >= h_max {
             return Err(FreezeError::WINDOW_FULL);
         }
         entry.push(record);
+        self.weid_index.insert(weid, wid.to_vec());
         Ok(())
     }
 
@@ -129,13 +136,31 @@ impl MultiHeadWindow {
             return Err(FreezeError::MERGE_INVALID);
         }
         new_record.accept_time = now;
+        let new_weid = new_record.we_epoch_id;
         let h_max = self.h_max;
         let wid_old_key = wid_old.to_vec();
+
+        // Prune first, then work with the entry directly via heads map
+        // to avoid double-mutable-borrow through self.prune.
+        {
+            let ttl = self.ttl;
+            let index = &mut self.weid_index;
+            let entry = self.heads.entry(wid_old_key.clone()).or_default();
+            entry.retain(|record| {
+                let keep = now.duration_since(record.accept_time) <= ttl;
+                if !keep {
+                    index.remove(&record.we_epoch_id);
+                }
+                keep
+            });
+        }
+
         let remove_old_entry = {
-            let entry_old = self.prune(wid_old, now);
+            let entry_old = self.heads.get_mut(&wid_old_key).unwrap();
             for head in mh_heads {
                 if let Some(pos) = entry_old.iter().position(|rec| &rec.we_epoch_id == head) {
                     entry_old.remove(pos);
+                    self.weid_index.remove(head);
                 } else {
                     return Err(FreezeError::MERGE_INVALID);
                 }
@@ -146,6 +171,7 @@ impl MultiHeadWindow {
                     return Err(FreezeError::WINDOW_FULL);
                 }
                 entry_old.push(new_record);
+                self.weid_index.insert(new_weid, wid_old.to_vec());
                 return Ok(());
             }
 
@@ -161,6 +187,7 @@ impl MultiHeadWindow {
             return Err(FreezeError::WINDOW_FULL);
         }
         entry_new.push(new_record);
+        self.weid_index.insert(new_weid, wid_new.to_vec());
         Ok(())
     }
 
@@ -180,16 +207,7 @@ impl MultiHeadWindow {
     }
 
     pub fn find_head_window(&self, we_epoch_id: &[u8; 32]) -> Option<Vec<u8>> {
-        self.heads.iter().find_map(|(wid, records)| {
-            if records
-                .iter()
-                .any(|record| &record.we_epoch_id == we_epoch_id)
-            {
-                Some(wid.clone())
-            } else {
-                None
-            }
-        })
+        self.weid_index.get(we_epoch_id).cloned()
     }
 
     pub fn h_max(&self) -> usize {
@@ -212,7 +230,13 @@ impl MultiHeadWindow {
     pub fn prune_all(&mut self, now: AcceptInstant) {
         let ttl_bound = self.ttl;
         self.heads.retain(|_, records| {
-            records.retain(|record| now.duration_since(record.accept_time) <= ttl_bound);
+            records.retain(|record| {
+                let keep = now.duration_since(record.accept_time) <= ttl_bound;
+                if !keep {
+                    self.weid_index.remove(&record.we_epoch_id);
+                }
+                keep
+            });
             !records.is_empty()
         });
     }
@@ -226,8 +250,15 @@ impl MultiHeadWindow {
 
     fn prune(&mut self, wid: &[u8], now: AcceptInstant) -> &mut Vec<HeadRecord> {
         let ttl = self.ttl;
+        let index = &mut self.weid_index;
         let entry = self.heads.entry(wid.to_vec()).or_default();
-        entry.retain(|record| now.duration_since(record.accept_time) <= ttl);
+        entry.retain(|record| {
+            let keep = now.duration_since(record.accept_time) <= ttl;
+            if !keep {
+                index.remove(&record.we_epoch_id);
+            }
+            keep
+        });
         entry
     }
 }
@@ -353,6 +384,40 @@ mod tests {
                 .accept_head(&wid, sample_record(6), AcceptInstant::from_ticks(2))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn weid_index_consistent_after_insert_merge_prune() {
+        let mut window = MultiHeadWindow::new(4, Duration::from_secs(5));
+        let wid = [0x01; 32];
+        let now = AcceptInstant::from_ticks(0);
+
+        // Insert two heads
+        window.accept_head(&wid, sample_record(1), now).unwrap();
+        window.accept_head(&wid, sample_record(2), now).unwrap();
+        assert_eq!(window.find_head_window(&[1; 32]), Some(wid.to_vec()));
+        assert_eq!(window.find_head_window(&[2; 32]), Some(wid.to_vec()));
+        assert_eq!(window.find_head_window(&[99; 32]), None);
+
+        // Merge retires [1;32], should remove from index
+        window
+            .accept_merge(
+                &wid,
+                &wid,
+                &[[1; 32]],
+                sample_record(3),
+                AcceptInstant::from_ticks(1),
+            )
+            .unwrap();
+        assert_eq!(window.find_head_window(&[1; 32]), None, "retired head should be removed from index");
+        assert_eq!(window.find_head_window(&[2; 32]), Some(wid.to_vec()));
+        assert_eq!(window.find_head_window(&[3; 32]), Some(wid.to_vec()));
+
+        // Prune by TTL
+        let far_future = AcceptInstant::from_ticks(10);
+        window.prune_all(far_future);
+        assert_eq!(window.find_head_window(&[2; 32]), None, "expired head should be removed from index");
+        assert_eq!(window.find_head_window(&[3; 32]), None, "expired head should be removed from index");
     }
 
     #[test]
