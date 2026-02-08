@@ -490,7 +490,7 @@ impl AcceptanceContext {
             fs_capss: proofs.fs_capss.clone(),
             proofs_commit: proofs.commit,
             srx_commit,
-            srx_root_sw: None,
+            srx_root_sw: self.srx_root_sw(),
             is_join: true,
             hp_envelope: header_map
                 .get(&HDR_HP_BYTES)

@@ -87,7 +87,12 @@ use ciborium::value::Value;
 use msphf_core::{MsphfError, hash::eid_from_epoch, instance::AnchorInstance};
 use msphf_orchestrator::{
     AnchorInstanceParts, CapssWitnessBundle, ForwardSecrecyState, HpBindingInputs, HpProof,
-    JoinerKGenResult, OrchestrationParams, PivotParity, extract_epoch_msphf_or, hdr::HDR_FS_EC,
+    JoinerKGenResult, LeafIdMode, OrchestrationParams, PivotParity, extract_epoch_msphf_or,
+    hdr::{
+        HDR_FS_EC, HDR_MERGE_DELEGATION_SIG, HDR_MH_HEADS, HDR_POP_ALG, HDR_POP_PK,
+        HDR_ROLLUP_EPOCH_REPLAY, HDR_ROLLUP_FS_MODE, HDR_ROLLUP_PIVOT_WEID,
+        HDR_ROLLUP_PROVENANCE_COMMIT, HDR_ROLLUP_VCK_COMMIT,
+    },
     joiner_kgen_merge_or, joiner_kgen_or, recover_hp_material_from_header,
 };
 use serde::{Deserialize, Serialize};
@@ -455,8 +460,12 @@ impl ClientEpochBundle {
         &self.anchor.gid
     }
 
-    /// Decode the SRX payload and return the join/revoke delta it represents.
-    /// For merge-only heads (where no SRX payload is present) an empty delta is returned.
+    /// Decode the membership delta represented by this bundle.
+    ///
+    /// - If SRX payload bytes are present, decode them directly.
+    /// - If SRX payload bytes are absent for merge-mode headers, return an empty delta.
+    /// - If SRX payload bytes are absent for join-mode headers, derive the joined
+    ///   leaf from POP fields (per-group leaf id).
     pub fn membership_delta(&self) -> Result<MembershipDelta, CityGError> {
         let payload_bytes = match self
             .header_map
@@ -464,7 +473,32 @@ impl ClientEpochBundle {
         {
             Some(Value::Bytes(bytes)) => bytes,
             Some(_) => return Err(CityGError::InvalidInput("srx_payload must be bytes")),
-            None => return Ok(MembershipDelta::default()),
+            None => {
+                if is_merge_header(&self.header_map) {
+                    return Ok(MembershipDelta::default());
+                }
+
+                let pop_alg = match self.header_map.get(&HDR_POP_ALG) {
+                    Some(Value::Text(text)) if !text.is_empty() => text.as_str(),
+                    Some(_) => return Err(CityGError::InvalidInput("pop_alg must be text")),
+                    None => return Err(CityGError::InvalidInput("missing pop_alg")),
+                };
+                let pop_pk = match self.header_map.get(&HDR_POP_PK) {
+                    Some(Value::Bytes(bytes)) if !bytes.is_empty() => bytes.as_slice(),
+                    Some(_) => return Err(CityGError::InvalidInput("pop_pk must be bytes")),
+                    None => return Err(CityGError::InvalidInput("missing pop_pk")),
+                };
+                let joined = msphf_orchestrator::compute_leaf_id(
+                    LeafIdMode::PerGroup,
+                    self.gid(),
+                    pop_alg,
+                    pop_pk,
+                )?;
+                return Ok(MembershipDelta {
+                    joined: vec![joined],
+                    revoked: Vec::new(),
+                });
+            }
         };
 
         let payload: Value = ciborium::de::from_reader(payload_bytes.as_slice())
@@ -693,6 +727,24 @@ fn parse_srx_complete_membership(value: &Value) -> Result<MembershipDelta, CityG
     Ok(MembershipDelta { joined, revoked })
 }
 
+fn is_merge_header(header: &BTreeMap<u64, Value>) -> bool {
+    [
+        HDR_MH_HEADS,
+        HDR_ROLLUP_PIVOT_WEID,
+        HDR_ROLLUP_PROVENANCE_COMMIT,
+        HDR_ROLLUP_EPOCH_REPLAY,
+        HDR_ROLLUP_VCK_COMMIT,
+        HDR_MERGE_DELEGATION_SIG,
+        msphf_orchestrator::hdr::HDR_KBROAD_REPLAY,
+        HDR_ROLLUP_FS_MODE,
+        msphf_orchestrator::hdr::HDR_FS_EVOLUTION_BOUNDARY,
+        msphf_orchestrator::hdr::HDR_FS_PURGE_TIMES,
+        msphf_orchestrator::hdr::HDR_FS_CHECKPOINT_EC,
+    ]
+    .iter()
+    .any(|key| header.contains_key(key))
+}
+
 /// Join/revoke change-set extracted from an SRX payload.
 #[derive(Debug, Clone, Default)]
 pub struct MembershipDelta {
@@ -747,7 +799,8 @@ impl GroupMembership {
 mod tests {
     use super::*;
     use crate::demo::{
-        demo_bundle, demo_bundle_alice, demo_bundle_bob, kbroad_public, kbroad_secret,
+        demo_bundle, demo_bundle_alice, demo_bundle_bob, demo_member_leaf, kbroad_public,
+        kbroad_secret,
     };
     use crate::witness::{
         build_branch_b_artifacts, demo_pox_commit, join_delta_root, sequential_leaf,
@@ -830,7 +883,7 @@ mod tests {
     fn membership_delta_extracts_demo_micro() -> Result<(), Box<dyn std::error::Error>> {
         let bundle = demo_bundle_alice()?;
         let delta = bundle.membership_delta()?;
-        assert!(delta.joined.is_empty());
+        assert_eq!(delta.joined, vec![demo_member_leaf("alice")]);
         assert!(delta.revoked.is_empty());
         Ok(())
     }
@@ -842,7 +895,7 @@ mod tests {
         assert_ne!(bundle.anchor.parent_root, [0u8; 32]);
         assert_eq!(bundle.anchor.parent_root, genesis.anchor.join_delta_root);
         let delta = bundle.membership_delta()?;
-        assert!(delta.joined.is_empty());
+        assert_eq!(delta.joined, vec![demo_member_leaf("bob")]);
         assert!(delta.revoked.is_empty());
         Ok(())
     }
@@ -869,7 +922,7 @@ mod tests {
             Value::Text("srx/vX".to_string()),
         );
         let delta = bundle.membership_delta()?;
-        assert!(delta.joined.is_empty());
+        assert_eq!(delta.joined, vec![demo_member_leaf("alice")]);
         assert!(delta.revoked.is_empty());
         Ok(())
     }
@@ -961,7 +1014,16 @@ mod tests {
         bundle
             .header_map
             .remove(&msphf_orchestrator::hdr::HDR_SRX_PAYLOAD);
+        assert_eq!(bundle.membership_delta()?.joined, vec![demo_member_leaf("alice")]);
+
+        bundle.header_map.insert(
+            msphf_orchestrator::hdr::HDR_MH_HEADS,
+            Value::Array(Vec::new()),
+        );
         assert!(bundle.membership_delta()?.joined.is_empty());
+        bundle
+            .header_map
+            .remove(&msphf_orchestrator::hdr::HDR_MH_HEADS);
 
         bundle.header_map.insert(
             msphf_orchestrator::hdr::HDR_SRX_PAYLOAD,

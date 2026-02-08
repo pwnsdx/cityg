@@ -82,9 +82,8 @@ use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
 use msphf_orchestrator::mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW};
 use msphf_orchestrator::process_anchor_or;
 use msphf_orchestrator::{
-    self, AcceptanceContext, AcceptanceOptions, BootstrapPolicy, DEFAULT_POLICY_VERSION,
-    DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes,
-    hdr,
+    self, AcceptanceContext, AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE,
+    DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes, hdr,
 };
 
 /// Re-export commonly used client-side bundle types for convenience.
@@ -656,11 +655,7 @@ impl CityGServer {
             .find(|parity| parity.we_epoch_id == pivot_weid)
             .ok_or(CityGError::InvalidInput("pivot parity missing for refresh"))?;
 
-        let policy_version = header_string(
-            &bundle.header_map,
-            hdr::HDR_POLICY_VERSION,
-            Some(DEFAULT_POLICY_VERSION),
-        )?;
+        let policy_version = header_string(&bundle.header_map, hdr::HDR_FS_POLICY_VERSION, None)?;
         let proof_mode = header_string(
             &bundle.header_map,
             hdr::HDR_PROOF_MODE,

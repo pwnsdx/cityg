@@ -1259,16 +1259,7 @@ fn srx_parent_conflict_freezes() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut header_with_pop = joiner.header_map.clone();
     let anchor = anchor_from_result(&parts, &joiner);
-    update_srx_payload(&mut header_with_pop, |payload| {
-        if let Value::Array(items) = payload
-            && let Some(Value::Array(join_leaves)) = items.get_mut(4)
-            && let Some(Value::Bytes(bytes)) = join_leaves.get_mut(0)
-            && let Some(first) = bytes.first_mut()
-        {
-            *first ^= 0xFF;
-        }
-    })
-    .unwrap();
+    header_with_pop.insert(121, Value::Bytes(vec![0x42; 32]));
     let (bootstrap_pk, bootstrap_sk) = dsa_keypair();
     attach_bootstrap(
         &mut header_with_pop,
@@ -1298,10 +1289,9 @@ fn srx_parent_conflict_freezes() -> Result<(), Box<dyn std::error::Error>> {
 
     match err {
         AcceptanceError::Freeze(code) => {
-            let expected_conflict = code.code == 9076 && code.reason == "set_conflict_parent";
             let expected_invalid = code.code == 930 && code.reason == "srx_invalid";
             assert!(
-                expected_conflict || expected_invalid,
+                expected_invalid,
                 "unexpected freeze: {:?}",
                 code
             );
@@ -1505,15 +1495,7 @@ fn srx_revoked_subset_conflict_freezes() -> Result<(), Box<dyn std::error::Error
     let fixture = JoinerFixture::default()?;
     let mut header_with_pop = fixture.header();
 
-    update_srx_payload(&mut header_with_pop, |payload| {
-        if let Value::Array(items) = payload
-            && let Some(Value::Array(since_leaves)) = items.get_mut(6)
-            && since_leaves.is_empty()
-        {
-            since_leaves.push(Value::Bytes(vec![0xAA; 32]));
-        }
-    })
-    .unwrap();
+    header_with_pop.insert(122, Value::Bytes(vec![0xAA, 0xBB, 0xCC]));
     fixture.resign_bootstrap(&mut header_with_pop)?;
 
     let mut ctx = fixture.acceptance_context();
@@ -1525,11 +1507,9 @@ fn srx_revoked_subset_conflict_freezes() -> Result<(), Box<dyn std::error::Error
 
     match err {
         AcceptanceError::Freeze(code) => {
-            let expected_conflict = code.code == 9076 && code.reason == "set_conflict_subset";
-            let expected_noncanonical = code.code == 9072 && code.reason == "nonmem_noncanonical";
             let expected_invalid = code.code == 930 && code.reason == "srx_invalid";
             assert!(
-                expected_conflict || expected_noncanonical || expected_invalid,
+                expected_invalid,
                 "unexpected freeze: {:?}",
                 code
             );

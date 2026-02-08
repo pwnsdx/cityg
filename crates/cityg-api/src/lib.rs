@@ -1569,6 +1569,7 @@ fn pivot_parity_to_cbor(parity: &PivotParity) -> Result<Vec<u8>, ApiError> {
         fs_capss: ByteBuf,
         proofs_commit: ByteBuf,
         srx_commit: Option<ByteBuf>,
+        srx_root_sw: Option<ByteBuf>,
         is_join: bool,
         hp_envelope: ByteBuf,
         fs_epoch_commit: Option<ByteBuf>,
@@ -1604,6 +1605,9 @@ fn pivot_parity_to_cbor(parity: &PivotParity) -> Result<Vec<u8>, ApiError> {
         srx_commit: parity
             .srx_commit
             .map(|commit| ByteBuf::from(commit.to_vec())),
+        srx_root_sw: parity
+            .srx_root_sw
+            .map(|root| ByteBuf::from(root.to_vec())),
         is_join: parity.is_join,
         hp_envelope: ByteBuf::from(parity.hp_envelope.as_ref().to_vec()),
         fs_epoch_commit: parity

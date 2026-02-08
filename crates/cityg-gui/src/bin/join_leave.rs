@@ -1342,24 +1342,33 @@ fn log_fs_metadata(pivot: &PivotParity, header: &BTreeMap<u64, Value>) {
 }
 
 fn apply_pivot_alignment(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity) {
-    header.insert(
-        hdr::HDR_POLICY_VERSION,
-        Value::Text(pivot.policy_version.clone()),
-    );
-    header.insert(hdr::HDR_PROOF_MODE, Value::Text(pivot.proof_mode.clone()));
-    header.insert(hdr::HDR_VRF_ID, Value::Text(pivot.vrf_id.clone()));
-    header.insert(hdr::HDR_VRF_PROOF, Value::Bytes(pivot.vrf_proof.clone()));
-    header.insert(
-        hdr::HDR_VRF_PUBLIC_KEY,
-        Value::Bytes(pivot.vrf_public.clone()),
-    );
-    header.insert(hdr::HDR_VRF_MASK_A, Value::Bytes(pivot.mask_a.to_vec()));
-    header.insert(hdr::HDR_VRF_MASK_B, Value::Bytes(pivot.mask_b.to_vec()));
-    header.insert(hdr::HDR_FS_CAPSS, Value::Bytes(pivot.fs_capss.clone()));
-    header.insert(
-        hdr::HDR_PROOFS_COMMIT,
-        Value::Bytes(pivot.proofs_commit.to_vec()),
-    );
+    header
+        .entry(hdr::HDR_FS_POLICY_VERSION)
+        .or_insert_with(|| Value::Text(pivot.policy_version.clone()));
+    header
+        .entry(hdr::HDR_PROOF_MODE)
+        .or_insert_with(|| Value::Text(pivot.proof_mode.clone()));
+    header
+        .entry(hdr::HDR_VRF_ID)
+        .or_insert_with(|| Value::Text(pivot.vrf_id.clone()));
+    header
+        .entry(hdr::HDR_VRF_PROOF)
+        .or_insert_with(|| Value::Bytes(pivot.vrf_proof.clone()));
+    header
+        .entry(hdr::HDR_VRF_PUBLIC_KEY)
+        .or_insert_with(|| Value::Bytes(pivot.vrf_public.clone()));
+    header
+        .entry(hdr::HDR_VRF_MASK_A)
+        .or_insert_with(|| Value::Bytes(pivot.mask_a.to_vec()));
+    header
+        .entry(hdr::HDR_VRF_MASK_B)
+        .or_insert_with(|| Value::Bytes(pivot.mask_b.to_vec()));
+    header
+        .entry(hdr::HDR_FS_CAPSS)
+        .or_insert_with(|| Value::Bytes(pivot.fs_capss.clone()));
+    header
+        .entry(hdr::HDR_PROOFS_COMMIT)
+        .or_insert_with(|| Value::Bytes(pivot.proofs_commit.to_vec()));
 
     if let Some(fs_ec) = pivot.fs_ec {
         header
@@ -1906,7 +1915,7 @@ mod tests {
         apply_pivot_alignment(&mut header, &pivot);
 
         assert_eq!(
-            header.get(&hdr::HDR_POLICY_VERSION),
+            header.get(&hdr::HDR_FS_POLICY_VERSION),
             Some(&Value::Text("policy-v1".to_string()))
         );
         assert_eq!(
