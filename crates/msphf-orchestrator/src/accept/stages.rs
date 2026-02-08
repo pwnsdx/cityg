@@ -582,10 +582,6 @@ pub(super) fn ensure_proofs(
             Value::Integer(int) => u64::try_from(*int)
                 .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?
                 .to_string(),
-            Value::Text(text) => text.clone(),
-            Value::Bytes(bytes) => std::str::from_utf8(bytes)
-                .map(|s| s.to_string())
-                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?,
             _ => return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED)),
         };
         if legacy != fs_policy_version_owned {

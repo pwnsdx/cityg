@@ -1714,12 +1714,6 @@ pub fn accept_and_extract_or<'a>(
         Some(Value::Bytes(bytes)) => {
             String::from_utf8(bytes.clone()).unwrap_or_else(|_| DEFAULT_POLICY_VERSION.to_string())
         }
-        None => match header_map.get(&HDR_POLICY_VERSION) {
-            Some(Value::Text(text)) => text.clone(),
-            Some(Value::Bytes(bytes)) => String::from_utf8(bytes.clone())
-                .unwrap_or_else(|_| DEFAULT_POLICY_VERSION.to_string()),
-            _ => DEFAULT_POLICY_VERSION.to_string(),
-        },
         _ => DEFAULT_POLICY_VERSION.to_string(),
     };
     let proof_mode = match header_map.get(&HDR_PROOF_MODE) {
