@@ -15,12 +15,10 @@ use anchor_seed::{build_anchor_seed_ctx, compute_seed_ctx_hash};
 use blake3::Hasher;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
-use ciborium::de::from_reader;
 use ciborium::ser::into_writer;
 use ciborium::value::{Integer, Value};
 use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_A1};
 use msphf_core::{
-    ds,
     hash::h_l,
     instance, merkle,
     witness::{
@@ -666,125 +664,6 @@ fn make_anchor_fixture(
     };
 
     Some((parts, params, join_leaves))
-}
-
-#[derive(Serialize)]
-struct SrxCommit<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
-
-fn compute_srx_commit(bytes: &[u8]) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    Ok(h_l(ds::MSPHF_SRX_COMMIT, &SrxCommit(bytes))?)
-}
-
-fn encode_value(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut buf = Vec::new();
-    into_writer(value, &mut buf)?;
-    Ok(buf)
-}
-
-fn update_srx_payload(
-    header: &mut BTreeMap<u64, Value>,
-    mutator: impl FnOnce(&mut Value),
-) -> Result<(), Box<dyn std::error::Error>> {
-    let payload_bytes = match header.get(&122) {
-        Some(Value::Bytes(bytes)) => bytes.clone(),
-        _ => panic!("missing srx payload"),
-    };
-    let mut payload_value: Value = from_reader(payload_bytes.as_slice())?;
-    mutator(&mut payload_value);
-
-    let Value::Array(items) = &mut payload_value else {
-        panic!("unexpected payload structure");
-    };
-    if items.len() != 9 {
-        panic!("unexpected payload length: {}", items.len());
-    }
-
-    let join_count = items[4]
-        .as_array()
-        .ok_or_else(|| Box::<dyn std::error::Error>::from("join_leaves not an array"))?
-        .len();
-    let since_count = items[6]
-        .as_array()
-        .ok_or_else(|| Box::<dyn std::error::Error>::from("since_leaves not an array"))?
-        .len();
-    let anchors_count = items[8]
-        .as_array()
-        .ok_or_else(|| Box::<dyn std::error::Error>::from("anchors not an array"))?
-        .len();
-    let join_frontier_len = items[5].as_array().map(|arr| arr.len()).unwrap_or(0);
-    let since_frontier_len = items[7].as_array().map(|arr| arr.len()).unwrap_or(0);
-
-    set_srx_meta(
-        &mut payload_value,
-        join_count,
-        since_count,
-        join_frontier_len,
-        since_frontier_len,
-    );
-
-    let new_payload_bytes = encode_value(&payload_value)?;
-    let payload_len = new_payload_bytes.len() as u64;
-
-    let commit = compute_srx_commit(&new_payload_bytes)?;
-    header.insert(120, Value::Text("srx/v1-complete".to_string()));
-    header.insert(121, Value::Bytes(commit.to_vec()));
-    header.insert(122, Value::Bytes(new_payload_bytes.clone()));
-
-    let hint_counts = Value::Map(vec![
-        (
-            Value::Text("join".to_string()),
-            Value::Integer(Integer::from(join_count as u64)),
-        ),
-        (
-            Value::Text("since".to_string()),
-            Value::Integer(Integer::from(since_count as u64)),
-        ),
-        (
-            Value::Text("anchors".to_string()),
-            Value::Integer(Integer::from(anchors_count as u64)),
-        ),
-    ]);
-    header.insert(123, Value::Bytes(encode_value(&hint_counts)?));
-
-    let hint_sizes = Value::Map(vec![(
-        Value::Text("bytes".to_string()),
-        Value::Integer(Integer::from(payload_len)),
-    )]);
-    header.insert(124, Value::Bytes(encode_value(&hint_sizes)?));
-    Ok(())
-}
-
-fn set_srx_meta(
-    payload_value: &mut Value,
-    join_count: usize,
-    since_count: usize,
-    join_frontier_len: usize,
-    since_frontier_len: usize,
-) {
-    let Value::Array(items) = payload_value else {
-        return;
-    };
-    if items.len() != 9 {
-        return;
-    }
-    items[3] = Value::Map(vec![
-        (
-            Value::Text("join_count".to_string()),
-            Value::Integer(Integer::from(join_count as u64)),
-        ),
-        (
-            Value::Text("since_count".to_string()),
-            Value::Integer(Integer::from(since_count as u64)),
-        ),
-        (
-            Value::Text("join_frontier_size".to_string()),
-            Value::Integer(Integer::from(join_frontier_len as u64)),
-        ),
-        (
-            Value::Text("since_frontier_size".to_string()),
-            Value::Integer(Integer::from(since_frontier_len as u64)),
-        ),
-    ]);
 }
 
 fn anchor_from_result<'a>(
