@@ -1506,30 +1506,304 @@ impl AppModel {
     ) -> Div {
         let window_size = window.bounds().size;
         let window_width = f32::from(window_size.width);
-        let window_height = f32::from(window_size.height);
+        let sidebar_width = if window_width >= 1360.0 { 248.0 } else { 214.0 };
+        let details_width = if window_width >= 1460.0 { 392.0 } else { 332.0 };
 
-        let max_card_width = px((window_width - 80.0).clamp(360.0, 960.0));
-        let min_card_width = px(320.0);
-        let max_card_height = px((window_height - 160.0).clamp(320.0, 780.0));
-
-        let mut content = div()
+        let mut center_column = div()
             .flex()
             .flex_col()
-            .px(px(36.0))
-            .py(px(32.0))
-            .gap(px(16.0))
-            .rounded(px(18.0))
-            .bg(rgb(0x151929))
+            .flex_grow()
+            .min_w(px(420.0))
+            .h_full()
+            .gap(px(12.0))
+            .child(self.render_chat_header(session, cx))
+            .child(self.render_message_panel(session, cx));
+
+        if let Some(info) = &self.info_message {
+            center_column = center_column.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(UI_ACCENT_TEXT))
+                    .child(info.clone()),
+            );
+        }
+
+        if let Some(error_box) = self.render_error_box(cx) {
+            center_column = center_column.child(error_box);
+        } else if let Some(err) = &self.last_error {
+            center_column = center_column.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(UI_WARN_TEXT))
+                    .child(err.clone()),
+            );
+        }
+
+        let left_column = div()
+            .flex()
+            .flex_col()
+            .min_w(px(sidebar_width))
+            .max_w(px(sidebar_width))
+            .h_full()
+            .gap(px(12.0))
+            .child(self.render_workspace_sidebar(session, cx))
+            .child(self.render_leave_controls(cx));
+
+        let mut details_scroll = div()
+            .flex()
+            .flex_col()
+            .h_full()
+            .gap(px(12.0))
+            .child(self.render_overview_panel(session, cx))
+            .child(self.render_members_panel(cx))
+            .child(self.render_security_panel(cx))
+            .child(self.render_activity_panel(cx));
+
+        {
+            let interactivity = details_scroll.interactivity();
+            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
+            interactivity.block_mouse_except_scroll();
+        }
+
+        let right_column = div()
+            .flex()
+            .flex_col()
+            .min_w(px(details_width))
+            .max_w(px(details_width))
+            .h_full()
+            .child(details_scroll);
+
+        let mut shell = div()
+            .flex()
+            .w_full()
+            .h_full()
+            .min_h(px(420.0))
+            .px(px(16.0))
+            .py(px(16.0))
+            .gap(px(14.0))
+            .bg(rgb(UI_CANVAS_BG))
+            .child(left_column)
+            .child(center_column)
+            .child(right_column);
+
+        {
+            let interactivity = shell.interactivity();
+            interactivity.base_style.overflow.x = Some(Overflow::Scroll);
+            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
+            interactivity.element_id = Some(ElementId::Name("session-scroll".into()));
+            interactivity.block_mouse_except_scroll();
+        }
+
+        shell
+    }
+
+    fn render_workspace_sidebar(&self, session: &AppSession, cx: &mut ViewContext<Self>) -> Div {
+        let members_total = self.members_total.max(self.members.len() as u64);
+        let ws_state = if self.ws_connected {
+            ("Live updates", UI_ACCENT_TEXT)
+        } else {
+            ("Polling mode", UI_SUBTLE_TEXT)
+        };
+        let room_preview = if session.room_id.len() > 20 {
+            format!(
+                "{}…{}",
+                &session.room_id[..12],
+                &session.room_id[session.room_id.len().saturating_sub(6)..]
+            )
+        } else {
+            session.room_id.clone()
+        };
+        let mut copy_room_button = div()
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(10.0))
+            .bg(rgb(UI_BUTTON_BG))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_PANEL_TEXT))
+            .cursor(CursorStyle::PointingHand)
+            .child("Copy room ID");
+        copy_room_button =
+            copy_room_button.on_mouse_down(MouseButton::Left, cx.listener(Self::on_copy_room_id));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .px(px(14.0))
+            .py(px(14.0))
+            .rounded(px(14.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
+            .bg(rgb(UI_SIDEBAR_BG))
             .child(
                 div()
-                    .text_size(px(28.0))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xf2f4ff))
-                    .child("Connected to City-G"),
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(17.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(UI_PANEL_TEXT))
+                            .child("City-G"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(UI_SUBTLE_TEXT))
+                            .child("Workspace"),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(UI_ROW_BG))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(UI_MUTED_TEXT))
+                            .child("Room"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(UI_PANEL_TEXT))
+                            .child(format!("#{}", room_preview)),
+                    ),
+            )
+            .child(copy_room_button)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(ws_state.1))
+                            .child(ws_state.0),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(UI_SUBTLE_TEXT))
+                            .child(format!("Alias: {}", session.alias)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(UI_SUBTLE_TEXT))
+                            .child(format!("Members: {}/{}", self.members.len(), members_total)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(UI_MUTED_TEXT))
+                            .child(session.server_url.clone()),
+                    ),
+            )
+    }
+
+    fn render_chat_header(&self, session: &AppSession, cx: &mut ViewContext<Self>) -> Div {
+        let room_label = if session.room_id.len() > 28 {
+            format!(
+                "{}…{}",
+                &session.room_id[..16],
+                &session.room_id[session.room_id.len().saturating_sub(8)..]
+            )
+        } else {
+            session.room_id.clone()
+        };
+        let ws_state = if self.ws_connected {
+            "WebSocket live"
+        } else {
+            "Polling fallback"
+        };
+        let fetch_state = match self.fetch_status {
+            FetchStatus::Idle => "Idle",
+            FetchStatus::Refreshing => "Refreshing",
+        };
+        let status_text = format!("{} • {}", ws_state, fetch_state);
+        let status_color = if matches!(self.fetch_status, FetchStatus::Refreshing) {
+            rgb(UI_ACCENT_TEXT)
+        } else {
+            rgb(UI_SUBTLE_TEXT)
+        };
+
+        let mut toggle_ciphertext = div()
+            .px(px(12.0))
+            .py(px(7.0))
+            .rounded(px(10.0))
+            .bg(rgb(UI_ACCENT_TEXT))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_ACCENT_BUTTON_TEXT))
+            .cursor(CursorStyle::PointingHand)
+            .child(if self.show_ciphertext {
+                "Hide ciphertext"
+            } else {
+                "Show ciphertext"
+            });
+        toggle_ciphertext = toggle_ciphertext
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_toggle_ciphertext));
+
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(16.0))
+            .py(px(12.0))
+            .rounded(px(14.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
+            .bg(rgb(UI_PANEL_BG))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(21.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(UI_PANEL_TEXT))
+                            .child(format!("# {}", room_label)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(status_color)
+                            .child(status_text),
+                    ),
+            )
+            .child(toggle_ciphertext)
+    }
+
+    fn render_overview_panel(&self, session: &AppSession, cx: &mut ViewContext<Self>) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .px(px(12.0))
+            .py(px(12.0))
+            .rounded(px(14.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
+            .bg(rgb(UI_PANEL_BG))
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(UI_PANEL_TEXT))
+                    .child("Session overview"),
             )
             .child(self.session_row("Server", &session.server_url))
             .child(self.render_copyable_session_row(
-                "Room",
+                "Room ID",
                 &session.room_id,
                 Self::on_copy_room_id,
                 cx,
@@ -1549,67 +1823,27 @@ impl AppModel {
             .child(self.session_row("FS policy", &session.fs_policy_version))
             .child(self.render_epoch_age_row(session))
             .child(self.session_row("KBROAD key (hex)", &hex_encode(&session.kbroad_public)))
-            .child(self.render_members_panel(cx))
-            .child(self.render_security_panel(cx))
-            .child(self.render_activity_panel(cx))
-            .child(self.render_message_panel(session, cx))
-            .child(self.render_leave_controls(cx));
-
-        if let Some(info) = &self.info_message {
-            content = content.child(
-                div()
-                    .text_size(px(13.0))
-                    .text_color(rgb(0x72f88e))
-                    .child(info.clone()),
-            );
-        }
-
-        // Show categorized error box if available
-        if let Some(error_box) = self.render_error_box(cx) {
-            content = content.child(error_box);
-        } else if let Some(err) = &self.last_error {
-            // Fallback to simple error message
-            content = content.child(
-                div()
-                    .text_size(px(13.0))
-                    .text_color(rgb(0xff9f68))
-                    .child(err.clone()),
-            );
-        }
-
-        let mut scroll = div().flex().flex_col().w_full();
-
-        scroll = scroll
-            .min_w(min_card_width)
-            .max_w(max_card_width)
-            .max_h(max_card_height);
-
-        {
-            let interactivity = scroll.interactivity();
-            interactivity.base_style.overflow.x = Some(Overflow::Scroll);
-            interactivity.base_style.overflow.y = Some(Overflow::Scroll);
-            interactivity.element_id = Some(ElementId::Name("session-scroll".into()));
-            interactivity.block_mouse_except_scroll();
-        }
-
-        scroll.child(content)
     }
 
     fn session_row(&self, label: &str, value: &str) -> Div {
         div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(3.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .bg(rgb(UI_ROW_BG))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(0x9aa5d3))
+                    .text_size(px(11.0))
+                    .text_color(rgb(UI_MUTED_TEXT))
                     .child(label.to_string()),
             )
             .child(
                 div()
-                    .text_size(px(15.0))
-                    .text_color(rgb(0xf2f4ff))
+                    .text_size(px(13.0))
+                    .text_color(rgb(UI_PANEL_TEXT))
                     .child(value.to_string()),
             )
     }
@@ -1625,10 +1859,14 @@ impl AppModel {
             .flex()
             .flex_col()
             .gap(px(4.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .bg(rgb(UI_ROW_BG))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(0x9aa5d3))
+                    .text_size(px(11.0))
+                    .text_color(rgb(UI_MUTED_TEXT))
                     .child(label.to_string()),
             )
             .child(
@@ -1640,8 +1878,8 @@ impl AppModel {
                     .child(
                         div()
                             .flex_grow()
-                            .text_size(px(15.0))
-                            .text_color(rgb(0xf2f4ff))
+                            .text_size(px(13.0))
+                            .text_color(rgb(UI_PANEL_TEXT))
                             .child(value.to_string()),
                     )
                     .child(
@@ -1649,10 +1887,10 @@ impl AppModel {
                             .px(px(10.0))
                             .py(px(6.0))
                             .rounded(px(10.0))
-                            .border(px(1.0))
-                            .border_color(rgb(0x72f88e))
                             .text_size(px(12.0))
-                            .text_color(rgb(0x72f88e))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(UI_ACCENT_BUTTON_TEXT))
+                            .bg(rgb(UI_ACCENT_TEXT))
                             .cursor(CursorStyle::PointingHand)
                             .child("Copy")
                             .on_mouse_down(MouseButton::Left, cx.listener(handler)),
@@ -1684,17 +1922,21 @@ impl AppModel {
         div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(3.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .bg(rgb(UI_ROW_BG))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(0x9aa5d3))
+                    .text_size(px(11.0))
+                    .text_color(rgb(UI_MUTED_TEXT))
                     .child("Forward Secrecy Epoch"),
             )
             .child(
                 div()
-                    .text_size(px(15.0))
-                    .text_color(rgb(0xf2f4ff))
+                    .text_size(px(13.0))
+                    .text_color(rgb(UI_PANEL_TEXT))
                     .child(value_text),
             )
     }
@@ -1735,17 +1977,17 @@ impl AppModel {
             .px(px(10.0))
             .py(px(6.0))
             .rounded(px(10.0))
-            .border(px(1.0))
-            .border_color(if copy_enabled {
-                rgb(0x72f88e)
-            } else {
-                rgb(0x2a3148)
-            })
             .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
             .text_color(if copy_enabled {
-                rgb(0x72f88e)
+                rgb(UI_ACCENT_BUTTON_TEXT)
             } else {
-                rgb(0x5b6584)
+                rgb(UI_MUTED_TEXT)
+            })
+            .bg(if copy_enabled {
+                rgb(UI_ACCENT_TEXT)
+            } else {
+                rgb(UI_BUTTON_BG)
             })
             .cursor(if copy_enabled {
                 CursorStyle::PointingHand
@@ -1762,10 +2004,14 @@ impl AppModel {
             .flex()
             .flex_col()
             .gap(px(4.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .bg(rgb(UI_ROW_BG))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(0x9aa5d3))
+                    .text_size(px(11.0))
+                    .text_color(rgb(UI_MUTED_TEXT))
                     .child(label.to_string()),
             )
             .child(
@@ -1777,8 +2023,8 @@ impl AppModel {
                     .child(
                         div()
                             .flex_grow()
-                            .text_size(px(15.0))
-                            .text_color(rgb(0xf2f4ff))
+                            .text_size(px(13.0))
+                            .text_color(rgb(UI_PANEL_TEXT))
                             .child(value),
                     )
                     .child(copy_button),
@@ -2342,80 +2588,30 @@ impl AppModel {
     }
 
     fn render_message_panel(&self, _session: &AppSession, cx: &mut ViewContext<Self>) -> Div {
-        let border_color = rgb(0x2a3148);
-        let heading_color = rgb(0xf2f4ff);
-        let subtext_color = rgb(0x9aa5d3);
-        let status_color = match self.fetch_status {
-            FetchStatus::Idle => subtext_color,
-            FetchStatus::Refreshing => rgb(0x72f88e),
-        };
-        let ws_status = if self.ws_connected { "WS" } else { "Poll" };
-        let status_text = match self.fetch_status {
-            FetchStatus::Idle => format!("{} • Idle", ws_status),
-            FetchStatus::Refreshing => format!("{} • Refreshing…", ws_status),
-        };
-
         div()
             .flex()
             .flex_col()
+            .flex_grow()
             .gap(px(14.0))
             .border(px(1.0))
-            .border_color(border_color)
+            .border_color(rgb(UI_PANEL_BORDER))
             .rounded(px(14.0))
-            .px(px(18.0))
-            .py(px(16.0))
-            .bg(rgb(0x161b2a))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(20.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(heading_color)
-                            .child("Room messages"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(status_color)
-                                    .child(status_text.to_string()),
-                            )
-                            .child({
-                                let mut button = div()
-                                    .px(px(10.0))
-                                    .py(px(6.0))
-                                    .rounded(px(10.0))
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(0x0f1118))
-                                    .bg(rgb(0x72f88e))
-                                    .cursor(CursorStyle::PointingHand)
-                                    .child(if self.show_ciphertext {
-                                        "Hide ciphertext"
-                                    } else {
-                                        "Show ciphertext"
-                                    });
-                                button = button.on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(Self::on_toggle_ciphertext),
-                                );
-                                button
-                            }),
-                    ),
-            )
+            .px(px(16.0))
+            .py(px(14.0))
+            .bg(rgb(UI_PANEL_BG))
             .child(self.render_message_list())
             .child(self.render_message_composer(cx))
     }
 
     fn render_message_list(&self) -> Div {
-        let mut list = div().flex().flex_col().gap(px(10.0)).max_h(px(240.0));
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .gap(px(8.0))
+            .max_h(px(620.0))
+            .px(px(2.0))
+            .py(px(2.0));
         {
             let interactivity = list.interactivity();
             interactivity.base_style.overflow.y = Some(Overflow::Scroll);
@@ -2425,8 +2621,8 @@ impl AppModel {
             return list.child(
                 div()
                     .text_size(px(13.0))
-                    .text_color(rgb(0x5b6584))
-                    .child("No messages yet. Messaging sync is being wired up."),
+                    .text_color(rgb(UI_MUTED_TEXT))
+                    .child("No messages yet. Send one to warm up this room."),
             );
         }
 
@@ -2434,40 +2630,51 @@ impl AppModel {
             let timestamp =
                 format_rfc3339_seconds(UNIX_EPOCH + Duration::from_millis(message.timestamp_ms));
             let sender = self.resolve_sender_label(message);
-            let (card_bg, body_color, meta_color, status_line) = match message.delivery {
+            let (card_bg, card_border, body_color, meta_color, status_line) = match message.delivery
+            {
                 MessageDelivery::Pending => (
-                    rgb(0x1a2131),
-                    rgb(0xb8bed3),
-                    rgb(0x7f89ab),
-                    Some(("sending...", rgb(0x72f88e))),
+                    rgb(0x1d293b),
+                    rgb(0x2d4057),
+                    rgb(0xe1e7ff),
+                    rgb(0xa2b2d6),
+                    Some(("sending...", rgb(UI_ACCENT_TEXT))),
                 ),
                 MessageDelivery::Failed => (
-                    rgb(0x2b1c27),
-                    rgb(0xffd5e5),
-                    rgb(0xff9f68),
-                    Some(("failed to send", rgb(0xff6b6b))),
+                    rgb(0x32212c),
+                    rgb(0x563342),
+                    rgb(0xffd7e3),
+                    rgb(0xffafc3),
+                    Some(("failed to send", rgb(0xff8ca7))),
                 ),
-                MessageDelivery::Sent => (rgb(0x1b2135), rgb(0xf2f4ff), rgb(0x5b6584), None),
+                MessageDelivery::Sent => (
+                    rgb(0x171f31),
+                    rgb(0x243149),
+                    rgb(0xf2f5ff),
+                    rgb(0x9eabd2),
+                    None,
+                ),
             };
             let mut entry = div()
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
                 .bg(card_bg)
-                .rounded(px(10.0))
+                .rounded(px(11.0))
+                .border(px(1.0))
+                .border_color(card_border)
                 .px(px(12.0))
                 .py(px(10.0))
                 .child(
                     div()
                         .flex()
                         .justify_between()
-                        .text_size(px(13.0))
-                        .text_color(rgb(0x9aa5d3))
+                        .text_size(px(12.0))
+                        .text_color(rgb(UI_SUBTLE_TEXT))
                         .child(format!("{} • {}", sender, timestamp)),
                 )
                 .child(
                     div()
-                        .text_size(px(15.0))
+                        .text_size(px(14.0))
                         .text_color(body_color)
                         .child(message.plaintext.clone()),
                 )
@@ -2783,16 +2990,16 @@ impl AppModel {
     fn render_leave_controls(&self, cx: &mut ViewContext<Self>) -> Div {
         let leaving = matches!(self.leave_status, LeaveStatus::Leaving);
         let mut leave_button = div()
-            .px(px(16.0))
-            .py(px(10.0))
+            .px(px(12.0))
+            .py(px(8.0))
             .rounded(px(12.0))
-            .text_size(px(16.0))
+            .text_size(px(14.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(0xfafafa))
             .bg(if leaving {
-                rgb(0x42475d)
+                rgb(0x5a4552)
             } else {
-                rgb(0xff6b6b)
+                rgb(0xbb4f68)
             })
             .cursor(if leaving {
                 CursorStyle::Arrow
@@ -2807,21 +3014,33 @@ impl AppModel {
         }
 
         let reset_button = div()
-            .px(px(16.0))
-            .py(px(10.0))
+            .px(px(12.0))
+            .py(px(8.0))
             .rounded(px(12.0))
-            .text_size(px(16.0))
+            .text_size(px(14.0))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(0xf2f4ff))
-            .bg(rgb(0x2a3148))
+            .text_color(rgb(UI_PANEL_TEXT))
+            .bg(rgb(UI_BUTTON_BG))
             .cursor(CursorStyle::PointingHand)
             .child("Reset session")
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_reset_clicked));
 
         div()
-            .mt(px(12.0))
             .flex()
-            .gap(px(12.0))
+            .flex_col()
+            .gap(px(8.0))
+            .px(px(12.0))
+            .py(px(12.0))
+            .rounded(px(14.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
+            .bg(rgb(UI_SIDEBAR_BG))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(UI_MUTED_TEXT))
+                    .child("Session controls"),
+            )
             .child(leave_button)
             .child(reset_button)
     }
@@ -2837,19 +3056,20 @@ impl AppModel {
         };
         let mut header = div().flex().items_center().justify_between().child(
             div()
-                .text_size(px(18.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0xf2f4ff))
+                .text_size(px(15.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(UI_PANEL_TEXT))
                 .child(title_text),
         );
 
         let refresh_button = div()
-            .px(px(10.0))
-            .py(px(6.0))
+            .px(px(8.0))
+            .py(px(5.0))
             .rounded(px(10.0))
-            .text_size(px(14.0))
-            .text_color(rgb(0xf2f4ff))
-            .bg(rgb(0x2a3148))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_PANEL_TEXT))
+            .bg(rgb(UI_BUTTON_BG))
             .cursor(CursorStyle::PointingHand)
             .child("Refresh")
             .on_mouse_down(
@@ -2863,12 +3083,13 @@ impl AppModel {
             && next_offset < total
         {
             let load_more = div()
-                .px(px(10.0))
-                .py(px(6.0))
+                .px(px(8.0))
+                .py(px(5.0))
                 .rounded(px(10.0))
-                .text_size(px(14.0))
-                .text_color(rgb(0xf2f4ff))
-                .bg(rgb(0x38405b))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(UI_PANEL_TEXT))
+                .bg(rgb(0x32415f))
                 .cursor(CursorStyle::PointingHand)
                 .child("Load more")
                 .on_mouse_down(
@@ -2881,19 +3102,19 @@ impl AppModel {
         let search_placeholder = "Filter alias or leaf hex";
         let search_active = self.members_search.active;
         let search_border = if search_active {
-            rgb(0x72f88e)
+            rgb(UI_ACCENT_TEXT)
         } else {
-            rgb(0x2a3148)
+            rgb(UI_PANEL_BORDER)
         };
         let search_background = if search_active {
-            rgb(0x1b2135)
+            rgb(0x1b2840)
         } else {
-            rgb(0x161b2a)
+            rgb(UI_ROW_BG)
         };
         let search_text_color = if self.members_search.query.is_empty() {
-            rgb(0x5b6584)
+            rgb(UI_MUTED_TEXT)
         } else {
-            rgb(0xf5f7ff)
+            rgb(UI_PANEL_TEXT)
         };
         let search_display = if self.members_search.query.is_empty() {
             search_placeholder.to_string()
@@ -2905,8 +3126,8 @@ impl AppModel {
             .flex()
             .items_center()
             .flex_grow()
-            .px(px(12.0))
-            .py(px(8.0))
+            .px(px(10.0))
+            .py(px(7.0))
             .rounded(px(10.0))
             .border(px(1.0))
             .border_color(search_border)
@@ -2918,18 +3139,19 @@ impl AppModel {
             )
             .child(
                 div()
-                    .text_size(px(14.0))
+                    .text_size(px(12.0))
                     .text_color(search_text_color)
                     .child(search_display),
             );
 
         let search_button = div()
-            .px(px(10.0))
+            .px(px(8.0))
             .py(px(6.0))
             .rounded(px(10.0))
-            .text_size(px(14.0))
-            .text_color(rgb(0xf2f4ff))
-            .bg(rgb(0x2a3148))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_PANEL_TEXT))
+            .bg(rgb(UI_BUTTON_BG))
             .cursor(CursorStyle::PointingHand)
             .child("Search")
             .on_mouse_down(
@@ -2943,12 +3165,13 @@ impl AppModel {
         let has_query = !self.members_search.query.trim().is_empty();
         if has_query || matches!(self.members_mode, MembersMode::Search { .. }) {
             let clear_button = div()
-                .px(px(10.0))
+                .px(px(8.0))
                 .py(px(6.0))
                 .rounded(px(10.0))
-                .text_size(px(14.0))
-                .text_color(rgb(0xf2f4ff))
-                .bg(rgb(0x383f56))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(UI_PANEL_TEXT))
+                .bg(rgb(0x3e4b66))
                 .cursor(CursorStyle::PointingHand)
                 .child("Clear")
                 .on_mouse_down(
@@ -2958,12 +3181,7 @@ impl AppModel {
             search_row = search_row.child(clear_button);
         }
 
-        let mut list = div()
-            .mt(px(8.0))
-            .max_h(px(160.0))
-            .flex()
-            .flex_col()
-            .gap(px(4.0));
+        let mut list = div().max_h(px(180.0)).flex().flex_col().gap(px(6.0));
 
         {
             let interactivity = list.interactivity();
@@ -2973,32 +3191,34 @@ impl AppModel {
         if self.members.is_empty() {
             list = list.child(
                 div()
-                    .text_size(px(14.0))
-                    .text_color(rgb(0xb8bed3))
+                    .text_size(px(12.0))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
                     .child("No members reported for this root."),
             );
         } else {
             for member in &self.members {
                 let primary_label = format_member_label(member);
                 let mut entry = div()
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .rounded(px(8.0))
-                    .bg(rgb(0x1f2436))
+                    .px(px(9.0))
+                    .py(px(7.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(UI_ROW_BG))
+                    .border(px(1.0))
+                    .border_color(rgb(0x2c3952))
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
+                    .gap(px(3.0))
                     .child(
                         div()
-                            .text_size(px(14.0))
+                            .text_size(px(13.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0xf2f4ff))
+                            .text_color(rgb(UI_PANEL_TEXT))
                             .child(primary_label),
                     )
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(0x8b92b0))
+                            .text_color(rgb(UI_SUBTLE_TEXT))
                             .child(format!("leaf: {}", hex_encode(member.leaf_id))),
                     );
 
@@ -3006,7 +3226,7 @@ impl AppModel {
                     entry = entry.child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(0x5b6584))
+                            .text_color(rgb(UI_MUTED_TEXT))
                             .child(format!("joined {}", format_timestamp(joined))),
                     );
                 }
@@ -3015,7 +3235,7 @@ impl AppModel {
                     entry = entry.child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(0x5b6584))
+                            .text_color(rgb(UI_MUTED_TEXT))
                             .child(format!("last seen {}", format_timestamp(last_seen))),
                     );
                 }
@@ -3031,17 +3251,22 @@ impl AppModel {
         };
 
         let mut root = div()
-            .mt(px(12.0))
             .flex()
             .flex_col()
             .gap(px(8.0))
+            .px(px(12.0))
+            .py(px(12.0))
+            .rounded(px(14.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
+            .bg(rgb(UI_PANEL_BG))
             .child(header);
         root = root.child(search_row);
         if let Some(text) = status_text {
             root = root.child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(0xff9f68))
+                    .text_color(rgb(UI_WARN_TEXT))
                     .child(text),
             );
         }
@@ -3051,9 +3276,9 @@ impl AppModel {
     fn render_security_panel(&self, cx: &mut ViewContext<Self>) -> Div {
         let count = self.security_events.len();
         let title = div()
-            .text_size(px(18.0))
-            .font_weight(FontWeight::BOLD)
-            .text_color(rgb(0xf2f4ff))
+            .text_size(px(15.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(UI_PANEL_TEXT))
             .child(format!("Security alerts ({count})"));
         let mut header = div().flex().items_center().justify_between().child(title);
 
@@ -3073,8 +3298,9 @@ impl AppModel {
                 .py(px(4.0))
                 .rounded(px(8.0))
                 .text_size(px(12.0))
-                .text_color(rgb(0xf2f4ff))
-                .bg(rgb(0x383f56))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(UI_PANEL_TEXT))
+                .bg(rgb(UI_BUTTON_BG))
                 .cursor(CursorStyle::PointingHand)
                 .child("Mark read")
                 .on_mouse_down(
@@ -3094,8 +3320,9 @@ impl AppModel {
             .py(px(4.0))
             .rounded(px(8.0))
             .text_size(px(12.0))
-            .text_color(rgb(0xf2f4ff))
-            .bg(rgb(0x2a3148))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_PANEL_TEXT))
+            .bg(rgb(UI_BUTTON_BG))
             .cursor(CursorStyle::PointingHand)
             .child(toggle_label)
             .on_mouse_down(
@@ -3110,8 +3337,9 @@ impl AppModel {
                 .py(px(4.0))
                 .rounded(px(8.0))
                 .text_size(px(12.0))
-                .text_color(rgb(0xf2f4ff))
-                .bg(rgb(0x383f56))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(UI_PANEL_TEXT))
+                .bg(rgb(0x3d4b66))
                 .cursor(CursorStyle::PointingHand)
                 .child("Clear log")
                 .on_mouse_down(
@@ -3123,12 +3351,7 @@ impl AppModel {
 
         header = header.child(actions);
 
-        let mut list = div()
-            .mt(px(8.0))
-            .max_h(px(140.0))
-            .flex()
-            .flex_col()
-            .gap(px(4.0));
+        let mut list = div().max_h(px(160.0)).flex().flex_col().gap(px(6.0));
 
         {
             let interactivity = list.interactivity();
@@ -3143,38 +3366,40 @@ impl AppModel {
             };
             list = list.child(
                 div()
-                    .text_size(px(13.0))
-                    .text_color(rgb(0xb8bed3))
+                    .text_size(px(12.0))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
                     .child(summary),
             );
         } else if self.security_events.is_empty() {
             list = list.child(
                 div()
-                    .text_size(px(13.0))
-                    .text_color(rgb(0xb8bed3))
+                    .text_size(px(12.0))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
                     .child("No security alerts recorded."),
             );
         } else {
             for event in self.security_events.iter().rev() {
                 let entry = div()
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .rounded(px(8.0))
-                    .bg(rgb(0x231f2f))
+                    .px(px(9.0))
+                    .py(px(7.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(0x2a1f31))
+                    .border(px(1.0))
+                    .border_color(rgb(0x4b334f))
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(px(12.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0xf2f4ff))
+                            .text_color(rgb(0xffe3ee))
                             .child(format!("{} – {}", event.alias, event.description)),
                     )
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(0x8b92b0))
+                            .text_color(rgb(0xd3aec2))
                             .child(format_timestamp(event.timestamp_ms)),
                     );
                 list = list.child(entry);
@@ -3182,10 +3407,15 @@ impl AppModel {
         }
 
         div()
-            .mt(px(12.0))
             .flex()
             .flex_col()
             .gap(px(8.0))
+            .px(px(12.0))
+            .py(px(12.0))
+            .rounded(px(14.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
+            .bg(rgb(UI_PANEL_BG))
             .child(header)
             .child(list)
     }
@@ -3193,9 +3423,9 @@ impl AppModel {
     fn render_activity_panel(&self, cx: &mut ViewContext<Self>) -> Div {
         let count = self.activity_events.len();
         let title = div()
-            .text_size(px(18.0))
-            .font_weight(FontWeight::BOLD)
-            .text_color(rgb(0xf2f4ff))
+            .text_size(px(15.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(UI_PANEL_TEXT))
             .child(format!("Live activity ({count})"));
         let mut header = div().flex().items_center().justify_between().child(title);
 
@@ -3205,8 +3435,9 @@ impl AppModel {
                 .py(px(4.0))
                 .rounded(px(8.0))
                 .text_size(px(12.0))
-                .text_color(rgb(0xf2f4ff))
-                .bg(rgb(0x383f56))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(UI_PANEL_TEXT))
+                .bg(rgb(UI_BUTTON_BG))
                 .cursor(CursorStyle::PointingHand)
                 .child("Clear")
                 .on_mouse_down(
@@ -3257,12 +3488,7 @@ impl AppModel {
                     .child(format!("members {}/{}", self.members.len(), total_members)),
             );
 
-        let mut list = div()
-            .mt(px(8.0))
-            .max_h(px(180.0))
-            .flex()
-            .flex_col()
-            .gap(px(4.0));
+        let mut list = div().max_h(px(220.0)).flex().flex_col().gap(px(6.0));
         {
             let interactivity = list.interactivity();
             interactivity.base_style.overflow.y = Some(Overflow::Scroll);
@@ -3271,8 +3497,8 @@ impl AppModel {
         if self.activity_events.is_empty() {
             list = list.child(
                 div()
-                    .text_size(px(13.0))
-                    .text_color(rgb(0xb8bed3))
+                    .text_size(px(12.0))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
                     .child("No live activity yet."),
             );
         } else {
@@ -3289,10 +3515,12 @@ impl AppModel {
                     ActivityKind::System => ("system", rgb(0x373c4a), rgb(0xd0d6ef), rgb(0x262a36)),
                 };
                 let mut entry = div()
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .rounded(px(8.0))
+                    .px(px(9.0))
+                    .py(px(7.0))
+                    .rounded(px(10.0))
                     .bg(card_bg)
+                    .border(px(1.0))
+                    .border_color(rgb(0x33445d))
                     .flex()
                     .flex_col()
                     .gap(px(3.0))
@@ -3315,22 +3543,22 @@ impl AppModel {
                             .child(
                                 div()
                                     .text_size(px(11.0))
-                                    .text_color(rgb(0x9aa5d3))
+                                    .text_color(rgb(UI_SUBTLE_TEXT))
                                     .child(format_timestamp(event.timestamp_ms)),
                             ),
                     )
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(px(12.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0xf2f4ff))
+                            .text_color(rgb(UI_PANEL_TEXT))
                             .child(event.summary.clone()),
                     );
                 if let Some(detail) = event.detail.as_ref().filter(|text| !text.is_empty()) {
                     entry = entry.child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(0x8b92b0))
+                            .text_color(rgb(UI_MUTED_TEXT))
                             .child(detail.clone()),
                     );
                 }
@@ -3339,10 +3567,15 @@ impl AppModel {
         }
 
         div()
-            .mt(px(12.0))
             .flex()
             .flex_col()
             .gap(px(8.0))
+            .px(px(12.0))
+            .py(px(12.0))
+            .rounded(px(14.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
+            .bg(rgb(UI_PANEL_BG))
             .child(header)
             .child(metrics)
             .child(list)
@@ -4544,6 +4777,18 @@ const ALIAS_STORE_VERSION: u32 = 2;
 const SECURITY_LOG_VERSION: u32 = 1;
 const MAX_SECURITY_EVENTS: usize = 128;
 const MAX_ACTIVITY_EVENTS: usize = 256;
+const UI_CANVAS_BG: u32 = 0x111522;
+const UI_SIDEBAR_BG: u32 = 0x151c2f;
+const UI_PANEL_BG: u32 = 0x171f33;
+const UI_ROW_BG: u32 = 0x1e2940;
+const UI_PANEL_BORDER: u32 = 0x2e3d5b;
+const UI_BUTTON_BG: u32 = 0x2c3956;
+const UI_PANEL_TEXT: u32 = 0xf2f5ff;
+const UI_SUBTLE_TEXT: u32 = 0x9eabd2;
+const UI_MUTED_TEXT: u32 = 0x7180a5;
+const UI_ACCENT_TEXT: u32 = 0x67f3b8;
+const UI_ACCENT_BUTTON_TEXT: u32 = 0x122015;
+const UI_WARN_TEXT: u32 = 0xffb384;
 const ENCRYPTED_SESSION_ENVELOPE_VERSION: u32 = 1;
 const ENCRYPTED_SESSION_ALG: &str = "chacha20poly1305";
 const SESSION_PASSPHRASE_ENV: &str = "CITYG_GUI_SESSION_PASSPHRASE";
