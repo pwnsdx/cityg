@@ -444,19 +444,7 @@ fn parent_nonmem_witness(
                 lca_right_height: None,
             }
         }
-        (None, None) => RawNonMembershipWitness {
-            query: query.to_vec(),
-            root: parent_root.to_vec(),
-            left: None,
-            right: None,
-            path: Vec::new(),
-            left_below: Vec::new(),
-            right_below: Vec::new(),
-            above: Vec::new(),
-            nmint: None,
-            lca_left_height: None,
-            lca_right_height: None,
-        },
+        (None, None) => unreachable!("non-empty parent set must yield at least one boundary"),
     };
 
     Ok((witness, left, right))
@@ -633,4 +621,232 @@ fn split_interval_paths(
 /// Constant PoX commitment used by the demo flows.
 pub fn demo_pox_commit() -> [u8; 32] {
     hash_leaf(b"demo-pox")
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use msphf_core::witness::{RawMembershipWitness, RawNonMembershipWitness};
+    use std::borrow::Cow;
+
+    #[test]
+    fn srx_inputs_owned_roundtrip_preserves_frontiers() {
+        let owned = SrxInputsOwned {
+            join_leaf_ids: vec![[0x11; 32]],
+            join_nonmem_parent: vec![SrxNonMembershipAnchorOwned {
+                witness: RawNonMembershipWitness {
+                    query: vec![0x01; 32],
+                    root: vec![0x02; 32],
+                    left: None,
+                    right: None,
+                    path: vec![],
+                    left_below: vec![],
+                    right_below: vec![],
+                    above: vec![],
+                    nmint: None,
+                    lca_left_height: None,
+                    lca_right_height: None,
+                },
+                left_ref: Some(0),
+                right_ref: None,
+            }],
+            join_nonmem_revoked_since: vec![],
+            since_leaf_ids: vec![[0x22; 32]],
+            since_mem_revoked: vec![RawMembershipWitness {
+                leaf_id: vec![0xAA; 32],
+                root: vec![0xBB; 32],
+                path: vec![],
+            }],
+            anchor_mem_pool: vec![],
+            join_frontier: Some(vec![[0x33; 32]]),
+            since_frontier: Some(vec![[0x44; 32]]),
+        };
+
+        let borrowed = owned.clone().into_srx_inputs();
+        let roundtrip = SrxInputsOwned::from(&borrowed);
+        assert_eq!(roundtrip.join_leaf_ids, owned.join_leaf_ids);
+        assert_eq!(roundtrip.since_leaf_ids, owned.since_leaf_ids);
+        assert_eq!(roundtrip.join_frontier, owned.join_frontier);
+        assert_eq!(roundtrip.since_frontier, owned.since_frontier);
+
+        let explicit = SrxInputs {
+            join_leaf_ids: Cow::Owned(vec![[0x51; 32]]),
+            join_nonmem_parent: vec![],
+            join_nonmem_revoked_since: vec![],
+            since_leaf_ids: Cow::Owned(vec![[0x61; 32]]),
+            since_mem_revoked: Cow::Owned(vec![]),
+            anchor_mem_pool: vec![],
+            join_frontier: Some(Cow::Owned(vec![[0x71; 32]])),
+            since_frontier: Some(Cow::Owned(vec![[0x81; 32]])),
+        };
+        let explicit_owned = SrxInputsOwned::from(&explicit);
+        assert_eq!(explicit_owned.join_frontier, Some(vec![[0x71; 32]]));
+        assert_eq!(explicit_owned.since_frontier, Some(vec![[0x81; 32]]));
+    }
+
+    #[test]
+    fn split_interval_paths_rejects_invalid_sibling_lengths() {
+        let err = split_interval_paths(
+            [0x10; 32],
+            &[RawPathEntry {
+                dir: 0,
+                sibling: vec![0xAA; 31],
+            }],
+            [0x20; 32],
+            &[RawPathEntry {
+                dir: 0,
+                sibling: vec![0xBB; 32],
+            }],
+            [0x30; 32],
+        )
+        .expect_err("invalid left sibling length must fail");
+        assert!(err.to_string().contains("invalid path entry"));
+
+        let err = split_interval_paths(
+            [0x10; 32],
+            &[RawPathEntry {
+                dir: 0,
+                sibling: vec![0xAA; 32],
+            }],
+            [0x20; 32],
+            &[RawPathEntry {
+                dir: 0,
+                sibling: vec![0xBB; 31],
+            }],
+            [0x30; 32],
+        )
+        .expect_err("invalid right sibling length must fail");
+        assert!(err.to_string().contains("invalid path entry"));
+    }
+
+    #[test]
+    fn split_interval_paths_rejects_missing_height_steps() {
+        let err = split_interval_paths([0x10; 32], &[], [0x20; 32], &[], [0x30; 32])
+            .expect_err("missing left path step must fail");
+        assert!(err.to_string().contains("invalid left path height"));
+
+        let err = split_interval_paths(
+            [0x10; 32],
+            &[
+                RawPathEntry {
+                    dir: 0,
+                    sibling: vec![0xAA; 32],
+                },
+                RawPathEntry {
+                    dir: 0,
+                    sibling: vec![0xAB; 32],
+                },
+                RawPathEntry {
+                    dir: 0,
+                    sibling: vec![0xAC; 32],
+                },
+            ],
+            [0x20; 32],
+            &[RawPathEntry {
+                dir: 0,
+                sibling: vec![0xBB; 32],
+            }],
+            [0x30; 32],
+        )
+        .expect_err("missing right path step must fail");
+        assert!(err.to_string().contains("invalid right path height"));
+    }
+
+    #[test]
+    fn split_interval_paths_rejects_invalid_upper_level_entries() {
+        let err = split_interval_paths(
+            [0x10; 32],
+            &[
+                RawPathEntry {
+                    dir: 0,
+                    sibling: vec![0xAA; 32],
+                },
+                RawPathEntry {
+                    dir: 0,
+                    sibling: vec![0xAB; 31],
+                },
+            ],
+            [0x20; 32],
+            &[
+                RawPathEntry {
+                    dir: 1,
+                    sibling: vec![0xCC; 32],
+                },
+                RawPathEntry {
+                    dir: 1,
+                    sibling: vec![0xCD; 32],
+                },
+            ],
+            [0x30; 32],
+        )
+        .expect_err("invalid left upper-level sibling must fail");
+        assert!(err.to_string().contains("invalid path entry"));
+
+        let err = split_interval_paths(
+            [0x10; 32],
+            &[
+                RawPathEntry {
+                    dir: 0,
+                    sibling: vec![0xAA; 32],
+                },
+                RawPathEntry {
+                    dir: 0,
+                    sibling: vec![0xAB; 32],
+                },
+            ],
+            [0x20; 32],
+            &[
+                RawPathEntry {
+                    dir: 1,
+                    sibling: vec![0xCC; 32],
+                },
+                RawPathEntry {
+                    dir: 1,
+                    sibling: vec![0xCD; 31],
+                },
+            ],
+            [0x30; 32],
+        )
+        .expect_err("invalid right upper-level sibling must fail");
+        assert!(err.to_string().contains("invalid path entry"));
+    }
+
+    #[test]
+    fn build_srx_inputs_owned_rejects_revoked_root_mismatches() {
+        let parent_leaves = vec![[0x10; 32]];
+        let join_leaves = vec![[0x20; 32]];
+        let parent_root = canonical_set_root(&parent_leaves).expect("parent root should compute");
+
+        let revoked_since_leaves = vec![[0xA5; 32]];
+        let revoked_since_root =
+            canonical_set_root(&revoked_since_leaves).expect("revoked_since root should compute");
+        let revoked_leaves = vec![[0xA5; 32], [0xB5; 32]];
+        let wrong_revoked_root =
+            canonical_set_root(&revoked_since_leaves).expect("single-leaf root should compute");
+
+        let err = build_srx_inputs_owned(
+            &join_leaves,
+            &parent_leaves,
+            parent_root,
+            &revoked_since_leaves,
+            revoked_since_root,
+            &revoked_leaves,
+            wrong_revoked_root,
+        )
+        .expect_err("mismatched revoked_root must fail");
+        assert!(err.to_string().contains("revoked_root mismatch"));
+
+        let err = build_srx_inputs_owned(
+            &join_leaves,
+            &parent_leaves,
+            parent_root,
+            &revoked_since_leaves,
+            [0xFF; 32],
+            &revoked_leaves,
+            canonical_set_root(&revoked_leaves).expect("revoked root should compute"),
+        )
+        .expect_err("mismatched revoked_since_root must fail");
+        assert!(err.to_string().contains("revoked_since_root mismatch"));
+    }
 }

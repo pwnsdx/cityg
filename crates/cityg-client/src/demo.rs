@@ -547,22 +547,7 @@ pub fn parent_nonmem_witness(
             };
             (witness, None, Some(r))
         }
-        (None, None) => {
-            let witness = RawNonMembershipWitness {
-                query: query.to_vec(),
-                root: parent_root.to_vec(),
-                left: None,
-                right: None,
-                path: Vec::new(),
-                left_below: Vec::new(),
-                right_below: Vec::new(),
-                above: Vec::new(),
-                nmint: None,
-                lca_left_height: None,
-                lca_right_height: None,
-            };
-            (witness, None, None)
-        }
+        (None, None) => unreachable!("non-empty parent set must produce at least one anchor"),
     }
 }
 
@@ -802,6 +787,26 @@ mod tests {
     }
 
     #[test]
+    fn demo_config_root_uses_fallback_when_env_blank() -> Result<(), CityGError> {
+        let _guard = env_lock()
+            .lock()
+            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let previous = std::env::var_os("CITYG_DEMO_CONFIG_DIR");
+        // SAFETY: tests are serialized via `env_lock`, so mutating process env is race-free.
+        unsafe { std::env::set_var("CITYG_DEMO_CONFIG_DIR", "   ") };
+        let root = demo_config_root();
+        let expected = dirs::config_dir().map(|dir| dir.join("cityg"));
+        assert_eq!(root, expected);
+        match previous {
+            // SAFETY: tests are serialized via `env_lock`, so mutating process env is race-free.
+            Some(value) => unsafe { std::env::set_var("CITYG_DEMO_CONFIG_DIR", value) },
+            // SAFETY: tests are serialized via `env_lock`, so mutating process env is race-free.
+            None => unsafe { std::env::remove_var("CITYG_DEMO_CONFIG_DIR") },
+        }
+        Ok(())
+    }
+
+    #[test]
     fn load_or_generate_kbroad_keys_roundtrips_on_disk() -> Result<(), CityGError> {
         let _guard = env_lock()
             .lock()
@@ -874,6 +879,124 @@ mod tests {
         assert_eq!(rewritten.len(), pk.len() + sk.as_bytes().len());
 
         teardown_demo_config_dir(&dir, previous);
+        Ok(())
+    }
+
+    #[test]
+    fn demo_bundle_attaches_bootstrap_only_for_genesis() -> Result<(), CityGError> {
+        let genesis = demo_bundle_with_parent_leaves(&[], sequential_leaf(501))?;
+        assert!(genesis.header_map.contains_key(&hdr::HDR_BOOTSTRAP_SIG));
+        let parent = [sequential_leaf(1)];
+        let joined = demo_bundle_with_parent_leaves(&parent, sequential_leaf(502))?;
+        assert!(!joined.header_map.contains_key(&hdr::HDR_BOOTSTRAP_SIG));
+        Ok(())
+    }
+
+    #[test]
+    fn parent_nonmem_witness_covers_all_reachable_shapes() -> Result<(), CityGError> {
+        let leaves = vec![
+            sequential_leaf(10),
+            sequential_leaf(20),
+            sequential_leaf(30),
+        ];
+        let parent_root = canonical_set_root(&leaves)?;
+
+        let (empty_witness, empty_left, empty_right) =
+            parent_nonmem_witness(&[], [0x11; 32], sequential_leaf(1));
+        assert!(empty_witness.left.is_none());
+        assert!(empty_witness.right.is_none());
+        assert!(empty_left.is_none());
+        assert!(empty_right.is_none());
+
+        let (left_boundary, left_anchor, right_anchor) =
+            parent_nonmem_witness(&leaves, parent_root, sequential_leaf(1));
+        assert!(left_anchor.is_none());
+        assert_eq!(right_anchor, Some(leaves[0]));
+        assert!(left_boundary.left.is_none());
+        assert!(left_boundary.right.is_some());
+        assert!(!left_boundary.path.is_empty());
+
+        let (right_boundary, left_anchor, right_anchor) =
+            parent_nonmem_witness(&leaves, parent_root, sequential_leaf(100));
+        assert_eq!(left_anchor, Some(leaves[2]));
+        assert!(right_anchor.is_none());
+        assert!(right_boundary.left.is_some());
+        assert!(right_boundary.right.is_none());
+        assert!(!right_boundary.path.is_empty());
+
+        let (interval, left_anchor, right_anchor) =
+            parent_nonmem_witness(&leaves, parent_root, sequential_leaf(25));
+        assert_eq!(left_anchor, Some(leaves[1]));
+        assert_eq!(right_anchor, Some(leaves[2]));
+        assert!(interval.path.is_empty());
+        assert!(interval.left_below.len() <= 1);
+        assert!(interval.right_below.len() <= 1);
+        assert!(interval.nmint.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn build_srx_inputs_covers_single_sided_anchor_refs() -> Result<(), CityGError> {
+        let parent_leaves = vec![sequential_leaf(1), sequential_leaf(2)];
+        let parent_root = canonical_set_root(&parent_leaves)?;
+
+        let left_join = vec![sequential_leaf(0)];
+        let left_srx = build_srx_inputs(&left_join, &parent_leaves, parent_root, [0xAA; 32]);
+        let left_item = &left_srx.join_nonmem_parent[0];
+        assert!(left_item.left_ref.is_none());
+        assert!(left_item.right_ref.is_some());
+
+        let right_join = vec![sequential_leaf(99)];
+        let right_srx = build_srx_inputs(&right_join, &parent_leaves, parent_root, [0xBB; 32]);
+        let right_item = &right_srx.join_nonmem_parent[0];
+        assert!(right_item.left_ref.is_some());
+        assert!(right_item.right_ref.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_membership_path_and_fold_step_cover_success() -> Result<(), CityGError> {
+        let leaves = vec![sequential_leaf(7), sequential_leaf(8)];
+        let root = canonical_set_root(&leaves)?;
+
+        let left_path = canonical_membership_path(&leaves, &leaves[0]);
+        assert_eq!(left_path.len(), 1);
+        assert_eq!(left_path[0].dir, 0);
+        let mut left_acc = leaves[0];
+        fold_step_into(&mut left_acc, &left_path[0])?;
+        assert_eq!(left_acc, root);
+
+        let right_path = canonical_membership_path(&leaves, &leaves[1]);
+        assert_eq!(right_path.len(), 1);
+        assert_eq!(right_path[0].dir, 1);
+        let mut right_acc = leaves[1];
+        fold_step_into(&mut right_acc, &right_path[0])?;
+        assert_eq!(right_acc, root);
+
+        assert!(canonical_membership_path(&[leaves[0]], &leaves[0]).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn split_interval_paths_success_and_invalid_depth() -> Result<(), CityGError> {
+        let leaves = vec![
+            sequential_leaf(11),
+            sequential_leaf(12),
+            sequential_leaf(13),
+            sequential_leaf(14),
+        ];
+        let root = canonical_set_root(&leaves)?;
+        let left_path = canonical_membership_path(&leaves, &leaves[0]);
+        let right_path = canonical_membership_path(&leaves, &leaves[1]);
+        let (left_below, right_below, above, l_h, r_h) =
+            split_interval_paths(leaves[0], &left_path, leaves[1], &right_path, root)?;
+        assert_eq!(usize::from(l_h), left_below.len() + 1);
+        assert_eq!(usize::from(r_h), right_below.len() + 1);
+        assert!(!above.is_empty());
+
+        let err = split_interval_paths(leaves[0], &[], leaves[0], &[], leaves[0])
+            .expect_err("expected invalid LCA depth");
+        assert!(err.to_string().contains("invalid LCA depth"));
         Ok(())
     }
 

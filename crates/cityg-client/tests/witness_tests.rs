@@ -223,6 +223,56 @@ fn test_build_merge_srx_inputs_rejects_revoked_since_not_in_revoked_set() {
 }
 
 #[test]
+fn test_build_merge_srx_inputs_rejects_nonempty_revoked_root_mismatch() {
+    let parent_leaves = vec![[0x10; 32]];
+    let join_leaves = vec![[0x20; 32]];
+    let parent_root =
+        msphf_core::merkle::canonical_set_root(&parent_leaves).expect("parent root should compute");
+    let revoked_since_leaves = vec![[0xA5; 32]];
+    let revoked_leaves = vec![[0xA5; 32], [0xB5; 32]];
+    let wrong_revoked_root = msphf_core::merkle::canonical_set_root(&revoked_since_leaves)
+        .expect("single-leaf root should compute");
+
+    let err = build_merge_srx_inputs(
+        &parent_leaves,
+        &join_leaves,
+        parent_root,
+        &revoked_since_leaves,
+        &revoked_leaves,
+        wrong_revoked_root,
+    )
+    .expect_err("mismatched revoked_root must fail");
+
+    assert!(err.to_string().contains("revoked_root mismatch"));
+}
+
+#[test]
+fn test_build_merge_srx_inputs_accepts_consistent_revocation_sets()
+-> Result<(), Box<dyn std::error::Error>> {
+    let parent_leaves = vec![[0x10; 32], [0x20; 32]];
+    let join_leaves = vec![[0x30; 32]];
+    let parent_root = msphf_core::merkle::canonical_set_root(&parent_leaves)?;
+    let revoked_since_leaves = vec![[0xA5; 32]];
+    let revoked_leaves = vec![[0xA5; 32], [0xB5; 32]];
+    let revoked_root = msphf_core::merkle::canonical_set_root(&revoked_leaves)?;
+
+    let srx = build_merge_srx_inputs(
+        &parent_leaves,
+        &join_leaves,
+        parent_root,
+        &revoked_since_leaves,
+        &revoked_leaves,
+        revoked_root,
+    )?;
+
+    assert_eq!(srx.since_leaf_ids, revoked_since_leaves);
+    assert_eq!(srx.since_mem_revoked.len(), 1);
+    assert_eq!(srx.since_mem_revoked[0].root, revoked_root.to_vec());
+    assert!(!srx.since_mem_revoked[0].path.is_empty());
+    Ok(())
+}
+
+#[test]
 fn test_build_branch_b_artifacts_interval_nonmembership_includes_anchors()
 -> Result<(), Box<dyn std::error::Error>> {
     let parent_leaves = vec![[0x10; 32], [0x30; 32], [0x50; 32]];

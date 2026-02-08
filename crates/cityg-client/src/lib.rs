@@ -748,18 +748,26 @@ impl GroupMembership {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::demo::{demo_bundle, demo_bundle_alice, demo_bundle_bob, kbroad_secret};
-    use msphf_orchestrator::{
-        FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, SrxMode,
+    use crate::demo::{
+        demo_bundle, demo_bundle_alice, demo_bundle_bob, kbroad_public, kbroad_secret,
     };
+    use crate::witness::{
+        build_branch_b_artifacts, demo_pox_commit, join_delta_root, sequential_leaf,
+        witness_to_cbor,
+    };
+    use msphf_core::{instance::tswe_salt_hash, merkle::canonical_set_root, params::*};
+    use msphf_orchestrator::{DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID};
+    use msphf_orchestrator::{
+        FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PivotParity, PopKeypair,
+        SrxMode, deterministic_lb_vrf_keys,
+    };
+    use pqcrypto_dilithium::dilithium5::keypair;
+    use pqcrypto_traits::sign::PublicKey as _;
 
     #[test]
     fn slice_to_array_rejects_short_input() {
-        let result = slice_to_array(&[0u8; 31]);
-        assert!(result.is_err(), "short slice should fail");
-        if let Err(err) = result {
-            assert!(matches!(err, CityGError::InvalidInput(_)));
-        }
+        let err = slice_to_array(&[0u8; 31]).expect_err("short slice should fail");
+        assert!(matches!(err, CityGError::InvalidInput(_)));
     }
 
     #[test]
@@ -832,11 +840,10 @@ mod tests {
             msphf_orchestrator::hdr::HDR_SRX_PAYLOAD,
             Value::Text("bad".to_string()),
         );
-        let result = bundle.membership_delta();
-        assert!(result.is_err(), "invalid payload type should fail");
-        if let Err(err) = result {
-            assert!(matches!(err, CityGError::InvalidInput(_)));
-        }
+        let err = bundle
+            .membership_delta()
+            .expect_err("invalid payload type should fail");
+        assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
 
@@ -847,11 +854,10 @@ mod tests {
             msphf_orchestrator::hdr::HDR_SRX_MODE,
             Value::Text("srx/vX".to_string()),
         );
-        let result = bundle.membership_delta();
-        assert!(result.is_err(), "unknown mode should fail");
-        if let Err(err) = result {
-            assert!(matches!(err, CityGError::InvalidInput(_)));
-        }
+        let err = bundle
+            .membership_delta()
+            .expect_err("unknown mode should fail");
+        assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
 
@@ -895,6 +901,440 @@ mod tests {
         let (epoch_key, eid) = decoded.derive_epoch_secrets_with_kbroad_secret(kbroad_secret())?;
         assert_eq!(epoch_key, bundle.epoch_key);
         assert_eq!(eid, bundle.eid);
+        Ok(())
+    }
+
+    #[test]
+    fn cityg_error_display_and_conversion_paths() {
+        let msphf_err = MsphfError::invalid_input("bad input");
+        let converted: CityGError = msphf_err.into();
+        assert!(format!("{converted}").contains("MSPHF error"));
+
+        let acceptance = msphf_orchestrator::AcceptanceError::Msphf(MsphfError::invalid_input("x"));
+        let converted: CityGError = acceptance.into();
+        assert!(format!("{converted}").contains("acceptance error"));
+
+        let receiver = msphf_orchestrator::receiver::ReceiverError::UnknownHead;
+        let converted: CityGError = receiver.into();
+        assert!(format!("{converted}").contains("receiver error"));
+
+        let io_err = std::io::Error::other("io");
+        let converted: CityGError = io_err.into();
+        assert!(format!("{converted}").contains("io error"));
+
+        let invalid = CityGError::InvalidInput("oops");
+        assert_eq!(format!("{invalid}"), "invalid input: oops");
+    }
+
+    #[test]
+    fn membership_delta_parser_handles_missing_and_malformed_variants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut bundle = demo_bundle_alice()?;
+
+        bundle
+            .header_map
+            .remove(&msphf_orchestrator::hdr::HDR_SRX_MODE);
+        assert!(bundle.membership_delta()?.joined.is_empty());
+
+        bundle.header_map.insert(
+            msphf_orchestrator::hdr::HDR_SRX_MODE,
+            Value::Bytes(vec![0xFF]),
+        );
+        assert!(bundle.membership_delta().is_err());
+
+        bundle.header_map.insert(
+            msphf_orchestrator::hdr::HDR_SRX_MODE,
+            Value::Integer(1.into()),
+        );
+        assert!(bundle.membership_delta().is_err());
+
+        bundle.header_map.insert(
+            msphf_orchestrator::hdr::HDR_SRX_MODE,
+            Value::Text("srx/v1-complete".to_string()),
+        );
+        bundle
+            .header_map
+            .remove(&msphf_orchestrator::hdr::HDR_SRX_PAYLOAD);
+        assert!(bundle.membership_delta()?.joined.is_empty());
+
+        bundle.header_map.insert(
+            msphf_orchestrator::hdr::HDR_SRX_PAYLOAD,
+            Value::Bytes(vec![0xFF, 0x00]),
+        );
+        assert!(bundle.membership_delta().is_err());
+
+        let bad_payload = Value::Array(vec![Value::Integer(1.into())]);
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&bad_payload, &mut encoded)?;
+        bundle.header_map.insert(
+            msphf_orchestrator::hdr::HDR_SRX_PAYLOAD,
+            Value::Bytes(encoded),
+        );
+        assert!(bundle.membership_delta().is_err());
+
+        let non_array_payload = Value::Text("bad".to_string());
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&non_array_payload, &mut encoded)?;
+        bundle.header_map.insert(
+            msphf_orchestrator::hdr::HDR_SRX_PAYLOAD,
+            Value::Bytes(encoded),
+        );
+        assert!(bundle.membership_delta().is_err());
+
+        let bad_leaf_payload = Value::Array(vec![
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Array(vec![Value::Integer(9.into())]),
+            Value::Null,
+            Value::Array(vec![]),
+            Value::Null,
+            Value::Null,
+        ]);
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&bad_leaf_payload, &mut encoded)?;
+        bundle.header_map.insert(
+            msphf_orchestrator::hdr::HDR_SRX_PAYLOAD,
+            Value::Bytes(encoded),
+        );
+        assert!(bundle.membership_delta().is_err());
+
+        let non_array_leaf_payload = Value::Array(vec![
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Text("bad".to_string()),
+            Value::Null,
+            Value::Array(vec![]),
+            Value::Null,
+            Value::Null,
+        ]);
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&non_array_leaf_payload, &mut encoded)?;
+        bundle.header_map.insert(
+            msphf_orchestrator::hdr::HDR_SRX_PAYLOAD,
+            Value::Bytes(encoded),
+        );
+        assert!(bundle.membership_delta().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn derive_epoch_secrets_and_header_helpers_cover_error_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = demo_bundle_bob()?;
+        let (epoch_key, eid) = bundle.derive_epoch_secrets()?;
+        assert_eq!(epoch_key, bundle.epoch_key);
+        assert_eq!(eid, bundle.eid);
+        assert_eq!(bundle.gid(), bundle.anchor.gid.as_slice());
+
+        let wire_bytes = bundle.to_cbor()?;
+        let mut wire = ClientEpochBundle::from_cbor(&wire_bytes)?;
+        assert!(wire.derive_epoch_secrets().is_err());
+
+        wire.epoch_key = [0xAA; 32];
+        let mismatch = wire.derive_epoch_secrets_with_kbroad_secret(kbroad_secret());
+        assert!(mismatch.is_err());
+
+        wire.epoch_key = [0u8; 32];
+        wire.eid = [0xBB; 32];
+        let mismatch = wire.derive_epoch_secrets_with_kbroad_secret(kbroad_secret());
+        assert!(mismatch.is_err());
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(7.into()));
+        assert_eq!(extract_fs_ec(&header), Some(7));
+        header.insert(HDR_FS_EC, Value::Bytes(7u64.to_be_bytes().to_vec()));
+        assert_eq!(extract_fs_ec(&header), Some(7));
+        header.insert(HDR_FS_EC, Value::Bytes(vec![1, 2, 3]));
+        assert_eq!(extract_fs_ec(&header), None);
+        header.insert(HDR_FS_EC, Value::Text("bad".to_string()));
+        assert_eq!(extract_fs_ec(&header), None);
+        Ok(())
+    }
+
+    #[test]
+    fn anchor_and_group_membership_checked_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let parts = AnchorInstanceParts {
+            gid: b"gid2",
+            cat: b"cat2",
+            tswe_salt_hash: &[0xAA; 32],
+            parent_root: &[0x11; 32],
+            join_delta_root: &[0x22; 32],
+            revoked_since_prev_root: &[0x33; 32],
+            revoked_root: &[0x44; 32],
+            pox_r_commit: Some(&[0x55; 32]),
+        };
+        let bundle = AnchorBundle::try_from_parts(&parts)?;
+        assert_eq!(bundle.pox_r_commit, Some([0x55; 32]));
+
+        let mut group = GroupMembership::new();
+        let join = MembershipDelta {
+            joined: vec![[0x10; 32], [0x20; 32]],
+            revoked: vec![],
+        };
+        group.apply_delta_checked(&join)?;
+        let collected: Vec<[u8; 32]> = group.members().copied().collect();
+        assert_eq!(collected.len(), 2);
+        assert!(group.contains(&[0x10; 32]));
+
+        let revoke_missing = MembershipDelta {
+            joined: vec![],
+            revoked: vec![[0x99; 32]],
+        };
+        assert!(group.apply_delta_checked(&revoke_missing).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn apply_delta_checked_rejects_missing_member_directly() {
+        let mut group = GroupMembership::new();
+        let delta = MembershipDelta {
+            joined: vec![],
+            revoked: vec![[0xAA; 32]],
+        };
+        let err = group
+            .apply_delta_checked(&delta)
+            .expect_err("revoking absent member must fail");
+        assert!(matches!(err, CityGError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn apply_delta_checked_revokes_existing_member() {
+        let mut group = GroupMembership::new();
+        group
+            .apply_delta_checked(&MembershipDelta {
+                joined: vec![[0xAB; 32]],
+                revoked: vec![],
+            })
+            .expect("initial join should succeed");
+        group
+            .apply_delta_checked(&MembershipDelta {
+                joined: vec![],
+                revoked: vec![[0xAB; 32]],
+            })
+            .expect("revoking existing member should succeed");
+        assert!(!group.contains(&[0xAB; 32]));
+    }
+
+    #[test]
+    fn generate_epoch_records_tau_and_exposes_binding_inputs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid = [0x43; 32];
+        let cat = [0x21; 32];
+        let parent_leaves: Vec<[u8; 32]> = Vec::new();
+        let join_leaves = vec![sequential_leaf(77)];
+        let parent_root = canonical_set_root(&parent_leaves)?;
+        let tswe_salt = tswe_salt_hash(&gid, &parent_root)?;
+        let join_root = join_delta_root(&join_leaves)?;
+        let revoked_root = [0u8; 32];
+        let revoked_since_root = [0u8; 32];
+        let (canonical_witness, srx_owned) = build_branch_b_artifacts(
+            &parent_leaves,
+            &join_leaves,
+            parent_root,
+            revoked_since_root,
+        )
+        .expect("branch-b artifact generation should succeed");
+        let witness_bytes = witness_to_cbor(&canonical_witness)?;
+        let srx_inputs = srx_owned.into_srx_inputs();
+        let pox_commit = demo_pox_commit();
+
+        let parts = AnchorInstanceParts {
+            gid: &gid,
+            cat: &cat,
+            tswe_salt_hash: tswe_salt.as_ref(),
+            parent_root: &parent_root,
+            join_delta_root: join_root.as_ref(),
+            revoked_since_prev_root: &revoked_since_root,
+            revoked_root: &revoked_root,
+            pox_r_commit: Some(pox_commit.as_ref()),
+        };
+
+        let (pop_pk, pop_sk) = keypair();
+        let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
+        let params = OrchestrationParams {
+            msphf_crs_id: RLWE_CRS_ID_DEFAULT,
+            params_id: RLWE_PARAMS_ID_MOCK,
+            srx: Some(srx_inputs),
+            srx_mode: SrxMode::Complete,
+            pop_keys: Some(PopKeypair {
+                algorithm: "ML-DSA-65",
+                public_key: pop_pk.as_bytes(),
+                secret_key: &pop_sk,
+            }),
+            leaf_id_mode: LeafIdMode::PerGroup,
+            proof_mode: DEFAULT_PROOF_MODE,
+            vrf_id: DEFAULT_VRF_ID,
+            policy_version: DEFAULT_POLICY_VERSION,
+            vrf_secret_key: Some(vrf_secret_key),
+            vrf_public_key: Some(vrf_public_key),
+            fs_policy_version: "fs-policy-v1",
+            fs_epoch_base_ts: 0,
+            fs_join: FsJoinInputs::default(),
+            fs_merge: FsMergeInputs::default(),
+        };
+
+        let mut fs_state = ForwardSecrecyState::new([0xAA; 32]);
+        let mut header = BTreeMap::new();
+        header.insert(
+            msphf_orchestrator::hdr::HDR_KBROAD_ALG,
+            Value::Text("ml-kem-768".to_string()),
+        );
+        header.insert(
+            msphf_orchestrator::hdr::HDR_KBROAD_PUB,
+            Value::Bytes(kbroad_public().to_vec()),
+        );
+        let bundle =
+            CityGClient::generate_epoch(header, parts, params, &mut fs_state, Some(&witness_bytes))
+                .expect("generate_epoch should succeed");
+
+        let fs_ec = extract_fs_ec(&bundle.header_map).ok_or("missing fs_ec in generated header")?;
+        assert!(fs_state.cached_tau(&bundle.we_epoch_id, fs_ec).is_some());
+        let binding_inputs = bundle.hp_binding_inputs();
+        assert_eq!(binding_inputs.xk_hash, &bundle.hp_binding.xk_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn generate_merge_path_with_accepted_parity() -> Result<(), Box<dyn std::error::Error>> {
+        let source = demo_bundle_bob()?;
+        let binding_inputs = source.hp_binding_inputs();
+        assert_eq!(binding_inputs.hp_commit, &source.hp_binding.hp_commit);
+        let parity = PivotParity {
+            gid: source.anchor.gid.clone(),
+            cat: source.anchor.cat.clone(),
+            parent_root: source.anchor.parent_root,
+            we_epoch_id: source.we_epoch_id,
+            rho_commit: source.hp_binding.rho_commit,
+            seed_ctx_hash: source.hp_binding.seed_ctx_hash,
+            seed_commit: source.hp_binding.seed_commit,
+            hp_commit: source.hp_binding.hp_commit,
+            xk_hash: source.hp_binding.xk_hash,
+            join_delta_root: source.anchor.join_delta_root,
+            revoked_since_root: source.anchor.revoked_since_prev_root,
+            revoked_root: source.anchor.revoked_root,
+            accept_seq: 1,
+            crs_id: source.hp_binding.msphf_crs_id.as_bytes().to_vec(),
+            params_id: source.hp_binding.params_id.as_bytes().to_vec(),
+            policy_version: DEFAULT_POLICY_VERSION.to_string(),
+            proof_mode: DEFAULT_PROOF_MODE.to_string(),
+            vrf_id: DEFAULT_VRF_ID.to_string(),
+            vrf_proof: vec![0x01],
+            vrf_public: vec![0x02],
+            mask_a: [0xAA; 32],
+            mask_b: [0xBB; 32],
+            fs_capss: vec![0x03],
+            proofs_commit: [0x44; 32],
+            srx_commit: None,
+            is_join: false,
+            hp_envelope: std::sync::Arc::from([] as [u8; 0]),
+            fs_epoch_commit: Some([0x55; 32]),
+            fs_ec: Some(0),
+            fs_dev_commit: Some([0u8; 32]),
+        };
+
+        let parts = AnchorInstanceParts {
+            gid: source.anchor.gid.as_slice(),
+            cat: source.anchor.cat.as_slice(),
+            tswe_salt_hash: source.anchor.tswe_salt_hash.as_slice(),
+            parent_root: &source.anchor.parent_root,
+            join_delta_root: &source.anchor.join_delta_root,
+            revoked_since_prev_root: &source.anchor.revoked_since_prev_root,
+            revoked_root: &source.anchor.revoked_root,
+            pox_r_commit: source
+                .anchor
+                .pox_r_commit
+                .as_ref()
+                .map(|value| value.as_slice()),
+        };
+
+        let (pop_pk, pop_sk) = keypair();
+        let (vrf_secret_key, vrf_public_key) = deterministic_lb_vrf_keys();
+        let params = OrchestrationParams {
+            msphf_crs_id: RLWE_CRS_ID_DEFAULT,
+            params_id: RLWE_PARAMS_ID_MOCK,
+            srx: None,
+            srx_mode: SrxMode::Complete,
+            pop_keys: Some(PopKeypair {
+                algorithm: "ML-DSA-65",
+                public_key: pop_pk.as_bytes(),
+                secret_key: &pop_sk,
+            }),
+            leaf_id_mode: LeafIdMode::PerGroup,
+            proof_mode: DEFAULT_PROOF_MODE,
+            vrf_id: DEFAULT_VRF_ID,
+            policy_version: DEFAULT_POLICY_VERSION,
+            vrf_secret_key: Some(vrf_secret_key),
+            vrf_public_key: Some(vrf_public_key),
+            fs_policy_version: "fs-policy-v1",
+            fs_epoch_base_ts: 0,
+            fs_join: FsJoinInputs::default(),
+            fs_merge: FsMergeInputs::default(),
+        };
+
+        let mut header = BTreeMap::new();
+        header.insert(
+            msphf_orchestrator::hdr::HDR_KBROAD_ALG,
+            Value::Text("ml-kem-768".to_string()),
+        );
+        header.insert(
+            msphf_orchestrator::hdr::HDR_KBROAD_PUB,
+            Value::Bytes(kbroad_public().to_vec()),
+        );
+        let merged = CityGClient::generate_merge(
+            header,
+            parts,
+            params,
+            &[parity],
+            Some("merge-note"),
+            source.witness_bytes(),
+        )
+        .expect("generate_merge should succeed");
+        assert_eq!(merged.gid(), source.gid());
+        assert!(
+            merged
+                .header_map
+                .contains_key(&msphf_orchestrator::hdr::HDR_MH_HEADS)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn derive_with_kbroad_secret_prefers_local_material() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let bundle = demo_bundle_bob()?;
+        // Intentionally pass a bad secret; local hp_aead_key must be preferred.
+        let bad_secret = [0xFF; 32];
+        let (epoch_key, eid) = bundle.derive_epoch_secrets_with_kbroad_secret(&bad_secret)?;
+        assert_eq!(epoch_key, bundle.epoch_key);
+        assert_eq!(eid, bundle.eid);
+        Ok(())
+    }
+
+    #[test]
+    fn derive_with_kbroad_secret_rejects_wrong_secret_for_wire_bundle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = demo_bundle_bob()?;
+        let bytes = bundle.to_cbor()?;
+        let wire_bundle = ClientEpochBundle::from_cbor(&bytes)?;
+        let bad_secret = [0xCD; 32];
+        assert!(
+            wire_bundle
+                .derive_epoch_secrets_with_kbroad_secret(&bad_secret)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn derive_epoch_secrets_rejects_mismatched_hp_binding() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut bundle = demo_bundle_bob()?;
+        bundle.hp_binding.xk_hash = [0xEE; 32];
+        assert!(bundle.derive_epoch_secrets().is_err());
         Ok(())
     }
 }
