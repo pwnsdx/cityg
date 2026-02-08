@@ -522,105 +522,109 @@ fn split_interval_paths(
     right_path: &[RawPathEntry],
     parent_root: [u8; 32],
 ) -> SplitPathsResult {
-    let mut left_below = Vec::new();
-    let mut right_below = Vec::new();
-    let mut above = Vec::new();
-
-    let mut left_acc = left_leaf;
-    let mut right_acc = right_leaf;
-
-    for (idx, entry) in left_path.iter().enumerate() {
-        let sibling: [u8; 32] = entry
-            .sibling
-            .as_slice()
-            .try_into()
-            .map_err(|_| CityGError::InvalidInput("invalid path entry"))?;
-        if entry.dir == 0 {
-            left_acc = hash_node(&left_acc, &sibling);
-        } else {
-            left_acc = hash_node(&sibling, &left_acc);
+    fn fold_step_into(acc: &mut [u8; 32], entry: &RawPathEntry) -> Result<(), CityGError> {
+        if entry.sibling.len() != 32 {
+            return Err(CityGError::InvalidInput("invalid path entry"));
         }
-        if right_path.get(idx).map(|e| e.dir) == Some(entry.dir) {
-            left_below.push(RawPathEntry {
-                dir: entry.dir,
-                sibling: entry.sibling.clone(),
-            });
+        let mut sibling = [0u8; 32];
+        sibling.copy_from_slice(&entry.sibling);
+        match entry.dir {
+            0 => {
+                *acc = hash_node(acc, &sibling);
+                Ok(())
+            }
+            1 => {
+                *acc = hash_node(&sibling, acc);
+                Ok(())
+            }
+            _ => Err(CityGError::InvalidInput("invalid path entry")),
+        }
+    }
+
+    fn build_chain(leaf: [u8; 32], path: &[RawPathEntry]) -> Result<Vec<[u8; 32]>, CityGError> {
+        let mut chain = Vec::with_capacity(path.len() + 1);
+        let mut acc = leaf;
+        chain.push(acc);
+        for entry in path {
+            fold_step_into(&mut acc, entry)?;
+            chain.push(acc);
+        }
+        Ok(chain)
+    }
+
+    let left_chain = build_chain(left_leaf, left_path)?;
+    let right_chain = build_chain(right_leaf, right_path)?;
+
+    let left_root = *left_chain
+        .last()
+        .ok_or(CityGError::InvalidInput("empty membership path"))?;
+    let right_root = *right_chain
+        .last()
+        .ok_or(CityGError::InvalidInput("empty membership path"))?;
+
+    if left_root != parent_root || right_root != parent_root {
+        return Err(CityGError::InvalidInput(
+            "membership path inconsistent with root",
+        ));
+    }
+
+    let mut common = 0usize;
+    while common < left_chain.len() && common < right_chain.len() {
+        let l = left_chain[left_chain.len() - 1 - common];
+        let r = right_chain[right_chain.len() - 1 - common];
+        if l == r {
+            common += 1;
         } else {
-            left_below.push(RawPathEntry {
-                dir: entry.dir,
-                sibling: entry.sibling.clone(),
-            });
             break;
         }
     }
 
-    for (idx, entry) in right_path.iter().enumerate() {
-        let sibling: [u8; 32] = entry
-            .sibling
-            .as_slice()
-            .try_into()
-            .map_err(|_| CityGError::InvalidInput("invalid path entry"))?;
-        if entry.dir == 0 {
-            right_acc = hash_node(&right_acc, &sibling);
-        } else {
-            right_acc = hash_node(&sibling, &right_acc);
-        }
-        if left_path.get(idx).map(|e| e.dir) == Some(entry.dir) {
-            right_below.push(RawPathEntry {
-                dir: entry.dir,
-                sibling: entry.sibling.clone(),
-            });
-        } else {
-            right_below.push(RawPathEntry {
-                dir: entry.dir,
-                sibling: entry.sibling.clone(),
-            });
-            break;
-        }
+    if common == 0 {
+        return Err(CityGError::InvalidInput("anchors share no ancestry"));
     }
 
-    let mut left_height = left_below.len() as u8;
-    let mut right_height = right_below.len() as u8;
-
-    while left_acc != parent_root && right_acc != parent_root {
-        let left_step = left_path
-            .get(left_height as usize)
-            .ok_or(CityGError::InvalidInput("invalid left path height"))?;
-        let right_step = right_path
-            .get(right_height as usize)
-            .ok_or(CityGError::InvalidInput("invalid right path height"))?;
-
-        let left_sib: [u8; 32] = left_step
-            .sibling
-            .as_slice()
-            .try_into()
-            .map_err(|_| CityGError::InvalidInput("invalid path entry"))?;
-        if left_step.dir == 0 {
-            left_acc = hash_node(&left_acc, &left_sib);
-        } else {
-            left_acc = hash_node(&left_sib, &left_acc);
-        }
-
-        let right_sib: [u8; 32] = right_step
-            .sibling
-            .as_slice()
-            .try_into()
-            .map_err(|_| CityGError::InvalidInput("invalid path entry"))?;
-        if right_step.dir == 0 {
-            right_acc = hash_node(&right_acc, &right_sib);
-        } else {
-            right_acc = hash_node(&right_sib, &right_acc);
-        }
-
-        above.push(RawPathEntry {
-            dir: left_step.dir,
-            sibling: left_step.sibling.clone(),
-        });
-        left_height += 1;
-        right_height += 1;
+    let left_len = left_path.len();
+    let right_len = right_path.len();
+    if common > left_len || common > right_len {
+        return Err(CityGError::InvalidInput("invalid LCA depth"));
     }
 
-    Ok((left_below, right_below, above, left_height, right_height))
+    let lca_step_left = left_len - common;
+    let lca_step_right = right_len - common;
+
+    let left_below = left_path[..lca_step_left].to_vec();
+    let right_below = right_path[..lca_step_right].to_vec();
+
+    let shared_suffix_len = common.saturating_sub(1);
+    let above = if shared_suffix_len > 0 {
+        let start_left = left_len - shared_suffix_len;
+        let start_right = right_len - shared_suffix_len;
+        let suffix_left = &left_path[start_left..];
+        let suffix_right = &right_path[start_right..];
+        if suffix_left.len() != suffix_right.len() {
+            return Err(CityGError::InvalidInput("shared suffix mismatch"));
+        }
+        for (l_entry, r_entry) in suffix_left.iter().zip(suffix_right.iter()) {
+            if l_entry.dir != r_entry.dir || l_entry.sibling != r_entry.sibling {
+                return Err(CityGError::InvalidInput("shared suffix mismatch"));
+            }
+        }
+        for entry in suffix_left {
+            if entry.dir > 1 {
+                return Err(CityGError::InvalidInput("shared suffix malformed"));
+            }
+        }
+        suffix_left.to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let l_h = u8::try_from(left_below.len() + 1)
+        .map_err(|_| CityGError::InvalidInput("lca depth overflow"))?;
+    let r_h = u8::try_from(right_below.len() + 1)
+        .map_err(|_| CityGError::InvalidInput("lca depth overflow"))?;
+
+    Ok((left_below, right_below, above, l_h, r_h))
 }
 
 /// Constant PoX commitment used by the demo flows.
@@ -739,7 +743,10 @@ mod tests {
     fn split_interval_paths_rejects_missing_height_steps() {
         let err = split_interval_paths([0x10; 32], &[], [0x20; 32], &[], [0x30; 32])
             .expect_err("missing left path step must fail");
-        assert!(err.to_string().contains("invalid left path height"));
+        assert!(
+            err.to_string()
+                .contains("membership path inconsistent with root")
+        );
 
         let err = split_interval_paths(
             [0x10; 32],
@@ -765,7 +772,56 @@ mod tests {
             [0x30; 32],
         )
         .expect_err("missing right path step must fail");
-        assert!(err.to_string().contains("invalid right path height"));
+        assert!(
+            err.to_string()
+                .contains("membership path inconsistent with root")
+        );
+    }
+
+    #[test]
+    fn build_srx_inputs_owned_two_leaf_interval_is_canonical() {
+        let left = [0x10; 32];
+        let right = [0x20; 32];
+        let query = [0x18; 32];
+        let parent_leaves = vec![left, right];
+        let parent_root =
+            canonical_set_root(&parent_leaves).expect("parent root for two-leaf set must compute");
+
+        let srx = build_srx_inputs_owned(
+            &[query],
+            &parent_leaves,
+            parent_root,
+            &[],
+            [0u8; 32],
+            &[],
+            [0u8; 32],
+        )
+        .expect("SRX inputs for interval witness must build");
+
+        let anchored = srx
+            .join_nonmem_parent
+            .first()
+            .expect("one join non-membership witness expected");
+        let validated = CanonicalWitness::validate_nonmembership_witness(&anchored.witness, &parent_root)
+            .expect("two-leaf interval non-membership witness must validate");
+        assert_eq!(validated.left, Some(left));
+        assert_eq!(validated.right, Some(right));
+        let left_ref = anchored.left_ref.expect("left anchor ref must be present") as usize;
+        let right_ref = anchored
+            .right_ref
+            .expect("right anchor ref must be present") as usize;
+        let left_leaf: [u8; 32] = srx.anchor_mem_pool[left_ref]
+            .leaf_id
+            .as_slice()
+            .try_into()
+            .expect("left anchor leaf bytes");
+        let right_leaf: [u8; 32] = srx.anchor_mem_pool[right_ref]
+            .leaf_id
+            .as_slice()
+            .try_into()
+            .expect("right anchor leaf bytes");
+        assert_eq!(left_leaf, left);
+        assert_eq!(right_leaf, right);
     }
 
     #[test]
