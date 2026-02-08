@@ -162,6 +162,9 @@ impl AcceptanceContext {
         let Some(first_head) = mh_heads.first() else {
             return Err(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID));
         };
+        if !mh_heads.windows(2).all(|window| window[0] < window[1]) {
+            return Err(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID));
+        }
         let wid_old_vec = self
             .mh_window
             .find_head_window(first_head)
