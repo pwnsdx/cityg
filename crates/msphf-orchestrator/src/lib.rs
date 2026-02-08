@@ -823,6 +823,12 @@ pub struct ForwardSecrecyState {
     tau_cache: TauCache,
 }
 
+impl Drop for ForwardSecrecyState {
+    fn drop(&mut self) {
+        self.clear_secrets();
+    }
+}
+
 impl ForwardSecrecyState {
     pub fn new(k_fs: [u8; 32]) -> Self {
         Self::with_policy(k_fs, ForwardSecrecyPolicy::default())
@@ -855,6 +861,10 @@ impl ForwardSecrecyState {
             boundary,
             tau_cache,
         }
+    }
+
+    fn clear_secrets(&mut self) {
+        self.k_fs.zeroize();
     }
 
     pub fn set_epoch_base_ts(&mut self, epoch_base_ts: u64) {
@@ -1262,6 +1272,14 @@ mod fs_state_tests {
             "subsequent ticks should continue bounded catch-up"
         );
         Ok(())
+    }
+
+    #[test]
+    fn clear_secrets_zeroizes_kfs_material() {
+        let mut state = ForwardSecrecyState::new([0xA7; 32]);
+        assert_ne!(state.snapshot().k_fs, [0u8; 32]);
+        state.clear_secrets();
+        assert_eq!(state.snapshot().k_fs, [0u8; 32]);
     }
 }
 
