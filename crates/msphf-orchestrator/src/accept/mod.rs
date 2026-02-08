@@ -74,7 +74,11 @@ pub use telemetry::*;
 const MAX_HP_PROOF_BYTES: usize = 512 * 1024;
 /// Maximum VRF proof size per Section 12 (field #95 ≤ 8,192 bytes)
 const MAX_VRF_PROOF_BYTES: usize = 8_192;
-const RHO_GUARD_CAPACITY: usize = 64;
+/// Default capacity for the per-(gid, parent_root) replay guard.
+///
+/// When the guard is full, new `rho_commit` values are **rejected** (not evicted).
+/// Use [`AcceptanceContext::clear_rho_guard_for`] to reclaim capacity after epoch rotation.
+pub const RHO_GUARD_CAPACITY: usize = 64;
 const MIN_SRX_MAX_BYTES: usize = 256 * 1024;
 const DEFAULT_SRX_MAX_BYTES: usize = 1024 * 1024;
 const FS_CAPSS_MAX_BYTES: usize = 16_384;
@@ -321,6 +325,9 @@ pub struct AcceptanceOptions {
     pub leaf_id_mode: crate::LeafIdMode,
     pub kbroad_registry: Option<BTreeMap<Vec<u8>, Vec<u8>>>,
     pub fs_policy_config: FsPolicyConfig,
+    /// Maximum number of `rho_commit` values tracked per (gid, parent_root) pair.
+    /// Once full, new values are **rejected** instead of evicting old entries.
+    pub rho_guard_capacity: usize,
 }
 
 impl Default for AcceptanceOptions {
@@ -348,6 +355,7 @@ impl Default for AcceptanceOptions {
             leaf_id_mode: crate::LeafIdMode::PerGroup,
             kbroad_registry: None,
             fs_policy_config: FsPolicyConfig::default(),
+            rho_guard_capacity: RHO_GUARD_CAPACITY,
         }
     }
 }
@@ -478,7 +486,7 @@ impl AcceptanceContext {
         let verify_ttl = mh_window.ttl();
         let mut ctx = Self {
             mh_window,
-            rho_guard: RhoReplayGuard::new(RHO_GUARD_CAPACITY),
+            rho_guard: RhoReplayGuard::new(options.rho_guard_capacity.max(1)),
             vck_cache: VckCache::new(verify_ttl),
             pivot_store: PivotParityStore::new(verify_ttl),
             bootstrap_policy: options.bootstrap_policy,
@@ -858,6 +866,14 @@ impl AcceptanceContext {
         self.allowed_params_ids.as_ref()
     }
 
+    pub fn set_rho_guard_capacity(&mut self, cap: usize) {
+        self.rho_guard.limit = cap.max(1);
+    }
+
+    pub fn clear_rho_guard_for(&mut self, gid: &[u8], parent_root: &[u8]) {
+        self.rho_guard.clear_for(gid, parent_root);
+    }
+
     pub fn set_srx_max_bytes(&mut self, max_bytes: usize) {
         self.srx_max_bytes = max_bytes.max(MIN_SRX_MAX_BYTES);
     }
@@ -1163,17 +1179,38 @@ impl RhoReplayGuard {
         }
     }
 
+    /// Record a `rho_commit` value.
+    ///
+    /// Returns `true` if the value was freshly recorded.
+    /// Returns `false` if:
+    /// - The value is a duplicate of one already tracked, **or**
+    /// - The per-key deque has reached its capacity limit.
+    ///
+    /// Unlike the previous (eviction-based) design, this version never
+    /// silently drops old entries; the caller must explicitly reclaim
+    /// capacity via [`clear_for`](Self::clear_for).
     fn record(&mut self, gid: &[u8], parent_root: &[u8], rho_commit: &[u8; 32]) -> bool {
         let key = Self::make_key(gid, parent_root);
         let deque = self.entries.entry(key).or_default();
         if deque.iter().any(|existing| existing == rho_commit) {
             return false;
         }
-        deque.push_back(*rho_commit);
-        if deque.len() > self.limit {
-            deque.pop_front();
+        if deque.len() >= self.limit {
+            return false;
         }
+        deque.push_back(*rho_commit);
         true
+    }
+
+    fn clear_for(&mut self, gid: &[u8], parent_root: &[u8]) {
+        let key = Self::make_key(gid, parent_root);
+        self.entries.remove(&key);
+    }
+
+    #[cfg(test)]
+    fn count_for(&self, gid: &[u8], parent_root: &[u8]) -> usize {
+        let key = Self::make_key(gid, parent_root);
+        self.entries.get(&key).map_or(0, |d| d.len())
     }
 
     fn make_key(gid: &[u8], parent_root: &[u8]) -> Vec<u8> {
@@ -5334,5 +5371,80 @@ mod tests {
             other => panic!("unexpected error: {:?}", other),
         }
         Ok(())
+    }
+
+    // ── RhoReplayGuard unit tests ─────────────────────────────────────
+
+    #[test]
+    fn rho_guard_rejects_duplicate() {
+        let mut guard = RhoReplayGuard::new(8);
+        let gid = b"gid";
+        let root = &[0xAA; 32];
+        let rho = [0x01; 32];
+        assert!(guard.record(gid, root, &rho));
+        assert!(!guard.record(gid, root, &rho), "duplicate must be rejected");
+    }
+
+    #[test]
+    fn rho_guard_rejects_when_full_instead_of_evicting() {
+        let capacity = 4;
+        let mut guard = RhoReplayGuard::new(capacity);
+        let gid = b"gid";
+        let root = &[0xBB; 32];
+
+        // Fill to capacity.
+        for i in 0u8..capacity as u8 {
+            assert!(guard.record(gid, root, &[i; 32]));
+        }
+        assert_eq!(guard.count_for(gid, root), capacity);
+
+        // The next distinct value must be rejected, not evict an old one.
+        assert!(
+            !guard.record(gid, root, &[0xFF; 32]),
+            "overflow must reject, not evict"
+        );
+        assert_eq!(
+            guard.count_for(gid, root),
+            capacity,
+            "size must not grow past capacity"
+        );
+
+        // All previously-recorded values must still be detected as duplicates
+        // (proving nothing was evicted).
+        for i in 0u8..capacity as u8 {
+            assert!(
+                !guard.record(gid, root, &[i; 32]),
+                "old rho {i} must still be detected"
+            );
+        }
+    }
+
+    #[test]
+    fn rho_guard_clear_for_reclaims_capacity() {
+        let mut guard = RhoReplayGuard::new(2);
+        let gid = b"gid";
+        let root = &[0xCC; 32];
+        assert!(guard.record(gid, root, &[1; 32]));
+        assert!(guard.record(gid, root, &[2; 32]));
+        assert!(!guard.record(gid, root, &[3; 32]), "must be full");
+
+        guard.clear_for(gid, root);
+        assert_eq!(guard.count_for(gid, root), 0);
+        assert!(
+            guard.record(gid, root, &[3; 32]),
+            "after clear, capacity is reclaimed"
+        );
+    }
+
+    #[test]
+    fn rho_guard_different_keys_are_independent() {
+        let mut guard = RhoReplayGuard::new(1);
+        let gid = b"gid";
+        let root_a = &[0x01; 32];
+        let root_b = &[0x02; 32];
+        let rho = [0xDD; 32];
+        assert!(guard.record(gid, root_a, &rho));
+        // Same rho under a different parent_root is independent.
+        assert!(guard.record(gid, root_b, &rho));
     }
 }
