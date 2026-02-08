@@ -1,9 +1,11 @@
-use crate::param::P;
+use crate::param::{P, R_BASE};
 use crate::poly::PolyArith;
 use crate::poly32::Poly32;
 use crate::poly32::poly32_inner_product;
+use crate::poly256::Poly256;
 use crate::serde::Serdes;
 use proptest::prelude::*;
+use zeroize::Zeroize;
 
 #[test]
 fn test_rand_mod_p() {
@@ -169,6 +171,122 @@ fn test_karatsuba() {
     assert_eq!(result_ka.coeff[0], 1);
     assert_eq!(result_ka.coeff[1], 2);
     assert_eq!(result_ka.coeff[2], 1);
+}
+
+#[test]
+fn test_from_poly256_matches_manual_fold() {
+    let mut source = Poly256::zero();
+    for j in 0..8usize {
+        source.coeff[j << 5] = (j as i64) + 1;
+        source.coeff[1 + (j << 5)] = (j as i64) + 3;
+    }
+
+    let converted = Poly32::from(source);
+    for i in 0..Poly32::DEGREE {
+        let mut expected = 0i64;
+        for (j, r) in R_BASE.iter().enumerate() {
+            expected += source.coeff[i + (j << 5)] * (*r);
+        }
+        expected %= P;
+        assert_eq!(converted.coeff[i], expected, "index {i} mismatch");
+    }
+}
+
+#[test]
+fn test_wrapper_methods_and_zeroize() {
+    let mut rng = rand::thread_rng();
+    let a = Poly32::uniform_random(&mut rng);
+    let b = Poly32::rand_trinary(&mut rng);
+
+    assert_eq!(Poly32::mul(&a, &b), Poly32::mul_trinary(&a, &b));
+    assert_eq!(Poly32::mul(&a, &b), Poly32::mul_karatsuba(&a, &b));
+
+    let mut z = a;
+    z.zeroize();
+    assert!(z.coeff.iter().all(|c| *c == 0));
+}
+
+#[test]
+fn test_normalized_centered_and_random_ranges() {
+    let mut poly = Poly32 {
+        coeff: [
+            -1,
+            -P - 1,
+            P + 2,
+            2 * P + 3,
+            -3 * P - 4,
+            5,
+            -6,
+            7,
+            -8,
+            9,
+            -10,
+            11,
+            -12,
+            13,
+            -14,
+            15,
+            -16,
+            17,
+            -18,
+            19,
+            -20,
+            21,
+            -22,
+            23,
+            -24,
+            25,
+            -26,
+            27,
+            -28,
+            29,
+            -30,
+            31,
+        ],
+    };
+    let original = poly.coeff;
+    poly.normalized();
+    for (i, (before, after)) in original.iter().zip(poly.coeff.iter()).enumerate() {
+        let expected = (before + (P << 1)) % P;
+        assert_eq!(*after, expected, "normalized mismatch at index {i}");
+        assert!(
+            *after > -P && *after < P,
+            "normalized coefficient out of reduced range at index {i}"
+        );
+    }
+
+    let normalized = poly.coeff;
+    poly.centered();
+    for (i, (before, after)) in normalized.iter().zip(poly.coeff.iter()).enumerate() {
+        let mut expected = (before + (P << 1)) % P;
+        if (expected << 1) > P {
+            expected -= P;
+        }
+        assert_eq!(*after, expected, "centered mismatch at index {i}");
+    }
+
+    let mut rng = rand::thread_rng();
+    let beta_poly = Poly32::rand_mod_beta(&mut rng);
+    let beta_high = crate::param::BETA_M2_P1 as i64 - crate::param::BETA - 1;
+    assert!(
+        beta_poly
+            .coeff
+            .iter()
+            .all(|c| *c >= -crate::param::BETA && *c <= beta_high)
+    );
+
+    let tri = Poly32::rand_trinary(&mut rng);
+    assert!(tri.coeff.iter().all(|c| (-1..=1).contains(c)));
+}
+
+#[test]
+fn test_inner_product_length_mismatch_panics_in_debug() {
+    let a = [Poly32::zero(); 2];
+    let b = [Poly32::zero(); 1];
+    let result = std::panic::catch_unwind(|| {
+        let _ = poly32_inner_product(&a, &b);
+    });
+    assert!(result.is_err());
 }
 
 #[test]

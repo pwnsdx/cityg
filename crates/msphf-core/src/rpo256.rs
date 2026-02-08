@@ -202,6 +202,75 @@ mod tests {
     }
 
     #[test]
+    fn interval_helpers_match_tagged_hashes() {
+        let left = [0x11u8; 32];
+        let right = [0x22u8; 32];
+        let mut payload = [0u8; 64];
+        payload[..32].copy_from_slice(&left);
+        payload[32..].copy_from_slice(&right);
+
+        assert_eq!(
+            interval_node(&left, &right),
+            hash_with_tag(DS_NONMEM_INTNODE_U64, &payload)
+        );
+
+        let left_id = [0x33u8; 32];
+        let left_leaf = [0x44u8; 32];
+        let right_id = [0x55u8; 32];
+        let right_leaf = [0x66u8; 32];
+        let h1 = interval_binding(&left_id, &left_leaf, &right_id, &right_leaf, 3, 7);
+        let h2 = interval_binding(&left_id, &left_leaf, &right_id, &right_leaf, 3, 7);
+        let h3 = interval_binding(&left_id, &left_leaf, &right_id, &right_leaf, 4, 7);
+        assert_eq!(h1, h2, "binding should be deterministic");
+        assert_ne!(h1, h3, "binding should change when heights change");
+    }
+
+    #[test]
+    fn set_hash_and_digest_validation_reject_invalid_inputs() {
+        let a = [0x01u8; 32];
+        let b = [0x02u8; 32];
+        assert!(set_hash(&[b, a]).is_err(), "unsorted sets must be rejected");
+        assert!(
+            set_hash(&[a, a]).is_err(),
+            "duplicate set items must be rejected"
+        );
+
+        let digest = digest_from_slice(&[0xAAu8; 32]).expect("32-byte digest must parse");
+        assert_eq!(digest, [0xAAu8; 32]);
+        assert!(digest_from_slice(&[0xAAu8; 31]).is_err());
+        assert!(digest_from_slice(&[0xAAu8; 33]).is_err());
+    }
+
+    #[test]
+    fn absorb_and_bytes_mapping_cover_edge_cases() {
+        let mut state = [BaseElement::ZERO; STATE_WIDTH];
+        state[RATE_OFFSET] = BaseElement::new(7);
+        let original = state;
+        absorb_words(&mut state, &[]);
+        assert_eq!(state, original, "empty absorb should not mutate state");
+
+        let mut state = [BaseElement::ZERO; STATE_WIDTH];
+        let words: Vec<BaseElement> = (0u64..9u64).map(BaseElement::new).collect();
+        absorb_words(&mut state, &words);
+        assert_ne!(
+            state,
+            [BaseElement::ZERO; STATE_WIDTH],
+            "non-empty absorb should mutate state"
+        );
+
+        let mapped = bytes_to_field_elements(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(mapped.len(), 2);
+        assert_eq!(
+            mapped[0].as_int(),
+            u64::from_be_bytes([1, 2, 3, 4, 5, 6, 7, 8])
+        );
+        assert_eq!(
+            mapped[1].as_int(),
+            u64::from_be_bytes([9, 0, 0, 0, 0, 0, 0, 0])
+        );
+    }
+
+    #[test]
     fn kat_vectors_match_expected() {
         let range: Vec<u8> = (0u8..=0x3f).collect();
         let zero32 = [0u8; 32];
@@ -281,7 +350,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn kat_debug_print() {
         let range: Vec<u8> = (0u8..=0x3f).collect();
         let zero32 = [0u8; 32];
