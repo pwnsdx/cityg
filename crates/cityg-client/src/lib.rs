@@ -98,6 +98,8 @@ use msphf_orchestrator::{
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+const MAX_BUNDLE_CBOR_BYTES: usize = 4 * 1024 * 1024;
+
 /// Unified error type for City-G client operations.
 ///
 /// This enum wraps all possible error types that can occur during
@@ -514,6 +516,9 @@ impl ClientEpochBundle {
     }
 
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CityGError> {
+        if bytes.len() > MAX_BUNDLE_CBOR_BYTES {
+            return Err(CityGError::InvalidInput("bundle payload too large"));
+        }
         let cursor = Cursor::new(bytes);
         ciborium::de::from_reader(cursor)
             .map_err(|_| CityGError::InvalidInput("bundle decode failed"))
@@ -956,6 +961,17 @@ mod tests {
         assert_eq!(decoded.eid, [0u8; 32]);
         assert_eq!(decoded.hp_aead_key, [0u8; 32]);
         Ok(())
+    }
+
+    #[test]
+    fn from_cbor_rejects_oversized_bundle_payload() {
+        let oversized = vec![0u8; MAX_BUNDLE_CBOR_BYTES + 1];
+        let err = ClientEpochBundle::from_cbor(&oversized)
+            .expect_err("oversized bundle payload must fail");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("bundle payload too large")
+        ));
     }
 
     #[test]
