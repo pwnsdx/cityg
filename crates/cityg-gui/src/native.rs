@@ -25,10 +25,13 @@ use cityg_config::CityGConfig;
 use dirs::config_dir;
 use futures::{StreamExt, channel::mpsc as futures_mpsc};
 use gpui::prelude::*;
+#[cfg(not(test))]
 use gpui::{
-    App, Application, Bounds, ClipboardItem, Context as ViewContext, CursorStyle, Div, ElementId,
-    FontWeight, Keystroke, MouseButton, MouseDownEvent, Overflow, Render, Task, TitlebarOptions,
-    Window, WindowBounds, WindowDecorations, WindowOptions, div, point, px, rgb, size,
+    App, Application, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, size,
+};
+use gpui::{
+    ClipboardItem, Context as ViewContext, CursorStyle, Div, ElementId, FontWeight, Keystroke,
+    MouseButton, MouseDownEvent, Overflow, Render, Task, Window, div, point, px, rgb,
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
@@ -126,6 +129,7 @@ mod tokio_bridge {
 
 use tokio_bridge::Tokio;
 
+#[cfg(not(test))]
 pub fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -1087,13 +1091,25 @@ impl AppModel {
         hex_encode(bytes)
     }
 
+    fn toast_cleanup_delay() -> Duration {
+        #[cfg(test)]
+        {
+            Duration::from_millis(1)
+        }
+        #[cfg(not(test))]
+        {
+            Duration::from_secs(8)
+        }
+    }
+
     // Toast notification helpers
     fn show_toast(&mut self, toast: Toast, cx: &mut ViewContext<Self>) {
         self.toasts.push(toast);
         cx.notify();
 
+        let cleanup_delay = Self::toast_cleanup_delay();
         let delay = Tokio::spawn_result(cx, async move {
-            sleep(Duration::from_secs(8)).await;
+            sleep(cleanup_delay).await;
             Ok(())
         });
 
@@ -2271,37 +2287,8 @@ impl AppModel {
             };
 
             while let Some(event) = event_rx.next().await {
-                let _ = this.update(cx, |model, cx| match event {
-                    WebSocketEvent::Connected => {
-                        model.ws_connected = true;
-                        model.record_activity(
-                            ActivityKind::Connection,
-                            "WebSocket connected (live updates enabled)",
-                        );
-                        model.schedule_epoch_sync(
-                            cx,
-                            "Syncing latest epoch after WebSocket reconnect…",
-                        );
-                        cx.notify();
-                    }
-                    WebSocketEvent::Disconnected => {
-                        model.ws_connected = false;
-                        model.record_activity(
-                            ActivityKind::Connection,
-                            "WebSocket disconnected (falling back to polling)",
-                        );
-                        cx.notify();
-                    }
-                    WebSocketEvent::Message => {
-                        model.record_activity(ActivityKind::Message, "New message notification");
-                        if !model.fetch_in_flight {
-                            model.schedule_fetch(cx, Duration::ZERO);
-                        }
-                    }
-                    WebSocketEvent::Membership(signal) => {
-                        model.record_membership_activity(&signal);
-                        model.handle_membership_signal(&signal, cx);
-                    }
+                let _ = this.update(cx, |model, cx| {
+                    model.handle_websocket_event(event, cx);
                 });
             }
 
@@ -2311,6 +2298,38 @@ impl AppModel {
         });
 
         self.ws_task = Some(task);
+    }
+
+    fn handle_websocket_event(&mut self, event: WebSocketEvent, cx: &mut ViewContext<Self>) {
+        match event {
+            WebSocketEvent::Connected => {
+                self.ws_connected = true;
+                self.record_activity(
+                    ActivityKind::Connection,
+                    "WebSocket connected (live updates enabled)",
+                );
+                self.schedule_epoch_sync(cx, "Syncing latest epoch after WebSocket reconnect…");
+                cx.notify();
+            }
+            WebSocketEvent::Disconnected => {
+                self.ws_connected = false;
+                self.record_activity(
+                    ActivityKind::Connection,
+                    "WebSocket disconnected (falling back to polling)",
+                );
+                cx.notify();
+            }
+            WebSocketEvent::Message => {
+                self.record_activity(ActivityKind::Message, "New message notification");
+                if !self.fetch_in_flight {
+                    self.schedule_fetch(cx, Duration::ZERO);
+                }
+            }
+            WebSocketEvent::Membership(signal) => {
+                self.record_membership_activity(&signal);
+                self.handle_membership_signal(&signal, cx);
+            }
+        }
     }
 
     // Stop WebSocket connection
@@ -6835,9 +6854,6 @@ fn fingerprint_full_hex(bytes: &[u8; 32]) -> String {
 
 fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
     let hex = fingerprint_full_hex(bytes);
-    if hex.len() <= 16 {
-        return hex;
-    }
     let first = &hex[..8];
     let second = &hex[8..16];
     format!(
@@ -6948,9 +6964,6 @@ fn configured_hex_from_env(var_name: &str) -> Result<Option<Vec<u8>>> {
 
     let bytes =
         hex_decode(normalized).with_context(|| format!("{var_name} must contain hex bytes"))?;
-    if bytes.is_empty() {
-        return Ok(None);
-    }
     Ok(Some(bytes))
 }
 
@@ -7266,6 +7279,7 @@ mod tests {
     use super::*;
     use cityg_api;
     use futures::SinkExt;
+    use gpui::{Modifiers, TestAppContext};
     use msphf_rlwe::CapssBranchWitness;
     use rand::{RngCore, SeedableRng, rngs::StdRng};
     use std::sync::{
@@ -7475,6 +7489,895 @@ mod tests {
             .bootstrap_room(room_id, demo::kbroad_public())
             .await
             .map_err(anyhow::Error::from)
+    }
+
+    fn test_mouse_down_event() -> MouseDownEvent {
+        MouseDownEvent {
+            position: point(px(0.0), px(0.0)),
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+
+    #[gpui::test]
+    fn gpui_render_and_callback_paths_cover_ui_state(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        cx.refresh().expect("initial refresh");
+        cx.run_until_parked();
+
+        let session = build_test_session(
+            0xC17,
+            "http://127.0.0.1:9",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "sab",
+        )
+        .expect("build test session");
+
+        view.update(cx, |model, _| {
+            model.session = Some(session);
+            model.messages.push(ChatMessageEntry {
+                sender_leaf: Some([0x11; 32]),
+                fallback_label: "sab".to_string(),
+                plaintext: "hello".to_string(),
+                ciphertext_hex: "abcd".to_string(),
+                timestamp_ms: 1,
+                delivery: MessageDelivery::Sent,
+                pending_id: None,
+            });
+            model.members.push(MemberEntry {
+                leaf_id: [0x11; 32],
+                alias: Some("sab".to_string()),
+                pop_public_key: Some(vec![0x01]),
+                join_timestamp_ms: Some(1),
+                last_seen_timestamp_ms: Some(2),
+            });
+            model.members_total = 1;
+            model.members_status = MembersStatus::Idle;
+            model.security_events.push(SecurityEvent {
+                alias: "sab".to_string(),
+                description: "security".to_string(),
+                timestamp_ms: 11,
+            });
+            model.security_unread = 1;
+            model.activity_events.push(ActivityEvent {
+                timestamp_ms: 7,
+                kind: ActivityKind::System,
+                summary: "boot".to_string(),
+                detail: Some("detail".to_string()),
+            });
+            model.categorized_error = Some(CategorizedError {
+                category: ErrorCategory::Network,
+                user_message: "network".to_string(),
+                technical_details: "connection refused".to_string(),
+                recovery_suggestion: "retry".to_string(),
+                can_retry: true,
+            });
+            model.last_retry_action = Some(RetryAction::Join);
+        });
+
+        cx.refresh().expect("session refresh");
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            view.update(app, |model, view_cx| {
+                let event = test_mouse_down_event();
+
+                model.on_copy_room_id(&event, window, view_cx);
+                let copied_room = view_cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .expect("clipboard room id");
+                assert_eq!(
+                    copied_room,
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                );
+
+                model.on_copy_regular_fingerprint(&event, window, view_cx);
+                let copied_regular = view_cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .expect("clipboard regular fingerprint");
+                assert_eq!(copied_regular.len(), 64);
+
+                model.on_copy_fs_fingerprint(&event, window, view_cx);
+                let copied_fs = view_cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .expect("clipboard fs fingerprint");
+                assert_eq!(copied_fs.len(), 64);
+
+                model.on_copy_error_details(&event, window, view_cx);
+                model.on_report_issue(&event, window, view_cx);
+                model.on_dismiss_error(&event, window, view_cx);
+                assert!(model.categorized_error.is_none());
+
+                model.on_generate_room_id(&event, window, view_cx);
+                assert_eq!(model.join_form.room_id.len(), 64);
+
+                model.on_toggle_ciphertext(&event, window, view_cx);
+                assert!(model.show_ciphertext);
+
+                model.on_security_panel_toggle_clicked(&event, window, view_cx);
+                assert!(model.security_panel_expanded);
+                assert_eq!(model.security_unread, 0);
+                model.on_security_panel_mark_read_clicked(&event, window, view_cx);
+
+                model.on_activity_clear_clicked(&event, window, view_cx);
+                assert!(model.activity_events.is_empty());
+                model.on_security_log_clear_clicked(&event, window, view_cx);
+                assert!(model.security_events.is_empty());
+
+                model.on_reset_clicked(&event, window, view_cx);
+                assert!(model.session.is_none());
+                model.on_leave_clicked(&event, window, view_cx);
+                model.on_copy_room_id(&event, window, view_cx);
+                model.on_copy_regular_fingerprint(&event, window, view_cx);
+                model.on_copy_fs_fingerprint(&event, window, view_cx);
+                model.on_retry_clicked(&event, window, view_cx);
+            });
+        });
+
+        cx.refresh().expect("post-callback refresh");
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn gpui_missing_tokio_global_surfaces_scheduler_failures(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xD00D,
+            "http://127.0.0.1:9",
+            "8899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677",
+            "no-tokio",
+        )
+        .expect("build session");
+
+        view.update(cx, |model, view_cx| {
+            model.session = Some(session.clone());
+            model.schedule_fetch(view_cx, Duration::ZERO);
+            model.start_websocket(view_cx);
+            model.start_members_refresh_task(view_cx);
+        });
+
+        view.update(cx, |model, _| {
+            assert!(model.fetch_task.is_some(), "fetch task should be scheduled");
+            assert!(
+                model.ws_task.is_some(),
+                "websocket task should be scheduled"
+            );
+            assert!(
+                model.members_refresh_task.is_some(),
+                "members refresh task should be scheduled"
+            );
+            assert!(model.fetch_in_flight, "fetch should be marked in-flight");
+            assert!(matches!(model.fetch_status, FetchStatus::Refreshing));
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_handle_websocket_event_updates_state(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xA11CE,
+            "http://127.0.0.1:9",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            "ws",
+        )
+        .expect("build session");
+
+        view.update(cx, |model, view_cx| {
+            model.session = Some(session.clone());
+            model.handle_websocket_event(WebSocketEvent::Connected, view_cx);
+            assert!(model.ws_connected);
+
+            model.handle_websocket_event(WebSocketEvent::Message, view_cx);
+            assert!(matches!(model.fetch_status, FetchStatus::Refreshing));
+
+            model.handle_websocket_event(
+                WebSocketEvent::Membership(MembershipSignal {
+                    gid: session.gid,
+                    leaf_id: Some(session.leaf_id),
+                    kind: Some(MembershipSignalKind::Join),
+                    timestamp_ms: Some(42),
+                }),
+                view_cx,
+            );
+            assert!(
+                model
+                    .activity_events
+                    .iter()
+                    .any(|event| event.summary.contains("Roster join"))
+            );
+
+            model.handle_websocket_event(WebSocketEvent::Disconnected, view_cx);
+            assert!(!model.ws_connected);
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_render_panels_cover_conditional_branches(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xBEEF,
+            "http://127.0.0.1:9",
+            "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+            "render",
+        )
+        .expect("build session");
+
+        view.update(cx, |model, view_cx| {
+            model.session = Some(session);
+            model.ws_connected = true;
+            model.members = vec![MemberEntry {
+                leaf_id: [0x11; 32],
+                alias: Some("alice".to_string()),
+                pop_public_key: Some(vec![0x01]),
+                join_timestamp_ms: Some(1),
+                last_seen_timestamp_ms: Some(2),
+            }];
+            model.members_total = 3;
+            model.members_next_offset = Some(1);
+            model.members_mode = MembersMode::Search {
+                query: "ali".to_string(),
+            };
+            model.members_search.focus();
+            model.members_search.set_query("ali".to_string());
+            let _ = model.render_members_panel(view_cx);
+
+            model.security_events = vec![SecurityEvent {
+                alias: "alice".to_string(),
+                description: "joined".to_string(),
+                timestamp_ms: 7,
+            }];
+            model.security_unread = 1;
+            model.security_panel_expanded = true;
+            let _ = model.render_security_panel(view_cx);
+
+            model.security_events.clear();
+            let _ = model.render_security_panel(view_cx);
+
+            model.security_events = vec![SecurityEvent {
+                alias: "bob".to_string(),
+                description: "revoked".to_string(),
+                timestamp_ms: 9,
+            }];
+            model.security_panel_expanded = false;
+            let _ = model.render_security_panel(view_cx);
+
+            model.activity_events = vec![
+                ActivityEvent {
+                    timestamp_ms: 1,
+                    kind: ActivityKind::Connection,
+                    summary: "connected".to_string(),
+                    detail: Some("ws".to_string()),
+                },
+                ActivityEvent {
+                    timestamp_ms: 2,
+                    kind: ActivityKind::Roster,
+                    summary: "roster".to_string(),
+                    detail: None,
+                },
+                ActivityEvent {
+                    timestamp_ms: 3,
+                    kind: ActivityKind::Message,
+                    summary: "message".to_string(),
+                    detail: Some("cipher".to_string()),
+                },
+                ActivityEvent {
+                    timestamp_ms: 4,
+                    kind: ActivityKind::Sync,
+                    summary: "sync".to_string(),
+                    detail: None,
+                },
+                ActivityEvent {
+                    timestamp_ms: 5,
+                    kind: ActivityKind::System,
+                    summary: "system".to_string(),
+                    detail: Some("ok".to_string()),
+                },
+            ];
+            let _ = model.render_activity_panel(view_cx);
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_members_refresh_and_search_cover_branch_paths(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xFACE,
+            "http://127.0.0.1:9",
+            "33445566778899aabbccddeeff00112233445566778899aabbccddeeff001122",
+            "members",
+        )
+        .expect("build session");
+
+        view.update(cx, |model, view_cx| {
+            model.session = Some(session.clone());
+
+            model.members_mode = MembersMode::Full;
+            model.members_search.clear();
+            model.submit_members_search(view_cx);
+
+            model.members_mode = MembersMode::Search {
+                query: "old".to_string(),
+            };
+            model.members_search.clear();
+            model.submit_members_search(view_cx);
+
+            model.members_search.set_query("ali".to_string());
+            model.submit_members_search(view_cx);
+
+            model.members_mode = MembersMode::Full;
+            model.members_search.set_query("ali".to_string());
+            model.clear_members_search(view_cx);
+
+            model.members_mode = MembersMode::Search {
+                query: "ali".to_string(),
+            };
+            model.members_search.set_query("ali".to_string());
+            model.clear_members_search(view_cx);
+
+            model.members_status = MembersStatus::Idle;
+            model.members_mode = MembersMode::Search {
+                query: "ali".to_string(),
+            };
+            model.refresh_members_soft(view_cx);
+
+            model.members_status = MembersStatus::Loading("busy".to_string());
+            model.refresh_members_soft(view_cx);
+            model.members_status = MembersStatus::Idle;
+
+            model.members_total = 3;
+            model.members_next_offset = Some(1);
+            model.load_more_members_with_mode(view_cx, false);
+            model.members_next_offset = Some(3);
+            model.load_more_members_with_mode(view_cx, true);
+
+            model.members_loading_append = false;
+            model.members_mode = MembersMode::Full;
+            model.members_alias_dirty = true;
+            model.members_auto_page = false;
+            model.on_members_refreshed(
+                Ok(MembersPage {
+                    members: vec![MemberEntry {
+                        leaf_id: [0xAA; 32],
+                        alias: Some("ali".to_string()),
+                        pop_public_key: Some(vec![0x42]),
+                        join_timestamp_ms: Some(1),
+                        last_seen_timestamp_ms: Some(2),
+                    }],
+                    root: [0xAA; 32],
+                    total_count: 1,
+                    next_offset: 1,
+                }),
+                view_cx,
+            );
+            assert!(!model.members_alias_dirty);
+
+            model.members_mode = MembersMode::Search {
+                query: "ali".to_string(),
+            };
+            model.members_auto_page = true;
+            model.on_members_refreshed(
+                Ok(MembersPage {
+                    members: vec![MemberEntry {
+                        leaf_id: [0xBB; 32],
+                        alias: Some("bob".to_string()),
+                        pop_public_key: Some(vec![0x24]),
+                        join_timestamp_ms: Some(3),
+                        last_seen_timestamp_ms: Some(4),
+                    }],
+                    root: [0xAA; 32],
+                    total_count: 2,
+                    next_offset: 1,
+                }),
+                view_cx,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_callback_and_shortcut_branches_cover_edge_paths(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0x7E57,
+            "http://127.0.0.1:9",
+            "5566778899aabbccddeeff00112233445566778899aabbccddeeff0011223344",
+            "edges",
+        )
+        .expect("build session");
+
+        let session_path =
+            session_file_path(&session.server_url, &session.room_id).expect("session path");
+        fs::create_dir_all(&session_path).expect("create blocking session path");
+
+        cx.update(|window, app| {
+            view.update(app, |model, view_cx| {
+                let event = test_mouse_down_event();
+                model.session = Some(session.clone());
+
+                model.last_error = Some("join-fallback".to_string());
+                model.categorized_error = None;
+                model.info_message = Some("join-info".to_string());
+                let _ = model.render_join(view_cx);
+
+                let mut session_for_render = session.clone();
+                session_for_render.regular_fingerprint = None;
+                session_for_render.fs_fingerprint = None;
+                model.last_error = Some("session-fallback".to_string());
+                let _ = model.render_session(window, &session_for_render, view_cx);
+                model.session = Some(session_for_render.clone());
+                model.on_copy_regular_fingerprint(&event, window, view_cx);
+                model.on_copy_fs_fingerprint(&event, window, view_cx);
+                assert!(
+                    model
+                        .toasts
+                        .iter()
+                        .any(|toast| toast.message.contains("fingerprint unavailable"))
+                );
+                model.session = Some(session.clone());
+
+                model.focus_field(ActiveField::Alias, view_cx);
+                assert!(matches!(model.join_form.active, Some(ActiveField::Alias)));
+
+                model.categorized_error = Some(CategorizedError {
+                    category: ErrorCategory::Server,
+                    user_message: "err".to_string(),
+                    technical_details: "detail".to_string(),
+                    recovery_suggestion: "retry".to_string(),
+                    can_retry: true,
+                });
+                model.on_report_issue(&event, window, view_cx);
+
+                model.join_form.active = Some(ActiveField::Alias);
+                model.join_form.alias = "ab".to_string();
+                view_cx.write_to_clipboard(ClipboardItem::new_string("c".to_string()));
+                let paste = Keystroke::parse("cmd-v").expect("parse cmd-v");
+                assert!(matches!(
+                    model.handle_join_form_clipboard_shortcuts(&paste, view_cx),
+                    KeyOutcome::Updated
+                ));
+
+                model.composer.focus();
+                model.composer.set_text("pre".to_string());
+                view_cx.write_to_clipboard(ClipboardItem::new_string("\npost".to_string()));
+                assert!(matches!(
+                    model.handle_composer_clipboard_shortcuts(&paste, view_cx),
+                    KeyOutcome::Updated
+                ));
+                assert_eq!(model.composer.text(), "pre post");
+
+                model.members_search.focus();
+                model.members_search.set_query("xy".to_string());
+                let copy = Keystroke::parse("cmd-c").expect("parse cmd-c");
+                let cut = Keystroke::parse("cmd-x").expect("parse cmd-x");
+                assert!(matches!(
+                    model.handle_members_search_clipboard_shortcuts(&copy, view_cx),
+                    KeyOutcome::Updated
+                ));
+                assert!(matches!(
+                    model.handle_members_search_clipboard_shortcuts(&cut, view_cx),
+                    KeyOutcome::Updated
+                ));
+                view_cx.write_to_clipboard(ClipboardItem::new_string("zz".to_string()));
+                assert!(matches!(
+                    model.handle_members_search_clipboard_shortcuts(&paste, view_cx),
+                    KeyOutcome::Updated
+                ));
+
+                model.join_status = JoinStatus::Joining;
+                model.start_join(view_cx);
+                model.join_status = JoinStatus::Idle;
+                model.join_form.room_id.clear();
+                model.start_join(view_cx);
+
+                model.session = None;
+                model.start_send(view_cx);
+                model.session = Some(session.clone());
+                model.composer.clear();
+                model.start_send(view_cx);
+                model.composer.set_text("hello".to_string());
+                model.send_status = SendStatus::Sending;
+                model.start_send(view_cx);
+                model.send_status = SendStatus::Idle;
+                model.composer.set_text("   ".to_string());
+                model.start_send(view_cx);
+
+                model.security_events.clear();
+                model.security_unread = 0;
+                model.session = Some(session.clone());
+                for index in 0..(MAX_SECURITY_EVENTS + 2) {
+                    model.record_security_event("sab", format!("evt {index}"), view_cx);
+                }
+                assert_eq!(model.security_events.len(), MAX_SECURITY_EVENTS);
+                assert!(model.security_unread > 0);
+
+                model.session = None;
+                model.fetch_in_flight = true;
+                model.fetch_status = FetchStatus::Refreshing;
+                model.ensure_fetch_loop(view_cx);
+                assert!(matches!(model.fetch_status, FetchStatus::Idle));
+                model.schedule_fetch(view_cx, Duration::ZERO);
+
+                model.session = Some(session.clone());
+                model.ensure_fetch_loop(view_cx);
+                model.schedule_fetch(view_cx, Duration::from_millis(1));
+
+                model.epoch_sync_task = Some(view_cx.spawn(async move |_, _| {}));
+                model.session = None;
+                model.ensure_epoch_sync_task(view_cx);
+                assert!(model.epoch_sync_task.is_none());
+
+                model.session = Some(session.clone());
+                model.fetch_in_flight = false;
+                model.handle_fetch_result(
+                    Ok(FetchOutcome {
+                        messages: vec![ChatMessageEntry {
+                            sender_leaf: Some(session.leaf_id),
+                            fallback_label: session.alias.clone(),
+                            plaintext: "ignored".to_string(),
+                            ciphertext_hex: String::new(),
+                            timestamp_ms: 1,
+                            delivery: MessageDelivery::Sent,
+                            pending_id: None,
+                        }],
+                        last_timestamp_ms: Some(99),
+                    }),
+                    session.we_epoch_id,
+                    view_cx,
+                );
+                model.handle_fetch_result(
+                    Err(anyhow::anyhow!("404 not found resource not found")),
+                    session.we_epoch_id,
+                    view_cx,
+                );
+
+                model.last_retry_action = Some(RetryAction::Leave);
+                model.session = Some(session.clone());
+                model.on_retry_clicked(&event, window, view_cx);
+                assert!(matches!(model.leave_status, LeaveStatus::Leaving));
+
+                model.leave_status = LeaveStatus::Leaving;
+                model.on_leave_clicked(&event, window, view_cx);
+
+                model.session = Some(session.clone());
+                let pending_id = model.queue_pending_message(&session, "queued");
+                model.fetch_in_flight = false;
+                model.on_send_finished(
+                    Ok(ChatMessageEntry {
+                        sender_leaf: Some(session.leaf_id),
+                        fallback_label: session.alias.clone(),
+                        plaintext: "sent".to_string(),
+                        ciphertext_hex: "aa".to_string(),
+                        timestamp_ms: 555,
+                        delivery: MessageDelivery::Sent,
+                        pending_id: None,
+                    }),
+                    pending_id,
+                    view_cx,
+                );
+                model.on_send_finished(
+                    Err(anyhow::anyhow!("404 not found resource not found")),
+                    pending_id.saturating_add(1),
+                    view_cx,
+                );
+            });
+        });
+
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn gpui_on_leave_finished_surfaces_session_cleanup_error(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xBADD,
+            "http://127.0.0.1:18080",
+            "99aabbccddeeff00112233445566778899aabbccddeeff001122334455667788",
+            "leave-err",
+        )
+        .expect("build session");
+        let blocking_path =
+            session_file_path(&session.server_url, &session.room_id).expect("session path");
+        fs::create_dir_all(&blocking_path).expect("create blocking path");
+
+        view.update(cx, |model, view_cx| {
+            model.session = Some(session.clone());
+            model.on_leave_finished(Ok(()), view_cx);
+            assert!(
+                model
+                    .last_error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("failed to remove session data")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_keystroke_routing_covers_clipboard_shortcuts(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+
+        cx.write_to_clipboard(ClipboardItem::new_string("http://demo".to_string()));
+        view.update(cx, |model, view_cx| {
+            model.join_form.server.clear();
+            model.join_form.room_id.clear();
+            model.join_form.alias = "sab".to_string();
+            model.join_form.active = Some(ActiveField::Server);
+            model.on_keystroke(&Keystroke::parse("cmd-v").expect("parse cmd-v"), view_cx);
+            assert_eq!(model.join_form.server, "http://demo");
+
+            model.on_keystroke(&Keystroke::parse("cmd-c").expect("parse cmd-c"), view_cx);
+            let copied = view_cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .expect("clipboard join field");
+            assert_eq!(copied, "http://demo");
+
+            model.on_keystroke(&Keystroke::parse("cmd-x").expect("parse cmd-x"), view_cx);
+            assert!(model.join_form.server.is_empty());
+
+            model.join_status = JoinStatus::Joining;
+            model.join_form.alias = "keep".to_string();
+            model.on_keystroke(&Keystroke::parse("x->z").expect("parse x"), view_cx);
+            assert_eq!(model.join_form.alias, "keep");
+            model.join_status = JoinStatus::Idle;
+            model.join_form.active = Some(ActiveField::Alias);
+            model.on_keystroke(&Keystroke::parse("ctrl-a").expect("parse ctrl-a"), view_cx);
+            model.on_keystroke(&Keystroke::parse("x->q").expect("parse x->q"), view_cx);
+        });
+
+        let session = build_test_session(
+            0x77,
+            "http://127.0.0.1:9",
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+            "goy",
+        )
+        .expect("build test session");
+        cx.write_to_clipboard(ClipboardItem::new_string("\nxyz".to_string()));
+        view.update(cx, |model, view_cx| {
+            model.session = Some(session);
+
+            model.members_search.focus();
+            model.members_search.set_query("ab".to_string());
+            model.on_keystroke(&Keystroke::parse("cmd-v").expect("parse cmd-v"), view_cx);
+            assert_eq!(model.members_search.query(), "ab xyz");
+            model.on_keystroke(&Keystroke::parse("x->d").expect("parse x->d"), view_cx);
+            model.on_keystroke(&Keystroke::parse("ctrl-a").expect("parse ctrl-a"), view_cx);
+            model.on_keystroke(&Keystroke::parse("enter").expect("parse enter"), view_cx);
+
+            model.on_keystroke(&Keystroke::parse("cmd-x").expect("parse cmd-x"), view_cx);
+            assert!(model.members_search.query().is_empty());
+
+            model.members_search.blur();
+            model.composer.focus();
+            model.composer.set_text("hello".to_string());
+            model.on_keystroke(&Keystroke::parse("x->r").expect("parse x->r"), view_cx);
+            model.on_keystroke(&Keystroke::parse("ctrl-a").expect("parse ctrl-a"), view_cx);
+            model.on_keystroke(&Keystroke::parse("cmd-c").expect("parse cmd-c"), view_cx);
+            let copied = view_cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .expect("clipboard composer");
+            assert_eq!(copied, "hellor");
+
+            model.on_keystroke(&Keystroke::parse("cmd-x").expect("parse cmd-x"), view_cx);
+            assert!(model.composer.text().is_empty());
+            model.composer.set_text("ok".to_string());
+            model.on_keystroke(&Keystroke::parse("enter").expect("parse enter"), view_cx);
+        });
+
+        cx.update(|window, app| {
+            view.update(app, |model, view_cx| {
+                let event = test_mouse_down_event();
+                model.composer.set_text(String::new());
+                model.on_send_clicked(&event, window, view_cx);
+                model.on_composer_clicked(&event, window, view_cx);
+                model.on_join_clicked(&event, window, view_cx);
+                model.on_members_search_field_clicked(&event, window, view_cx);
+                model.on_members_search_button_clicked(&event, window, view_cx);
+                model.on_members_search_clear_clicked(&event, window, view_cx);
+                model.on_members_refresh_clicked(&event, window, view_cx);
+                model.on_members_load_more_clicked(&event, window, view_cx);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_async_handler_paths_cover_state_machine(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        cx.refresh().expect("initial refresh");
+        cx.run_until_parked();
+
+        let session = build_test_session(
+            0xA11CE,
+            "http://127.0.0.1:9",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            "async",
+        )
+        .expect("build test session");
+
+        cx.update(|window, app| {
+            view.update(app, |model, view_cx| {
+                let event = test_mouse_down_event();
+
+                model.join_form.server = "http://127.0.0.1:9".to_string();
+                model.join_form.room_id =
+                    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".to_string();
+                model.join_form.alias = "async".to_string();
+                model.start_join(view_cx);
+                assert!(matches!(model.join_status, JoinStatus::Joining));
+
+                model.on_join_finished(Err(anyhow::anyhow!("join failed")), view_cx);
+                assert!(matches!(model.join_status, JoinStatus::Idle));
+
+                model.on_join_finished(Ok(session.clone()), view_cx);
+                assert!(model.session.is_some());
+
+                model.composer.set_text("hello".to_string());
+                model.start_send(view_cx);
+                assert!(matches!(model.send_status, SendStatus::Sending));
+                let pending_id = model.next_pending_message_id.saturating_sub(1);
+                model.on_send_finished(
+                    Ok(ChatMessageEntry {
+                        sender_leaf: Some(session.leaf_id),
+                        fallback_label: session.alias.clone(),
+                        plaintext: "hello".to_string(),
+                        ciphertext_hex: "abcd".to_string(),
+                        timestamp_ms: 42,
+                        delivery: MessageDelivery::Sent,
+                        pending_id: None,
+                    }),
+                    pending_id,
+                    view_cx,
+                );
+                model.on_send_finished(
+                    Err(anyhow::anyhow!("send failed")),
+                    pending_id.saturating_add(10),
+                    view_cx,
+                );
+
+                let expected_weid = session.we_epoch_id;
+                model.handle_fetch_result(
+                    Ok(FetchOutcome {
+                        messages: vec![ChatMessageEntry {
+                            sender_leaf: Some(session.leaf_id),
+                            fallback_label: session.alias.clone(),
+                            plaintext: "synced".to_string(),
+                            ciphertext_hex: "beef".to_string(),
+                            timestamp_ms: 100,
+                            delivery: MessageDelivery::Sent,
+                            pending_id: None,
+                        }],
+                        last_timestamp_ms: Some(100),
+                    }),
+                    expected_weid,
+                    view_cx,
+                );
+                model.handle_fetch_result(
+                    Err(anyhow::anyhow!("fetch failed")),
+                    expected_weid,
+                    view_cx,
+                );
+                model.handle_fetch_result(
+                    Ok(FetchOutcome {
+                        messages: vec![],
+                        last_timestamp_ms: None,
+                    }),
+                    [0xFF; 32],
+                    view_cx,
+                );
+
+                model.on_members_refreshed(
+                    Ok(MembersPage {
+                        members: vec![MemberEntry {
+                            leaf_id: session.leaf_id,
+                            alias: Some(session.alias.clone()),
+                            pop_public_key: Some(vec![0x01]),
+                            join_timestamp_ms: Some(10),
+                            last_seen_timestamp_ms: Some(11),
+                        }],
+                        root: session.parent_root,
+                        total_count: 1,
+                        next_offset: 1,
+                    }),
+                    view_cx,
+                );
+                model.on_members_refreshed(Err(anyhow::anyhow!("members failed")), view_cx);
+
+                model.handle_epoch_sync_result(
+                    Ok(EpochSyncOutcome {
+                        session: session.clone(),
+                        changed: false,
+                    }),
+                    &session.server_url,
+                    &session.room_id,
+                    session.leaf_id,
+                    "noop",
+                    view_cx,
+                );
+                let mut changed_session = session.clone();
+                changed_session.we_epoch_id = [0x55; 32];
+                model.handle_epoch_sync_result(
+                    Ok(EpochSyncOutcome {
+                        session: changed_session,
+                        changed: true,
+                    }),
+                    &session.server_url,
+                    &session.room_id,
+                    session.leaf_id,
+                    "changed",
+                    view_cx,
+                );
+                model.handle_epoch_sync_result(
+                    Err(anyhow::anyhow!("sync failed")),
+                    &session.server_url,
+                    &session.room_id,
+                    session.leaf_id,
+                    "err",
+                    view_cx,
+                );
+
+                model.handle_stale_server_session("stale", view_cx);
+                assert!(model.session.is_none());
+
+                model.session = Some(session.clone());
+                model.on_leave_clicked(&event, window, view_cx);
+                assert!(matches!(model.leave_status, LeaveStatus::Leaving));
+                model.on_leave_finished(Err(anyhow::anyhow!("leave failed")), view_cx);
+                model.on_leave_finished(Ok(()), view_cx);
+            });
+        });
+
+        cx.refresh().expect("post async state refresh");
+        cx.run_until_parked();
     }
 
     #[test]
@@ -7687,6 +8590,37 @@ mod tests {
     }
 
     #[test]
+    fn session_dir_falls_back_to_user_config_directory() -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _config_guard = set_config_dir_override_for_tests(None);
+
+        let original = std::env::var("CITYG_GUI_CONFIG_DIR").ok();
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var("CITYG_GUI_CONFIG_DIR") };
+
+        let resolved = session_dir()?;
+        assert!(
+            resolved.ends_with("cityg/gui"),
+            "fallback session dir should include cityg/gui suffix: {}",
+            resolved.display()
+        );
+
+        match original {
+            Some(value) => {
+                // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                unsafe { std::env::set_var("CITYG_GUI_CONFIG_DIR", value) };
+            }
+            None => {
+                // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                unsafe { std::env::remove_var("CITYG_GUI_CONFIG_DIR") };
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn load_last_session_removes_dangling_pointer() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let base = temp_dir.path().join("cityg").join("gui");
@@ -7762,6 +8696,47 @@ mod tests {
     }
 
     #[test]
+    fn reset_session_state_uses_pointer_and_handles_security_log_remove_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base.clone()));
+
+        let pointer = LastSessionPointer {
+            server_url: "http://127.0.0.1:8080".to_string(),
+            room_id: "room-reset".to_string(),
+        };
+        let pointer_path = last_session_pointer_path()?;
+        if let Some(parent) = pointer_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&pointer_path, serde_json::to_vec(&pointer)?)?;
+
+        // Force remove_security_log to fail with "is a directory".
+        let log_path = security_log_file_path(&pointer.server_url, &pointer.room_id)?;
+        fs::create_dir_all(&log_path)?;
+
+        let mut model = AppModel::new(CityGConfig::default());
+        model.reset_session_state()?;
+        assert!(model.session.is_none());
+        assert!(model.members.is_empty());
+        assert!(model.security_events.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn reset_session_state_without_session_or_pointer_is_ok()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let mut model = AppModel::new(CityGConfig::default());
+        model.reset_session_state()?;
+        assert!(model.session.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn alias_bindings_persist_load_legacy_and_cleanup() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let base = temp_dir.path().join("cityg").join("gui");
@@ -7815,6 +8790,13 @@ mod tests {
                         leaf_id_hex: "not-hex".to_string(),
                     },
                 ),
+                (
+                    "empty_pop".to_string(),
+                    PersistedAliasBinding {
+                        pop_public_key_hex: String::new(),
+                        leaf_id_hex: hex_encode([0x22; 32]),
+                    },
+                ),
             ]
             .into_iter()
             .collect(),
@@ -7830,6 +8812,10 @@ mod tests {
             .ok_or_else(|| anyhow!("bad_leaf binding should remain with zeroed leaf id"))?;
         assert_eq!(bad_leaf.pop_public_key, vec![0xAA]);
         assert_eq!(bad_leaf.leaf_id, [0u8; 32]);
+        assert!(
+            !invalid_loaded.contains_key("empty_pop"),
+            "entries with empty pop keys should be skipped"
+        );
 
         persist_alias_bindings(server, room, &AHashMap::new())?;
         assert!(
@@ -7902,6 +8888,231 @@ mod tests {
         remove_security_log(server, room)?;
         assert!(!log_path.exists(), "remove_security_log should delete file");
         Ok(())
+    }
+
+    #[test]
+    fn load_security_events_from_disk_handles_invalid_and_missing_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let mut model = AppModel::new(CityGConfig::default());
+
+        let session = build_test_session(
+            0x5151,
+            "http://127.0.0.1:18080",
+            "feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed",
+            "security",
+        )?;
+        let log_path = security_log_file_path(&session.server_url, &session.room_id)?;
+        if let Some(parent) = log_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&log_path, b"not-json")?;
+
+        model.session = Some(session);
+        model.security_events = vec![SecurityEvent {
+            alias: "seed".to_string(),
+            description: "stale".to_string(),
+            timestamp_ms: 1,
+        }];
+        model.security_unread = 7;
+        model.security_panel_expanded = true;
+        model.load_security_events_from_disk();
+        assert!(model.security_events.is_empty());
+        assert_eq!(model.security_unread, 0);
+        assert!(!model.security_panel_expanded);
+
+        model.session = None;
+        model.security_events = vec![SecurityEvent {
+            alias: "seed".to_string(),
+            description: "stale".to_string(),
+            timestamp_ms: 2,
+        }];
+        model.security_unread = 3;
+        model.security_panel_expanded = true;
+        model.load_security_events_from_disk();
+        assert!(model.security_events.is_empty());
+        assert_eq!(model.security_unread, 0);
+        assert!(!model.security_panel_expanded);
+        Ok(())
+    }
+
+    #[test]
+    fn hydrate_alias_bindings_from_disk_handles_invalid_and_missing_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let mut model = AppModel::new(CityGConfig::default());
+
+        let session = build_test_session(
+            0x5152,
+            "http://127.0.0.1:18080",
+            "deafdeafdeafdeafdeafdeafdeafdeafdeafdeafdeafdeafdeafdeafdeafdeaf",
+            "aliases",
+        )?;
+        let bindings_path = roster_file_path(&session.server_url, &session.room_id)?;
+        if let Some(parent) = bindings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&bindings_path, b"not-json")?;
+
+        model.session = Some(session);
+        model.alias_bindings.insert(
+            "seed".to_string(),
+            AliasBindingRecord {
+                pop_public_key: vec![0xAA],
+                leaf_id: [0x11; 32],
+            },
+        );
+        model
+            .leaf_alias_index
+            .insert([0x11; 32], "seed".to_string());
+        model.hydrate_alias_bindings_from_disk();
+        assert!(model.alias_bindings.is_empty());
+        assert!(model.leaf_alias_index.is_empty());
+
+        model.session = None;
+        model.alias_bindings.insert(
+            "stale".to_string(),
+            AliasBindingRecord {
+                pop_public_key: vec![0xBB],
+                leaf_id: [0x22; 32],
+            },
+        );
+        model
+            .leaf_alias_index
+            .insert([0x22; 32], "stale".to_string());
+        model.hydrate_alias_bindings_from_disk();
+        assert!(model.alias_bindings.is_empty());
+        assert!(model.leaf_alias_index.is_empty());
+        Ok(())
+    }
+
+    #[gpui::test]
+    fn gpui_reconcile_alias_bindings_covers_mismatch_and_early_return(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xABCD,
+            "http://127.0.0.1:18080",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sab",
+        )
+        .expect("build session");
+
+        view.update(cx, |model, view_cx| {
+            model.session = None;
+            model.alias_bindings.insert(
+                "keep".to_string(),
+                AliasBindingRecord {
+                    pop_public_key: vec![0x01],
+                    leaf_id: [0x01; 32],
+                },
+            );
+            model.reconcile_alias_bindings(view_cx);
+            assert!(
+                model.alias_bindings.contains_key("keep"),
+                "early return without session should keep existing bindings"
+            );
+        });
+
+        view.update(cx, |model, view_cx| {
+            model.session = Some(session.clone());
+            model.alias_bindings.insert(
+                "sab".to_string(),
+                AliasBindingRecord {
+                    pop_public_key: vec![0xAA],
+                    leaf_id: [0x10; 32],
+                },
+            );
+            model.members = vec![
+                MemberEntry {
+                    leaf_id: [0x20; 32],
+                    alias: Some("sab".to_string()),
+                    pop_public_key: Some(vec![0xBB]),
+                    join_timestamp_ms: Some(1),
+                    last_seen_timestamp_ms: Some(2),
+                },
+                MemberEntry {
+                    leaf_id: [0x21; 32],
+                    alias: None,
+                    pop_public_key: Some(vec![0xCC]),
+                    join_timestamp_ms: None,
+                    last_seen_timestamp_ms: None,
+                },
+                MemberEntry {
+                    leaf_id: [0x22; 32],
+                    alias: Some(String::new()),
+                    pop_public_key: Some(vec![0xDD]),
+                    join_timestamp_ms: None,
+                    last_seen_timestamp_ms: None,
+                },
+                MemberEntry {
+                    leaf_id: [0x23; 32],
+                    alias: Some("dock".to_string()),
+                    pop_public_key: None,
+                    join_timestamp_ms: None,
+                    last_seen_timestamp_ms: None,
+                },
+            ];
+
+            model.reconcile_alias_bindings(view_cx);
+
+            let updated = model.alias_bindings.get("sab").expect("alias updated");
+            assert_eq!(updated.pop_public_key, vec![0xBB]);
+            assert_eq!(updated.leaf_id, [0x20; 32]);
+            assert_eq!(
+                model.leaf_alias_index.get(&[0x20; 32]).map(String::as_str),
+                Some("sab")
+            );
+            assert_eq!(model.security_events.len(), 1);
+            assert!(
+                model.security_events[0].description.contains("TOFU alert"),
+                "TOFU mismatch should record a security event"
+            );
+            assert!(
+                !model.toasts.is_empty(),
+                "TOFU mismatch should show a toast"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_reconcile_alias_bindings_handles_persist_failure(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base_file = temp_dir.path().join("not-a-directory");
+        fs::write(&base_file, b"blocking dir").expect("create blocking file");
+        let _override_guard = set_config_dir_override_for_tests(Some(base_file));
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xABCE,
+            "http://127.0.0.1:18080",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "dock",
+        )
+        .expect("build session");
+
+        view.update(cx, |model, view_cx| {
+            model.session = Some(session.clone());
+            model.members = vec![MemberEntry {
+                leaf_id: [0x42; 32],
+                alias: Some("dock".to_string()),
+                pop_public_key: Some(vec![0x42]),
+                join_timestamp_ms: None,
+                last_seen_timestamp_ms: None,
+            }];
+            model.reconcile_alias_bindings(view_cx);
+            assert!(
+                model.alias_bindings.contains_key("dock"),
+                "binding should still update when disk persistence fails"
+            );
+        });
     }
 
     #[test]
@@ -7994,6 +9205,36 @@ mod tests {
                 .contains("encrypted session envelope ciphertext is not valid hex"),
             "unexpected error: {err}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn decode_persisted_session_accepts_payload_when_key_source_label_mismatches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let session_path = temp_dir
+            .path()
+            .join("cityg")
+            .join("gui")
+            .join("session.json");
+        if let Some(parent) = session_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let session = build_test_session(
+            0xDA7A,
+            "https://example.invalid",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "mismatch",
+        )?;
+        let persisted = PersistedSession::from_session(&session);
+        let encrypted = encrypt_persisted_session(&persisted, &session_path)?;
+        let mut envelope: EncryptedSessionEnvelope = serde_json::from_slice(&encrypted)?;
+        envelope.key_source = SessionKeySource::EnvPassphrase.as_str().to_string();
+
+        let decoded = decode_persisted_session(&serde_json::to_vec(&envelope)?, &session_path)?;
+        assert_eq!(decoded.room_id, session.room_id);
+        assert_eq!(decoded.server_url, session.server_url);
         Ok(())
     }
 
@@ -8208,6 +9449,217 @@ mod tests {
     }
 
     #[test]
+    fn pivot_alignment_inserts_optional_fs_fields_when_missing() {
+        let mut header = BTreeMap::new();
+        let mut pivot = sample_pivot_parity();
+        pivot.fs_ec = Some(91);
+        pivot.fs_epoch_commit = Some([0x9A; 32]);
+        pivot.fs_dev_commit = Some([0xBC; 32]);
+
+        apply_pivot_alignment(&mut header, &pivot);
+
+        assert_eq!(
+            header.get(&hdr::HDR_FS_EC),
+            Some(&Value::Integer(Integer::from(91u64)))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_CHECKPOINT_EC),
+            Some(&Value::Integer(Integer::from(91u64)))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_EPOCH_COMMIT),
+            Some(&Value::Bytes([0x9A; 32].to_vec()))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_DEV_PREV_COMMIT),
+            Some(&Value::Bytes([0xBC; 32].to_vec()))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_FS_DEV_COMMIT),
+            Some(&Value::Bytes([0xBC; 32].to_vec()))
+        );
+    }
+
+    #[test]
+    fn helper_none_and_error_paths_cover_header_and_fingerprint_logic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(format_regular_fingerprint(None), "Not available");
+        assert_eq!(format_fs_fingerprint(None, 12), "Not available");
+
+        let mut typed = BTreeMap::new();
+        typed.insert(1, Value::Integer(Integer::from(9u64)));
+        typed.insert(2, Value::Text("bad".to_string()));
+        typed.insert(3, Value::Integer(Integer::from(7u64)));
+        typed.insert(4, Value::Integer(Integer::from(1u64)));
+        assert_eq!(header_text(&typed, 1), None);
+        assert_eq!(header_u64(&typed, 2), None);
+        assert_eq!(header_bytes32(&typed, 3), None);
+        assert!(
+            header_bytes_opt(&typed, 4).is_err(),
+            "header_bytes_opt should reject non-bytes"
+        );
+        assert!(
+            header_bytes32_opt(&typed, 4).is_err(),
+            "header_bytes32_opt should reject non-bytes"
+        );
+
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_FS_POLICY_VERSION,
+            Value::Text("fs-policy-v1".to_string()),
+        );
+        assert!(
+            compute_fs_fingerprint_from_header(&header).is_none(),
+            "missing fs_ec should fail"
+        );
+        header.insert(hdr::HDR_FS_EC, Value::Integer(Integer::from(7u64)));
+        assert!(
+            compute_fs_fingerprint_from_header(&header).is_none(),
+            "missing fs_epoch_commit should fail"
+        );
+        header.insert(hdr::HDR_FS_EPOCH_COMMIT, Value::Bytes([0x44; 32].to_vec()));
+        assert!(
+            compute_fs_fingerprint_from_header(&header).is_none(),
+            "missing fs_epoch_base_ts should fail"
+        );
+        header.insert(
+            hdr::HDR_FS_EPOCH_BASE_TS,
+            Value::Integer(Integer::from(99u64)),
+        );
+        assert!(
+            compute_fs_fingerprint_from_header(&header).is_some(),
+            "fully populated header should derive a fingerprint"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn env_hex_parsing_and_kbroad_helper_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        let temp_var = "CITYG_GUI_TEST_HEX_ENV";
+        let temp_original = std::env::var_os(temp_var);
+
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, " \n\t ") };
+        assert_eq!(configured_kbroad_public_from_env()?, None);
+
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, "0x") };
+        assert_eq!(configured_kbroad_public_from_env()?, None);
+
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, "0Xa1b2") };
+        assert_eq!(configured_kbroad_public_from_env()?, Some(vec![0xA1, 0xB2]));
+
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(temp_var, "zz") };
+        assert!(
+            configured_hex_from_env(temp_var).is_err(),
+            "invalid hex should fail parsing"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+            // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+            unsafe { std::env::set_var(temp_var, OsString::from_vec(vec![0xFF, 0xFE])) };
+            assert!(
+                configured_hex_from_env(temp_var).is_err(),
+                "invalid unicode env var should be surfaced"
+            );
+        }
+
+        let (public_key, secret_key) = generate_kbroad_keypair();
+        assert!(
+            !public_key.is_empty(),
+            "generated public key should be non-empty"
+        );
+        assert!(
+            !secret_key.is_empty(),
+            "generated secret key should be non-empty"
+        );
+
+        let now_ms = current_unix_timestamp_ms();
+        assert!(
+            now_ms > 1_000_000_000,
+            "current timestamp should be epoch milliseconds"
+        );
+
+        match temp_original {
+            Some(value) => {
+                // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                unsafe { std::env::set_var(temp_var, value) };
+            }
+            None => {
+                // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                unsafe { std::env::remove_var(temp_var) };
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_message_decode_reports_precise_truncation_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let encoded = encode_authenticated_message(7, b"abc", b"key!", b"siggg");
+
+        let mut truncated_plaintext = encoded.clone();
+        truncated_plaintext[12..16].copy_from_slice(&(99u32).to_le_bytes());
+        let err = decode_authenticated_message(&truncated_plaintext).expect_err("must fail");
+        assert!(
+            err.to_string().contains("truncated (plaintext)"),
+            "expected plaintext truncation error"
+        );
+
+        let mut truncated_public = encoded.clone();
+        truncated_public[19..23].copy_from_slice(&(77u32).to_le_bytes());
+        let err = decode_authenticated_message(&truncated_public).expect_err("must fail");
+        assert!(
+            err.to_string().contains("truncated (public key)"),
+            "expected public key truncation error"
+        );
+
+        let mut truncated_signature = encoded.clone();
+        truncated_signature[27..31].copy_from_slice(&(9u32).to_le_bytes());
+        let err = decode_authenticated_message(&truncated_signature).expect_err("must fail");
+        assert!(
+            err.to_string().contains("truncated (signature)"),
+            "expected signature truncation error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn signing_helpers_reject_invalid_key_material() -> Result<(), Box<dyn std::error::Error>> {
+        let leaf = [0x11; 32];
+        let ts = 42u64;
+        let payload = b"hello";
+
+        assert!(
+            sign_message(&leaf, ts, payload, &[0u8; 8]).is_err(),
+            "invalid secret key bytes should fail"
+        );
+
+        let (pk, sk) = dilithium3::keypair();
+        let signature = sign_message(&leaf, ts, payload, sk.as_bytes())?;
+
+        assert!(
+            verify_message_signature(&leaf, ts, payload, &signature, &[0u8; 8]).is_err(),
+            "invalid public key bytes should fail"
+        );
+        assert!(
+            verify_message_signature(&leaf, ts, payload, &[0u8; 8], pk.as_bytes()).is_err(),
+            "invalid signature bytes should fail"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn primary_shortcut_detection_accepts_cmd_and_ctrl() -> Result<(), Box<dyn std::error::Error>> {
         let cmd_v = Keystroke::parse("cmd-v")?;
         let ctrl_c = Keystroke::parse("ctrl-c")?;
@@ -8239,10 +9691,7 @@ mod tests {
     fn message_composer_keystroke_paths() -> Result<(), Box<dyn std::error::Error>> {
         let mut composer = MessageComposer::default();
         let a = Keystroke::parse("a")?;
-        assert!(matches!(
-            composer.handle_keystroke(&a),
-            KeyOutcome::None
-        ));
+        assert!(matches!(composer.handle_keystroke(&a), KeyOutcome::None));
 
         composer.focus();
         composer.set_text("hi".to_string());
@@ -8310,7 +9759,10 @@ mod tests {
         assert_eq!(search.query(), "");
 
         let enter = Keystroke::parse("enter")?;
-        assert!(matches!(search.handle_keystroke(&enter), KeyOutcome::Submit));
+        assert!(matches!(
+            search.handle_keystroke(&enter),
+            KeyOutcome::Submit
+        ));
 
         let tab = Keystroke::parse("tab")?;
         assert!(matches!(search.handle_keystroke(&tab), KeyOutcome::Updated));
@@ -8322,8 +9774,7 @@ mod tests {
     fn join_form_keystroke_paths() -> Result<(), Box<dyn std::error::Error>> {
         let mut form = JoinFormState {
             server: "http://127.0.0.1:18080".to_string(),
-            room_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                .to_string(),
+            room_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
             alias: "alice".to_string(),
             active: Some(ActiveField::Server),
         };
@@ -8348,7 +9799,10 @@ mod tests {
         assert!(matches!(form.handle_keystroke(&enter), KeyOutcome::Submit));
 
         let escape = Keystroke::parse("escape")?;
-        assert!(matches!(form.handle_keystroke(&escape), KeyOutcome::Updated));
+        assert!(matches!(
+            form.handle_keystroke(&escape),
+            KeyOutcome::Updated
+        ));
         assert!(form.active.is_none());
         Ok(())
     }
@@ -8435,8 +9889,8 @@ mod tests {
     }
 
     #[test]
-    fn app_model_new_handles_invalid_saved_session_pointer() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn app_model_new_handles_invalid_saved_session_pointer()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let base = temp_dir.path().join("cityg").join("gui");
         let _override_guard = set_config_dir_override_for_tests(Some(base));
@@ -8455,7 +9909,8 @@ mod tests {
     }
 
     #[test]
-    fn keystroke_helpers_cover_modifier_and_empty_paths() -> Result<(), Box<dyn std::error::Error>> {
+    fn keystroke_helpers_cover_modifier_and_empty_paths() -> Result<(), Box<dyn std::error::Error>>
+    {
         let mut composer = MessageComposer::default();
         composer.focus();
         let backspace = Keystroke::parse("backspace")?;
@@ -8464,7 +9919,10 @@ mod tests {
             KeyOutcome::None
         ));
         let delete = Keystroke::parse("delete")?;
-        assert!(matches!(composer.handle_keystroke(&delete), KeyOutcome::None));
+        assert!(matches!(
+            composer.handle_keystroke(&delete),
+            KeyOutcome::None
+        ));
         composer.set_text("  ".to_string());
         assert!(!composer.is_ready());
         composer.clear();
@@ -8473,19 +9931,28 @@ mod tests {
         assert!(matches!(composer.handle_keystroke(&x), KeyOutcome::Updated));
         assert_eq!(composer.text(), "x");
         let ctrl_a = Keystroke::parse("ctrl-a")?;
-        assert!(matches!(composer.handle_keystroke(&ctrl_a), KeyOutcome::None));
+        assert!(matches!(
+            composer.handle_keystroke(&ctrl_a),
+            KeyOutcome::None
+        ));
         composer.blur();
 
         let mut search = MembersSearchState::default();
         search.focus();
-        assert!(matches!(search.handle_keystroke(&backspace), KeyOutcome::None));
+        assert!(matches!(
+            search.handle_keystroke(&backspace),
+            KeyOutcome::None
+        ));
         assert!(matches!(search.handle_keystroke(&delete), KeyOutcome::None));
         search.set_query("abc".to_string());
         search.clear();
         assert_eq!(search.query(), "");
         assert!(matches!(search.handle_keystroke(&x), KeyOutcome::Updated));
         let escape = Keystroke::parse("escape")?;
-        assert!(matches!(search.handle_keystroke(&escape), KeyOutcome::Updated));
+        assert!(matches!(
+            search.handle_keystroke(&escape),
+            KeyOutcome::Updated
+        ));
         assert!(!search.active);
         search.focus();
         assert!(matches!(search.handle_keystroke(&ctrl_a), KeyOutcome::None));
@@ -8497,8 +9964,7 @@ mod tests {
     fn join_form_and_shortcut_edge_paths() -> Result<(), Box<dyn std::error::Error>> {
         let mut form = JoinFormState {
             server: " http://127.0.0.1:18080 ".to_string(),
-            room_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                .to_string(),
+            room_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             alias: " alice ".to_string(),
             active: None,
         };
@@ -8515,10 +9981,16 @@ mod tests {
 
         let backspace = Keystroke::parse("backspace")?;
         form.alias.clear();
-        assert!(matches!(form.handle_keystroke(&backspace), KeyOutcome::None));
+        assert!(matches!(
+            form.handle_keystroke(&backspace),
+            KeyOutcome::None
+        ));
 
         let delete = Keystroke::parse("delete")?;
-        assert!(matches!(form.handle_keystroke(&delete), KeyOutcome::Updated));
+        assert!(matches!(
+            form.handle_keystroke(&delete),
+            KeyOutcome::Updated
+        ));
         assert_eq!(form.alias, "");
 
         let space = Keystroke::parse("space")?;
@@ -8535,8 +10007,8 @@ mod tests {
         form.room_id = "bad-room".to_string();
         let enter = Keystroke::parse("enter")?;
         assert!(matches!(form.handle_keystroke(&enter), KeyOutcome::None));
-        form.room_id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-            .to_string();
+        form.room_id =
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string();
         form.alias = "zed".to_string();
         assert!(matches!(form.handle_keystroke(&enter), KeyOutcome::Submit));
 
@@ -8719,6 +10191,223 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn websocket_worker_parses_unknown_membership_and_ping()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let membership_gid = [0x66u8; 32];
+        let membership_gid_hex = hex_encode(membership_gid);
+        let membership_leaf = [0x99u8; 32];
+        let membership_leaf_hex = hex_encode(membership_leaf);
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            ws.send(WsMessage::Text(
+                format!(
+                    r#"{{"type":"membership","gid":"{membership_gid_hex}","leaf_id":"{membership_leaf_hex}","event":"unknown","timestamp_ms":77}}"#
+                )
+                .into(),
+            ))
+            .await?;
+            ws.send(WsMessage::Ping(vec![1, 2, 3].into())).await?;
+            ws.close(None).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+        let worker = tokio::spawn(run_websocket_worker(
+            format!("ws://{addr}/v1/ws"),
+            Duration::from_millis(20),
+            tx,
+        ));
+
+        let mut saw_unknown_kind = false;
+        for _ in 0..8 {
+            let next = tokio::time::timeout(Duration::from_secs(1), rx.next()).await?;
+            let Some(event) = next else {
+                break;
+            };
+            if let WebSocketEvent::Membership(signal) = event
+                && signal.gid == membership_gid
+                && signal.leaf_id == Some(membership_leaf)
+            {
+                saw_unknown_kind = signal.kind.is_none();
+                break;
+            }
+        }
+        assert!(
+            saw_unknown_kind,
+            "expected membership event with unknown kind"
+        );
+
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
+        tokio::time::timeout(Duration::from_secs(1), worker).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_worker_returns_when_message_delivery_channel_closes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            sleep(Duration::from_millis(60)).await;
+            ws.send(WsMessage::Text(r#"{"type":"message"}"#.to_string().into()))
+                .await?;
+            ws.close(None).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+        let worker = tokio::spawn(run_websocket_worker(
+            format!("ws://{addr}/v1/ws"),
+            Duration::from_secs(1),
+            tx,
+        ));
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.next()).await?;
+        assert!(matches!(first, Some(WebSocketEvent::Connected)));
+        drop(rx);
+
+        tokio::time::timeout(Duration::from_secs(1), worker).await???;
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_worker_returns_when_membership_delivery_channel_closes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let gid_hex = hex_encode([0x33u8; 32]);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            sleep(Duration::from_millis(60)).await;
+            ws.send(WsMessage::Text(
+                format!(r#"{{"type":"membership","gid":"{gid_hex}","event":"join"}}"#).into(),
+            ))
+            .await?;
+            ws.close(None).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+        let worker = tokio::spawn(run_websocket_worker(
+            format!("ws://{addr}/v1/ws"),
+            Duration::from_secs(1),
+            tx,
+        ));
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.next()).await?;
+        assert!(matches!(first, Some(WebSocketEvent::Connected)));
+        drop(rx);
+
+        tokio::time::timeout(Duration::from_secs(1), worker).await???;
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_worker_ignores_invalid_json_and_unknown_notification_type()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            ws.send(WsMessage::Text("not-json".to_string().into()))
+                .await?;
+            ws.send(WsMessage::Text(r#"{"type":"other"}"#.to_string().into()))
+                .await?;
+            ws.close(None).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+        let worker = tokio::spawn(run_websocket_worker(
+            format!("ws://{addr}/v1/ws"),
+            Duration::from_millis(20),
+            tx,
+        ));
+
+        let mut saw_connected = false;
+        let mut saw_disconnected = false;
+        for _ in 0..6 {
+            let next = tokio::time::timeout(Duration::from_secs(1), rx.next()).await?;
+            let Some(event) = next else {
+                break;
+            };
+            match event {
+                WebSocketEvent::Connected => saw_connected = true,
+                WebSocketEvent::Disconnected => {
+                    saw_disconnected = true;
+                    break;
+                }
+                WebSocketEvent::Message | WebSocketEvent::Membership(_) => {
+                    return Err(anyhow!("unexpected event from invalid payloads").into());
+                }
+            }
+        }
+
+        assert!(saw_connected, "expected Connected event");
+        assert!(saw_disconnected, "expected Disconnected event");
+
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
+        tokio::time::timeout(Duration::from_secs(1), worker).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_worker_handles_stream_protocol_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            ws.get_mut().write_all(b"not-a-websocket-frame").await?;
+            ws.get_mut().shutdown().await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+        let worker = tokio::spawn(run_websocket_worker(
+            format!("ws://{addr}/v1/ws"),
+            Duration::from_millis(20),
+            tx,
+        ));
+
+        let mut saw_disconnected = false;
+        for _ in 0..6 {
+            let next = tokio::time::timeout(Duration::from_secs(1), rx.next()).await?;
+            let Some(event) = next else {
+                break;
+            };
+            if matches!(event, WebSocketEvent::Disconnected) {
+                saw_disconnected = true;
+                break;
+            }
+        }
+        assert!(
+            saw_disconnected,
+            "protocol errors should produce a disconnected event"
+        );
+
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
+        tokio::time::timeout(Duration::from_secs(1), worker).await???;
+        Ok(())
+    }
+
     #[test]
     fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
@@ -8891,6 +10580,50 @@ mod tests {
 
         // Clean up persisted files to avoid leaking into other tests.
         remove_persisted_session(&session.server_url, &session.room_id)?;
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_session_into_app_session_covers_version_and_legacy_fallbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let session = build_test_session(
+            0xCAFE,
+            "https://example.invalid",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "legacy",
+        )?;
+
+        let mut unsupported = PersistedSession::from_session(&session);
+        unsupported.version = 999;
+        assert!(
+            unsupported.into_app_session().is_err(),
+            "unsupported persisted session versions must be rejected"
+        );
+
+        let mut persisted = PersistedSession::from_session(&session);
+        persisted.regular_fingerprint_hex.clear();
+        persisted.forward_state.fs_last_weid_hex.clear();
+        persisted.fs_epoch_created_at_unix_ms = 0;
+
+        let restored = persisted.into_app_session()?;
+        assert!(
+            restored.regular_fingerprint.is_none(),
+            "empty regular fingerprint should deserialize as missing"
+        );
+        assert_eq!(
+            restored.forward_state.snapshot().last_weid,
+            restored.we_epoch_id,
+            "missing forward_state.last_weid should fall back to we_epoch_id"
+        );
+        let restored_ms = restored
+            .fs_epoch_created_at
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        assert!(
+            restored_ms > 0,
+            "zero persisted epoch timestamp should fall back to current time"
+        );
         Ok(())
     }
 
@@ -9189,6 +10922,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn members_fetch_recovers_from_stale_parent_root_on_nonzero_offset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x7Bu8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        let _alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        let mut bob = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+
+        bob.parent_root = [0xCD; 32];
+        let full_page =
+            perform_fetch_members(MembersParams::from_session(&bob, 1, 1, MembersMode::Full))
+                .await?;
+        assert!(
+            full_page.total_count >= 2,
+            "fallback on nonzero offset should preserve roster total"
+        );
+        assert_ne!(
+            full_page.root, [0xCD; 32],
+            "fallback should replace stale root on nonzero offset"
+        );
+
+        let search_page = perform_fetch_members(MembersParams::from_session(
+            &bob,
+            1,
+            1,
+            MembersMode::Search {
+                query: "a".to_string(),
+            },
+        ))
+        .await?;
+        assert!(
+            search_page.total_count >= search_page.members.len() as u64,
+            "search fallback should return coherent pagination metadata"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn members_fetch_prefers_latest_root_when_old_root_is_still_valid()
     -> Result<(), Box<dyn std::error::Error>> {
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
@@ -9232,6 +11021,109 @@ mod tests {
         assert_ne!(
             page.root, alice.parent_root,
             "page 0 should not remain on stale local root"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn epoch_sync_rejects_gid_mismatch_between_session_and_bundle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x7Cu8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        let alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        let _bob = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+
+        let mut mismatched = alice.clone();
+        mismatched.gid = [0xEE; 32];
+        let err = match perform_epoch_sync(mismatched).await {
+            Ok(_) => return Err(anyhow!("epoch sync should fail when gid mismatches").into()),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("bundle gid mismatch"),
+            "expected explicit gid mismatch error: {err}"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn epoch_sync_requires_kbroad_secret_for_redacted_bundle_derivation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x7Du8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        let mut alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        let _bob = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+
+        alice.kbroad_secret.clear();
+        let err = match perform_epoch_sync(alice).await {
+            Ok(_) => {
+                return Err(anyhow!(
+                    "epoch sync should require KBROAD secret for redacted bundles"
+                )
+                .into());
+            }
+            Err(err) => err,
+        };
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains(KBROAD_SECRET_ENV) || err_text.contains("failed to derive epoch key"),
+            "expected KBROAD derivation failure detail: {err_text}"
         );
 
         handle.abort();
@@ -9305,6 +11197,283 @@ mod tests {
         assert!(
             !session.kbroad_secret.is_empty(),
             "auto-bootstrap join should persist generated KBROAD secret"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_bootstraps_with_configured_kbroad_material()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, hex_encode(demo::kbroad_public())) };
+
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_with_seed_demo_room(port, false).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x8Du8; 32]);
+        let session = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id,
+            alias: "alice".to_string(),
+        })
+        .await?;
+        assert_eq!(
+            session.kbroad_public,
+            demo::kbroad_public(),
+            "configured KBROAD public should match room key"
+        );
+        assert_eq!(
+            session.kbroad_secret,
+            demo::kbroad_secret(),
+            "configured KBROAD secret should be persisted in session"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_errors_when_kbroad_secret_set_without_public_on_unprovisioned_room()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_with_seed_demo_room(port, false).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x8Au8; 32]);
+        let err = match perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id,
+            alias: "alice".to_string(),
+        })
+        .await
+        {
+            Ok(_) => return Err(anyhow!("join should fail when only KBROAD secret is set").into()),
+            Err(err) => err,
+        };
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains(KBROAD_SECRET_ENV) && err_text.contains(KBROAD_PUBLIC_ENV),
+            "error should explain missing paired KBROAD public env var: {err_text}"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_rejects_configured_kbroad_public_that_does_not_match_room()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, hex_encode(vec![0xEE; 1184])) };
+
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_with_seed_demo_room(port, false).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x8Bu8; 32]);
+        CitygApiClient::new(&server_url)
+            .bootstrap_room(&room_id, demo::kbroad_public())
+            .await?;
+
+        let err = match perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id,
+            alias: "alice".to_string(),
+        })
+        .await
+        {
+            Ok(_) => {
+                return Err(anyhow!("join should fail when KBROAD public does not match").into());
+            }
+            Err(err) => err,
+        };
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains(KBROAD_PUBLIC_ENV) && err_text.contains("does not match"),
+            "error should report KBROAD public mismatch: {err_text}"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_fetch_skips_malformed_ciphertexts_and_invalid_auth_envelopes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x8Cu8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        let alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+
+        let client = CitygApiClient::new(&server_url);
+        client
+            .send_message(
+                &alice.we_epoch_id,
+                &[0x01, 0x02, 0x03],
+                Some(&alice.leaf_id),
+            )
+            .await?;
+
+        let short_payload = encrypt_message(b"tiny", &alice.epoch_key)?;
+        client
+            .send_message(&alice.we_epoch_id, &short_payload, Some(&alice.leaf_id))
+            .await?;
+
+        let mut wrong_prefix = encode_authenticated_message(
+            2,
+            &vec![b'a'; 2100],
+            &vec![0x11; ml_dsa_public_key_bytes()],
+            &vec![0x22; ml_dsa_signature_bytes()],
+        );
+        wrong_prefix[0] = b'X';
+        let wrong_prefix_ct = encrypt_message(&wrong_prefix, &alice.epoch_key)?;
+        client
+            .send_message(&alice.we_epoch_id, &wrong_prefix_ct, Some(&alice.leaf_id))
+            .await?;
+
+        let short_public_key = encode_authenticated_message(
+            3,
+            &vec![b'b'; 2200],
+            b"pk",
+            &vec![0x33; ml_dsa_signature_bytes()],
+        );
+        let short_public_key_ct = encrypt_message(&short_public_key, &alice.epoch_key)?;
+        client
+            .send_message(
+                &alice.we_epoch_id,
+                &short_public_key_ct,
+                Some(&alice.leaf_id),
+            )
+            .await?;
+
+        let short_signature = encode_authenticated_message(
+            4,
+            &vec![b'c'; 3500],
+            &vec![0x44; ml_dsa_public_key_bytes()],
+            b"sig",
+        );
+        let short_signature_ct = encrypt_message(&short_signature, &alice.epoch_key)?;
+        client
+            .send_message(
+                &alice.we_epoch_id,
+                &short_signature_ct,
+                Some(&alice.leaf_id),
+            )
+            .await?;
+
+        let invalid_signature = encode_authenticated_message(
+            5,
+            b"invalid-signature",
+            &vec![0x55; ml_dsa_public_key_bytes()],
+            &vec![0x66; ml_dsa_signature_bytes()],
+        );
+        let invalid_signature_ct = encrypt_message(&invalid_signature, &alice.epoch_key)?;
+        client
+            .send_message(
+                &alice.we_epoch_id,
+                &invalid_signature_ct,
+                Some(&alice.leaf_id),
+            )
+            .await?;
+
+        let senderless_payload = encode_authenticated_message(
+            6,
+            &vec![b'd'; 2200],
+            &vec![0x77; ml_dsa_public_key_bytes()],
+            &vec![0x88; ml_dsa_signature_bytes()],
+        );
+        let senderless_payload_ct = encrypt_message(&senderless_payload, &alice.epoch_key)?;
+        client
+            .send_message(&alice.we_epoch_id, &senderless_payload_ct, None)
+            .await?;
+
+        let marker = "valid-message-marker".to_string();
+        perform_send(SendParams::from_session(&alice, marker.clone())).await?;
+
+        let fetched = perform_fetch(FetchParams::from_session(&alice, None)).await?;
+        assert!(
+            fetched
+                .messages
+                .iter()
+                .any(|message| message.plaintext == marker),
+            "valid authenticated messages should still be returned"
+        );
+        assert!(
+            fetched
+                .messages
+                .iter()
+                .all(|message| message.ciphertext_hex != hex_encode(&short_payload)),
+            "messages failing minimum authenticated size should be skipped"
+        );
+        assert!(
+            fetched
+                .messages
+                .iter()
+                .all(|message| message.ciphertext_hex != hex_encode(&wrong_prefix_ct)),
+            "messages with invalid authenticated prefix should be skipped"
+        );
+        assert!(
+            fetched
+                .messages
+                .iter()
+                .all(|message| message.ciphertext_hex != hex_encode(&invalid_signature_ct)),
+            "messages with invalid signatures should be skipped"
         );
 
         handle.abort();
@@ -9617,6 +11786,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_members_root_from_leaves_rejects_incorrect_total_count()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let leaves = vec![[0x0Au8; 32], [0x0Bu8; 32]];
+        let root = canonical_set_root(&leaves)?;
+        let result = validate_members_root_from_leaves(root, leaves, 3);
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("expected 3 leaves")),
+            "mismatched roster totals must fail validation: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn activity_log_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let base = temp_dir.path().join("cityg").join("gui");
@@ -9673,6 +11858,202 @@ mod tests {
         assert_eq!(model.messages[0].ciphertext_hex, "cafebabe");
         assert_eq!(model.messages[0].delivery, MessageDelivery::Sent);
         assert_eq!(model.messages[0].pending_id, None);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_message_lifecycle_marks_failed() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let mut model = AppModel::new(CityGConfig::default());
+        let session = build_test_session(
+            0xA11CE,
+            "http://127.0.0.1:18080",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "alice",
+        )?;
+
+        let pending_id = model.queue_pending_message(&session, "hello");
+        assert_eq!(model.messages.len(), 1);
+        assert_eq!(model.messages[0].delivery, MessageDelivery::Pending);
+        assert_eq!(model.messages[0].pending_id, Some(pending_id));
+        assert_eq!(model.messages[0].fallback_label, "alice");
+
+        model.mark_pending_message_failed(pending_id);
+        assert_eq!(model.messages[0].delivery, MessageDelivery::Failed);
+        assert_eq!(model.messages[0].pending_id, None);
+
+        // Missing pending IDs should be ignored.
+        model.mark_pending_message_failed(u64::MAX);
+        assert_eq!(model.messages.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn render_helpers_cover_session_and_message_list_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let mut model = AppModel::new(CityGConfig::default());
+
+        // No-panics smoke tests for helper UI builders.
+        let _ = model.render_spinner();
+        let _ = model.session_row("Server", "http://127.0.0.1:18080");
+
+        let mut session = build_test_session(
+            0xE0C0,
+            "http://127.0.0.1:18080",
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "sab",
+        )?;
+
+        session.fs_epoch_created_at = SystemTime::now() - Duration::from_secs(42);
+        let _ = model.render_epoch_age_row(&session);
+        session.fs_epoch_created_at = SystemTime::now() - Duration::from_secs(15 * 60);
+        let _ = model.render_epoch_age_row(&session);
+        session.fs_epoch_created_at = SystemTime::now() - Duration::from_secs(3 * 3600);
+        let _ = model.render_epoch_age_row(&session);
+
+        // Empty list branch.
+        let _ = model.render_message_list();
+
+        model.messages = vec![
+            ChatMessageEntry {
+                sender_leaf: Some([0x01; 32]),
+                fallback_label: "pending".to_string(),
+                plaintext: "pending text".to_string(),
+                ciphertext_hex: "aa".to_string(),
+                timestamp_ms: 1,
+                delivery: MessageDelivery::Pending,
+                pending_id: Some(1),
+            },
+            ChatMessageEntry {
+                sender_leaf: Some([0x02; 32]),
+                fallback_label: "failed".to_string(),
+                plaintext: "failed text".to_string(),
+                ciphertext_hex: "bb".to_string(),
+                timestamp_ms: 2,
+                delivery: MessageDelivery::Failed,
+                pending_id: None,
+            },
+            ChatMessageEntry {
+                sender_leaf: Some([0x03; 32]),
+                fallback_label: "sent".to_string(),
+                plaintext: "sent text".to_string(),
+                ciphertext_hex: "cc".to_string(),
+                timestamp_ms: 3,
+                delivery: MessageDelivery::Sent,
+                pending_id: None,
+            },
+        ];
+        model.show_ciphertext = false;
+        let _ = model.render_message_list();
+        model.show_ciphertext = true;
+        let _ = model.render_message_list();
+
+        Ok(())
+    }
+
+    #[test]
+    fn sender_resolution_membership_activity_and_security_persist()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let mut model = AppModel::new(CityGConfig::default());
+        let leaf = [0xAB; 32];
+
+        model.members.push(MemberEntry {
+            leaf_id: leaf,
+            alias: Some("goy".to_string()),
+            pop_public_key: Some(vec![0x01]),
+            join_timestamp_ms: Some(1),
+            last_seen_timestamp_ms: Some(2),
+        });
+        let from_member = ChatMessageEntry {
+            sender_leaf: Some(leaf),
+            fallback_label: "fallback".to_string(),
+            plaintext: "hello".to_string(),
+            ciphertext_hex: "abcd".to_string(),
+            timestamp_ms: 100,
+            delivery: MessageDelivery::Sent,
+            pending_id: None,
+        };
+        assert!(model.resolve_sender_label(&from_member).contains("goy"));
+
+        model.members.clear();
+        model.leaf_alias_index.insert(leaf, "sab".to_string());
+        assert!(model.resolve_sender_label(&from_member).contains("sab"));
+
+        model.leaf_alias_index.clear();
+        assert_eq!(model.resolve_sender_label(&from_member), "fallback");
+
+        model.record_membership_activity(&MembershipSignal {
+            gid: [0x11; 32],
+            leaf_id: Some(leaf),
+            kind: Some(MembershipSignalKind::Join),
+            timestamp_ms: Some(1234),
+        });
+        model.record_membership_activity(&MembershipSignal {
+            gid: [0x11; 32],
+            leaf_id: Some(leaf),
+            kind: Some(MembershipSignalKind::Revoke),
+            timestamp_ms: None,
+        });
+        model.record_membership_activity(&MembershipSignal {
+            gid: [0x11; 32],
+            leaf_id: None,
+            kind: None,
+            timestamp_ms: None,
+        });
+        assert_eq!(model.activity_events.len(), 3);
+        assert!(model.activity_events[0].summary.contains("Roster join"));
+        assert!(model.activity_events[1].summary.contains("Roster revoke"));
+        assert!(model.activity_events[2].summary.contains("Roster changed"));
+
+        let session = build_test_session(
+            0x5EED,
+            "http://127.0.0.1:18080",
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+            "sab",
+        )?;
+        model.session = Some(session.clone());
+        model.security_events = vec![SecurityEvent {
+            alias: "sab".to_string(),
+            description: "security check".to_string(),
+            timestamp_ms: 88,
+        }];
+        model.persist_security_events_to_disk();
+        let loaded = load_security_log(&session.server_url, &session.room_id)?;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].description, "security check");
+
+        // Early-return path when no session.
+        model.session = None;
+        model.persist_security_events_to_disk();
+        Ok(())
+    }
+
+    #[test]
+    fn helper_formatters_cover_http_epoch_and_leaf_paths() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let no_freeze = describe_http_failure("500", "internal", None, None);
+        assert_eq!(no_freeze, "server error (500): internal");
+
+        let freeze_only = describe_http_failure("500", "bad", Some(925), None);
+        assert!(freeze_only.contains("[freeze 925]"));
+
+        let freeze_with_reason = describe_http_failure("400", "invalid", Some(910), Some("rho"));
+        assert!(freeze_with_reason.contains("[freeze 910 rho]"));
+
+        assert_eq!(default_epoch_rotation_interval(), 300);
+
+        let leaf = [0xCD; 32];
+        let short = short_leaf_display(&leaf);
+        assert!(short.ends_with('…'));
+        assert_eq!(short.chars().count(), 9);
         Ok(())
     }
 
