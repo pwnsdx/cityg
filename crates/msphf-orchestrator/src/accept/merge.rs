@@ -262,7 +262,7 @@ impl AcceptanceContext {
             self.allowed_vrf_ids.as_ref(),
             &self.deprecated_vrf_ids,
         )?;
-        if proofs.vrf_pi.len() > MAX_VRF_PROOF_BYTES {
+        if proofs.vrf_pi.is_empty() || proofs.vrf_pi.len() > MAX_VRF_PROOF_BYTES {
             return Err(AcceptanceError::Freeze(FREEZE_VRF_INVALID));
         }
 
@@ -998,6 +998,52 @@ mod tests {
             return Err(anyhow!("unexpected error"));
         };
         assert_eq!(code, FREEZE_MH_HEADS_INVALID);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_anchor_rejects_empty_vrf_proof() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let pivot_weid = match header.get(&HDR_ROLLUP_PIVOT_WEID) {
+            Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
+                let mut weid = [0u8; 32];
+                weid.copy_from_slice(bytes);
+                weid
+            }
+            _ => bail!("missing pivot weid"),
+        };
+        let mut pivot = pivot_parity_from_store(&mut ctx, &parts, pivot_weid)?;
+        pivot.vrf_proof.clear();
+        align_header_with_pivot(&mut header, &pivot);
+        recompute_proofs_commit(&mut header)?;
+        let recomputed_commit = match header.get(&HDR_PROOFS_COMMIT) {
+            Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
+                let mut commit = [0u8; 32];
+                commit.copy_from_slice(bytes);
+                commit
+            }
+            _ => bail!("missing recomputed proofs_commit"),
+        };
+        pivot.proofs_commit = recomputed_commit;
+        refresh_pivot_parity(&mut ctx, &parts, &pivot)?;
+        seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
+        let now = ctx.next_accept_instant();
+
+        let err = match ctx.accept_anchor_merge(
+            &parts,
+            merge_joiner.we_epoch_id,
+            &header,
+            heads,
+            merge_joiner.mh_note.clone(),
+            now,
+        ) {
+            Ok(_) => bail!("empty vrf proof should freeze"),
+            Err(e) => e,
+        };
+        assert_freeze(err, FREEZE_VRF_INVALID)?;
         Ok(())
     }
 
