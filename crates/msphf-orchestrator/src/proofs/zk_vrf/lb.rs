@@ -91,8 +91,8 @@ pub fn verify(
     ctx: &VrfCtx,
     masks: (&MaskDigest, &MaskDigest),
     proof: &VrfProof,
-) -> bool {
-    verify_result(pk_payload, ctx, masks, proof).unwrap_or_default()
+) -> Result<bool> {
+    verify_result(pk_payload, ctx, masks, proof)
 }
 
 pub fn verify_result(
@@ -686,6 +686,24 @@ mod tests {
             "truncated proof should return MalformedProof, got: {malformed_err}"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn verify_propagates_errors() -> Result<()> {
+        let ctx = demo_ctx();
+        let masks = mask_pair();
+        let err = verify(
+            &[],
+            &ctx,
+            (&masks.0, &masks.1),
+            &VrfProof { bytes: vec![0; 64] },
+        )
+        .unwrap_err();
+        ensure!(
+            matches!(err, Error::InvalidKey(_)),
+            "verify should return typed errors, got: {err}"
+        );
         Ok(())
     }
 }
