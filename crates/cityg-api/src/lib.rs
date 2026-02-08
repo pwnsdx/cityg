@@ -20,7 +20,7 @@ use axum::{
     body::Bytes,
     extract::ws::{Message as WsMessage, WebSocket},
     extract::{DefaultBodyLimit, State, WebSocketUpgrade},
-    http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE},
     middleware as axum_middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -147,6 +147,8 @@ const ALIAS_RATE_LIMIT_BURST: u32 = 10;
 const ALIAS_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const ALIAS_RATE_LIMIT_MAX_BUCKETS: usize = 100_000;
 const API_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const WINDOW_CONFIG_ADMIN_HEADER: &str = "x-cityg-admin-token";
+const WINDOW_CONFIG_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_WINDOW_ADMIN_TOKEN";
 
 #[derive(Clone)]
 struct ApiState {
@@ -385,6 +387,8 @@ enum ApiError {
     NotFound,
     #[error("rate limited")]
     RateLimited,
+    #[error("unauthorized: {0}")]
+    Unauthorized(&'static str),
 }
 
 impl ApiError {
@@ -475,6 +479,13 @@ impl IntoResponse for ApiError {
                 None,
                 None,
             ),
+            ApiError::Unauthorized(msg) => (
+                StatusCode::UNAUTHORIZED,
+                msg.to_string(),
+                None,
+                None,
+                None,
+            ),
             ApiError::Server {
                 message,
                 freeze,
@@ -521,6 +532,30 @@ fn parse_gid(room_id: &str) -> Result<[u8; 32], ApiError> {
     let mut gid = [0u8; 32];
     gid.copy_from_slice(&bytes);
     Ok(gid)
+}
+
+fn configured_window_admin_token() -> Option<String> {
+    std::env::var(WINDOW_CONFIG_ADMIN_TOKEN_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn enforce_window_config_auth(
+    headers: &HeaderMap,
+    expected_token: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(expected_token) = expected_token else {
+        return Ok(());
+    };
+    let provided = headers
+        .get(WINDOW_CONFIG_ADMIN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if provided == Some(expected_token) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized("missing or invalid admin token"))
+    }
 }
 
 /// Verifies an identity binding signature.
@@ -1541,8 +1576,10 @@ fn pivot_parity_to_cbor(parity: &PivotParity) -> Result<Vec<u8>, ApiError> {
 
 async fn configure_window(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    enforce_window_config_auth(&headers, configured_window_admin_token().as_deref())?;
     let request = ConfigureWindowRequest::decode(body)?;
     let h_max = request
         .h_max
@@ -1963,6 +2000,42 @@ mod tests {
         let mut body = Vec::new();
         message.encode(&mut body).expect("encode protobuf request");
         Bytes::from(body)
+    }
+
+    #[test]
+    fn window_config_auth_accepts_matching_header_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WINDOW_CONFIG_ADMIN_HEADER,
+            HeaderValue::from_static("top-secret"),
+        );
+        assert!(enforce_window_config_auth(&headers, Some("top-secret")).is_ok());
+    }
+
+    #[test]
+    fn window_config_auth_rejects_missing_or_wrong_token() {
+        let empty_headers = HeaderMap::new();
+        let missing = enforce_window_config_auth(&empty_headers, Some("top-secret"));
+        assert!(matches!(
+            missing,
+            Err(ApiError::Unauthorized("missing or invalid admin token"))
+        ));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WINDOW_CONFIG_ADMIN_HEADER,
+            HeaderValue::from_static("wrong"),
+        );
+        let wrong = enforce_window_config_auth(&headers, Some("top-secret"));
+        assert!(matches!(
+            wrong,
+            Err(ApiError::Unauthorized("missing or invalid admin token"))
+        ));
+
+        assert!(
+            enforce_window_config_auth(&empty_headers, None).is_ok(),
+            "auth should be bypassed when no admin token is configured"
+        );
     }
 
     #[test]
