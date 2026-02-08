@@ -635,13 +635,16 @@ impl CityGServer {
         }
         self.reset_state();
         self.replaying = true;
-        for entry in entries {
-            let bundle = ClientEpochBundle::from_cbor(&entry)?;
-            let (_, ctx, receiver, roster) = self.stage_bundle(&bundle)?;
-            self.commit_staged(ctx, receiver, roster);
-        }
+        let replay_result = (|| -> Result<(), CityGError> {
+            for entry in entries {
+                let bundle = ClientEpochBundle::from_cbor(&entry)?;
+                let (_, ctx, receiver, roster) = self.stage_bundle(&bundle)?;
+                self.commit_staged(ctx, receiver, roster);
+            }
+            Ok(())
+        })();
         self.replaying = false;
-        Ok(())
+        replay_result
     }
 
     pub fn refresh_pivot(&mut self, bundle: &ClientEpochBundle) -> Result<(), CityGError> {
@@ -1327,6 +1330,43 @@ mod tests {
 
         let server = demo_server_with_journal(&journal_path);
         assert_eq!(server.members(&cityg_client::demo::DEMO_GID).len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_error_does_not_leave_server_replaying_or_disable_journaling()
+    -> Result<(), CityGError> {
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("corrupt.journal");
+        {
+            let mut file = File::create(&journal_path)?;
+            let bad = [0xFFu8];
+            file.write_all(&(bad.len() as u32).to_le_bytes())?;
+            file.write_all(&bad)?;
+            file.flush()?;
+        }
+
+        let mut server = demo_server_with_journal(&journal_path);
+        assert!(
+            !server.replaying,
+            "replay flag must reset even when startup recovery fails"
+        );
+
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let entries = super::ServerJournal::load_entries(&journal_path)?;
+        assert_eq!(
+            entries.len(),
+            2,
+            "post-recovery accepts must still append to the journal"
+        );
+        let latest = entries
+            .last()
+            .ok_or(CityGError::InvalidInput("missing appended journal entry"))?;
+        let decoded = ClientEpochBundle::from_cbor(latest)?;
+        assert_eq!(decoded.gid(), cityg_client::demo::DEMO_GID.as_slice());
         Ok(())
     }
 
