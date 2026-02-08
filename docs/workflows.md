@@ -229,7 +229,8 @@ sequenceDiagram
 **Key Points:**
 - Merge is for existing members (leaf_id already in roster)
 - Fresh pivot parities ensure forward secrecy
-- Similar to join but skips roster addition
+- Current merge tickets encode requester self-revocation in `revoked_since`
+- Accepted merge bundles therefore apply a leave/rekey-style roster delta
 
 ---
 

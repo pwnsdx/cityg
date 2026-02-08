@@ -246,15 +246,16 @@ pub struct JoinTicketBundle {
     pub kbroad_public: Vec<u8>,
 }
 
-/// Merge ticket bundle provided to existing members resyncing after offline.
+/// Merge ticket bundle provided to existing members during leave/rekey flow.
 ///
 /// Similar to [`JoinTicketBundle`] but for members who already have a leaf_id
-/// in the roster. Contains fresh pivot parities for forward secrecy.
+/// in the roster. The current merge flow encodes requester self-revocation in
+/// SRX `since_leaf_ids`, and carries fresh pivot parities for forward secrecy.
 ///
 /// # Use Case
 ///
-/// When a member has been offline and needs to create a new epoch with
-/// current group state without generating new cryptographic material.
+/// A member proves continuity against the current pivot and publishes a
+/// revocation delta rooted at their own leaf during controlled leave/rekey.
 ///
 /// # Security
 ///
@@ -1576,6 +1577,32 @@ mod tests {
             "expected pivot parity snapshot for current parent root"
         );
         assert_eq!(ticket.parent_root, ticket.parities[0].parent_root);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_ticket_encodes_requester_self_revocation_delta() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let leaf_id = cityg_client::demo::demo_member_leaf("alice");
+        let ticket = server.build_merge_ticket(&cityg_client::demo::DEMO_GID, &leaf_id)?;
+        let srx = cityg_client::witness::SrxInputsOwned::from_cbor(ticket.srx_cbor.as_slice())
+            .map_err(|_| CityGError::InvalidInput("merge srx decode failed"))?;
+
+        assert!(
+            srx.join_leaf_ids.is_empty(),
+            "merge must not add join leaves"
+        );
+        assert_eq!(
+            srx.since_leaf_ids,
+            vec![leaf_id],
+            "merge ticket should include requester in revoked_since delta"
+        );
+        let expected_since_root = msphf_core::merkle::canonical_set_root(&[leaf_id])?;
+        assert_eq!(ticket.revoked_since_root, expected_since_root);
+        assert_eq!(ticket.revoked_root, expected_since_root);
         Ok(())
     }
 }

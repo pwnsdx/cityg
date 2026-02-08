@@ -334,7 +334,8 @@ let ticket = client.join_ticket("my-room", "alice", Some(identity)).await?;
 
 #### `POST /v1/rooms/merge_ticket`
 
-Requests a merge ticket for an existing member to resync with the group.
+Requests a merge ticket for an existing member during merge/leave rekey flow.
+Current server behavior includes requester self-revocation in the merge SRX delta.
 
 **Protobuf Request:** `MergeTicketRequest`
 ```protobuf
@@ -379,9 +380,8 @@ println!("Merge ticket pivots: {}", ticket.pivot_parity_cbor.len());
 ```
 
 **Use Cases:**
-- Rejoining after being offline
-- Recovering from local state loss
-- Creating a new epoch after extended inactivity
+- Controlled leave/rekey transitions
+- Refreshing parity context for merge-era state transitions
 
 ---
 
