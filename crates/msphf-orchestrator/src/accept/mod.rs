@@ -83,6 +83,33 @@ pub const RHO_GUARD_CAPACITY: usize = 64;
 const MIN_SRX_MAX_BYTES: usize = 256 * 1024;
 const DEFAULT_SRX_MAX_BYTES: usize = 1024 * 1024;
 const FS_CAPSS_MAX_BYTES: usize = 16_384;
+const DEFAULT_SRX_SMALLWOOD_PROFILE: &str = "smallwood-v1/anemoi-jive-a1";
+pub(crate) const MERGE_ONLY_KEYS: [u64; 11] = [
+    HDR_MH_HEADS,
+    HDR_ROLLUP_PIVOT_WEID,
+    HDR_ROLLUP_PROVENANCE_COMMIT,
+    HDR_ROLLUP_EPOCH_REPLAY,
+    HDR_ROLLUP_VCK_COMMIT,
+    HDR_MERGE_DELEGATION_SIG,
+    HDR_KBROAD_REPLAY,
+    HDR_ROLLUP_FS_MODE,
+    HDR_FS_EVOLUTION_BOUNDARY,
+    HDR_FS_PURGE_TIMES,
+    HDR_FS_CHECKPOINT_EC,
+];
+pub(crate) const SRX_ONLY_KEYS: [u64; 4] = [
+    HDR_SRX_COMMIT,
+    HDR_SRX_PAYLOAD,
+    HDR_SRX_ROOT_SW,
+    HDR_SRX_SMALLWOOD,
+];
+
+#[derive(Serialize)]
+struct SrxEmptyRootProfile<'a>(&'a str);
+
+pub(crate) fn derive_srx_empty_root_sw(profile: &str) -> Result<[u8; 32], MsphfError> {
+    h_l("srx/root_sw/empty", &SrxEmptyRootProfile(profile))
+}
 
 const KBROAD_WRAP_KEY_BYTES: usize = 32;
 const KBROAD_WRAP_CIPHERTEXT_BYTES: usize = KBROAD_WRAP_KEY_BYTES + crate::AEAD_TAG_LEN;
@@ -136,7 +163,7 @@ mod bench {
             parts: &AnchorInstanceParts<'_>,
             joiner: &JoinerKGenResult,
             require: bool,
-            allowed_modes: Option<&BTreeSet<String>>,
+            _allowed_modes: Option<&BTreeSet<String>>,
             now: AcceptInstant,
         ) -> Result<(), AcceptanceError> {
             let empty_set = BTreeSet::new();
@@ -165,11 +192,10 @@ mod bench {
                 &joiner.seed_commit,
                 &joiner.rho_commit,
                 &joiner.hp_commit,
-                allowed_modes,
-                &self.deprecated_modes,
                 now,
                 &mut self.cache,
                 &proofs,
+                &[0u8; 32],
             )
         }
     }
@@ -457,6 +483,9 @@ pub struct AcceptanceContext {
     fs_caps: FsCaps,
     last_checkpoint_ec: u64,
     last_accepted_ec: u64,
+    srx_root_sw: Option<[u8; 32]>,
+    srx_empty_root_sw: [u8; 32],
+    srx_migration_root_sw: Option<[u8; 32]>,
     fs_base_ts: Option<u64>,
     fs_policy_version: Option<String>,
     allowed_fs_policy_version: Option<String>,
@@ -486,6 +515,8 @@ impl AcceptanceContext {
     fn with_options_internal(h_max: usize, ttl: Duration, options: AcceptanceOptions) -> Self {
         let mh_window = MultiHeadWindow::new(h_max, ttl);
         let verify_ttl = mh_window.ttl();
+        let srx_empty_root_sw =
+            derive_srx_empty_root_sw(DEFAULT_SRX_SMALLWOOD_PROFILE).unwrap_or([0u8; 32]);
         let mut ctx = Self {
             mh_window,
             rho_guard: RhoReplayGuard::new(options.rho_guard_capacity.max(1), verify_ttl),
@@ -515,6 +546,9 @@ impl AcceptanceContext {
             fs_caps: FsCaps::default(),
             last_checkpoint_ec: 0,
             last_accepted_ec: 0,
+            srx_root_sw: Some(srx_empty_root_sw),
+            srx_empty_root_sw,
+            srx_migration_root_sw: None,
             fs_base_ts: None,
             fs_policy_version: None,
             allowed_fs_policy_version: None,
@@ -590,6 +624,37 @@ impl AcceptanceContext {
 
     pub fn last_accepted_ec(&self) -> u64 {
         self.last_accepted_ec
+    }
+
+    pub fn srx_root_sw(&self) -> Option<[u8; 32]> {
+        self.srx_root_sw
+    }
+
+    pub fn set_srx_root_sw(&mut self, root: Option<[u8; 32]>) {
+        self.srx_root_sw = root;
+    }
+
+    pub fn set_srx_empty_root_sw(&mut self, root: [u8; 32]) {
+        let previous = self.srx_empty_root_sw;
+        self.srx_empty_root_sw = root;
+        if self.srx_root_sw == Some(previous) {
+            self.srx_root_sw = Some(root);
+        }
+    }
+
+    pub fn set_srx_migration_root_sw(&mut self, root: Option<[u8; 32]>) {
+        self.srx_migration_root_sw = root;
+    }
+
+    pub fn ensure_srx_root_sw(&mut self) -> Result<[u8; 32], AcceptanceError> {
+        if let Some(root) = self.srx_root_sw {
+            return Ok(root);
+        }
+        if let Some(migration_root) = self.srx_migration_root_sw {
+            self.srx_root_sw = Some(migration_root);
+            return Ok(migration_root);
+        }
+        Err(AcceptanceError::Freeze(FREEZE_SUITE_FORBIDDEN))
     }
 
     pub fn record_accepted_ec(&mut self, ec: u64) {
@@ -1137,10 +1202,11 @@ impl AcceptanceContext {
     ) -> Result<AcceptanceOutcome, AcceptanceError> {
         let now = self.next_accept_instant();
         self.mh_window.prune_all(now);
+        let is_merge = is_merge_anchor(header_map);
         debug!(
-            "accept_anchor: gid={:?} merge_heads={}",
+            "accept_anchor: gid={:?} is_merge={}",
             hex::encode(parts.gid),
-            header_map.contains_key(&HDR_MH_HEADS)
+            is_merge
         );
         if matches!(
             header_map.get(&HDR_FS_CAPSS),
@@ -1149,13 +1215,13 @@ impl AcceptanceContext {
             return Err(AcceptanceError::Freeze(FREEZE_STARK_OVERSIZE));
         }
 
-        let mh_heads = match parse_mh_heads(header_map) {
-            Ok(value) => value,
-            Err(_) => return Err(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID)),
-        };
         let mh_note = parse_mh_note(header_map).map_err(AcceptanceError::from)?;
 
-        let result = if let Some(heads) = mh_heads {
+        let result = if is_merge {
+            let heads = match parse_mh_heads(header_map) {
+                Ok(Some(value)) => value,
+                Ok(None) | Err(_) => return Err(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID)),
+            };
             self.accept_anchor_merge(parts, we_epoch_id_claim, header_map, heads, mh_note, now)
         } else {
             self.accept_anchor_join(parts, we_epoch_id_claim, header_map, mh_note, now)
@@ -1287,7 +1353,7 @@ struct VckPreimage<'a> {
     proofs_commit: &'a [u8],
     proof_mode: &'a str,
     vrf_id: &'a str,
-    policy_version: &'a str,
+    fs_policy_version: &'a str,
 }
 
 fn header_value_bytes<'a>(
@@ -1362,13 +1428,33 @@ fn compute_vck_key(
         _ => return Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING)),
     };
 
-    let policy_version = match header.get(&HDR_POLICY_VERSION) {
+    let fs_policy_version = match header.get(&HDR_FS_POLICY_VERSION) {
         Some(Value::Text(text)) => Cow::Borrowed(text.as_str()),
+        Some(Value::Integer(int)) => Cow::Owned(
+            u64::try_from(*int)
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?
+                .to_string(),
+        ),
         Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes)
             .map(Cow::Borrowed)
-            .map_err(|_| AcceptanceError::Freeze(FREEZE_FIELD_MISSING))?,
-        _ => Cow::Borrowed("v0"),
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?,
+        _ => return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED)),
     };
+    if let Some(value) = header.get(&HDR_POLICY_VERSION) {
+        let legacy = match value {
+            Value::Integer(int) => u64::try_from(*int)
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?
+                .to_string(),
+            Value::Text(text) => text.clone(),
+            Value::Bytes(bytes) => std::str::from_utf8(bytes)
+                .map(|s| s.to_string())
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?,
+            _ => return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED)),
+        };
+        if legacy != fs_policy_version.as_ref() {
+            return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED));
+        }
+    }
 
     let preimage = VckPreimage {
         xk_hash,
@@ -1381,7 +1467,7 @@ fn compute_vck_key(
         proofs_commit: &proofs_commit,
         proof_mode: proof_mode.as_ref(),
         vrf_id: vrf_id.as_ref(),
-        policy_version: policy_version.as_ref(),
+        fs_policy_version: fs_policy_version.as_ref(),
     };
 
     h_l("msphf/vck", &preimage).map_err(AcceptanceError::from)
@@ -1401,7 +1487,7 @@ fn compute_vck_from_parity(parity: &PivotParity) -> Result<[u8; 32], AcceptanceE
         map.insert(HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
     }
     map.insert(
-        HDR_POLICY_VERSION,
+        HDR_FS_POLICY_VERSION,
         Value::Text(parity.policy_version.clone()),
     );
     compute_vck_key(
@@ -1442,6 +1528,12 @@ pub fn parse_mh_heads(
         return Err(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID));
     }
     Ok(Some(heads))
+}
+
+pub(crate) fn is_merge_anchor(header: &BTreeMap<u64, Value>) -> bool {
+    MERGE_ONLY_KEYS
+        .into_iter()
+        .any(|key| header.contains_key(&key))
 }
 
 fn is_sorted_unique(heads: &[[u8; 32]]) -> bool {
@@ -3554,11 +3646,10 @@ mod tests {
             &joiner.seed_commit,
             &joiner.rho_commit,
             &joiner.hp_commit,
-            None,
-            &empty,
             AcceptInstant::from_ticks(0),
             &mut cache,
             &proofs,
+            &[0u8; 32],
         );
         assert!(result.is_err(), "missing SRX must freeze");
         let err = result.unwrap_err();

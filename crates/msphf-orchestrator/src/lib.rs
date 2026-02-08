@@ -125,6 +125,7 @@ const FS_KFS_INFO_PREFIX: &[u8] = b"city-g|fs/kfs/v1";
 pub const DEFAULT_PROOF_MODE: &str = "lin+zkvrf";
 pub const DEFAULT_VRF_ID: &str = "lb-vrf/v1";
 pub const DEFAULT_POLICY_VERSION: &str = "v0";
+const DEFAULT_SRX_SMALLWOOD_PROFILE: &str = "smallwood-v1/anemoi-jive-a1";
 
 type MergeMetadata = (Option<Vec<[u8; 32]>>, Option<String>);
 
@@ -1499,6 +1500,7 @@ pub struct PivotParity {
     pub fs_capss: Vec<u8>,
     pub proofs_commit: [u8; 32],
     pub srx_commit: Option<[u8; 32]>,
+    pub srx_root_sw: Option<[u8; 32]>,
     pub is_join: bool,
     pub hp_envelope: Arc<[u8]>,
     pub fs_epoch_commit: Option<[u8; 32]>,
@@ -1704,11 +1706,20 @@ pub fn accept_and_extract_or<'a>(
 
     let mut parent_root = [0u8; 32];
     parent_root.copy_from_slice(anchor.parent_root);
-    let policy_version = match header_map.get(&HDR_POLICY_VERSION) {
+    let policy_version = match header_map.get(&HDR_FS_POLICY_VERSION) {
         Some(Value::Text(text)) => text.clone(),
+        Some(Value::Integer(value)) => u64::try_from(*value)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| DEFAULT_POLICY_VERSION.to_string()),
         Some(Value::Bytes(bytes)) => {
             String::from_utf8(bytes.clone()).unwrap_or_else(|_| DEFAULT_POLICY_VERSION.to_string())
         }
+        None => match header_map.get(&HDR_POLICY_VERSION) {
+            Some(Value::Text(text)) => text.clone(),
+            Some(Value::Bytes(bytes)) => String::from_utf8(bytes.clone())
+                .unwrap_or_else(|_| DEFAULT_POLICY_VERSION.to_string()),
+            _ => DEFAULT_POLICY_VERSION.to_string(),
+        },
         _ => DEFAULT_POLICY_VERSION.to_string(),
     };
     let proof_mode = match header_map.get(&HDR_PROOF_MODE) {
@@ -1783,6 +1794,14 @@ pub fn accept_and_extract_or<'a>(
         }
         _ => None,
     };
+    let srx_root_sw = match header_map.get(&HDR_SRX_ROOT_SW) {
+        Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(bytes);
+            Some(arr)
+        }
+        _ => None,
+    };
     let is_join = matches!(outcome.kind, AcceptanceKind::NonMerge);
 
     let pivot_parity = PivotParity {
@@ -1811,6 +1830,7 @@ pub fn accept_and_extract_or<'a>(
         fs_capss,
         proofs_commit,
         srx_commit,
+        srx_root_sw,
         is_join,
         hp_envelope,
         fs_epoch_commit: outcome.fs_epoch_commit,
@@ -1972,23 +1992,36 @@ fn parse_merge_metadata(header_map: &BTreeMap<u64, Value>) -> Result<MergeMetada
     Ok((heads_meta, mh_note))
 }
 
-fn populate_join_srx<'a>(
-    header: &mut BTreeMap<u64, Value>,
-    parts: &AnchorInstanceParts<'a>,
-    params: &OrchestrationParams<'a>,
-) -> Result<(), MsphfError> {
-    populate_join_srx_complete(header, parts, params)
+#[derive(Serialize)]
+struct SrxEmptyRootProfile<'a>(&'a str);
+
+fn default_srx_empty_root_sw() -> [u8; 32] {
+    h_l(
+        "srx/root_sw/empty",
+        &SrxEmptyRootProfile(DEFAULT_SRX_SMALLWOOD_PROFILE),
+    )
+    .unwrap_or([0u8; 32])
 }
 
-fn populate_join_srx_complete<'a>(
+fn populate_merge_srx<'a>(
     header: &mut BTreeMap<u64, Value>,
     parts: &AnchorInstanceParts<'a>,
     params: &OrchestrationParams<'a>,
+    srx_root_sw_before: &[u8; 32],
+) -> Result<(), MsphfError> {
+    populate_merge_srx_complete(header, parts, params, srx_root_sw_before)
+}
+
+fn populate_merge_srx_complete<'a>(
+    header: &mut BTreeMap<u64, Value>,
+    parts: &AnchorInstanceParts<'a>,
+    params: &OrchestrationParams<'a>,
+    srx_root_sw_before: &[u8; 32],
 ) -> Result<(), MsphfError> {
     let srx_inputs = params
         .srx
         .as_ref()
-        .ok_or_else(|| MsphfError::invalid_input("srx inputs required for join anchor"))?;
+        .ok_or_else(|| MsphfError::invalid_input("srx inputs required for merge anchor"))?;
 
     let join_leaf_ids = srx_inputs.join_leaf_ids.as_ref();
     let since_leaf_ids = srx_inputs.since_leaf_ids.as_ref();
@@ -2194,12 +2227,12 @@ fn populate_join_srx_complete<'a>(
     let hint_counts_bytes = encode_value(&hint_counts)?;
     let hint_sizes_bytes = encode_value(&hint_sizes)?;
 
-    header.insert(120, Value::Text("srx/v1-complete".to_string()));
     header.insert(121, Value::Bytes(commit.to_vec()));
 
     attach_srx_smallwood_proof(
         header,
         params,
+        srx_root_sw_before,
         &parent_root,
         &join_root_arr,
         &revoked_since_root,
@@ -2208,12 +2241,9 @@ fn populate_join_srx_complete<'a>(
         &payload_bytes,
         &hint_counts_bytes,
         &hint_sizes_bytes,
-        "srx/v1-complete",
     )?;
 
     header.insert(122, Value::Bytes(payload_bytes));
-    header.insert(123, Value::Bytes(hint_counts_bytes));
-    header.insert(124, Value::Bytes(hint_sizes_bytes));
 
     Ok(())
 }
@@ -2222,6 +2252,7 @@ fn populate_join_srx_complete<'a>(
 fn attach_srx_smallwood_proof(
     header: &mut BTreeMap<u64, Value>,
     params: &OrchestrationParams<'_>,
+    shadow_root_before: &[u8; 32],
     parent_root: &[u8; 32],
     join_root: &[u8; 32],
     revoked_since_root: &[u8; 32],
@@ -2230,17 +2261,8 @@ fn attach_srx_smallwood_proof(
     payload_bytes: &[u8],
     hint_counts_bytes: &[u8],
     hint_sizes_bytes: &[u8],
-    srx_mode: &str,
 ) -> Result<(), MsphfError> {
     let payload_digest = srx_smallwood::payload_digest(payload_bytes);
-    let shadow_before = srx_smallwood::compute_shadow_root(
-        parent_root,
-        join_root,
-        revoked_since_root,
-        revoked_root,
-        None,
-        None,
-    );
     let shadow_after = srx_smallwood::compute_shadow_root(
         parent_root,
         join_root,
@@ -2251,16 +2273,16 @@ fn attach_srx_smallwood_proof(
     );
 
     let inputs = srx_smallwood::Inputs {
-        shadow_root_before: &shadow_before,
+        shadow_root_before,
         shadow_root_after: &shadow_after,
         parent_root,
         join_root,
         revoked_since_root,
         revoked_root,
         srx_commit,
-        srx_mode,
+        srx_mode: "srx/v1-complete",
         proof_mode: params.proof_mode,
-        policy_version: params.policy_version,
+        fs_policy_version: params.fs_policy_version,
         vrf_id: params.vrf_id,
         payload: payload_bytes,
         hint_counts_cbor: hint_counts_bytes,
@@ -2393,10 +2415,6 @@ pub fn joiner_kgen_or<'a>(
     header_map.insert(112, Value::Bytes(parts.revoked_since_prev_root.to_vec()));
     header_map.insert(113, Value::Bytes(parts.revoked_root.to_vec()));
     header_map.insert(
-        HDR_POLICY_VERSION,
-        Value::Text(params.policy_version.to_string()),
-    );
-    header_map.insert(
         HDR_FS_POLICY_VERSION,
         Value::Text(params.fs_policy_version.to_string()),
     );
@@ -2430,10 +2448,6 @@ pub fn joiner_kgen_or<'a>(
     header_map.insert(HDR_FS_DEV_COMMIT, Value::Bytes(fs_dev_commit.to_vec()));
 
     let (retired_heads, mh_note) = parse_merge_metadata(&header_map)?;
-
-    if retired_heads.is_none() {
-        populate_join_srx(&mut header_map, &parts, &params)?;
-    }
 
     // Build ANCHOR_SEED_CTX with the current header (seed fields will be refined below).
     let mut anchor_seed_ctx = build_anchor_seed_ctx(&header_map)?;
@@ -2734,7 +2748,7 @@ pub fn joiner_kgen_or<'a>(
             crs_id: params.msphf_crs_id,
             params_id: params.params_id,
             proof_mode: params.proof_mode,
-            policy_version: params.policy_version,
+            fs_policy_version: params.fs_policy_version,
             vrf_id: params.vrf_id,
             parent_root: parts.parent_root,
             join_delta_root: parts.join_delta_root,
@@ -2798,7 +2812,7 @@ pub fn joiner_kgen_or<'a>(
         revoked_since_prev_root: parts.revoked_since_prev_root,
         revoked_root: parts.revoked_root,
         proof_mode: params.proof_mode,
-        policy_version: params.policy_version,
+        fs_policy_version: params.fs_policy_version,
         meor_vrf_id: params.vrf_id,
         fs_epoch_commit: &fs_inputs.fs_epoch_commit,
         fs_ec: fs_inputs.fs_ec,
@@ -3022,20 +3036,35 @@ pub fn joiner_kgen_merge_or<'a>(
     let requires_srx = join_delta_root_new != pivot.join_delta_root
         || revoked_since_root_new != pivot.revoked_since_root
         || revoked_root_new != pivot.revoked_root;
+    let srx_root_sw_before = pivot
+        .srx_root_sw
+        .unwrap_or_else(default_srx_empty_root_sw);
     if requires_srx {
-        populate_join_srx(&mut result.header_map, &parts, &params)?;
+        populate_merge_srx(&mut result.header_map, &parts, &params, &srx_root_sw_before)?;
     } else {
         for key in [
-            HDR_SRX_MODE,
             HDR_SRX_COMMIT,
             HDR_SRX_PAYLOAD,
+            HDR_SRX_ROOT_SW,
+            HDR_SRX_SMALLWOOD,
+            // Clear legacy SRX keys as defense-in-depth.
+            HDR_SRX_MODE,
             HDR_SRX_HINT_COUNTS,
             HDR_SRX_HINT_SIZES,
         ] {
             result.header_map.remove(&key);
         }
     }
-    if requires_srx && !result.header_map.contains_key(&HDR_SRX_MODE) {
+    if requires_srx
+        && ![
+            HDR_SRX_COMMIT,
+            HDR_SRX_PAYLOAD,
+            HDR_SRX_ROOT_SW,
+            HDR_SRX_SMALLWOOD,
+        ]
+        .into_iter()
+        .all(|key| result.header_map.contains_key(&key))
+    {
         return Err(MsphfError::invalid_input("merge requires srx"));
     }
 
@@ -3082,7 +3111,7 @@ pub fn joiner_kgen_merge_or<'a>(
         .header_map
         .insert(HDR_HP_COMMIT, Value::Bytes(pivot.hp_commit.to_vec()));
     result.header_map.insert(
-        HDR_POLICY_VERSION,
+        HDR_FS_POLICY_VERSION,
         Value::Text(pivot.policy_version.clone()),
     );
     result
@@ -3105,11 +3134,31 @@ pub fn joiner_kgen_merge_or<'a>(
         .insert(HDR_VRF_PROOF, Value::Bytes(pivot.vrf_proof.clone()));
     result
         .header_map
-        .insert(HDR_VRF_PROOF, Value::Bytes(pivot.vrf_proof.clone()));
-    result.header_map.insert(
-        HDR_PROOFS_COMMIT,
-        Value::Bytes(pivot.proofs_commit.to_vec()),
-    );
+        .insert(HDR_FS_CAPSS, Value::Bytes(pivot.fs_capss.clone()));
+
+    let srx_root_sw_bytes = result
+        .header_map
+        .get(&HDR_SRX_ROOT_SW)
+        .and_then(|value| match value {
+            Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes.as_slice()),
+            _ => None,
+        });
+    let srx_smallwood_bytes = result
+        .header_map
+        .get(&HDR_SRX_SMALLWOOD)
+        .and_then(|value| match value {
+            Value::Bytes(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        });
+    let proofs_commit = compute_proofs_commit_bytes(
+        pivot.vrf_proof.as_slice(),
+        pivot.fs_capss.as_slice(),
+        srx_root_sw_bytes,
+        srx_smallwood_bytes,
+    )?;
+    result
+        .header_map
+        .insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
 
     let anchor_instance = AnchorInstance {
         gid: parts.gid,
@@ -3441,6 +3490,7 @@ mod tests {
             fs_capss: vec![0x40],
             proofs_commit: [0x99; 32],
             srx_commit: None,
+            srx_root_sw: None,
             is_join: true,
             hp_envelope: Arc::from([] as [u8; 0]),
             fs_epoch_commit: None,
@@ -3499,6 +3549,7 @@ mod tests {
             fs_capss: vec![proof_tag.wrapping_add(4)],
             proofs_commit,
             srx_commit: Some([proof_tag; 32]),
+            srx_root_sw: Some([proof_tag; 32]),
             is_join: true,
             hp_envelope: Arc::from([] as [u8; 0]),
             fs_epoch_commit: Some([rho_tag; 32]),
@@ -4342,6 +4393,7 @@ mod tests {
                 fs_capss: vec![0x07],
                 proofs_commit: [0x99; 32],
                 srx_commit: Some([0x21; 32]),
+                srx_root_sw: Some([0x31; 32]),
                 is_join: true,
                 hp_envelope: Arc::from(vec![0xDE, 0xAD].into_boxed_slice()),
                 fs_epoch_commit: Some([0x55; 32]),
@@ -4374,6 +4426,7 @@ mod tests {
                 fs_capss: vec![0x08],
                 proofs_commit: [0x98; 32],
                 srx_commit: None,
+                srx_root_sw: None,
                 is_join: false,
                 hp_envelope: Arc::from([] as [u8; 0]),
                 fs_epoch_commit: None,

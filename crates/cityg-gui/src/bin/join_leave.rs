@@ -1469,6 +1469,7 @@ mod tests {
             fs_capss: vec![0xCC],
             proofs_commit: [0xDD; 32],
             srx_commit: Some([0xEE; 32]),
+            srx_root_sw: Some([0xEF; 32]),
             is_join: true,
             hp_envelope: Arc::<[u8]>::from(vec![0x99, 0x88]),
             fs_epoch_commit: Some([0x44; 32]),

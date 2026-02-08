@@ -123,7 +123,7 @@ pub fn verify_result(
 fn encode_message(ctx: &VrfCtx<'_>, masks: (&MaskDigest, &MaskDigest)) -> Result<Vec<u8>> {
     // Encode the complete bind_fs context as specified in Section 11
     // bind_fs := CBOR_det([xk_hash, 93, 94, 98, 99, 106, 110, 111, 112, 113,
-    //                      proof_mode, policy_version, meor_vrf_id,
+    //                      proof_mode, fs_policy_version, meor_vrf_id,
     //                      fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit,
     //                      (srx_root_sw when SRX applies)])
 
@@ -153,7 +153,7 @@ fn encode_bind_fs(ctx: &VrfCtx<'_>) -> Result<Vec<u8>> {
     fields.push(Value::Bytes(ctx.revoked_since_prev_root.to_vec()));
     fields.push(Value::Bytes(ctx.revoked_root.to_vec()));
     fields.push(Value::Text(ctx.proof_mode.to_string()));
-    fields.push(Value::Text(ctx.policy_version.to_string()));
+    fields.push(Value::Text(ctx.fs_policy_version.to_string()));
     fields.push(Value::Text(ctx.meor_vrf_id.to_string()));
     fields.push(Value::Bytes(ctx.fs_epoch_commit.to_vec()));
     fields.push(Value::Integer(Integer::from(ctx.fs_ec)));
@@ -317,7 +317,7 @@ mod tests {
             revoked_since_prev_root: &[6u8; 32],
             revoked_root: &[7u8; 32],
             proof_mode: "test-mode",
-            policy_version: "v1",
+            fs_policy_version: "v1",
             meor_vrf_id: "lb-vrf/v1",
             fs_epoch_commit: &[8u8; 32],
             fs_ec: 100,

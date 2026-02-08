@@ -21,6 +21,7 @@ impl AcceptanceContext {
         ensure_kbroad_alg(header_map)?;
         self.ensure_kbroad_pub(parts.gid, header_map)?;
         self.ensure_params_id(header_map)?;
+        ensure_join_srx_keys_absent(header_map)?;
 
         let parent_root =
             header_bytes32_or_freeze(header_map, 110, FREEZE_FIELD_MISSING, "parent_root")?;
@@ -286,7 +287,7 @@ impl AcceptanceContext {
                 crs_id: crs_id.as_str(),
                 params_id: params_id.as_str(),
                 proof_mode: proofs.proof_mode.as_str(),
-                policy_version: proofs.policy_version.as_str(),
+                fs_policy_version: proofs.fs_policy_version.as_str(),
                 vrf_id: proofs.vrf_id.as_str(),
                 parent_root: parts.parent_root,
                 join_delta_root: parts.join_delta_root,
@@ -348,19 +349,6 @@ impl AcceptanceContext {
             return Err(AcceptanceError::Freeze(FREEZE_VRF_INVALID));
         }
 
-        // Extract SRX root when present (field #160) - needed for VRF bind context
-        let srx_root_sw = match header_map.get(&super::HDR_SRX_ROOT_SW) {
-            Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(bytes);
-                Some(arr)
-            }
-            Some(Value::Bytes(_)) | Some(_) => {
-                return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-            }
-            None => None,
-        };
-
         let vrf_ctx = VrfCtx {
             xk_hash: &xk_hash,
             rho_commit: &rho_commit,
@@ -373,13 +361,13 @@ impl AcceptanceContext {
             revoked_since_prev_root: parts.revoked_since_prev_root,
             revoked_root: parts.revoked_root,
             proof_mode: proofs.proof_mode.as_str(),
-            policy_version: proofs.policy_version.as_str(),
+            fs_policy_version: proofs.fs_policy_version.as_str(),
             meor_vrf_id: proofs.vrf_id.as_str(),
             fs_epoch_commit: &fs_epoch_commit,
             fs_ec,
             fs_dev_prev_commit: &fs_dev_prev_commit,
             fs_dev_commit: &fs_dev_commit,
-            srx_root_sw: srx_root_sw.as_ref(),
+            srx_root_sw: None,
             we_epoch_id: &derived_we_epoch_id,
         };
         let vrf_public_payload = proofs.vrf_public.as_slice();
@@ -403,26 +391,6 @@ impl AcceptanceContext {
                 return Err(AcceptanceError::Freeze(FREEZE_VRF_INVALID));
             }
         }
-
-        // SRX/Smallwood-v1 verification (ZK set-delta correctness)
-        ensure_srx_relations(
-            header_map,
-            &parent_root,
-            &join_delta_root,
-            &revoked_since_root,
-            &revoked_root,
-            self.srx_required || is_genesis,
-            self.srx_max_bytes,
-            &xk_hash,
-            &seed_commit,
-            &rho_commit,
-            &hp_commit,
-            self.allowed_srx_modes.as_ref(),
-            &self.deprecated_srx_modes,
-            now,
-            &mut self.vck_cache,
-            &proofs,
-        )?;
 
         let fresh_device_state = self.device_chain_get(parts.gid, &pop_pk_bytes);
         self.verify_device_chain_state(
@@ -512,7 +480,7 @@ impl AcceptanceContext {
             accept_seq,
             crs_id,
             params_id,
-            policy_version: proofs.policy_version.clone(),
+            policy_version: proofs.fs_policy_version.clone(),
             proof_mode: proofs.proof_mode.clone(),
             vrf_id: proofs.vrf_id.clone(),
             vrf_proof: proofs.vrf_pi.clone(),
@@ -522,6 +490,7 @@ impl AcceptanceContext {
             fs_capss: proofs.fs_capss.clone(),
             proofs_commit: proofs.commit,
             srx_commit,
+            srx_root_sw: None,
             is_join: true,
             hp_envelope: header_map
                 .get(&HDR_HP_BYTES)

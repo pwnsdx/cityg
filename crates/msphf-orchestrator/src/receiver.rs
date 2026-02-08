@@ -208,6 +208,7 @@ mod tests {
             fs_capss: vec![0x33],
             proofs_commit: [0x99; 32],
             srx_commit: None,
+            srx_root_sw: None,
             is_join: true,
             hp_envelope: Arc::from([] as [u8; 0]),
             fs_epoch_commit: None,

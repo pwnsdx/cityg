@@ -51,6 +51,10 @@ pub enum PolicyError {
     InvalidPolicyJournalRoot,
     #[error("fs policy window incompatible")]
     FsPolicyWindowIncompatible,
+    #[error("srx root must be 32-byte hex")]
+    InvalidSrxRoot,
+    #[error("srx_empty_root_sw mismatch for configured srx_smallwood_profile")]
+    InvalidSrxEmptyRootMismatch,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -127,6 +131,9 @@ pub struct PolicyDocument {
     pub fs_policy: FsPolicyConfig,
     pub fs_policy_version: String,
     pub fs_base_ts: u64,
+    pub srx_smallwood_profile: String,
+    pub srx_empty_root_sw: [u8; 32],
+    pub srx_migration_root_sw: Option<[u8; 32]>,
 }
 
 impl PolicyDocument {
@@ -170,6 +177,8 @@ impl PolicyDocument {
         ctx.apply_fs_policy_config(fs_config)
             .map_err(|_| PolicyError::FsPolicyWindowIncompatible)?;
         ctx.set_fs_base_ts(Some(self.fs_base_ts));
+        ctx.set_srx_empty_root_sw(self.srx_empty_root_sw);
+        ctx.set_srx_migration_root_sw(self.srx_migration_root_sw);
         Ok(())
     }
 }
@@ -211,6 +220,12 @@ struct PolicyPayloadSer {
     fs_policy_version: Option<String>,
     #[serde(rename = "T_base")]
     fs_base_ts: Option<u64>,
+    #[serde(rename = "srx_smallwood_profile")]
+    srx_smallwood_profile: Option<String>,
+    #[serde(rename = "srx_empty_root_sw")]
+    srx_empty_root_sw: Option<String>,
+    #[serde(rename = "srx_migration_root_sw")]
+    srx_migration_root_sw: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -338,6 +353,16 @@ impl PolicySignatureSer {
 
 impl PolicyPayloadSer {
     fn into_document(self, version: PolicyVersion) -> Result<PolicyDocument, PolicyError> {
+        fn parse_hex32(value: &str) -> Result<[u8; 32], PolicyError> {
+            let bytes = hex::decode(value)?;
+            if bytes.len() != 32 {
+                return Err(PolicyError::InvalidSrxRoot);
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Ok(arr)
+        }
+
         let allow_ser = self.allow.unwrap_or_default();
         let allow = PolicyAllowList {
             msphf_crs_id: if allow_ser.msphf_crs_id.is_empty() {
@@ -440,6 +465,22 @@ impl PolicyPayloadSer {
             .clone()
             .unwrap_or_else(|| version.raw.clone());
         let fs_base_ts = self.fs_base_ts.unwrap_or(0);
+        let srx_smallwood_profile = self
+            .srx_smallwood_profile
+            .unwrap_or_else(|| "smallwood-v1/anemoi-jive-a1".to_string());
+        let derived_srx_empty = crate::accept::derive_srx_empty_root_sw(&srx_smallwood_profile)
+            .map_err(|_| PolicyError::InvalidSrxEmptyRootMismatch)?;
+        let srx_empty_root_sw = match self.srx_empty_root_sw {
+            Some(root_hex) => parse_hex32(&root_hex)?,
+            None => derived_srx_empty,
+        };
+        if srx_empty_root_sw != derived_srx_empty {
+            return Err(PolicyError::InvalidSrxEmptyRootMismatch);
+        }
+        let srx_migration_root_sw = match self.srx_migration_root_sw {
+            Some(root_hex) => Some(parse_hex32(&root_hex)?),
+            None => None,
+        };
 
         Ok(PolicyDocument {
             version,
@@ -452,6 +493,9 @@ impl PolicyPayloadSer {
             fs_policy,
             fs_policy_version,
             fs_base_ts,
+            srx_smallwood_profile,
+            srx_empty_root_sw,
+            srx_migration_root_sw,
         })
     }
 }
@@ -493,6 +537,9 @@ mod tests {
             fs_slack_device: None,
             fs_policy_version: None,
             fs_base_ts: None,
+            srx_smallwood_profile: None,
+            srx_empty_root_sw: None,
+            srx_migration_root_sw: None,
         }
     }
 

@@ -458,17 +458,6 @@ impl ClientEpochBundle {
     /// Decode the SRX payload and return the join/revoke delta it represents.
     /// For merge-only heads (where no SRX payload is present) an empty delta is returned.
     pub fn membership_delta(&self) -> Result<MembershipDelta, CityGError> {
-        let Some(mode_value) = self.header_map.get(&msphf_orchestrator::hdr::HDR_SRX_MODE) else {
-            return Ok(MembershipDelta::default());
-        };
-
-        let mode = match mode_value {
-            Value::Text(text) => text.as_str(),
-            Value::Bytes(bytes) => std::str::from_utf8(bytes)
-                .map_err(|_| CityGError::InvalidInput("srx_mode invalid utf8"))?,
-            _ => return Err(CityGError::InvalidInput("srx_mode invalid type")),
-        };
-
         let payload_bytes = match self
             .header_map
             .get(&msphf_orchestrator::hdr::HDR_SRX_PAYLOAD)
@@ -480,11 +469,7 @@ impl ClientEpochBundle {
 
         let payload: Value = ciborium::de::from_reader(payload_bytes.as_slice())
             .map_err(|_| CityGError::InvalidInput("unable to decode srx payload"))?;
-
-        match mode {
-            "srx/v1-complete" => parse_srx_complete_membership(&payload),
-            _ => Err(CityGError::InvalidInput("unsupported srx_mode")),
-        }
+        parse_srx_complete_membership(&payload)
     }
 
     pub fn to_cbor(&self) -> Result<Vec<u8>, CityGError> {
@@ -845,7 +830,7 @@ mod tests {
     fn membership_delta_extracts_demo_micro() -> Result<(), Box<dyn std::error::Error>> {
         let bundle = demo_bundle_alice()?;
         let delta = bundle.membership_delta()?;
-        assert_eq!(delta.joined.len(), 1);
+        assert!(delta.joined.is_empty());
         assert!(delta.revoked.is_empty());
         Ok(())
     }
@@ -857,7 +842,7 @@ mod tests {
         assert_ne!(bundle.anchor.parent_root, [0u8; 32]);
         assert_eq!(bundle.anchor.parent_root, genesis.anchor.join_delta_root);
         let delta = bundle.membership_delta()?;
-        assert_eq!(delta.joined.len(), 1);
+        assert!(delta.joined.is_empty());
         assert!(delta.revoked.is_empty());
         Ok(())
     }
@@ -877,16 +862,15 @@ mod tests {
     }
 
     #[test]
-    fn membership_delta_rejects_unknown_mode() -> Result<(), Box<dyn std::error::Error>> {
+    fn membership_delta_ignores_legacy_mode_field() -> Result<(), Box<dyn std::error::Error>> {
         let mut bundle = demo_bundle_alice()?;
         bundle.header_map.insert(
             msphf_orchestrator::hdr::HDR_SRX_MODE,
             Value::Text("srx/vX".to_string()),
         );
-        let err = bundle
-            .membership_delta()
-            .expect_err("unknown mode should fail");
-        assert!(matches!(err, CityGError::InvalidInput(_)));
+        let delta = bundle.membership_delta()?;
+        assert!(delta.joined.is_empty());
+        assert!(delta.revoked.is_empty());
         Ok(())
     }
 
@@ -974,27 +958,6 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let mut bundle = demo_bundle_alice()?;
 
-        bundle
-            .header_map
-            .remove(&msphf_orchestrator::hdr::HDR_SRX_MODE);
-        assert!(bundle.membership_delta()?.joined.is_empty());
-
-        bundle.header_map.insert(
-            msphf_orchestrator::hdr::HDR_SRX_MODE,
-            Value::Bytes(vec![0xFF]),
-        );
-        assert!(bundle.membership_delta().is_err());
-
-        bundle.header_map.insert(
-            msphf_orchestrator::hdr::HDR_SRX_MODE,
-            Value::Integer(1.into()),
-        );
-        assert!(bundle.membership_delta().is_err());
-
-        bundle.header_map.insert(
-            msphf_orchestrator::hdr::HDR_SRX_MODE,
-            Value::Text("srx/v1-complete".to_string()),
-        );
         bundle
             .header_map
             .remove(&msphf_orchestrator::hdr::HDR_SRX_PAYLOAD);
@@ -1272,6 +1235,7 @@ mod tests {
             fs_capss: vec![0x03],
             proofs_commit: [0x44; 32],
             srx_commit: None,
+            srx_root_sw: None,
             is_join: false,
             hp_envelope: std::sync::Arc::from([] as [u8; 0]),
             fs_epoch_commit: Some([0x55; 32]),

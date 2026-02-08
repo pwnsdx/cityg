@@ -304,7 +304,7 @@ impl AcceptanceContext {
         {
             return Err(AcceptanceError::Freeze(FREEZE_VRF_INVALID));
         }
-        if proofs.policy_version != pivot_parity.policy_version
+        if proofs.fs_policy_version != pivot_parity.policy_version
             || proofs.proof_mode != pivot_parity.proof_mode
             || proofs.vrf_id != pivot_parity.vrf_id
         {
@@ -358,47 +358,26 @@ impl AcceptanceContext {
                     Some(Arc::from(bytes.into_boxed_slice()))
                 }
             });
-        let srx_present = header_map.contains_key(&HDR_SRX_MODE);
-        let roots_changed = pivot_record.join_delta_root != join_delta_root_arr
-            || pivot_record.revoked_since_root != revoked_since_root_arr
-            || pivot_record.revoked_root != revoked_root_arr;
-        if roots_changed {
-            if !srx_present {
-                return Err(AcceptanceError::Freeze(FREEZE_SRX_REQUIRED));
-            }
-        } else if srx_present {
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        }
-        if !roots_changed {
-            for key in [
-                HDR_SRX_COMMIT,
-                HDR_SRX_PAYLOAD,
-                HDR_SRX_HINT_COUNTS,
-                HDR_SRX_HINT_SIZES,
-            ] {
-                if header_map.contains_key(&key) {
-                    return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-                }
-            }
-        }
-        if roots_changed {
+        let srx_required_for_merge = self.srx_required;
+        ensure_merge_srx_keys(header_map, srx_required_for_merge)?;
+        let srx_root_sw_before = self.ensure_srx_root_sw()?;
+        if srx_required_for_merge {
             ensure_srx_relations(
                 header_map,
                 &parent_root,
                 &join_delta_root_arr,
                 &revoked_since_root_arr,
                 &revoked_root_arr,
-                roots_changed,
+                true,
                 self.srx_max_bytes,
                 &xk_hash,
                 &seed_commit,
                 &rho_commit,
                 &pivot_record.msphf_hp_commit,
-                self.allowed_srx_modes.as_ref(),
-                &self.deprecated_srx_modes,
                 now,
                 &mut self.vck_cache,
                 &proofs,
+                &srx_root_sw_before,
             )
             .inspect_err(|_err| {
                 debug!("merge: ensure_srx_relations failed");
@@ -563,7 +542,7 @@ impl AcceptanceContext {
             header_value_bytes(header_map, HDR_CRS_ID, FREEZE_MSPHF_CRS_INVALID)?.into_owned();
         let params_id =
             header_value_bytes(header_map, HDR_PARAMS_ID, FREEZE_PARAMS_ID_INVALID)?.into_owned();
-        let srx_commit = if roots_changed {
+        let srx_commit = if srx_required_for_merge {
             let bytes = header_bytes32_or_freeze(
                 header_map,
                 HDR_SRX_COMMIT,
@@ -573,6 +552,17 @@ impl AcceptanceContext {
             Some(bytes)
         } else {
             None
+        };
+        let srx_root_sw = if srx_required_for_merge {
+            let bytes = header_bytes32_or_freeze(
+                header_map,
+                HDR_SRX_ROOT_SW,
+                FREEZE_SRX_INVALID,
+                "srx_root_sw",
+            )?;
+            Some(bytes)
+        } else {
+            self.srx_root_sw()
         };
 
         let fs_epoch_commit = header_map
@@ -616,7 +606,7 @@ impl AcceptanceContext {
             accept_seq,
             crs_id,
             params_id,
-            policy_version: proofs.policy_version.clone(),
+            policy_version: proofs.fs_policy_version.clone(),
             proof_mode: proofs.proof_mode.clone(),
             vrf_id: proofs.vrf_id.clone(),
             vrf_proof: proofs.vrf_pi.clone(),
@@ -626,12 +616,19 @@ impl AcceptanceContext {
             fs_capss: proofs.fs_capss.clone(),
             proofs_commit: proofs.commit,
             srx_commit,
+            srx_root_sw,
             is_join: false,
             hp_envelope: hp_envelope_candidate.unwrap_or_else(|| pivot_parity.hp_envelope.clone()),
             fs_epoch_commit,
             fs_ec: fs_ec_opt,
             fs_dev_commit,
         };
+        if srx_required_for_merge {
+            if self.srx_root_sw() != Some(srx_root_sw_before) {
+                return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+            }
+            self.set_srx_root_sw(srx_root_sw);
+        }
         self.pivot_store.insert(parity, now);
 
         self.set_last_checkpoint_ec(fs_checkpoint_ec);
@@ -753,7 +750,7 @@ mod tests {
 
     fn align_header_with_pivot(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity) {
         header.insert(
-            HDR_POLICY_VERSION,
+            HDR_FS_POLICY_VERSION,
             Value::Text(pivot.policy_version.clone()),
         );
         header.insert(HDR_PROOF_MODE, Value::Text(pivot.proof_mode.clone()));

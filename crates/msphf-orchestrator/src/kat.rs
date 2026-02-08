@@ -1192,7 +1192,7 @@ fn generate_case(
             crs_id: params_obj.msphf_crs_id,
             params_id: params_obj.params_id,
             proof_mode: params_obj.proof_mode,
-            policy_version: params_obj.policy_version,
+            fs_policy_version: params_obj.fs_policy_version,
             vrf_id: params_obj.vrf_id,
             parent_root: parts.parent_root,
             join_delta_root: parts.join_delta_root,

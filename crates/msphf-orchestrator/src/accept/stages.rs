@@ -5,7 +5,7 @@ use crate::{
     KBROAD_ML_KEM_ALG, KBROAD_MODE, TSWE_ALG_CODE, TSWE_ALG_LABEL,
     proofs::srx_smallwood::{self, SRX_SMALLWOOD_MAX_BYTES},
 };
-use ciborium::de;
+use ciborium::{de, ser};
 use msphf_core::ds::MSPHF_POP_MSG;
 use serde::Serialize;
 use tracing::debug;
@@ -20,7 +20,7 @@ pub(super) struct ProofArtifacts {
     pub(crate) vrf_id: String,
     pub(crate) mask_a: MaskDigest,
     pub(crate) mask_b: MaskDigest,
-    pub(crate) policy_version: String,
+    pub(crate) fs_policy_version: String,
     pub(crate) vrf_public: Vec<u8>,
 }
 
@@ -40,6 +40,53 @@ pub(super) fn ensure_merge_join_keys_absent(
             debug!("ensure_merge_join_keys_absent: key {} present", key);
             return Err(AcceptanceError::Freeze(FREEZE_MERGE_JOIN_KEYS));
         }
+    }
+    Ok(())
+}
+
+fn srx_only_presence(header: &BTreeMap<u64, Value>) -> [bool; 4] {
+    let keys = super::SRX_ONLY_KEYS;
+    [
+        header.contains_key(&keys[0]),
+        header.contains_key(&keys[1]),
+        header.contains_key(&keys[2]),
+        header.contains_key(&keys[3]),
+    ]
+}
+
+fn has_legacy_srx_keys(header: &BTreeMap<u64, Value>) -> bool {
+    [super::HDR_SRX_MODE, super::HDR_SRX_HINT_COUNTS, super::HDR_SRX_HINT_SIZES]
+        .into_iter()
+        .any(|key| header.contains_key(&key))
+}
+
+pub(super) fn ensure_join_srx_keys_absent(
+    header: &BTreeMap<u64, Value>,
+) -> Result<(), AcceptanceError> {
+    if srx_only_presence(header).into_iter().any(|present| present) || has_legacy_srx_keys(header) {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_merge_srx_keys(
+    header: &BTreeMap<u64, Value>,
+    required: bool,
+) -> Result<(), AcceptanceError> {
+    if has_legacy_srx_keys(header) {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    }
+    let [has_commit, has_payload, has_root, has_proof] = srx_only_presence(header);
+    let present_count = [has_commit, has_payload, has_root, has_proof]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+    if required {
+        if present_count != 4 {
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_REQUIRED));
+        }
+    } else if present_count != 0 {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
     }
     Ok(())
 }
@@ -244,94 +291,29 @@ pub(super) fn ensure_srx_relations(
     seed_commit: &[u8; 32],
     rho_commit: &[u8; 32],
     hp_commit: &[u8; 32],
-    allowed_srx_modes: Option<&BTreeSet<String>>,
-    deprecated_srx_modes: &BTreeSet<String>,
     now: AcceptInstant,
     cache: &mut VckCache,
     proofs: &ProofArtifacts,
+    srx_root_sw_before: &[u8; 32],
 ) -> Result<(), AcceptanceError> {
     let max_bytes = srx_max_bytes.max(MIN_SRX_MAX_BYTES);
-    let has_mode = header.get(&super::HDR_SRX_MODE);
-    if has_mode.is_none() {
-        if require {
-            debug!("ensure_srx_relations: missing mode but require=true");
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_REQUIRED));
-        }
-        if [121u64, 122, 123, 124]
-            .into_iter()
-            .any(|key| header.contains_key(&key))
-        {
-            debug!("ensure_srx_relations: stray SRX fields without mode");
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        }
+    ensure_merge_srx_keys(header, require)?;
+    if !require {
         return Ok(());
     }
 
-    let srx_present = true;
-
-    if !header.contains_key(&super::HDR_SRX_COMMIT)
-        || !header.contains_key(&super::HDR_SRX_PAYLOAD)
-        || !header.contains_key(&super::HDR_SRX_HINT_COUNTS)
-        || !header.contains_key(&super::HDR_SRX_HINT_SIZES)
-    {
-        debug!("ensure_srx_relations: missing mandatory SRX fields");
-        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-    }
-
-    let mode_value = match has_mode {
-        Some(value) => value,
-        None => {
-            debug!("ensure_srx_relations: mode vanished unexpectedly");
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        }
-    };
-    let mode_text = match mode_value {
-        Value::Text(text) => text.as_str(),
-        Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
+    let mode_text = match header.get(&super::HDR_SRX_MODE) {
+        None => "srx/v1-complete",
+        Some(Value::Text(text)) => text.as_str(),
+        Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes).map_err(|_| {
             debug!("ensure_srx_relations: mode not valid utf8");
             AcceptanceError::Freeze(FREEZE_SRX_INVALID)
         })?,
-        _ => {
+        Some(_) => {
             debug!("ensure_srx_relations: mode not text/bytes");
             return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
         }
     };
-    if allowed_srx_modes.is_some_and(|allowed| !allowed.contains(mode_text)) {
-        debug!("ensure_srx_relations: mode {mode_text} not allowed");
-        return Err(AcceptanceError::Freeze(FREEZE_SUITE_DEPRECATED));
-    }
-    if deprecated_srx_modes.contains(mode_text) {
-        return Err(AcceptanceError::Freeze(FREEZE_SUITE_DEPRECATED));
-    }
-    let hint_counts_bytes = match header.get(&super::HDR_SRX_HINT_COUNTS) {
-        Some(Value::Bytes(bytes)) => bytes.as_slice(),
-        _ => {
-            debug!("ensure_srx_relations: hint counts missing/invalid");
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        }
-    };
-    let hint_counts_value: Value = de::from_reader(hint_counts_bytes).map_err(|_| {
-        debug!("ensure_srx_relations: hint counts CBOR malformed");
-        AcceptanceError::Freeze(FREEZE_SRX_INVALID)
-    })?;
-    let (hint_join_count, hint_since_count, hint_anchor_count) =
-        parse_hint_counts(&hint_counts_value)?;
-
-    let hint_sizes_bytes = match header.get(&super::HDR_SRX_HINT_SIZES) {
-        Some(Value::Bytes(bytes)) => bytes.as_slice(),
-        _ => {
-            debug!("ensure_srx_relations: hint sizes missing/invalid");
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        }
-    };
-    let hint_sizes_value: Value = de::from_reader(hint_sizes_bytes).map_err(|_| {
-        debug!("ensure_srx_relations: hint sizes CBOR malformed");
-        AcceptanceError::Freeze(FREEZE_SRX_INVALID)
-    })?;
-    let hint_payload_bytes = parse_hint_sizes(&hint_sizes_value)?;
-    if hint_payload_bytes > max_bytes as u64 {
-        return Err(AcceptanceError::Freeze(FREEZE_SRX_OVERSIZE_HINT));
-    }
 
     let commit = header_bytes32_or_freeze(header, 121, FREEZE_SRX_INVALID, "srx_commit")?;
     let payload_bytes = match header.get(&super::HDR_SRX_PAYLOAD) {
@@ -343,9 +325,6 @@ pub(super) fn ensure_srx_relations(
     };
     if payload_bytes.len() > max_bytes {
         return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-    }
-    if payload_bytes.len() as u64 > hint_payload_bytes {
-        return Err(AcceptanceError::Freeze(FREEZE_SRX_HINT_UNDER));
     }
 
     #[derive(Serialize)]
@@ -360,6 +339,70 @@ pub(super) fn ensure_srx_relations(
         debug!("ensure_srx_relations: payload CBOR malformed");
         AcceptanceError::Freeze(FREEZE_SRX_INVALID)
     })?;
+    let srx = match mode_text {
+        "srx/v1-complete" => parse_srx_payload(&payload_value)?,
+        _ => {
+            debug!("ensure_srx_relations: unsupported mode {}", mode_text);
+            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+        }
+    };
+    let mut hint_join_count = srx.join_leaf_ids.len() as u64;
+    let mut hint_since_count = srx.since_leaf_ids.len() as u64;
+    let mut hint_anchor_count = srx.anchor_mem_pool.len() as u64;
+    let mut hint_payload_bytes = payload_bytes.len() as u64;
+    let mut hint_counts_bytes_owned = {
+        let value = Value::Map(vec![
+            (
+                Value::Text("join".to_string()),
+                Value::Integer(Integer::from(hint_join_count)),
+            ),
+            (
+                Value::Text("since".to_string()),
+                Value::Integer(Integer::from(hint_since_count)),
+            ),
+            (
+                Value::Text("anchors".to_string()),
+                Value::Integer(Integer::from(hint_anchor_count)),
+            ),
+        ]);
+        let mut buf = Vec::new();
+        ser::into_writer(&value, &mut buf)
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
+        buf
+    };
+    let mut hint_sizes_bytes_owned = {
+        let value = Value::Map(vec![(
+            Value::Text("bytes".to_string()),
+            Value::Integer(Integer::from(hint_payload_bytes)),
+        )]);
+        let mut buf = Vec::new();
+        ser::into_writer(&value, &mut buf)
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_SRX_INVALID))?;
+        buf
+    };
+    if let Some(Value::Bytes(bytes)) = header.get(&super::HDR_SRX_HINT_COUNTS) {
+        let hint_counts_value: Value = de::from_reader(bytes.as_slice()).map_err(|_| {
+            debug!("ensure_srx_relations: hint counts CBOR malformed");
+            AcceptanceError::Freeze(FREEZE_SRX_INVALID)
+        })?;
+        (hint_join_count, hint_since_count, hint_anchor_count) = parse_hint_counts(&hint_counts_value)?;
+        hint_counts_bytes_owned = bytes.clone();
+    } else if header.contains_key(&super::HDR_SRX_HINT_COUNTS) {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    }
+    if let Some(Value::Bytes(bytes)) = header.get(&super::HDR_SRX_HINT_SIZES) {
+        let hint_sizes_value: Value = de::from_reader(bytes.as_slice()).map_err(|_| {
+            debug!("ensure_srx_relations: hint sizes CBOR malformed");
+            AcceptanceError::Freeze(FREEZE_SRX_INVALID)
+        })?;
+        hint_payload_bytes = parse_hint_sizes(&hint_sizes_value)?;
+        hint_sizes_bytes_owned = bytes.clone();
+    } else if header.contains_key(&super::HDR_SRX_HINT_SIZES) {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    }
+    if hint_payload_bytes > max_bytes as u64 {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_OVERSIZE_HINT));
+    }
     let cache_key = compute_vck_key(xk_hash, seed_commit, rho_commit, hp_commit, header)?;
     let payload_len = payload_bytes.len();
     if cache.try_skip_srx(
@@ -373,14 +416,6 @@ pub(super) fn ensure_srx_relations(
     )? {
         return Ok(());
     }
-
-    let srx = match mode_text {
-        "srx/v1-complete" => parse_srx_payload(&payload_value)?,
-        _ => {
-            debug!("ensure_srx_relations: unsupported mode {}", mode_text);
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        }
-    };
 
     validate_anchor_pool(&srx.anchor_mem_pool)?;
 
@@ -448,56 +483,47 @@ pub(super) fn ensure_srx_relations(
         validate_membership_array(&srx.revoked_since_mem_in_revoked, revoked_root)?;
     ensure_mem_coverage(&srx.since_leaf_ids, &validated_subset)?;
 
-    if let Some(root_sw) = proofs.srx_root_sw.as_ref() {
-        let proof_bytes = proofs
-            .srx_smallwood
-            .as_ref()
-            .ok_or(AcceptanceError::Freeze(FREEZE_SRX_SMALLWOOD_INVALID))?;
+    let root_sw = proofs
+        .srx_root_sw
+        .as_ref()
+        .ok_or(AcceptanceError::Freeze(FREEZE_SRX_SMALLWOOD_INVALID))?;
+    let proof_bytes = proofs
+        .srx_smallwood
+        .as_ref()
+        .ok_or(AcceptanceError::Freeze(FREEZE_SRX_SMALLWOOD_INVALID))?;
 
-        let payload_digest = srx_smallwood::payload_digest(payload_bytes);
+    let payload_digest = srx_smallwood::payload_digest(payload_bytes);
 
-        let expected_shadow_after = srx_smallwood::compute_shadow_root(
-            parent_root,
-            &join_root_arr,
-            revoked_since_root,
-            revoked_root,
-            Some(&commit),
-            Some(&payload_digest),
-        );
-        if &expected_shadow_after != root_sw {
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_SMALLWOOD_INVALID));
-        }
-
-        let shadow_before = srx_smallwood::compute_shadow_root(
-            parent_root,
-            &join_root_arr,
-            revoked_since_root,
-            revoked_root,
-            None,
-            None,
-        );
-
-        let proof = srx_smallwood::Proof::from_bytes(proof_bytes.clone())?;
-        let inputs = srx_smallwood::Inputs {
-            shadow_root_before: &shadow_before,
-            shadow_root_after: root_sw,
-            parent_root,
-            join_root: &join_root_arr,
-            revoked_since_root,
-            revoked_root,
-            srx_commit: &commit,
-            srx_mode: mode_text,
-            proof_mode: proofs.proof_mode.as_str(),
-            policy_version: proofs.policy_version.as_str(),
-            vrf_id: proofs.vrf_id.as_str(),
-            payload: payload_bytes,
-            hint_counts_cbor: hint_counts_bytes,
-            hint_sizes_cbor: hint_sizes_bytes,
-        };
-        srx_smallwood::verify(&inputs, &proof)?;
-    } else if srx_present {
+    let expected_shadow_after = srx_smallwood::compute_shadow_root(
+        parent_root,
+        &join_root_arr,
+        revoked_since_root,
+        revoked_root,
+        Some(&commit),
+        Some(&payload_digest),
+    );
+    if &expected_shadow_after != root_sw {
         return Err(AcceptanceError::Freeze(FREEZE_SRX_SMALLWOOD_INVALID));
     }
+
+    let proof = srx_smallwood::Proof::from_bytes(proof_bytes.clone())?;
+    let inputs = srx_smallwood::Inputs {
+        shadow_root_before: srx_root_sw_before,
+        shadow_root_after: root_sw,
+        parent_root,
+        join_root: &join_root_arr,
+        revoked_since_root,
+        revoked_root,
+        srx_commit: &commit,
+        srx_mode: mode_text,
+        proof_mode: proofs.proof_mode.as_str(),
+        fs_policy_version: proofs.fs_policy_version.as_str(),
+        vrf_id: proofs.vrf_id.as_str(),
+        payload: payload_bytes,
+        hint_counts_cbor: hint_counts_bytes_owned.as_slice(),
+        hint_sizes_cbor: hint_sizes_bytes_owned.as_slice(),
+    };
+    srx_smallwood::verify(&inputs, &proof)?;
 
     cache.record_srx(
         cache_key,
@@ -541,13 +567,33 @@ pub(super) fn ensure_proofs(
         return Err(AcceptanceError::Freeze(FREEZE_SUITE_DEPRECATED));
     }
 
-    let policy_version_owned = match header.get(&HDR_POLICY_VERSION) {
+    let fs_policy_version_owned = match header.get(&HDR_FS_POLICY_VERSION) {
         Some(Value::Text(text)) => text.clone(),
+        Some(Value::Integer(int)) => u64::try_from(*int)
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?
+            .to_string(),
         Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes)
             .map(|s| s.to_string())
-            .map_err(|_| AcceptanceError::Freeze(FREEZE_FIELD_MISSING))?,
-        _ => crate::DEFAULT_POLICY_VERSION.to_string(),
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?,
+        _ => return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED)),
     };
+    if let Some(value) = header.get(&HDR_POLICY_VERSION) {
+        let legacy = match value {
+            Value::Integer(int) => u64::try_from(*int)
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?
+                .to_string(),
+            Value::Text(text) => text.clone(),
+            Value::Bytes(bytes) => std::str::from_utf8(bytes)
+                .map(|s| s.to_string())
+                .map_err(|_| AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED))?,
+            _ => return Err(AcceptanceError::Freeze(FREEZE_FS_POLICY_VERSION_UNSUPPORTED)),
+        };
+        if legacy != fs_policy_version_owned {
+            return Err(AcceptanceError::Freeze(
+                FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+            ));
+        }
+    }
 
     let mask_a = match header.get(&super::HDR_VRF_MASK_A) {
         Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
@@ -579,7 +625,12 @@ pub(super) fn ensure_proofs(
         _ => return Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING)),
     };
 
-    let srx_present = header.contains_key(&super::HDR_SRX_MODE);
+    let has_srx_root = header.contains_key(&super::HDR_SRX_ROOT_SW);
+    let has_srx_smallwood = header.contains_key(&super::HDR_SRX_SMALLWOOD);
+    if has_srx_root != has_srx_smallwood {
+        return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
+    }
+    let srx_present = has_srx_root;
     let (srx_root_sw, srx_smallwood) = if srx_present {
         let root_bytes = match header.get(&super::HDR_SRX_ROOT_SW) {
             Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
@@ -600,11 +651,6 @@ pub(super) fn ensure_proofs(
         };
         (Some(root_bytes), Some(proof_bytes))
     } else {
-        if header.contains_key(&super::HDR_SRX_ROOT_SW)
-            || header.contains_key(&super::HDR_SRX_SMALLWOOD)
-        {
-            return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
-        }
         (None, None)
     };
 
@@ -639,7 +685,7 @@ pub(super) fn ensure_proofs(
         vrf_id,
         mask_a,
         mask_b,
-        policy_version: policy_version_owned,
+        fs_policy_version: fs_policy_version_owned,
         vrf_public,
     })
 }
@@ -813,7 +859,7 @@ mod tests {
             vrf_id: String::new(),
             mask_a: [0u8; 32],
             mask_b: [0u8; 32],
-            policy_version: String::new(),
+            fs_policy_version: String::new(),
             vrf_public: Vec::new(),
         }
     }
@@ -844,11 +890,10 @@ mod tests {
             &[0u8; 32],
             &[0u8; 32],
             &[0u8; 32],
-            None,
-            &BTreeSet::new(),
             AcceptInstant::from_ticks(0),
             &mut cache,
             &dummy_proofs(),
+            &[0u8; 32],
         )?;
         Ok(())
     }
@@ -869,11 +914,10 @@ mod tests {
             &[0u8; 32],
             &[0u8; 32],
             &[0u8; 32],
-            None,
-            &BTreeSet::new(),
             AcceptInstant::from_ticks(0),
             &mut cache,
             &dummy_proofs(),
+            &[0u8; 32],
         ) {
             Ok(_) => bail!("required SRX should freeze when missing"),
             Err(e) => e,
@@ -902,11 +946,10 @@ mod tests {
             &[0u8; 32],
             &[0u8; 32],
             &[0u8; 32],
-            None,
-            &BTreeSet::new(),
             AcceptInstant::from_ticks(0),
             &mut cache,
             &dummy_proofs(),
+            &[0u8; 32],
         ) {
             Ok(_) => bail!("orphaned hints should freeze"),
             Err(e) => e,
@@ -1171,11 +1214,10 @@ mod tests {
             &[0u8; 32],
             &[0u8; 32],
             &[0u8; 32],
-            None,
-            &BTreeSet::new(),
             AcceptInstant::from_ticks(0),
             &mut cache,
             &dummy_proofs(),
+            &[0u8; 32],
         ) {
             Ok(_) => bail!("non-utf8 SRX mode should freeze"),
             Err(err) => err,

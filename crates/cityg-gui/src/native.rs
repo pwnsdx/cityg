@@ -7600,6 +7600,7 @@ mod tests {
             fs_capss: vec![0x55],
             proofs_commit: [0x66; 32],
             srx_commit: Some([0x77; 32]),
+            srx_root_sw: Some([0x78; 32]),
             is_join: true,
             hp_envelope: Arc::<[u8]>::from(vec![0x99, 0x88]),
             fs_epoch_commit: Some([0x42; 32]),
