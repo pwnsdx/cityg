@@ -50,3 +50,73 @@ pub const HDR_VRF_MASK_B: u64 = 155;
 pub const HDR_VRF_PUBLIC_KEY: u64 = 156;
 pub const HDR_FS_CHECKPOINT_EC: u64 = 148;
 pub const HDR_REVOKED_ROOT: u64 = 113;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn header_tag_values_are_unique() {
+        let tags = [
+            HDR_TSWE_ALG,
+            HDR_SEED_CTX_HASH,
+            HDR_MERKLE_SUITE,
+            HDR_RHO_COMMIT,
+            HDR_SEED_BUNDLE_COMMIT,
+            HDR_VRF_PROOF,
+            HDR_HP_BYTES,
+            HDR_CRS_ID,
+            HDR_HP_COMMIT,
+            HDR_KBROAD_ALG,
+            HDR_KBROAD_PUB,
+            HDR_PARAMS_ID,
+            HDR_POP_ALG,
+            HDR_POP_PK,
+            HDR_POP_SIG,
+            HDR_VRF_ID,
+            HDR_PROOF_MODE,
+            HDR_SRX_MODE,
+            HDR_SRX_COMMIT,
+            HDR_SRX_PAYLOAD,
+            HDR_SRX_HINT_COUNTS,
+            HDR_SRX_HINT_SIZES,
+            HDR_PROOFS_COMMIT,
+            HDR_SRX_ROOT_SW,
+            HDR_SRX_SMALLWOOD,
+            HDR_MH_HEADS,
+            HDR_ROLLUP_PIVOT_WEID,
+            HDR_ROLLUP_PROVENANCE_COMMIT,
+            HDR_ROLLUP_EPOCH_REPLAY,
+            HDR_ROLLUP_VCK_COMMIT,
+            HDR_MERGE_DELEGATION_SIG,
+            HDR_KBROAD_REPLAY,
+            HDR_ROLLUP_FS_MODE,
+            HDR_BOOTSTRAP_ALG,
+            HDR_BOOTSTRAP_SIG,
+            HDR_BOOTSTRAP_PK,
+            HDR_POLICY_VERSION,
+            HDR_FS_POLICY_VERSION,
+            HDR_FS_EC,
+            HDR_FS_EPOCH_COMMIT,
+            HDR_FS_EPOCH_BASE_TS,
+            HDR_FS_EVOLUTION_BOUNDARY,
+            HDR_FS_PURGE_TIMES,
+            HDR_FS_CAPSS,
+            HDR_FS_DEV_PREV_COMMIT,
+            HDR_FS_DEV_COMMIT,
+            HDR_VRF_MASK_A,
+            HDR_VRF_MASK_B,
+            HDR_VRF_PUBLIC_KEY,
+            HDR_FS_CHECKPOINT_EC,
+            HDR_REVOKED_ROOT,
+        ];
+
+        let unique: HashSet<u64> = tags.into_iter().collect();
+        assert_eq!(
+            unique.len(),
+            tags.len(),
+            "HDR tags must remain globally unique"
+        );
+    }
+}
