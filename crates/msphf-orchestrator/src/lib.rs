@@ -757,6 +757,9 @@ pub struct ForwardSecrecyPolicy {
     pub tau_cache_retention: Duration,
     pub tau_cache_max_entries: usize,
     pub forward_slack: u64,
+    /// Maximum number of ratchet steps performed per autonomic tick.
+    /// This bounds catch-up cost for long-offline clients.
+    pub ratchet_budget_per_tick: u64,
 }
 
 impl Default for ForwardSecrecyPolicy {
@@ -767,6 +770,7 @@ impl Default for ForwardSecrecyPolicy {
             tau_cache_retention: Duration::from_secs(600),
             tau_cache_max_entries: 2_000,
             forward_slack: 0,
+            ratchet_budget_per_tick: 1_024,
         }
     }
 }
@@ -938,11 +942,8 @@ impl ForwardSecrecyState {
 
     fn autonomic_evolve_with_clock(&mut self, now_wall: SystemTime, now_mono: Instant) {
         let target = self.boundary.update(now_wall, now_mono, &self.policy);
-        self.advance_to(target);
-    }
-
-    fn advance_to(&mut self, target_ec: u64) {
-        self.advance_to_with_budget(target_ec, u64::MAX);
+        let budget = self.policy.ratchet_budget_per_tick.max(1);
+        self.advance_to_with_budget(target, budget);
     }
 
     /// Advance the forward-secrecy ratchet toward `target_ec`, performing at
@@ -1225,6 +1226,39 @@ mod fs_state_tests {
             after.fs_ec
         );
         assert_ne!(before.k_fs, after.k_fs, "k_fs must evolve with EC");
+        Ok(())
+    }
+
+    #[test]
+    fn autonomic_evolve_respects_ratchet_budget_per_tick() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let policy = ForwardSecrecyPolicy {
+            epoch_period: Duration::from_secs(1),
+            epoch_base_ts: 0,
+            forward_slack: 200,
+            ratchet_budget_per_tick: 5,
+            ..Default::default()
+        };
+        let mut state = ForwardSecrecyState::with_policy([0x66; 32], policy);
+        state.set_last_we_epoch_id([0xEF; 32]);
+        let base_mono = Instant::now();
+
+        // Monotonic clock implies ~100 epochs elapsed.
+        let future_wall = SystemTime::UNIX_EPOCH;
+        state.autonomic_evolve_with_clock(future_wall, base_mono + Duration::from_secs(100));
+        assert_eq!(
+            state.current_ec(),
+            5,
+            "autonomic evolve should cap work per tick to policy budget"
+        );
+
+        // A subsequent tick should advance by another budget-sized chunk.
+        state.autonomic_evolve_with_clock(future_wall, base_mono + Duration::from_secs(101));
+        assert_eq!(
+            state.current_ec(),
+            10,
+            "subsequent ticks should continue bounded catch-up"
+        );
         Ok(())
     }
 }
