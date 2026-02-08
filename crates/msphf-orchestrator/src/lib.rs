@@ -113,7 +113,7 @@ pub(crate) fn compute_window_id(
 
 pub(crate) const MAX_HP_BYTES: usize = 16 * 1024;
 pub(crate) const AEAD_TAG_LEN: usize = 16;
-const MERKLE_DS_ID: &str = "rpo-256/v1";
+const MERKLE_DS_ID: &str = "rpo-256/v2";
 const TSWE_ALG_CODE: u8 = 31;
 const TSWE_ALG_LABEL: &str = "tswe/msphf-we/fs-hybrid";
 const KBROAD_MODE: &str = "kbroad-v1";

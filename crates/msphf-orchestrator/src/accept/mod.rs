@@ -3087,6 +3087,40 @@ mod tests {
     }
 
     #[test]
+    fn accept_anchor_rejects_legacy_merkle_suite_v1() -> Result<(), Box<dyn std::error::Error>> {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        let original_pub = match tampered.get(&HDR_KBROAD_PUB) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            Some(_) => unreachable!("kbroad_pub should be bytes"),
+            None => unreachable!("kbroad_pub present"),
+        };
+        tampered.insert(HDR_MERKLE_SUITE, Value::Text("rpo-256/v1".to_string()));
+
+        let mut registry = BTreeMap::new();
+        registry.insert(parts.gid.to_vec(), original_pub);
+        let options = AcceptanceOptions {
+            kbroad_registry: Some(registry),
+            ..AcceptanceOptions::default()
+        };
+        let mut ctx = AcceptanceContext::with_options(DEFAULT_H_MAX, DEFAULT_T_WINDOW, options);
+        configure_bootstrap(&mut ctx);
+        seed_capss_from_joiner(&mut ctx, &joiner);
+
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "legacy merkle suite must freeze");
+        let err = result.unwrap_err();
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MERKLE_SUITE_INVALID),
+            other => panic!("unexpected error: {:?}", other),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn accept_anchor_requires_kbroad_alg() -> Result<(), Box<dyn std::error::Error>> {
         let parts = sample_parts();
         let header = sample_header();

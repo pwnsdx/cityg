@@ -71,17 +71,17 @@ fn apply_path(mut acc: [u8; 32], path: &[(u8, [u8; 32])]) -> [u8; 32] {
 
 #[inline]
 pub fn hash_leaf(leaf: &[u8]) -> [u8; 32] {
-    crate::rpo256::leaf(leaf)
+    crate::rpo256::v2::leaf(leaf)
 }
 
 #[inline]
 pub fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    crate::rpo256::node(left, right)
+    crate::rpo256::v2::node(left, right)
 }
 
 #[inline]
 pub fn hash_interval(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    crate::rpo256::interval_node(left, right)
+    crate::rpo256::v2::interval_node(left, right)
 }
 
 #[inline]
@@ -93,13 +93,18 @@ pub fn hash_interval_binding(
     lca_left_height: u8,
     lca_right_height: u8,
 ) -> [u8; 32] {
-    crate::rpo256::interval_binding(
-        left_id,
-        left_leaf,
-        right_id,
-        right_leaf,
-        lca_left_height,
-        lca_right_height,
+    crate::rpo256::v2::hash_with_tag(
+        0x4D54_5F4E_4D42_494E, // "MT_NMBIN"
+        &{
+            let mut payload = Vec::with_capacity(32 * 4 + 2);
+            payload.extend_from_slice(left_id);
+            payload.extend_from_slice(left_leaf);
+            payload.extend_from_slice(right_id);
+            payload.extend_from_slice(right_leaf);
+            payload.push(lca_left_height);
+            payload.push(lca_right_height);
+            payload
+        },
     )
 }
 
@@ -121,6 +126,24 @@ pub fn bytes32(slice: &[u8]) -> Result<[u8; 32], MsphfError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hash_interval_binding_v1_compat(
+        left_id: &[u8; 32],
+        left_leaf: &[u8; 32],
+        right_id: &[u8; 32],
+        right_leaf: &[u8; 32],
+        lca_left_height: u8,
+        lca_right_height: u8,
+    ) -> [u8; 32] {
+        crate::rpo256::interval_binding(
+            left_id,
+            left_leaf,
+            right_id,
+            right_leaf,
+            lca_left_height,
+            lca_right_height,
+        )
+    }
 
     fn leaf(id: u8) -> [u8; 32] {
         let mut data = [0u8; 32];
@@ -181,8 +204,32 @@ mod tests {
 
     #[test]
     fn canonical_set_requires_sorted() {
-        let leaves = [leaf(2), leaf(1)];
+        let mut leaves = [leaf(1), leaf(2)];
+        leaves.sort();
+        leaves.swap(0, 1);
         assert!(canonical_set_root(&leaves).is_err());
         assert!(canonical_frontier(&leaves).is_err());
+    }
+
+    #[test]
+    fn leaf_hash_uses_v2_trailing_zero_safe_behavior() {
+        let short = [0x01u8];
+        let padded = [0x01u8, 0, 0, 0, 0, 0, 0, 0];
+        assert_ne!(
+            hash_leaf(&short),
+            hash_leaf(&padded),
+            "merkle leaf hashing should use rpo-256/v2 semantics"
+        );
+    }
+
+    #[test]
+    fn interval_binding_switched_to_v2() {
+        let left_id = [0x10u8; 32];
+        let left_leaf = [0x20u8; 32];
+        let right_id = [0x30u8; 32];
+        let right_leaf = [0x40u8; 32];
+        let v2 = hash_interval_binding(&left_id, &left_leaf, &right_id, &right_leaf, 1, 2);
+        let v1 = hash_interval_binding_v1_compat(&left_id, &left_leaf, &right_id, &right_leaf, 1, 2);
+        assert_ne!(v2, v1, "interval binding should route through rpo-256/v2");
     }
 }
