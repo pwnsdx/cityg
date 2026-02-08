@@ -112,6 +112,17 @@ mod tests {
     use super::FieldElement;
 
     #[test]
+    fn zero_default_and_accessors_are_consistent() {
+        let zero = FieldElement::zero();
+        let defaulted = FieldElement::default();
+        assert_eq!(zero, defaulted);
+        assert_eq!(zero.as_base(), super::BaseField::from(0u64));
+
+        let from_base = FieldElement::from_base(super::BaseField::from(7u64));
+        assert_eq!(from_base.as_base(), super::BaseField::from(7u64));
+    }
+
+    #[test]
     fn to_bytes_and_from_bytes_roundtrip() {
         let elem = FieldElement::from_base(super::BaseField::from(42u64));
         let bytes = elem.to_bytes();
@@ -133,5 +144,18 @@ mod tests {
         let invalid_json = format!("[{}]", vec!["0"; 31].join(","));
         let result: Result<FieldElement, _> = serde_json::from_str(&invalid_json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn binary_serde_roundtrip_and_length_validation() -> Result<(), Box<dyn std::error::Error>> {
+        let elem = FieldElement::from_base(super::BaseField::from(777u64));
+        let encoded = bincode::serialize(&elem)?;
+        let decoded: FieldElement = bincode::deserialize(&encoded)?;
+        assert_eq!(decoded, elem);
+
+        let short_bytes = bincode::serialize(&vec![0u8; 31])?;
+        let short: Result<FieldElement, _> = bincode::deserialize(&short_bytes);
+        assert!(short.is_err());
+        Ok(())
     }
 }

@@ -131,3 +131,58 @@ impl VckCache {
         entry.verified_at = now;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_freeze(err: AcceptanceError, expected: FreezeError) {
+        match err {
+            AcceptanceError::Freeze(code) => assert_eq!(code, expected),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_ttl_prunes_existing_entries() {
+        let mut cache = VckCache::new(Duration::from_secs(10));
+        let key = [0x11u8; 32];
+        let now = AcceptInstant::from_ticks(0);
+        cache.record_srx(key, 1, 1, 1, 8, now);
+
+        let skip = cache
+            .try_skip_srx(key, 1, 1, 1, 8, 8, AcceptInstant::from_ticks(5))
+            .unwrap_or_else(|err| panic!("unexpected error: {err:?}"));
+        assert!(skip);
+
+        cache.set_ttl(Duration::from_secs(1), AcceptInstant::from_ticks(2));
+        let skip = cache
+            .try_skip_srx(key, 1, 1, 1, 8, 8, AcceptInstant::from_ticks(2))
+            .unwrap_or_else(|err| panic!("unexpected error: {err:?}"));
+        assert!(!skip);
+    }
+
+    #[test]
+    fn try_skip_srx_rejects_payload_len_mismatch() {
+        let mut cache = VckCache::new(Duration::from_secs(60));
+        let key = [0x22u8; 32];
+        cache.record_srx(key, 2, 2, 2, 16, AcceptInstant::from_ticks(0));
+
+        let err = cache
+            .try_skip_srx(key, 2, 2, 2, 16, 15, AcceptInstant::from_ticks(1))
+            .expect_err("payload_len mismatch should freeze");
+        assert_freeze(err, FREEZE_SRX_INVALID);
+    }
+
+    #[test]
+    fn try_skip_srx_rejects_hint_undercounts() {
+        let mut cache = VckCache::new(Duration::from_secs(60));
+        let key = [0x33u8; 32];
+        cache.record_srx(key, 3, 2, 1, 24, AcceptInstant::from_ticks(0));
+
+        let err = cache
+            .try_skip_srx(key, 2, 2, 1, 24, 24, AcceptInstant::from_ticks(1))
+            .expect_err("understated hints should freeze");
+        assert_freeze(err, FREEZE_SRX_HINT_UNDER);
+    }
+}

@@ -665,8 +665,8 @@ impl AcceptanceContext {
 mod tests {
     use super::*;
     use crate::accept::fixtures::{
-        accept_with_header, configure_bootstrap, header_ready_with_pop, sample_header,
-        sample_parts_params_joiner, sample_pop_keys, seed_capss_with,
+        accept_with_header, configure_bootstrap, header_ready_with_pop, refresh_seed_bindings,
+        sample_header, sample_parts_params_joiner, sample_pop_keys, seed_capss_with,
     };
     use crate::{
         JoinerKGenResult, OrchestrationParams, compute_proofs_commit_bytes, joiner_kgen_merge_or,
@@ -674,6 +674,7 @@ mod tests {
     };
     use anyhow::{Result, anyhow, bail};
     use ciborium::value::Integer;
+    use std::sync::Arc;
 
     type MergeFixture = (
         AcceptanceContext,
@@ -922,6 +923,30 @@ mod tests {
         }
     }
 
+    fn expect_merge_freeze(
+        ctx: &mut AcceptanceContext,
+        parts: &AnchorInstanceParts<'_>,
+        joiner: &JoinerKGenResult,
+        header: &BTreeMap<u64, Value>,
+        retired_heads: Vec<[u8; 32]>,
+        expected: FreezeError,
+    ) -> Result<()> {
+        seed_capss_with(ctx, &joiner.capss_witness);
+        let now = ctx.next_accept_instant();
+        let err = match ctx.accept_anchor_merge(
+            parts,
+            joiner.we_epoch_id,
+            header,
+            retired_heads,
+            joiner.mh_note.clone(),
+            now,
+        ) {
+            Ok(_) => bail!("expected merge freeze"),
+            Err(err) => err,
+        };
+        assert_freeze(err, expected)
+    }
+
     #[test]
     fn merge_anchor_rejects_invalid_purge_metadata() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
@@ -1146,5 +1171,251 @@ mod tests {
         };
         assert_eq!(code, FREEZE_CAPSS_INVALID);
         Ok(())
+    }
+
+    #[test]
+    fn merge_anchor_rejects_kbroad_replay_header() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(HDR_KBROAD_REPLAY, Value::Bytes(vec![0u8; 4]));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_FS_KBROAD_PRESENT,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_invalid_fs_boundary_and_mode() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(HDR_FS_EVOLUTION_BOUNDARY, Value::Bool(false));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_MH_HEADS_INVALID,
+        )?;
+
+        header.insert(HDR_FS_EVOLUTION_BOUNDARY, Value::Bool(true));
+        header.insert(HDR_ROLLUP_FS_MODE, Value::Text("not-fs-purge".to_string()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_MH_HEADS_INVALID,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_root_binding_mismatches() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(110, Value::Bytes([0xA1; 32].to_vec()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_FIELD_MISSING,
+        )?;
+
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(111, Value::Bytes([0xB2; 32].to_vec()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_FIELD_MISSING,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_seed_commit_mismatches() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(HDR_SEED_CTX_HASH, Value::Bytes([0xCC; 32].to_vec()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_SEEDCTX_MISMATCH,
+        )?;
+
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(HDR_SEED_BUNDLE_COMMIT, Value::Bytes([0xDD; 32].to_vec()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_SEEDCTX_MISMATCH,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_empty_or_unknown_retired_heads() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            Vec::new(),
+            FREEZE_MH_HEADS_INVALID,
+        )?;
+
+        let mut tampered_heads = heads.clone();
+        tampered_heads.push([0xEF; 32]);
+        tampered_heads.sort();
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            tampered_heads,
+            FREEZE_MH_HEADS_INVALID,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_changed_roots_without_srx() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let mut mutated_join_root = [0u8; 32];
+        mutated_join_root.copy_from_slice(parts.join_delta_root);
+        mutated_join_root[0] ^= 0xFF;
+        header.insert(111, Value::Bytes(mutated_join_root.to_vec()));
+        let mutated_parts = AnchorInstanceParts {
+            gid: parts.gid,
+            cat: parts.cat,
+            tswe_salt_hash: parts.tswe_salt_hash,
+            parent_root: parts.parent_root,
+            join_delta_root: &mutated_join_root,
+            revoked_since_prev_root: parts.revoked_since_prev_root,
+            revoked_root: parts.revoked_root,
+            pox_r_commit: parts.pox_r_commit,
+        };
+        refresh_seed_bindings(&mut header, &mutated_parts, &merge_joiner);
+        seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
+        let now = ctx.next_accept_instant();
+        let weid_claim = compute_we_epoch_id_from_header(&mutated_parts, &header)?;
+        let err = match ctx.accept_anchor_merge(
+            &mutated_parts,
+            weid_claim,
+            &header,
+            heads,
+            merge_joiner.mh_note.clone(),
+            now,
+        ) {
+            Ok(_) => bail!("expected roots-changed merge to freeze without SRX"),
+            Err(err) => err,
+        };
+        assert_freeze(err, FREEZE_SRX_REQUIRED)
+    }
+
+    #[test]
+    fn merge_anchor_rejects_rollup_incompleteness() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(HDR_ROLLUP_PROVENANCE_COMMIT, Value::Bytes(vec![0x11; 32]));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_MH_HEADS_INVALID,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_checkpoint_monotonicity_violations() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let checkpoint_ec = match header
+            .get(&HDR_FS_CHECKPOINT_EC)
+            .and_then(|value| match value {
+                Value::Integer(int) => u64::try_from(*int).ok(),
+                _ => None,
+            }) {
+            Some(ec) => ec,
+            None => bail!("missing fs checkpoint ec"),
+        };
+
+        ctx.set_last_checkpoint_ec(checkpoint_ec.saturating_add(1));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_FS_CHECKPOINT_MONOTONICITY,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_invalid_pivot_envelope_bytes() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let pivot_weid = match header
+            .get(&HDR_ROLLUP_PIVOT_WEID)
+            .and_then(|value| match value {
+                Value::Bytes(bytes) if bytes.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(bytes);
+                    Some(arr)
+                }
+                _ => None,
+            }) {
+            Some(weid) => weid,
+            None => bail!("missing pivot weid"),
+        };
+
+        let mut parity = pivot_parity_from_store(&mut ctx, &parts, pivot_weid)?;
+        parity.hp_envelope = Arc::from(vec![0xFF].into_boxed_slice());
+        refresh_pivot_parity(&mut ctx, &parts, &parity)?;
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_HASH_CBOR,
+        )?;
+
+        let mut parity = pivot_parity_from_store(&mut ctx, &parts, pivot_weid)?;
+        parity.hp_envelope = Arc::from(Vec::<u8>::new().into_boxed_slice());
+        refresh_pivot_parity(&mut ctx, &parts, &parity)?;
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_FIELD_MISSING,
+        )
     }
 }

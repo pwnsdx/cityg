@@ -706,6 +706,9 @@ pub(super) fn ensure_kbroad_alg(header: &BTreeMap<u64, Value>) -> Result<(), Acc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accept::fixtures::{
+        anchor_from_result, header_ready_with_pop, sample_parts_params_joiner, sample_pop_keys,
+    };
     use anyhow::{Result, anyhow, bail};
     use pqcrypto_kyber::kyber768::ciphertext_bytes as ml_kem_ciphertext_bytes;
 
@@ -815,6 +818,16 @@ mod tests {
         }
     }
 
+    fn expect_freeze(err: AcceptanceError, expected: FreezeError) -> Result<()> {
+        match err {
+            AcceptanceError::Freeze(code) => {
+                assert_eq!(code, expected);
+                Ok(())
+            }
+            other => Err(anyhow!("unexpected error: {other:?}")),
+        }
+    }
+
     #[test]
     fn ensure_srx_relations_allows_absent_when_optional() -> Result<()> {
         let header = base_header();
@@ -902,6 +915,272 @@ mod tests {
             return Err(anyhow!("unexpected error"));
         };
         assert_eq!(code, FREEZE_SRX_INVALID);
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_bootstrap_absent_rejects_each_field() -> Result<()> {
+        for (key, value) in [
+            (super::HDR_BOOTSTRAP_SIG, Value::Bytes(vec![0u8; 16])),
+            (
+                super::HDR_BOOTSTRAP_ALG,
+                Value::Text("oob-ca-v1".to_string()),
+            ),
+            (super::HDR_BOOTSTRAP_PK, Value::Bytes(vec![0u8; 16])),
+        ] {
+            let mut header = base_header();
+            header.insert(key, value);
+            let err = match ensure_bootstrap_absent(&header) {
+                Ok(_) => bail!("bootstrap field {} should freeze", key),
+                Err(err) => err,
+            };
+            expect_freeze(err, FREEZE_BOOTSTRAP_INVALID)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_join_pop_accepts_fixture_header() -> Result<()> {
+        let (parts, _params, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header, _weid, _witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+        let anchor = anchor_from_result(&parts, &joiner);
+
+        ensure_join_pop(&header, &anchor, crate::LeafIdMode::PerGroup)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_join_pop_rejects_invalid_alg_and_signature_shapes() -> Result<()> {
+        let (parts, _params, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, _weid, _witness) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+        let anchor = anchor_from_result(&parts, &joiner);
+
+        header.insert(super::HDR_POP_ALG, Value::Bytes(vec![0xFF]));
+        let err = match ensure_join_pop(&header, &anchor, crate::LeafIdMode::PerGroup) {
+            Ok(_) => bail!("invalid pop alg encoding should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_POP_INVALID)?;
+
+        header.insert(super::HDR_POP_ALG, Value::Text("ML-DSA-65".to_string()));
+        header.insert(super::HDR_POP_SIG, Value::Bytes(vec![0u8; 4]));
+        let err = match ensure_join_pop(&header, &anchor, crate::LeafIdMode::PerGroup) {
+            Ok(_) => bail!("invalid pop signature length should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_POP_INVALID)?;
+        Ok(())
+    }
+
+    #[test]
+    fn verify_join_payload_kbroad_rejects_mode_aead_and_shape_errors() -> Result<()> {
+        let mut header = base_header();
+        let wrong_mode = Value::Array(vec![
+            Value::Text("wrong-mode".to_string()),
+            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
+            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Text("chacha20-poly1305".to_string()),
+        ]);
+        header.insert(super::HDR_HP_BYTES, wrong_mode);
+        let err = match verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        ) {
+            Ok(_) => bail!("wrong kbroad mode should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_PARENT_EID_FORBIDDEN)?;
+
+        let wrong_aead = Value::Array(vec![
+            Value::Text(KBROAD_MODE.to_string()),
+            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
+            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Text("aes-gcm".to_string()),
+        ]);
+        header.insert(super::HDR_HP_BYTES, wrong_aead);
+        let err = match verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        ) {
+            Ok(_) => bail!("wrong AEAD label should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_SUITE_DEPRECATED)?;
+
+        header.insert(super::HDR_HP_BYTES, Value::Map(Vec::new()));
+        let err = match verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        ) {
+            Ok(_) => bail!("non-array envelope should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_HASH_CBOR)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_suite_helpers_accept_text_and_bytes_encodings() -> Result<()> {
+        for value in [
+            Value::Text(TSWE_ALG_LABEL.to_string()),
+            Value::Bytes(TSWE_ALG_LABEL.as_bytes().to_vec()),
+            Value::Integer(Integer::from(TSWE_ALG_CODE)),
+        ] {
+            let mut header = base_header();
+            header.insert(super::HDR_TSWE_ALG, value);
+            ensure_tswe_alg(&header)?;
+        }
+
+        for value in [
+            Value::Text(super::MERKLE_DS_ID.to_string()),
+            Value::Bytes(super::MERKLE_DS_ID.as_bytes().to_vec()),
+        ] {
+            let mut header = base_header();
+            header.insert(super::HDR_MERKLE_SUITE, value);
+            ensure_merkle_suite(&header)?;
+        }
+
+        for value in [
+            Value::Text(KBROAD_ML_KEM_ALG.to_string()),
+            Value::Bytes(KBROAD_ML_KEM_ALG.as_bytes().to_vec()),
+        ] {
+            let mut header = base_header();
+            header.insert(super::HDR_KBROAD_ALG, value);
+            ensure_kbroad_alg(&header)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_proofs_accepts_fixture_header_and_rejects_tampering() -> Result<()> {
+        let (_parts, _params, joiner) = sample_parts_params_joiner();
+        let mut header = joiner.header_map.clone();
+        let empty = BTreeSet::new();
+
+        let artifacts = ensure_proofs(&header, None, &empty, None, &empty)?;
+        assert_eq!(artifacts.commit.len(), 32);
+        assert_eq!(artifacts.mask_a.len(), 32);
+        assert_eq!(artifacts.mask_b.len(), 32);
+
+        header.insert(HDR_PROOFS_COMMIT, Value::Bytes(vec![0x55; 32]));
+        let err = match ensure_proofs(&header, None, &empty, None, &empty) {
+            Ok(_) => bail!("tampered proofs commit should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_PROOFS_COMMIT_INVALID)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_proofs_rejects_mode_and_vrf_policy_violations() -> Result<()> {
+        let (_parts, _params, joiner) = sample_parts_params_joiner();
+        let mut header = joiner.header_map.clone();
+        let empty = BTreeSet::new();
+
+        header.insert(HDR_PROOF_MODE, Value::Text("not-supported".to_string()));
+        let err = match ensure_proofs(&header, None, &empty, None, &empty) {
+            Ok(_) => bail!("unsupported proof mode should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_SUITE_FORBIDDEN)?;
+
+        let mut header = joiner.header_map.clone();
+        let current_mode = match header.get(&HDR_PROOF_MODE) {
+            Some(Value::Text(text)) => text.clone(),
+            _ => bail!("fixture proof mode missing"),
+        };
+        let mut deprecated = BTreeSet::new();
+        deprecated.insert(current_mode);
+        let err = match ensure_proofs(&header, None, &deprecated, None, &empty) {
+            Ok(_) => bail!("deprecated proof mode should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_SUITE_DEPRECATED)?;
+
+        header.insert(HDR_PROOF_MODE, Value::Text("lib-sig-vrf/v1".to_string()));
+        header.insert(HDR_VRF_ID, Value::Text("unknown-vrf".to_string()));
+        let err = match ensure_proofs(&header, None, &empty, None, &empty) {
+            Ok(_) => bail!("unsupported vrf id should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_SUITE_FORBIDDEN)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_proofs_rejects_stray_srx_and_oversized_capss() -> Result<()> {
+        let (_parts, _params, joiner) = sample_parts_params_joiner();
+        let mut header = joiner.header_map.clone();
+        let empty = BTreeSet::new();
+
+        header.remove(&HDR_SRX_MODE);
+        header.insert(HDR_SRX_ROOT_SW, Value::Bytes(vec![0u8; 32]));
+        header.insert(HDR_SRX_SMALLWOOD, Value::Bytes(vec![0u8; 4]));
+        let err = match ensure_proofs(&header, None, &empty, None, &empty) {
+            Ok(_) => bail!("stray SRX smallwood fields without mode should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_SRX_INVALID)?;
+
+        let mut header = joiner.header_map.clone();
+        header.insert(
+            HDR_FS_CAPSS,
+            Value::Bytes(vec![0u8; FS_CAPSS_MAX_BYTES + 1]),
+        );
+        let err = match ensure_proofs(&header, None, &empty, None, &empty) {
+            Ok(_) => bail!("oversized fs capss payload should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_CAPSS_INVALID)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_srx_relations_rejects_non_utf8_mode_after_required_fields_present() -> Result<()> {
+        let mut header = base_header();
+        header.insert(HDR_SRX_MODE, Value::Bytes(vec![0xFF]));
+        header.insert(HDR_SRX_COMMIT, Value::Bytes(vec![0u8; 32]));
+        header.insert(HDR_SRX_PAYLOAD, Value::Bytes(Vec::new()));
+        header.insert(HDR_SRX_HINT_COUNTS, Value::Bytes(Vec::new()));
+        header.insert(HDR_SRX_HINT_SIZES, Value::Bytes(Vec::new()));
+
+        let mut cache = VckCache::new(Duration::from_secs(60));
+        let err = match ensure_srx_relations(
+            &header,
+            &[0u8; 32],
+            &[0u8; 32],
+            &[0u8; 32],
+            &[0u8; 32],
+            true,
+            1024,
+            &[0u8; 32],
+            &[0u8; 32],
+            &[0u8; 32],
+            &[0u8; 32],
+            None,
+            &BTreeSet::new(),
+            AcceptInstant::from_ticks(0),
+            &mut cache,
+            &dummy_proofs(),
+        ) {
+            Ok(_) => bail!("non-utf8 SRX mode should freeze"),
+            Err(err) => err,
+        };
+        expect_freeze(err, FREEZE_SRX_INVALID)?;
         Ok(())
     }
 }

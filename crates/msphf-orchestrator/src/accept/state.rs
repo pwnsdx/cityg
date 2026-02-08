@@ -69,3 +69,54 @@ impl FsPolicyConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthesize_caps_rejects_zero_and_inverted_windows() {
+        let mut cfg = FsPolicyConfig::default();
+        cfg.h_seconds = 0;
+        assert_eq!(
+            cfg.synthesize_caps().expect_err("h_seconds=0 must freeze"),
+            FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE
+        );
+
+        let mut cfg = FsPolicyConfig::default();
+        cfg.checkpoint_interval_seconds = 0;
+        assert_eq!(
+            cfg.synthesize_caps()
+                .expect_err("checkpoint_interval_seconds=0 must freeze"),
+            FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE
+        );
+
+        let mut cfg = FsPolicyConfig::default();
+        cfg.h_seconds = 600;
+        cfg.checkpoint_interval_seconds = 300;
+        assert_eq!(
+            cfg.synthesize_caps()
+                .expect_err("checkpoint interval below h must freeze"),
+            FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE
+        );
+    }
+
+    #[test]
+    fn synthesize_caps_computes_expected_values() {
+        let cfg = FsPolicyConfig {
+            h_seconds: 300,
+            checkpoint_interval_seconds: 1000,
+            checkpoint_head_threshold: 24,
+            slack_anchor: 2,
+            slack_first_device: 3,
+            slack_device: 4,
+        };
+        let caps = cfg
+            .synthesize_caps()
+            .unwrap_or_else(|err| panic!("unexpected error: {err:?}"));
+        assert_eq!(caps.window_periods, 4);
+        assert_eq!(caps.anchor_max, 6);
+        assert_eq!(caps.first_device, 7);
+        assert_eq!(caps.device_max, 8);
+    }
+}
