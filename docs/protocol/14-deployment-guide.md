@@ -123,11 +123,20 @@ h_max = 16                # Max concurrent heads per WID (default: 16)
 t_window_secs = 120       # TTL for head expiration (default: 120s)
 
 # SRX configuration
-srx_required = true       # Require SRX payload for join mode
 srx_max_bytes = 1048576   # Max SRX payload size (1 MB, default)
 
-# Policy configuration
-policy_version = "v0.1.0" # Policy version string
+# FS policy configuration
+fs_policy_version = "7"   # Must match header key 139 / allowlist
+fs_period_seconds = 300   # H
+checkpoint_interval_seconds = 3600
+slack_anchor = 0
+slack_first_device = 0
+slack_device = 4
+
+# SRX shadow-root migration (optional)
+srx_migration_root_sw = null
+
+# Suite configuration
 allowed_crs_ids = [       # Allowed CRS identifiers
     "rlwe-merkle/v1",
 ]
@@ -166,20 +175,32 @@ fn create_acceptance_context(config: &ServerConfig) -> AcceptanceContext {
             None
         },
         srx_max_bytes: Some(config.acceptance.srx_max_bytes),
-        srx_required: Some(config.acceptance.srx_required),
         allowed_crs_ids: Some(config.acceptance.allowed_crs_ids.clone()),
         allowed_vrf_ids: Some(config.acceptance.allowed_vrf_ids.clone()),
         allowed_proof_modes: Some(config.acceptance.allowed_proof_modes.clone()),
         kbroad_registry: Some(load_kbroad_registry(&config.kbroad_registry)),
-        policy_version: Some(config.acceptance.policy_version.clone()),
+        fs_policy_config: FsPolicyConfig {
+            h_seconds: config.acceptance.fs_period_seconds,
+            checkpoint_interval_seconds: config.acceptance.checkpoint_interval_seconds,
+            checkpoint_head_threshold: 24,
+            slack_anchor: config.acceptance.slack_anchor,
+            slack_first_device: config.acceptance.slack_first_device,
+            slack_device: config.acceptance.slack_device,
+        },
         policy_timestamp: Some(OffsetDateTime::now_utc()),
     };
 
-    AcceptanceContext::with_options(
+    let mut ctx = AcceptanceContext::with_options(
         config.acceptance.h_max,
         Duration::from_secs(config.acceptance.t_window_secs),
         options,
-    )
+    );
+    ctx.set_allowed_fs_policy_version(Some(config.acceptance.fs_policy_version.clone()));
+    ctx.set_fs_policy_version(Some(config.acceptance.fs_policy_version.clone()));
+    if let Some(root) = config.acceptance.srx_migration_root_sw {
+        ctx.set_srx_migration_root_sw(Some(root));
+    }
+    ctx
 }
 ```
 
@@ -685,18 +706,18 @@ curl https://cityg.example.com/metrics | grep cityg_accept_total
 
 ### 7.2 Configuration Changes
 
-**Policy Version Update**:
+**FS Policy Version Update**:
 ```bash
 # Update config
 vim config/server.toml
-# Change: policy_version = "v0.2.0"
+# Change: fs_policy_version = "8"
 
 # Graceful reload (no downtime)
 systemctl reload cityg-server
 
 # Verify
 curl https://cityg.example.com/policy
-# Expected: {"version": "v0.2.0"}
+# Expected: {"fs_policy_version": "8"}
 ```
 
 **KBROAD Registry Update**:

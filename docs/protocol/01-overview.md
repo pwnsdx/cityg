@@ -495,7 +495,7 @@ JOINER                        SERVER                      RECEIVERS
    - gid (group identifier)
    - kbroad_pub (group KEM public key)
    - params_id (RLWE parameter pack identifier)
-   - policy_version (governance rules)
+   - fs_policy_version (header key 139 governance pin)
 
 2. Founder generates first anchor (bootstrap):
    - parent_root = [0; 32] (empty set)
@@ -600,7 +600,7 @@ Scenario: 10 people joining simultaneously
    - New unified head represents merged state
 ```
 
-**Capacity:** Default h_max=16 concurrent heads. If 17th joiner arrives before merge, server returns `Freeze(925, "mh_window_full")`.
+**Capacity:** Default h_max=16 concurrent heads. If a 17th joiner arrives before merge, the server returns deterministic code `925` (`mh_window_full`).
 
 **Reference Implementation:** See the GUI client implementation in [`crates/cityg-gui/src/bin/join_leave.rs`](../../crates/cityg-gui/src/bin/join_leave.rs) for the complete join/leave workflow including ticket handling, forward secrecy, and proper cryptographic operations.
 
@@ -713,11 +713,11 @@ Scenario: 10 people joining simultaneously
 
 ### 8.4 Fail-Secure Errors
 
-**Principle:** Invalid inputs freeze (cacheable), not reject (retry-able).
+**Principle:** Invalid inputs produce deterministic protocol outcome codes; most validation failures are per-message `REJECT(code)` outcomes.
 
 **Error Semantics:**
-- **Freeze(code, reason):** Deterministic failure, cacheable (VCK)
-- **Reject:** Stateless failure, not cacheable (rare)
+- **REJECT(code):** Deterministic input failure; no acceptance-state mutation.
+- **DROP / QUARANTINE / FREEZE(group):** Reserved operational actions; not default acceptance behavior.
 
 **Benefit:** Prevents grinding attacks. Attacker cannot retry with modified inputs.
 

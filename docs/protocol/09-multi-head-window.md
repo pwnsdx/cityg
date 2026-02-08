@@ -455,7 +455,7 @@ impl RhoGuard {
 **H_MAX** (Maximum heads):
 - Prevents unbounded head proliferation
 - Typical value: 16 (configurable)
-- When exceeded: `Freeze(925, "mh_window_full")`
+- When exceeded: deterministic code `925` (`mh_window_full`)
 
 **T_WINDOW** (Time-to-live):
 - Automatically prunes stale heads

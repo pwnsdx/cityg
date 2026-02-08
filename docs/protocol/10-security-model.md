@@ -129,9 +129,9 @@ ML-DSA-65; CAPSS Smallwood FS proof (ROM soundness); ZK-VRF in QROM.
 
 | Goal | Definition | Enforcement |
 |------|------------|-------------|
-| **Policy Anchoring** | Cryptographic binding to policy | policy_version in proof bind |
-| **Auditability** | Deterministic freeze codes | Error mapping (§15, specification) |
-| **Replayability** | Same input → same freeze | Deterministic validation pipeline |
+| **Policy Anchoring** | Cryptographic binding to policy | `fs_policy_version` (`139`) in proof binds |
+| **Auditability** | Deterministic reject codes | Error mapping (§16, unified specification) |
+| **Replayability** | Same input → same outcome code | Deterministic validation pipeline |
 
 ---
 
@@ -553,8 +553,8 @@ fn defense_in_depth_checks(
 
 | Mechanism | Purpose | Configuration |
 |-----------|---------|---------------|
-| **Proof limits** | Reject oversize proofs early | VRF ≤ 6KB, KBROAD C_hp ≤ 16.4KB, CAPSS Smallwood ≤ 16KB (≈12KB typical), SRX payload ≤ policy limit |
-| **SRX Hints Budget** | Limit hint overhead | MAX_HINT_COUNTS=32, MAX_HINT_SIZES=32 |
+| **Proof limits** | Reject oversize proofs early | `|95|≤8192`, `|97|≤262144`, `|146|≤16384`, `|161|≤16384`, `|122|≤1048576` |
+| **Proof commit fail-fast** | Abort before expensive proofs | Verify `125` before Smallwood/VRF/SRX |
 | **Multi-Head Window** | Capacity limit | H_MAX=16 heads per WID |
 | **TTL** | Auto-expire stale heads | T_WINDOW=120s (default) |
 | **Rho Replay Guard** | Detect duplicate ρ | RHO_GUARD_CAPACITY=64 |

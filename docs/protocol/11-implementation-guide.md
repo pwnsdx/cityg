@@ -454,16 +454,16 @@ pub fn recompute_capss_witness(
 pub fn build_anchor_seed_ctx(
     header: &BTreeMap<u64, Value>,
 ) -> Result<Value, MsphfError> {
-    // Extract header minus proof fields (93-99, 107-109, 120-124)
+    // Extract header minus proof/materialization fields.
     let mut ctx = header.clone();
 
-    // Remove: rho_commit, seed_bundle_commit, hp_commit, PoP, SRX
+    // Remove: rho_commit, seed_bundle_commit, hp_commit, PoP, legacy SRX keys.
     ctx.remove(&93); // msphf_kgen_rho_commit
     ctx.remove(&94); // seed_bundle_commit
     ctx.remove(&99); // msphf_hp_commit
     ctx.remove(&107); ctx.remove(&108); ctx.remove(&109); // PoP
-    ctx.remove(&120); ctx.remove(&121); ctx.remove(&122);
-    ctx.remove(&123); ctx.remove(&124); // SRX
+    ctx.remove(&120); ctx.remove(&121); ctx.remove(&122); // legacy+SRX payload
+    ctx.remove(&123); ctx.remove(&124); // legacy SRX hints
 
     Ok(Value::Map(ctx))
 }
@@ -513,8 +513,10 @@ pub struct AcceptanceContext {
     kbroad_registry: Option<BTreeMap<Vec<u8>, Vec<u8>>>, // ✅ Public keys
     pending_capss_witness: Option<CapssWitnessBundle>,  // ✅ Public witness
     telemetry: BTreeMap<TelemetryKey, TelemetryCounters>, // ✅ Counters
-    policy_version: String,                              // ✅ Config
+    fs_policy_version: Option<String>,                   // ✅ FS policy pin
+    allowed_fs_policy_version: Option<String>,           // ✅ FS allowlist
     policy_timestamp: Option<OffsetDateTime>,            // ✅ Timestamp
+    srx_root_sw: Option<[u8;32]>,                        // ✅ Durable SRX shadow root
 }
 ```
 
@@ -545,13 +547,14 @@ pub fn accept_anchor(
     // Step 5: KBROAD binding (PUBLIC, NO DECRYPT)
     self.validate_kbroad_envelope_structure(header)?;
 
-    // Step 6: SRX (join only)
-    if is_join { self.validate_srx(header, parts)?; }
+    // Step 6: Proofs commit precheck (fail-fast)
+    self.validate_proofs_commit(header)?;
 
-    // Step 7: Proofs (join only)
-    if is_join {
-        self.verify_capss(header)?;
-        self.verify_zk_vrf(header)?;
+    // Step 7: Proofs (FS Smallwood -> VRF -> SRX when required on merges)
+    self.verify_capss(header)?;
+    self.verify_zk_vrf(header)?;
+    if is_merge && srx_required_for_merge {
+        self.verify_srx_smallwood(header, parts)?;
     }
 
     // Step 8: Defense-in-depth
@@ -1044,7 +1047,7 @@ WID [32 bytes]
    └─► header = CBOR.Decode(header_cbor)
 
 2. Pre-filter checks
-   └─► Validate sizes: |95| ≤ 6KB, |97| ≤ 16.4KB, |146| ≤ 16KB, |122| ≤ policy limit
+   └─► Validate sizes: |95| ≤ 8192, |97| ≤ 262144, |146| ≤ 16384, |161| ≤ 16384, |122| ≤ 1048576
 
 3. Structure validation
    └─► Verify required keys present (90, 91, 92, ...)
@@ -1060,12 +1063,15 @@ WID [32 bytes]
 6. KBROAD envelope structure (NO DECRYPT)
    └─► Validate: header[97] = ["kbroad-v1", _, _, _, "chacha20-poly1305"]
 
-7. SRX validation (join only)
-   └─► Verify frontier completeness, anchor pool, anchored adjacency
+7. SRX validation (merge-only, conditional)
+   └─► Join mode forbids 121/122/160/161
+   └─► Merge mode requires all-or-none 121/122/160/161 per §22
+   └─► Verifier sources srx_root_sw_before from durable GroupState
 
-8. Proof verification (join only)
+8. Proof verification
    └─► CAPSS Smallwood.Verify(header[146], inputs)
-   └─► ZK-VRF.Verify(header[95], vrf_ctx)
+   └─► ZK-VRF.Verify(header[95], vrf_ctx; include 160 when SRX applies)
+   └─► SRX/Smallwood.Verify(header[161], srx_ctx) only when SRX applies
 
 9. Defense-in-depth
    └─► Cross-check: header fields vs proof bindings

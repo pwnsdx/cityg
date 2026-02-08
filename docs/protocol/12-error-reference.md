@@ -21,7 +21,10 @@
 
 ## 1. Introduction
 
-This document provides a complete catalog of **freeze** and **reject** error codes defined in the City-G `tswe/msphf-we/fs-hybrid` protocol. Error codes are **deterministic** and **cacheable**, enabling efficient handling of malformed or policy-violating anchors.
+This document provides a catalog of deterministic protocol outcome codes for
+City-G `tswe/msphf-we/fs-hybrid`. The unified action model is
+`REJECT(code)` for protocol validation failures. Some implementation modules
+still use the historical `FreezeError` type name for numeric codes.
 
 **Blueprint Reference**: Alpha (0.1.0) §15 (Error Semantics and Codes)
 
@@ -29,48 +32,48 @@ This document provides a complete catalog of **freeze** and **reject** error cod
 
 Error codes serve multiple purposes:
 1. **Deterministic validation**: Same input → same error code
-2. **Cache efficiency**: Server can cache freeze decisions (VCK cache)
+2. **Cache efficiency**: Server can cache deterministic outcomes (VCK cache)
 3. **Debugging**: Precise error reasons for client/publisher diagnosis
-4. **Auditability**: Freeze codes are logged for transparency
+4. **Auditability**: Outcome codes are logged for transparency
 5. **DoS mitigation**: Fast rejection of malformed requests
 
 ---
 
 ## 2. Error Semantics
 
-### 2.1 Freeze vs. Reject
+### 2.1 Action Model
 
 | Error Type | Cacheability | Determinism | Use Case |
 |------------|--------------|-------------|----------|
-| **Freeze** | ✅ Cacheable | ✅ Deterministic | Validation failure (PoP, proofs, witnesses) |
-| **Reject** | ❌ Not cacheable | ⚠️ May vary | Transient failure (network, internal error) |
+| **REJECT(code)** | ✅ Cacheable (by implementation policy) | ✅ Deterministic | Protocol validation failure (PoP, proofs, witnesses) |
+| **DROP / QUARANTINE / FREEZE(group)** | ⚠️ Operational policy | context-dependent | Optional anti-spam or authenticated corruption handling |
+| **Reject (transport/internal)** | ❌ Not protocol-cacheable | ⚠️ May vary | Transient server/runtime failures |
 
-**Freeze**: The anchor is **permanently invalid** due to a validation failure. The server caches the decision (VCK) and immediately returns the same freeze code on re-submission.
-
-**Reject**: The request cannot be processed due to a transient issue (e.g., internal server error, rate limit exceeded). Clients may retry.
+`REJECT(code)` means the input is invalid under protocol rules. No acceptance
+state is mutated for that input.
 
 **Blueprint Quote** (Alpha (0.1.0) §15):
 > Reject: stateless failure; not cacheable. Freeze(code,reason): deterministic, cacheable.
 
 ---
 
-### 2.2 Freeze Properties
+### 2.2 Deterministic-Code Properties
 
 **Deterministic**:
 ```
 ∀ anchor A, server S:
-  S.validate(A) = Freeze(code, reason)
-  ⇒ S.validate(A) = Freeze(code, reason) (always)
+  S.validate(A) = REJECT(code)
+  ⇒ S.validate(A) = REJECT(code) (always)
 ```
 
 **Cacheable**:
 ```
-VCK (Verify-Cache Key) = H_L("msphf/proofs", [95, 146])
-Cache entry: (VCK, freeze_code, expires_at)
+VCK (Verify-Cache Key) = H_L("msphf/proofs", [95, 146, (160,161 if present)])
+Cache entry: (VCK, outcome_code, expires_at)
 ```
 
 **Public**:
-- Freeze codes do not leak secrets (no hp, Y\*, E_k in error messages)
+- Outcome codes do not leak secrets (no hp, Y\*, E_k in error messages)
 - Reason strings are generic ("proof_invalid", not specific Y\* values)
 
 ### 2.3 Transport mapping & retry guidance
@@ -128,7 +131,7 @@ pub const FREEZE_CAPSS_INVALID: FreezeError = FreezeError {
 
 **Category**: CBOR encoding errors
 **Cacheability**: ✅ Freeze
-**Description**: Header failed basic structural checks (malformed CBOR, missing required field, wrong type). The current implementation tolerates unknown and duplicate keys, but they are discouraged and may be rejected by future revisions.
+**Description**: Header failed basic structural checks (malformed CBOR, missing required field, wrong type, unknown key, or duplicate key).
 
 **Sub-reasons**:
 - `field_missing`: Required header key absent or of the wrong type
@@ -358,7 +361,7 @@ for _ in 0..16 {
     ctx.mh_window.accept_head(wid, we_epoch_id, now)?;
 }
 // 17th head:
-// Result: Freeze(925, "mh_window_full")
+// Result: REJECT(925, "mh_window_full")
 ```
 
 ---

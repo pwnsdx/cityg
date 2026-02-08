@@ -174,7 +174,7 @@ Throughout this documentation:
 - **Code References**: References to the acceptance pipeline point to `crates/msphf-orchestrator/src/accept/` (module rooted at `mod.rs`); look for the helper or function named in the surrounding text
 - **Header Fields**: `#91` or `HDR_SEED_CTX_HASH` refers to CBOR map key 91
 - **Domain Labels**: `"msphf/hp/commit"` refers to a BLAKE3 domain-separation label
-- **Error Codes**: `Freeze(923)` refers to freeze error code 923
+- **Error Codes**: `REJECT(923)` refers to deterministic protocol outcome code 923
 - **Types**: `[u8; 32]` denotes a 32-byte array
 - **Functions**: `H_L(label, args)` denotes a domain-separated hash function
 

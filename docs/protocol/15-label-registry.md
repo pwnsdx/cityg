@@ -109,7 +109,7 @@ pub fn h_l<T: Serialize>(label: &str, val: &T) -> Result<[u8; 32], MsphfError> {
 | **msphf/hp/commit** | `[hp]` | hp_commit (99) [32B] | Commitment to hash projection key |
 | **msphf/seed_bundle** | `[SeedCommitFields]` | seed_bundle_commit (94) [32B] | Commitment to seed bundle |
 | **msphf/srx/commit** | `[srx_payload]` | srx_commit (121) [32B] | Commitment to SRX payload |
-| **msphf/proofs** | `[vrf_proof(95), fs_capss(146)]` | proofs_commit [32B] | Commitment to proofs (VCK) |
+| **msphf/proofs** | `[95, 146, (160,161 if present)]` | proofs_commit [32B] | Commitment to proofs (fail-fast precheck) |
 | **vk/hp** | `[hp_commit(99), meor_vrf_id]` | vk_commit [32B] | VRF verification key commit |
 
 **Blueprint Reference**: Alpha (0.1.0) §12.0 (Header Keys), Annex I (VCK)
@@ -122,7 +122,7 @@ pub fn h_l<T: Serialize>(label: &str, val: &T) -> Result<[u8; 32], MsphfError> {
 |-------|------|--------|-------|
 | **msphf/epoch** | `[X_k, Y*]` | E_k [32B] | Epoch key derivation |
 | **we/eid** | `[E_k]` | eid [32B] | Epoch identifier (optional, client-side) |
-| **msphf/xk** | `[CBOR_det(X_k)]` | xk_hash [32B] | Hash of epoch context |
+| **msphf/xk** | `[X_k]` | xk_hash [32B] | Hash of canonical CBOR epoch context |
 | **leaf-id** | `[device_pk_alg, device_pk_bytes]` | leaf_id [32B] | Device leaf identifier |
 
 **Blueprint Reference**: Alpha (0.1.0) §4 (Public Instance), §7 (Primitive API)
@@ -260,7 +260,7 @@ let mask_digest = h_l("vrf/mask", &MaskDigest {
 
 | Label | Args | Output | Usage |
 |-------|------|--------|-------|
-| **msphf/vck** | `[xk_hash, 94, 93, 99, 98, 106, srx_commit, proofs_commit, policy_version, meor_vrf_id]` | VCK [32B] | Cache key for freeze decisions |
+| **msphf/vck** | `[xk_hash, 94, 93, 99, 98, 106, srx_commit_or_zero, proofs_commit_or_zero, proof_mode, meor_vrf_id, fs_policy_version]` | VCK [32B] | Cache key for deterministic reject outcomes |
 
 **Blueprint Reference**: Alpha (0.1.0) Annex I (VCK)
 
@@ -275,8 +275,9 @@ let vck = h_l("msphf/vck", &VckInputs {
     params_id: &header[&106],
     srx_commit: srx_commit_or_zero,
     proofs_commit: &proofs_commit,
-    policy_version: &ctx.policy_version,
+    proof_mode: &header[&119],
     meor_vrf_id: &header[&116],
+    fs_policy_version: &ctx.fs_policy_version,
 })?;
 ```
 
@@ -321,7 +322,8 @@ pub fn h_branch_bytes(
 
 `bind_fs_tuple := [ xk_hash, seed_commit, seed_bundle_commit, rho_commit, crs_id, hp_commit,
 params_id, parent_root, join_delta_root, revoked_since_prev_root, revoked_root, proof_mode,
-policy_version, vrf_id, fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit ]`.
+fs_policy_version, vrf_id, fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit,
+(srx_root_sw when SRX applies) ]`.
 
 **Profile**: `tswe/msphf-we/fs-hybrid` only
 
@@ -355,7 +357,7 @@ let fs_dev_commit = h_l("fs/dev/chain", &[device_pk, fs_ec, fs_dev_prev_commit])
 K_fs^(t+1) = HKDF_BLAKE3(
     ikm  = K_fs^t,
     salt = h_l("fs/kfs/salt", &[weid])?,
-    info = b"city-g|fs/kfs/v1" || to_le_bytes(fs_ec + 1),
+    info = b"city-g|fs/kfs/v1" || to_le_bytes_u64(fs_ec + 1),
     len  = 32
 )?;
 zeroize(K_fs^t); // REQUIRED
@@ -467,10 +469,10 @@ completes the November 2025 label spot-audit.
 | Label / Info String | Spec Reference | Implementation Anchor |
 |---------------------|----------------|------------------------|
 | `fs/epoch/salt`, `fs/epoch/sk_salt`, `fs/epoch/commit` | Alpha §13–14 | `crates/msphf-orchestrator/src/lib.rs` (`fs_epoch_*`) |
-| `fs/kfs/salt`, `city-g\|fs/kfs/v1` \|\| `le(fs_ec+1)` | Alpha §13 | `ForwardSecrecyState::evolve_k_fs` (`crates/msphf-orchestrator/src/lib.rs`) |
+| `fs/kfs/salt`, `city-g\|fs/kfs/v1` \|\| `le_u64(fs_ec+1)` | Alpha §13 | `ForwardSecrecyState::evolve_k_fs` (`crates/msphf-orchestrator/src/lib.rs`) |
 | `city-g\|fs/epoch/tau|v1`, `city-g\|fs/epoch/sk|v1` | Table 22 (Annex H/J) | `ForwardSecrecyState::prepare_join` (`crates/msphf-orchestrator/src/lib.rs`) |
 | `srx/commit` | Annex F, header key 121 | `msphf_core::ds::MSPHF_SRX_COMMIT` + `accept/stages.rs` commitment checks |
-| `city-g\|srx/shadow/v1|` | Annex F (Smallwood) | `crates/msphf-orchestrator/src/proofs/srx_smallwood.rs` (`srx_shadow_challenge`) |
+| `srx/payload/digest`, `srx/bridge/v1`, `srx/root_sw/empty` | Annex F (Smallwood bridge + init) | `crates/msphf-orchestrator/src/accept/mod.rs` + `crates/msphf-orchestrator/src/proofs/srx_smallwood.rs` |
 | `city-g\|hp/kek/v1` | Alpha §12.3 | `derive_hp_kek` (`crates/msphf-orchestrator/src/lib.rs`) |
 
 Additional labels listed in §3 inherit their implementations from the canonical
