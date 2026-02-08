@@ -12,6 +12,8 @@ pub const FREEZE_MH_PARENT_MISMATCH: FreezeError = FreezeError {
     reason: "mh_parent_mismatch",
 };
 
+const DEFAULT_MAX_ENTRIES: usize = 100_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CacheEntry {
     parent_root: Vec<u8>,
@@ -50,13 +52,19 @@ impl From<MsphfError> for ReceiverError {
 #[derive(Clone)]
 pub struct ReceiverCache {
     ttl: Duration,
+    max_entries: usize,
     entries: AHashMap<[u8; 32], CacheEntry>,
 }
 
 impl ReceiverCache {
     pub fn new(ttl: Duration) -> Self {
+        Self::with_limits(ttl, DEFAULT_MAX_ENTRIES)
+    }
+
+    pub fn with_limits(ttl: Duration, max_entries: usize) -> Self {
         Self {
             ttl,
+            max_entries,
             entries: AHashMap::new(),
         }
     }
@@ -68,6 +76,13 @@ impl ReceiverCache {
     pub fn set_ttl(&mut self, ttl: Duration, now: AcceptInstant) {
         self.ttl = ttl;
         self.prune(now, None);
+        self.enforce_max_entries();
+    }
+
+    pub fn set_max_entries(&mut self, max_entries: usize, now: AcceptInstant) {
+        self.max_entries = max_entries;
+        self.prune(now, None);
+        self.enforce_max_entries();
     }
 
     fn prune(&mut self, now: AcceptInstant, target: Option<&[u8; 32]>) -> bool {
@@ -95,6 +110,24 @@ impl ReceiverCache {
         );
     }
 
+    fn enforce_max_entries(&mut self) {
+        if self.max_entries == 0 {
+            self.entries.clear();
+            return;
+        }
+        while self.entries.len() > self.max_entries {
+            let Some(oldest_weid) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.accept_time)
+                .map(|(weid, _)| *weid)
+            else {
+                break;
+            };
+            self.entries.remove(&oldest_weid);
+        }
+    }
+
     pub fn apply_acceptance(&mut self, acceptance: &AnchorAcceptanceResult) {
         let now = acceptance.outcome.accept_time;
         self.prune(now, None);
@@ -107,6 +140,7 @@ impl ReceiverCache {
                 self.insert(acceptance);
             }
         }
+        self.enforce_max_entries();
     }
 
     pub fn len(&self) -> usize {
@@ -301,6 +335,48 @@ mod tests {
                 )
                 .is_none()
         );
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn max_entries_evicts_oldest_acceptance() {
+        let mut cache = ReceiverCache::with_limits(Duration::from_secs(60), 2);
+
+        let mut first = acceptance(AcceptanceKind::NonMerge, 0x01, 0x01, 0x11);
+        first.outcome.accept_time = AcceptInstant::from_ticks(1);
+        let mut second = acceptance(AcceptanceKind::NonMerge, 0x02, 0x02, 0x22);
+        second.outcome.accept_time = AcceptInstant::from_ticks(2);
+        let mut third = acceptance(AcceptanceKind::NonMerge, 0x03, 0x03, 0x33);
+        third.outcome.accept_time = AcceptInstant::from_ticks(3);
+
+        cache.apply_acceptance(&first);
+        cache.apply_acceptance(&second);
+        cache.apply_acceptance(&third);
+
+        assert_eq!(cache.len(), 2);
+        assert!(
+            cache
+                .wid_for_head(&first.outcome.we_epoch_id, AcceptInstant::from_ticks(3))
+                .is_none(),
+            "oldest entry should be evicted when cache exceeds max_entries"
+        );
+        assert!(
+            cache
+                .wid_for_head(&second.outcome.we_epoch_id, AcceptInstant::from_ticks(3))
+                .is_some()
+        );
+        assert!(
+            cache
+                .wid_for_head(&third.outcome.we_epoch_id, AcceptInstant::from_ticks(3))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn zero_max_entries_disables_cache_storage() {
+        let mut cache = ReceiverCache::with_limits(Duration::from_secs(60), 0);
+        let acceptance = acceptance(AcceptanceKind::NonMerge, 0x44, 0x04, 0xF0);
+        cache.apply_acceptance(&acceptance);
         assert!(cache.is_empty());
     }
 }
