@@ -123,6 +123,7 @@ impl AnnexMTelemetryReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn telemetry_key_from_parts_copies_inputs() {
@@ -195,5 +196,48 @@ mod tests {
         assert_eq!(report.total_insertions, 3);
         assert_eq!(report.total_freeze_rho_replay, 1);
         assert_eq!(report.total_freeze_window_full, 1);
+    }
+
+    #[test]
+    fn annex_row_serializes_expected_fields() {
+        let row = AnnexMTelemetryRow {
+            gid: SmallVec::from_slice(&[0xAA, 0xBB]),
+            parent_root: [0xCC; 32],
+            head_attempts: 7,
+            head_insertions: 5,
+            freeze_rho_replay: 2,
+            freeze_window_full: 1,
+            last_active_heads: 4,
+        };
+        let value: Value = serde_json::to_value(&row).expect("serialize annex row");
+        assert!(value.get("gid").is_some());
+        assert!(value.get("parent_root").is_some());
+        assert_eq!(value.get("head_attempts"), Some(&Value::from(7u64)));
+        assert_eq!(value.get("head_insertions"), Some(&Value::from(5u64)));
+        assert_eq!(value.get("freeze_rho_replay"), Some(&Value::from(2u64)));
+        assert_eq!(value.get("freeze_window_full"), Some(&Value::from(1u64)));
+        assert_eq!(value.get("last_active_heads"), Some(&Value::from(4u64)));
+    }
+
+    #[test]
+    fn report_log_handles_empty_and_populated_rows() {
+        AnnexMTelemetryReport::default().log();
+
+        let report = AnnexMTelemetryReport {
+            rows: vec![AnnexMTelemetryRow {
+                gid: SmallVec::from_slice(&[0x01]),
+                parent_root: [0x11; 32],
+                head_attempts: 1,
+                head_insertions: 1,
+                freeze_rho_replay: 0,
+                freeze_window_full: 0,
+                last_active_heads: 1,
+            }],
+            total_attempts: 1,
+            total_insertions: 1,
+            total_freeze_rho_replay: 0,
+            total_freeze_window_full: 0,
+        };
+        report.log();
     }
 }

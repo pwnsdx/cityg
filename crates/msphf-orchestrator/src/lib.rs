@@ -5052,7 +5052,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn process_anchor_or_handles_merge() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let params = fixture.params();

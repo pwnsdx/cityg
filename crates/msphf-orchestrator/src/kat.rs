@@ -1725,7 +1725,10 @@ mod tests {
         let case: PlanCase = serde_json::from_value(json!({
             "id": "defaulted"
         }))?;
-        ensure!(matches!(case.branch, CaseBranch::A), "default branch must be A");
+        ensure!(
+            matches!(case.branch, CaseBranch::A),
+            "default branch must be A"
+        );
 
         let scenario: ScenarioPlan = serde_json::from_value(json!({
             "kind": "mhw-clock",
@@ -2075,7 +2078,10 @@ mod tests {
                 &hp_commit,
                 &hp_ciphertext,
             )?;
-            let KatCaseScenario::HeaderMissing { expected_freeze, .. } = scenario else {
+            let KatCaseScenario::HeaderMissing {
+                expected_freeze, ..
+            } = scenario
+            else {
                 return Err(anyhow!("expected header-missing scenario output"));
             };
             assert_eq!(expected_freeze, "srx_required");
@@ -2095,7 +2101,10 @@ mod tests {
                 &hp_commit,
                 &hp_ciphertext,
             )?;
-            let KatCaseScenario::MergeJoinKeys { expected_freeze, .. } = scenario else {
+            let KatCaseScenario::MergeJoinKeys {
+                expected_freeze, ..
+            } = scenario
+            else {
                 return Err(anyhow!("expected merge-carries-join scenario output"));
             };
             assert_eq!(expected_freeze, "921");
@@ -2114,7 +2123,10 @@ mod tests {
             (ScenarioPlan::SrxCommitMismatch, "srx_invalid"),
             (ScenarioPlan::SrxNoncanonical, "nonmem_noncanonical"),
             (ScenarioPlan::SrxNoncanonicalRightEq, "nonmem_noncanonical"),
-            (ScenarioPlan::SrxNoncanonicalIntervalOrder, "nonmem_noncanonical"),
+            (
+                ScenarioPlan::SrxNoncanonicalIntervalOrder,
+                "nonmem_noncanonical",
+            ),
         ];
 
         for (plan, expected_status) in expectations {
@@ -2149,7 +2161,8 @@ mod tests {
 
     #[test]
     fn witness_and_mask_helpers_cover_success_and_errors() -> Result<()> {
-        let (anchor, _header_map, _head, we_epoch_id, hp_commit, _hp_ciphertext) = scenario_fixture()?;
+        let (anchor, _header_map, _head, we_epoch_id, hp_commit, _hp_ciphertext) =
+            scenario_fixture()?;
         let anchor_instance =
             anchor_instance_from_owned(&anchor, we_epoch_id, Some(hp_commit.as_slice()));
 
@@ -2191,12 +2204,7 @@ mod tests {
             anchor_instance.join_delta_root[0] ^ 0x01
         );
 
-        assert!(prepare_witness(
-            Some(vec![0xFF, 0x00, 0xAA]),
-            &anchor_instance,
-            None
-        )
-        .is_err());
+        assert!(prepare_witness(Some(vec![0xFF, 0x00, 0xAA]), &anchor_instance, None).is_err());
 
         let mut m_a = [0u8; 32];
         let mut m_b = [0u8; 32];
@@ -2233,16 +2241,18 @@ mod tests {
             &mut m_b,
         )?;
         assert_eq!(m_b[1], 0x01);
-        assert!(apply_mask_mod(
-            &MaskModification::Flip {
-                target: MaskTarget::A,
-                byte: 0,
-                mask: "0011".to_string(),
-            },
-            &mut m_a,
-            &mut m_b,
-        )
-        .is_err());
+        assert!(
+            apply_mask_mod(
+                &MaskModification::Flip {
+                    target: MaskTarget::A,
+                    byte: 0,
+                    mask: "0011".to_string(),
+                },
+                &mut m_a,
+                &mut m_b,
+            )
+            .is_err()
+        );
 
         Ok(())
     }
