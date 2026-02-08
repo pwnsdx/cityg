@@ -818,6 +818,14 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[test]
+    fn demo_vrf_keys_are_stable_across_calls() {
+        let (sk1, pk1) = demo_vrf_keys();
+        let (sk2, pk2) = demo_vrf_keys();
+        assert_eq!(sk1, sk2);
+        assert_eq!(pk1, pk2);
+    }
+
     fn setup_demo_config_dir(label: &str) -> Result<(PathBuf, Option<OsString>), CityGError> {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
