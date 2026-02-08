@@ -234,6 +234,7 @@ Key `140` remains legacy `policy_version` (non‑FS profiles). Under this profil
 `fs_dev_commit := H_L("fs/dev/chain",[108 /*device pk*/, 141 /*fs_ec*/, 152])`.
 
 **SRX (Smallwood) fields (when SRX applies; **REQUIRED**):**
+*(Under this profile, SRX applies only in merge mode per §22.)*
 `160 srx_root_sw:bstr32`, `161 srx_smallwood:bstr`.
 
 **Proof material & commits:**
@@ -268,10 +269,13 @@ D_device_max := W + S_device                   // REQUIRED
 ### 12.2 Acceptance Pipeline *(publisher‑blind, **time‑blind**, DoS‑hardened)*
 
 Maintain `A := GroupState.last_accepted_ec` (monotone; init: `last_checkpoint_ec`).
-Maintain `GroupState.srx_root_sw` as durable SRX shadow state (initialized from genesis state; if no SRX state exists yet, initialize to `ZERO32`).
+Maintain `GroupState.srx_root_sw` as durable SRX shadow state.
+At genesis, `GroupState.srx_root_sw` MUST be `SRX_EMPTY_ROOT_SW` (Annex F/Annex N).
+If persisted `srx_root_sw` is missing at startup, the server MUST fail closed with `934` unless an explicit migration root is provided by policy.
 
 0. **Pre‑filters & maxima** — canonical CBOR, no duplicate keys, no unknown keys, respect size limits.
 1. **Structure/presence** — require FS (`139,141,142,143,146`) and device‑chain (`152–153`) fields; **if SRX applies**, require `160,161`.
+   Under this profile, in non-merge join mode `160/161` MUST be absent; presence is `930`.
 2. **Gates** — suite & `fs_policy_version` MUST be allow‑listed (Annex N).
 
 **(2a) FS base constant (join & merge; REQUIRED):**
@@ -298,8 +302,9 @@ Lookup `(stored_last_commit, stored_last_ec)` by device key `108`.
 
 3. **Proof commit & proofs (REQUIRED; fail‑fast):**
    1. Verify `125 == H_L("msphf/proofs",[95,146,(160,161 if present)])` **before** expensive proof verification.
-   2. When SRX applies, set `srx_root_sw_before := GroupState.srx_root_sw` and supply it as the public input `srx_root_sw_before`; the prover MUST NOT choose this value.
-   3. Verify proofs in order: **Smallwood (FS)** → **ZK‑VRF** (bind_fs, include `160` if present) → **SRX/Smallwood‑v1** (Annex F, if SRX applies).
+   2. When SRX applies, require `121` is `bstr32` and `122` is `bstr` (else `907.1`) before any SRX verification.
+   3. When SRX applies, set `srx_root_sw_before := GroupState.srx_root_sw` and supply it as the public input `srx_root_sw_before`; the prover MUST NOT choose this value.
+   4. Verify proofs in order: **Smallwood (FS)** → **ZK‑VRF** (bind_fs, include `160` if present) → **SRX/Smallwood‑v1** (Annex F, if SRX applies).
 4. **Defense‑in‑depth** — cross‑field binds across `93/94/98/99/106/110–113/116/139/141/142/143/152/153/(160 if present)`.
 5. **Atomic commit (REQUIRED):**
 
@@ -482,6 +487,10 @@ Arrays (132/133/134) are canonical CBOR, sorted by `weid`, no duplicates.
 
 ## 22) SRX Carve‑Out on Merges *(normative)*
 
+Under `tswe/msphf-we/fs-hybrid`, SRX-bearing anchors are **linearized merge-mode events**.
+Join anchors MUST NOT carry `160/161` (else `930`).
+Concurrent SRX-bearing heads are out of profile and MUST be rejected (`930`).
+
 **SRX is REQUIRED** iff revocation roots differ from the pivot (`112` or `113` differ); otherwise SRX is **FORBIDDEN**.
 When SRX is required, the merge MUST carry `160 srx_root_sw` and `161 srx_smallwood` and satisfy Annex F.
 
@@ -555,7 +564,7 @@ Transport derivations/forbidden Parent‑EID as in § 12.3.
 
 ## Annex E — Label & Field Registry *(normative)*
 
-Labels include `"msphf/xk"`, `"hp/kek/salt"`, `"hp/kek/nonce"`, `"hp/nonce"`, `"msphf/hp/commit"`, `"msphf/proofs"`, `"msphf/smallwood/chal"`, `"mhw/window"`, `"msphf/drbg"`, `"msphf/kgen/rho"`, `"msphf/rho/der"`, `"seedctx"`, `"fs/epoch/salt"`, `"fs/epoch/sk_salt"`, `"fs/kfs/salt"`, `"fs/epoch/commit"`, `"fs/timegrid/base"`, `"fs/dev/chain"`, `"srx/root_sw"`, and rollup labels as applicable.
+Labels include `"msphf/xk"`, `"hp/kek/salt"`, `"hp/kek/nonce"`, `"hp/nonce"`, `"msphf/hp/commit"`, `"msphf/proofs"`, `"msphf/smallwood/chal"`, `"mhw/window"`, `"msphf/drbg"`, `"msphf/kgen/rho"`, `"msphf/rho/der"`, `"seedctx"`, `"fs/epoch/salt"`, `"fs/epoch/sk_salt"`, `"fs/kfs/salt"`, `"fs/epoch/commit"`, `"fs/timegrid/base"`, `"fs/dev/chain"`, `"srx/root_sw"`, `"srx/root_sw/empty"`, `"srx/payload/digest"`, `"srx/bridge/v1"`, and rollup labels as applicable.
 
 ---
 
@@ -573,6 +582,9 @@ Labels include `"msphf/xk"`, `"hp/kek/salt"`, `"hp/kek/nonce"`, `"hp/nonce"`, `"
 * Include `160/161` in `125 := H_L("msphf/proofs",[95,146,(160,161)])`.
 * Include `160` in the **VRF bind tuple** (see § 11) whenever SRX applies.
 * On‑wire roots `112/113` remain canonical and normative.
+* `SRX_EMPTY_ROOT_SW := H_L("srx/root_sw/empty",[srx_smallwood_profile])`.
+* At genesis, `GroupState.srx_root_sw` MUST be initialized to `SRX_EMPTY_ROOT_SW`.
+* If a deployment upgrades from state without persisted `srx_root_sw`, startup MUST fail with `934` unless policy provides an explicit migration root. `ZERO32` MAY be used only when policy explicitly sets `SRX_EMPTY_ROOT_SW == ZERO32`.
 * Define bridge inputs and context:
 
 ```text
@@ -721,6 +733,7 @@ smallwood:
 
 ```yaml
 srx_smallwood_profile: srx-anemoi-128
+srx_empty_root_sw: H_L("srx/root_sw/empty",[srx_smallwood_profile])
 srx_smallwood:
   security: 128
   permutation: anemoi
