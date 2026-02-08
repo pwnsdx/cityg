@@ -275,8 +275,8 @@ If persisted `srx_root_sw` is missing at startup: use `srx_migration_root_sw` (p
 
 0. **Pre‑filters & maxima** — canonical CBOR, no duplicate keys, no unknown keys, respect size limits.
 1. **Structure/presence** — require FS (`139,141,142,143,146`) and device‑chain (`152–153`) fields; **if SRX applies**, require `160,161`.
-   Define `is_merge :=` header contains any merge-only key in `{130,131,132,133,134,135,136,138,144,145,148}`.
-   If `is_merge == false` (join mode), `160/161` MUST be absent; presence is `930`.
+   Define `is_merge :=` header contains any merge-only key (see §21; `{130,131,132,133,134,135,136,138,144,145,148}` in this profile).
+   If `is_merge == false` (join mode), `121/122/160/161` MUST be absent; presence is `930`.
 2. **Gates** — suite & `fs_policy_version` MUST be allow‑listed (Annex N).
 
 **(2a) FS base constant (join & merge; REQUIRED):**
@@ -459,7 +459,7 @@ State: ~64 B per active device; group state maintains two counters.
   – `125` mismatch when `160/161` present → `923`.
   – VRF bind mismatch (tamper `160`) → `944.3`.
   – Invalid SRX proof → `930`.
-  – Join anchor carrying `160/161` → `930`.
+  – Join anchor carrying any of `121/122/160/161` → `930`.
   – Startup with missing persisted `srx_root_sw`: no `srx_migration_root_sw` → startup fails `934`; with `srx_migration_root_sw` → initialize once and proceed.
   – Genesis initialization: `GroupState.srx_root_sw == SRX_EMPTY_ROOT_SW` for configured `srx_smallwood_profile`.
 * **Publisher‑blindness negative:** Supplying `kbroad_sk` (or any KBROAD private material) in server config MUST fail at startup with `934`.
@@ -494,7 +494,7 @@ Arrays (132/133/134) are canonical CBOR, sorted by `weid`, no duplicates.
 ## 22) SRX Carve‑Out on Merges *(normative)*
 
 Under `tswe/msphf-we/fs-hybrid`, SRX-bearing anchors are **linearized merge-mode events**.
-Join anchors MUST NOT carry `160/161` (else `930`).
+Join anchors MUST NOT carry SRX-only keys `121/122/160/161` (else `930`).
 Concurrent SRX-bearing heads are out of profile and MUST be rejected (`930`).
 
 **SRX is REQUIRED** iff revocation roots differ from the pivot (`112` or `113` differ); otherwise SRX is **FORBIDDEN**.
@@ -714,6 +714,7 @@ allow_suites: ["rlwe-merkle/v1"]
 fs_policy_version: 7
 srx_migration_root_sw: null      # OPTIONAL bstr32; one-time init only when persisted srx_root_sw is missing
 ```
+If `srx_migration_root_sw` is present, it MUST be `bstr32`; otherwise startup MUST fail with `934`.
 
 **Presets:**
 
@@ -776,7 +777,7 @@ For time-blind FLG, deployments MUST specify how `A` is advanced after long idle
 ## Annex I — Implementation Binding (Server/Client) *(normative)*
 
 **Server (REQUIRED):** Enforce FS base (`143`), device chain (`152/153`), FLG vs `A`, **SRX/Smallwood‑v1** carve‑outs, Smallwood & VRF binds (incl. `160`), parity, **no `kbroad_replay`**, time‑blind checkpoint rule; maintain durable `last_checkpoint_ec`, `A`, `srx_root_sw`, and per‑device map; atomicity; crash‑rehydration. Server MUST fail closed (return `934 suite/config error`) if any KBROAD private material (e.g., `kbroad_sk`, injected `K_HP`) is supplied at startup, and SHOULD NOT link a KEM decapsulation entry point on the acceptance path.
-**Client (REQUIRED):** Maintain `K_fs^t`, `fs_ec`, encrypted τₑ cache; device‑chain LRU; bounded queues; compute `ec_local(now)` (Annex H); evolve on boundary; zeroize old `K_fs`; enforce device‑chain monotonicity; mirror FLG at **adoption**; adopt checkpoints only when local counter is ready and forward cap allows.
+**Client (REQUIRED):** Maintain `K_fs^t`, `fs_ec`, encrypted τₑ cache; device‑chain LRU; bounded queues; compute `ec_local(now)` (Annex H); evolve on boundary; zeroize old `K_fs`; enforce device‑chain monotonicity; mirror FLG at **adoption**; adopt checkpoints only when local counter is ready and forward cap allows. Clients that verify SRX MUST persist `srx_root_sw` and update it on accepted SRX-bearing merges.
 
 ---
 
