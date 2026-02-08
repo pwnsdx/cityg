@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use ahash::AHashMap;
 
 const MAX_WITNESS_CBOR_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SRX_CBOR_BYTES: usize = 4 * 1024 * 1024;
 
 type NonMemResult =
     Result<(RawNonMembershipWitness, Option<[u8; 32]>, Option<[u8; 32]>), CityGError>;
@@ -114,6 +115,9 @@ impl SrxInputsOwned {
     }
 
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CityGError> {
+        if bytes.len() > MAX_SRX_CBOR_BYTES {
+            return Err(CityGError::InvalidInput("srx payload too large"));
+        }
         ciborium::de::from_reader(bytes)
             .map_err(|_| CityGError::InvalidInput("unable to parse SRX inputs"))
     }

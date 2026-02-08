@@ -328,3 +328,10 @@ fn test_srx_inputs_from_cbor_invalid() {
     let err = SrxInputsOwned::from_cbor(&[0xFF, 0x00]).expect_err("invalid cbor should fail");
     assert!(err.to_string().contains("unable to parse SRX inputs"));
 }
+
+#[test]
+fn test_srx_inputs_from_cbor_rejects_oversized_payload() {
+    let oversized = vec![0u8; (4 * 1024 * 1024) + 1];
+    let err = SrxInputsOwned::from_cbor(&oversized).expect_err("oversized SRX payload must fail");
+    assert!(err.to_string().contains("srx payload too large"));
+}
