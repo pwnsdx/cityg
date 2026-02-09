@@ -334,7 +334,7 @@ To leave the current room:
 - WebSocket connection is closed
 - You can rejoin at any time
 
-**⚠️ Note:** Leaving does NOT revoke your membership. Other members can still see you in the roster and send messages to your leaf ID.
+**⚠️ Note:** In the current merge/leave flow, leaving publishes a self-revocation delta. Other members should see a roster `revoke` event for your leaf ID after the leave is accepted.
 
 ### Automatic Epoch Rotation
 
