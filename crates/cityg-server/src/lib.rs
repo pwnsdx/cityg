@@ -995,7 +995,10 @@ mod tests {
             Err(e) => e,
             Ok(_) => unreachable!("rotating an unknown group must fail"),
         };
-        assert!(matches!(missing, CityGError::InvalidInput("kbroad key missing")));
+        assert!(matches!(
+            missing,
+            CityGError::InvalidInput("kbroad key missing")
+        ));
 
         server.register_group(&gid, key.clone())?;
         let unchanged = match server.rotate_group_kbroad(&gid, key) {
@@ -1987,11 +1990,17 @@ impl GroupRoster {
     }
 
     fn mark_kbroad_rotation_required(&mut self, gid: &[u8]) {
-        self.groups.entry(gid.to_vec()).or_default().rotation_required = true;
+        self.groups
+            .entry(gid.to_vec())
+            .or_default()
+            .rotation_required = true;
     }
 
     fn clear_kbroad_rotation_required(&mut self, gid: &[u8]) {
-        self.groups.entry(gid.to_vec()).or_default().rotation_required = false;
+        self.groups
+            .entry(gid.to_vec())
+            .or_default()
+            .rotation_required = false;
     }
 }
 

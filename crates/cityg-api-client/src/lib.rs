@@ -135,8 +135,8 @@ use pb::{
     GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetTelemetryResponse,
     GetWindowRequest, GetWindowResponse, JoinTicketRequest, JoinTicketResponse, MembersRequest,
     MembersResponse, MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest,
-    RefreshPivotResponse, RotateRoomKbroadRequest, RotateRoomKbroadResponse,
-    SearchMembersRequest, SearchMembersResponse, SendMessageRequest, SendMessageResponse,
+    RefreshPivotResponse, RotateRoomKbroadRequest, RotateRoomKbroadResponse, SearchMembersRequest,
+    SearchMembersResponse, SendMessageRequest, SendMessageResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -1388,7 +1388,9 @@ mod tests {
     fn admin_token_path_classification_and_builder() {
         assert!(CitygApiClient::requires_admin_token("/v1/config/window"));
         assert!(CitygApiClient::requires_admin_token("/v1/rooms/bootstrap"));
-        assert!(CitygApiClient::requires_admin_token("/v1/rooms/rotate_kbroad"));
+        assert!(CitygApiClient::requires_admin_token(
+            "/v1/rooms/rotate_kbroad"
+        ));
         assert!(!CitygApiClient::requires_admin_token("/v1/members"));
 
         let client = CitygApiClient::new("http://localhost:8080").with_admin_token("  secret  ");

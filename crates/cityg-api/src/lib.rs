@@ -552,10 +552,7 @@ fn configured_rooms_admin_token() -> Option<String> {
         .or_else(configured_window_admin_token)
 }
 
-fn enforce_admin_token(
-    headers: &HeaderMap,
-    expected_token: Option<&str>,
-) -> Result<(), ApiError> {
+fn enforce_admin_token(headers: &HeaderMap, expected_token: Option<&str>) -> Result<(), ApiError> {
     let Some(expected_token) = expected_token else {
         return Ok(());
     };
@@ -576,7 +573,10 @@ fn enforce_window_config_auth(
     enforce_admin_token(headers, expected_token)
 }
 
-fn enforce_room_admin_auth(headers: &HeaderMap, expected_token: Option<&str>) -> Result<(), ApiError> {
+fn enforce_room_admin_auth(
+    headers: &HeaderMap,
+    expected_token: Option<&str>,
+) -> Result<(), ApiError> {
     enforce_admin_token(headers, expected_token)
 }
 
