@@ -21,6 +21,8 @@ use msphf_orchestrator::{
     OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
 };
 use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
+use pqcrypto_kyber::kyber768;
+use pqcrypto_traits::kem::PublicKey as KemPublicKeyTrait;
 use pqcrypto_traits::sign::{
     DetachedSignature as DilithiumDetachedSignatureTrait, PublicKey as DilithiumPublicKeyTrait,
 };
@@ -32,26 +34,69 @@ use tokio::{sync::mpsc, time::timeout};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tracing::warn;
 
-fn demo_vrf_keys() -> (&'static [u8], &'static [u8]) {
-    static VRF_KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
-    let pair = VRF_KEYS.get_or_init(|| {
-        let params = match msphf_orchestrator::lb::generate_parameters([0u8; 32]) {
-            Ok(params) => params,
-            Err(_) => unreachable!("deterministic join-leave VRF params must be derivable"),
-        };
-        match msphf_orchestrator::lb::generate_keypair(&params, [1u8; 32]) {
-            Ok(pair) => pair,
-            Err(_) => unreachable!("deterministic join-leave VRF keypair must be derivable"),
-        }
-    });
-    (&pair.0, &pair.1)
-}
-
 fn random_room_id() -> String {
     let mut rng = thread_rng();
     let mut bytes = [0u8; 32];
     rng.fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
+const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
+
+fn read_nonempty_env(var: &str) -> Option<String> {
+    std::env::var(var)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn configured_client_admin_token() -> Option<String> {
+    read_nonempty_env(CLIENT_ADMIN_TOKEN_ENV)
+        .or_else(|| read_nonempty_env("CITYG_SERVER_ROOMS_ADMIN_TOKEN"))
+        .or_else(|| read_nonempty_env("CITYG_SERVER_WINDOW_ADMIN_TOKEN"))
+}
+
+fn configured_client_message_token() -> Option<String> {
+    read_nonempty_env(CLIENT_MESSAGE_TOKEN_ENV)
+        .or_else(|| read_nonempty_env("CITYG_SERVER_MESSAGE_AUTH_TOKEN"))
+}
+
+fn new_api_client(server_url: &str) -> CitygApiClient {
+    let mut client = CitygApiClient::new(server_url);
+    if let Some(token) = configured_client_admin_token() {
+        client = client.with_admin_token(token);
+    }
+    if let Some(token) = configured_client_message_token() {
+        client = client.with_message_auth_token(token);
+    }
+    client
+}
+
+fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut params_seed = [0u8; 32];
+    let mut key_seed = [0u8; 32];
+    let mut rng = thread_rng();
+    rng.fill_bytes(&mut params_seed);
+    rng.fill_bytes(&mut key_seed);
+    let params = msphf_orchestrator::lb::generate_parameters(params_seed)
+        .map_err(|err| anyhow!("generate VRF params: {err}"))?;
+    msphf_orchestrator::lb::generate_keypair(&params, key_seed)
+        .map_err(|err| anyhow!("generate VRF keypair: {err}"))
+}
+
+fn fresh_kbroad_public() -> Vec<u8> {
+    let (public, _) = kyber768::keypair();
+    KemPublicKeyTrait::as_bytes(&public).to_vec()
+}
+
+async fn rotate_room_kbroad_with_fresh_key(client: &CitygApiClient, room_id: &str) -> Result<()> {
+    let fresh_public = fresh_kbroad_public();
+    client
+        .rotate_room_kbroad(room_id, &fresh_public)
+        .await
+        .context("rotate room KBROAD")?;
+    Ok(())
 }
 
 fn bytes32(name: &str, input: &[u8]) -> Result<[u8; 32]> {
@@ -366,7 +411,7 @@ struct Session {
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
-    let client = CitygApiClient::new(server_url);
+    let client = new_api_client(server_url);
     let (pop_pk, pop_sk) = dilithium5::keypair();
     let pop_public_key = DilithiumPublicKeyTrait::as_bytes(&pop_pk).to_vec();
     let pop_secret = Box::new(pop_sk);
@@ -385,10 +430,24 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         signature: binding_signature.as_bytes().to_vec(),
     };
 
-    let ticket = match client
-        .join_ticket(room_id, alias, Some(identity_binding))
-        .await
+    let mut join_ticket_result = client
+        .join_ticket(room_id, alias, Some(identity_binding.clone()))
+        .await;
+    if let Err(ApiClientError::HttpStatus {
+        status, message, ..
+    }) = &join_ticket_result
+        && status.is_server_error()
+        && message.contains("kbroad rotation required")
     {
+        rotate_room_kbroad_with_fresh_key(&client, room_id)
+            .await
+            .context("rotate KBROAD before join")?;
+        join_ticket_result = client
+            .join_ticket(room_id, alias, Some(identity_binding))
+            .await;
+    }
+
+    let ticket = match join_ticket_result {
         Ok(t) => t,
         Err(ApiClientError::HttpStatus {
             status,
@@ -439,7 +498,8 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         seed
     });
 
-    let (vrf_secret_key, vrf_public_key) = demo_vrf_keys();
+    let (vrf_secret_key, vrf_public_key) =
+        generate_vrf_keys().context("generate runtime VRF keypair")?;
 
     let params = OrchestrationParams {
         msphf_crs_id: ticket.msphf_crs_id.as_str(),
@@ -459,8 +519,8 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         proof_mode: ticket.proof_mode.as_str(),
         vrf_id: ticket.vrf_id.as_str(),
         policy_version: ticket.policy_version.as_str(),
-        vrf_secret_key: Some(vrf_secret_key),
-        vrf_public_key: Some(vrf_public_key),
+        vrf_secret_key: Some(vrf_secret_key.as_slice()),
+        vrf_public_key: Some(vrf_public_key.as_slice()),
         fs_policy_version: ticket.fs_policy_version.as_str(),
         fs_epoch_base_ts: ticket.fs_epoch_base_ts,
         fs_join: FsJoinInputs::default(),
@@ -544,8 +604,8 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         leaf_id,
         pop_public_key,
         pop_secret,
-        vrf_secret_key: vrf_secret_key.to_vec(),
-        vrf_public_key: vrf_public_key.to_vec(),
+        vrf_secret_key,
+        vrf_public_key,
         fs_ec,
         fs_epoch_commit,
         fs_dev_prev_commit,
@@ -560,11 +620,24 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
 }
 
 async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
-    let client = CitygApiClient::new(&session.server_url);
-    let ticket = client
+    let client = new_api_client(&session.server_url);
+    let mut merge_ticket_result = client
         .merge_ticket(&session.room_id, &session.leaf_id)
-        .await
-        .context("fetch merge ticket")?;
+        .await;
+    if let Err(ApiClientError::HttpStatus {
+        status, message, ..
+    }) = &merge_ticket_result
+        && status.is_server_error()
+        && message.contains("kbroad rotation required")
+    {
+        rotate_room_kbroad_with_fresh_key(&client, &session.room_id)
+            .await
+            .context("rotate KBROAD before merge")?;
+        merge_ticket_result = client
+            .merge_ticket(&session.room_id, &session.leaf_id)
+            .await;
+    }
+    let ticket = merge_ticket_result.context("fetch merge ticket")?;
 
     let parities = hydrate_parities(
         &ticket.parities,
@@ -942,11 +1015,25 @@ async fn run_watch_mode(
     println!(
         "watch mode: server={server_url} room={room_id} alias_base={alias_base} count={count}"
     );
-    let ws_url = websocket_url(server_url);
-    let (mut event_rx, ws_handle) = spawn_notification_listener(&ws_url).await?;
     let mut sessions = Vec::with_capacity(count);
 
-    for i in 0..count {
+    let first_alias = alias_for(alias_base, count, 0);
+    println!("joining alias={first_alias}");
+    let first_session = perform_join(server_url, room_id, &first_alias).await?;
+    println!("join ok: weid={}", hex::encode(first_session.we_epoch_id));
+    log_fingerprints(&first_session);
+    let message_token = configured_client_message_token()
+        .ok_or_else(|| anyhow!("message auth token is not configured"))?;
+    let ws_url = websocket_url(
+        server_url,
+        &first_session.gid,
+        &first_session.leaf_id,
+        &message_token,
+    );
+    let (mut event_rx, ws_handle) = spawn_notification_listener(&ws_url).await?;
+    sessions.push(first_session);
+
+    for i in 1..count {
         let alias = alias_for(alias_base, count, i);
         println!("joining alias={alias}");
         let session = perform_join(server_url, room_id, &alias).await?;
@@ -1010,7 +1097,7 @@ async fn run_watch_mode(
 }
 
 async fn send_dummy_message(session: &Session) -> Result<()> {
-    let client = CitygApiClient::new(&session.server_url);
+    let client = new_api_client(&session.server_url);
     let mut ciphertext = vec![0u8; 64];
     thread_rng().fill_bytes(&mut ciphertext);
     client
@@ -1126,14 +1213,19 @@ async fn expect_message_event(
     .await?
 }
 
-fn websocket_url(server_url: &str) -> String {
-    if let Some(rest) = server_url.strip_prefix("https://") {
-        format!("wss://{rest}/v1/ws")
+fn websocket_url(server_url: &str, gid: &[u8; 32], leaf_id: &[u8; 32], token: &str) -> String {
+    let base = if let Some(rest) = server_url.strip_prefix("https://") {
+        format!("wss://{rest}")
     } else if let Some(rest) = server_url.strip_prefix("http://") {
-        format!("ws://{rest}/v1/ws")
+        format!("ws://{rest}")
     } else {
-        format!("ws://{server_url}/v1/ws")
-    }
+        format!("ws://{server_url}")
+    };
+    format!(
+        "{base}/v1/ws?gid={}&leaf_id={}&token={token}",
+        hex::encode(gid),
+        hex::encode(leaf_id)
+    )
 }
 
 #[derive(Debug)]
@@ -1420,7 +1512,7 @@ mod tests {
     use futures::SinkExt;
     use std::{
         sync::{
-            Arc,
+            Arc, OnceLock,
             atomic::{AtomicU16, Ordering},
         },
         time::Duration,
@@ -1428,11 +1520,29 @@ mod tests {
     use tokio::time::sleep;
 
     static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18600);
+    static TEST_AUTH_ENV: OnceLock<()> = OnceLock::new();
+
+    fn ensure_test_auth_env() {
+        TEST_AUTH_ENV.get_or_init(|| unsafe {
+            std::env::set_var("CITYG_SERVER_ROOMS_ADMIN_TOKEN", "join-leave-admin-token");
+            std::env::set_var("CITYG_SERVER_WINDOW_ADMIN_TOKEN", "join-leave-admin-token");
+            std::env::set_var(
+                "CITYG_SERVER_MESSAGE_AUTH_TOKEN",
+                "join-leave-message-token",
+            );
+            std::env::set_var("CITYG_CLIENT_ADMIN_TOKEN", "join-leave-admin-token");
+            std::env::set_var(
+                "CITYG_CLIENT_MESSAGE_AUTH_TOKEN",
+                "join-leave-message-token",
+            );
+        });
+    }
 
     async fn spawn_server_on_with_seed_demo(
         port: u16,
         seed_demo_room: bool,
     ) -> tokio::task::JoinHandle<()> {
+        ensure_test_auth_env();
         tokio::spawn(async move {
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             let mut config = CityGConfig::default();
@@ -1448,7 +1558,8 @@ mod tests {
     }
 
     async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<()> {
-        CitygApiClient::new(server_url)
+        ensure_test_auth_env();
+        new_api_client(server_url)
             .bootstrap_room(room_id, demo::kbroad_public())
             .await
             .map_err(anyhow::Error::from)
@@ -1502,6 +1613,17 @@ mod tests {
 
         let err = bytes32("room", &[0xAB; 31]).expect_err("must reject non-32-byte input");
         assert!(err.to_string().contains("room must be 32 bytes"));
+        Ok(())
+    }
+
+    #[test]
+    fn generate_vrf_keys_are_not_deterministic() -> Result<()> {
+        let (secret_a, public_a) = generate_vrf_keys()?;
+        let (secret_b, public_b) = generate_vrf_keys()?;
+        assert!(!secret_a.is_empty());
+        assert!(!public_a.is_empty());
+        assert_ne!(secret_a, secret_b);
+        assert_ne!(public_a, public_b);
         Ok(())
     }
 
@@ -1589,15 +1711,32 @@ mod tests {
 
     #[test]
     fn websocket_url_converts_schemes() {
+        let gid = [0x11u8; 32];
+        let leaf_id = [0x22u8; 32];
         assert_eq!(
-            websocket_url("http://127.0.0.1:18080"),
-            "ws://127.0.0.1:18080/v1/ws"
+            websocket_url("http://127.0.0.1:18080", &gid, &leaf_id, "token"),
+            format!(
+                "ws://127.0.0.1:18080/v1/ws?gid={}&leaf_id={}&token=token",
+                hex::encode(gid),
+                hex::encode(leaf_id)
+            )
         );
         assert_eq!(
-            websocket_url("https://example.com"),
-            "wss://example.com/v1/ws"
+            websocket_url("https://example.com", &gid, &leaf_id, "token"),
+            format!(
+                "wss://example.com/v1/ws?gid={}&leaf_id={}&token=token",
+                hex::encode(gid),
+                hex::encode(leaf_id)
+            )
         );
-        assert_eq!(websocket_url("localhost:9000"), "ws://localhost:9000/v1/ws");
+        assert_eq!(
+            websocket_url("localhost:9000", &gid, &leaf_id, "token"),
+            format!(
+                "ws://localhost:9000/v1/ws?gid={}&leaf_id={}&token=token",
+                hex::encode(gid),
+                hex::encode(leaf_id)
+            )
+        );
     }
 
     #[test]
@@ -2050,7 +2189,7 @@ mod tests {
         bootstrap_test_room(&server_url, &room_id).await?;
         let alice = perform_join(&server_url, &room_id, "alice").await?;
         let bob = perform_join(&server_url, &room_id, "bob").await?;
-        let client = CitygApiClient::new(&server_url);
+        let client = new_api_client(&server_url);
         let before_leave = client.members(&alice.gid, None).await?;
         assert_eq!(before_leave.total_count, 2);
         assert!(

@@ -2527,18 +2527,7 @@ fn header_bytes32_or_freeze(
         );
         return Err(AcceptanceError::Freeze(freeze));
     };
-    let result = match value {
-        Value::Bytes(_) => value_bytes32(value, freeze),
-        _ => {
-            debug!(
-                "header_bytes32_or_freeze: key {} label {} had type {:?}",
-                key, label, value
-            );
-            Err(AcceptanceError::Msphf(MsphfError::invalid_input(format!(
-                "{label} not bytes"
-            ))))
-        }
-    };
+    let result = value_bytes32(value, freeze);
     if matches!(key, 110..=113) {
         match &result {
             Ok(bytes) => debug!(
@@ -2560,14 +2549,14 @@ fn header_u64_or_freeze(
     let Some(value) = header.get(&key) else {
         return Err(AcceptanceError::Freeze(freeze));
     };
-    match value {
-        Value::Integer(int) => u64::try_from(*int).map_err(|_| {
-            AcceptanceError::Msphf(MsphfError::invalid_input(format!("{label} not unsigned")))
-        }),
-        _ => Err(AcceptanceError::Msphf(MsphfError::invalid_input(format!(
-            "{label} not unsigned"
-        )))),
-    }
+    let Value::Integer(int) = value else {
+        debug!(
+            "header_u64_or_freeze: key {} label {} had type {:?}",
+            key, label, value
+        );
+        return Err(AcceptanceError::Freeze(freeze));
+    };
+    u64::try_from(*int).map_err(|_| AcceptanceError::Freeze(freeze))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2663,6 +2652,35 @@ mod tests {
             AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_DEVICE)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn header_type_mismatch_helpers_emit_freeze_errors() {
+        let freeze = FREEZE_FIELD_MISSING;
+        let mut header = BTreeMap::new();
+        header.insert(110, Value::Integer(Integer::from(7)));
+        let bytes_err = header_bytes32_or_freeze(&header, 110, freeze, "parent_root")
+            .expect_err("bytes32 type mismatch should freeze");
+        assert!(matches!(
+            bytes_err,
+            AcceptanceError::Freeze(code) if code == freeze
+        ));
+
+        header.insert(HDR_FS_EC, Value::Text("not-integer".to_string()));
+        let u64_err = header_u64_or_freeze(&header, HDR_FS_EC, freeze, "fs_ec")
+            .expect_err("u64 type mismatch should freeze");
+        assert!(matches!(
+            u64_err,
+            AcceptanceError::Freeze(code) if code == freeze
+        ));
+
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(-1)));
+        let signed_err = header_u64_or_freeze(&header, HDR_FS_EC, freeze, "fs_ec")
+            .expect_err("signed integer should freeze");
+        assert!(matches!(
+            signed_err,
+            AcceptanceError::Freeze(code) if code == freeze
+        ));
     }
 
     #[test]

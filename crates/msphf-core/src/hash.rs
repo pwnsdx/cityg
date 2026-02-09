@@ -104,13 +104,13 @@ pub fn h_branch_bytes(
     )
 }
 
-/// Compute the normative `XOF(seed, ctx)` function (32-byte output).
+/// Build a BLAKE3 XOF reader for the normative `XOF(seed, ctx)` function.
 ///
 /// # Panics
 ///
 /// Panics if `ctx` contains embedded NUL bytes, which would corrupt the
 /// label separator.
-pub fn xof32(ctx: &str, seed: &[u8]) -> [u8; 32] {
+pub fn xof_reader(ctx: &str, seed: &[u8]) -> blake3::OutputReader {
     assert!(
         !ctx.as_bytes().contains(&0u8),
         "xof32 ctx must not contain embedded NUL bytes"
@@ -120,7 +120,17 @@ pub fn xof32(ctx: &str, seed: &[u8]) -> [u8; 32] {
     hasher.update(ctx.as_bytes());
     hasher.update(&[0u8]);
     hasher.update(seed);
-    let mut reader = hasher.finalize_xof();
+    hasher.finalize_xof()
+}
+
+/// Compute the normative `XOF(seed, ctx)` function (32-byte output).
+///
+/// # Panics
+///
+/// Panics if `ctx` contains embedded NUL bytes, which would corrupt the
+/// label separator.
+pub fn xof32(ctx: &str, seed: &[u8]) -> [u8; 32] {
+    let mut reader = xof_reader(ctx, seed);
     let mut out = [0u8; 32];
     reader.fill(&mut out);
     out
@@ -275,5 +285,15 @@ mod tests {
             derived, plain_out,
             "xof32 must use derive_key mode and not plain BLAKE3 mode"
         );
+    }
+
+    #[test]
+    fn xof_reader_prefix_matches_xof32() {
+        let ctx = "reader-prefix";
+        let seed = [0x5Cu8; 32];
+        let mut reader = xof_reader(ctx, &seed);
+        let mut first = [0u8; 32];
+        reader.fill(&mut first);
+        assert_eq!(first, xof32(ctx, &seed));
     }
 }

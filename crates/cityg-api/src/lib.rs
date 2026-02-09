@@ -11,7 +11,10 @@ use std::{
     collections::{BTreeMap, HashSet},
     convert::TryInto,
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -21,7 +24,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::ws::{Message as WsMessage, WebSocket},
-    extract::{DefaultBodyLimit, State, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Query, State, WebSocketUpgrade},
     http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE},
     middleware as axum_middleware,
     response::{IntoResponse, Response},
@@ -50,14 +53,17 @@ use unicode_normalization::UnicodeNormalization;
 
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_server::{CityGServer, MergeTicketBundle, ServerConfig, ServerOutcome};
-use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
+use msphf_core::{
+    MsphfError,
+    params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK},
+};
 use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
 use msphf_orchestrator::{
     AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, FsPolicyConfig,
     LeafIdMode, PivotParity, compute_leaf_id,
 };
 use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use serde_json::to_vec as to_json_vec;
 
@@ -153,6 +159,10 @@ const API_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const WINDOW_CONFIG_ADMIN_HEADER: &str = "x-cityg-admin-token";
 const WINDOW_CONFIG_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_WINDOW_ADMIN_TOKEN";
 const ROOMS_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_ROOMS_ADMIN_TOKEN";
+const ALLOW_INSECURE_ADMIN_ENV: &str = "CITYG_SERVER_ALLOW_INSECURE_ADMIN";
+const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
+const MESSAGE_AUTH_TOKEN_ENV: &str = "CITYG_SERVER_MESSAGE_AUTH_TOKEN";
+const MESSAGE_PRUNE_INTERVAL_MS: u64 = 1_000;
 const WS_MAX_LAG_ENV: &str = "CITYG_SERVER_WS_MAX_LAG";
 const WS_MAX_LAG_DEFAULT: u64 = 256;
 
@@ -168,15 +178,31 @@ struct ApiState {
     alias_registry: Arc<RwLock<AHashMap<String, AliasBinding>>>,
     member_metadata: Arc<RwLock<AHashMap<[u8; 32], MemberMetadata>>>,
     weid_to_leaf: Arc<RwLock<AHashMap<[u8; 32], [u8; 32]>>>,
+    epoch_scopes: Arc<RwLock<AHashMap<[u8; 32], EpochScope>>>,
     // Broadcast channel for WebSocket notifications
     notification_tx: broadcast::Sender<BroadcastNotification>,
     alias_rate_limiter: AliasRateLimiter,
+    message_prune_due_ms: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Debug)]
 struct MessageNotification {
+    gid: [u8; 32],
     we_epoch_id: [u8; 32],
     timestamp_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EpochScope {
+    gid: [u8; 32],
+    membership_root: [u8; 32],
+}
+
+#[derive(Clone, Deserialize)]
+struct WebSocketSubscriptionQuery {
+    gid: String,
+    leaf_id: String,
+    token: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -303,16 +329,20 @@ impl ApiState {
         map.retain(|_, existing| !revoked.contains(existing));
     }
 
-    async fn touch_member_for_weid(&self, we_epoch_id: &[u8; 32], timestamp_ms: u64) {
-        let leaf = {
-            let map = self.weid_to_leaf.read().await;
-            map.get(we_epoch_id).copied()
-        };
-        if let Some(leaf_id) = leaf {
-            let mut metadata = self.member_metadata.write().await;
-            if let Some(entry) = metadata.get_mut(&leaf_id) {
-                entry.last_seen_timestamp_ms = timestamp_ms;
-            }
+    async fn record_epoch_scope(&self, we_epoch_id: [u8; 32], scope: EpochScope) {
+        let mut scopes = self.epoch_scopes.write().await;
+        scopes.insert(we_epoch_id, scope);
+    }
+
+    async fn epoch_scope_for_weid(&self, we_epoch_id: &[u8; 32]) -> Option<EpochScope> {
+        let scopes = self.epoch_scopes.read().await;
+        scopes.get(we_epoch_id).copied()
+    }
+
+    async fn touch_member(&self, leaf_id: [u8; 32], timestamp_ms: u64) {
+        let mut metadata = self.member_metadata.write().await;
+        if let Some(entry) = metadata.get_mut(&leaf_id) {
+            entry.last_seen_timestamp_ms = timestamp_ms;
         }
     }
 
@@ -375,6 +405,31 @@ fn prune_expired_messages(
         messages.retain(|msg| msg.timestamp_ms >= cutoff);
         !messages.is_empty()
     });
+}
+
+fn should_prune_messages(prune_due_ms: &AtomicU64, now_ms: u64) -> bool {
+    let due = prune_due_ms.load(Ordering::Relaxed);
+    if now_ms < due {
+        return false;
+    }
+    prune_due_ms
+        .compare_exchange(
+            due,
+            now_ms.saturating_add(MESSAGE_PRUNE_INTERVAL_MS),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+}
+
+fn maybe_prune_expired_messages(
+    state: &ApiState,
+    store: &mut AHashMap<[u8; 32], Vec<StoredMessage>>,
+    now_ms: u64,
+) {
+    if should_prune_messages(state.message_prune_due_ms.as_ref(), now_ms) {
+        prune_expired_messages(store, now_ms, state.message_retention);
+    }
 }
 
 #[derive(Debug, Error)]
@@ -537,6 +592,16 @@ fn parse_gid(room_id: &str) -> Result<[u8; 32], ApiError> {
     Ok(gid)
 }
 
+fn parse_hex_32(label: &'static str, value: &str) -> Result<[u8; 32], ApiError> {
+    let bytes = Vec::from_hex(value).map_err(|_| ApiError::InvalidRequest(label))?;
+    if bytes.len() != 32 {
+        return Err(ApiError::InvalidRequest(label));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
 fn configured_window_admin_token() -> Option<String> {
     std::env::var(WINDOW_CONFIG_ADMIN_TOKEN_ENV)
         .ok()
@@ -552,9 +617,33 @@ fn configured_rooms_admin_token() -> Option<String> {
         .or_else(configured_window_admin_token)
 }
 
-fn enforce_admin_token(headers: &HeaderMap, expected_token: Option<&str>) -> Result<(), ApiError> {
+fn configured_message_auth_token() -> Option<String> {
+    std::env::var(MESSAGE_AUTH_TOKEN_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_bool_env(raw: Option<String>) -> bool {
+    raw.map(|value| value.trim().to_ascii_lowercase())
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn allow_insecure_admin() -> bool {
+    parse_bool_env(std::env::var(ALLOW_INSECURE_ADMIN_ENV).ok())
+}
+
+fn enforce_admin_token_with_policy(
+    headers: &HeaderMap,
+    expected_token: Option<&str>,
+    allow_insecure: bool,
+) -> Result<(), ApiError> {
     let Some(expected_token) = expected_token else {
-        return Ok(());
+        if allow_insecure {
+            return Ok(());
+        }
+        return Err(ApiError::Unauthorized("admin token is not configured"));
     };
     let provided = headers
         .get(WINDOW_CONFIG_ADMIN_HEADER)
@@ -564,6 +653,10 @@ fn enforce_admin_token(headers: &HeaderMap, expected_token: Option<&str>) -> Res
     } else {
         Err(ApiError::Unauthorized("missing or invalid admin token"))
     }
+}
+
+fn enforce_admin_token(headers: &HeaderMap, expected_token: Option<&str>) -> Result<(), ApiError> {
+    enforce_admin_token_with_policy(headers, expected_token, allow_insecure_admin())
 }
 
 fn enforce_window_config_auth(
@@ -578,6 +671,45 @@ fn enforce_room_admin_auth(
     expected_token: Option<&str>,
 ) -> Result<(), ApiError> {
     enforce_admin_token(headers, expected_token)
+}
+
+fn enforce_message_auth_header(
+    headers: &HeaderMap,
+    expected_token: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(expected_token) = expected_token else {
+        return Err(ApiError::Unauthorized(
+            "message auth token is not configured",
+        ));
+    };
+    let provided = headers
+        .get(MESSAGE_AUTH_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if provided == Some(expected_token) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized(
+            "missing or invalid message auth token",
+        ))
+    }
+}
+
+fn enforce_message_auth_query(
+    provided: Option<&str>,
+    expected_token: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(expected_token) = expected_token else {
+        return Err(ApiError::Unauthorized(
+            "message auth token is not configured",
+        ));
+    };
+    if provided == Some(expected_token) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized(
+            "missing or invalid message auth token",
+        ))
+    }
 }
 
 fn parse_ws_max_lag(raw: Option<&str>) -> u64 {
@@ -673,7 +805,7 @@ async fn apply_bundle(
     let sanitized_bundle = bundle
         .to_cbor()
         .map_err(|err| ApiError::server_message(format!("failed to sanitize bundle: {err}")))?;
-    persist_bundle(state, bundle, weid, sanitized_bundle).await?;
+    persist_bundle(state, bundle, weid, sanitized_bundle, outcome.new_root).await?;
     Ok(accept_response_from(&outcome))
 }
 
@@ -687,7 +819,21 @@ async fn persist_bundle(
     bundle: &ClientEpochBundle,
     weid: [u8; 32],
     bytes: Vec<u8>,
+    membership_root: [u8; 32],
 ) -> Result<(), ApiError> {
+    let gid: [u8; 32] = bundle
+        .gid()
+        .try_into()
+        .map_err(|_| ApiError::server_message("invalid gid length in bundle"))?;
+    state
+        .record_epoch_scope(
+            weid,
+            EpochScope {
+                gid,
+                membership_root,
+            },
+        )
+        .await;
     record_membership_updates(state, bundle, weid).await?;
     store_bundle_bytes(state, weid, bytes).await;
     Ok(())
@@ -720,6 +866,47 @@ async fn record_membership_updates(
     Ok(())
 }
 
+async fn ensure_leaf_member_for_epoch(
+    state: &ApiState,
+    we_epoch_id: &[u8; 32],
+    leaf_id: [u8; 32],
+) -> Result<EpochScope, ApiError> {
+    let scope = state
+        .epoch_scope_for_weid(we_epoch_id)
+        .await
+        .ok_or(ApiError::NotFound)?;
+    let members = {
+        let guard = state.server.read().await;
+        guard
+            .members_for_root(&scope.gid, &scope.membership_root)
+            .ok_or(ApiError::NotFound)?
+    };
+    if members.iter().any(|member| member == &leaf_id) {
+        Ok(scope)
+    } else {
+        Err(ApiError::Unauthorized("leaf is not a member for epoch"))
+    }
+}
+
+async fn ensure_leaf_member_for_room(
+    state: &ApiState,
+    gid: &[u8; 32],
+    leaf_id: [u8; 32],
+) -> Result<(), ApiError> {
+    let members = {
+        let guard = state.server.read().await;
+        let latest_root = guard.latest_parent_root(gid).ok_or(ApiError::NotFound)?;
+        guard
+            .members_for_root(gid, &latest_root)
+            .ok_or(ApiError::NotFound)?
+    };
+    if members.iter().any(|member| member == &leaf_id) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized("leaf is not a member for room"))
+    }
+}
+
 fn accept_response_from(outcome: &ServerOutcome) -> AcceptEpochResponse {
     AcceptEpochResponse {
         we_epoch_id: outcome.we_epoch_id.to_vec(),
@@ -745,6 +932,9 @@ async fn map_accept_error(
                 error_label,
                 failed_index,
             )
+        }
+        ClientError::Acceptance(AcceptanceError::Msphf(MsphfError::InvalidInput(_))) => {
+            ApiError::InvalidRequest("invalid bundle components")
         }
         ClientError::Acceptance(other) => ApiError::server_message_with_context(
             format!("acceptance error: {other:?}"),
@@ -1201,7 +1391,12 @@ async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Resp
     Ok(protobuf_response(&response))
 }
 
-async fn send_message(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+async fn send_message(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = SendMessageRequest::decode(body)?;
     if request.we_epoch_id.len() != 32 {
         return Err(ApiError::InvalidRequest("we_epoch_id must be 32 bytes"));
@@ -1215,6 +1410,12 @@ async fn send_message(State(state): State<ApiState>, body: Bytes) -> Result<Resp
     }
 
     let sender = request.sender;
+    if sender.len() != 32 {
+        return Err(ApiError::InvalidRequest("sender must be 32 bytes"));
+    }
+    let mut sender_leaf = [0u8; 32];
+    sender_leaf.copy_from_slice(&sender);
+    let scope = ensure_leaf_member_for_epoch(&state, &weid, sender_leaf).await?;
     let timestamp_ms = current_timestamp_ms();
 
     let stored = StoredMessage {
@@ -1227,17 +1428,18 @@ async fn send_message(State(state): State<ApiState>, body: Bytes) -> Result<Resp
     {
         let mut guard = state.messages.write().await;
         guard.entry(weid).or_default().push(stored);
-        prune_expired_messages(&mut guard, timestamp_ms, state.message_retention);
+        maybe_prune_expired_messages(&state, &mut guard, timestamp_ms);
     }
 
     // Broadcast notification to WebSocket clients
     let notification = MessageNotification {
+        gid: scope.gid,
         we_epoch_id: weid,
         timestamp_ms,
     };
     state.broadcast_message(notification);
 
-    state.touch_member_for_weid(&weid, timestamp_ms).await;
+    state.touch_member(sender_leaf, timestamp_ms).await;
 
     let reply = SendMessageResponse {
         status: "stored".to_string(),
@@ -1245,17 +1447,29 @@ async fn send_message(State(state): State<ApiState>, body: Bytes) -> Result<Resp
     Ok(protobuf_response(&reply))
 }
 
-async fn fetch_messages(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+async fn fetch_messages(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = FetchMessagesRequest::decode(body)?;
     if request.we_epoch_id.len() != 32 {
         return Err(ApiError::InvalidRequest("we_epoch_id must be 32 bytes"));
     }
+    if request.leaf_id.len() != 32 {
+        return Err(ApiError::InvalidRequest("leaf_id must be 32 bytes"));
+    }
     let mut weid = [0u8; 32];
     weid.copy_from_slice(&request.we_epoch_id);
+    let mut leaf_id = [0u8; 32];
+    leaf_id.copy_from_slice(&request.leaf_id);
+    ensure_leaf_member_for_epoch(&state, &weid, leaf_id).await?;
 
+    let now_ms = current_timestamp_ms();
     let messages = {
         let mut guard = state.messages.write().await;
-        prune_expired_messages(&mut guard, current_timestamp_ms(), state.message_retention);
+        maybe_prune_expired_messages(&state, &mut guard, now_ms);
         guard.get(&weid).cloned().unwrap_or_default()
     };
 
@@ -1274,18 +1488,32 @@ async fn fetch_messages(State(state): State<ApiState>, body: Bytes) -> Result<Re
     Ok(protobuf_response(&reply))
 }
 
-async fn websocket_handler(ws: WebSocketUpgrade, State(state): State<ApiState>) -> Response {
-    ws.on_upgrade(|socket| handle_websocket(socket, state))
+async fn websocket_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<ApiState>,
+    Query(query): Query<WebSocketSubscriptionQuery>,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_query(
+        query.token.as_deref(),
+        configured_message_auth_token().as_deref(),
+    )?;
+    let gid = parse_gid(&query.gid)?;
+    let leaf_id = parse_hex_32("leaf_id must be 64 hex characters", &query.leaf_id)?;
+    ensure_leaf_member_for_room(&state, &gid, leaf_id).await?;
+    Ok(ws.on_upgrade(move |socket| handle_websocket(socket, state, gid)))
 }
 
-async fn handle_websocket(socket: WebSocket, state: ApiState) {
+async fn handle_websocket(socket: WebSocket, state: ApiState, subscribed_gid: [u8; 32]) {
     let (mut sender, mut receiver) = socket.split();
 
     // Subscribe to server notifications
     let mut rx = state.notification_tx.subscribe();
     let max_lag = configured_ws_max_lag();
 
-    debug!("WebSocket client connected");
+    debug!(
+        "WebSocket client connected for gid {}",
+        hex::encode(subscribed_gid)
+    );
 
     // Track connection health for auto-reconnect signaling
     let connection_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1348,13 +1576,22 @@ async fn handle_websocket(socket: WebSocket, state: ApiState) {
                     match result {
                         Ok(notification) => {
                             let payload = match notification {
-                                BroadcastNotification::Message(msg) => serde_json::json!({
-                                    "type": "message",
-                                    "we_epoch_id": hex::encode(msg.we_epoch_id),
-                                    "timestamp_ms": msg.timestamp_ms,
-                                    "connection_healthy": true
-                                }),
+                                BroadcastNotification::Message(msg) => {
+                                    if msg.gid != subscribed_gid {
+                                        continue;
+                                    }
+                                    serde_json::json!({
+                                        "type": "message",
+                                        "gid": hex::encode(msg.gid),
+                                        "we_epoch_id": hex::encode(msg.we_epoch_id),
+                                        "timestamp_ms": msg.timestamp_ms,
+                                        "connection_healthy": true
+                                    })
+                                }
                                 BroadcastNotification::Membership(event) => {
+                                    if event.gid != subscribed_gid {
+                                        continue;
+                                    }
                                     let kind = match event.event {
                                         MembershipEventKind::Join => "join",
                                         MembershipEventKind::Revoke => "revoke",
@@ -1863,11 +2100,13 @@ pub async fn run_with_config(
         alias_registry: Arc::new(RwLock::new(AHashMap::new())),
         member_metadata: Arc::new(RwLock::new(AHashMap::new())),
         weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+        epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
         notification_tx,
         alias_rate_limiter: AliasRateLimiter::new(
             ALIAS_RATE_LIMIT_BURST,
             Duration::from_secs(ALIAS_RATE_LIMIT_WINDOW_SECS),
         ),
+        message_prune_due_ms: Arc::new(AtomicU64::new(0)),
     };
 
     // Build router with all routes
@@ -2071,6 +2310,7 @@ mod tests {
     use prost::Message;
     use serde_bytes::ByteBuf;
     use serde_json::Value;
+    use std::sync::Once;
 
     fn test_api_state() -> ApiState {
         let mut cfg = CityGConfig::default();
@@ -2085,12 +2325,24 @@ mod tests {
             alias_registry: Arc::new(RwLock::new(AHashMap::new())),
             member_metadata: Arc::new(RwLock::new(AHashMap::new())),
             weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
             notification_tx: broadcast::channel(8).0,
             alias_rate_limiter: AliasRateLimiter::new(
                 ALIAS_RATE_LIMIT_BURST,
                 Duration::from_secs(ALIAS_RATE_LIMIT_WINDOW_SECS),
             ),
+            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    fn ensure_test_admin_tokens() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| unsafe {
+            std::env::set_var(WINDOW_CONFIG_ADMIN_TOKEN_ENV, "window-test-token");
+            std::env::set_var(ROOMS_ADMIN_TOKEN_ENV, "room-test-token");
+            std::env::set_var(MESSAGE_AUTH_TOKEN_ENV, "message-test-token");
+            std::env::remove_var(ALLOW_INSECURE_ADMIN_ENV);
+        });
     }
 
     async fn decode_proto_response<T>(response: Response) -> T
@@ -2113,10 +2365,21 @@ mod tests {
     }
 
     fn room_admin_headers() -> HeaderMap {
+        ensure_test_admin_tokens();
         let mut headers = HeaderMap::new();
         if let Some(token) = configured_rooms_admin_token() {
             let token = HeaderValue::from_str(token.as_str()).expect("valid room admin token");
             headers.insert(WINDOW_CONFIG_ADMIN_HEADER, token);
+        }
+        headers
+    }
+
+    fn message_auth_headers() -> HeaderMap {
+        ensure_test_admin_tokens();
+        let mut headers = HeaderMap::new();
+        if let Some(token) = configured_message_auth_token() {
+            let token = HeaderValue::from_str(token.as_str()).expect("valid message auth token");
+            headers.insert(MESSAGE_AUTH_HEADER, token);
         }
         headers
     }
@@ -2152,9 +2415,22 @@ mod tests {
         ));
 
         assert!(
-            enforce_window_config_auth(&empty_headers, None).is_ok(),
-            "auth should be bypassed when no admin token is configured"
+            matches!(
+                enforce_window_config_auth(&empty_headers, None),
+                Err(ApiError::Unauthorized("admin token is not configured"))
+            ),
+            "auth should fail closed when admin token is not configured"
         );
+    }
+
+    #[test]
+    fn admin_auth_policy_supports_explicit_insecure_override() {
+        let empty_headers = HeaderMap::new();
+        assert!(enforce_admin_token_with_policy(&empty_headers, None, true).is_ok());
+        assert!(matches!(
+            enforce_admin_token_with_policy(&empty_headers, None, false),
+            Err(ApiError::Unauthorized("admin token is not configured"))
+        ));
     }
 
     #[test]
@@ -2188,9 +2464,38 @@ mod tests {
         ));
 
         assert!(
-            enforce_room_admin_auth(&empty_headers, None).is_ok(),
-            "auth should be bypassed when no admin token is configured"
+            matches!(
+                enforce_room_admin_auth(&empty_headers, None),
+                Err(ApiError::Unauthorized("admin token is not configured"))
+            ),
+            "auth should fail closed when no room admin token is configured"
         );
+    }
+
+    #[test]
+    fn message_auth_rejects_missing_wrong_or_unconfigured_tokens() {
+        let mut headers = HeaderMap::new();
+        headers.insert(MESSAGE_AUTH_HEADER, HeaderValue::from_static("wrong"));
+        assert!(matches!(
+            enforce_message_auth_header(&headers, Some("msg-secret")),
+            Err(ApiError::Unauthorized(
+                "missing or invalid message auth token"
+            ))
+        ));
+
+        let empty_headers = HeaderMap::new();
+        assert!(matches!(
+            enforce_message_auth_header(&empty_headers, Some("msg-secret")),
+            Err(ApiError::Unauthorized(
+                "missing or invalid message auth token"
+            ))
+        ));
+        assert!(matches!(
+            enforce_message_auth_query(None, None),
+            Err(ApiError::Unauthorized(
+                "message auth token is not configured"
+            ))
+        ));
     }
 
     #[test]
@@ -2206,6 +2511,16 @@ mod tests {
         assert!(!should_disconnect_for_lag(10, 10));
         assert!(!should_disconnect_for_lag(9, 10));
         assert!(should_disconnect_for_lag(11, 10));
+    }
+
+    #[test]
+    fn parse_bool_env_accepts_truthy_values() {
+        assert!(parse_bool_env(Some("1".to_string())));
+        assert!(parse_bool_env(Some("true".to_string())));
+        assert!(parse_bool_env(Some("YES".to_string())));
+        assert!(!parse_bool_env(Some("0".to_string())));
+        assert!(!parse_bool_env(Some("false".to_string())));
+        assert!(!parse_bool_env(None));
     }
 
     #[test]
@@ -2380,8 +2695,10 @@ mod tests {
             alias_registry: Arc::new(RwLock::new(AHashMap::new())),
             member_metadata: Arc::new(RwLock::new(AHashMap::new())),
             weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
+            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
         };
 
         let alias = "alice";
@@ -2426,8 +2743,10 @@ mod tests {
             alias_registry: Arc::new(RwLock::new(AHashMap::new())),
             member_metadata: Arc::new(RwLock::new(AHashMap::new())),
             weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
+            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
         };
 
         let (pop_pk, pop_sk) = dilithium5::keypair();
@@ -2512,14 +2831,10 @@ mod tests {
             Some(2),
         )
         .await;
-        let response = acceptance.into_response();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read body");
-        let json: Value = serde_json::from_slice(&body).expect("json body");
-        assert_eq!(json["error"], "batch_step");
-        assert_eq!(json["failed_index"], 2);
+        assert!(matches!(
+            acceptance,
+            ApiError::InvalidRequest("invalid bundle components")
+        ));
     }
 
     #[tokio::test]
@@ -3052,12 +3367,34 @@ mod tests {
     #[tokio::test]
     async fn send_and_fetch_messages_cover_validation_touch_and_roundtrip() {
         let state = test_api_state();
-        let weid = [0x77; 32];
-        let leaf = [0x44; 32];
-        state.record_member_join(leaf, weid, 100).await;
+        let bundle = demo_bundle("alice").expect("alice bundle");
+        apply_bundle(&state, &bundle)
+            .await
+            .expect("accept bundle should seed epoch scope");
+        let mut weid = [0u8; 32];
+        weid.copy_from_slice(&bundle.we_epoch_id);
+        let leaf = cityg_client::demo::demo_member_leaf("alice");
+        let headers = message_auth_headers();
 
         let err = send_message(
             State(state.clone()),
+            HeaderMap::new(),
+            encode_proto_request(&SendMessageRequest {
+                we_epoch_id: weid.to_vec(),
+                ciphertext: vec![0xAA],
+                sender: leaf.to_vec(),
+            }),
+        )
+        .await
+        .expect_err("missing message auth header should fail");
+        assert!(matches!(
+            err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+
+        let err = send_message(
+            State(state.clone()),
+            headers.clone(),
             encode_proto_request(&SendMessageRequest {
                 we_epoch_id: vec![0x01; 31],
                 ciphertext: vec![0xAA],
@@ -3073,6 +3410,7 @@ mod tests {
 
         let err = send_message(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&SendMessageRequest {
                 we_epoch_id: weid.to_vec(),
                 ciphertext: Vec::new(),
@@ -3088,10 +3426,11 @@ mod tests {
 
         let response = send_message(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&SendMessageRequest {
                 we_epoch_id: weid.to_vec(),
                 ciphertext: b"hello".to_vec(),
-                sender: vec![0x03; 32],
+                sender: leaf.to_vec(),
             }),
         )
         .await
@@ -3102,15 +3441,17 @@ mod tests {
         let metadata = state.member_metadata.read().await;
         let member = metadata.get(&leaf).expect("member metadata");
         assert!(
-            member.last_seen_timestamp_ms >= 100,
+            member.last_seen_timestamp_ms >= member.join_timestamp_ms,
             "send path should touch member last-seen timestamp"
         );
         drop(metadata);
 
         let err = fetch_messages(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&FetchMessagesRequest {
                 we_epoch_id: vec![0x01; 31],
+                leaf_id: leaf.to_vec(),
             }),
         )
         .await
@@ -3122,8 +3463,10 @@ mod tests {
 
         let response = fetch_messages(
             State(state.clone()),
+            headers,
             encode_proto_request(&FetchMessagesRequest {
                 we_epoch_id: weid.to_vec(),
+                leaf_id: leaf.to_vec(),
             }),
         )
         .await
@@ -3233,7 +3576,14 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_handler_streams_message_and_membership_notifications() {
+        ensure_test_admin_tokens();
         let state = test_api_state();
+        let bundle = demo_bundle("alice").expect("alice bundle");
+        apply_bundle(&state, &bundle)
+            .await
+            .expect("accept bundle for websocket membership auth");
+        let leaf = cityg_client::demo::demo_member_leaf("alice");
+        let token = configured_message_auth_token().expect("message auth token configured");
         let app = Router::new()
             .route("/v1/ws", get(websocket_handler))
             .with_state(state.clone());
@@ -3247,12 +3597,18 @@ mod tests {
                 .expect("serve websocket test app");
         });
 
-        let url = format!("ws://{addr}/v1/ws");
+        let url = format!(
+            "ws://{addr}/v1/ws?gid={}&leaf_id={}&token={}",
+            hex::encode(DEMO_GID),
+            hex::encode(leaf),
+            token
+        );
         let (mut socket, _) = tokio_tungstenite::connect_async(url)
             .await
             .expect("connect websocket");
 
         state.broadcast_message(MessageNotification {
+            gid: DEMO_GID,
             we_epoch_id: [0xA5; 32],
             timestamp_ms: 101,
         });
@@ -3268,6 +3624,7 @@ mod tests {
         let first_json: Value =
             serde_json::from_str(&first_text).expect("decode message notification JSON");
         assert_eq!(first_json["type"], "message");
+        assert_eq!(first_json["gid"], hex::encode(DEMO_GID));
         assert_eq!(first_json["timestamp_ms"], 101);
 
         state.broadcast_membership(DEMO_GID, [0xB6; 32], MembershipEventKind::Join, 202);
@@ -3399,6 +3756,17 @@ mod tests {
     }
 
     #[test]
+    fn should_prune_messages_throttles_global_pruning() {
+        let due = AtomicU64::new(0);
+        assert!(should_prune_messages(&due, 1_000));
+        assert!(
+            !should_prune_messages(&due, 1_100),
+            "requests inside the prune interval should not rescan all buckets"
+        );
+        assert!(should_prune_messages(&due, 2_100));
+    }
+
+    #[test]
     fn aligned_fs_epoch_base_ts_rounds_down_to_period() {
         let now = UNIX_EPOCH + Duration::from_secs(1_001);
         assert_eq!(aligned_fs_epoch_base_ts(now, 300), 900);
@@ -3450,9 +3818,11 @@ mod tests {
             alias_registry: Arc::new(RwLock::new(AHashMap::new())),
             member_metadata: Arc::new(RwLock::new(AHashMap::new())),
             weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
             notification_tx: broadcast::channel(4).0,
             // Burst of 1 so the second attempt triggers rate limit
             alias_rate_limiter: AliasRateLimiter::new(1, Duration::from_secs(60)),
+            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
         };
         let leaf = [0x01u8; 32];
         let key = vec![0xAB; 8];

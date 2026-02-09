@@ -5,11 +5,10 @@
 //! `HP_RLWE_A1_V1` tuple (CBOR), and produces the full/projective digests that
 //! feed the ME-OR masking scheme.
 
-use blake3::Hasher;
 use ciborium::de::from_reader;
 use msphf_core::{
     MsphfError, WitnessReplayField, ds,
-    hash::{h_branch_bytes, h_l},
+    hash::{h_branch_bytes, h_l, xof_reader, xof32},
     instance::AnchorInstance,
     rlwe::{
         arithmetic::barrett_reduce,
@@ -614,22 +613,6 @@ fn sample_polyvec(seed: &[u8; 32], label: &str) -> Result<PolyVec, MsphfError> {
     Ok(PolyVec { polys })
 }
 
-fn xof_reader(label: &str, seed: &[u8; 32]) -> blake3::OutputReader {
-    let mut hasher = Hasher::new();
-    hasher.update(b"city-g|xof|");
-    hasher.update(label.as_bytes());
-    hasher.update(&[0u8]);
-    hasher.update(seed);
-    hasher.finalize_xof()
-}
-
-fn xof32(label: &str, seed: &[u8; 32]) -> [u8; 32] {
-    let mut reader = xof_reader(label, seed);
-    let mut out = [0u8; 32];
-    reader.fill(&mut out);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,6 +625,16 @@ mod tests {
     };
     use pqcrypto_dilithium::dilithium5::{detached_sign, keypair};
     use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+
+    #[test]
+    fn xof_helpers_align_with_core_hash_domain() {
+        let seed = [0xA5u8; 32];
+        let label = "hps/test";
+        let mut reader = xof_reader(label, &seed);
+        let mut out = [0u8; 32];
+        reader.fill(&mut out);
+        assert_eq!(out, msphf_core::hash::xof32(label, &seed));
+    }
 
     fn fixture() -> Result<(AnchorInstance<'static>, ValidatedWitness, [u8; 32]), MsphfError> {
         fn leak(bytes: [u8; 32]) -> &'static [u8] {

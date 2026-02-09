@@ -63,19 +63,16 @@ use tracing::{debug, info, warn};
 #[cfg(test)]
 use cityg_client::demo;
 
-fn demo_vrf_keys() -> (&'static [u8], &'static [u8]) {
-    static VRF_KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
-    let pair = VRF_KEYS.get_or_init(|| {
-        let params = match msphf_orchestrator::lb::generate_parameters([0u8; 32]) {
-            Ok(params) => params,
-            Err(_) => unreachable!("deterministic GUI VRF params must be derivable"),
-        };
-        match msphf_orchestrator::lb::generate_keypair(&params, [1u8; 32]) {
-            Ok(pair) => pair,
-            Err(_) => unreachable!("deterministic GUI VRF keypair must be derivable"),
-        }
-    });
-    (&pair.0, &pair.1)
+fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut params_seed = [0u8; 32];
+    let mut key_seed = [0u8; 32];
+    let mut rng = thread_rng();
+    rng.fill_bytes(&mut params_seed);
+    rng.fill_bytes(&mut key_seed);
+    let params = msphf_orchestrator::lb::generate_parameters(params_seed)
+        .map_err(|err| anyhow!("generate VRF params: {err}"))?;
+    msphf_orchestrator::lb::generate_keypair(&params, key_seed)
+        .map_err(|err| anyhow!("generate VRF keypair: {err}"))
 }
 
 mod tokio_bridge {
@@ -2541,13 +2538,23 @@ impl AppModel {
         let Some(session) = &self.session else {
             return;
         };
+        let Some(message_token) = configured_client_message_token() else {
+            warn!("message auth token is not configured; skipping websocket startup");
+            return;
+        };
 
         // Convert HTTP URL to WebSocket URL
         let ws_url = session
             .server_url
             .replace("http://", "ws://")
             .replace("https://", "wss://");
-        let ws_url = format!("{}/v1/ws", ws_url);
+        let ws_url = format!(
+            "{}/v1/ws?gid={}&leaf_id={}&token={}",
+            ws_url,
+            hex_encode(session.gid),
+            hex_encode(session.leaf_id),
+            message_token
+        );
         let reconnect_delay = self.config.client.websocket_reconnect_delay();
 
         info!("Starting WebSocket connection to {}", ws_url);
@@ -4724,6 +4731,7 @@ struct FetchParams {
     server_url: String,
     we_epoch_id: [u8; 32],
     epoch_key: [u8; 32],
+    leaf_id: [u8; 32],
     since: Option<u64>,
 }
 
@@ -4733,6 +4741,7 @@ impl FetchParams {
             server_url: session.server_url.clone(),
             we_epoch_id: session.we_epoch_id,
             epoch_key: session.epoch_key,
+            leaf_id: session.leaf_id,
             since,
         }
     }
@@ -4819,6 +4828,8 @@ const ENCRYPTED_SESSION_ALG: &str = "chacha20poly1305";
 const SESSION_PASSPHRASE_ENV: &str = "CITYG_GUI_SESSION_PASSPHRASE";
 const KBROAD_SECRET_ENV: &str = "CITYG_GUI_KBROAD_SECRET_HEX";
 const KBROAD_PUBLIC_ENV: &str = "CITYG_GUI_KBROAD_PUBLIC_HEX";
+const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
+const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
 const SESSION_KEY_DERIVE_CONTEXT: &str = "cityg/gui/session-encryption/v1";
 const SESSION_LOCAL_KEY_FILE: &str = "session-key-v1.bin";
 
@@ -4850,6 +4861,35 @@ struct PersistedSecurityEvent {
 
 fn default_epoch_rotation_interval() -> u64 {
     300 // 5 minutes in seconds
+}
+
+fn read_nonempty_env(var: &str) -> Option<String> {
+    std::env::var(var)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn configured_client_admin_token() -> Option<String> {
+    read_nonempty_env(CLIENT_ADMIN_TOKEN_ENV)
+        .or_else(|| read_nonempty_env("CITYG_SERVER_ROOMS_ADMIN_TOKEN"))
+        .or_else(|| read_nonempty_env("CITYG_SERVER_WINDOW_ADMIN_TOKEN"))
+}
+
+fn configured_client_message_token() -> Option<String> {
+    read_nonempty_env(CLIENT_MESSAGE_TOKEN_ENV)
+        .or_else(|| read_nonempty_env("CITYG_SERVER_MESSAGE_AUTH_TOKEN"))
+}
+
+fn new_api_client(server_url: &str) -> CitygApiClient {
+    let mut client = CitygApiClient::new(server_url);
+    if let Some(token) = configured_client_admin_token() {
+        client = client.with_admin_token(token);
+    }
+    if let Some(token) = configured_client_message_token() {
+        client = client.with_message_auth_token(token);
+    }
+    client
 }
 
 #[derive(Serialize, Deserialize)]
@@ -5981,7 +6021,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let mut generated_kbroad_keypair: Option<(Vec<u8>, Vec<u8>)> = None;
     let mut bootstrap_attempted = false;
 
-    let client = CitygApiClient::new(&server_url);
+    let client = new_api_client(&server_url);
     let ticket = loop {
         match client
             .join_ticket(&room_id, &alias, identity_binding.clone())
@@ -6115,7 +6155,8 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
     let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
 
-    let (vrf_secret_key, vrf_public_key) = demo_vrf_keys();
+    let (vrf_secret_key, vrf_public_key) =
+        generate_vrf_keys().context("generate runtime VRF keypair")?;
 
     let msphf_crs_id = if ticket.msphf_crs_id.is_empty() {
         "rlwe-merkle/v1".to_string()
@@ -6163,8 +6204,8 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         proof_mode: proof_mode.as_str(),
         vrf_id: vrf_id.as_str(),
         policy_version: policy_version.as_str(),
-        vrf_secret_key: Some(vrf_secret_key),
-        vrf_public_key: Some(vrf_public_key),
+        vrf_secret_key: Some(vrf_secret_key.as_slice()),
+        vrf_public_key: Some(vrf_public_key.as_slice()),
         fs_policy_version: fs_policy_version.as_str(),
         fs_epoch_base_ts,
         fs_join: FsJoinInputs::default(),
@@ -6264,8 +6305,8 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         pop_secret_key,
         msg_sign_public_key,
         msg_sign_secret_key,
-        vrf_secret_key: vrf_secret_key.to_vec(),
-        vrf_public_key: vrf_public_key.to_vec(),
+        vrf_secret_key,
+        vrf_public_key,
         kbroad_public,
         kbroad_secret,
         bootstrap_public,
@@ -6299,7 +6340,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         ..
     } = request;
 
-    let client = CitygApiClient::new(&server_url);
+    let client = new_api_client(&server_url);
     let ticket = client
         .merge_ticket(&room_id, &leaf_id)
         .await
@@ -6574,7 +6615,7 @@ async fn verify_members_root_consistency(
 }
 
 async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
-    let client = CitygApiClient::new(&params.server_url);
+    let client = new_api_client(&params.server_url);
     let (raw_members, root, total_count, next_offset) = match &params.mode {
         MembersMode::Full => {
             // Always resolve the first page against latest server root to avoid
@@ -6737,7 +6778,7 @@ async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
         encrypt_message(&authenticated_msg, &epoch_key).context("failed to encrypt message")?;
 
     // Send with leaf_id as sender identifier
-    let client = CitygApiClient::new(&server_url);
+    let client = new_api_client(&server_url);
     client
         .send_message(&we_epoch_id, &ciphertext, Some(&leaf_id))
         .await
@@ -6759,12 +6800,13 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
         server_url,
         we_epoch_id,
         epoch_key,
+        leaf_id,
         since,
     } = params;
 
-    let client = CitygApiClient::new(&server_url);
+    let client = new_api_client(&server_url);
     let response = client
-        .fetch_messages(&we_epoch_id)
+        .fetch_messages(&we_epoch_id, &leaf_id)
         .await
         .context("failed to fetch messages")?;
 
@@ -6893,7 +6935,7 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
 }
 
 async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome> {
-    let client = CitygApiClient::new(&session.server_url);
+    let client = new_api_client(&session.server_url);
     let ticket = client
         .merge_ticket(&session.room_id, &session.leaf_id)
         .await
@@ -7629,6 +7671,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn generate_vrf_keys_are_not_deterministic() -> Result<(), Box<dyn std::error::Error>> {
+        let (secret_a, public_a) = generate_vrf_keys()?;
+        let (secret_b, public_b) = generate_vrf_keys()?;
+        assert!(!secret_a.is_empty());
+        assert!(!public_a.is_empty());
+        assert_ne!(secret_a, secret_b);
+        assert_ne!(public_a, public_b);
+        Ok(())
+    }
+
     fn build_test_session(
         seed: u64,
         server_url: &str,
@@ -7787,7 +7840,7 @@ mod tests {
     }
 
     async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<(), anyhow::Error> {
-        CitygApiClient::new(server_url)
+        new_api_client(server_url)
             .bootstrap_room(room_id, demo::kbroad_public())
             .await
             .map_err(anyhow::Error::from)
@@ -11023,7 +11076,7 @@ mod tests {
         })
         .await?;
 
-        let client = CitygApiClient::new(&server_url);
+        let client = new_api_client(&server_url);
         let before_leave = client.members(&alice.gid, None).await?;
         assert_eq!(before_leave.total_count, 2);
         assert!(
@@ -11471,7 +11524,7 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x88u8; 32]);
-        CitygApiClient::new(&server_url)
+        new_api_client(&server_url)
             .bootstrap_room(&room_id, demo::kbroad_public())
             .await?;
 
@@ -11647,7 +11700,7 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x8Bu8; 32]);
-        CitygApiClient::new(&server_url)
+        new_api_client(&server_url)
             .bootstrap_room(&room_id, demo::kbroad_public())
             .await?;
 
@@ -11692,7 +11745,7 @@ mod tests {
         })
         .await?;
 
-        let client = CitygApiClient::new(&server_url);
+        let client = new_api_client(&server_url);
         client
             .send_message(
                 &alice.we_epoch_id,
