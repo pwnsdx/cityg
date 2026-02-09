@@ -6,7 +6,7 @@ authors = ["Sabri Haddouche"]
 edition = "2024"
 
 [dependencies]
-blake3 = "1.5"
+blake3 = "1.8"
 ciborium = { version = "0.2", features = ["std"] }
 msphf-core = { path = "../msphf-core" }
 thiserror = "1.0"

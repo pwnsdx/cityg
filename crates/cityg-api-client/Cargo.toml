@@ -21,10 +21,10 @@ msphf-orchestrator = { path = "../msphf-orchestrator" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-tokio = { version = "1.38", features = ["time"] }
+tokio = { version = "1.49", features = ["time"] }
 
 [dev-dependencies]
-tokio = { version = "1.38", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.49", features = ["macros", "rt-multi-thread"] }
 hex = "0.4"
 axum = "0.7"
 

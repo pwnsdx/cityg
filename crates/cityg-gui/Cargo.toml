@@ -40,6 +40,10 @@ msphf-rlwe = { path = "../msphf-rlwe" }
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 ahash = { version = "0.8", features = ["serde"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Keep core-text aligned with gpui/zed-font-kit's core-graphics expectations.
+core-text = "=21.0.0"
+
 [dev-dependencies]
 gpui = { version = "0.2.2", features = ["test-support"] }
 tempfile = "3"
