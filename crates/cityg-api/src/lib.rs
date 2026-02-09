@@ -53,7 +53,10 @@ use unicode_normalization::UnicodeNormalization;
 
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_server::{CityGServer, MergeTicketBundle, ServerConfig, ServerOutcome};
-use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
+use msphf_core::{
+    MsphfError,
+    params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK},
+};
 use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
 use msphf_orchestrator::{
     AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, FsPolicyConfig,
@@ -929,6 +932,9 @@ async fn map_accept_error(
                 error_label,
                 failed_index,
             )
+        }
+        ClientError::Acceptance(AcceptanceError::Msphf(MsphfError::InvalidInput(_))) => {
+            ApiError::InvalidRequest("invalid bundle components")
         }
         ClientError::Acceptance(other) => ApiError::server_message_with_context(
             format!("acceptance error: {other:?}"),
@@ -2825,14 +2831,10 @@ mod tests {
             Some(2),
         )
         .await;
-        let response = acceptance.into_response();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read body");
-        let json: Value = serde_json::from_slice(&body).expect("json body");
-        assert_eq!(json["error"], "batch_step");
-        assert_eq!(json["failed_index"], 2);
+        assert!(matches!(
+            acceptance,
+            ApiError::InvalidRequest("invalid bundle components")
+        ));
     }
 
     #[tokio::test]
