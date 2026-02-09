@@ -63,19 +63,16 @@ use tracing::{debug, info, warn};
 #[cfg(test)]
 use cityg_client::demo;
 
-fn demo_vrf_keys() -> (&'static [u8], &'static [u8]) {
-    static VRF_KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
-    let pair = VRF_KEYS.get_or_init(|| {
-        let params = match msphf_orchestrator::lb::generate_parameters([0u8; 32]) {
-            Ok(params) => params,
-            Err(_) => unreachable!("deterministic GUI VRF params must be derivable"),
-        };
-        match msphf_orchestrator::lb::generate_keypair(&params, [1u8; 32]) {
-            Ok(pair) => pair,
-            Err(_) => unreachable!("deterministic GUI VRF keypair must be derivable"),
-        }
-    });
-    (&pair.0, &pair.1)
+fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut params_seed = [0u8; 32];
+    let mut key_seed = [0u8; 32];
+    let mut rng = thread_rng();
+    rng.fill_bytes(&mut params_seed);
+    rng.fill_bytes(&mut key_seed);
+    let params = msphf_orchestrator::lb::generate_parameters(params_seed)
+        .map_err(|err| anyhow!("generate VRF params: {err}"))?;
+    msphf_orchestrator::lb::generate_keypair(&params, key_seed)
+        .map_err(|err| anyhow!("generate VRF keypair: {err}"))
 }
 
 mod tokio_bridge {
@@ -6158,7 +6155,8 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
     let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
 
-    let (vrf_secret_key, vrf_public_key) = demo_vrf_keys();
+    let (vrf_secret_key, vrf_public_key) =
+        generate_vrf_keys().context("generate runtime VRF keypair")?;
 
     let msphf_crs_id = if ticket.msphf_crs_id.is_empty() {
         "rlwe-merkle/v1".to_string()
@@ -6206,8 +6204,8 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         proof_mode: proof_mode.as_str(),
         vrf_id: vrf_id.as_str(),
         policy_version: policy_version.as_str(),
-        vrf_secret_key: Some(vrf_secret_key),
-        vrf_public_key: Some(vrf_public_key),
+        vrf_secret_key: Some(vrf_secret_key.as_slice()),
+        vrf_public_key: Some(vrf_public_key.as_slice()),
         fs_policy_version: fs_policy_version.as_str(),
         fs_epoch_base_ts,
         fs_join: FsJoinInputs::default(),
@@ -6307,8 +6305,8 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         pop_secret_key,
         msg_sign_public_key,
         msg_sign_secret_key,
-        vrf_secret_key: vrf_secret_key.to_vec(),
-        vrf_public_key: vrf_public_key.to_vec(),
+        vrf_secret_key,
+        vrf_public_key,
         kbroad_public,
         kbroad_secret,
         bootstrap_public,
@@ -7670,6 +7668,17 @@ mod tests {
             fs_ec: Some(12),
             fs_dev_commit: Some([0x24; 32]),
         }
+    }
+
+    #[test]
+    fn generate_vrf_keys_are_not_deterministic() -> Result<(), Box<dyn std::error::Error>> {
+        let (secret_a, public_a) = generate_vrf_keys()?;
+        let (secret_b, public_b) = generate_vrf_keys()?;
+        assert!(!secret_a.is_empty());
+        assert!(!public_a.is_empty());
+        assert_ne!(secret_a, secret_b);
+        assert_ne!(public_a, public_b);
+        Ok(())
     }
 
     fn build_test_session(

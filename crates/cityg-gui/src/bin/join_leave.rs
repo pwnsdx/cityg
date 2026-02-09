@@ -34,21 +34,6 @@ use tokio::{sync::mpsc, time::timeout};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tracing::warn;
 
-fn demo_vrf_keys() -> (&'static [u8], &'static [u8]) {
-    static VRF_KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
-    let pair = VRF_KEYS.get_or_init(|| {
-        let params = match msphf_orchestrator::lb::generate_parameters([0u8; 32]) {
-            Ok(params) => params,
-            Err(_) => unreachable!("deterministic join-leave VRF params must be derivable"),
-        };
-        match msphf_orchestrator::lb::generate_keypair(&params, [1u8; 32]) {
-            Ok(pair) => pair,
-            Err(_) => unreachable!("deterministic join-leave VRF keypair must be derivable"),
-        }
-    });
-    (&pair.0, &pair.1)
-}
-
 fn random_room_id() -> String {
     let mut rng = thread_rng();
     let mut bytes = [0u8; 32];
@@ -86,6 +71,18 @@ fn new_api_client(server_url: &str) -> CitygApiClient {
         client = client.with_message_auth_token(token);
     }
     client
+}
+
+fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut params_seed = [0u8; 32];
+    let mut key_seed = [0u8; 32];
+    let mut rng = thread_rng();
+    rng.fill_bytes(&mut params_seed);
+    rng.fill_bytes(&mut key_seed);
+    let params = msphf_orchestrator::lb::generate_parameters(params_seed)
+        .map_err(|err| anyhow!("generate VRF params: {err}"))?;
+    msphf_orchestrator::lb::generate_keypair(&params, key_seed)
+        .map_err(|err| anyhow!("generate VRF keypair: {err}"))
 }
 
 fn fresh_kbroad_public() -> Vec<u8> {
@@ -501,7 +498,8 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         seed
     });
 
-    let (vrf_secret_key, vrf_public_key) = demo_vrf_keys();
+    let (vrf_secret_key, vrf_public_key) =
+        generate_vrf_keys().context("generate runtime VRF keypair")?;
 
     let params = OrchestrationParams {
         msphf_crs_id: ticket.msphf_crs_id.as_str(),
@@ -521,8 +519,8 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         proof_mode: ticket.proof_mode.as_str(),
         vrf_id: ticket.vrf_id.as_str(),
         policy_version: ticket.policy_version.as_str(),
-        vrf_secret_key: Some(vrf_secret_key),
-        vrf_public_key: Some(vrf_public_key),
+        vrf_secret_key: Some(vrf_secret_key.as_slice()),
+        vrf_public_key: Some(vrf_public_key.as_slice()),
         fs_policy_version: ticket.fs_policy_version.as_str(),
         fs_epoch_base_ts: ticket.fs_epoch_base_ts,
         fs_join: FsJoinInputs::default(),
@@ -606,8 +604,8 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         leaf_id,
         pop_public_key,
         pop_secret,
-        vrf_secret_key: vrf_secret_key.to_vec(),
-        vrf_public_key: vrf_public_key.to_vec(),
+        vrf_secret_key,
+        vrf_public_key,
         fs_ec,
         fs_epoch_commit,
         fs_dev_prev_commit,
@@ -1615,6 +1613,17 @@ mod tests {
 
         let err = bytes32("room", &[0xAB; 31]).expect_err("must reject non-32-byte input");
         assert!(err.to_string().contains("room must be 32 bytes"));
+        Ok(())
+    }
+
+    #[test]
+    fn generate_vrf_keys_are_not_deterministic() -> Result<()> {
+        let (secret_a, public_a) = generate_vrf_keys()?;
+        let (secret_b, public_b) = generate_vrf_keys()?;
+        assert!(!secret_a.is_empty());
+        assert!(!public_a.is_empty());
+        assert_ne!(secret_a, secret_b);
+        assert_ne!(public_a, public_b);
         Ok(())
     }
 
