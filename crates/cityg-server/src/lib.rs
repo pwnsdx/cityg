@@ -2103,7 +2103,9 @@ impl GroupRoster {
         self.groups
             .get(gid)
             .map(|state| {
-                state.latest_root.is_some() || !state.snapshots.is_empty() || !state.revoked.is_empty()
+                state.latest_root.is_some()
+                    || !state.snapshots.is_empty()
+                    || !state.revoked.is_empty()
             })
             .unwrap_or(false)
     }

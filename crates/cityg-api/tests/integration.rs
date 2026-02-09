@@ -5,7 +5,9 @@ use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
 use cityg_api_client::{CitygApiClient, Error};
 use cityg_client::{
     ClientEpochBundle,
-    demo::{DEMO_GID, bootstrap_public, demo_bundle, kbroad_public, kbroad_secret},
+    demo::{
+        DEMO_GID, bootstrap_public, demo_bundle, demo_member_leaf, kbroad_public, kbroad_secret,
+    },
 };
 use cityg_config::CityGConfig;
 use reqwest::StatusCode;
@@ -14,18 +16,22 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::sleep;
 
 const TEST_ADMIN_TOKEN: &str = "integration-admin-token";
+const TEST_MESSAGE_TOKEN: &str = "integration-message-token";
 
 fn ensure_admin_auth_env() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| unsafe {
         std::env::set_var("CITYG_SERVER_WINDOW_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
         std::env::set_var("CITYG_SERVER_ROOMS_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
+        std::env::set_var("CITYG_SERVER_MESSAGE_AUTH_TOKEN", TEST_MESSAGE_TOKEN);
         std::env::remove_var("CITYG_SERVER_ALLOW_INSECURE_ADMIN");
     });
 }
 
 fn test_client(base_url: impl Into<String>) -> CitygApiClient {
-    CitygApiClient::new(base_url).with_admin_token(TEST_ADMIN_TOKEN)
+    CitygApiClient::new(base_url)
+        .with_admin_token(TEST_ADMIN_TOKEN)
+        .with_message_auth_token(TEST_MESSAGE_TOKEN)
 }
 
 async fn spawn_server_on(port: u16) -> JoinHandle<()> {
@@ -110,6 +116,7 @@ async fn end_to_end_demo_flow() {
     }
 
     let alice_bundle = demo_bundle("alice").expect("alice bundle");
+    let alice_leaf = demo_member_leaf("alice");
     client
         .accept_epoch_bundle(&alice_bundle)
         .await
@@ -150,12 +157,12 @@ async fn end_to_end_demo_flow() {
     let ciphertext = cipher.encrypt(nonce, plaintext.as_ref()).expect("encrypt");
 
     client
-        .send_message(&bob_bundle.we_epoch_id, &ciphertext, Some(b"alice"))
+        .send_message(&bob_bundle.we_epoch_id, &ciphertext, Some(&alice_leaf))
         .await
         .expect("send msg");
 
     let messages = client
-        .fetch_messages(&bob_bundle.we_epoch_id)
+        .fetch_messages(&bob_bundle.we_epoch_id, &alice_leaf)
         .await
         .expect("fetch");
     assert_eq!(messages.messages.len(), 1);
@@ -701,22 +708,35 @@ async fn error_message_with_invalid_epoch() -> Result<()> {
     sleep(Duration::from_millis(200)).await;
 
     let client = test_client(format!("http://127.0.0.1:{port}"));
+    let sender_leaf = demo_member_leaf("alice");
 
-    // Send a message to non-existent epoch (should succeed - messages can be queued)
+    // Send/fetch against non-existent epoch should be rejected.
     let fake_epoch = [0xffu8; 32];
     let result = client
-        .send_message(&fake_epoch, b"test message", Some(b"sender"))
+        .send_message(&fake_epoch, b"test message", Some(&sender_leaf))
         .await;
-
-    // Should succeed - the API accepts messages for any epoch (offline queue support)
     assert!(
-        result.is_ok(),
-        "messages should be accepted even for non-existent epochs (offline queue)"
+        matches!(
+            result,
+            Err(Error::HttpStatus {
+                status: StatusCode::NOT_FOUND,
+                ..
+            })
+        ),
+        "unknown epochs should not accept message writes"
     );
 
-    // Verify the message was stored
-    let messages = client.fetch_messages(&fake_epoch).await?;
-    assert_eq!(messages.messages.len(), 1, "message should be queued");
+    let fetch = client.fetch_messages(&fake_epoch, &sender_leaf).await;
+    assert!(
+        matches!(
+            fetch,
+            Err(Error::HttpStatus {
+                status: StatusCode::NOT_FOUND,
+                ..
+            })
+        ),
+        "unknown epochs should not allow message reads"
+    );
 
     drop(client);
     handle.abort();
@@ -801,9 +821,10 @@ async fn error_recovery_graceful_degradation() -> Result<()> {
     let nonce = nonce_array.into();
     let plaintext = b"test message";
     let ciphertext = cipher.encrypt(nonce, plaintext.as_ref()).expect("encrypt");
+    let sender_leaf = demo_member_leaf("alice");
 
     client
-        .send_message(&alice.we_epoch_id, &ciphertext, Some(b"alice"))
+        .send_message(&alice.we_epoch_id, &ciphertext, Some(&sender_leaf))
         .await
         .expect("send message");
 

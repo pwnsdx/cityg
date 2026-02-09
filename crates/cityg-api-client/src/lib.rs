@@ -149,6 +149,7 @@ use thiserror::Error;
 use tracing::warn;
 
 const ADMIN_TOKEN_HEADER: &str = "x-cityg-admin-token";
+const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
 
 /// HTTP client for the City-G API server.
 ///
@@ -185,6 +186,7 @@ pub struct CitygApiClient {
     http: Client,
     base_url: String,
     admin_token: Option<String>,
+    message_auth_token: Option<String>,
 }
 
 impl CitygApiClient {
@@ -213,6 +215,7 @@ impl CitygApiClient {
             http: Client::new(),
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             admin_token: None,
+            message_auth_token: None,
         }
     }
 
@@ -251,6 +254,7 @@ impl CitygApiClient {
             http: client,
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             admin_token: None,
+            message_auth_token: None,
         }
     }
 
@@ -263,6 +267,17 @@ impl CitygApiClient {
     pub fn with_admin_token(mut self, token: impl Into<String>) -> Self {
         let token = token.into().trim().to_string();
         self.admin_token = if token.is_empty() { None } else { Some(token) };
+        self
+    }
+
+    /// Configures a message-plane token for send/fetch endpoints.
+    ///
+    /// The token is sent in the `x-cityg-message-token` header for:
+    /// - `/v1/send_message`
+    /// - `/v1/messages`
+    pub fn with_message_auth_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into().trim().to_string();
+        self.message_auth_token = if token.is_empty() { None } else { Some(token) };
         self
     }
 
@@ -802,7 +817,8 @@ impl CitygApiClient {
     /// use cityg_api_client::CitygApiClient;
     ///
     /// # async fn example(client: &CitygApiClient, epoch_id: &[u8; 32]) -> Result<(), Box<dyn std::error::Error>> {
-    /// let response = client.fetch_messages(epoch_id).await?;
+    /// let leaf_id = [0u8; 32];
+    /// let response = client.fetch_messages(epoch_id, &leaf_id).await?;
     ///
     /// for msg in response.messages {
     ///     println!(
@@ -818,9 +834,11 @@ impl CitygApiClient {
     pub async fn fetch_messages(
         &self,
         we_epoch_id: &[u8; 32],
+        leaf_id: &[u8; 32],
     ) -> Result<FetchMessagesResponse, Error> {
         let request = FetchMessagesRequest {
             we_epoch_id: we_epoch_id.to_vec(),
+            leaf_id: leaf_id.to_vec(),
         };
         self.post_proto("/v1/messages", request).await
     }
@@ -1078,6 +1096,11 @@ impl CitygApiClient {
             {
                 req = req.header(ADMIN_TOKEN_HEADER, token);
             }
+            if Self::requires_message_auth(path)
+                && let Some(token) = self.message_auth_token.as_deref()
+            {
+                req = req.header(MESSAGE_AUTH_HEADER, token);
+            }
             let response = req.body(buf.clone()).send().await;
 
             match response {
@@ -1134,6 +1157,10 @@ impl CitygApiClient {
             path,
             "/v1/config/window" | "/v1/rooms/bootstrap" | "/v1/rooms/rotate_kbroad"
         )
+    }
+
+    fn requires_message_auth(path: &str) -> bool {
+        matches!(path, "/v1/send_message" | "/v1/messages")
     }
 }
 
@@ -1392,11 +1419,20 @@ mod tests {
             "/v1/rooms/rotate_kbroad"
         ));
         assert!(!CitygApiClient::requires_admin_token("/v1/members"));
+        assert!(CitygApiClient::requires_message_auth("/v1/send_message"));
+        assert!(CitygApiClient::requires_message_auth("/v1/messages"));
+        assert!(!CitygApiClient::requires_message_auth("/v1/window"));
 
         let client = CitygApiClient::new("http://localhost:8080").with_admin_token("  secret  ");
         assert_eq!(client.admin_token.as_deref(), Some("secret"));
         let client = client.with_admin_token("   ");
         assert!(client.admin_token.is_none());
+
+        let client =
+            CitygApiClient::new("http://localhost:8080").with_message_auth_token("  msg-secret  ");
+        assert_eq!(client.message_auth_token.as_deref(), Some("msg-secret"));
+        let client = client.with_message_auth_token("   ");
+        assert!(client.message_auth_token.is_none());
     }
 
     #[test]
@@ -1448,9 +1484,9 @@ mod tests {
         assert_eq!(merge.kbroad_generation, 0);
 
         let _ = client
-            .send_message(&[0x22; 32], b"ciphertext", Some(b"sender"))
+            .send_message(&[0x22; 32], b"ciphertext", Some(&[0xAA; 32]))
             .await?;
-        let _ = client.fetch_messages(&[0x22; 32]).await?;
+        let _ = client.fetch_messages(&[0x22; 32], &[0xAA; 32]).await?;
         let _ = client.get_bundle(&[0x22; 32]).await?;
         let _ = client.window().await?;
         let _ = client.telemetry().await?;
