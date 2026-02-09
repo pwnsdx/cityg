@@ -2050,10 +2050,42 @@ mod tests {
         bootstrap_test_room(&server_url, &room_id).await?;
         let alice = perform_join(&server_url, &room_id, "alice").await?;
         let bob = perform_join(&server_url, &room_id, "bob").await?;
+        let client = CitygApiClient::new(&server_url);
+        let before_leave = client.members(&alice.gid, None).await?;
+        assert_eq!(before_leave.total_count, 2);
+        assert!(
+            before_leave
+                .members
+                .iter()
+                .any(|member| member.leaf_id.as_slice() == alice.leaf_id.as_slice())
+        );
+        assert!(
+            before_leave
+                .members
+                .iter()
+                .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice())
+        );
 
         send_dummy_message(&bob).await?;
         perform_leave(&alice, true).await?;
+        let after_alice_leave = client.members(&alice.gid, None).await?;
+        assert_eq!(after_alice_leave.total_count, 1);
+        assert!(
+            !after_alice_leave
+                .members
+                .iter()
+                .any(|member| member.leaf_id.as_slice() == alice.leaf_id.as_slice())
+        );
+        assert!(
+            after_alice_leave
+                .members
+                .iter()
+                .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice())
+        );
         perform_leave(&bob, true).await?;
+        let after_bob_leave = client.members(&alice.gid, None).await?;
+        assert_eq!(after_bob_leave.total_count, 0);
+        assert!(after_bob_leave.members.is_empty());
 
         handle.abort();
         let _ = handle.await;
