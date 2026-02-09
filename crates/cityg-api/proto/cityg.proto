@@ -230,6 +230,7 @@ message JoinTicketResponse {
   bytes kbroad_public = 19;
   bytes bootstrap_public = 20;
   optional IdentityBinding confirmed_binding = 21;  // Server confirms the binding
+  uint64 kbroad_generation = 22;
 }
 
 message MergeTicketRequest {
@@ -259,6 +260,7 @@ message MergeTicketResponse {
   string msphf_params_id = 17;
   string fs_policy_version = 18;
   uint64 fs_epoch_base_ts = 19;
+  uint64 kbroad_generation = 20;
 }
 
 message BootstrapRoomRequest {
@@ -270,4 +272,16 @@ message BootstrapRoomRequest {
 message BootstrapRoomResponse {
   reserved 1000 to 1999;
   string status = 1;
+}
+
+message RotateRoomKbroadRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  bytes kbroad_public = 2;
+}
+
+message RotateRoomKbroadResponse {
+  reserved 1000 to 1999;
+  string status = 1;
+  uint64 kbroad_generation = 2;
 }
