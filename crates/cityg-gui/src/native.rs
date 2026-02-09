@@ -6325,6 +6325,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         msphf_params_id,
         fs_policy_version,
         fs_epoch_base_ts,
+        kbroad_generation: _,
     } = ticket;
 
     let srx_inputs = SrxInputsOwned::from_cbor(&srx_cbor)
