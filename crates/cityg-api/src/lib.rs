@@ -1992,9 +1992,11 @@ mod tests {
     use axum::body::to_bytes;
     use axum::routing::get;
     use cityg_client::demo::{DEMO_GID, demo_bundle};
+    use cityg_client::witness::SrxInputsOwned;
     use cityg_config::CityGConfig;
     use futures::{SinkExt, StreamExt};
     use msphf_core::MsphfError;
+    use msphf_core::merkle::canonical_set_root;
     use pqcrypto_dilithium::dilithium5;
     use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
     use prost::Message;
@@ -2637,6 +2639,17 @@ mod tests {
             !decoded.pivot_parity_cbor.is_empty(),
             "merge ticket should include at least one pivot parity"
         );
+        assert_eq!(decoded.join_delta_root, vec![0u8; 32]);
+        let expected_revoked_root = canonical_set_root(&[leaf_id]).expect("canonical revoked root");
+        assert_eq!(decoded.revoked_since_root, expected_revoked_root.to_vec());
+        assert_eq!(decoded.revoked_root, expected_revoked_root.to_vec());
+
+        let srx = SrxInputsOwned::from_cbor(&decoded.srx_cbor).expect("decode merge srx payload");
+        assert!(
+            srx.join_leaf_ids.is_empty(),
+            "leave merge must not add joins"
+        );
+        assert_eq!(srx.since_leaf_ids, vec![leaf_id]);
     }
 
     #[test]
@@ -3083,6 +3096,22 @@ mod tests {
         assert_eq!(second_json["type"], "membership");
         assert_eq!(second_json["event"], "join");
         assert_eq!(second_json["timestamp_ms"], 202);
+
+        state.broadcast_membership(DEMO_GID, [0xC7; 32], MembershipEventKind::Revoke, 303);
+        let third = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .expect("wait for revoke notification")
+            .expect("revoke notification frame")
+            .expect("revoke notification payload");
+        let third_text = match third {
+            tokio_tungstenite::tungstenite::Message::Text(text) => text,
+            other => panic!("expected text revoke frame, got {other:?}"),
+        };
+        let third_json: Value =
+            serde_json::from_str(&third_text).expect("decode revoke notification JSON");
+        assert_eq!(third_json["type"], "membership");
+        assert_eq!(third_json["event"], "revoke");
+        assert_eq!(third_json["timestamp_ms"], 303);
 
         socket
             .send(tokio_tungstenite::tungstenite::Message::Ping(vec![1, 2, 3]))
