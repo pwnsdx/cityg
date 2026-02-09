@@ -153,6 +153,7 @@ const API_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const WINDOW_CONFIG_ADMIN_HEADER: &str = "x-cityg-admin-token";
 const WINDOW_CONFIG_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_WINDOW_ADMIN_TOKEN";
 const ROOMS_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_ROOMS_ADMIN_TOKEN";
+const ALLOW_INSECURE_ADMIN_ENV: &str = "CITYG_SERVER_ALLOW_INSECURE_ADMIN";
 const WS_MAX_LAG_ENV: &str = "CITYG_SERVER_WS_MAX_LAG";
 const WS_MAX_LAG_DEFAULT: u64 = 256;
 
@@ -552,9 +553,26 @@ fn configured_rooms_admin_token() -> Option<String> {
         .or_else(configured_window_admin_token)
 }
 
-fn enforce_admin_token(headers: &HeaderMap, expected_token: Option<&str>) -> Result<(), ApiError> {
+fn parse_bool_env(raw: Option<String>) -> bool {
+    raw.map(|value| value.trim().to_ascii_lowercase())
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn allow_insecure_admin() -> bool {
+    parse_bool_env(std::env::var(ALLOW_INSECURE_ADMIN_ENV).ok())
+}
+
+fn enforce_admin_token_with_policy(
+    headers: &HeaderMap,
+    expected_token: Option<&str>,
+    allow_insecure: bool,
+) -> Result<(), ApiError> {
     let Some(expected_token) = expected_token else {
-        return Ok(());
+        if allow_insecure {
+            return Ok(());
+        }
+        return Err(ApiError::Unauthorized("admin token is not configured"));
     };
     let provided = headers
         .get(WINDOW_CONFIG_ADMIN_HEADER)
@@ -564,6 +582,10 @@ fn enforce_admin_token(headers: &HeaderMap, expected_token: Option<&str>) -> Res
     } else {
         Err(ApiError::Unauthorized("missing or invalid admin token"))
     }
+}
+
+fn enforce_admin_token(headers: &HeaderMap, expected_token: Option<&str>) -> Result<(), ApiError> {
+    enforce_admin_token_with_policy(headers, expected_token, allow_insecure_admin())
 }
 
 fn enforce_window_config_auth(
@@ -2071,6 +2093,7 @@ mod tests {
     use prost::Message;
     use serde_bytes::ByteBuf;
     use serde_json::Value;
+    use std::sync::Once;
 
     fn test_api_state() -> ApiState {
         let mut cfg = CityGConfig::default();
@@ -2093,6 +2116,15 @@ mod tests {
         }
     }
 
+    fn ensure_test_admin_tokens() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| unsafe {
+            std::env::set_var(WINDOW_CONFIG_ADMIN_TOKEN_ENV, "window-test-token");
+            std::env::set_var(ROOMS_ADMIN_TOKEN_ENV, "room-test-token");
+            std::env::remove_var(ALLOW_INSECURE_ADMIN_ENV);
+        });
+    }
+
     async fn decode_proto_response<T>(response: Response) -> T
     where
         T: Message + Default,
@@ -2113,6 +2145,7 @@ mod tests {
     }
 
     fn room_admin_headers() -> HeaderMap {
+        ensure_test_admin_tokens();
         let mut headers = HeaderMap::new();
         if let Some(token) = configured_rooms_admin_token() {
             let token = HeaderValue::from_str(token.as_str()).expect("valid room admin token");
@@ -2152,9 +2185,22 @@ mod tests {
         ));
 
         assert!(
-            enforce_window_config_auth(&empty_headers, None).is_ok(),
-            "auth should be bypassed when no admin token is configured"
+            matches!(
+                enforce_window_config_auth(&empty_headers, None),
+                Err(ApiError::Unauthorized("admin token is not configured"))
+            ),
+            "auth should fail closed when admin token is not configured"
         );
+    }
+
+    #[test]
+    fn admin_auth_policy_supports_explicit_insecure_override() {
+        let empty_headers = HeaderMap::new();
+        assert!(enforce_admin_token_with_policy(&empty_headers, None, true).is_ok());
+        assert!(matches!(
+            enforce_admin_token_with_policy(&empty_headers, None, false),
+            Err(ApiError::Unauthorized("admin token is not configured"))
+        ));
     }
 
     #[test]
@@ -2188,8 +2234,11 @@ mod tests {
         ));
 
         assert!(
-            enforce_room_admin_auth(&empty_headers, None).is_ok(),
-            "auth should be bypassed when no admin token is configured"
+            matches!(
+                enforce_room_admin_auth(&empty_headers, None),
+                Err(ApiError::Unauthorized("admin token is not configured"))
+            ),
+            "auth should fail closed when no room admin token is configured"
         );
     }
 
@@ -2206,6 +2255,16 @@ mod tests {
         assert!(!should_disconnect_for_lag(10, 10));
         assert!(!should_disconnect_for_lag(9, 10));
         assert!(should_disconnect_for_lag(11, 10));
+    }
+
+    #[test]
+    fn parse_bool_env_accepts_truthy_values() {
+        assert!(parse_bool_env(Some("1".to_string())));
+        assert!(parse_bool_env(Some("true".to_string())));
+        assert!(parse_bool_env(Some("YES".to_string())));
+        assert!(!parse_bool_env(Some("0".to_string())));
+        assert!(!parse_bool_env(Some("false".to_string())));
+        assert!(!parse_bool_env(None));
     }
 
     #[test]
