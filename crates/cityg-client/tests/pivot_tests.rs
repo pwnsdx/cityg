@@ -94,9 +94,14 @@ fn test_pivot_parity_from_cbor_empty() {
 #[test]
 fn test_pivot_parity_from_cbor_rejects_oversized_payload() {
     let oversized = vec![0u8; (2 * 1024 * 1024) + 1];
-    let err =
-        pivot_parity_from_cbor(&oversized).expect_err("oversized pivot parity payload must fail");
-    assert!(err.to_string().contains("pivot parity payload too large"));
+    let maybe_err = pivot_parity_from_cbor(&oversized).err();
+    assert!(
+        maybe_err.is_some(),
+        "oversized pivot parity payload must fail"
+    );
+    if let Some(err) = maybe_err {
+        assert!(err.to_string().contains("pivot parity payload too large"));
+    }
 }
 
 #[test]

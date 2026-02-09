@@ -147,6 +147,7 @@ pub fn hash_bytes_with_label(label: &str, bytes: &[u8]) -> Result<[u8; 32], Msph
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use serde::Serialize;

@@ -801,6 +801,7 @@ impl GroupMembership {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::demo::{

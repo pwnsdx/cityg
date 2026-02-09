@@ -121,6 +121,7 @@ pub fn deserialize_vector_exact(bytes: &[u8]) -> Result<Vec<BaseField>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

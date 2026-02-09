@@ -234,6 +234,7 @@ vim crates/msphf-core/tests/rlwe_kat.rs
 # Verify compliance
 ./scripts/setup-git-hooks.sh
 ./scripts/ci/local-ci.sh
+CITYG_FAST=1 ./scripts/ci/local-ci.sh
 
 # Commit with spec references
 git commit -m "Optimize RLWE NTT (§9, Annex C)"

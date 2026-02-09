@@ -120,7 +120,14 @@ Before committing, run all checks:
 CITYG_SKIP_GUI=1 ./scripts/ci/local-ci.sh
 CITYG_SKIP_DOCKER=1 ./scripts/ci/local-ci.sh
 CITYG_SKIP_NEXTEST=1 ./scripts/ci/local-ci.sh
+CITYG_FAST=1 ./scripts/ci/local-ci.sh
+CITYG_DISABLE_PARITY_IMAGE_CACHE=1 ./scripts/ci/local-ci.sh
 ```
+
+Notes:
+- The first macOS run now builds a cached Linux parity image (`cityg/local-ci:rust-1.91-bookworm-v1`).
+- Subsequent runs reuse that image plus Docker cargo cache volumes, which avoids repeated apt/tool bootstrap.
+- `CITYG_FAST=1` runs fmt + strict clippy + cargo check (+ nextest unless skipped), then exits before secret scan/release builds/package tests.
 
 ### 4. Commit Your Changes
 

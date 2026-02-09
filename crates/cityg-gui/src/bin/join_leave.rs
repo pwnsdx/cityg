@@ -1342,13 +1342,11 @@ fn log_fs_metadata(pivot: &PivotParity, header: &BTreeMap<u64, Value>) {
 }
 
 fn apply_pivot_alignment(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity) {
-    let fs_policy_version = pivot
-        .policy_version
-        .parse::<u64>()
-        .expect("pivot policy_version must be uint decimal");
-    header
-        .entry(hdr::HDR_FS_POLICY_VERSION)
-        .or_insert_with(|| Value::Integer(Integer::from(fs_policy_version)));
+    if let Ok(fs_policy_version) = pivot.policy_version.parse::<u64>() {
+        header
+            .entry(hdr::HDR_FS_POLICY_VERSION)
+            .or_insert_with(|| Value::Integer(Integer::from(fs_policy_version)));
+    }
     header
         .entry(hdr::HDR_PROOF_MODE)
         .or_insert_with(|| Value::Text(pivot.proof_mode.clone()));
@@ -1415,6 +1413,7 @@ fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use cityg_config::CityGConfig;

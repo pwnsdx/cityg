@@ -130,6 +130,7 @@ fn main() {
 #[cfg(test)]
 fn main() {}
 
+#[allow(clippy::expect_used)]
 fn measure(args: &Args, cls: u8, rng: &mut StdRng, stats: &mut Stats) {
     use std::hint::black_box;
     let inner = args.inner as usize;
@@ -234,6 +235,7 @@ struct SmallwoodFixture {
 }
 
 impl SmallwoodFixture {
+    #[allow(clippy::expect_used)]
     fn new(cls: u8) -> Self {
         let config = smallwood_config();
         let statement = smallwood_statement(cls);

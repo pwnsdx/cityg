@@ -170,21 +170,24 @@ fn test_build_branch_b_artifacts_rejects_parent_root_mismatch() {
     let join_leaves = vec![[0x30; 32]];
     let bad_parent_root = [0xFF; 32];
 
-    let err = build_branch_b_artifacts(&parent_leaves, &join_leaves, bad_parent_root, [0u8; 32])
-        .expect_err("mismatched parent root must fail");
-    assert!(err.to_string().contains("parent root mismatch"));
+    let maybe_err =
+        build_branch_b_artifacts(&parent_leaves, &join_leaves, bad_parent_root, [0u8; 32]).err();
+    assert!(maybe_err.is_some(), "mismatched parent root must fail");
+    if let Some(err) = maybe_err {
+        assert!(err.to_string().contains("parent root mismatch"));
+    }
 }
 
 #[test]
-fn test_build_merge_srx_inputs_rejects_nonzero_revoked_root_when_empty() {
+fn test_build_merge_srx_inputs_rejects_nonzero_revoked_root_when_empty()
+-> Result<(), Box<dyn std::error::Error>> {
     let parent_leaves = vec![[0x10; 32]];
     let join_leaves = vec![[0x20; 32]];
-    let parent_root =
-        msphf_core::merkle::canonical_set_root(&parent_leaves).expect("parent root should compute");
+    let parent_root = msphf_core::merkle::canonical_set_root(&parent_leaves)?;
     let revoked_since_leaves: Vec<[u8; 32]> = Vec::new();
     let revoked_leaves: Vec<[u8; 32]> = Vec::new();
 
-    let err = build_merge_srx_inputs(
+    let maybe_err = build_merge_srx_inputs(
         &parent_leaves,
         &join_leaves,
         parent_root,
@@ -192,21 +195,28 @@ fn test_build_merge_srx_inputs_rejects_nonzero_revoked_root_when_empty() {
         &revoked_leaves,
         [0x99; 32],
     )
-    .expect_err("non-zero revoked root with empty revoked set must fail");
+    .err();
+    assert!(
+        maybe_err.is_some(),
+        "non-zero revoked root with empty revoked set must fail"
+    );
+    if let Some(err) = maybe_err {
+        assert!(err.to_string().contains("revoked_root mismatch"));
+    }
 
-    assert!(err.to_string().contains("revoked_root mismatch"));
+    Ok(())
 }
 
 #[test]
-fn test_build_merge_srx_inputs_rejects_revoked_since_not_in_revoked_set() {
+fn test_build_merge_srx_inputs_rejects_revoked_since_not_in_revoked_set()
+-> Result<(), Box<dyn std::error::Error>> {
     let parent_leaves = vec![[0x10; 32]];
     let join_leaves = vec![[0x20; 32]];
-    let parent_root =
-        msphf_core::merkle::canonical_set_root(&parent_leaves).expect("parent root should compute");
+    let parent_root = msphf_core::merkle::canonical_set_root(&parent_leaves)?;
     let revoked_since_leaves = vec![[0xA5; 32]];
     let revoked_leaves: Vec<[u8; 32]> = Vec::new();
 
-    let err = build_merge_srx_inputs(
+    let maybe_err = build_merge_srx_inputs(
         &parent_leaves,
         &join_leaves,
         parent_root,
@@ -214,26 +224,32 @@ fn test_build_merge_srx_inputs_rejects_revoked_since_not_in_revoked_set() {
         &revoked_leaves,
         [0u8; 32],
     )
-    .expect_err("revoked_since entries must belong to revoked set");
-
+    .err();
     assert!(
-        err.to_string()
-            .contains("revoked leaf missing from revoked set")
+        maybe_err.is_some(),
+        "revoked_since entries must belong to revoked set"
     );
+
+    if let Some(err) = maybe_err {
+        assert!(
+            err.to_string()
+                .contains("revoked leaf missing from revoked set")
+        );
+    }
+    Ok(())
 }
 
 #[test]
-fn test_build_merge_srx_inputs_rejects_nonempty_revoked_root_mismatch() {
+fn test_build_merge_srx_inputs_rejects_nonempty_revoked_root_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
     let parent_leaves = vec![[0x10; 32]];
     let join_leaves = vec![[0x20; 32]];
-    let parent_root =
-        msphf_core::merkle::canonical_set_root(&parent_leaves).expect("parent root should compute");
+    let parent_root = msphf_core::merkle::canonical_set_root(&parent_leaves)?;
     let revoked_since_leaves = vec![[0xA5; 32]];
     let revoked_leaves = vec![[0xA5; 32], [0xB5; 32]];
-    let wrong_revoked_root = msphf_core::merkle::canonical_set_root(&revoked_since_leaves)
-        .expect("single-leaf root should compute");
+    let wrong_revoked_root = msphf_core::merkle::canonical_set_root(&revoked_since_leaves)?;
 
-    let err = build_merge_srx_inputs(
+    let maybe_err = build_merge_srx_inputs(
         &parent_leaves,
         &join_leaves,
         parent_root,
@@ -241,9 +257,13 @@ fn test_build_merge_srx_inputs_rejects_nonempty_revoked_root_mismatch() {
         &revoked_leaves,
         wrong_revoked_root,
     )
-    .expect_err("mismatched revoked_root must fail");
+    .err();
+    assert!(maybe_err.is_some(), "mismatched revoked_root must fail");
 
-    assert!(err.to_string().contains("revoked_root mismatch"));
+    if let Some(err) = maybe_err {
+        assert!(err.to_string().contains("revoked_root mismatch"));
+    }
+    Ok(())
 }
 
 #[test]
@@ -325,13 +345,19 @@ fn test_build_branch_b_artifacts_right_boundary_nonmembership()
 
 #[test]
 fn test_srx_inputs_from_cbor_invalid() {
-    let err = SrxInputsOwned::from_cbor(&[0xFF, 0x00]).expect_err("invalid cbor should fail");
-    assert!(err.to_string().contains("unable to parse SRX inputs"));
+    let maybe_err = SrxInputsOwned::from_cbor(&[0xFF, 0x00]).err();
+    assert!(maybe_err.is_some(), "invalid cbor should fail");
+    if let Some(err) = maybe_err {
+        assert!(err.to_string().contains("unable to parse SRX inputs"));
+    }
 }
 
 #[test]
 fn test_srx_inputs_from_cbor_rejects_oversized_payload() {
     let oversized = vec![0u8; (4 * 1024 * 1024) + 1];
-    let err = SrxInputsOwned::from_cbor(&oversized).expect_err("oversized SRX payload must fail");
-    assert!(err.to_string().contains("srx payload too large"));
+    let maybe_err = SrxInputsOwned::from_cbor(&oversized).err();
+    assert!(maybe_err.is_some(), "oversized SRX payload must fail");
+    if let Some(err) = maybe_err {
+        assert!(err.to_string().contains("srx payload too large"));
+    }
 }

@@ -1101,16 +1101,8 @@ mod tests {
             Err(CityGError::InvalidInput("required"))
         ));
 
-        assert!(
-            super::header_bytes32_opt(&map, 1)
-                .expect("optional bytes")
-                .is_some()
-        );
-        assert!(
-            super::header_bytes32_opt(&map, 4)
-                .expect("null optional")
-                .is_none()
-        );
+        assert!(matches!(super::header_bytes32_opt(&map, 1), Ok(Some(_))));
+        assert!(matches!(super::header_bytes32_opt(&map, 4), Ok(None)));
         assert!(matches!(
             super::header_bytes32_opt(&map, 2),
             Err(CityGError::InvalidInput("pivot field wrong length"))
@@ -1124,18 +1116,18 @@ mod tests {
             super::header_bytes_opt(&map, 3),
             Err(CityGError::InvalidInput("pivot field wrong type"))
         ));
-        assert_eq!(
-            super::header_string(&map, 5, None).expect("text value"),
-            "ok".to_string()
-        );
-        assert_eq!(
-            super::header_string(&map, 6, None).expect("bytes utf8 value"),
-            "fg".to_string()
-        );
-        assert_eq!(
-            super::header_string(&map, 4, Some("fallback")).expect("null fallback"),
-            "fallback".to_string()
-        );
+        assert!(matches!(
+            super::header_string(&map, 5, None),
+            Ok(value) if value == "ok"
+        ));
+        assert!(matches!(
+            super::header_string(&map, 6, None),
+            Ok(value) if value == "fg"
+        ));
+        assert!(matches!(
+            super::header_string(&map, 4, Some("fallback")),
+            Ok(value) if value == "fallback"
+        ));
         assert!(matches!(
             super::header_string(&map, 4, None),
             Err(CityGError::InvalidInput("pivot field missing"))
@@ -1240,14 +1232,16 @@ mod tests {
             return Err(CityGError::InvalidInput("vrf proof has invalid type"));
         }
 
-        let err = match server.refresh_pivot(&tampered) {
-            Err(e) => e,
-            Ok(_) => unreachable!("tampered refresh bundle must fail"),
-        };
-        match err {
-            CityGError::InvalidInput("refresh payload diverges from stored parity") => {}
-            other => panic!("unexpected refresh error: {other:?}"),
-        }
+        let err = server
+            .refresh_pivot(&tampered)
+            .err()
+            .ok_or(CityGError::InvalidInput(
+                "tampered refresh bundle must fail",
+            ))?;
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("refresh payload diverges from stored parity")
+        ));
         Ok(())
     }
 
@@ -1940,19 +1934,21 @@ impl Drop for JournalFailureGuard {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 pub(crate) fn fail_journal_after(countdown: usize) -> JournalFailureGuard {
-    let lock = journal_failure_lock()
-        .lock()
-        .expect("Failed to acquire journal failure lock");
+    let lock = match journal_failure_lock().lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     JOURNAL_FAIL_ON_APPEND.store(countdown as isize, Ordering::SeqCst);
     JournalFailureGuard { _lock: lock }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 pub(crate) fn journal_serial_guard() -> MutexGuard<'static, ()> {
-    journal_serial_lock().lock().unwrap()
+    match journal_serial_lock().lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 impl ServerJournal {

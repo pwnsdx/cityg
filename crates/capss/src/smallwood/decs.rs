@@ -812,6 +812,7 @@ fn null_digest(len: usize) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{field::BaseField, smallwood::rng::SmallwoodSeeder};

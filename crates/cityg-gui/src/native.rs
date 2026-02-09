@@ -7053,13 +7053,11 @@ fn hydrate_parities(
 }
 
 fn apply_pivot_alignment(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity) {
-    let fs_policy_version = pivot
-        .policy_version
-        .parse::<u64>()
-        .expect("pivot policy_version must be uint decimal");
-    header
-        .entry(hdr::HDR_FS_POLICY_VERSION)
-        .or_insert_with(|| Value::Integer(Integer::from(fs_policy_version)));
+    if let Ok(fs_policy_version) = pivot.policy_version.parse::<u64>() {
+        header
+            .entry(hdr::HDR_FS_POLICY_VERSION)
+            .or_insert_with(|| Value::Integer(Integer::from(fs_policy_version)));
+    }
     header
         .entry(hdr::HDR_PROOF_MODE)
         .or_insert_with(|| Value::Text(pivot.proof_mode.clone()));

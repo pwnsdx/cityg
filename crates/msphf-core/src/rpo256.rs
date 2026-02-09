@@ -311,6 +311,7 @@ fn rpo_hash_v2(ds_tag: u64, payload: &[u8]) -> [u8; 32] {
 // ----------------------------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

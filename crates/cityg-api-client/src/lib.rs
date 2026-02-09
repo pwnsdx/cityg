@@ -1193,6 +1193,7 @@ fn build_http_error(status: StatusCode, body: Vec<u8>) -> Error {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use axum::{

@@ -1303,11 +1303,13 @@ default_window_height = 1080.0
                 overrides.get(lookup).cloned().ok_or(VarError::NotPresent)
             });
             assert!(result.is_err(), "{key} should fail parsing");
-            let err = result.expect_err("expected parse error");
-            assert!(
-                err.to_string().contains(expected_msg),
-                "unexpected error for {key}: {err}"
-            );
+            let maybe_err = result.err();
+            if let Some(err) = maybe_err {
+                assert!(
+                    err.to_string().contains(expected_msg),
+                    "unexpected error for {key}: {err}"
+                );
+            }
         }
         Ok(())
     }
@@ -1315,7 +1317,10 @@ default_window_height = 1080.0
     #[test]
     fn test_load_prefers_cwd_files_before_other_sources()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let _lock = LOAD_ENV_LOCK.lock().expect("lock poisoned");
+        let _lock = match LOAD_ENV_LOCK.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let temp_dir = TempDir::new()?;
         let original = std::env::current_dir()?;
         let _cwd_guard = CurrentDirGuard(original);
@@ -1362,7 +1367,10 @@ default_server_url = "http://10.1.1.1:9001"
     #[test]
     fn test_load_reads_user_config_directory_when_cwd_missing()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let _lock = LOAD_ENV_LOCK.lock().expect("lock poisoned");
+        let _lock = match LOAD_ENV_LOCK.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let temp_home = TempDir::new()?;
         let temp_xdg = TempDir::new()?;
         let _home_guard = set_env_guard("HOME", temp_home.path().to_string_lossy().as_ref());
