@@ -85,6 +85,7 @@ use msphf_orchestrator::{
     self, AcceptanceContext, AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE,
     DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes, hdr,
 };
+use serde::{Deserialize, Serialize};
 
 /// Re-export commonly used client-side bundle types for convenience.
 pub use cityg_client::{AnchorBundle, BindingMaterial};
@@ -92,6 +93,7 @@ pub use cityg_client::{AnchorBundle, BindingMaterial};
 const DEFAULT_CAT: [u8; 32] = [0x21; 32];
 const KBROAD_ROTATION_REQUIRED_ERR: &str = "kbroad rotation required";
 const KBROAD_KEY_UNCHANGED_ERR: &str = "kbroad key unchanged";
+const KBROAD_HISTORY_EXISTS_ERR: &str = "group already has roster history";
 
 /// Configuration for [`CityGServer`] initialization.
 ///
@@ -198,6 +200,7 @@ pub struct CityGServer {
     window_ttl: Duration,
     acceptance_options: AcceptanceOptions,
     journal: Option<ServerJournal>,
+    kbroad_state_path: Option<PathBuf>,
     replaying: bool,
 }
 
@@ -296,6 +299,9 @@ impl CityGServer {
         gid: &[u8; 32],
         kbroad_public: Vec<u8>,
     ) -> Result<(), CityGError> {
+        if self.roster.has_history(gid) {
+            return Err(CityGError::InvalidInput(KBROAD_HISTORY_EXISTS_ERR));
+        }
         let mut registry = self.ctx.kbroad_registry().cloned().unwrap_or_default();
         if registry.contains_key(gid.as_ref()) {
             return Err(CityGError::InvalidInput("kbroad key already registered"));
@@ -305,6 +311,7 @@ impl CityGServer {
         let state = self.roster.groups.entry(gid.to_vec()).or_default();
         state.rotation_required = false;
         state.kbroad_generation = 0;
+        self.persist_kbroad_state()?;
         Ok(())
     }
 
@@ -324,6 +331,7 @@ impl CityGServer {
         self.ctx.set_kbroad_registry(Some(registry));
         let generation = self.roster.increment_kbroad_generation(gid);
         self.roster.clear_kbroad_rotation_required(gid);
+        self.persist_kbroad_state()?;
         Ok(generation)
     }
 
@@ -338,7 +346,22 @@ impl CityGServer {
     pub fn new(config: ServerConfig) -> Self {
         let h_max = config.h_max.unwrap_or(DEFAULT_H_MAX);
         let ttl = config.window_ttl.unwrap_or(DEFAULT_T_WINDOW);
-        let options = config.acceptance_options.unwrap_or_default();
+        let kbroad_state_path = config
+            .state_path
+            .as_ref()
+            .map(|path| kbroad_state_path_for_journal(path.as_path()));
+        let persisted_kbroad_state = kbroad_state_path
+            .as_ref()
+            .and_then(|path| load_kbroad_state(path).ok())
+            .filter(|state| !state.is_empty());
+        let mut options = config.acceptance_options.unwrap_or_default();
+        if let Some(state) = persisted_kbroad_state.as_ref() {
+            let registry: BTreeMap<Vec<u8>, Vec<u8>> = state
+                .iter()
+                .map(|(gid, room)| (gid.clone(), room.kbroad_public.clone()))
+                .collect();
+            options.kbroad_registry = Some(registry);
+        }
         let journal = config
             .state_path
             .as_ref()
@@ -351,6 +374,7 @@ impl CityGServer {
             window_ttl: ttl,
             acceptance_options: options,
             journal,
+            kbroad_state_path,
             replaying: false,
         };
         #[allow(clippy::collapsible_if)]
@@ -358,6 +382,9 @@ impl CityGServer {
             if let Err(err) = server.recover_from_state(&path) {
                 eprintln!("cityg-server: state recovery failed: {err:?}");
             }
+        }
+        if let Some(state) = persisted_kbroad_state {
+            server.apply_persisted_kbroad_state(&state);
         }
         server
     }
@@ -663,6 +690,39 @@ impl CityGServer {
         self.ctx = staged_ctx;
         self.receiver = staged_receiver;
         self.roster = staged_roster;
+    }
+
+    fn apply_persisted_kbroad_state(&mut self, state: &PersistedKbroadState) {
+        let mut registry = self.ctx.kbroad_registry().cloned().unwrap_or_default();
+        for (gid, room_state) in state {
+            registry.insert(gid.clone(), room_state.kbroad_public.clone());
+            let group = self.roster.groups.entry(gid.clone()).or_default();
+            group.kbroad_generation = room_state.kbroad_generation;
+            group.rotation_required = room_state.rotation_required;
+        }
+        self.ctx.set_kbroad_registry(Some(registry));
+    }
+
+    fn snapshot_kbroad_state(&self) -> PersistedKbroadState {
+        let registry = self.ctx.kbroad_registry().cloned().unwrap_or_default();
+        registry
+            .into_iter()
+            .map(|(gid, kbroad_public)| {
+                let room = PersistedKbroadRoomState {
+                    kbroad_public,
+                    kbroad_generation: self.roster.kbroad_generation(gid.as_slice()),
+                    rotation_required: self.roster.kbroad_rotation_required(gid.as_slice()),
+                };
+                (gid, room)
+            })
+            .collect()
+    }
+
+    fn persist_kbroad_state(&self) -> Result<(), CityGError> {
+        if let Some(path) = self.kbroad_state_path.as_ref() {
+            persist_kbroad_state(path, &self.snapshot_kbroad_state())?;
+        }
+        Ok(())
     }
 
     fn reset_state(&mut self) {
@@ -986,6 +1046,34 @@ mod tests {
     }
 
     #[test]
+    fn register_group_rejects_gid_with_existing_history_even_if_registry_is_missing()
+    -> Result<(), CityGError> {
+        let gid = [0xCA; 32];
+        let leaf = cityg_client::demo::demo_member_leaf("history-owner");
+        let mut server = CityGServer::new(ServerConfig::new());
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![leaf],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[leaf])?;
+        let mut state = super::GroupState::default();
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        server.roster.groups.insert(gid.to_vec(), state);
+
+        let err = match server.register_group(&gid, vec![0x9A; 16]) {
+            Err(err) => err,
+            Ok(_) => unreachable!("group with history must not be re-bootstrapped"),
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(super::KBROAD_HISTORY_EXISTS_ERR)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn rotate_group_kbroad_rejects_missing_and_unchanged_keys() -> Result<(), CityGError> {
         let mut server = CityGServer::new(ServerConfig::new());
         let gid = [0xB1; 32];
@@ -1048,6 +1136,46 @@ mod tests {
         let ticket = server.build_join_ticket(&gid)?;
         assert_eq!(ticket.kbroad_public, rotated_key);
         assert_eq!(ticket.kbroad_generation, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn kbroad_state_persists_across_restart() -> Result<(), CityGError> {
+        let _serial = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("kbroad-state.journal");
+        let gid = [0xC1; 32];
+        let initial_key = vec![0x44; 16];
+        let rotated_key = vec![0x66; 16];
+
+        {
+            let mut cfg = ServerConfig::new();
+            cfg.state_path = Some(journal_path.clone());
+            let mut server = CityGServer::new(cfg);
+            server.register_group(&gid, initial_key.clone())?;
+            server.roster.mark_kbroad_rotation_required(gid.as_slice());
+            let generation = server.rotate_group_kbroad(&gid, rotated_key.clone())?;
+            assert_eq!(generation, 1);
+            assert_eq!(server.kbroad_generation(&gid), 1);
+            assert!(!server.kbroad_rotation_required(&gid));
+        }
+
+        let mut cfg = ServerConfig::new();
+        cfg.state_path = Some(journal_path.clone());
+        let mut server = CityGServer::new(cfg);
+        assert_eq!(server.kbroad_generation(&gid), 1);
+        assert!(!server.kbroad_rotation_required(&gid));
+        let ticket = server.build_join_ticket(&gid)?;
+        assert_eq!(ticket.kbroad_public, rotated_key);
+        assert_eq!(ticket.kbroad_generation, 1);
+        let duplicate = match server.register_group(&gid, initial_key) {
+            Err(err) => err,
+            Ok(_) => unreachable!("restart must preserve registered room kbroad key"),
+        };
+        assert!(matches!(
+            duplicate,
+            CityGError::InvalidInput("kbroad key already registered")
+        ));
         Ok(())
     }
 
@@ -1139,7 +1267,9 @@ mod tests {
         state.snapshots.insert(root, membership);
         state.latest_root = Some(root);
         server.roster.groups.insert(gid.to_vec(), state);
-        server.register_group(&gid, vec![0x77; 16])?;
+        let mut registry = BTreeMap::new();
+        registry.insert(gid.to_vec(), vec![0x77; 16]);
+        server.context_mut().set_kbroad_registry(Some(registry));
 
         let missing_leaf_err = match server.build_merge_ticket(&gid, &[0xFF; 32]) {
             Err(e) => e,
@@ -1969,6 +2099,15 @@ impl GroupRoster {
             .unwrap_or_default()
     }
 
+    fn has_history(&self, gid: &[u8]) -> bool {
+        self.groups
+            .get(gid)
+            .map(|state| {
+                state.latest_root.is_some() || !state.snapshots.is_empty() || !state.revoked.is_empty()
+            })
+            .unwrap_or(false)
+    }
+
     fn kbroad_generation(&self, gid: &[u8]) -> u64 {
         self.groups
             .get(gid)
@@ -2040,6 +2179,53 @@ impl GroupState {
             self.next_index = candidate;
         }
     }
+}
+
+type PersistedKbroadState = BTreeMap<Vec<u8>, PersistedKbroadRoomState>;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PersistedKbroadRoomState {
+    kbroad_public: Vec<u8>,
+    kbroad_generation: u64,
+    rotation_required: bool,
+}
+
+fn kbroad_state_path_for_journal(journal_path: &Path) -> PathBuf {
+    journal_path.with_extension("kbroad.cbor")
+}
+
+fn load_kbroad_state(path: &Path) -> Result<PersistedKbroadState, CityGError> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(err) => return Err(CityGError::Io(err)),
+    };
+    ciborium::de::from_reader(file).map_err(|_| CityGError::InvalidInput("invalid kbroad state"))
+}
+
+fn persist_kbroad_state(path: &Path, state: &PersistedKbroadState) -> Result<(), CityGError> {
+    #[allow(clippy::collapsible_if)]
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(state, &mut bytes)
+        .map_err(|_| CityGError::InvalidInput("failed to encode kbroad state"))?;
+
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_os);
+    {
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(&bytes)?;
+        file.flush()?;
+        file.sync_data()?;
+    }
+    std::fs::rename(tmp_path, path)?;
+    Ok(())
 }
 
 fn is_zero_root(root: &[u8; 32]) -> bool {
