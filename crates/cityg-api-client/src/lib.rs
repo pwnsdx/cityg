@@ -135,8 +135,8 @@ use pb::{
     GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetTelemetryResponse,
     GetWindowRequest, GetWindowResponse, JoinTicketRequest, JoinTicketResponse, MembersRequest,
     MembersResponse, MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest,
-    RefreshPivotResponse, SearchMembersRequest, SearchMembersResponse, SendMessageRequest,
-    SendMessageResponse,
+    RefreshPivotResponse, RotateRoomKbroadRequest, RotateRoomKbroadResponse,
+    SearchMembersRequest, SearchMembersResponse, SendMessageRequest, SendMessageResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -147,6 +147,8 @@ use std::convert::TryInto;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::warn;
+
+const ADMIN_TOKEN_HEADER: &str = "x-cityg-admin-token";
 
 /// HTTP client for the City-G API server.
 ///
@@ -182,6 +184,7 @@ use tracing::warn;
 pub struct CitygApiClient {
     http: Client,
     base_url: String,
+    admin_token: Option<String>,
 }
 
 impl CitygApiClient {
@@ -209,6 +212,7 @@ impl CitygApiClient {
         Self {
             http: Client::new(),
             base_url: base_url.into().trim_end_matches('/').to_owned(),
+            admin_token: None,
         }
     }
 
@@ -246,7 +250,20 @@ impl CitygApiClient {
         Self {
             http: client,
             base_url: base_url.into().trim_end_matches('/').to_owned(),
+            admin_token: None,
         }
+    }
+
+    /// Configures an admin token for protected control-plane endpoints.
+    ///
+    /// The token is sent in the `x-cityg-admin-token` header for:
+    /// - `/v1/config/window`
+    /// - `/v1/rooms/bootstrap`
+    /// - `/v1/rooms/rotate_kbroad`
+    pub fn with_admin_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into().trim().to_string();
+        self.admin_token = if token.is_empty() { None } else { Some(token) };
+        self
     }
 
     /// Performs a health check on the server.
@@ -383,6 +400,21 @@ impl CitygApiClient {
         };
         let _: BootstrapRoomResponse = self.post_proto("/v1/rooms/bootstrap", request).await?;
         Ok(())
+    }
+
+    /// Rotates the room KBROAD public key and returns the new generation.
+    pub async fn rotate_room_kbroad(
+        &self,
+        room_id: &str,
+        kbroad_public: &[u8],
+    ) -> Result<u64, Error> {
+        let request = RotateRoomKbroadRequest {
+            room_id: room_id.to_string(),
+            kbroad_public: kbroad_public.to_vec(),
+        };
+        let response: RotateRoomKbroadResponse =
+            self.post_proto("/v1/rooms/rotate_kbroad", request).await?;
+        Ok(response.kbroad_generation)
     }
 
     /// Retrieves the member roster for a group.
@@ -697,6 +729,7 @@ impl CitygApiClient {
             msphf_params_id: response.msphf_params_id,
             fs_policy_version: response.fs_policy_version,
             fs_epoch_base_ts: response.fs_epoch_base_ts,
+            kbroad_generation: response.kbroad_generation,
         })
     }
 
@@ -1036,13 +1069,16 @@ impl CitygApiClient {
         }
 
         for attempt in 0..=max_retries {
-            let response = self
+            let mut req = self
                 .http
                 .post(&url)
-                .header("Content-Type", "application/x-protobuf")
-                .body(buf.clone())
-                .send()
-                .await;
+                .header("Content-Type", "application/x-protobuf");
+            if Self::requires_admin_token(path)
+                && let Some(token) = self.admin_token.as_deref()
+            {
+                req = req.header(ADMIN_TOKEN_HEADER, token);
+            }
+            let response = req.body(buf.clone()).send().await;
 
             match response {
                 Ok(resp) => return Self::decode_response(resp).await,
@@ -1092,6 +1128,13 @@ impl CitygApiClient {
         }
         R::decode(bytes).map_err(Error::from)
     }
+
+    fn requires_admin_token(path: &str) -> bool {
+        matches!(
+            path,
+            "/v1/config/window" | "/v1/rooms/bootstrap" | "/v1/rooms/rotate_kbroad"
+        )
+    }
 }
 
 /// Merge ticket containing all data needed to create a new epoch.
@@ -1127,6 +1170,7 @@ impl CitygApiClient {
 /// - `msphf_params_id`: MSPHF parameter set identifier
 /// - `fs_policy_version`: Forward secrecy policy version
 /// - `fs_epoch_base_ts`: Forward secrecy epoch base timestamp (Unix ms)
+/// - `kbroad_generation`: Monotonic room KBROAD generation
 #[derive(Debug, Clone)]
 pub struct MergeTicket {
     pub we_epoch_id: [u8; 32],
@@ -1148,6 +1192,7 @@ pub struct MergeTicket {
     pub msphf_params_id: String,
     pub fs_policy_version: String,
     pub fs_epoch_base_ts: u64,
+    pub kbroad_generation: u64,
 }
 
 fn array32(bytes: &[u8]) -> Result<[u8; 32], Error> {
@@ -1204,7 +1249,7 @@ mod tests {
     use pb::{
         BootstrapRoomResponse, ConfigureWindowResponse, FetchMessagesResponse, GetBundleResponse,
         GetTelemetryResponse, GetWindowResponse, JoinTicketResponse, MembersResponse,
-        MergeTicketResponse, SearchMembersResponse, SendMessageResponse,
+        MergeTicketResponse, RotateRoomKbroadResponse, SearchMembersResponse, SendMessageResponse,
     };
     use prost::Message;
     use std::{error::Error as StdError, net::SocketAddr};
@@ -1235,6 +1280,7 @@ mod tests {
             msphf_params_id: "rlwe-hps2048509".to_string(),
             fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 0,
+            kbroad_generation: 0,
         }
     }
 
@@ -1253,6 +1299,7 @@ mod tests {
     async fn mock_post(uri: Uri) -> Response {
         let payload = match uri.path() {
             "/v1/rooms/bootstrap" => encode_proto(BootstrapRoomResponse::default()),
+            "/v1/rooms/rotate_kbroad" => encode_proto(RotateRoomKbroadResponse::default()),
             "/v1/members" => encode_proto(MembersResponse::default()),
             "/v1/members/search" => encode_proto(SearchMembersResponse::default()),
             "/v1/rooms/join_ticket" => encode_proto(JoinTicketResponse::default()),
@@ -1337,6 +1384,19 @@ mod tests {
     }
 
     #[test]
+    fn admin_token_path_classification_and_builder() {
+        assert!(CitygApiClient::requires_admin_token("/v1/config/window"));
+        assert!(CitygApiClient::requires_admin_token("/v1/rooms/bootstrap"));
+        assert!(CitygApiClient::requires_admin_token("/v1/rooms/rotate_kbroad"));
+        assert!(!CitygApiClient::requires_admin_token("/v1/members"));
+
+        let client = CitygApiClient::new("http://localhost:8080").with_admin_token("  secret  ");
+        assert_eq!(client.admin_token.as_deref(), Some("secret"));
+        let client = client.with_admin_token("   ");
+        assert!(client.admin_token.is_none());
+    }
+
+    #[test]
     fn build_http_error_uses_payload_message_and_code() {
         let err = build_http_error(
             StatusCode::BAD_REQUEST,
@@ -1367,6 +1427,7 @@ mod tests {
 
         client.health().await?;
         client.bootstrap_room("room-1", &[0xAB; 32]).await?;
+        let _ = client.rotate_room_kbroad("room-1", &[0xBC; 32]).await?;
 
         let gid = [0x33u8; 32];
         let _ = client.members(&gid, None).await?;
@@ -1381,6 +1442,7 @@ mod tests {
         let merge = client.merge_ticket("room-1", &[0x01; 32]).await?;
         assert_eq!(merge.we_epoch_id, [0x01; 32]);
         assert_eq!(merge.parent_root, [0x03; 32]);
+        assert_eq!(merge.kbroad_generation, 0);
 
         let _ = client
             .send_message(&[0x22; 32], b"ciphertext", Some(b"sender"))

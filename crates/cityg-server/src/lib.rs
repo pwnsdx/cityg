@@ -90,6 +90,8 @@ use msphf_orchestrator::{
 pub use cityg_client::{AnchorBundle, BindingMaterial};
 
 const DEFAULT_CAT: [u8; 32] = [0x21; 32];
+const KBROAD_ROTATION_REQUIRED_ERR: &str = "kbroad rotation required";
+const KBROAD_KEY_UNCHANGED_ERR: &str = "kbroad key unchanged";
 
 /// Configuration for [`CityGServer`] initialization.
 ///
@@ -243,6 +245,8 @@ pub struct JoinTicketBundle {
     pub srx_cbor: Vec<u8>,
     /// KBROAD public key for encryption
     pub kbroad_public: Vec<u8>,
+    /// Monotonic KBROAD generation for this group.
+    pub kbroad_generation: u64,
 }
 
 /// Merge ticket bundle provided to existing members during leave/rekey flow.
@@ -283,6 +287,7 @@ pub struct MergeTicketBundle {
     pub fs_policy_version: String,
     pub fs_epoch_base_ts: u64,
     pub kbroad_public: Vec<u8>,
+    pub kbroad_generation: u64,
 }
 
 impl CityGServer {
@@ -297,8 +302,37 @@ impl CityGServer {
         }
         registry.insert(gid.to_vec(), kbroad_public);
         self.ctx.set_kbroad_registry(Some(registry));
-        self.roster.groups.entry(gid.to_vec()).or_default();
+        let state = self.roster.groups.entry(gid.to_vec()).or_default();
+        state.rotation_required = false;
+        state.kbroad_generation = 0;
         Ok(())
+    }
+
+    pub fn rotate_group_kbroad(
+        &mut self,
+        gid: &[u8; 32],
+        kbroad_public: Vec<u8>,
+    ) -> Result<u64, CityGError> {
+        let mut registry = self.ctx.kbroad_registry().cloned().unwrap_or_default();
+        let existing = registry
+            .get(gid.as_ref())
+            .ok_or(CityGError::InvalidInput("kbroad key missing"))?;
+        if existing == &kbroad_public {
+            return Err(CityGError::InvalidInput(KBROAD_KEY_UNCHANGED_ERR));
+        }
+        registry.insert(gid.to_vec(), kbroad_public);
+        self.ctx.set_kbroad_registry(Some(registry));
+        let generation = self.roster.increment_kbroad_generation(gid);
+        self.roster.clear_kbroad_rotation_required(gid);
+        Ok(generation)
+    }
+
+    pub fn kbroad_generation(&self, gid: &[u8; 32]) -> u64 {
+        self.roster.kbroad_generation(gid)
+    }
+
+    pub fn kbroad_rotation_required(&self, gid: &[u8; 32]) -> bool {
+        self.roster.kbroad_rotation_required(gid)
     }
 
     pub fn new(config: ServerConfig) -> Self {
@@ -337,6 +371,9 @@ impl CityGServer {
         gid: &[u8; 32],
         leaf_id_override: Option<[u8; 32]>,
     ) -> Result<JoinTicketBundle, CityGError> {
+        if self.roster.kbroad_rotation_required(gid) {
+            return Err(CityGError::InvalidInput(KBROAD_ROTATION_REQUIRED_ERR));
+        }
         let revoked_root = [0u8; 32];
         let revoked_since_root = [0u8; 32];
         let pox_r_commit = witness::demo_pox_commit();
@@ -395,6 +432,7 @@ impl CityGServer {
             .kbroad_registry()
             .and_then(|registry| registry.get(&gid.to_vec()).cloned())
             .ok_or(CityGError::InvalidInput("kbroad key missing"))?;
+        let kbroad_generation = self.roster.kbroad_generation(gid);
 
         Ok(JoinTicketBundle {
             gid: *gid,
@@ -409,6 +447,7 @@ impl CityGServer {
             witness_cbor,
             srx_cbor,
             kbroad_public,
+            kbroad_generation,
         })
     }
 
@@ -417,6 +456,9 @@ impl CityGServer {
         gid: &[u8; 32],
         leaf_id: &[u8; 32],
     ) -> Result<MergeTicketBundle, CityGError> {
+        if self.roster.kbroad_rotation_required(gid) {
+            return Err(CityGError::InvalidInput(KBROAD_ROTATION_REQUIRED_ERR));
+        }
         let parent_root = self
             .roster
             .latest_root(gid)
@@ -478,6 +520,7 @@ impl CityGServer {
             .kbroad_registry()
             .and_then(|registry| registry.get(&gid.to_vec()).cloned())
             .ok_or(CityGError::InvalidInput("kbroad key missing"))?;
+        let kbroad_generation = self.roster.kbroad_generation(gid);
 
         let pivot = &parities[0];
         let proof_mode = pivot.proof_mode.clone();
@@ -517,6 +560,7 @@ impl CityGServer {
             fs_policy_version,
             fs_epoch_base_ts,
             kbroad_public,
+            kbroad_generation,
         })
     }
 
@@ -524,6 +568,9 @@ impl CityGServer {
         &mut self,
         bundle: &ClientEpochBundle,
     ) -> Result<ServerOutcome, CityGError> {
+        if self.roster.kbroad_rotation_required(bundle.gid()) {
+            return Err(CityGError::InvalidInput(KBROAD_ROTATION_REQUIRED_ERR));
+        }
         let (outcome, staged_ctx, staged_receiver, staged_roster) = self.stage_bundle(bundle)?;
         #[allow(clippy::collapsible_if)]
         if !self.replaying {
@@ -594,6 +641,9 @@ impl CityGServer {
                 mirrored.parent_root = new_root;
             }
             ctx.insert_pivot_parity(mirrored, acceptance.outcome.accept_time);
+        }
+        if !delta.revoked.is_empty() {
+            roster.mark_kbroad_rotation_required(bundle.gid());
         }
 
         Ok(ServerOutcome {
@@ -932,6 +982,69 @@ mod tests {
             err,
             CityGError::InvalidInput("kbroad key already registered")
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn rotate_group_kbroad_rejects_missing_and_unchanged_keys() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0xB1; 32];
+        let key = vec![0x44; 16];
+
+        let missing = match server.rotate_group_kbroad(&gid, key.clone()) {
+            Err(e) => e,
+            Ok(_) => unreachable!("rotating an unknown group must fail"),
+        };
+        assert!(matches!(missing, CityGError::InvalidInput("kbroad key missing")));
+
+        server.register_group(&gid, key.clone())?;
+        let unchanged = match server.rotate_group_kbroad(&gid, key) {
+            Err(e) => e,
+            Ok(_) => unreachable!("rotating with the same key must fail"),
+        };
+        assert!(matches!(
+            unchanged,
+            CityGError::InvalidInput("kbroad key unchanged")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn kbroad_rotation_gate_blocks_until_rotated() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let gid = cityg_client::demo::DEMO_GID;
+
+        server.roster.mark_kbroad_rotation_required(gid.as_slice());
+
+        let join_err = match server.build_join_ticket(&gid) {
+            Err(e) => e,
+            Ok(_) => unreachable!("join ticket must be blocked while rotation is required"),
+        };
+        assert!(matches!(
+            join_err,
+            CityGError::InvalidInput("kbroad rotation required")
+        ));
+
+        let bundle = cityg_client::demo::demo_bundle("rotation-gate")?;
+        let accept_err = match server.accept_epoch(&bundle) {
+            Err(e) => e,
+            Ok(_) => unreachable!("acceptance must be blocked while rotation is required"),
+        };
+        assert!(matches!(
+            accept_err,
+            CityGError::InvalidInput("kbroad rotation required")
+        ));
+
+        let mut rotated_key = cityg_client::demo::kbroad_public().to_vec();
+        rotated_key[0] ^= 0x5A;
+        let generation = server.rotate_group_kbroad(&gid, rotated_key.clone())?;
+        assert_eq!(generation, 1);
+        assert_eq!(server.kbroad_generation(&gid), 1);
+        assert!(!server.kbroad_rotation_required(&gid));
+
+        let ticket = server.build_join_ticket(&gid)?;
+        assert_eq!(ticket.kbroad_public, rotated_key);
+        assert_eq!(ticket.kbroad_generation, 1);
         Ok(())
     }
 
@@ -1858,6 +1971,34 @@ impl GroupRoster {
             .map(|state| state.revoked.iter().copied().collect())
             .unwrap_or_default()
     }
+
+    fn kbroad_generation(&self, gid: &[u8]) -> u64 {
+        self.groups
+            .get(gid)
+            .map(|state| state.kbroad_generation)
+            .unwrap_or(0)
+    }
+
+    fn increment_kbroad_generation(&mut self, gid: &[u8]) -> u64 {
+        let state = self.groups.entry(gid.to_vec()).or_default();
+        state.kbroad_generation = state.kbroad_generation.saturating_add(1);
+        state.kbroad_generation
+    }
+
+    fn kbroad_rotation_required(&self, gid: &[u8]) -> bool {
+        self.groups
+            .get(gid)
+            .map(|state| state.rotation_required)
+            .unwrap_or(false)
+    }
+
+    fn mark_kbroad_rotation_required(&mut self, gid: &[u8]) {
+        self.groups.entry(gid.to_vec()).or_default().rotation_required = true;
+    }
+
+    fn clear_kbroad_rotation_required(&mut self, gid: &[u8]) {
+        self.groups.entry(gid.to_vec()).or_default().rotation_required = false;
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1866,6 +2007,8 @@ struct GroupState {
     snapshots: BTreeMap<[u8; 32], GroupMembership>,
     revoked: BTreeSet<[u8; 32]>,
     next_index: u32,
+    kbroad_generation: u64,
+    rotation_required: bool,
 }
 
 impl GroupState {
