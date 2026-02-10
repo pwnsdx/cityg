@@ -3519,10 +3519,10 @@ mod tests {
         let result = validate_anchor_pool(&unsorted);
         assert!(result.is_err(), "unsorted pool should fail");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_ANCHOR_POOL_UNSORTED),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_SRX_ANCHOR_POOL_UNSORTED),
+            "unexpected error: {err:?}"
+        );
 
         let sorted = vec![witness_b, witness_a];
         validate_anchor_pool(&sorted)?;
@@ -3536,10 +3536,10 @@ mod tests {
         let result = validate_anchor_reference(&[], &root, Some(&bound), Some(0));
         assert!(result.is_err(), "oob reference should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_ANCHOR_OOB),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_SRX_ANCHOR_OOB),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -3560,10 +3560,10 @@ mod tests {
         let result = verify_anchored_adjacency(&entry, Some(&left_anchor), None);
         assert!(result.is_err(), "mismatched left anchor should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_NONMEM_ADJ_INCOHERENT),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_NONMEM_ADJ_INCOHERENT),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -3586,10 +3586,10 @@ mod tests {
         let result = verify_anchored_adjacency(&entry_bad, None, Some(&right_anchor));
         assert!(result.is_err(), "non-zero dirs should fail");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_NONMEM_ADJ_INCOHERENT),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_NONMEM_ADJ_INCOHERENT),
+            "unexpected error: {err:?}"
+        );
 
         let path_ok = vec![(0u8, [0x22; 32])];
         let right_anchor_ok = ValidatedMembership {
@@ -3627,10 +3627,10 @@ mod tests {
         let result = verify_anchored_adjacency(&entry_bad, Some(&left_anchor), None);
         assert!(result.is_err(), "non-one dirs should fail");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_NONMEM_ADJ_INCOHERENT),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_NONMEM_ADJ_INCOHERENT),
+            "unexpected error: {err:?}"
+        );
 
         let path_ok = vec![(1u8, [0x44; 32])];
         let left_anchor_ok = ValidatedMembership {
@@ -3749,20 +3749,21 @@ mod tests {
             AcceptanceError::Freeze(code) if code == FreezeError::WINDOW_FULL
         );
         if !window_froze {
-            match err {
-                AcceptanceError::Freeze(code)
-                    if code == FREEZE_MSPHF_RHO_PARITY || code == FREEZE_FS_DEV_CHAIN_BREAK => {}
-                AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
-                other => panic!("unexpected error: {:?}", other),
-            }
+            assert!(
+                matches!(
+                    &err,
+                    AcceptanceError::Freeze(code)
+                        if *code == FREEZE_MSPHF_RHO_PARITY || *code == FREEZE_FS_DEV_CHAIN_BREAK
+                ),
+                "unexpected error: {err:?}"
+            );
         }
 
         let telemetry_key = TelemetryKey::from_parts(parts.gid, parts.parent_root);
         let snapshot = ctx.telemetry_snapshot();
-        let counters = match snapshot.get(&telemetry_key) {
-            Some(v) => v,
-            None => unreachable!("telemetry entry for window-full scenario"),
-        };
+        let counters = snapshot
+            .get(&telemetry_key)
+            .expect("telemetry entry for window-full scenario");
         assert_eq!(counters.head_attempts, 2);
         assert_eq!(counters.head_insertions, 1);
         if window_froze {
@@ -3813,17 +3814,16 @@ mod tests {
         assert!(result.is_err(), "rho reuse should freeze");
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_RHO_PARITY),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_RHO_PARITY),
+            "unexpected error: {err:?}"
+        );
 
         let telemetry_key = TelemetryKey::from_parts(parts.gid, parts.parent_root);
         let snapshot = ctx.telemetry_snapshot();
-        let counters = match snapshot.get(&telemetry_key) {
-            Some(v) => v,
-            None => unreachable!("telemetry entry for rho replay"),
-        };
+        let counters = snapshot
+            .get(&telemetry_key)
+            .expect("telemetry entry for rho replay");
         assert_eq!(counters.head_attempts, 2);
         assert_eq!(counters.head_insertions, 1);
         assert_eq!(counters.freeze_rho_replay, 1);
@@ -3861,10 +3861,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "device chain mismatch should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_FS_DEV_CHAIN_BREAK),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_FS_DEV_CHAIN_BREAK),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -3983,12 +3983,14 @@ mod tests {
             AcceptanceError::Freeze(code) if code == FreezeError::WINDOW_FULL
         );
         if !window_froze {
-            match err {
-                AcceptanceError::Freeze(code)
-                    if code == FREEZE_MSPHF_RHO_PARITY || code == FREEZE_FS_DEV_CHAIN_BREAK => {}
-                AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
-                other => panic!("unexpected error: {other:?}"),
-            }
+            assert!(
+                matches!(
+                    &err,
+                    AcceptanceError::Freeze(code)
+                        if *code == FREEZE_MSPHF_RHO_PARITY || *code == FREEZE_FS_DEV_CHAIN_BREAK
+                ),
+                "unexpected error: {err:?}"
+            );
         }
         if window_froze {
             assert_eq!(ctx.active_heads(&outcome_a.wid), 1);
@@ -4013,10 +4015,10 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_TSWE_ALG_INVALID),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_TSWE_ALG_INVALID),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4027,11 +4029,11 @@ mod tests {
         let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
-        let original_pub = match tampered.get(&HDR_KBROAD_PUB) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            Some(_) => unreachable!("kbroad_pub should be bytes"),
-            None => unreachable!("kbroad_pub present"),
-        };
+        let original_pub = tampered
+            .get(&HDR_KBROAD_PUB)
+            .and_then(Value::as_bytes)
+            .expect("kbroad_pub should be present bytes")
+            .to_vec();
         tampered.insert(HDR_MERKLE_SUITE, Value::Text("wrong-suite".to_string()));
         let mut registry = BTreeMap::new();
         registry.insert(parts.gid.to_vec(), original_pub);
@@ -4048,10 +4050,10 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MERKLE_SUITE_INVALID),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_MERKLE_SUITE_INVALID),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4062,11 +4064,11 @@ mod tests {
         let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
-        let original_pub = match tampered.get(&HDR_KBROAD_PUB) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            Some(_) => unreachable!("kbroad_pub should be bytes"),
-            None => unreachable!("kbroad_pub present"),
-        };
+        let original_pub = tampered
+            .get(&HDR_KBROAD_PUB)
+            .and_then(Value::as_bytes)
+            .expect("kbroad_pub should be present bytes")
+            .to_vec();
         tampered.insert(HDR_MERKLE_SUITE, Value::Text("rpo-256/v1".to_string()));
 
         let mut registry = BTreeMap::new();
@@ -4082,10 +4084,10 @@ mod tests {
         let result = accept_with_header(&mut ctx, &parts, &tampered);
         assert!(result.is_err(), "legacy merkle suite must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MERKLE_SUITE_INVALID),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_MERKLE_SUITE_INVALID),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4106,10 +4108,10 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_KBROAD_ALG_INVALID),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_KBROAD_ALG_INVALID),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4120,16 +4122,15 @@ mod tests {
         let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
-        let original_pub = match tampered.get(&HDR_KBROAD_PUB) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            Some(_) => unreachable!("kbroad_pub should be bytes"),
-            None => unreachable!("kbroad_pub present"),
-        };
-        let pub_bytes = match tampered.get_mut(&HDR_KBROAD_PUB) {
-            Some(Value::Bytes(bytes)) => bytes,
-            Some(_) => panic!("kbroad_pub not bytes"),
-            None => unreachable!("kbroad_pub present"),
-        };
+        let original_pub = tampered
+            .get(&HDR_KBROAD_PUB)
+            .and_then(Value::as_bytes)
+            .expect("kbroad_pub should be present bytes")
+            .to_vec();
+        let pub_bytes = tampered
+            .get_mut(&HDR_KBROAD_PUB)
+            .and_then(Value::as_bytes_mut)
+            .expect("kbroad_pub should be mutable bytes");
         pub_bytes[0] ^= 0xFF;
 
         let anchor_seed_ctx = build_anchor_seed_ctx(&tampered)?;
@@ -4162,10 +4163,10 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_KBROAD_PARENT_MISMATCH),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_KBROAD_PARENT_MISMATCH),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4175,16 +4176,14 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
 
-        let Value::Array(items) = (match header.get_mut(&HDR_HP_BYTES) {
-            Some(v) => v,
-            None => unreachable!("hp bytes expected"),
-        }) else {
-            panic!("hp envelope not array");
-        };
+        let items = header
+            .get_mut(&HDR_HP_BYTES)
+            .and_then(Value::as_array_mut)
+            .expect("hp bytes should be an array envelope");
         if let Some(mode) = items.get_mut(0) {
             *mode = Value::Text("parent-v1".to_string());
         } else {
-            panic!("hp envelope missing mode entry");
+            return Err("hp envelope missing mode entry".into());
         }
 
         let mut ctx = AcceptanceContext::with_defaults();
@@ -4195,10 +4194,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "non-kbroad envelope must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_PARENT_EID_FORBIDDEN),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_PARENT_EID_FORBIDDEN),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4213,28 +4212,22 @@ mod tests {
         let scenarios = ["ct", "wrap", "c_hp"];
         for scenario in scenarios {
             let mut header = base_header.clone();
-            let items = match header.get_mut(&HDR_HP_BYTES) {
-                Some(Value::Array(items)) => items,
-                Some(_) => panic!("hp envelope not array"),
-                None => unreachable!("hp envelope expected"),
-            };
-            match scenario {
-                "ct" => {
-                    if let Some(entry) = items.get_mut(1) {
-                        *entry = Value::Bytes(vec![0xAA; 1000]);
-                    }
+            let items = header
+                .get_mut(&HDR_HP_BYTES)
+                .and_then(Value::as_array_mut)
+                .expect("hp envelope expected");
+            if scenario == "ct" {
+                if let Some(entry) = items.get_mut(1) {
+                    *entry = Value::Bytes(vec![0xAA; 1000]);
                 }
-                "wrap" => {
-                    if let Some(entry) = items.get_mut(2) {
-                        *entry = Value::Bytes(vec![0xBB; 32]);
-                    }
+            } else if scenario == "wrap" {
+                if let Some(entry) = items.get_mut(2) {
+                    *entry = Value::Bytes(vec![0xBB; 32]);
                 }
-                "c_hp" => {
-                    if let Some(entry) = items.get_mut(3) {
-                        *entry = Value::Bytes(vec![0xCC; 20_000]);
-                    }
+            } else {
+                if let Some(entry) = items.get_mut(3) {
+                    *entry = Value::Bytes(vec![0xCC; 20_000]);
                 }
-                other => panic!("unknown scenario {other}"),
             }
 
             let fs_witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);
@@ -4246,12 +4239,10 @@ mod tests {
             assert!(result.is_err(), "error expected");
             assert!(result.is_err(), "kbroad length mismatch must freeze");
             let err = result.unwrap_err();
-            match err {
-                AcceptanceError::Freeze(code) => {
-                    assert_eq!(code, FREEZE_KBROAD_PARENT_MISMATCH)
-                }
-                other => panic!("unexpected error: {other:?}"),
-            }
+            assert!(
+                matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_KBROAD_PARENT_MISMATCH),
+                "unexpected error: {err:?}"
+            );
         }
         Ok(())
     }
@@ -4285,10 +4276,7 @@ mod tests {
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
         let parities = ctx.pivot_parities_for(parts.gid, &parent_root_arr);
-        let pivot = match parities.first().cloned() {
-            Some(v) => v,
-            None => unreachable!("pivot expected"),
-        };
+        let pivot = parities.first().cloned().expect("pivot expected");
         let mut sibling = pivot.clone();
         sibling.we_epoch_id[0] ^= 0x01;
         sibling.accept_seq = sibling.accept_seq.wrapping_add(1);
@@ -4307,10 +4295,10 @@ mod tests {
         );
         assert!(result.is_err(), "mixed parent_root should error");
         let err = result.unwrap_err();
-        match err {
-            MsphfError::InvalidInput(msg) => assert_eq!(msg, "merge parity mismatch"),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(&err, MsphfError::InvalidInput(msg) if msg == "merge parity mismatch"),
+            "unexpected error: {err:?}"
+        );
 
         let mut mismatched = vec![pivot.clone(), sibling];
         mismatched[0].gid[0] ^= 0x01;
@@ -4321,10 +4309,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "mixed gid should error");
         let err = result.unwrap_err();
-        match err {
-            MsphfError::InvalidInput(msg) => assert_eq!(msg, "merge parity mismatch"),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(&err, MsphfError::InvalidInput(msg) if msg == "merge parity mismatch"),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4351,10 +4339,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "policy kbroad mismatch must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_KBROAD_PARENT_MISMATCH),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_KBROAD_PARENT_MISMATCH),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4366,10 +4354,11 @@ mod tests {
         let (header_with_pop, _, fs_witness) =
             header_ready_with_pop(&joiner, &parts, &sample_pop_keys().0, &sample_pop_keys().1);
 
-        let kbroad_bytes = match header_with_pop.get(&HDR_KBROAD_PUB) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => panic!("kbroad_pub missing"),
-        };
+        let kbroad_bytes = header_with_pop
+            .get(&HDR_KBROAD_PUB)
+            .and_then(Value::as_bytes)
+            .expect("kbroad_pub missing")
+            .to_vec();
 
         let mut registry = BTreeMap::new();
         registry.insert(parts.gid.to_vec(), kbroad_bytes);
@@ -4432,10 +4421,10 @@ mod tests {
             "merge builder must reject mixed parity domain"
         );
         let err = result.unwrap_err();
-        match err {
-            MsphfError::InvalidInput(msg) => assert_eq!(msg, "merge parity mismatch"),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(&err, MsphfError::InvalidInput(msg) if msg == "merge parity mismatch"),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4453,14 +4442,16 @@ mod tests {
         missing.remove(&HDR_SRX_HINT_SIZES);
         missing.remove(&HDR_SRX_ROOT_SW);
         missing.remove(&HDR_SRX_SMALLWOOD);
-        let vrf_pi = match missing.get(&HDR_VRF_PROOF) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            other => panic!("missing vrf proof: {other:?}"),
-        };
-        let fs_capss = match missing.get(&HDR_FS_CAPSS) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            other => panic!("missing fs_capss: {other:?}"),
-        };
+        let vrf_pi = missing
+            .get(&HDR_VRF_PROOF)
+            .and_then(Value::as_bytes)
+            .expect("missing vrf proof")
+            .to_vec();
+        let fs_capss = missing
+            .get(&HDR_FS_CAPSS)
+            .and_then(Value::as_bytes)
+            .expect("missing fs_capss")
+            .to_vec();
         let proofs_commit = compute_proofs_commit_bytes(&vrf_pi, &fs_capss, None, None)?;
         missing.insert(HDR_PROOFS_COMMIT, Value::Bytes(proofs_commit.to_vec()));
         refresh_seed_ctx_hash(&mut missing);
@@ -4499,10 +4490,10 @@ mod tests {
         );
         assert!(result.is_err(), "missing SRX must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_REQUIRED),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_SRX_REQUIRED),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4523,10 +4514,10 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_PARAMS_ID_INVALID),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_PARAMS_ID_INVALID),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4546,10 +4537,10 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MSPHF_CRS_INVALID),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_MSPHF_CRS_INVALID),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4587,10 +4578,10 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_FIELD_MISSING),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_FIELD_MISSING),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -4612,10 +4603,7 @@ mod tests {
 
         let telemetry_key = TelemetryKey::from_parts(parts.gid, parts.parent_root);
         let snapshot = ctx.telemetry_snapshot();
-        let counters = match snapshot.get(&telemetry_key) {
-            Some(v) => v,
-            None => unreachable!("telemetry expected"),
-        };
+        let counters = snapshot.get(&telemetry_key).expect("telemetry expected");
         assert_eq!(counters.head_attempts, 1);
         assert_eq!(counters.head_insertions, 1);
         assert_eq!(counters.freeze_rho_replay, 0);
@@ -4654,13 +4642,14 @@ mod tests {
         let (mut header, _, fs_witness_original) =
             header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
 
-        match header.get_mut(&HDR_RHO_COMMIT) {
-            Some(Value::Bytes(bytes)) => {
-                if let Some(first) = bytes.first_mut() {
-                    *first ^= 0x80;
-                }
-            }
-            _ => panic!("rho commit missing"),
+        if let Some(first) = header
+            .get_mut(&HDR_RHO_COMMIT)
+            .and_then(Value::as_bytes_mut)
+            .and_then(|bytes| bytes.first_mut())
+        {
+            *first ^= 0x80;
+        } else {
+            return Err("rho commit missing".into());
         }
 
         ensure_bootstrap_fields(&mut header, &parts, &joiner);
@@ -4673,14 +4662,14 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "tampered rho commit must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code)
-                if code == FREEZE_CAPSS_INVALID || code == FREEZE_SEEDCTX_MISMATCH => {}
-            AcceptanceError::Freeze(code) => {
-                panic!("unexpected freeze code: {code:?}");
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_CAPSS_INVALID || code == FREEZE_SEEDCTX_MISMATCH
+            ),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -4704,14 +4693,18 @@ mod tests {
 
         let mut tampered = joiner_mut.header_map.clone();
 
-        let orig_vrf = match joiner_orig.header_map.get(&HDR_VRF_PROOF) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => panic!("vrf proof missing"),
-        };
-        let orig_fs_capss = match joiner_orig.header_map.get(&HDR_FS_CAPSS) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => panic!("fs_capss missing"),
-        };
+        let orig_vrf = joiner_orig
+            .header_map
+            .get(&HDR_VRF_PROOF)
+            .and_then(Value::as_bytes)
+            .expect("vrf proof missing")
+            .to_vec();
+        let orig_fs_capss = joiner_orig
+            .header_map
+            .get(&HDR_FS_CAPSS)
+            .and_then(Value::as_bytes)
+            .expect("fs_capss missing")
+            .to_vec();
 
         tampered.insert(HDR_VRF_PROOF, Value::Bytes(orig_vrf.clone()));
         tampered.insert(HDR_FS_CAPSS, Value::Bytes(orig_fs_capss.clone()));
@@ -4722,17 +4715,13 @@ mod tests {
             joiner_orig
                 .header_map
                 .get(&HDR_SRX_ROOT_SW)
-                .and_then(|value| match value {
-                    Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes.clone()),
-                    _ => None,
-                });
+                .and_then(|value| value.as_bytes().filter(|bytes| bytes.len() == 32))
+                .map(ToOwned::to_owned);
         let srx_smallwood = joiner_orig
             .header_map
             .get(&HDR_SRX_SMALLWOOD)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) => Some(bytes.clone()),
-                _ => None,
-            });
+            .and_then(Value::as_bytes)
+            .map(ToOwned::to_owned);
         let proofs_commit = compute_proofs_commit_bytes(
             orig_vrf.as_slice(),
             orig_fs_capss.as_slice(),
@@ -4751,12 +4740,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "tampered seed bundle must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert_eq!(code, FREEZE_CAPSS_INVALID);
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_CAPSS_INVALID),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -4780,14 +4767,18 @@ mod tests {
 
         let mut tampered = joiner_mut.header_map.clone();
 
-        let orig_vrf = match joiner_orig.header_map.get(&HDR_VRF_PROOF) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => panic!("vrf proof missing"),
-        };
-        let orig_fs_capss = match joiner_orig.header_map.get(&HDR_FS_CAPSS) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => panic!("fs_capss missing"),
-        };
+        let orig_vrf = joiner_orig
+            .header_map
+            .get(&HDR_VRF_PROOF)
+            .and_then(Value::as_bytes)
+            .expect("vrf proof missing")
+            .to_vec();
+        let orig_fs_capss = joiner_orig
+            .header_map
+            .get(&HDR_FS_CAPSS)
+            .and_then(Value::as_bytes)
+            .expect("fs_capss missing")
+            .to_vec();
 
         tampered.insert(HDR_VRF_PROOF, Value::Bytes(orig_vrf.clone()));
         tampered.insert(HDR_FS_CAPSS, Value::Bytes(orig_fs_capss.clone()));
@@ -4798,17 +4789,13 @@ mod tests {
             joiner_orig
                 .header_map
                 .get(&HDR_SRX_ROOT_SW)
-                .and_then(|value| match value {
-                    Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes.clone()),
-                    _ => None,
-                });
+                .and_then(|value| value.as_bytes().filter(|bytes| bytes.len() == 32))
+                .map(ToOwned::to_owned);
         let srx_smallwood = joiner_orig
             .header_map
             .get(&HDR_SRX_SMALLWOOD)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) => Some(bytes.clone()),
-                _ => None,
-            });
+            .and_then(Value::as_bytes)
+            .map(ToOwned::to_owned);
         let proofs_commit = compute_proofs_commit_bytes(
             orig_vrf.as_slice(),
             orig_fs_capss.as_slice(),
@@ -4832,12 +4819,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "tampered params id must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert_eq!(code, FREEZE_CAPSS_INVALID);
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_CAPSS_INVALID),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -4856,14 +4841,18 @@ mod tests {
         let joiner_mut = joiner_kgen_or(header_mut, parts.clone(), params_mut, None, None)?;
 
         let mut tampered = joiner_mut.header_map.clone();
-        let orig_vrf = match joiner_orig.header_map.get(&HDR_VRF_PROOF) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => panic!("vrf proof missing"),
-        };
-        let orig_fs_capss = match joiner_orig.header_map.get(&HDR_FS_CAPSS) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => panic!("fs_capss missing"),
-        };
+        let orig_vrf = joiner_orig
+            .header_map
+            .get(&HDR_VRF_PROOF)
+            .and_then(Value::as_bytes)
+            .expect("vrf proof missing")
+            .to_vec();
+        let orig_fs_capss = joiner_orig
+            .header_map
+            .get(&HDR_FS_CAPSS)
+            .and_then(Value::as_bytes)
+            .expect("fs_capss missing")
+            .to_vec();
 
         tampered.insert(HDR_VRF_PROOF, Value::Bytes(orig_vrf.clone()));
         tampered.insert(HDR_FS_CAPSS, Value::Bytes(orig_fs_capss.clone()));
@@ -4874,17 +4863,13 @@ mod tests {
             joiner_orig
                 .header_map
                 .get(&HDR_SRX_ROOT_SW)
-                .and_then(|value| match value {
-                    Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes.clone()),
-                    _ => None,
-                });
+                .and_then(|value| value.as_bytes().filter(|bytes| bytes.len() == 32))
+                .map(ToOwned::to_owned);
         let srx_smallwood = joiner_orig
             .header_map
             .get(&HDR_SRX_SMALLWOOD)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) => Some(bytes.clone()),
-                _ => None,
-            });
+            .and_then(Value::as_bytes)
+            .map(ToOwned::to_owned);
         let proofs_commit = compute_proofs_commit_bytes(
             orig_vrf.as_slice(),
             orig_fs_capss.as_slice(),
@@ -4903,12 +4888,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "tampered pop pk must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert_eq!(code, FREEZE_CAPSS_INVALID);
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_CAPSS_INVALID),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -4918,22 +4901,21 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
 
-        let vrf_pi = match header.get(&HDR_VRF_PROOF) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => panic!("vrf proof missing"),
-        };
+        let vrf_pi = header
+            .get(&HDR_VRF_PROOF)
+            .and_then(Value::as_bytes)
+            .expect("vrf proof missing")
+            .to_vec();
         let oversize = vec![0xAA; FS_CAPSS_MAX_BYTES + 1];
         header.insert(HDR_FS_CAPSS, Value::Bytes(oversize.clone()));
-        let srx_root_sw = header.get(&HDR_SRX_ROOT_SW).and_then(|value| match value {
-            Value::Bytes(bytes) if bytes.len() == 32 => Some(bytes.clone()),
-            _ => None,
-        });
+        let srx_root_sw = header
+            .get(&HDR_SRX_ROOT_SW)
+            .and_then(|value| value.as_bytes().filter(|bytes| bytes.len() == 32))
+            .map(ToOwned::to_owned);
         let srx_smallwood = header
             .get(&HDR_SRX_SMALLWOOD)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) => Some(bytes.clone()),
-                _ => None,
-            });
+            .and_then(Value::as_bytes)
+            .map(ToOwned::to_owned);
         let proofs_commit = compute_proofs_commit_bytes(
             vrf_pi.as_slice(),
             oversize.as_slice(),
@@ -4950,12 +4932,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "oversized fs-lin proof must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert_eq!(code, FREEZE_CAPSS_INVALID);
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_CAPSS_INVALID),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -4975,12 +4955,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "unknown proof_mode must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert_eq!(code, FREEZE_SUITE_FORBIDDEN);
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_SUITE_FORBIDDEN),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -4999,12 +4977,10 @@ mod tests {
         let result = accept_with_header(&mut ctx, &parts, &header);
         assert!(result.is_err(), "unknown vrf_id must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert_eq!(code, FREEZE_SUITE_FORBIDDEN);
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_SUITE_FORBIDDEN),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -5027,10 +5003,10 @@ mod tests {
         let result = accept_with_header(&mut ctx, &parts, &header);
         assert!(result.is_err(), "rho mismatch must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_POP_INVALID),
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_POP_INVALID),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -5356,10 +5332,10 @@ mod tests {
         let result = accept_with_header(&mut ctx, &parts, &header);
         assert!(result.is_err(), "missing leaf should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_INVALID),
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_SRX_INVALID),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -5401,10 +5377,10 @@ mod tests {
         let result = accept_with_header(&mut ctx, &parts, &header);
         assert!(result.is_err(), "leaf mismatch should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_INVALID),
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_SRX_INVALID),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -5548,16 +5524,14 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "parent conflict should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert!(
-                    code == FREEZE_SRX_SET_CONFLICT_PARENT || code == FREEZE_SRX_INVALID,
-                    "unexpected freeze code: {:?}",
-                    code
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_SRX_SET_CONFLICT_PARENT || code == FREEZE_SRX_INVALID
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -5601,14 +5575,16 @@ mod tests {
             "understated hints must freeze even with cache"
         );
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code)
-                if code == FREEZE_SRX_HINT_UNDER
-                    || code == FREEZE_FS_DEV_CHAIN_BREAK
-                    || code == FREEZE_MSPHF_RHO_PARITY => {}
-            AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_SRX_HINT_UNDER
+                        || code == FREEZE_FS_DEV_CHAIN_BREAK
+                        || code == FREEZE_MSPHF_RHO_PARITY
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -5657,16 +5633,14 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "revoked conflict should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert!(
-                    code == FREEZE_SRX_SET_CONFLICT_REVOKE || code == FREEZE_SRX_INVALID,
-                    "unexpected freeze code: {:?}",
-                    code
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_SRX_SET_CONFLICT_REVOKE || code == FREEZE_SRX_INVALID
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -5717,16 +5691,14 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "subset conflict should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert!(
-                    code == FREEZE_SRX_SET_CONFLICT_SUBSET || code == FREEZE_SRX_INVALID,
-                    "unexpected freeze code: {:?}",
-                    code
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_SRX_SET_CONFLICT_SUBSET || code == FREEZE_SRX_INVALID
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -5766,15 +5738,14 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "commit mismatch should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert!(
-                    code == FREEZE_SRX_COMMIT_MISMATCH || code == FREEZE_SRX_INVALID,
-                    "unexpected freeze code: {code:?}"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_SRX_COMMIT_MISMATCH || code == FREEZE_SRX_INVALID
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -5810,10 +5781,10 @@ mod tests {
         let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
         assert!(result.is_err(), "bootstrap metadata should be rejected");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_BOOTSTRAP_UNSUPPORTED),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_BOOTSTRAP_UNSUPPORTED),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -5837,10 +5808,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "missing bootstrap signature should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_BOOTSTRAP_INVALID),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_BOOTSTRAP_INVALID),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -5893,10 +5864,10 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_FIELD_MISSING),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_FIELD_MISSING),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -5921,10 +5892,10 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_TSWE_SALT_MISMATCH),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_TSWE_SALT_MISMATCH),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -5944,10 +5915,10 @@ mod tests {
         let result = accept_with_header(&mut ctx, &parts, &tampered);
         assert!(result.is_err(), "invalid pop must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_POP_INVALID),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_POP_INVALID),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -5999,23 +5970,24 @@ mod tests {
         ensure_bootstrap_fields(&mut merge_header, &parts, &merge_joiner);
         refresh_seed_bindings(&mut merge_header, &parts, &merge_joiner);
         let merge_witness = merge_joiner.capss_witness.clone();
-        let header_rho = match merge_header.get(&93) {
-            Some(Value::Bytes(bytes)) => bytes.clone(),
-            _ => panic!("expected rho commit in merge header"),
-        };
-        let pivot = match parities.iter().max_by(|a, b| {
-            a.accept_seq
-                .cmp(&b.accept_seq)
-                .then_with(|| b.xk_hash.cmp(&a.xk_hash))
-        }) {
-            Some(v) => v,
-            None => unreachable!("pivot expected"),
-        };
+        let header_rho = merge_header
+            .get(&93)
+            .and_then(Value::as_bytes)
+            .expect("expected rho commit in merge header")
+            .to_vec();
+        let pivot = parities
+            .iter()
+            .max_by(|a, b| {
+                a.accept_seq
+                    .cmp(&b.accept_seq)
+                    .then_with(|| b.xk_hash.cmp(&a.xk_hash))
+            })
+            .expect("pivot expected");
         assert_eq!(header_rho, pivot.rho_commit.as_ref());
-        let retired_heads = match merge_joiner.retired_heads.as_ref() {
-            Some(v) => v,
-            None => unreachable!("retired heads expected"),
-        };
+        let retired_heads = merge_joiner
+            .retired_heads
+            .as_ref()
+            .expect("retired heads expected");
         assert!(
             !retired_heads.is_empty(),
             "expected at least one head to be marked for retirement"
@@ -6029,14 +6001,16 @@ mod tests {
             "merge should freeze until rho parity alignment is addressed"
         );
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code)
-                if code == FREEZE_MSPHF_RHO_PARITY
-                    || code == FREEZE_MH_HEADS_INVALID
-                    || code == FREEZE_MSPHF_CRS_INVALID => {}
-            AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_MSPHF_RHO_PARITY
+                        || code == FREEZE_MH_HEADS_INVALID
+                        || code == FREEZE_MSPHF_CRS_INVALID
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -6070,14 +6044,12 @@ mod tests {
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &witness_a);
-        accept_with_header(&mut ctx, &parts, &header_a)
-            .unwrap_or_else(|err| panic!("first acceptance failed: {err:?}"));
+        accept_with_header(&mut ctx, &parts, &header_a).expect("first acceptance failed");
 
         ctx.clear_device_chains();
         ctx.rho_guard = RhoReplayGuard::new(RHO_GUARD_CAPACITY, ctx.mh_window.ttl());
         seed_capss_with(&mut ctx, &witness_b);
-        accept_with_header(&mut ctx, &parts, &header_b)
-            .unwrap_or_else(|err| panic!("second acceptance failed: {err:?}"));
+        accept_with_header(&mut ctx, &parts, &header_b).expect("second acceptance failed");
 
         let mut parent_root_arr = [0u8; 32];
         parent_root_arr.copy_from_slice(parts.parent_root);
@@ -6099,7 +6071,7 @@ mod tests {
                 if debug.contains("fs_dev_chain_break") {
                     return Ok(());
                 }
-                panic!("merge build failed: {debug}");
+                return Err(format!("merge build failed: {debug}").into());
             }
         };
 
@@ -6125,13 +6097,16 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code)
-                if code == FREEZE_SRX_INVALID
-                    || code == FREEZE_FS_DEV_CHAIN_BREAK
-                    || code == FREEZE_MSPHF_CRS_INVALID => {}
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_SRX_INVALID
+                        || code == FREEZE_FS_DEV_CHAIN_BREAK
+                        || code == FREEZE_MSPHF_CRS_INVALID
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -6177,13 +6152,16 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "roots change without SRX must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code)
-                if code == FREEZE_SRX_REQUIRED
-                    || code == FREEZE_FS_KBROAD_PRESENT
-                    || code == FREEZE_MSPHF_CRS_INVALID => {}
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_SRX_REQUIRED
+                        || code == FREEZE_FS_KBROAD_PRESENT
+                        || code == FREEZE_MSPHF_CRS_INVALID
+            ),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -6234,13 +6212,16 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "retiring head outside window must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code)
-                if code == FREEZE_MH_HEADS_INVALID
-                    || code == FREEZE_FS_KBROAD_PRESENT
-                    || code == FREEZE_MSPHF_CRS_INVALID => {}
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_MH_HEADS_INVALID
+                        || code == FREEZE_FS_KBROAD_PRESENT
+                        || code == FREEZE_MSPHF_CRS_INVALID
+            ),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -6284,11 +6265,14 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "ρ parity mismatch must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code)
-                if code == FREEZE_MSPHF_RHO_PARITY || code == FREEZE_MSPHF_CRS_INVALID => {}
-            other => panic!("unexpected result: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_MSPHF_RHO_PARITY || code == FREEZE_MSPHF_CRS_INVALID
+            ),
+            "unexpected result: {err:?}"
+        );
         Ok(())
     }
 
@@ -6324,10 +6308,10 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "duplicate heads should freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_MH_HEADS_INVALID),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_MH_HEADS_INVALID),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -6393,11 +6377,14 @@ mod tests {
 
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code)
-                if code == FREEZE_MH_HEADS_INVALID || code == FREEZE_FS_KBROAD_PRESENT => {}
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_MH_HEADS_INVALID || code == FREEZE_FS_KBROAD_PRESENT
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -6443,13 +6430,14 @@ mod tests {
 
         let mut merge_header = merge_joiner.header_map.clone();
         merge_header.remove(&HDR_KBROAD_REPLAY);
-        match merge_header.get_mut(&HDR_RHO_COMMIT) {
-            Some(Value::Bytes(bytes)) => {
-                if let Some(first) = bytes.first_mut() {
-                    *first ^= 0xFF;
-                }
-            }
-            _ => panic!("merge header missing rho commit"),
+        if let Some(first) = merge_header
+            .get_mut(&HDR_RHO_COMMIT)
+            .and_then(Value::as_bytes_mut)
+            .and_then(|bytes| bytes.first_mut())
+        {
+            *first ^= 0xFF;
+        } else {
+            return Err("merge header missing rho commit".into());
         }
 
         ensure_bootstrap_fields(&mut merge_header, &parts, &merge_joiner);
@@ -6460,14 +6448,16 @@ mod tests {
         assert!(result.is_err(), "error expected");
         assert!(result.is_err(), "tampered merge rho must freeze");
         let err = result.unwrap_err();
-        match err {
-            AcceptanceError::Freeze(code)
-                if code == FREEZE_MSPHF_RHO_PARITY
-                    || code == FREEZE_MH_HEADS_INVALID
-                    || code == FREEZE_MSPHF_CRS_INVALID => {}
-            AcceptanceError::Freeze(code) => panic!("unexpected freeze code: {code:?}"),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_MSPHF_RHO_PARITY
+                        || code == FREEZE_MH_HEADS_INVALID
+                        || code == FREEZE_MSPHF_CRS_INVALID
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -6490,10 +6480,10 @@ mod tests {
         assert!(result.is_err(), "tampered epoch id should freeze");
         let err = result.unwrap_err();
 
-        match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_EPOCHID_MISMATCH),
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_EPOCHID_MISMATCH),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -6584,7 +6574,7 @@ mod tests {
                 25 => {
                     mutated.insert(HDR_FS_POLICY_VERSION, Value::Text("not-int".to_string()));
                 }
-                _ => unreachable!("bounded case index"),
+                _ => {}
             }
 
             let mut ctx = AcceptanceContext::with_defaults();

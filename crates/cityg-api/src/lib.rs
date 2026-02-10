@@ -2374,6 +2374,16 @@ mod tests {
         headers
     }
 
+    fn window_admin_headers() -> HeaderMap {
+        ensure_test_admin_tokens();
+        let mut headers = HeaderMap::new();
+        if let Some(token) = configured_window_admin_token() {
+            let token = HeaderValue::from_str(token.as_str()).expect("valid window admin token");
+            headers.insert(WINDOW_CONFIG_ADMIN_HEADER, token);
+        }
+        headers
+    }
+
     fn message_auth_headers() -> HeaderMap {
         ensure_test_admin_tokens();
         let mut headers = HeaderMap::new();
@@ -2418,8 +2428,7 @@ mod tests {
             matches!(
                 enforce_window_config_auth(&empty_headers, None),
                 Err(ApiError::Unauthorized("admin token is not configured"))
-            ),
-            "auth should fail closed when admin token is not configured"
+            )
         );
     }
 
@@ -2467,8 +2476,7 @@ mod tests {
             matches!(
                 enforce_room_admin_auth(&empty_headers, None),
                 Err(ApiError::Unauthorized("admin token is not configured"))
-            ),
-            "auth should fail closed when no room admin token is configured"
+            )
         );
     }
 
@@ -2534,6 +2542,30 @@ mod tests {
         assert_eq!(json["message"], "missing token");
     }
 
+    #[tokio::test]
+    async fn api_error_helpers_cover_decode_notfound_and_context_payload() {
+        let decode = ApiError::Decode(prost::DecodeError::new("bad payload")).into_response();
+        assert_eq!(decode.status(), StatusCode::BAD_REQUEST);
+
+        let not_found = ApiError::NotFound.into_response();
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+
+        let contextual = ApiError::server_message_with_context(
+            "batch failed",
+            Some("batch_step_failed"),
+            Some(4),
+        )
+        .into_response();
+        assert_eq!(contextual.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(contextual.into_body(), usize::MAX)
+            .await
+            .expect("contextual body bytes");
+        let json: Value = serde_json::from_slice(&body).expect("contextual error json");
+        assert_eq!(json["message"], "batch failed");
+        assert_eq!(json["error"], "batch_step_failed");
+        assert_eq!(json["failed_index"], 4);
+    }
+
     #[test]
     fn parse_ws_max_lag_uses_default_on_invalid_input() {
         assert_eq!(parse_ws_max_lag(None), WS_MAX_LAG_DEFAULT);
@@ -2588,10 +2620,7 @@ mod tests {
 
         // Verify it
         let result = verify_identity_binding(&binding);
-        assert!(
-            result.is_ok(),
-            "Identity binding verification should succeed"
-        );
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -2614,10 +2643,7 @@ mod tests {
 
         // Verify it should fail
         let result = verify_identity_binding(&binding);
-        assert!(
-            result.is_err(),
-            "Identity binding with wrong signature should fail"
-        );
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -2633,24 +2659,21 @@ mod tests {
             state
                 .register_alias(alias, leaf_a, key_a.clone())
                 .await
-                .expect("new alias registration"),
-            "first registration should mark alias as new"
+                .expect("new alias registration")
         );
 
         assert!(
             !state
                 .register_alias(alias, leaf_a, key_a.clone())
                 .await
-                .expect("matching alias registration"),
-            "same alias/key/leaf should be treated as existing binding"
+                .expect("matching alias registration")
         );
 
         assert!(
             !state
                 .register_alias(alias, leaf_b, key_a.clone())
                 .await
-                .expect("leaf update for matching key"),
-            "same alias/key with new leaf should update in-place"
+                .expect("leaf update for matching key")
         );
 
         let err = state
@@ -2676,15 +2699,13 @@ mod tests {
             state
                 .register_alias(alias_nfd, leaf, pop_key.clone())
                 .await
-                .expect("first registration should succeed"),
-            "first registration should create a new binding"
+                .expect("first registration should succeed")
         );
         assert!(
             !state
                 .register_alias(alias_nfc, leaf, pop_key)
                 .await
-                .expect("normalized alias should match existing binding"),
-            "canonically equivalent alias should resolve to same binding"
+                .expect("normalized alias should match existing binding")
         );
 
         let registry = state.alias_registry.read().await;
@@ -2756,10 +2777,7 @@ mod tests {
 
         let registry = state.alias_registry.read().await;
         let binding = registry.get(alias).expect("binding present");
-        assert_eq!(
-            binding.leaf_id, assigned_leaf,
-            "alias binding should track the server-issued leaf id"
-        );
+        assert_eq!(binding.leaf_id, assigned_leaf);
         assert_eq!(
             binding.pop_public_key, pop_public_key,
             "alias binding must retain the original pop key"
@@ -2870,6 +2888,40 @@ mod tests {
         assert!(matches!(
             acceptance,
             ApiError::InvalidRequest("invalid bundle components")
+        ));
+
+        let acceptance_other = map_accept_error(
+            &state,
+            ClientError::Acceptance(AcceptanceError::Msphf(MsphfError::serialization(
+                "broken proof",
+            ))),
+            Some("batch_step"),
+            Some(5),
+        )
+        .await;
+        assert!(matches!(
+            acceptance_other,
+            ApiError::Server {
+                error_label: Some("batch_step"),
+                failed_index: Some(5),
+                ..
+            }
+        ));
+
+        let io_error = map_accept_error(
+            &state,
+            ClientError::Io(std::io::Error::other("disk error")),
+            Some("batch_step"),
+            Some(6),
+        )
+        .await;
+        assert!(matches!(
+            io_error,
+            ApiError::Server {
+                error_label: Some("batch_step"),
+                failed_index: Some(6),
+                ..
+            }
         ));
     }
 
@@ -3099,7 +3151,7 @@ mod tests {
         let alice = demo_bundle("alice").expect("alice demo bundle");
         let bob = demo_bundle("bob").expect("bob demo bundle");
 
-        let (root, tagged_leaf) = {
+        let (root, tagged_leaf, second_leaf) = {
             let mut guard = state.server.write().await;
             guard.accept_epoch(&alice).expect("accept alice");
             guard.accept_epoch(&bob).expect("accept bob");
@@ -3109,18 +3161,22 @@ mod tests {
             let members = guard
                 .members_for_root(DEMO_GID.as_ref(), &root)
                 .expect("members for root");
-            (root, members[0])
+            (root, members[0], members[1])
         };
 
         state
             .register_alias("special-user", tagged_leaf, vec![0xAB; 8])
             .await
             .expect("register alias for search");
+        state
+            .register_alias("special-two", second_leaf, vec![0xBC; 8])
+            .await
+            .expect("register second alias for search");
 
         let mut body = Vec::new();
         pb::SearchMembersRequest {
             gid: DEMO_GID.to_vec(),
-            query: "special".to_string(),
+            query: "special-user".to_string(),
             parent_root: Vec::new(),
             offset: Some(0),
             limit: Some(10),
@@ -3135,8 +3191,7 @@ mod tests {
         assert_eq!(decoded.members.len(), 1);
         assert_eq!(
             decoded.members[0].alias.as_deref(),
-            Some("special-user"),
-            "alias query should return aliased member"
+            Some("special-user")
         );
 
         let leaf_prefix = hex::encode(tagged_leaf);
@@ -3154,10 +3209,24 @@ mod tests {
             .await
             .expect("leaf query should succeed");
         let decoded: pb::SearchMembersResponse = decode_proto_response(response).await;
-        assert!(
-            decoded.total_count >= 1,
-            "leaf hex search should return at least one match"
-        );
+        assert!(decoded.total_count >= 1);
+
+        let mut body = Vec::new();
+        pb::SearchMembersRequest {
+            gid: DEMO_GID.to_vec(),
+            query: "special".to_string(),
+            parent_root: root.to_vec(),
+            offset: Some(0),
+            limit: Some(1),
+        }
+        .encode(&mut body)
+        .expect("encode paged alias query request");
+        let response = search_members(State(state.clone()), Bytes::from(body))
+            .await
+            .expect("paged alias query should succeed");
+        let decoded: pb::SearchMembersResponse = decode_proto_response(response).await;
+        assert_eq!(decoded.total_count, 2);
+        assert_eq!(decoded.next_offset, 1);
 
         let mut body = Vec::new();
         pb::SearchMembersRequest {
@@ -3176,6 +3245,21 @@ mod tests {
             err,
             ApiError::InvalidRequest("query must be provided")
         ));
+
+        let mut body = Vec::new();
+        pb::SearchMembersRequest {
+            gid: Vec::new(),
+            query: "special".to_string(),
+            parent_root: Vec::new(),
+            offset: Some(0),
+            limit: Some(10),
+        }
+        .encode(&mut body)
+        .expect("encode missing gid request");
+        let err = search_members(State(state.clone()), Bytes::from(body))
+            .await
+            .expect_err("missing gid should fail");
+        assert!(matches!(err, ApiError::InvalidRequest("gid must be provided")));
 
         let mut body = Vec::new();
         pb::SearchMembersRequest {
@@ -3257,7 +3341,7 @@ mod tests {
         assert_eq!(decoded.parent_root.len(), 32);
         assert!(
             !decoded.pivot_parity_cbor.is_empty(),
-            "merge ticket should include at least one pivot parity"
+            
         );
         assert_eq!(decoded.join_delta_root, vec![0u8; 32]);
         let expected_revoked_root = canonical_set_root(&[leaf_id]).expect("canonical revoked root");
@@ -3265,10 +3349,7 @@ mod tests {
         assert_eq!(decoded.revoked_root, expected_revoked_root.to_vec());
 
         let srx = SrxInputsOwned::from_cbor(&decoded.srx_cbor).expect("decode merge srx payload");
-        assert!(
-            srx.join_leaf_ids.is_empty(),
-            "leave merge must not add joins"
-        );
+        assert!(srx.join_leaf_ids.is_empty());
         assert_eq!(srx.since_leaf_ids, vec![leaf_id]);
     }
 
@@ -3316,7 +3397,7 @@ mod tests {
                 assert_eq!(inner.code, 9412);
                 assert_eq!(inner.reason, "rho_replay");
             }
-            other => panic!("expected frozen server error, got {other:?}"),
+            _ => panic!("expected frozen server error"),
         }
 
         let converted: ApiError =
@@ -3327,7 +3408,7 @@ mod tests {
         let converted: ApiError = ClientError::Io(std::io::Error::other("disk")).into();
         match converted {
             ApiError::Server { message, .. } => assert!(message.contains("io error")),
-            other => panic!("expected server error, got {other:?}"),
+            _ => panic!("expected server error"),
         }
     }
 
@@ -3529,6 +3610,22 @@ mod tests {
             headers.clone(),
             encode_proto_request(&SendMessageRequest {
                 we_epoch_id: weid.to_vec(),
+                ciphertext: vec![0xAA],
+                sender: vec![0x01; 31],
+            }),
+        )
+        .await
+        .expect_err("invalid sender length should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("sender must be 32 bytes")
+        ));
+
+        let err = send_message(
+            State(state.clone()),
+            headers.clone(),
+            encode_proto_request(&SendMessageRequest {
+                we_epoch_id: weid.to_vec(),
                 ciphertext: Vec::new(),
                 sender: vec![0x02; 32],
             }),
@@ -3556,10 +3653,7 @@ mod tests {
 
         let metadata = state.member_metadata.read().await;
         let member = metadata.get(&leaf).expect("member metadata");
-        assert!(
-            member.last_seen_timestamp_ms >= member.join_timestamp_ms,
-            "send path should touch member last-seen timestamp"
-        );
+        assert!(member.last_seen_timestamp_ms >= member.join_timestamp_ms);
         drop(metadata);
 
         let err = fetch_messages(
@@ -3577,6 +3671,21 @@ mod tests {
             ApiError::InvalidRequest("we_epoch_id must be 32 bytes")
         ));
 
+        let err = fetch_messages(
+            State(state.clone()),
+            headers.clone(),
+            encode_proto_request(&FetchMessagesRequest {
+                we_epoch_id: weid.to_vec(),
+                leaf_id: vec![0xAB; 31],
+            }),
+        )
+        .await
+        .expect_err("invalid fetch leaf length should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("leaf_id must be 32 bytes")
+        ));
+
         let response = fetch_messages(
             State(state.clone()),
             headers,
@@ -3590,6 +3699,34 @@ mod tests {
         let decoded: FetchMessagesResponse = decode_proto_response(response).await;
         assert_eq!(decoded.messages.len(), 1);
         assert_eq!(decoded.messages[0].ciphertext, b"hello");
+    }
+
+    #[tokio::test]
+    async fn membership_checks_reject_non_member_leaves() {
+        let state = test_api_state();
+        let bundle = demo_bundle("alice").expect("alice bundle");
+        apply_bundle(&state, &bundle)
+            .await
+            .expect("accept bundle should seed membership scope");
+        let mut weid = [0u8; 32];
+        weid.copy_from_slice(&bundle.we_epoch_id);
+        let outsider = [0xF9; 32];
+
+        let err = ensure_leaf_member_for_epoch(&state, &weid, outsider)
+            .await
+            .expect_err("non-member epoch send should fail");
+        assert!(matches!(
+            err,
+            ApiError::Unauthorized("leaf is not a member for epoch")
+        ));
+
+        let err = ensure_leaf_member_for_room(&state, &DEMO_GID, outsider)
+            .await
+            .expect_err("non-member room subscription should fail");
+        assert!(matches!(
+            err,
+            ApiError::Unauthorized("leaf is not a member for room")
+        ));
     }
 
     #[tokio::test]
@@ -3691,6 +3828,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configure_window_validates_and_applies_limits() {
+        let state = test_api_state();
+        let headers = window_admin_headers();
+
+        let err = configure_window(
+            State(state.clone()),
+            headers.clone(),
+            encode_proto_request(&ConfigureWindowRequest {
+                h_max: Some(0),
+                ttl_ms: None,
+            }),
+        )
+        .await
+        .expect_err("zero h_max should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("h_max must be at least 1")
+        ));
+
+        let err = configure_window(
+            State(state.clone()),
+            headers.clone(),
+            encode_proto_request(&ConfigureWindowRequest {
+                h_max: Some(2048),
+                ttl_ms: None,
+            }),
+        )
+        .await
+        .expect_err("oversized h_max should fail");
+        assert!(matches!(err, ApiError::InvalidRequest("h_max too large")));
+
+        let err = configure_window(
+            State(state.clone()),
+            headers.clone(),
+            encode_proto_request(&ConfigureWindowRequest {
+                h_max: None,
+                ttl_ms: Some(0),
+            }),
+        )
+        .await
+        .expect_err("zero ttl should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("ttl_ms must be positive")
+        ));
+
+        let response = configure_window(
+            State(state),
+            headers,
+            encode_proto_request(&ConfigureWindowRequest {
+                h_max: Some(9),
+                ttl_ms: Some(4_321),
+            }),
+        )
+        .await
+        .expect("window update should succeed");
+        let decoded: ConfigureWindowResponse = decode_proto_response(response).await;
+        assert_eq!(decoded.h_max, 9);
+        assert_eq!(decoded.ttl_ms, 4_321);
+    }
+
+    #[tokio::test]
+    async fn window_and_telemetry_handlers_emit_snapshot_and_freeze_stats() {
+        let state = test_api_state();
+        let bundle = demo_bundle("alice").expect("alice bundle");
+        apply_bundle(&state, &bundle)
+            .await
+            .expect("accept bundle should seed window state");
+        state
+            .record_freeze(FreezeError {
+                code: 4242,
+                reason: "unit_test_freeze",
+            })
+            .await;
+
+        let window_response = get_window(
+            State(state.clone()),
+            encode_proto_request(&GetWindowRequest {}),
+        )
+        .await
+        .expect("window snapshot should succeed");
+        let window: GetWindowResponse = decode_proto_response(window_response).await;
+        assert!(!window.entries.is_empty());
+        assert!(!window.entries[0].heads.is_empty());
+        let first_head = &window.entries[0].heads[0];
+        assert_eq!(first_head.we_epoch_id.len(), 32);
+        assert_eq!(first_head.msphf_hp_commit.len(), 32);
+        assert_eq!(first_head.seed_ctx_hash.len(), 32);
+        assert_eq!(first_head.rho_commit.len(), 32);
+        assert_eq!(first_head.seed_commit.len(), 32);
+        assert_eq!(first_head.xk_hash.len(), 32);
+
+        let telemetry_response = get_telemetry(
+            State(state),
+            encode_proto_request(&GetTelemetryRequest {}),
+        )
+        .await
+        .expect("telemetry snapshot should succeed");
+        let telemetry: GetTelemetryResponse = decode_proto_response(telemetry_response).await;
+        assert!(!telemetry.entries.is_empty());
+        assert!(
+            telemetry
+                .freeze_stats
+                .iter()
+                .any(|stat| stat.code == 4242
+                    && stat.reason == "unit_test_freeze"
+                    && stat.count == 1)
+        );
+    }
+
+    #[tokio::test]
     async fn websocket_handler_streams_message_and_membership_notifications() {
         ensure_test_admin_tokens();
         let state = test_api_state();
@@ -3708,10 +3956,19 @@ mod tests {
             .expect("bind ephemeral listener");
         let addr = listener.local_addr().expect("listener address");
         let server = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve websocket test app");
+            let _ = axum::serve(listener, app).await;
         });
+
+        let unauthorized_url = format!(
+            "ws://{addr}/v1/ws?gid={}&leaf_id={}",
+            hex::encode(DEMO_GID),
+            hex::encode(leaf)
+        );
+        assert!(
+            tokio_tungstenite::connect_async(unauthorized_url)
+                .await
+                .is_err()
+        );
 
         let url = format!(
             "ws://{addr}/v1/ws?gid={}&leaf_id={}&token={}",
@@ -3733,10 +3990,7 @@ mod tests {
             .expect("wait for message notification")
             .expect("message notification frame")
             .expect("message notification payload");
-        let first_text = match first {
-            tokio_tungstenite::tungstenite::Message::Text(text) => text,
-            other => panic!("expected text notification frame, got {other:?}"),
-        };
+        let first_text = first.into_text().expect("expected text notification frame");
         let first_json: Value =
             serde_json::from_str(&first_text).expect("decode message notification JSON");
         assert_eq!(first_json["type"], "message");
@@ -3749,10 +4003,7 @@ mod tests {
             .expect("wait for membership notification")
             .expect("membership notification frame")
             .expect("membership notification payload");
-        let second_text = match second {
-            tokio_tungstenite::tungstenite::Message::Text(text) => text,
-            other => panic!("expected text membership frame, got {other:?}"),
-        };
+        let second_text = second.into_text().expect("expected text membership frame");
         let second_json: Value =
             serde_json::from_str(&second_text).expect("decode membership notification JSON");
         assert_eq!(second_json["type"], "membership");
@@ -3765,10 +4016,7 @@ mod tests {
             .expect("wait for revoke notification")
             .expect("revoke notification frame")
             .expect("revoke notification payload");
-        let third_text = match third {
-            tokio_tungstenite::tungstenite::Message::Text(text) => text,
-            other => panic!("expected text revoke frame, got {other:?}"),
-        };
+        let third_text = third.into_text().expect("expected text revoke frame");
         let third_json: Value =
             serde_json::from_str(&third_text).expect("decode revoke notification JSON");
         assert_eq!(third_json["type"], "membership");
@@ -3783,6 +4031,72 @@ mod tests {
             .send(tokio_tungstenite::tungstenite::Message::Close(None))
             .await
             .expect("send close");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next()).await;
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_handler_emits_lag_signals_for_slow_clients() {
+        ensure_test_admin_tokens();
+        let state = test_api_state();
+        let bundle = demo_bundle("alice").expect("alice bundle");
+        apply_bundle(&state, &bundle)
+            .await
+            .expect("accept bundle for websocket membership auth");
+        let leaf = cityg_client::demo::demo_member_leaf("alice");
+        let token = configured_message_auth_token().expect("message auth token configured");
+        let app = Router::new()
+            .route("/v1/ws", get(websocket_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = format!(
+            "ws://{addr}/v1/ws?gid={}&leaf_id={}&token={}",
+            hex::encode(DEMO_GID),
+            hex::encode(leaf),
+            token
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("connect websocket");
+
+        for idx in 0u64..400 {
+            state.broadcast_message(MessageNotification {
+                gid: DEMO_GID,
+                we_epoch_id: [(idx % 251) as u8; 32],
+                timestamp_ms: 10_000 + idx,
+            });
+        }
+
+        let mut saw_lag_signal = false;
+        for _ in 0..20 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+                .await
+                .expect("wait for lag-related websocket frame")
+                .expect("lag-related frame")
+                .expect("lag-related payload");
+            let text = frame.into_text().expect("lag-related frame should be text");
+            let json: Value = serde_json::from_str(&text).expect("decode lag-related JSON");
+            let kind = json["type"].as_str().unwrap_or_default();
+            if kind == "lag" || kind == "lag_disconnect" {
+                saw_lag_signal = true;
+                break;
+            }
+        }
+        assert!(saw_lag_signal);
+
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await
+            .expect("send close");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next()).await;
 
         server.abort();
     }
@@ -3832,12 +4146,9 @@ mod tests {
         assert_eq!(retained.len(), 2, "old message should be pruned");
         assert!(
             retained.iter().all(|m| m.timestamp_ms >= 9_000),
-            "all retained messages should be inside the retention window"
+            
         );
-        assert!(
-            !store.contains_key(&weid_b),
-            "empty per-epoch buckets should be removed"
-        );
+        assert!(!store.contains_key(&weid_b));
     }
 
     #[test]
@@ -3875,10 +4186,7 @@ mod tests {
     fn should_prune_messages_throttles_global_pruning() {
         let due = AtomicU64::new(0);
         assert!(should_prune_messages(&due, 1_000));
-        assert!(
-            !should_prune_messages(&due, 1_100),
-            "requests inside the prune interval should not rescan all buckets"
-        );
+        assert!(!should_prune_messages(&due, 1_100));
         assert!(should_prune_messages(&due, 2_100));
     }
 
@@ -3892,10 +4200,7 @@ mod tests {
     fn server_from_config_leaves_fs_base_ts_unset() {
         let config = CityGConfig::default();
         let server = server_from_config(&config);
-        assert!(
-            server.context().fs_base_ts().is_none(),
-            "server should not pre-seed fs base timestamp before first accepted/join ticket flow"
-        );
+        assert!(server.context().fs_base_ts().is_none());
     }
 
     #[tokio::test]
@@ -3905,15 +4210,9 @@ mod tests {
         let alias = "squatter";
 
         for i in 0..burst {
-            assert!(
-                limiter.check_and_record(alias).await,
-                "attempt {i} within burst should be allowed"
-            );
+            assert!(limiter.check_and_record(alias).await, "{i}");
         }
-        assert!(
-            !limiter.check_and_record(alias).await,
-            "attempt past burst should be rejected"
-        );
+        assert!(!limiter.check_and_record(alias).await);
 
         // Different alias should still be allowed
         assert!(
@@ -3962,10 +4261,7 @@ mod tests {
         assert!(limiter.check_and_record("new-alias").await);
 
         let guard = limiter.attempts.read().await;
-        assert!(
-            !guard.contains_key("old-alias"),
-            "stale alias bucket should be removed during global prune"
-        );
+        assert!(!guard.contains_key("old-alias"));
         assert!(
             guard.contains_key("new-alias"),
             "active alias bucket should remain"
@@ -3983,10 +4279,7 @@ mod tests {
 
         let guard = limiter.attempts.read().await;
         assert_eq!(guard.len(), 2, "bucket map must remain capped");
-        assert!(
-            !guard.contains_key("alias-a"),
-            "oldest bucket should be evicted once cap is reached"
-        );
+        assert!(!guard.contains_key("alias-a"));
         assert!(guard.contains_key("alias-b"));
         assert!(guard.contains_key("alias-c"));
     }

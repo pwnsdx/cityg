@@ -63,8 +63,8 @@
 
 #[cfg(test)]
 use std::sync::{
-    Mutex, MutexGuard, OnceLock,
     atomic::{AtomicIsize, Ordering},
+    Mutex, MutexGuard, OnceLock,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -82,8 +82,8 @@ use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
 use msphf_orchestrator::mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW};
 use msphf_orchestrator::process_anchor_or;
 use msphf_orchestrator::{
-    self, AcceptanceContext, AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE,
-    DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes, hdr,
+    self, compute_proofs_commit_bytes, hdr, AcceptanceContext, AcceptanceOptions, BootstrapPolicy,
+    PivotParity, ReceiverCache, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
 };
 use serde::{Deserialize, Serialize};
 
@@ -976,8 +976,8 @@ mod tests {
     use ciborium::value::Value;
     use cityg_client::ClientEpochBundle;
     use msphf_core::hash::h_l;
-    use msphf_orchestrator::{AcceptanceOptions, BootstrapPolicy, hdr, mhw::HeadRecord};
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use msphf_orchestrator::{hdr, mhw::HeadRecord, AcceptanceOptions, BootstrapPolicy};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use serde::Serialize;
     use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Duration};
     use tempfile::tempdir;
@@ -1034,10 +1034,9 @@ mod tests {
         server.register_group(&gid, key.clone())?;
         assert!(server.roster.groups.contains_key(gid.as_slice()));
 
-        let err = match server.register_group(&gid, key) {
-            Err(e) => e,
-            Ok(_) => unreachable!("duplicate gid should fail"),
-        };
+        let err = server
+            .register_group(&gid, key)
+            .expect_err("duplicate gid should fail");
         assert!(matches!(
             err,
             CityGError::InvalidInput("kbroad key already registered")
@@ -1046,8 +1045,8 @@ mod tests {
     }
 
     #[test]
-    fn register_group_rejects_gid_with_existing_history_even_if_registry_is_missing()
-    -> Result<(), CityGError> {
+    fn register_group_rejects_gid_with_existing_history_even_if_registry_is_missing(
+    ) -> Result<(), CityGError> {
         let gid = [0xCA; 32];
         let leaf = cityg_client::demo::demo_member_leaf("history-owner");
         let mut server = CityGServer::new(ServerConfig::new());
@@ -1062,10 +1061,9 @@ mod tests {
         state.latest_root = Some(root);
         server.roster.groups.insert(gid.to_vec(), state);
 
-        let err = match server.register_group(&gid, vec![0x9A; 16]) {
-            Err(err) => err,
-            Ok(_) => unreachable!("group with history must not be re-bootstrapped"),
-        };
+        let err = server
+            .register_group(&gid, vec![0x9A; 16])
+            .expect_err("group with history must not be re-bootstrapped");
         assert!(matches!(
             err,
             CityGError::InvalidInput(super::KBROAD_HISTORY_EXISTS_ERR)
@@ -1079,20 +1077,18 @@ mod tests {
         let gid = [0xB1; 32];
         let key = vec![0x44; 16];
 
-        let missing = match server.rotate_group_kbroad(&gid, key.clone()) {
-            Err(e) => e,
-            Ok(_) => unreachable!("rotating an unknown group must fail"),
-        };
+        let missing = server
+            .rotate_group_kbroad(&gid, key.clone())
+            .expect_err("rotating an unknown group must fail");
         assert!(matches!(
             missing,
             CityGError::InvalidInput("kbroad key missing")
         ));
 
         server.register_group(&gid, key.clone())?;
-        let unchanged = match server.rotate_group_kbroad(&gid, key) {
-            Err(e) => e,
-            Ok(_) => unreachable!("rotating with the same key must fail"),
-        };
+        let unchanged = server
+            .rotate_group_kbroad(&gid, key)
+            .expect_err("rotating with the same key must fail");
         assert!(matches!(
             unchanged,
             CityGError::InvalidInput("kbroad key unchanged")
@@ -1107,20 +1103,18 @@ mod tests {
 
         server.roster.mark_kbroad_rotation_required(gid.as_slice());
 
-        let join_err = match server.build_join_ticket(&gid) {
-            Err(e) => e,
-            Ok(_) => unreachable!("join ticket must be blocked while rotation is required"),
-        };
+        let join_err = server
+            .build_join_ticket(&gid)
+            .expect_err("join ticket must be blocked while rotation is required");
         assert!(matches!(
             join_err,
             CityGError::InvalidInput("kbroad rotation required")
         ));
 
         let bundle = cityg_client::demo::demo_bundle("rotation-gate")?;
-        let accept_err = match server.accept_epoch(&bundle) {
-            Err(e) => e,
-            Ok(_) => unreachable!("acceptance must be blocked while rotation is required"),
-        };
+        let accept_err = server
+            .accept_epoch(&bundle)
+            .expect_err("acceptance must be blocked while rotation is required");
         assert!(matches!(
             accept_err,
             CityGError::InvalidInput("kbroad rotation required")
@@ -1168,10 +1162,9 @@ mod tests {
         let ticket = server.build_join_ticket(&gid)?;
         assert_eq!(ticket.kbroad_public, rotated_key);
         assert_eq!(ticket.kbroad_generation, 1);
-        let duplicate = match server.register_group(&gid, initial_key) {
-            Err(err) => err,
-            Ok(_) => unreachable!("restart must preserve registered room kbroad key"),
-        };
+        let duplicate = server
+            .register_group(&gid, initial_key)
+            .expect_err("restart must preserve registered room kbroad key");
         assert!(matches!(
             duplicate,
             CityGError::InvalidInput("kbroad key already registered")
@@ -1184,10 +1177,9 @@ mod tests {
         let mut server = CityGServer::new(ServerConfig::new());
         let gid = [0x42; 32];
 
-        let err = match server.build_join_ticket(&gid) {
-            Err(e) => e,
-            Ok(_) => unreachable!("missing kbroad should fail"),
-        };
+        let err = server
+            .build_join_ticket(&gid)
+            .expect_err("missing kbroad should fail");
         assert!(matches!(
             err,
             CityGError::InvalidInput("kbroad key missing")
@@ -1210,8 +1202,8 @@ mod tests {
     }
 
     #[test]
-    fn build_join_ticket_with_leaf_uses_requested_leaf_and_rejects_duplicates()
-    -> Result<(), CityGError> {
+    fn build_join_ticket_with_leaf_uses_requested_leaf_and_rejects_duplicates(
+    ) -> Result<(), CityGError> {
         let mut server = super::demo::demo_server();
         let gid = cityg_client::demo::DEMO_GID;
         let requested_leaf = cityg_client::demo::demo_member_leaf("bound-leaf");
@@ -1230,10 +1222,9 @@ mod tests {
         state.latest_root = Some(root);
         server.roster.groups.insert(gid.to_vec(), state);
 
-        let err = match server.build_join_ticket_with_leaf(&gid, Some(requested_leaf)) {
-            Err(e) => e,
-            Ok(_) => unreachable!("duplicate requested leaf must fail"),
-        };
+        let err = server
+            .build_join_ticket_with_leaf(&gid, Some(requested_leaf))
+            .expect_err("duplicate requested leaf must fail");
         assert!(matches!(
             err,
             CityGError::InvalidInput("leaf already present in roster")
@@ -1247,10 +1238,10 @@ mod tests {
         let leaf = cityg_client::demo::demo_member_leaf("merge");
 
         let mut empty = CityGServer::new(ServerConfig::new());
-        let err = match empty.build_merge_ticket(&gid, &leaf) {
-            Err(e) => e,
-            Ok(_) => unreachable!("empty server should reject merge ticket"),
-        };
+        let err = empty
+            .build_merge_ticket(&gid, &leaf)
+            .err()
+            .expect("empty server should reject merge ticket");
         assert!(matches!(
             err,
             CityGError::InvalidInput("no anchors accepted for group")
@@ -1271,19 +1262,19 @@ mod tests {
         registry.insert(gid.to_vec(), vec![0x77; 16]);
         server.context_mut().set_kbroad_registry(Some(registry));
 
-        let missing_leaf_err = match server.build_merge_ticket(&gid, &[0xFF; 32]) {
-            Err(e) => e,
-            Ok(_) => unreachable!("unknown leaf should fail before parity lookup"),
-        };
+        let missing_leaf_err = server
+            .build_merge_ticket(&gid, &[0xFF; 32])
+            .err()
+            .expect("unknown leaf should fail before parity lookup");
         assert!(matches!(
             missing_leaf_err,
             CityGError::InvalidInput("leaf not present in roster")
         ));
 
-        let no_parity_err = match server.build_merge_ticket(&gid, &leaf) {
-            Err(e) => e,
-            Ok(_) => unreachable!("missing parity should fail"),
-        };
+        let no_parity_err = server
+            .build_merge_ticket(&gid, &leaf)
+            .err()
+            .expect("missing parity should fail");
         assert!(matches!(
             no_parity_err,
             CityGError::InvalidInput("no pivot parity available")
@@ -1440,10 +1431,9 @@ mod tests {
         invalid
             .header_map
             .remove(&msphf_orchestrator::hdr::HDR_ROLLUP_PIVOT_WEID);
-        let err = match server.refresh_pivot(&invalid) {
-            Err(e) => e,
-            Ok(_) => unreachable!("missing pivot_weid header should fail"),
-        };
+        let err = server
+            .refresh_pivot(&invalid)
+            .expect_err("missing pivot_weid header should fail");
         assert!(matches!(err, CityGError::InvalidInput("pivot_weid")));
         Ok(())
     }
@@ -1567,10 +1557,7 @@ mod tests {
             .accept_head(&wid, record, accept_time)
             .map_err(|e| CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(e)))?;
 
-        let err = match server.accept_epoch(&bundle) {
-            Err(e) => e,
-            Ok(_) => unreachable!("expected error"),
-        };
+        let err = server.accept_epoch(&bundle).expect_err("expected error");
         match err {
             CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(code)) => {
                 assert_eq!(code, msphf_orchestrator::mhw::FreezeError::WINDOW_FULL);
@@ -1608,10 +1595,9 @@ mod tests {
         }
 
         let bundle_bob = cityg_client::demo::demo_bundle("bob")?;
-        let err = match server.accept_epoch(&bundle_bob) {
-            Err(e) => e,
-            Ok(_) => unreachable!("expected error"),
-        };
+        let err = server
+            .accept_epoch(&bundle_bob)
+            .expect_err("expected error");
         assert!(matches!(err, CityGError::InvalidInput(_)));
 
         assert_eq!(server.context().active_heads(&outcome.wid), 1);
@@ -1627,10 +1613,7 @@ mod tests {
         let mut server = demo_server_with_journal(&journal);
         let bundle = cityg_client::demo::demo_bundle("alice")?;
         let _guard = super::fail_journal_after(0);
-        let err = match server.accept_epoch(&bundle) {
-            Err(e) => e,
-            Ok(_) => unreachable!("expected error"),
-        };
+        let err = server.accept_epoch(&bundle).expect_err("expected error");
         assert!(matches!(err, CityGError::Io(_)));
         assert!(server.members(&cityg_client::demo::DEMO_GID).is_empty());
         let bundle_retry = cityg_client::demo::demo_bundle("alice")?;
@@ -1659,8 +1642,8 @@ mod tests {
     }
 
     #[test]
-    fn recovery_error_does_not_leave_server_replaying_or_disable_journaling()
-    -> Result<(), CityGError> {
+    fn recovery_error_does_not_leave_server_replaying_or_disable_journaling(
+    ) -> Result<(), CityGError> {
         let _guard = super::journal_serial_guard();
         let dir = tempdir()?;
         let journal_path = dir.path().join("corrupt.journal");
@@ -1795,16 +1778,14 @@ mod tests {
     ) -> Result<(), CityGError> {
         let (bundle, _) = build_join_bundle(membership, next_label)?;
         let _guard = super::fail_journal_after(0);
-        match primary.accept_epoch(&bundle) {
-            Err(CityGError::Io(_)) => {
-                *next_label = next_label.saturating_sub(1);
-                Ok(())
-            }
-            Err(err) => Err(err),
-            Ok(_) => Err(CityGError::Io(std::io::Error::other(
-                "forced journal failure should abort acceptance",
-            ))),
+        let err = primary
+            .accept_epoch(&bundle)
+            .expect_err("forced journal failure should abort acceptance");
+        if !matches!(err, CityGError::Io(_)) {
+            return Err(err);
         }
+        *next_label = next_label.saturating_sub(1);
+        Ok(())
     }
 
     fn build_join_bundle(
@@ -1978,10 +1959,9 @@ mod roster_tests {
             joined: vec![leaf(1)],
             revoked: Vec::new(),
         };
-        let err = match roster.apply_delta(gid, &bad_root, &delta) {
-            Err(e) => e,
-            Ok(_) => unreachable!("expected error"),
-        };
+        let err = roster
+            .apply_delta(gid, &bad_root, &delta)
+            .expect_err("expected error");
         assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
@@ -1995,10 +1975,9 @@ mod roster_tests {
             joined: Vec::new(),
             revoked: vec![leaf(10)],
         };
-        let err = match roster.apply_delta(gid, &zero, &delta) {
-            Err(e) => e,
-            Ok(_) => unreachable!("expected error"),
-        };
+        let err = roster
+            .apply_delta(gid, &zero, &delta)
+            .expect_err("expected error");
         assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
@@ -2017,10 +1996,9 @@ mod roster_tests {
             joined: vec![leaf(1)],
             revoked: Vec::new(),
         };
-        let err = match roster.apply_delta(gid, &root1, &delta_dup) {
-            Err(e) => e,
-            Ok(_) => unreachable!("expected error"),
-        };
+        let err = roster
+            .apply_delta(gid, &root1, &delta_dup)
+            .expect_err("expected error");
         assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
@@ -2041,10 +2019,9 @@ mod roster_tests {
             joined: vec![leaf(1)],
             revoked: vec![leaf(1)],
         };
-        let err = match roster.apply_delta(gid, &root1, &conflicting) {
-            Err(e) => e,
-            Ok(_) => unreachable!("expected error"),
-        };
+        let err = roster
+            .apply_delta(gid, &root1, &conflicting)
+            .expect_err("expected error");
         assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
