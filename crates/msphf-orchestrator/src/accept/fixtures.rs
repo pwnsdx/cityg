@@ -852,3 +852,143 @@ pub(crate) fn mutate_srx_payload_preserving_leaf_auto(
     }
     mutate_srx_payload(header, mutator);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_srx_payload_value() -> Value {
+        Value::Array(vec![
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+            Value::Map(Vec::new()),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+        ])
+    }
+
+    #[test]
+    fn helper_keypair_and_hp_inputs_are_constructible() {
+        let unique = unique_pop_keypair();
+        assert_eq!(unique.algorithm, "ML-DSA-65");
+        assert!(!unique.public_key.is_empty());
+
+        let fresh = fresh_pop_keypair();
+        assert_eq!(fresh.algorithm, "ML-DSA-65");
+        assert!(!fresh.public_key.is_empty());
+
+        let (inputs, proof) = sample_hp_inputs();
+        assert_eq!(inputs.msphf_crs_id, RLWE_CRS_ID_DEFAULT);
+        assert_eq!(inputs.params_id, RLWE_PARAMS_ID_MOCK);
+        assert!(!crate::proof_to_cbor(&proof).expect("proof to cbor").is_empty());
+    }
+
+    #[test]
+    fn reseal_header_reinstates_bootstrap_material() -> Result<(), Box<dyn std::error::Error>> {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut header, expected_weid) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        let _witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);
+        header.remove(&HDR_BOOTSTRAP_SIG);
+        header.remove(&HDR_BOOTSTRAP_PK);
+        reseal_header(&mut header, &parts, &joiner);
+
+        assert!(header.contains_key(&HDR_BOOTSTRAP_ALG));
+        assert!(header.contains_key(&HDR_BOOTSTRAP_SIG));
+        assert!(header.contains_key(&HDR_BOOTSTRAP_PK));
+        assert!(header.contains_key(&HDR_SEED_CTX_HASH));
+        assert!(header.contains_key(&HDR_SEED_BUNDLE_COMMIT));
+
+        let recomputed = super::compute_we_epoch_id_from_header(&parts, &header)?;
+        assert_eq!(recomputed, expected_weid);
+        Ok(())
+    }
+
+    #[test]
+    fn mutate_srx_payload_updates_commit_meta_and_preserves_leaf() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut header = BTreeMap::new();
+        let payload = empty_srx_payload_value();
+        header.insert(HDR_SRX_PAYLOAD, Value::Bytes(encode_value(&payload)));
+
+        let leaf = [0xA5; 32];
+        mutate_srx_payload_preserving_leaf(&mut header, &leaf, |payload| {
+            if let Value::Array(items) = payload {
+                if let Some(Value::Array(join_leaf_ids)) = items.get_mut(4) {
+                    join_leaf_ids.clear();
+                }
+                if let Some(Value::Array(since_leaf_ids)) = items.get_mut(6) {
+                    since_leaf_ids.push(Value::Bytes([0xB6; 32].to_vec()));
+                }
+                if let Some(Value::Array(anchor_pool)) = items.get_mut(8) {
+                    anchor_pool.push(Value::Map(vec![]));
+                }
+            }
+        });
+
+        let payload_bytes = match header.get(&HDR_SRX_PAYLOAD) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("payload bytes missing"),
+        };
+        let payload_value: Value = de::from_reader(payload_bytes.as_slice())?;
+        let Value::Array(items) = payload_value else {
+            panic!("payload should decode to array");
+        };
+
+        let join_leaf_ids = items[4].as_array().expect("join leaf ids array");
+        assert!(
+            join_leaf_ids
+                .iter()
+                .any(|entry| matches!(entry, Value::Bytes(bytes) if bytes.as_slice() == leaf))
+        );
+        assert!(header.contains_key(&HDR_SRX_COMMIT));
+        assert!(header.contains_key(&HDR_SRX_HINT_COUNTS));
+        assert!(header.contains_key(&HDR_SRX_HINT_SIZES));
+        Ok(())
+    }
+
+    #[test]
+    fn mutate_srx_payload_preserving_leaf_auto_keeps_expected_leaf() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut header = BTreeMap::new();
+        let payload = empty_srx_payload_value();
+        header.insert(HDR_SRX_PAYLOAD, Value::Bytes(encode_value(&payload)));
+
+        let gid = [0xCC; 32];
+        let (pop_pk, _) = sample_pop_keys();
+        mutate_srx_payload_preserving_leaf_auto(
+            &mut header,
+            &gid,
+            crate::LeafIdMode::PerGroup,
+            &pop_pk,
+            |_| {},
+        );
+
+        let expected_leaf = crate::compute_leaf_id(
+            crate::LeafIdMode::PerGroup,
+            &gid,
+            "ML-DSA-65",
+            &pop_pk,
+        )?;
+        let payload_bytes = match header.get(&HDR_SRX_PAYLOAD) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => panic!("payload bytes missing"),
+        };
+        let payload_value: Value = de::from_reader(payload_bytes.as_slice())?;
+        let Value::Array(items) = payload_value else {
+            panic!("payload should decode to array");
+        };
+        let join_leaf_ids = items[4].as_array().expect("join leaf ids array");
+        assert!(
+            join_leaf_ids.iter().any(
+                |entry| matches!(entry, Value::Bytes(bytes) if bytes.as_slice() == expected_leaf)
+            ),
+            "expected derived leaf id to be preserved"
+        );
+        Ok(())
+    }
+}

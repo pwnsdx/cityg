@@ -671,7 +671,7 @@ mod tests {
         JoinerKGenResult, OrchestrationParams, compute_proofs_commit_bytes, joiner_kgen_merge_or,
         mhw::HeadRecord,
     };
-    use anyhow::{Result, anyhow, bail};
+    use anyhow::{Result, anyhow};
     use ciborium::value::Integer;
     use std::sync::Arc;
 
@@ -712,29 +712,25 @@ mod tests {
             params.clone(),
             None,
         )?;
-        let retired_heads = match merge_joiner.retired_heads() {
-            Some(val) => val.to_vec(),
-            None => unreachable!("merge joiner retired heads"),
-        };
+        let retired_heads = merge_joiner
+            .retired_heads()
+            .expect("merge joiner retired heads")
+            .to_vec();
 
         Ok((ctx, parts, params, merge_joiner, retired_heads))
     }
 
     fn recompute_proofs_commit(header: &mut BTreeMap<u64, Value>) -> Result<()> {
-        let fs_capss = match header.get(&HDR_FS_CAPSS).and_then(|value| match value {
-            Value::Bytes(bytes) => Some(bytes.clone()),
-            _ => None,
-        }) {
-            Some(val) => val,
-            None => unreachable!("missing fs capss bytes"),
-        };
-        let vrf_pi = match header.get(&HDR_VRF_PROOF).and_then(|value| match value {
-            Value::Bytes(bytes) => Some(bytes.clone()),
-            _ => None,
-        }) {
-            Some(val) => val,
-            None => unreachable!("missing vrf proof"),
-        };
+        let fs_capss = header
+            .get(&HDR_FS_CAPSS)
+            .and_then(Value::as_bytes)
+            .expect("missing fs capss bytes")
+            .to_vec();
+        let vrf_pi = header
+            .get(&HDR_VRF_PROOF)
+            .and_then(Value::as_bytes)
+            .expect("missing vrf proof")
+            .to_vec();
         let srx_root = match header.get(&HDR_SRX_ROOT_SW) {
             Some(Value::Bytes(bytes)) if bytes.len() == 32 => Some(bytes.clone()),
             _ => None,
@@ -800,14 +796,10 @@ mod tests {
     ) -> Result<PivotParity> {
         let mut parent_root = [0u8; 32];
         parent_root.copy_from_slice(parts.parent_root);
-        match ctx
-            .pivot_parities_for(parts.gid, &parent_root)
+        ctx.pivot_parities_for(parts.gid, &parent_root)
             .into_iter()
             .find(|parity| parity.we_epoch_id == weid)
-        {
-            Some(val) => Ok(val),
-            None => unreachable!("pivot parity present"),
-        }
+            .ok_or_else(|| anyhow!("pivot parity present"))
     }
 
     fn refresh_pivot_parity(
@@ -815,14 +807,15 @@ mod tests {
         _parts: &AnchorInstanceParts<'_>,
         parity: &PivotParity,
     ) -> Result<()> {
-        let wid = match ctx.mh_window.find_head_window(&parity.we_epoch_id) {
-            Some(val) => val,
-            None => unreachable!("pivot window present"),
-        };
-        let old_record = match ctx.mh_window.find_head(wid.as_slice(), &parity.we_epoch_id) {
-            Some(val) => val.clone(),
-            None => unreachable!("pivot head present"),
-        };
+        let wid = ctx
+            .mh_window
+            .find_head_window(&parity.we_epoch_id)
+            .expect("pivot window present");
+        let old_record = ctx
+            .mh_window
+            .find_head(wid.as_slice(), &parity.we_epoch_id)
+            .expect("pivot head present")
+            .clone();
         let accept_time = old_record.accept_time();
 
         ctx.pivot_store.insert(parity.clone(), accept_time);
@@ -862,19 +855,11 @@ mod tests {
         let mut header = merge_joiner.header_map.clone();
         recompute_proofs_commit(&mut header)?;
 
-        let pivot_weid = match header
+        let pivot_weid = header
             .get(&HDR_ROLLUP_PIVOT_WEID)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) if bytes.len() == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(bytes);
-                    Some(arr)
-                }
-                _ => None,
-            }) {
-            Some(val) => val,
-            None => unreachable!("pivot weid missing"),
-        };
+            .and_then(Value::as_bytes)
+            .and_then(|bytes| bytes.as_slice().try_into().ok())
+            .expect("pivot weid missing");
 
         let mut pivot_parity = pivot_parity_from_store(ctx, parts, pivot_weid)?;
         align_header_with_pivot(&mut header, &pivot_parity);
@@ -895,19 +880,11 @@ mod tests {
         pivot_parity.srx_commit = None;
         recompute_proofs_commit(&mut header)?;
 
-        let proofs_commit = match header
+        let proofs_commit = header
             .get(&HDR_PROOFS_COMMIT)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) if bytes.len() == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(bytes);
-                    Some(arr)
-                }
-                _ => None,
-            }) {
-            Some(val) => val,
-            None => unreachable!("recomputed proofs commit missing"),
-        };
+            .and_then(Value::as_bytes)
+            .and_then(|bytes| bytes.as_slice().try_into().ok())
+            .expect("recomputed proofs commit missing");
         pivot_parity.proofs_commit = proofs_commit;
         refresh_pivot_parity(ctx, parts, &pivot_parity)?;
 
@@ -916,14 +893,78 @@ mod tests {
         Ok((header, heads))
     }
 
-    fn assert_freeze(err: AcceptanceError, expected: FreezeError) -> Result<()> {
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert_eq!(code, expected);
-                Ok(())
-            }
-            other => Err(anyhow!("unexpected error: {other:?}")),
+    fn inject_valid_rollup_metadata(
+        ctx: &mut AcceptanceContext,
+        parts: &AnchorInstanceParts<'_>,
+        merge_joiner: &JoinerKGenResult,
+        header: &mut BTreeMap<u64, Value>,
+        heads: &[[u8; 32]],
+    ) -> Result<()> {
+        let mut parent_root = [0u8; 32];
+        parent_root.copy_from_slice(parts.parent_root);
+        let parity_map: BTreeMap<[u8; 32], PivotParity> = ctx
+            .pivot_parities_for(parts.gid, &parent_root)
+            .into_iter()
+            .map(|parity| (parity.we_epoch_id, parity))
+            .collect();
+
+        let mut replay_entries = Vec::with_capacity(heads.len());
+        let mut provenance_entries = Vec::with_capacity(heads.len());
+        let mut vcks = Vec::with_capacity(heads.len());
+
+        for head in heads {
+            let parity = parity_map
+                .get(head)
+                .ok_or_else(|| anyhow!("missing parity for retired head"))?;
+            let vck = compute_vck_from_parity(parity)?;
+            vcks.push(vck);
+
+            replay_entries.push(Value::Array(vec![
+                Value::Bytes(head.to_vec()),
+                Value::Bytes(parity.xk_hash.to_vec()),
+                Value::Array(vec![
+                    Value::Bytes(parity.parent_root.to_vec()),
+                    Value::Bytes(parity.join_delta_root.to_vec()),
+                    Value::Bytes(parity.revoked_since_root.to_vec()),
+                    Value::Bytes(parity.revoked_root.to_vec()),
+                ]),
+                Value::Bool(parity.is_join),
+            ]));
+            provenance_entries.push(Value::Array(vec![
+                Value::Bytes(head.to_vec()),
+                Value::Bytes(vck.to_vec()),
+                Value::Bytes(parity.xk_hash.to_vec()),
+            ]));
         }
+
+        let mut encoded_provenance = Vec::new();
+        ciborium::ser::into_writer(&Value::Array(provenance_entries), &mut encoded_provenance)?;
+        let provenance_commit =
+            msphf_core::hash::h_l("msphf/rollup/prov", &RollupCommit(&encoded_provenance))?;
+
+        let mut encoded_vcks = Vec::new();
+        let vck_values: Vec<Value> = vcks
+            .iter()
+            .map(|vck| Value::Bytes(vck.to_vec()))
+            .collect();
+        ciborium::ser::into_writer(&Value::Array(vck_values), &mut encoded_vcks)?;
+        let vck_commit = msphf_core::hash::h_l("msphf/rollup/vck", &RollupCommit(&encoded_vcks))?;
+
+        header.insert(HDR_ROLLUP_EPOCH_REPLAY, Value::Array(replay_entries));
+        header.insert(
+            HDR_ROLLUP_PROVENANCE_COMMIT,
+            Value::Bytes(provenance_commit.to_vec()),
+        );
+        header.insert(HDR_ROLLUP_VCK_COMMIT, Value::Bytes(vck_commit.to_vec()));
+        refresh_seed_bindings(header, parts, merge_joiner);
+        Ok(())
+    }
+
+    fn assert_freeze(err: AcceptanceError, expected: FreezeError) {
+        assert!(
+            matches!(&err, AcceptanceError::Freeze(code) if *code == expected),
+            "unexpected error: {err:?}"
+        );
     }
 
     fn expect_merge_freeze(
@@ -936,18 +977,18 @@ mod tests {
     ) -> Result<()> {
         seed_capss_with(ctx, &joiner.capss_witness);
         let now = ctx.next_accept_instant();
-        let err = match ctx.accept_anchor_merge(
+        let err = ctx
+            .accept_anchor_merge(
             parts,
             joiner.we_epoch_id,
             header,
             retired_heads,
             joiner.mh_note.clone(),
             now,
-        ) {
-            Ok(_) => bail!("expected merge freeze"),
-            Err(err) => err,
-        };
-        assert_freeze(err, expected)
+        )
+        .expect_err("expected merge freeze");
+        assert_freeze(err, expected);
+        Ok(())
     }
 
     #[test]
@@ -959,21 +1000,17 @@ mod tests {
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
         let now = ctx.next_accept_instant();
 
-        let err = match ctx.accept_anchor_merge(
+        let err = ctx
+            .accept_anchor_merge(
             &parts,
             merge_joiner.we_epoch_id,
             &header,
             retired_heads,
             merge_joiner.mh_note.clone(),
             now,
-        ) {
-            Ok(_) => bail!("non-map purge metadata should freeze"),
-            Err(e) => e,
-        };
-        let AcceptanceError::Freeze(code) = err else {
-            return Err(anyhow!("unexpected error"));
-        };
-        assert_eq!(code, FREEZE_HASH_CBOR);
+        )
+        .expect_err("non-map purge metadata should freeze");
+        assert_freeze(err, FREEZE_HASH_CBOR);
         Ok(())
     }
 
@@ -988,21 +1025,17 @@ mod tests {
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
         let now = ctx.next_accept_instant();
 
-        let err = match ctx.accept_anchor_merge(
+        let err = ctx
+            .accept_anchor_merge(
             &parts,
             merge_joiner.we_epoch_id,
             &header,
             retired_heads,
             merge_joiner.mh_note.clone(),
             now,
-        ) {
-            Ok(_) => bail!("pivot mismatch should freeze"),
-            Err(e) => e,
-        };
-        let AcceptanceError::Freeze(code) = err else {
-            return Err(anyhow!("unexpected error"));
-        };
-        assert_eq!(code, FREEZE_MH_HEADS_INVALID);
+        )
+        .expect_err("pivot mismatch should freeze");
+        assert_freeze(err, FREEZE_MH_HEADS_INVALID);
         Ok(())
     }
 
@@ -1012,43 +1045,36 @@ mod tests {
         ctx.set_srx_required(false);
         let (mut header, heads) =
             ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
-        let pivot_weid = match header.get(&HDR_ROLLUP_PIVOT_WEID) {
-            Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
-                let mut weid = [0u8; 32];
-                weid.copy_from_slice(bytes);
-                weid
-            }
-            _ => bail!("missing pivot weid"),
-        };
+        let pivot_weid = header
+            .get(&HDR_ROLLUP_PIVOT_WEID)
+            .and_then(Value::as_bytes)
+            .and_then(|bytes| bytes.as_slice().try_into().ok())
+            .expect("missing pivot weid");
         let mut pivot = pivot_parity_from_store(&mut ctx, &parts, pivot_weid)?;
         pivot.vrf_proof.clear();
         align_header_with_pivot(&mut header, &pivot);
         recompute_proofs_commit(&mut header)?;
-        let recomputed_commit = match header.get(&HDR_PROOFS_COMMIT) {
-            Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
-                let mut commit = [0u8; 32];
-                commit.copy_from_slice(bytes);
-                commit
-            }
-            _ => bail!("missing recomputed proofs_commit"),
-        };
+        let recomputed_commit = header
+            .get(&HDR_PROOFS_COMMIT)
+            .and_then(Value::as_bytes)
+            .and_then(|bytes| bytes.as_slice().try_into().ok())
+            .expect("missing recomputed proofs_commit");
         pivot.proofs_commit = recomputed_commit;
         refresh_pivot_parity(&mut ctx, &parts, &pivot)?;
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
         let now = ctx.next_accept_instant();
 
-        let err = match ctx.accept_anchor_merge(
+        let err = ctx
+            .accept_anchor_merge(
             &parts,
             merge_joiner.we_epoch_id,
             &header,
             heads,
             merge_joiner.mh_note.clone(),
             now,
-        ) {
-            Ok(_) => bail!("empty vrf proof should freeze"),
-            Err(e) => e,
-        };
-        assert_freeze(err, FREEZE_VRF_INVALID)?;
+        )
+        .expect_err("empty vrf proof should freeze");
+        assert_freeze(err, FREEZE_VRF_INVALID);
         Ok(())
     }
 
@@ -1072,14 +1098,18 @@ mod tests {
             )
             .map_err(|err| anyhow!("unexpected error: {err:?}"))?;
 
-        match outcome.kind {
-            AcceptanceKind::Merge {
-                retired_heads: accepted,
-            } => {
-                assert_eq!(accepted, heads);
-            }
-            other => return Err(anyhow!("unexpected outcome {other:?}")),
-        }
+        assert!(
+            matches!(&outcome.kind, AcceptanceKind::Merge { .. }),
+            "unexpected outcome: {:?}",
+            outcome.kind
+        );
+        let AcceptanceKind::Merge {
+            retired_heads: accepted,
+        } = &outcome.kind
+        else {
+            unreachable!("merge outcome already asserted");
+        };
+        assert_eq!(accepted, &heads);
         assert_eq!(outcome.mh_note, merge_joiner.mh_note);
         assert_eq!(outcome.we_epoch_id, merge_joiner.we_epoch_id);
         assert_eq!(outcome.seed_ctx_hash, merge_joiner.seed_ctx_hash);
@@ -1095,18 +1125,17 @@ mod tests {
         header.remove(&HDR_FS_CHECKPOINT_EC);
         let now = ctx.next_accept_instant();
 
-        let err = match ctx.accept_anchor_merge(
+        let err = ctx
+            .accept_anchor_merge(
             &parts,
             merge_joiner.we_epoch_id,
             &header,
             heads,
             merge_joiner.mh_note.clone(),
             now,
-        ) {
-            Ok(_) => bail!("missing checkpoint ec must freeze"),
-            Err(e) => e,
-        };
-        assert_freeze(err, FREEZE_FS_JOIN_MISSING)?;
+        )
+        .expect_err("missing checkpoint ec must freeze");
+        assert_freeze(err, FREEZE_FS_JOIN_MISSING);
         Ok(())
     }
 
@@ -1122,18 +1151,17 @@ mod tests {
         );
         let now = ctx.next_accept_instant();
 
-        let err = match ctx.accept_anchor_merge(
+        let err = ctx
+            .accept_anchor_merge(
             &parts,
             merge_joiner.we_epoch_id,
             &header,
             heads,
             merge_joiner.mh_note.clone(),
             now,
-        ) {
-            Ok(_) => bail!("tampered checkpoint ec must freeze"),
-            Err(e) => e,
-        };
-        assert_freeze(err, FREEZE_FS_CHECKPOINT_BACKDATE)?;
+        )
+        .expect_err("tampered checkpoint ec must freeze");
+        assert_freeze(err, FREEZE_FS_CHECKPOINT_BACKDATE);
         Ok(())
     }
 
@@ -1147,21 +1175,17 @@ mod tests {
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
         let now = ctx.next_accept_instant();
 
-        let err = match ctx.accept_anchor_merge(
+        let err = ctx
+            .accept_anchor_merge(
             &parts,
             merge_joiner.we_epoch_id,
             &header,
             retired_heads,
             merge_joiner.mh_note.clone(),
             now,
-        ) {
-            Ok(_) => bail!("srx with unchanged roots should freeze"),
-            Err(e) => e,
-        };
-        let AcceptanceError::Freeze(code) = err else {
-            return Err(anyhow!("unexpected error"));
-        };
-        assert_eq!(code, FREEZE_SRX_INVALID);
+        )
+        .expect_err("srx with unchanged roots should freeze");
+        assert_freeze(err, FREEZE_SRX_INVALID);
         Ok(())
     }
 
@@ -1176,21 +1200,17 @@ mod tests {
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
         let now = ctx.next_accept_instant();
 
-        let err = match ctx.accept_anchor_merge(
+        let err = ctx
+            .accept_anchor_merge(
             &parts,
             merge_joiner.we_epoch_id,
             &header,
             retired_heads,
             merge_joiner.mh_note.clone(),
             now,
-        ) {
-            Ok(_) => bail!("vck without provenance should freeze"),
-            Err(e) => e,
-        };
-        let AcceptanceError::Freeze(code) = err else {
-            return Err(anyhow!("unexpected error"));
-        };
-        assert_eq!(code, FREEZE_MH_HEADS_INVALID);
+        )
+        .expect_err("vck without provenance should freeze");
+        assert_freeze(err, FREEZE_MH_HEADS_INVALID);
         Ok(())
     }
 
@@ -1207,21 +1227,17 @@ mod tests {
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
         let now = ctx.next_accept_instant();
 
-        let err = match ctx.accept_anchor_merge(
+        let err = ctx
+            .accept_anchor_merge(
             &parts,
             merge_joiner.we_epoch_id,
             &header,
             retired_heads,
             merge_joiner.mh_note.clone(),
             now,
-        ) {
-            Ok(_) => bail!("capss mismatch should freeze"),
-            Err(e) => e,
-        };
-        let AcceptanceError::Freeze(code) = err else {
-            return Err(anyhow!("unexpected error"));
-        };
-        assert_eq!(code, FREEZE_CAPSS_INVALID);
+        )
+        .expect_err("capss mismatch should freeze");
+        assert_freeze(err, FREEZE_CAPSS_INVALID);
         Ok(())
     }
 
@@ -1373,18 +1389,18 @@ mod tests {
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
         let now = ctx.next_accept_instant();
         let weid_claim = compute_we_epoch_id_from_header(&mutated_parts, &header)?;
-        let err = match ctx.accept_anchor_merge(
+        let err = ctx
+            .accept_anchor_merge(
             &mutated_parts,
             weid_claim,
             &header,
             heads,
             merge_joiner.mh_note.clone(),
             now,
-        ) {
-            Ok(_) => bail!("expected roots-changed merge to freeze without SRX"),
-            Err(err) => err,
-        };
-        assert_freeze(err, FREEZE_SRX_REQUIRED)
+        )
+        .expect_err("expected roots-changed merge to freeze without SRX");
+        assert_freeze(err, FREEZE_SRX_REQUIRED);
+        Ok(())
     }
 
     #[test]
@@ -1408,15 +1424,11 @@ mod tests {
     fn merge_anchor_rejects_checkpoint_monotonicity_violations() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
-        let checkpoint_ec = match header
+        let checkpoint_ec = header
             .get(&HDR_FS_CHECKPOINT_EC)
-            .and_then(|value| match value {
-                Value::Integer(int) => u64::try_from(*int).ok(),
-                _ => None,
-            }) {
-            Some(ec) => ec,
-            None => bail!("missing fs checkpoint ec"),
-        };
+            .and_then(Value::as_integer)
+            .and_then(|int| u64::try_from(int).ok())
+            .expect("missing fs checkpoint ec");
 
         ctx.set_last_checkpoint_ec(checkpoint_ec.saturating_add(1));
         expect_merge_freeze(
@@ -1433,19 +1445,11 @@ mod tests {
     fn merge_anchor_rejects_invalid_pivot_envelope_bytes() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
-        let pivot_weid = match header
+        let pivot_weid = header
             .get(&HDR_ROLLUP_PIVOT_WEID)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) if bytes.len() == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(bytes);
-                    Some(arr)
-                }
-                _ => None,
-            }) {
-            Some(weid) => weid,
-            None => bail!("missing pivot weid"),
-        };
+            .and_then(Value::as_bytes)
+            .and_then(|bytes| bytes.as_slice().try_into().ok())
+            .expect("missing pivot weid");
 
         let mut parity = pivot_parity_from_store(&mut ctx, &parts, pivot_weid)?;
         parity.hp_envelope = Arc::from(vec![0xFF].into_boxed_slice());
@@ -1469,6 +1473,88 @@ mod tests {
             &header,
             heads,
             FREEZE_FIELD_MISSING,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_accepts_with_valid_rollup_metadata() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        inject_valid_rollup_metadata(&mut ctx, &parts, &merge_joiner, &mut header, &heads)?;
+
+        seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
+        let now = ctx.next_accept_instant();
+        let outcome = ctx.accept_anchor_merge(
+            &parts,
+            merge_joiner.we_epoch_id,
+            &header,
+            heads.clone(),
+            merge_joiner.mh_note.clone(),
+            now,
+        )?;
+        assert!(
+            matches!(&outcome.kind, AcceptanceKind::Merge { .. }),
+            "unexpected outcome: {:?}",
+            outcome.kind
+        );
+        let AcceptanceKind::Merge { retired_heads } = &outcome.kind else {
+            unreachable!("merge outcome already asserted");
+        };
+        assert_eq!(retired_heads, &heads);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_anchor_rejects_rollup_replay_order_mismatch() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        inject_valid_rollup_metadata(&mut ctx, &parts, &merge_joiner, &mut header, &heads)?;
+
+        if let Some(Value::Array(entries)) = header.get_mut(&HDR_ROLLUP_EPOCH_REPLAY)
+            && let Some(Value::Array(fields)) = entries.get_mut(0)
+            && let Some(Value::Bytes(weid)) = fields.get_mut(0)
+            && let Some(first) = weid.first_mut()
+        {
+            *first ^= 0x7E;
+        }
+        refresh_seed_bindings(&mut header, &parts, &merge_joiner);
+
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_HASH_CBOR,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_rollup_vck_commit_mismatch() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        inject_valid_rollup_metadata(&mut ctx, &parts, &merge_joiner, &mut header, &heads)?;
+
+        if let Some(Value::Bytes(bytes)) = header.get_mut(&HDR_ROLLUP_VCK_COMMIT)
+            && let Some(first) = bytes.first_mut()
+        {
+            *first ^= 0xFF;
+        }
+        refresh_seed_bindings(&mut header, &parts, &merge_joiner);
+
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_MH_HEADS_INVALID,
         )
     }
 }

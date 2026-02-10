@@ -671,7 +671,7 @@ mod tests {
     use crate::accept::fixtures::{
         anchor_from_result, header_ready_with_pop, sample_parts_params_joiner, sample_pop_keys,
     };
-    use anyhow::{Result, anyhow, bail};
+    use anyhow::Result;
     use pqcrypto_kyber::kyber768::ciphertext_bytes as ml_kem_ciphertext_bytes;
 
     fn base_header() -> BTreeMap<u64, Value> {
@@ -712,20 +712,15 @@ mod tests {
         ]);
         header.insert(super::HDR_HP_BYTES, envelope);
 
-        let err = match verify_join_payload_kbroad(
+        let err = verify_join_payload_kbroad(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
             &[0u8; 32],
             &[0u8; 32],
-        ) {
-            Ok(_) => bail!("expected failure"),
-            Err(e) => e,
-        };
-        let AcceptanceError::Freeze(code) = err else {
-            return Err(anyhow!("unexpected error"));
-        };
-        assert_eq!(code, FREEZE_KBROAD_PARENT_MISMATCH);
+        )
+        .expect_err("expected failure");
+        expect_freeze(err, FREEZE_KBROAD_PARENT_MISMATCH);
         Ok(())
     }
 
@@ -734,14 +729,8 @@ mod tests {
         let mut header = base_header();
         header.insert(super::HDR_HP_BYTES, Value::Bytes(vec![]));
 
-        let err = match ensure_merge_join_keys_absent(&header) {
-            Ok(_) => bail!("join keys must be rejected"),
-            Err(e) => e,
-        };
-        let AcceptanceError::Freeze(code) = err else {
-            return Err(anyhow!("unexpected error"));
-        };
-        assert_eq!(code, FREEZE_MERGE_JOIN_KEYS);
+        let err = ensure_merge_join_keys_absent(&header).expect_err("join keys must be rejected");
+        expect_freeze(err, FREEZE_MERGE_JOIN_KEYS);
         Ok(())
     }
 
@@ -753,14 +742,8 @@ mod tests {
             Value::Integer(Integer::from(u64::from(TSWE_ALG_CODE) + 1)),
         );
 
-        let err = match ensure_tswe_alg(&header) {
-            Ok(_) => bail!("wrong algorithm code should freeze"),
-            Err(e) => e,
-        };
-        let AcceptanceError::Freeze(code) = err else {
-            return Err(anyhow!("unexpected error"));
-        };
-        assert_eq!(code, FREEZE_TSWE_ALG_INVALID);
+        let err = ensure_tswe_alg(&header).expect_err("wrong algorithm code should freeze");
+        expect_freeze(err, FREEZE_TSWE_ALG_INVALID);
         Ok(())
     }
 
@@ -780,14 +763,22 @@ mod tests {
         }
     }
 
-    fn expect_freeze(err: AcceptanceError, expected: FreezeError) -> Result<()> {
-        match err {
-            AcceptanceError::Freeze(code) => {
-                assert_eq!(code, expected);
-                Ok(())
-            }
-            other => Err(anyhow!("unexpected error: {other:?}")),
-        }
+    fn expect_freeze(err: AcceptanceError, expected: FreezeError) {
+        assert!(
+            matches!(&err, AcceptanceError::Freeze(code) if *code == expected),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    fn expect_proofs_freeze(
+        result: Result<ProofArtifacts, AcceptanceError>,
+        expected: FreezeError,
+    ) {
+        let err = match result {
+            Ok(_) => panic!("expected ensure_proofs failure"),
+            Err(err) => err,
+        };
+        expect_freeze(err, expected);
     }
 
     #[test]
@@ -818,7 +809,7 @@ mod tests {
     fn ensure_srx_relations_requires_payload_when_mandatory() -> Result<()> {
         let header = base_header();
         let mut cache = VckCache::new(Duration::from_secs(60));
-        let err = match ensure_srx_relations(
+        let err = ensure_srx_relations(
             &header,
             &[0u8; 32],
             &[0u8; 32],
@@ -834,14 +825,9 @@ mod tests {
             &mut cache,
             &dummy_proofs(),
             &[0u8; 32],
-        ) {
-            Ok(_) => bail!("required SRX should freeze when missing"),
-            Err(e) => e,
-        };
-        let AcceptanceError::Freeze(code) = err else {
-            return Err(anyhow!("unexpected error"));
-        };
-        assert_eq!(code, FREEZE_SRX_REQUIRED);
+        )
+        .expect_err("required SRX should freeze when missing");
+        expect_freeze(err, FREEZE_SRX_REQUIRED);
         Ok(())
     }
 
@@ -850,7 +836,7 @@ mod tests {
         let mut header = base_header();
         header.insert(super::HDR_SRX_HINT_COUNTS, Value::Bytes(Vec::new()));
         let mut cache = VckCache::new(Duration::from_secs(60));
-        let err = match ensure_srx_relations(
+        let err = ensure_srx_relations(
             &header,
             &[0u8; 32],
             &[0u8; 32],
@@ -866,14 +852,9 @@ mod tests {
             &mut cache,
             &dummy_proofs(),
             &[0u8; 32],
-        ) {
-            Ok(_) => bail!("orphaned hints should freeze"),
-            Err(e) => e,
-        };
-        let AcceptanceError::Freeze(code) = err else {
-            return Err(anyhow!("unexpected error"));
-        };
-        assert_eq!(code, FREEZE_SRX_INVALID);
+        )
+        .expect_err("orphaned hints should freeze");
+        expect_freeze(err, FREEZE_SRX_INVALID);
         Ok(())
     }
 
@@ -889,11 +870,9 @@ mod tests {
         ] {
             let mut header = base_header();
             header.insert(key, value);
-            let err = match ensure_bootstrap_absent(&header) {
-                Ok(_) => bail!("bootstrap field {} should freeze", key),
-                Err(err) => err,
-            };
-            expect_freeze(err, FREEZE_BOOTSTRAP_INVALID)?;
+            let err = ensure_bootstrap_absent(&header)
+                .expect_err("bootstrap field should freeze");
+            expect_freeze(err, FREEZE_BOOTSTRAP_INVALID);
         }
         Ok(())
     }
@@ -918,19 +897,22 @@ mod tests {
         let anchor = anchor_from_result(&parts, &joiner);
 
         header.insert(super::HDR_POP_ALG, Value::Bytes(vec![0xFF]));
-        let err = match ensure_join_pop(&header, &anchor, crate::LeafIdMode::PerGroup) {
-            Ok(_) => bail!("invalid pop alg encoding should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_POP_INVALID)?;
+        let err = ensure_join_pop(&header, &anchor, crate::LeafIdMode::PerGroup)
+            .expect_err("invalid pop alg encoding should freeze");
+        expect_freeze(err, FREEZE_POP_INVALID);
 
         header.insert(super::HDR_POP_ALG, Value::Text("ML-DSA-65".to_string()));
+        header.insert(super::HDR_POP_PK, Value::Bytes(vec![0u8; 4]));
+        let err = ensure_join_pop(&header, &anchor, crate::LeafIdMode::PerGroup)
+            .expect_err("invalid pop public key length should freeze");
+        expect_freeze(err, FREEZE_POP_INVALID);
+
+        let (pop_pk, _pop_sk) = sample_pop_keys();
+        header.insert(super::HDR_POP_PK, Value::Bytes(pop_pk.to_vec()));
         header.insert(super::HDR_POP_SIG, Value::Bytes(vec![0u8; 4]));
-        let err = match ensure_join_pop(&header, &anchor, crate::LeafIdMode::PerGroup) {
-            Ok(_) => bail!("invalid pop signature length should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_POP_INVALID)?;
+        let err = ensure_join_pop(&header, &anchor, crate::LeafIdMode::PerGroup)
+            .expect_err("invalid pop signature length should freeze");
+        expect_freeze(err, FREEZE_POP_INVALID);
         Ok(())
     }
 
@@ -945,17 +927,15 @@ mod tests {
             Value::Text("chacha20-poly1305".to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, wrong_mode);
-        let err = match verify_join_payload_kbroad(
+        let err = verify_join_payload_kbroad(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
             &[0u8; 32],
             &[0u8; 32],
-        ) {
-            Ok(_) => bail!("wrong kbroad mode should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_PARENT_EID_FORBIDDEN)?;
+        )
+        .expect_err("wrong kbroad mode should freeze");
+        expect_freeze(err, FREEZE_PARENT_EID_FORBIDDEN);
 
         let wrong_aead = Value::Array(vec![
             Value::Text(KBROAD_MODE.to_string()),
@@ -965,30 +945,26 @@ mod tests {
             Value::Text("aes-gcm".to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, wrong_aead);
-        let err = match verify_join_payload_kbroad(
+        let err = verify_join_payload_kbroad(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
             &[0u8; 32],
             &[0u8; 32],
-        ) {
-            Ok(_) => bail!("wrong AEAD label should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_SUITE_DEPRECATED)?;
+        )
+        .expect_err("wrong AEAD label should freeze");
+        expect_freeze(err, FREEZE_SUITE_DEPRECATED);
 
         header.insert(super::HDR_HP_BYTES, Value::Map(Vec::new()));
-        let err = match verify_join_payload_kbroad(
+        let err = verify_join_payload_kbroad(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
             &[0u8; 32],
             &[0u8; 32],
-        ) {
-            Ok(_) => bail!("non-array envelope should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_HASH_CBOR)?;
+        )
+        .expect_err("non-array envelope should freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
         Ok(())
     }
 
@@ -1036,11 +1012,10 @@ mod tests {
         assert_eq!(artifacts.mask_b.len(), 32);
 
         header.insert(HDR_PROOFS_COMMIT, Value::Bytes(vec![0x55; 32]));
-        let err = match ensure_proofs(&header, None, &empty, None, &empty) {
-            Ok(_) => bail!("tampered proofs commit should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_PROOFS_COMMIT_INVALID)?;
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_PROOFS_COMMIT_INVALID,
+        );
         Ok(())
     }
 
@@ -1051,32 +1026,30 @@ mod tests {
         let empty = BTreeSet::new();
 
         header.insert(HDR_PROOF_MODE, Value::Text("not-supported".to_string()));
-        let err = match ensure_proofs(&header, None, &empty, None, &empty) {
-            Ok(_) => bail!("unsupported proof mode should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_SUITE_FORBIDDEN)?;
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_SUITE_FORBIDDEN,
+        );
 
         let mut header = joiner.header_map.clone();
-        let current_mode = match header.get(&HDR_PROOF_MODE) {
-            Some(Value::Text(text)) => text.clone(),
-            _ => bail!("fixture proof mode missing"),
-        };
+        let current_mode = header
+            .get(&HDR_PROOF_MODE)
+            .and_then(Value::as_text)
+            .expect("fixture proof mode missing")
+            .to_string();
         let mut deprecated = BTreeSet::new();
         deprecated.insert(current_mode);
-        let err = match ensure_proofs(&header, None, &deprecated, None, &empty) {
-            Ok(_) => bail!("deprecated proof mode should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_SUITE_DEPRECATED)?;
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &deprecated, None, &empty),
+            FREEZE_SUITE_DEPRECATED,
+        );
 
         header.insert(HDR_PROOF_MODE, Value::Text("lib-sig-vrf/v1".to_string()));
         header.insert(HDR_VRF_ID, Value::Text("unknown-vrf".to_string()));
-        let err = match ensure_proofs(&header, None, &empty, None, &empty) {
-            Ok(_) => bail!("unsupported vrf id should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_SUITE_FORBIDDEN)?;
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_SUITE_FORBIDDEN,
+        );
         Ok(())
     }
 
@@ -1089,22 +1062,20 @@ mod tests {
         header.remove(&HDR_SRX_MODE);
         header.insert(HDR_SRX_ROOT_SW, Value::Bytes(vec![0u8; 32]));
         header.insert(HDR_SRX_SMALLWOOD, Value::Bytes(vec![0u8; 4]));
-        let err = match ensure_proofs(&header, None, &empty, None, &empty) {
-            Ok(_) => bail!("stray SRX smallwood fields without mode should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_PROOFS_COMMIT_INVALID)?;
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_PROOFS_COMMIT_INVALID,
+        );
 
         let mut header = joiner.header_map.clone();
         header.insert(
             HDR_FS_CAPSS,
             Value::Bytes(vec![0u8; FS_CAPSS_MAX_BYTES + 1]),
         );
-        let err = match ensure_proofs(&header, None, &empty, None, &empty) {
-            Ok(_) => bail!("oversized fs capss payload should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_CAPSS_INVALID)?;
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_CAPSS_INVALID,
+        );
         Ok(())
     }
 
@@ -1118,7 +1089,7 @@ mod tests {
         header.insert(HDR_SRX_HINT_SIZES, Value::Bytes(Vec::new()));
 
         let mut cache = VckCache::new(Duration::from_secs(60));
-        let err = match ensure_srx_relations(
+        let err = ensure_srx_relations(
             &header,
             &[0u8; 32],
             &[0u8; 32],
@@ -1134,11 +1105,309 @@ mod tests {
             &mut cache,
             &dummy_proofs(),
             &[0u8; 32],
-        ) {
-            Ok(_) => bail!("non-utf8 SRX mode should freeze"),
-            Err(err) => err,
-        };
-        expect_freeze(err, FREEZE_SRX_INVALID)?;
+        )
+        .expect_err("non-utf8 SRX mode should freeze");
+        expect_freeze(err, FREEZE_SRX_INVALID);
         Ok(())
+    }
+
+    #[test]
+    fn verify_join_payload_kbroad_rejects_missing_and_malformed_items() {
+        let mut header = base_header();
+        let err = verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("missing envelope must freeze");
+        expect_freeze(err, FREEZE_FIELD_MISSING);
+
+        let short = Value::Array(vec![
+            Value::Text(KBROAD_MODE.to_string()),
+            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
+            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+        ]);
+        header.insert(super::HDR_HP_BYTES, short);
+        let err = verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("short envelope must freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+
+        let malformed_mode = Value::Array(vec![
+            Value::Bytes(vec![0xFF]),
+            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
+            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Text("chacha20-poly1305".to_string()),
+        ]);
+        header.insert(super::HDR_HP_BYTES, malformed_mode);
+        let err = verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("invalid mode utf8 must freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+
+        let wrong_mode_type = Value::Array(vec![
+            Value::Integer(Integer::from(7u64)),
+            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
+            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Text("chacha20-poly1305".to_string()),
+        ]);
+        header.insert(super::HDR_HP_BYTES, wrong_mode_type);
+        let err = verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("non string mode must freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+
+        let wrong_ct_type = Value::Array(vec![
+            Value::Text(KBROAD_MODE.to_string()),
+            Value::Text("bad".to_string()),
+            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Text("chacha20-poly1305".to_string()),
+        ]);
+        header.insert(super::HDR_HP_BYTES, wrong_ct_type);
+        let err = verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("ct type mismatch must freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+
+        let wrong_wrap_type = Value::Array(vec![
+            Value::Text(KBROAD_MODE.to_string()),
+            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
+            Value::Text("bad".to_string()),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Text("chacha20-poly1305".to_string()),
+        ]);
+        header.insert(super::HDR_HP_BYTES, wrong_wrap_type);
+        let err = verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("wrap type mismatch must freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+
+        let wrong_hp_type = Value::Array(vec![
+            Value::Text(KBROAD_MODE.to_string()),
+            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
+            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Text("bad".to_string()),
+            Value::Text("chacha20-poly1305".to_string()),
+        ]);
+        header.insert(super::HDR_HP_BYTES, wrong_hp_type);
+        let err = verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("hp ciphertext type mismatch must freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+
+        let malformed_aead = Value::Array(vec![
+            Value::Text(KBROAD_MODE.to_string()),
+            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
+            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Bytes(vec![0xFF]),
+        ]);
+        header.insert(super::HDR_HP_BYTES, malformed_aead);
+        let err = verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("invalid aead utf8 must freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+
+        let wrong_aead_type = Value::Array(vec![
+            Value::Text(KBROAD_MODE.to_string()),
+            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
+            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Integer(Integer::from(1u64)),
+        ]);
+        header.insert(super::HDR_HP_BYTES, wrong_aead_type);
+        let err = verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("aead type mismatch must freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+    }
+
+    #[test]
+    fn ensure_suite_helpers_reject_missing_and_wrong_types() {
+        let mut header = base_header();
+        let err = ensure_tswe_alg(&header).expect_err("missing tswe alg should freeze");
+        expect_freeze(err, FREEZE_TSWE_ALG_INVALID);
+        header.insert(super::HDR_TSWE_ALG, Value::Integer(Integer::from(999u64)));
+        let err = ensure_tswe_alg(&header).expect_err("wrong tswe code should freeze");
+        expect_freeze(err, FREEZE_TSWE_ALG_INVALID);
+
+        let mut header = base_header();
+        let err = ensure_merkle_suite(&header).expect_err("missing merkle suite should freeze");
+        expect_freeze(err, FREEZE_MERKLE_SUITE_INVALID);
+        header.insert(super::HDR_MERKLE_SUITE, Value::Integer(Integer::from(1u64)));
+        let err = ensure_merkle_suite(&header).expect_err("wrong merkle type should freeze");
+        expect_freeze(err, FREEZE_MERKLE_SUITE_INVALID);
+
+        let mut header = base_header();
+        let err = ensure_kbroad_alg(&header).expect_err("missing kbroad alg should freeze");
+        expect_freeze(err, FREEZE_KBROAD_ALG_INVALID);
+        header.insert(super::HDR_KBROAD_ALG, Value::Integer(Integer::from(1u64)));
+        let err = ensure_kbroad_alg(&header).expect_err("wrong kbroad type should freeze");
+        expect_freeze(err, FREEZE_KBROAD_ALG_INVALID);
+    }
+
+    #[test]
+    fn ensure_proofs_rejects_policy_and_shape_mismatches() {
+        let (_parts, _params, joiner) = sample_parts_params_joiner();
+        let empty = BTreeSet::new();
+
+        let header = joiner.header_map.clone();
+        let allowed_modes = BTreeSet::from(["other-mode".to_string()]);
+        expect_proofs_freeze(
+            ensure_proofs(&header, Some(&allowed_modes), &empty, None, &empty),
+            FREEZE_SUITE_FORBIDDEN,
+        );
+
+        let header = joiner.header_map.clone();
+        let allowed_vrf = BTreeSet::from(["other-vrf".to_string()]);
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, Some(&allowed_vrf), &empty),
+            FREEZE_SUITE_FORBIDDEN,
+        );
+
+        let header = joiner.header_map.clone();
+        let deprecated_vrf =
+            BTreeSet::from([header.get(&HDR_VRF_ID).and_then(Value::as_text).unwrap().to_string()]);
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &deprecated_vrf),
+            FREEZE_SUITE_DEPRECATED,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.remove(&HDR_FS_POLICY_VERSION);
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.insert(HDR_POLICY_VERSION, Value::Text("bad".to_string()));
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.insert(HDR_POLICY_VERSION, Value::Integer(Integer::from(999u64)));
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.insert(HDR_VRF_MASK_A, Value::Integer(Integer::from(1u64)));
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_FIELD_MISSING,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.insert(HDR_VRF_MASK_B, Value::Bytes(vec![0u8; 31]));
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_FIELD_MISSING,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.remove(&HDR_VRF_PROOF);
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_FIELD_MISSING,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.remove(&HDR_VRF_PUBLIC_KEY);
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_FIELD_MISSING,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.remove(&HDR_FS_CAPSS);
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_FIELD_MISSING,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.insert(HDR_SRX_ROOT_SW, Value::Bytes(vec![0u8; 32]));
+        header.remove(&HDR_SRX_SMALLWOOD);
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_SRX_INVALID,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.insert(HDR_SRX_ROOT_SW, Value::Bytes(vec![0u8; 31]));
+        header.insert(HDR_SRX_SMALLWOOD, Value::Bytes(vec![0u8; 4]));
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_SRX_SMALLWOOD_INVALID,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.insert(HDR_SRX_ROOT_SW, Value::Bytes(vec![0u8; 32]));
+        header.insert(
+            HDR_SRX_SMALLWOOD,
+            Value::Bytes(vec![0u8; SRX_SMALLWOOD_MAX_BYTES + 1]),
+        );
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_SRX_SMALLWOOD_INVALID,
+        );
+
+        let mut header = joiner.header_map.clone();
+        header.insert(HDR_SRX_ROOT_SW, Value::Bytes(vec![0u8; 32]));
+        header.insert(HDR_SRX_SMALLWOOD, Value::Text("bad".to_string()));
+        expect_proofs_freeze(
+            ensure_proofs(&header, None, &empty, None, &empty),
+            FREEZE_SRX_SMALLWOOD_INVALID,
+        );
     }
 }

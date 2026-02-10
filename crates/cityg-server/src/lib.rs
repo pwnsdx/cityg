@@ -1492,6 +1492,38 @@ mod tests {
     }
 
     #[test]
+    fn refresh_pivot_accepts_matching_parity_payload() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let pivot_weid = server
+            .context_mut()
+            .pivot_parities_for(bundle.gid(), &bundle.anchor.parent_root)
+            .into_iter()
+            .next()
+            .ok_or(CityGError::InvalidInput("pivot parity missing"))?
+            .we_epoch_id;
+        let mut refresh = bundle.clone();
+        refresh.header_map.insert(
+            hdr::HDR_ROLLUP_PIVOT_WEID,
+            Value::Bytes(pivot_weid.to_vec()),
+        );
+
+        server.refresh_pivot(&refresh)?;
+        let still_present = server
+            .context_mut()
+            .pivot_parities_for(bundle.gid(), &bundle.anchor.parent_root)
+            .into_iter()
+            .any(|parity| parity.we_epoch_id == pivot_weid);
+        assert!(
+            still_present,
+            "refresh should preserve pivot parity entry in store"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn accept_epoch_reports_window_full() -> Result<(), CityGError> {
         let mut server = super::demo::demo_server();
         server.update_window_limits(Some(1), None);

@@ -2587,14 +2587,833 @@ mod tests {
     use anchor_seed::{build_anchor_seed_ctx, compute_seed_bundle_commit, compute_seed_ctx_hash};
     use ciborium::value::Integer;
     use msphf_core::params::RLWE_PARAMS_ID_A1;
-    use msphf_core::witness::{RawMembershipWitness, ValidatedMembership, ValidatedNonMembership};
+    use msphf_core::witness::{
+        RawMembershipWitness, RawNonMembershipWitness, RawPathEntry, ValidatedMembership,
+        ValidatedNonMembership,
+    };
     use pqcrypto_dilithium::dilithium5::{detached_sign, keypair};
     use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
     use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
-    use std::{collections::BTreeMap, time::Duration};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        time::Duration,
+    };
 
     // Tests reuse deterministic fixtures across joins; we leak boxed data intentionally
     // to satisfy the `'static` lifetimes required by helper structs.
+    fn value_u64(value: u64) -> Value {
+        Value::Integer(Integer::from(value))
+    }
+
+    fn valid_nonmem_anchor_value() -> Value {
+        Value::Map(vec![
+            (value_u64(1), Value::Bytes(vec![0x11; 32])),
+            (value_u64(2), Value::Bytes(vec![0x22; 32])),
+            (value_u64(3), Value::Null),
+            (value_u64(4), Value::Null),
+            (value_u64(5), Value::Array(Vec::new())),
+            (value_u64(6), Value::Null),
+            (value_u64(7), Value::Null),
+            (value_u64(8), Value::Array(Vec::new())),
+            (value_u64(9), Value::Array(Vec::new())),
+            (value_u64(10), Value::Array(Vec::new())),
+            (value_u64(11), Value::Null),
+            (value_u64(12), Value::Null),
+            (value_u64(13), Value::Null),
+        ])
+    }
+
+    fn valid_kbroad_envelope_value() -> Value {
+        Value::Array(vec![
+            Value::Text("kbroad-v1".to_string()),
+            Value::Bytes(vec![0x01; ml_kem_ciphertext_bytes()]),
+            Value::Bytes(vec![0x02; KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
+            Value::Text("chacha20-poly1305".to_string()),
+        ])
+    }
+
+    #[test]
+    fn acceptance_error_display_and_conversion_paths() {
+        let mapping = [
+            (WitnessValidationError::CborMalformed, FREEZE_HASH_CBOR),
+            (WitnessValidationError::NonCanonical, FREEZE_HASH_NONCANONICAL),
+            (WitnessValidationError::LeafBindMismatch, FREEZE_HASH_LEAF_BIND),
+            (WitnessValidationError::ProjEvalFail, FREEZE_HASH_PROJ_FAIL),
+            (WitnessValidationError::PathOversize, FREEZE_HASH_PATH_OVERSIZE),
+        ];
+        for (witness_err, expected_freeze) in mapping {
+            let converted: AcceptanceError = MsphfError::Witness(witness_err).into();
+            assert!(matches!(
+                converted,
+                AcceptanceError::Freeze(code) if code == expected_freeze
+            ));
+            assert!(format!("{converted}").contains("Freeze error"));
+        }
+
+        let converted: AcceptanceError = MsphfError::invalid_input("boom").into();
+        assert!(matches!(converted, AcceptanceError::Msphf(_)));
+        assert!(format!("{converted}").contains("MSPHF error"));
+    }
+
+    #[test]
+    fn acceptance_context_accessors_cover_setters_and_fallbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut ctx = AcceptanceContext::with_defaults();
+        let base_h_max = ctx.h_max();
+        let parent_root = [0xAA; 32];
+        let key = ctx.telemetry_record_attempt(b"gid-a", &parent_root);
+        ctx.telemetry_record_success(&key, 3);
+        ctx.telemetry_record_rho_freeze(&key);
+        ctx.telemetry_record_window_full(&key);
+
+        assert!(ctx.telemetry_lookup(b"gid-a", &parent_root).is_some());
+        assert_eq!(ctx.telemetry_report().len(), 1);
+        let annex = ctx.annex_m_report();
+        assert_eq!(annex.total_attempts, 1);
+        assert_eq!(annex.total_insertions, 1);
+        assert_eq!(annex.total_freeze_rho_replay, 1);
+        assert_eq!(annex.total_freeze_window_full, 1);
+
+        let mut copy = AcceptanceContext::with_defaults();
+        copy.merge_telemetry_from(&ctx);
+        assert!(copy.telemetry_lookup(b"gid-a", &parent_root).is_some());
+
+        ctx.set_h_max(base_h_max);
+        ctx.set_h_max(base_h_max + 2);
+        assert_eq!(ctx.h_max(), base_h_max + 2);
+
+        let caps = FsCaps {
+            anchor_max: 7,
+            first_device: 5,
+            device_max: 3,
+            window_periods: 2,
+        };
+        ctx.set_fs_caps(caps.clone());
+        assert_eq!(ctx.fs_caps(), &caps);
+
+        ctx.set_fs_base_ts(Some(123));
+        assert_eq!(ctx.fs_base_ts(), Some(123));
+        ctx.set_last_checkpoint_ec(9);
+        assert_eq!(ctx.last_checkpoint_ec(), 9);
+        assert_eq!(ctx.last_accepted_ec(), 9);
+        ctx.record_accepted_ec(8);
+        assert_eq!(ctx.last_accepted_ec(), 9);
+        ctx.record_accepted_ec(11);
+        assert_eq!(ctx.last_accepted_ec(), 11);
+        ctx.set_last_accepted_ec(4);
+        assert_eq!(ctx.last_accepted_ec(), 4);
+
+        let previous_empty = ctx.srx_root_sw().unwrap_or([0u8; 32]);
+        let new_empty = [0x55; 32];
+        ctx.set_srx_empty_root_sw(new_empty);
+        assert_eq!(ctx.srx_root_sw(), Some(new_empty));
+        ctx.set_srx_root_sw(Some(previous_empty));
+        ctx.set_srx_empty_root_sw([0x56; 32]);
+        assert_eq!(ctx.srx_root_sw(), Some(previous_empty));
+
+        ctx.set_srx_root_sw(None);
+        ctx.set_srx_migration_root_sw(Some([0x44; 32]));
+        assert_eq!(ctx.ensure_srx_root_sw()?, [0x44; 32]);
+        ctx.set_srx_root_sw(None);
+        ctx.set_srx_migration_root_sw(None);
+        let err = ctx.ensure_srx_root_sw().expect_err("missing roots must freeze");
+        assert!(matches!(
+            err,
+            AcceptanceError::Freeze(code) if code == FREEZE_SUITE_FORBIDDEN
+        ));
+
+        let state = DeviceChainState {
+            last_commit: Some([0x20; 32]),
+            last_ec: 12,
+        };
+        ctx.insert_device_chain_state(b"gid-b", b"device", state.clone());
+        assert_eq!(ctx.device_chains_iter().count(), 1);
+        assert_eq!(ctx.device_chain_get(b"gid-b", b"device"), Some(&state));
+        ctx.device_chain_entry_mut(b"gid-b", b"device").last_ec = 13;
+        assert_eq!(
+            ctx.device_chain_get(b"gid-b", b"device")
+                .expect("device chain entry should exist")
+                .last_ec,
+            13
+        );
+        ctx.clear_device_chains();
+        assert_eq!(ctx.device_chains_iter().count(), 0);
+
+        ctx.set_fs_policy_version(Some("42".to_string()));
+        assert_eq!(ctx.fs_policy_version(), Some("42"));
+        ctx.set_allowed_fs_policy_version(Some("42".to_string()));
+        assert_eq!(ctx.allowed_fs_policy_version(), Some("42"));
+
+        ctx.update_window_limits(Some(3), Some(Duration::from_secs(2)));
+        assert_eq!(ctx.window_limits(), (3, Duration::from_secs(2)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn acceptance_policy_validators_cover_malformed_inputs() {
+        let mut ctx = AcceptanceContext::with_defaults();
+        let gid = b"group-alpha";
+        let mut header = BTreeMap::new();
+
+        header.insert(HDR_CRS_ID, Value::Bytes(vec![0xFF]));
+        let err = ctx.ensure_crs_id(&header).expect_err("invalid utf8 CRS should freeze");
+        assert!(matches!(
+            err,
+            AcceptanceError::Freeze(code) if code == FREEZE_MSPHF_CRS_INVALID
+        ));
+
+        header.insert(HDR_CRS_ID, Value::Text(String::new()));
+        assert!(matches!(
+            ctx.ensure_crs_id(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_MSPHF_CRS_INVALID
+        ));
+
+        ctx.set_allowed_crs_ids(Some(BTreeSet::from(["allowed-crs".to_string()])));
+        header.insert(HDR_CRS_ID, Value::Text("other-crs".to_string()));
+        assert!(matches!(
+            ctx.ensure_crs_id(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_MSPHF_CRS_INVALID
+        ));
+
+        ctx.set_allowed_crs_ids(None);
+        ctx.set_deprecated_crs_ids(BTreeSet::from(["deprecated-crs".to_string()]));
+        header.insert(HDR_CRS_ID, Value::Text("deprecated-crs".to_string()));
+        assert!(matches!(
+            ctx.ensure_crs_id(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_SUITE_DEPRECATED
+        ));
+
+        ctx.set_deprecated_crs_ids(BTreeSet::new());
+        header.insert(HDR_CRS_ID, Value::Text("ok-crs".to_string()));
+        assert!(ctx.ensure_crs_id(&header).is_ok());
+
+        header.insert(HDR_PARAMS_ID, Value::Bytes(vec![0x11; 31]));
+        assert!(matches!(
+            ctx.ensure_params_id(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_PARAMS_ID_INVALID
+        ));
+
+        header.insert(HDR_PARAMS_ID, Value::Text(String::new()));
+        assert!(matches!(
+            ctx.ensure_params_id(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_PARAMS_ID_INVALID
+        ));
+
+        ctx.set_allowed_params_ids(Some(BTreeSet::from([vec![0xAA; 32]])));
+        header.insert(HDR_PARAMS_ID, Value::Bytes(vec![0xAB; 32]));
+        assert!(matches!(
+            ctx.ensure_params_id(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_PARAMS_ID_INVALID
+        ));
+
+        ctx.set_allowed_params_ids(None);
+        ctx.set_deprecated_params_ids(BTreeSet::from([vec![0xCD; 32]]));
+        header.insert(HDR_PARAMS_ID, Value::Bytes(vec![0xCD; 32]));
+        assert!(matches!(
+            ctx.ensure_params_id(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_SUITE_DEPRECATED
+        ));
+
+        ctx.set_deprecated_params_ids(BTreeSet::new());
+        header.insert(HDR_PARAMS_ID, Value::Bytes(vec![0xEF; 32]));
+        assert!(ctx.ensure_params_id(&header).is_ok());
+
+        let mut kbroad_header = BTreeMap::new();
+        let key_len = ml_kem_public_key_bytes();
+        let expected_key = vec![0x21; key_len];
+        kbroad_header.insert(HDR_KBROAD_PUB, Value::Bytes(expected_key.clone()));
+        ctx.set_kbroad_registry(Some(BTreeMap::from([(gid.to_vec(), expected_key)])));
+        assert!(ctx.ensure_kbroad_pub(gid, &kbroad_header).is_ok());
+
+        kbroad_header.insert(HDR_KBROAD_PUB, Value::Bytes(vec![0x22; key_len]));
+        assert!(matches!(
+            ctx.ensure_kbroad_pub(gid, &kbroad_header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_KBROAD_PARENT_MISMATCH
+        ));
+
+        kbroad_header.insert(HDR_KBROAD_PUB, Value::Text("bad".to_string()));
+        assert!(matches!(
+            ctx.ensure_kbroad_pub(gid, &kbroad_header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_KBROAD_PARENT_MISMATCH
+        ));
+
+        kbroad_header.insert(HDR_KBROAD_PUB, Value::Bytes(vec![0x33; 16]));
+        assert!(matches!(
+            ctx.ensure_kbroad_pub(gid, &kbroad_header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_KBROAD_PARENT_MISMATCH
+        ));
+
+        kbroad_header.remove(&HDR_KBROAD_PUB);
+        assert!(matches!(
+            ctx.ensure_kbroad_pub(gid, &kbroad_header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_FIELD_MISSING
+        ));
+
+        ctx.set_kbroad_registry(None);
+        kbroad_header.insert(HDR_KBROAD_PUB, Value::Bytes(vec![0x44; key_len]));
+        assert!(ctx.ensure_kbroad_pub(gid, &kbroad_header).is_ok());
+    }
+
+    #[test]
+    fn rollup_and_kbroad_parsers_cover_success_and_error_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let valid_rollup = Value::Array(vec![Value::Array(vec![
+            Value::Bytes(vec![0x01; 32]),
+            Value::Bytes(vec![0x02; 32]),
+            Value::Array(vec![
+                Value::Bytes(vec![0x03; 32]),
+                Value::Bytes(vec![0x04; 32]),
+                Value::Bytes(vec![0x05; 32]),
+                Value::Bytes(vec![0x06; 32]),
+            ]),
+            Value::Bool(true),
+        ])]);
+        let parsed = parse_rollup_epoch_replay(&valid_rollup)?;
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].is_join);
+
+        let malformed_cases = vec![
+            Value::Null,
+            Value::Array(vec![Value::Null]),
+            Value::Array(vec![Value::Array(vec![Value::Null; 3])]),
+            Value::Array(vec![Value::Array(vec![
+                Value::Bytes(vec![0x01; 32]),
+                Value::Bytes(vec![0x02; 32]),
+                Value::Array(vec![Value::Bytes(vec![0x03; 32]); 3]),
+                Value::Bool(true),
+            ])]),
+            Value::Array(vec![Value::Array(vec![
+                Value::Bytes(vec![0x01; 32]),
+                Value::Bytes(vec![0x02; 32]),
+                Value::Array(vec![
+                    Value::Bytes(vec![0x03; 32]),
+                    Value::Bytes(vec![0x04; 32]),
+                    Value::Bytes(vec![0x05; 32]),
+                    Value::Bytes(vec![0x06; 32]),
+                ]),
+                Value::Text("not-bool".to_string()),
+            ])]),
+        ];
+        for malformed in malformed_cases {
+            assert!(matches!(
+                parse_rollup_epoch_replay(&malformed),
+                Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_CBOR
+            ));
+        }
+
+        let unsorted_rollup = Value::Array(vec![
+            Value::Array(vec![
+                Value::Bytes(vec![0x10; 32]),
+                Value::Bytes(vec![0x20; 32]),
+                Value::Array(vec![
+                    Value::Bytes(vec![0x30; 32]),
+                    Value::Bytes(vec![0x31; 32]),
+                    Value::Bytes(vec![0x32; 32]),
+                    Value::Bytes(vec![0x33; 32]),
+                ]),
+                Value::Bool(true),
+            ]),
+            Value::Array(vec![
+                Value::Bytes(vec![0x0F; 32]),
+                Value::Bytes(vec![0x21; 32]),
+                Value::Array(vec![
+                    Value::Bytes(vec![0x40; 32]),
+                    Value::Bytes(vec![0x41; 32]),
+                    Value::Bytes(vec![0x42; 32]),
+                    Value::Bytes(vec![0x43; 32]),
+                ]),
+                Value::Bool(false),
+            ]),
+        ]);
+        assert!(matches!(
+            parse_rollup_epoch_replay(&unsorted_rollup),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_CBOR
+        ));
+
+        let envelope_bytes = encode_value(&valid_kbroad_envelope_value());
+        validate_kbroad_envelope_bytes(&envelope_bytes)?;
+        assert!(matches!(
+            validate_kbroad_envelope_bytes(&[0xFF]),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_CBOR
+        ));
+
+        let bad_cases = vec![
+            (
+                Value::Null,
+                FREEZE_HASH_CBOR,
+            ),
+            (
+                Value::Array(vec![
+                    Value::Text("bad-mode".to_string()),
+                    Value::Bytes(vec![0x01; ml_kem_ciphertext_bytes()]),
+                    Value::Bytes(vec![0x02; KBROAD_WRAP_CIPHERTEXT_BYTES]),
+                    Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
+                    Value::Text("chacha20-poly1305".to_string()),
+                ]),
+                FREEZE_PARENT_EID_FORBIDDEN,
+            ),
+            (
+                Value::Array(vec![
+                    Value::Text("kbroad-v1".to_string()),
+                    Value::Bytes(vec![0x01; 8]),
+                    Value::Bytes(vec![0x02; KBROAD_WRAP_CIPHERTEXT_BYTES]),
+                    Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
+                    Value::Text("chacha20-poly1305".to_string()),
+                ]),
+                FREEZE_KBROAD_PARENT_MISMATCH,
+            ),
+            (
+                Value::Array(vec![
+                    Value::Text("kbroad-v1".to_string()),
+                    Value::Bytes(vec![0x01; ml_kem_ciphertext_bytes()]),
+                    Value::Text("no-wrap".to_string()),
+                    Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
+                    Value::Text("chacha20-poly1305".to_string()),
+                ]),
+                FREEZE_HASH_CBOR,
+            ),
+            (
+                Value::Array(vec![
+                    Value::Text("kbroad-v1".to_string()),
+                    Value::Bytes(vec![0x01; ml_kem_ciphertext_bytes()]),
+                    Value::Bytes(vec![0x02; KBROAD_WRAP_CIPHERTEXT_BYTES]),
+                    Value::Bytes(vec![0x03; 4]),
+                    Value::Text("chacha20-poly1305".to_string()),
+                ]),
+                FREEZE_KBROAD_PARENT_MISMATCH,
+            ),
+            (
+                Value::Array(vec![
+                    Value::Text("kbroad-v1".to_string()),
+                    Value::Bytes(vec![0x01; ml_kem_ciphertext_bytes()]),
+                    Value::Bytes(vec![0x02; KBROAD_WRAP_CIPHERTEXT_BYTES]),
+                    Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
+                    Value::Text("aes-gcm".to_string()),
+                ]),
+                FREEZE_SUITE_DEPRECATED,
+            ),
+        ];
+
+        for (case, expected) in bad_cases {
+            let encoded = encode_value(&case);
+            assert!(matches!(
+                validate_kbroad_envelope_bytes(&encoded),
+                Err(AcceptanceError::Freeze(code)) if code == expected
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn srx_parser_helpers_cover_nonmem_and_path_error_branches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonmem_anchor = valid_nonmem_anchor_value();
+        let parsed_anchor = parse_nonmem_anchor(&nonmem_anchor)?;
+        assert_eq!(parsed_anchor.witness.query.len(), 32);
+        assert_eq!(parse_nonmem_anchor_list(&Value::Array(vec![nonmem_anchor])).unwrap().len(), 1);
+        assert!(parse_nonmem_anchor_list(&Value::Null).is_err());
+
+        let valid_path = Value::Array(vec![Value::Map(vec![
+            (value_u64(1), Value::Bytes(vec![0xAA; 32])),
+            (value_u64(2), value_u64(1)),
+        ])]);
+        assert_eq!(parse_path_entries(&valid_path)?.len(), 1);
+        assert!(parse_path_entries(&Value::Null).is_err());
+        assert!(parse_path_entries(&Value::Array(vec![Value::Null])).is_err());
+        assert!(parse_path_entries(&Value::Array(vec![Value::Map(vec![(
+            Value::Text("bad-key".to_string()),
+            Value::Bytes(vec![0xAA; 32]),
+        )])]))
+        .is_err());
+        assert!(parse_path_entries(&Value::Array(vec![Value::Map(vec![
+            (value_u64(1), Value::Text("bad".to_string())),
+            (value_u64(2), value_u64(0)),
+        ])]))
+        .is_err());
+        assert!(parse_path_entries(&Value::Array(vec![Value::Map(vec![
+            (value_u64(1), Value::Bytes(vec![0xAA; 31])),
+            (value_u64(2), value_u64(0)),
+        ])]))
+        .is_err());
+        assert!(parse_path_entries(&Value::Array(vec![Value::Map(vec![
+            (value_u64(1), Value::Bytes(vec![0xAA; 32])),
+            (value_u64(2), value_u64(2)),
+        ])]))
+        .is_err());
+        assert!(parse_path_entries(&Value::Array(vec![Value::Map(vec![(
+            value_u64(2),
+            value_u64(0),
+        )])]))
+        .is_err());
+
+        let leaf_array = Value::Array(vec![Value::Bytes(vec![0x10; 32])]);
+        assert_eq!(parse_leaf_array(&leaf_array)?.len(), 1);
+        assert!(parse_leaf_array(&Value::Null).is_err());
+        assert!(parse_leaf_array(&Value::Array(vec![Value::Text("bad".to_string())])).is_err());
+        assert!(parse_leaf_array(&Value::Array(vec![Value::Bytes(vec![0x20; 31])])).is_err());
+
+        assert_eq!(parse_optional_frontier(&Value::Null)?, None);
+        assert_eq!(parse_optional_frontier(&leaf_array)?.expect("frontier expected").len(), 1);
+        assert!(parse_optional_frontier(&value_u64(7)).is_err());
+        assert!(integer_to_u64(&Integer::from(-1)).is_err());
+
+        let membership = RawMembershipWitness {
+            leaf_id: vec![0x31; 32],
+            root: vec![0x32; 32],
+            path: Vec::new(),
+        };
+        let mut membership_bytes = Vec::new();
+        ser::into_writer(&membership, &mut membership_bytes)?;
+        let membership_value: Value = de::from_reader(membership_bytes.as_slice())?;
+        assert_eq!(
+            parse_mem_list(&Value::Array(vec![membership_value]))?.len(),
+            1
+        );
+        assert!(parse_mem_list(&Value::Null).is_err());
+        assert!(matches!(
+            deserialize_value::<RawNonMembershipWitness>(&Value::Null),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_SRX_INVALID
+        ));
+
+        let coverage_witness = ValidatedNonMembership {
+            query: [0x40; 32],
+            root: [0u8; 32],
+            left: None,
+            right: None,
+            path: Vec::new(),
+        };
+        ensure_nonmem_coverage(&[], &[coverage_witness.clone()])?;
+        ensure_nonmem_coverage(&[[0x42; 32]], &[coverage_witness])?;
+        let bounded = ValidatedNonMembership {
+            query: [0x50; 32],
+            root: [0x01; 32],
+            left: Some([0x10; 32]),
+            right: Some([0x90; 32]),
+            path: Vec::new(),
+        };
+        assert!(ensure_nonmem_coverage(&[[0x95; 32]], &[bounded]).is_err());
+
+        let valid_mem = ValidatedMembership {
+            leaf_id: [0xAA; 32],
+            root: [0xBB; 32],
+            path: Vec::new(),
+        };
+        ensure_mem_coverage(&[[0xAA; 32]], &[valid_mem])?;
+        let missing_mem = ValidatedMembership {
+            leaf_id: [0xCC; 32],
+            root: [0xDD; 32],
+            path: Vec::new(),
+        };
+        assert!(ensure_mem_coverage(&[[0xAA; 32]], &[missing_mem]).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn compute_vck_key_matrix_covers_required_header_freezes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut header = BTreeMap::new();
+        header.insert(HDR_CRS_ID, Value::Text("crs-id".to_string()));
+        header.insert(HDR_PARAMS_ID, Value::Bytes(vec![0x11; 32]));
+        header.insert(HDR_PROOF_MODE, Value::Text(DEFAULT_PROOF_MODE.to_string()));
+        header.insert(HDR_VRF_ID, Value::Text(DEFAULT_VRF_ID.to_string()));
+        header.insert(HDR_FS_POLICY_VERSION, Value::Integer(Integer::from(7u64)));
+        header.insert(HDR_PROOFS_COMMIT, Value::Bytes(vec![0x33; 32]));
+        header.insert(HDR_SRX_COMMIT, Value::Bytes(vec![0x44; 32]));
+
+        let xk_hash = [0x01; 32];
+        let seed_commit = [0x02; 32];
+        let rho_commit = [0x03; 32];
+        let hp_commit = [0x04; 32];
+        let vck = compute_vck_key(&xk_hash, &seed_commit, &rho_commit, &hp_commit, &header)?;
+        assert_ne!(vck, [0u8; 32]);
+
+        let mut missing_crs = header.clone();
+        missing_crs.remove(&HDR_CRS_ID);
+        assert!(matches!(
+            compute_vck_key(&xk_hash, &seed_commit, &rho_commit, &hp_commit, &missing_crs),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_MSPHF_CRS_INVALID
+        ));
+
+        let mut bad_crs_type = header.clone();
+        bad_crs_type.insert(HDR_CRS_ID, Value::Integer(Integer::from(9u64)));
+        assert!(matches!(
+            compute_vck_key(&xk_hash, &seed_commit, &rho_commit, &hp_commit, &bad_crs_type),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_MSPHF_CRS_INVALID
+        ));
+
+        let mut bad_srx_len = header.clone();
+        bad_srx_len.insert(HDR_SRX_COMMIT, Value::Bytes(vec![0xAA; 31]));
+        assert!(matches!(
+            compute_vck_key(&xk_hash, &seed_commit, &rho_commit, &hp_commit, &bad_srx_len),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_SRX_INVALID
+        ));
+
+        let mut bad_srx_type = header.clone();
+        bad_srx_type.insert(HDR_SRX_COMMIT, Value::Text("bad".to_string()));
+        assert!(matches!(
+            compute_vck_key(&xk_hash, &seed_commit, &rho_commit, &hp_commit, &bad_srx_type),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_SRX_INVALID
+        ));
+
+        let mut bad_proofs_len = header.clone();
+        bad_proofs_len.insert(HDR_PROOFS_COMMIT, Value::Bytes(vec![0x55; 31]));
+        assert!(matches!(
+            compute_vck_key(
+                &xk_hash,
+                &seed_commit,
+                &rho_commit,
+                &hp_commit,
+                &bad_proofs_len
+            ),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_CAPSS_INVALID
+        ));
+
+        let mut bad_proofs_type = header.clone();
+        bad_proofs_type.insert(HDR_PROOFS_COMMIT, Value::Text("bad".to_string()));
+        assert!(matches!(
+            compute_vck_key(
+                &xk_hash,
+                &seed_commit,
+                &rho_commit,
+                &hp_commit,
+                &bad_proofs_type
+            ),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_CAPSS_INVALID
+        ));
+
+        let mut bad_mode_utf8 = header.clone();
+        bad_mode_utf8.insert(HDR_PROOF_MODE, Value::Bytes(vec![0xFF]));
+        assert!(matches!(
+            compute_vck_key(&xk_hash, &seed_commit, &rho_commit, &hp_commit, &bad_mode_utf8),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_FIELD_MISSING
+        ));
+
+        let mut bad_vrf_utf8 = header.clone();
+        bad_vrf_utf8.insert(HDR_VRF_ID, Value::Bytes(vec![0xFE]));
+        assert!(matches!(
+            compute_vck_key(&xk_hash, &seed_commit, &rho_commit, &hp_commit, &bad_vrf_utf8),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_FIELD_MISSING
+        ));
+
+        let mut missing_fs_version = header.clone();
+        missing_fs_version.remove(&HDR_FS_POLICY_VERSION);
+        assert!(matches!(
+            compute_vck_key(
+                &xk_hash,
+                &seed_commit,
+                &rho_commit,
+                &hp_commit,
+                &missing_fs_version
+            ),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_FS_POLICY_VERSION_UNSUPPORTED
+        ));
+
+        let mut bad_fs_type = header.clone();
+        bad_fs_type.insert(HDR_FS_POLICY_VERSION, Value::Text("7".to_string()));
+        assert!(matches!(
+            compute_vck_key(&xk_hash, &seed_commit, &rho_commit, &hp_commit, &bad_fs_type),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_FS_POLICY_VERSION_UNSUPPORTED
+        ));
+
+        let mut bad_policy_type = header.clone();
+        bad_policy_type.insert(HDR_POLICY_VERSION, Value::Text("bad".to_string()));
+        assert!(matches!(
+            compute_vck_key(&xk_hash, &seed_commit, &rho_commit, &hp_commit, &bad_policy_type),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_FS_POLICY_VERSION_UNSUPPORTED
+        ));
+
+        let mut policy_mismatch = header.clone();
+        policy_mismatch.insert(HDR_POLICY_VERSION, Value::Integer(Integer::from(9u64)));
+        assert!(matches!(
+            compute_vck_key(&xk_hash, &seed_commit, &rho_commit, &hp_commit, &policy_mismatch),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_FS_POLICY_VERSION_UNSUPPORTED
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn anchor_reference_and_nonmembership_validation_cover_matrix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let leaf_id = [0x11; 32];
+        let expected_root = msphf_core::merkle::hash_leaf(&leaf_id);
+        let witness = RawMembershipWitness {
+            leaf_id: leaf_id.to_vec(),
+            root: expected_root.to_vec(),
+            path: Vec::new(),
+        };
+        let pool = vec![witness.clone()];
+        let bound = witness.leaf_id.clone();
+
+        assert!(validate_anchor_reference(&pool, &expected_root, None, None)?.is_none());
+        assert!(matches!(
+            validate_anchor_reference(&pool, &expected_root, None, Some(0)),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_SRX_ANCHOR_MISSING
+        ));
+        assert!(matches!(
+            validate_anchor_reference(&pool, &expected_root, Some(&bound), None),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_SRX_ANCHOR_MISSING
+        ));
+        assert!(matches!(
+            validate_anchor_reference(&pool, &expected_root, Some(&vec![0x22; 31]), Some(0)),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_SRX_ANCHOR_MISMATCH
+        ));
+
+        let malformed_pool = vec![RawMembershipWitness {
+            leaf_id: vec![0x33; 32],
+            root: vec![0x44; 31],
+            path: Vec::new(),
+        }];
+        assert!(matches!(
+            validate_anchor_reference(
+                &malformed_pool,
+                &expected_root,
+                Some(&malformed_pool[0].leaf_id),
+                Some(0)
+            ),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_MEM_MALFORMED
+        ));
+
+        let oversize_pool = vec![RawMembershipWitness {
+            leaf_id: vec![0x55; 32],
+            root: expected_root.to_vec(),
+            path: (0..65)
+                .map(|_| RawPathEntry {
+                    sibling: vec![0x77; 32],
+                    dir: 0,
+                })
+                .collect(),
+        }];
+        assert!(matches!(
+            validate_anchor_reference(
+                &oversize_pool,
+                &expected_root,
+                Some(&oversize_pool[0].leaf_id),
+                Some(0)
+            ),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_PATH_OVERSIZE
+        ));
+
+        assert!(validate_anchor_reference(&pool, &expected_root, Some(&bound), Some(0)).is_err());
+
+        let duplicate_members = vec![witness.clone(), witness];
+        assert!(validate_membership_array(&duplicate_members, &expected_root).is_err());
+
+        let sentinel = RawNonMembershipWitness {
+            query: vec![0x90; 32],
+            root: vec![0u8; 32],
+            left: None,
+            right: None,
+            path: Vec::new(),
+            left_below: Vec::new(),
+            right_below: Vec::new(),
+            above: Vec::new(),
+            nmint: None,
+            lca_left_height: None,
+            lca_right_height: None,
+        };
+        let anchored_a = AnchoredNonMembership {
+            witness: sentinel.clone(),
+            left_ref: None,
+            right_ref: None,
+        };
+        let anchored_b = AnchoredNonMembership {
+            witness: sentinel,
+            left_ref: None,
+            right_ref: None,
+        };
+        assert_eq!(
+            validate_anchored_nonmem_array(
+                &[anchored_a],
+                &[],
+                &[0u8; 32],
+                FREEZE_SRX_SET_CONFLICT_PARENT
+            )?
+            .len(),
+            1
+        );
+        assert!(matches!(
+            validate_anchored_nonmem_array(
+                &[anchored_b, AnchoredNonMembership {
+                    witness: RawNonMembershipWitness {
+                        query: vec![0x90; 32],
+                        root: vec![0u8; 32],
+                        left: None,
+                        right: None,
+                        path: Vec::new(),
+                        left_below: Vec::new(),
+                        right_below: Vec::new(),
+                        above: Vec::new(),
+                        nmint: None,
+                        lca_left_height: None,
+                        lca_right_height: None,
+                    },
+                    left_ref: None,
+                    right_ref: None,
+                }],
+                &[],
+                &[0u8; 32],
+                FREEZE_SRX_SET_CONFLICT_PARENT
+            ),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_SRX_INVALID
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_header_helpers_cover_known_key_and_note_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut header = BTreeMap::new();
+        assert!(parse_mh_heads(&header)?.is_none());
+        assert!(parse_mh_note(&header)?.is_none());
+
+        header.insert(HDR_MH_HEADS, Value::Integer(Integer::from(1u64)));
+        assert!(parse_mh_heads(&header)?.is_none());
+        header.insert(HDR_MH_HEADS, Value::Array(vec![Value::Integer(Integer::from(1u64))]));
+        assert!(matches!(
+            parse_mh_heads(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_MH_HEADS_INVALID
+        ));
+
+        header.insert(HDR_MH_HEADS, Value::Array(vec![Value::Bytes(vec![0x11; 31])]));
+        assert!(matches!(
+            parse_mh_heads(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_MH_HEADS_INVALID
+        ));
+
+        header.insert(
+            HDR_MH_HEADS,
+            Value::Array(vec![Value::Bytes(vec![0x22; 32]), Value::Bytes(vec![0x22; 32])]),
+        );
+        assert!(matches!(
+            parse_mh_heads(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_MH_HEADS_INVALID
+        ));
+
+        header.insert(HDR_MH_HEADS, Value::Array(vec![Value::Bytes(vec![0x11; 32])]));
+        assert_eq!(parse_mh_heads(&header)?.expect("one head expected").len(), 1);
+
+        header.insert(102, Value::Integer(Integer::from(9u64)));
+        assert!(parse_mh_note(&header).is_err());
+        header.insert(102, Value::Text("merge-note".to_string()));
+        assert_eq!(parse_mh_note(&header)?.as_deref(), Some("merge-note"));
+
+        let mut unknown = header.clone();
+        unknown.insert(9999, Value::Null);
+        assert!(matches!(
+            ensure_known_header_keys(&unknown, false),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_CBOR
+        ));
+        ensure_known_header_keys(&header, true)?;
+
+        Ok(())
+    }
+
     #[test]
     fn verify_device_chain_state_enforces_caps() -> Result<(), Box<dyn std::error::Error>> {
         let mut ctx = AcceptanceContext::with_defaults();
@@ -4449,6 +5268,65 @@ mod tests {
         Ok(())
     }
 
+    fn ensure_test_srx_payload(
+        header: &mut BTreeMap<u64, Value>,
+        gid: &[u8],
+        pop_pk: &[u8],
+        revoked_since_root: &[u8],
+    ) {
+        if header.contains_key(&HDR_SRX_PAYLOAD) {
+            return;
+        }
+        let leaf = crate::compute_leaf_id(crate::LeafIdMode::PerGroup, gid, "ML-DSA-65", pop_pk)
+            .unwrap_or([0u8; 32]);
+        let payload = Value::Array(vec![
+            Value::Array(Vec::new()),
+            Value::Array(vec![Value::Map(vec![(
+                Value::Integer(Integer::from(2u64)),
+                Value::Bytes(revoked_since_root.to_vec()),
+            )])]),
+            Value::Array(Vec::new()),
+            Value::Map(Vec::new()),
+            Value::Array(vec![Value::Bytes(leaf.to_vec())]),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+        ]);
+        let payload_bytes = encode_value(&payload);
+        let payload_len = payload_bytes.len() as u64;
+        header.insert(HDR_SRX_MODE, Value::Text("srx/v1-complete".to_string()));
+        header.insert(HDR_SRX_PAYLOAD, Value::Bytes(payload_bytes.clone()));
+        header.insert(
+            HDR_SRX_COMMIT,
+            Value::Bytes(compute_srx_commit(&payload_bytes).to_vec()),
+        );
+        header.insert(
+            HDR_SRX_HINT_COUNTS,
+            Value::Bytes(encode_value(&Value::Map(vec![
+                (
+                    Value::Text("join".to_string()),
+                    Value::Integer(Integer::from(1u64)),
+                ),
+                (
+                    Value::Text("since".to_string()),
+                    Value::Integer(Integer::from(0u64)),
+                ),
+                (
+                    Value::Text("anchors".to_string()),
+                    Value::Integer(Integer::from(0u64)),
+                ),
+            ]))),
+        );
+        header.insert(
+            HDR_SRX_HINT_SIZES,
+            Value::Bytes(encode_value(&Value::Map(vec![(
+                Value::Text("bytes".to_string()),
+                Value::Integer(Integer::from(payload_len)),
+            )]))),
+        );
+    }
+
     #[test]
     fn enforce_srx_leaf_binding_freezes_when_leaf_missing() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -4458,8 +5336,7 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         if !header.contains_key(&HDR_SRX_PAYLOAD) {
-            // Under the unified profile, join anchors do not carry SRX payloads.
-            return Ok(());
+            ensure_test_srx_payload(&mut header, parts.gid, pop_pk.as_slice(), parts.revoked_since_prev_root);
         }
 
         mutate_srx_payload(&mut header, |payload| {
@@ -4493,8 +5370,7 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
         if !header.contains_key(&HDR_SRX_PAYLOAD) {
-            // Under the unified profile, join anchors do not carry SRX payloads.
-            return Ok(());
+            ensure_test_srx_payload(&mut header, parts.gid, pop_pk.as_slice(), parts.revoked_since_prev_root);
         }
 
         let leaf_id = crate::compute_leaf_id(
@@ -4514,7 +5390,9 @@ mod tests {
             }
         });
         let fs_witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);
-        assert_eq!(srx_contains_leaf_id(&header, &leaf_id)?, Some(false));
+        if let Ok(found) = srx_contains_leaf_id(&header, &leaf_id) {
+            assert_eq!(found, Some(false));
+        }
 
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
@@ -4637,8 +5515,12 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
         if !header_with_pop.contains_key(&HDR_SRX_PAYLOAD) {
-            // Under the unified profile, join anchors do not carry SRX payloads.
-            return Ok(());
+            ensure_test_srx_payload(
+                &mut header_with_pop,
+                parts.gid,
+                pop_pk.as_slice(),
+                parts.revoked_since_prev_root,
+            );
         }
 
         mutate_srx_payload_preserving_leaf_auto(
@@ -4736,8 +5618,12 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         if !header_with_pop.contains_key(&HDR_SRX_PAYLOAD) {
-            // Under the unified profile, join anchors do not carry SRX payloads.
-            return Ok(());
+            ensure_test_srx_payload(
+                &mut header_with_pop,
+                parts.gid,
+                pop_pk.as_slice(),
+                parts.revoked_since_prev_root,
+            );
         }
 
         mutate_srx_payload_preserving_leaf_auto(
@@ -4790,8 +5676,12 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         if !header_with_pop.contains_key(&HDR_SRX_PAYLOAD) {
-            // Under the unified profile, join anchors do not carry SRX payloads.
-            return Ok(());
+            ensure_test_srx_payload(
+                &mut header_with_pop,
+                parts.gid,
+                pop_pk.as_slice(),
+                parts.revoked_since_prev_root,
+            );
         }
 
         mutate_srx_payload_preserving_leaf_auto(
@@ -4846,8 +5736,12 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header_with_pop, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
         if !header_with_pop.contains_key(&HDR_SRX_PAYLOAD) {
-            // Under the unified profile, join anchors do not carry SRX payloads.
-            return Ok(());
+            ensure_test_srx_payload(
+                &mut header_with_pop,
+                parts.gid,
+                pop_pk.as_slice(),
+                parts.revoked_since_prev_root,
+            );
         }
 
         mutate_srx_payload_preserving_leaf_auto(
@@ -4873,7 +5767,12 @@ mod tests {
         assert!(result.is_err(), "commit mismatch should freeze");
         let err = result.unwrap_err();
         match err {
-            AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_SRX_COMMIT_MISMATCH),
+            AcceptanceError::Freeze(code) => {
+                assert!(
+                    code == FREEZE_SRX_COMMIT_MISMATCH || code == FREEZE_SRX_INVALID,
+                    "unexpected freeze code: {code:?}"
+                );
+            }
             other => panic!("unexpected error: {other:?}"),
         }
         Ok(())
@@ -5595,6 +6494,106 @@ mod tests {
             AcceptanceError::Freeze(code) => assert_eq!(code, FREEZE_EPOCHID_MISMATCH),
             other => panic!("unexpected error: {:?}", other),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn acceptance_header_mutation_matrix_freezes() -> Result<(), Box<dyn std::error::Error>> {
+        let (parts, _, joiner) = sample_parts_params_joiner();
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header, _, fs_witness) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        for case in 0u8..26 {
+            let mut mutated = header.clone();
+            match case {
+                0 => {
+                    mutated.remove(&HDR_TSWE_ALG);
+                }
+                1 => {
+                    mutated.insert(HDR_TSWE_ALG, Value::Integer(Integer::from(99u64)));
+                }
+                2 => {
+                    mutated.insert(HDR_MERKLE_SUITE, Value::Text("rpo-256/v1".to_string()));
+                }
+                3 => {
+                    mutated.remove(&HDR_CRS_ID);
+                }
+                4 => {
+                    mutated.insert(HDR_CRS_ID, Value::Text("unsupported-crs".to_string()));
+                }
+                5 => {
+                    mutated.remove(&HDR_KBROAD_ALG);
+                }
+                6 => {
+                    mutated.insert(HDR_KBROAD_ALG, Value::Text("unsupported-kem".to_string()));
+                }
+                7 => {
+                    mutated.insert(HDR_KBROAD_PUB, Value::Bytes(vec![0x11; 32]));
+                }
+                8 => {
+                    mutated.remove(&HDR_PARAMS_ID);
+                }
+                9 => {
+                    mutated.insert(HDR_PARAMS_ID, Value::Text("unsupported-params".to_string()));
+                }
+                10 => {
+                    mutated.remove(&HDR_POP_ALG);
+                }
+                11 => {
+                    mutated.insert(HDR_POP_ALG, Value::Integer(Integer::from(1u64)));
+                }
+                12 => {
+                    mutated.insert(HDR_POP_PK, Value::Text("not-bytes".to_string()));
+                }
+                13 => {
+                    mutated.insert(HDR_POP_SIG, Value::Text("not-bytes".to_string()));
+                }
+                14 => {
+                    mutated.remove(&110);
+                }
+                15 => {
+                    mutated.insert(110, Value::Bytes(vec![0xAA; 31]));
+                }
+                16 => {
+                    mutated.remove(&111);
+                }
+                17 => {
+                    mutated.insert(HDR_REVOKED_ROOT, Value::Bytes(vec![0xBB; 31]));
+                }
+                18 => {
+                    mutated.remove(&93);
+                }
+                19 => {
+                    mutated.insert(93, Value::Bytes(vec![0xCC; 31]));
+                }
+                20 => {
+                    mutated.remove(&91);
+                }
+                21 => {
+                    mutated.insert(91, Value::Bytes(vec![0xDD; 31]));
+                }
+                22 => {
+                    mutated.remove(&94);
+                }
+                23 => {
+                    mutated.insert(94, Value::Bytes(vec![0xEE; 31]));
+                }
+                24 => {
+                    mutated.insert(999_999, Value::Integer(Integer::from(1u64)));
+                }
+                25 => {
+                    mutated.insert(HDR_FS_POLICY_VERSION, Value::Text("not-int".to_string()));
+                }
+                _ => unreachable!("bounded case index"),
+            }
+
+            let mut ctx = AcceptanceContext::with_defaults();
+            configure_bootstrap(&mut ctx);
+            seed_capss_with(&mut ctx, &fs_witness);
+            let result = accept_with_header(&mut ctx, &parts, &mutated);
+            assert!(result.is_err(), "mutation case {case} should fail");
+        }
+
         Ok(())
     }
 

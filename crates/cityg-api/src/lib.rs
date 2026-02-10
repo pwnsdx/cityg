@@ -2499,6 +2499,42 @@ mod tests {
     }
 
     #[test]
+    fn message_auth_helpers_cover_header_and_query_error_paths() {
+        let empty_headers = HeaderMap::new();
+        assert!(matches!(
+            enforce_message_auth_header(&empty_headers, None),
+            Err(ApiError::Unauthorized(
+                "message auth token is not configured"
+            ))
+        ));
+        assert!(matches!(
+            enforce_message_auth_query(Some("wrong"), Some("msg-secret")),
+            Err(ApiError::Unauthorized(
+                "missing or invalid message auth token"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn api_error_rate_limit_and_unauthorized_map_to_expected_http_responses() {
+        let rate_limited = ApiError::RateLimited.into_response();
+        assert_eq!(rate_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = to_bytes(rate_limited.into_body(), usize::MAX)
+            .await
+            .expect("rate limited body bytes");
+        let json: Value = serde_json::from_slice(&body).expect("rate limited json");
+        assert_eq!(json["message"], "rate limited");
+
+        let unauthorized = ApiError::Unauthorized("missing token").into_response();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(unauthorized.into_body(), usize::MAX)
+            .await
+            .expect("unauthorized body bytes");
+        let json: Value = serde_json::from_slice(&body).expect("unauthorized json");
+        assert_eq!(json["message"], "missing token");
+    }
+
+    #[test]
     fn parse_ws_max_lag_uses_default_on_invalid_input() {
         assert_eq!(parse_ws_max_lag(None), WS_MAX_LAG_DEFAULT);
         assert_eq!(parse_ws_max_lag(Some("0")), WS_MAX_LAG_DEFAULT);
@@ -2907,6 +2943,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bootstrap_room_maps_duplicate_group_to_invalid_request() {
+        let state = test_api_state();
+        let gid = [0x77u8; 32];
+        let kbroad_public = vec![0x44; ml_kem_public_key_bytes()];
+        let encode = |request: BootstrapRoomRequest| -> Bytes {
+            let mut body = Vec::new();
+            request.encode(&mut body).expect("encode bootstrap request");
+            Bytes::from(body)
+        };
+
+        bootstrap_room(
+            State(state.clone()),
+            room_admin_headers(),
+            encode(BootstrapRoomRequest {
+                room_id: hex::encode(gid),
+                kbroad_public: kbroad_public.clone(),
+            }),
+        )
+        .await
+        .expect("initial bootstrap should succeed");
+
+        let err = bootstrap_room(
+            State(state),
+            room_admin_headers(),
+            encode(BootstrapRoomRequest {
+                room_id: hex::encode(gid),
+                kbroad_public,
+            }),
+        )
+        .await
+        .expect_err("duplicate bootstrap should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("kbroad key already registered")
+        ));
+    }
+
+    #[tokio::test]
     async fn rotate_room_kbroad_validates_requests_and_updates_generation() {
         let state = test_api_state();
         let headers = room_admin_headers();
@@ -2975,6 +3049,48 @@ mod tests {
         let decoded: JoinTicketResponse = decode_proto_response(response).await;
         assert_eq!(decoded.kbroad_generation, 1);
         assert_eq!(decoded.kbroad_public, rotated);
+    }
+
+    #[tokio::test]
+    async fn rotate_room_kbroad_maps_server_invalid_input_paths() {
+        let state = test_api_state();
+        let headers = room_admin_headers();
+        let encode = |request: RotateRoomKbroadRequest| -> Bytes {
+            let mut body = Vec::new();
+            request.encode(&mut body).expect("encode rotate request");
+            Bytes::from(body)
+        };
+
+        let missing_gid = [0xEEu8; 32];
+        let missing_err = rotate_room_kbroad(
+            State(state.clone()),
+            headers.clone(),
+            encode(RotateRoomKbroadRequest {
+                room_id: hex::encode(missing_gid),
+                kbroad_public: vec![0x22; ml_kem_public_key_bytes()],
+            }),
+        )
+        .await
+        .expect_err("missing room should fail");
+        assert!(matches!(
+            missing_err,
+            ApiError::InvalidRequest("kbroad key missing")
+        ));
+
+        let unchanged_err = rotate_room_kbroad(
+            State(state),
+            headers,
+            encode(RotateRoomKbroadRequest {
+                room_id: hex::encode(DEMO_GID),
+                kbroad_public: cityg_client::demo::kbroad_public().to_vec(),
+            }),
+        )
+        .await
+        .expect_err("unchanged key should fail");
+        assert!(matches!(
+            unchanged_err,
+            ApiError::InvalidRequest("kbroad key unchanged")
+        ));
     }
 
     #[tokio::test]
