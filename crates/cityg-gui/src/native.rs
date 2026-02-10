@@ -7626,7 +7626,7 @@ mod tests {
     use msphf_rlwe::CapssBranchWitness;
     use rand::{RngCore, SeedableRng, rngs::StdRng};
     use std::sync::{
-        Arc,
+        Arc, Once,
         atomic::{AtomicU16, Ordering},
     };
     use tempfile::TempDir;
@@ -7634,6 +7634,23 @@ mod tests {
 
     static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18400);
     static ENV_VAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const TEST_ADMIN_TOKEN: &str = "cityg-test-admin-token";
+    const TEST_MESSAGE_TOKEN: &str = "cityg-test-message-token";
+    static TEST_AUTH_ENV_INIT: Once = Once::new();
+
+    fn init_test_auth_env() {
+        TEST_AUTH_ENV_INIT.call_once(|| {
+            // SAFETY: test auth env is initialized once with process-stable values.
+            unsafe {
+                std::env::set_var("CITYG_SERVER_WINDOW_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
+                std::env::set_var("CITYG_SERVER_ROOMS_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
+                std::env::set_var("CITYG_SERVER_MESSAGE_AUTH_TOKEN", TEST_MESSAGE_TOKEN);
+                std::env::set_var(CLIENT_ADMIN_TOKEN_ENV, TEST_ADMIN_TOKEN);
+                std::env::set_var(CLIENT_MESSAGE_TOKEN_ENV, TEST_MESSAGE_TOKEN);
+                std::env::remove_var("CITYG_SERVER_ALLOW_INSECURE_ADMIN");
+            }
+        });
+    }
 
     fn sample_pivot_parity() -> PivotParity {
         PivotParity {
@@ -7818,6 +7835,7 @@ mod tests {
     }
 
     async fn spawn_server_on(port: u16) -> JoinHandle<()> {
+        init_test_auth_env();
         tokio::spawn(async move {
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             let mut config = CityGConfig::default();
@@ -7829,6 +7847,7 @@ mod tests {
     }
 
     async fn spawn_server_with_seed_demo_room(port: u16, seed_demo_room: bool) -> JoinHandle<()> {
+        init_test_auth_env();
         tokio::spawn(async move {
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             let mut config = CityGConfig::default();
@@ -7986,6 +8005,7 @@ mod tests {
     #[gpui::test]
     fn gpui_missing_tokio_global_surfaces_scheduler_failures(cx: &mut TestAppContext) {
         cx.update(tokio_bridge::init);
+        init_test_auth_env();
         let temp_dir = TempDir::new().expect("create temp dir");
         let base = temp_dir.path().join("cityg").join("gui");
         let _override_guard = set_config_dir_override_for_tests(Some(base));
@@ -11108,6 +11128,12 @@ mod tests {
                 .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice())
         );
 
+        // Membership changes require KBROAD rotation before the next merge ticket.
+        let (rotated_kbroad_public, _) = generate_kbroad_keypair();
+        client
+            .rotate_room_kbroad(&room_id, &rotated_kbroad_public)
+            .await?;
+
         perform_leave(LeaveRequest::from_session(&bob)).await?;
         let after_bob_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_bob_leave.total_count, 0);
@@ -11823,9 +11849,16 @@ mod tests {
             &vec![0x88; ml_dsa_signature_bytes()],
         );
         let senderless_payload_ct = encrypt_message(&senderless_payload, &alice.epoch_key)?;
-        client
+        let senderless_err = client
             .send_message(&alice.we_epoch_id, &senderless_payload_ct, None)
-            .await?;
+            .await
+            .expect_err("server should reject messages without a sender leaf");
+        assert!(
+            senderless_err
+                .to_string()
+                .contains("sender must be 32 bytes"),
+            "missing sender should fail validation"
+        );
 
         let marker = "valid-message-marker".to_string();
         perform_send(SendParams::from_session(&alice, marker.clone())).await?;
