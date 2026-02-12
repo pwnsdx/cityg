@@ -164,11 +164,11 @@ S4. ANCHOR TYPES, HEADER-KEY REGISTRY, AND PRESENCE MATRIX (NORMATIVE)
 S4.1 Anchor types (normative)
 This profile defines three anchor types:
 * JOIN anchor: introduces a new device leaf and MUST carry barrier_leaf_pk (key 177).
-* MERGE anchor: carries merge/checkpoint state and MAY carry barrier_update (key 175); see predicates in S10.4 and S10.4A.
+* MERGE anchor: carries merge/checkpoint state and MAY carry barrier_update (key 175) with barrier_update_reason (key 178); see predicates in S10.4, S10.4A, and S10.4B.
 * REGULAR anchor: any anchor that is neither JOIN nor MERGE.
 
 Anchor type determination (normative):
-* If key 175 is present OR any key in S4.2.4 is present OR any key in S4.2.5 is present, anchor_type := MERGE.
+* If any key in S4.2.3 is present OR any key in S4.2.4 is present OR any key in S4.2.5 is present, anchor_type := MERGE.
 * Else if key 177 is present, anchor_type := JOIN.
 * Else anchor_type := REGULAR.
 
@@ -206,6 +206,7 @@ Key 177: barrier_leaf_pk (bstr; ML-KEM ek; MUST be 1184 bytes)
 
 S4.2.3 Keys PERMITTED only on MERGE anchors and FORBIDDEN on JOIN/REGULAR (merge-only)
 Key 175: barrier_update (bstr; optional; only when permitted by S10.4, S10.4A, and S11)
+Key 178: barrier_update_reason (uint; required iff key 175 is present)
 
 S4.2.4 Merge/checkpoint keys (merge-only set)
 130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148
@@ -223,8 +224,10 @@ S4.3 Presence matrix summary (normative)
 * JOIN: MUST include S4.2.1 + S4.2.2; MUST NOT include any of S4.2.3/S4.2.4/S4.2.5.
 * REGULAR: MUST include S4.2.1; MUST NOT include any of S4.2.2/S4.2.3/S4.2.4/S4.2.5.
 * MERGE: MUST include S4.2.1; MUST include merge/checkpoint keys as required by merge profile;
-  MAY include S4.2.3 (subject to S10.4/S10.4A/S11) and MAY include S4.2.5 (subject to S9.3);
+  MAY include S4.2.3 (subject to S10.4/S10.4A/S10.4B/S11) and MAY include S4.2.5 (subject to S9.3);
   MUST NOT include S4.2.2.
+Additional presence rule (normative):
+* key 178 MUST be present if and only if key 175 is present.
 
 S4.4 Size limits (normative; deployments MAY tighten)
 Max bytes per header field (unless otherwise specified by type):
@@ -251,8 +254,14 @@ S5.1 Server persistent group state
 * fs_epoch_base_ts (T_base) : uint64 -- immutable
 * last_checkpoint_ec : uint -- monotone
 * last_accepted_ec (A) : uint -- monotone
-* per-device map: DeviceState[device_pk] = (last_commit:bstr32, last_ec:uint)
+* per-device map: DeviceState[device_pk] = (last_commit:bstr32, last_ec:uint, last_pcs_refresh_ec:uint/null)
 * srx_root_sw : bstr32 -- durable SRX shadow root (if SRX used)
+* last_pcs_refresh_ec : uint/null -- null if no accepted PCS refresh yet
+
+PCS refresh policy state (time-blind; deployment-defined):
+* pcs_refresh_min_delta_device_ec : uint (>=1)
+* pcs_refresh_min_delta_group_ec : uint (>=1)
+* pcs_refresh_slot_width_ec : uint (>=1)
 
 Barrier public state:
 * barrier_initialized : bool
@@ -322,6 +331,17 @@ Requirement: header[142] MUST equal fs_epoch_commit.
 S6.5 Time-blind base timestamp (normative)
 Requirement: header[143] MUST equal GroupState.fs_epoch_base_ts else reject 945.0.
 Server acceptance MUST NOT consult wall clocks for FS validity.
+
+S6.6 PCS reseed of FS chain (normative; applies only to PCS refresh)
+When processing an accepted MERGE anchor carrying key 175 with key 178 = 1 (pcs_refresh), clients MUST reseed K_fs at activation time:
+K_fs := HKDF-BLAKE3(
+  ikm  = (K_fs || K_barrier_new),
+  salt = H_L("fs/pcs/salt", [weid, header[141], header[176]]),
+  info = "city-g|fs/pcs|v1",
+  L=32
+)
+This reseed MUST be applied atomically with barrier activation state updates (S11.13.7 for non-updater clients; S11.14.2 for updater activation).
+Servers do not learn K_fs and do not execute this derivation.
 
 S7. DEVICE-CHAIN BINDING + BARRIER DIGEST PATCH (NORMATIVE)
 
@@ -468,7 +488,7 @@ FS base:
 * header[143] MUST equal GroupState.fs_epoch_base_ts else reject 945.0.
 
 Device-chain:
-* Look up (stored_last_commit, stored_last_ec) by header[108] author_device_pk.
+* Look up (stored_last_commit, stored_last_ec, stored_last_pcs_refresh_ec) by header[108] author_device_pk.
 * New device: header[152] MUST equal ZERO32.
 * Known device: header[152] MUST equal stored_last_commit AND header[141] MUST be >= stored_last_ec else reject 947.0.
 * header[153] MUST equal H_L("fs/dev/chain/v2", [header[108], header[141], header[152], header[176], barrier_update_digest]) else reject 947.2.
@@ -489,10 +509,16 @@ Enforce:
 
 S10.4 Barrier version gating (normative)
 Let BV := GroupState.barrier_version.
+Define barrier_update_reason:
+* If header[175] is absent: header[178] MUST be absent.
+* If header[175] is present: header[178] MUST be present and MUST be one of:
+  * 0 = revocation_or_bootstrap
+  * 1 = pcs_refresh
 
 Genesis (barrier_initialized == false):
 * Reject JOIN or REGULAR with 960.10.
 * First accepted anchor MUST be MERGE and MUST include header[175].
+* header[178] MUST equal 0.
 * header[176] MUST equal 0.
 * BarrierUpdate.barrier_version MUST equal 0 and BarrierUpdate.prev_barrier_version MUST equal 0.
 * After acceptance: barrier_initialized := true; barrier_version := 0.
@@ -508,6 +534,7 @@ Let BV := GroupState.barrier_version.
 If GroupState.barrier_initialized == true AND RRH != GroupState.barrier_roots_hash, then:
 * The anchor MUST be a MERGE anchor.
 * header[175] MUST be present (barrier_update required).
+* header[178] MUST equal 0 (revocation_or_bootstrap).
 * header[176] MUST equal BV + 1.
 * If any of the above is violated, the server MUST reject with 960.11 barrier_update_required_on_revocation_change.
 
@@ -518,7 +545,35 @@ Clarification (normative):
 If GroupState.barrier_initialized == true AND RRH == GroupState.barrier_roots_hash, then:
 * JOIN and REGULAR anchors proceed under S10.4.
 * MERGE anchors MAY omit header[175] and proceed under S10.4 and S11.12 gating.
-* Proactive barrier_update remains forbidden by S11.12.1(A) (pending_revocations == false).
+* If MERGE carries header[175], proactive barrier behavior is controlled by S10.4B.
+
+S10.4B Proactive PCS refresh gating (time-blind; normative)
+This section applies only when:
+* GroupState.barrier_initialized == true
+* RRH == GroupState.barrier_roots_hash
+* header[175] is present
+
+Then:
+* header[178] MUST equal 1 (pcs_refresh), else reject 960.5.
+* The anchor MUST be a MERGE anchor.
+* header[176] MUST equal BV + 1.
+
+Policy parameters (deployment-defined; from GroupState):
+* pcs_refresh_min_delta_device_ec >= 1
+* pcs_refresh_min_delta_group_ec >= 1
+* pcs_refresh_slot_width_ec >= 1
+
+Let t := header[141].
+Let g_last := GroupState.last_pcs_refresh_ec (or null if none yet).
+Let d_last := stored_last_pcs_refresh_ec for header[108] (or null if none yet).
+
+Rate-limit checks (MUST):
+* If g_last is not null and t < g_last + pcs_refresh_min_delta_group_ec: reject 960.12.
+* If d_last is not null and t < d_last + pcs_refresh_min_delta_device_ec: reject 960.12.
+* If g_last is not null and floor(t / pcs_refresh_slot_width_ec) == floor(g_last / pcs_refresh_slot_width_ec): reject 960.12.
+
+Client behavior note:
+* Clients SHOULD back off and retry with jitter after 960.12 to avoid synchronized refresh storms.
 
 S10.5 Proof verification order (normative)
 * Verify proofs_commit.
@@ -528,10 +583,14 @@ S10.5 Proof verification order (normative)
 
 S10.6 Atomic commit (normative)
 On acceptance:
-* DeviceState[author_device_pk] := (last_commit := header[153], last_ec := header[141])
+* DeviceState[author_device_pk].last_commit := header[153]
+* DeviceState[author_device_pk].last_ec := header[141]
 * GroupState.last_accepted_ec := max(GroupState.last_accepted_ec, header[141])
 * If SRX applies: update GroupState.srx_root_sw := header[160]
 * If barrier_update accepted: update barrier public state per S11.12.1 step I
+* If barrier_update accepted and header[178] == 1:
+  * GroupState.last_pcs_refresh_ec := header[141]
+  * DeviceState[author_device_pk].last_pcs_refresh_ec := header[141]
 All updates MUST commit atomically.
 
 S11. PRS BARRIER (K_barrier + KEM-TREE COVER) (NORMATIVE)
@@ -824,7 +883,11 @@ S11.12.1 Validation procedure (MUST)
 If header[175] present, the server MUST execute steps A through I in order:
 
 A) Gating
-* If barrier_initialized == true and pending_revocations == false: reject 960.5 barrier_proactive_forbidden.
+* If header[178] is absent: reject 960.7.
+* If header[178] is present and header[178] is not in {0,1}: reject 960.7.
+* If barrier_initialized == true and pending_revocations == false:
+  * If header[178] != 1: reject 960.5 barrier_proactive_forbidden.
+  * If header[178] == 1, server MUST enforce S10.4B policy checks; on failure reject 960.12.
 * If merge_delegation_sig (key 135) is present: reject 960.4 barrier_merge_delegation_forbidden.
 
 B) Parse + structure
@@ -834,6 +897,8 @@ B) Parse + structure
 * Require BU.tree_size == N_max.
 * Require BU.revocation_roots_hash == computed revocation_roots_hash (from S11.1).
 * Require BU.barrier_version == header[176].
+* If computed revocation_roots_hash != GroupState.barrier_roots_hash and GroupState.barrier_initialized == true:
+  * Require header[178] == 0, else reject 960.13.
 * Genesis: require BU.prev_barrier_version == 0.
 * Non-genesis: require BU.prev_barrier_version == GroupState.barrier_version.
 
@@ -981,6 +1046,7 @@ On successful processing:
 * barrier_version     := v_new
 * K_barrier           := K_barrier_new
 * kem_tree_hash_after := BU.kem_tree_hash_after
+* If header[178] == 1 (pcs_refresh), apply FS reseed per S6.6 using K_barrier_new at the same atomic activation point.
 
 S11.14 Updater local state management (normative; crash-safe; REQUIRED)
 This section specifies how the updater activates its own barrier_update locally. The updater MUST NOT use the Recover path (S11.13) for its own updates.
@@ -991,6 +1057,15 @@ Before publishing/submitting any merge carrying header[175], the updater MUST pe
 * pending_revocation_roots_hash = revocation_roots_hash
 * pending_kem_tree_hash_after = kem_tree_hash_after /* BU.kem_tree_hash_after for the to-be-published barrier_update */
 * pending_K_barrier_new = K_barrier_new
+* pending_barrier_update_reason = header[178]
+* pending_K_fs_after_pcs = (if header[178] == 1 then
+    HKDF-BLAKE3(
+      ikm  = (K_fs || K_barrier_new),
+      salt = H_L("fs/pcs/salt", [weid, header[141], v_new]),
+      info = "city-g|fs/pcs|v1",
+      L=32
+    )
+  else null)
 * pending_barrier_update_digest = H_L("barrier/update/digest", [raw header[175] bytes to publish])
 * pending_on_path_key_material = { for each node n in ExpectedNodeSet:
     [ n:uint, dk_n:bstr(2400 bytes), pkhash_n:bstr32 ]
@@ -1011,6 +1086,7 @@ Upon observing acceptance of the merge carrying this barrier_update:
   * barrier_version := pending_barrier_version
   * K_barrier := pending_K_barrier_new
   * kem_tree_hash_after := pending_kem_tree_hash_after
+  * If pending_barrier_update_reason == 1: K_fs := pending_K_fs_after_pcs
   * for each entry [n, dk_n, pkhash_n] in pending_on_path_key_material:
     * if n IN SelfPath (updater's SelfPath), store (dk_n, pkhash_n) as the atomic pair for node n
     * if n NOT IN SelfPath, ignore (defense-in-depth)
@@ -1043,6 +1119,9 @@ Barrier required fields:
 * current kem_tree_hash_after (bstr32)
 * N_max (uint)
 * max_barrier_update_bytes (uint)
+* pcs_refresh_min_delta_device_ec (uint; >=1)
+* pcs_refresh_min_delta_group_ec (uint; >=1)
+* pcs_refresh_slot_width_ec (uint; >=1)
 FS-hybrid required fields:
 * initial K_fs (bstr32) and initial fs_ec (uint) -- or a derivation seed sufficient to compute them
 * group fs_epoch_base_ts (T_base; uint64)
@@ -1073,6 +1152,10 @@ Scope: CLIENT-LOCAL / UPDATER-LOCAL; MUST surface on snapshot/auth/correlation f
 960.10 barrier_genesis_required
 Scope: Server
 960.11 barrier_update_required_on_revocation_change
+Scope: Server (acceptance gating)
+960.12 pcs_refresh_rate_limited
+Scope: Server (acceptance gating)
+960.13 pcs_refresh_forbidden_while_pending_revocations
 Scope: Server (acceptance gating)
 
 FS/acceptance codes
@@ -1123,5 +1206,23 @@ A reference test vector set (or implementation conformance test) MUST include a 
 * the merge is accepted and the updater activates per S11.14.2,
 * subsequently, the updater processes another barrier_update for which its unique match targets an internal node on its SelfPath (not necessarily the leaf),
 * the updater is able to perform matching and AAD construction using the stored pkhash_t values, and recovery succeeds or fails only according to the normative match rules (no missing pkhash due to updater activation).
+
+S14.5 KAT: proactive PCS refresh gating and rate-limit (MUST)
+The test suite MUST include:
+* Positive case:
+  * RRH == GroupState.barrier_roots_hash,
+  * MERGE with header[175], header[178]=1, header[176]=BV+1,
+  * all S10.4B policy checks satisfied,
+  * server accepts.
+* Negative cases:
+  * header[175] present with header[178]=0 while RRH unchanged -> reject 960.5,
+  * RRH changed with header[178]=1 -> reject 960.13,
+  * RRH unchanged but group/device/slot rate-limit violated -> reject 960.12.
+
+S14.6 KAT: PCS reseed consistency and crash-safe activation (MUST)
+The test suite MUST include a case where:
+* header[178]=1 and barrier activation succeeds,
+* updater and non-updater client derive identical K_fs after applying S6.6 at activation,
+* after simulated crash/restart before activation completion, the implementation applies reseed at most once and converges to the same final K_fs.
 
 END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.1 -- final

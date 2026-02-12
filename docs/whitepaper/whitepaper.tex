@@ -235,16 +235,21 @@ Server-side validation is necessary but not sufficient against a malicious serve
 \subsection{Why the barrier gate matters}
 Without mandatory barrier advancement on revocation-root change, senders could continue deriving payload keys under stale barrier context. The profile now forbids that path by acceptance gating. This is the main reason post-revocation secrecy is a protocol property rather than an application convention.
 
+\subsection{Proactive PCS refresh and FS reseed}
+The final profile also allows a proactive barrier update mode (\texttt{barrier\_update\_reason = pcs\_refresh}) when revocation roots are unchanged, subject to strict time-blind rate limits. This provides a practical post-compromise recovery path for a healed endpoint without waiting for a revocation event. At activation, clients reseed the FS chain with the newly recovered barrier key (\(K_{fs} \leftarrow \mathrm{HKDF}(K_{fs}\|K_{\mathrm{barrier\_new}}, \ldots)\)), so recovery benefits propagate to both barrier- and FS-derived message schedules.
+
+This does not create ``magic PCS'' against an attacker who still controls an authorized member state; instead, it provides MLS-like recovery semantics once compromise of that member state has ceased and a valid refresh is accepted.
+
 \section{Comparison with Related Approaches}
 \subsection{Compared with MLS-style trees}
 Messaging Layer Security (MLS) standardizes tree-based group key management with strong formal structure \citep{rfc9420}. \cityg differs in emphasis:
 \begin{itemize}
   \item explicit time-blind acceptance and FLG-based epoch control,
   \item explicit server-keyless message path and raw-byte digest discipline,
-  \item revocation-root to barrier-update gating as a mandatory acceptance condition,
+  \item revocation-root to barrier-update gating as a mandatory acceptance condition, plus policy-governed proactive PCS refresh,
   \item separate treatment of fast-path anchors and revocation cold path.
 \end{itemize}
-This is not a ``better/worse'' claim in the abstract; it is a design fit claim for high-concurrency asynchronous environments that prioritize deterministic acceptance behavior and operationally explicit revocation semantics.
+Both systems share the same fundamental group PCS boundary: if an attacker still controls an authorized member state, that attacker can continue to follow group updates. Recovery occurs after a healthy self-update/refresh is accepted. This is not a ``better/worse'' claim in the abstract; it is a design fit claim for high-concurrency asynchronous environments that prioritize deterministic acceptance behavior, explicit revocation semantics, and policy-governed refresh cadence.
 
 \subsection{Compared with sender-key fanout designs}
 Sender-key systems can provide excellent throughput but often centralize revocation complexity in server policy or out-of-band repair. \cityg codifies revocation transition rules in the protocol state machine itself, reducing reliance on implicit operational assumptions.
@@ -258,6 +263,11 @@ Sender-key systems can provide excellent throughput but often centralize revocat
   \item Keep updater pending-state activation digest-correlated and atomic.
   \item Keep pairwise \((dk_t, pkhash_t)\) updates crash-safe.
 \end{itemize}
+
+\subsection{Concurrency policy for proactive refresh}
+Proactive PCS refresh is intentionally treated as a cold-path operation. To prevent traffic amplification and retry storms, the profile enforces time-blind rate limits in acceptance: per-device minimum epoch distance, group-wide minimum epoch distance, and a one-winner-per-slot rule in epoch space. Implementations should pair these checks with jittered client backoff after rate-limit rejections.
+
+Operationally, this keeps high-frequency JOIN/REGULAR traffic on the lightweight path while making compromise-recovery refreshes explicit, auditable, and bounded.
 
 \subsection{Verification levels: full chain-check vs recover-only clients}
 The profile supports two verification levels for PRS barrier processing \citep{citygSpec2026}. The difference is not about whether recovery can succeed, but about what classes of active-server behavior can be detected locally.
