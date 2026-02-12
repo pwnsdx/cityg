@@ -1,6 +1,6 @@
 CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER)
 
-Version: v0.1.1 -- final
+Version: v0.1.2 -- final
 Date: 2026-02-11
 Status: Final (self-contained; freeze-ready)
 Profile ID: tswe/msphf-we/fs-hybrid + prs-barrier (native; no legacy interop)
@@ -1225,4 +1225,4 @@ The test suite MUST include a case where:
 * updater and non-updater client derive identical K_fs after applying S6.6 at activation,
 * after simulated crash/restart before activation completion, the implementation applies reseed at most once and converges to the same final K_fs.
 
-END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.1 -- final
+END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.2 -- final
