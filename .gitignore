@@ -26,3 +26,13 @@ lcov.info
 *.tmp
 *.bak
 *.log
+
+# Whitepaper (LaTeX temporary artifacts)
+docs/whitepaper/*.aux
+docs/whitepaper/*.bbl
+docs/whitepaper/*.blg
+docs/whitepaper/*.out
+docs/whitepaper/*.toc
+docs/whitepaper/*.fdb_latexmk
+docs/whitepaper/*.fls
+docs/whitepaper/*.synctex.gz

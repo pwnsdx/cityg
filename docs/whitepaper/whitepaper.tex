@@ -1,0 +1,283 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  citecolor=blue!55!black,
+  urlcolor=blue!55!black,
+  pdftitle={City-G Whitepaper v0.1.1},
+  pdfauthor={City-G Working Group}
+}
+
+\setstretch{1.06}
+
+\newcommand{\cityg}{\textsc{City-G}}
+\newcommand{\rrh}{\texttt{revocation\_roots\_hash}}
+\newcommand{\kbarrier}{\texttt{K\_barrier}}
+\newcommand{\tauE}{\texttt{tau\_e}}
+\newcommand{\fsEc}{\texttt{fs\_ec}}
+\newcommand{\wpversion}{0.1.1}
+
+\title{\cityg: Publisher-Blind, Time-Blind End-to-End Encryption\
+for Massive Asynchronous Groups}
+\author{City-G Working Group}
+\date{Version \wpversion\\February 11, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Large-group end-to-end encrypted messaging is difficult to scale without giving up either security guarantees or operational simplicity. Existing approaches often force strict global ordering for key schedule evolution, rely on wall-clock assumptions, or expose revocation-side metadata that degrades privacy at scale. This paper presents \cityg, a protocol profile designed for high-concurrency, asynchronous environments with millions of members and strict server-side blindness over message secrets.
+
+\cityg combines a time-blind forward-secrecy schedule, deterministic acceptance, and a post-revocation secrecy (PRS) barrier based on a KEM-tree cover. The design separates public acceptance state from client secret state, enforces canonical wire encoding and raw-byte commitment discipline, and introduces explicit fail-closed rules for malformed or adversarial updates. We describe the protocol architecture, state machine, and security properties; analyze concurrency and scalability behavior; and compare \cityg with mainstream group key management patterns. The result is a protocol that keeps steady-state operations lightweight while making revocation handling explicit, verifiable, and robust under active-server threat assumptions.
+\end{abstract}
+
+\section{Introduction}
+End-to-end encrypted (E2EE) group systems must simultaneously satisfy three pressures: security under active attackers, asynchronous operability for offline devices, and production-grade scalability under bursty concurrency. In large deployments, those pressures collide. Systems that optimize for simplicity often centralize trust in servers for key distribution. Systems that optimize for strict cryptographic structure frequently impose serialization points that become throughput bottlenecks. Systems that optimize for throughput may under-specify edge-case validation, enabling interop drift or latent security regressions.
+
+\cityg targets this gap: robust security semantics without a server-side message secret role, explicit acceptance determinism without wall-clock dependence, and practical behavior for high-concurrency populations. The profile analyzed here is the final unified specification \texttt{v0.1.1} (FS-hybrid + PRS barrier), in which forward secrecy, acceptance rules, and post-revocation secrecy are specified in a single normative document \citep{citygSpec2026}.
+
+\paragraph{Core thesis.}
+\cityg is useful because it treats security invariants as state-machine invariants, not just crypto primitive selections. In practice, compromise and drift happen at boundaries: encoding, ordering, replay, and recovery behavior. \cityg codifies those boundaries with explicit MUST-level rules and verifiable transitions.
+
+\section{Problem Setting and Design Goals}
+\subsection{Operational setting}
+We consider very large asynchronous groups where:
+\begin{itemize}
+  \item clients may be offline for long intervals,
+  \item network delivery is adversarial and reordering is normal,
+  \item joins and regular sends occur concurrently at high rates,
+  \item revocations are infrequent but high impact,
+  \item acceptance infrastructure must scale horizontally.
+\end{itemize}
+
+\subsection{Threat model}
+The adversary may control transport and publishers, reorder or replay traffic, and attempt structural malleation. Excluded or revoked members may collude with compromised devices. Store-now-decrypt-later adversaries are in scope. The acceptance server is not trusted with message secrets and is treated as potentially curious; selected checks also model an active malicious server.
+
+\subsection{Goals}
+\begin{enumerate}
+  \item \textbf{Confidentiality without server message secrets:} server cannot decrypt payloads or header-protected message material.
+  \item \textbf{Time-blind forward secrecy:} acceptance must not rely on wall clocks.
+  \item \textbf{Post-revocation secrecy:} once revocation roots change, barrier advancement is required before normal traffic resumes.
+  \item \textbf{Deterministic acceptance:} canonical encoding, closed-world headers, bounded maxima, and fail-closed checks.
+  \item \textbf{Concurrency at scale:} preserve high steady-state throughput for non-revocation anchors.
+\end{enumerate}
+
+\section{System Model and State Separation}
+\subsection{Roles}
+\begin{itemize}
+  \item \textbf{Clients:} hold long-lived and evolving secrets, produce anchors, encrypt/decrypt payloads.
+  \item \textbf{Acceptance server:} validates anchors and manages public state transitions.
+  \item \textbf{Membership/SRX subsystem:} provides revocation and join enumerations with integrity.
+\end{itemize}
+
+\subsection{Anchor types}
+\cityg defines three anchor types: \texttt{JOIN}, \texttt{REGULAR}, and \texttt{MERGE}. Barrier update material (key 175) and merge-only keys force \texttt{MERGE} typing; join leaf key publication (key 177) forces \texttt{JOIN}. The profile uses a closed-world key registry with strict mode-specific presence rules \citep{citygSpec2026}.
+
+\subsection{State separation}
+A critical design choice is separating:
+\begin{itemize}
+  \item \textbf{Public state} (server): acceptance counters, per-device chain cursors, barrier public tree commitment, revocation hash commitment.
+  \item \textbf{Secret state} (client): FS chain secret, epoch derivations, barrier key, private KEM keys on self path.
+\end{itemize}
+This separation prevents accidental ``server helpfulness'' from becoming a secrecy dependency.
+
+\section{Cryptographic and Encoding Discipline}
+\subsection{Primitive suite}
+The profile uses BLAKE3-based domain-separated hashing, HKDF-BLAKE3 with fixed output length 32, ChaCha20-Poly1305 AEAD, and ML-KEM-768 for cover operations. Deterministic CBOR (RFC 8949 profile) is mandatory for all critical structures \citep{rfc8949,rfc8439,fips203}.
+
+\subsection{Why canonical encoding is first-class}
+In distributed cryptographic systems, parser-level ambiguity is often as dangerous as primitive breakage. \cityg therefore requires deterministic re-encoding checks and maps failures to explicit codes. It also distinguishes semantic objects from their raw transmitted bytes where identity is digest-bound (e.g., barrier update bytes).
+
+\section{Protocol Overview}
+\subsection{FS-hybrid schedule}
+Each anchor carries a monotone epoch counter \fsEc. Clients evolve local FS chain secret \texttt{K\_fs} and derive per-epoch material (including \tauE) via profile-fixed labels. The profile binds device-level chain commitments to barrier state by defining:
+\begin{equation}
+\begin{split}
+\texttt{fs\_dev\_commit} = H_L(&\texttt{"fs/dev/chain/v2"},\\
+&[\texttt{header[108]}, \texttt{header[141]}, \texttt{header[152]},\\
+&\texttt{header[176]}, \texttt{barrier\_update\_digest}]).
+\end{split}
+\end{equation}
+This construction ties device progression to barrier progression.
+
+\subsection{Payload envelope and nonce safety}
+Payload ciphertexts are carried in a 3-field envelope with explicit \texttt{msg\_index}. Message key and nonce derivation include \texttt{msg\_index}; uniqueness is mandatory for each fixed identifier tuple \{gid, weid, t, xk\_hash, E\_k, barrier\_version\}. State enforcing uniqueness must be crash-safe.
+
+\subsection{Time-blind acceptance and FLG}
+Acceptance never uses wall-clock checks. Instead, forward-leap guards (FLG) bound \fsEc jumps against persisted acceptance state and policy-derived windows. This is a key scaling and reliability property: skewed clocks cannot silently widen exposure windows.
+
+\subsection{PRS barrier overview}
+The barrier is a committed public KEM tree with client-held private keys along self paths. Revocation updates are represented by barrier updates that include:
+\begin{itemize}
+  \item pre- and post-update tree commitments,
+  \item deterministic new internal public keys on updater path ancestors,
+  \item node ciphertexts that transport ancestor path secrets to copath resolutions.
+\end{itemize}
+Clients recover a unique matching ciphertext, derive upward secrets, compute new \kbarrier, and update local key material.
+
+\subsection{Updater and recover semantics}
+The updater is explicitly excluded from running the generic recover path for its own update. Instead, it must persist pending activation state before publish, correlate accepted bytes by digest, then activate. This avoids false-local failures and crash-induced divergence.
+
+\paragraph{Acceptance skeleton for a barrier-carrying merge.}
+\begin{enumerate}
+  \item Parse deterministic header map; reject unknown keys or invalid maxima.
+  \item Enforce anchor-type presence matrix and closed-world policy.
+  \item Verify FS base, device-chain commit, and FLG bounds.
+  \item Parse and deterministic-check \texttt{BarrierUpdate} and \texttt{KemTreeCoverPayload}.
+  \item Validate path structure, canonical ordering, and exact \texttt{ExpectedNodeSet}.
+  \item Build \texttt{snapshot\_pre}; verify \texttt{kem\_tree\_hash\_before}.
+  \item Apply \texttt{CP.new\_public\_keys}; verify \texttt{kem\_tree\_hash\_after}.
+  \item Validate \texttt{ExpectedPairs} completeness/minimality.
+  \item Verify proofs in fail-fast order; then atomically commit public state.
+\end{enumerate}
+
+\section{Concurrency and Scalability Behavior}
+\subsection{Steady-state path}
+Under stable revocation roots, \texttt{JOIN} and \texttt{REGULAR} anchors do not require barrier update bytes and do not bump barrier version. This keeps high-frequency traffic on a lightweight path while preserving deterministic acceptance.
+
+\subsection{Revocation synchronization point}
+When revocation roots change, \cityg introduces an explicit synchronization requirement: the next admissible transition must be a merge carrying barrier update and barrier version increment. This is intentional. It localizes revocation cost to a cold path and prevents accidental post-revocation plaintext recoverability under stale barrier keys.
+
+\subsection{Large-group complexity}
+\begin{table}[t]
+\centering
+\caption{Asymptotic cost profile (high-level)}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}p{0.36\linewidth} >{\raggedright\arraybackslash}X}
+\toprule
+Operation & Dominant work & Notes \\
+\midrule
+Join/regular acceptance & Header/proof checks, O(1) state writes & Fast path when revocation roots unchanged \\
+Barrier merge acceptance & Tree reconstruction + hash-chain + ExpectedPairs & Cold path; cost scales with change set and coverage \\
+Client recover (non-updater) & Match scan + one successful decap + path derivation & Fail-closed on 0 or multi-match \\
+Updater rekey & Path secret derivation + KEM encaps per target pair & Burst cost concentrated on revocation events \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The design choice is clear: optimize daily throughput; pay structured complexity only when revocation semantics demand it.
+
+\section{Security Analysis}
+\subsection{Property matrix}
+\begin{table}[t]
+\centering
+\caption{Security and protocol properties in the final profile}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.33\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}X}
+\toprule
+Property & Status & Mechanism \\
+\midrule
+Confidentiality & Achieved & End-to-end payload keys from client-held \tauE and \kbarrier; server keyless for message decrypt path \\
+Authentication and integrity & Achieved & Anchor authentication + deterministic validation + proof commitments \\
+Forward secrecy (time-blind) & Achieved & Evolving FS chain, zeroization guidance, no wall-clock acceptance dependency \\
+Post-revocation secrecy & Achieved (policy-enforced) & Mandatory barrier update gating when revocation roots change \\
+Membership consistency & Achieved & Commitment chain, deterministic tree/hash checks, ExpectedPairs rules \\
+Asynchronicity and scalability & Achieved & Fast path for non-revocation anchors; explicit cold path for revocations \\
+Concurrency & Achieved with bounded retries & Deterministic acceptance and barrier version gating; retries on races are explicit \\
+Post-compromise recovery & Conditional & Requires compromise to cease and subsequent correct evolution/update \\
+Deniability & Out of scope in this profile & Strong sender authentication is explicit design choice \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Active-server resistance}
+Server-side validation is necessary but not sufficient against a malicious server controlling public-tree responses. \cityg addresses this by requiring updater and full clients to authenticate fetched public tree snapshots against previously committed hashes before proceeding. Snapshot auth failures are explicit diagnostics (960.9).
+
+\subsection{Why the barrier gate matters}
+Without mandatory barrier advancement on revocation-root change, senders could continue deriving payload keys under stale barrier context. The profile now forbids that path by acceptance gating. This is the main reason post-revocation secrecy is a protocol property rather than an application convention.
+
+\section{Comparison with Related Approaches}
+\subsection{Compared with MLS-style trees}
+Messaging Layer Security (MLS) standardizes tree-based group key management with strong formal structure \citep{rfc9420}. \cityg differs in emphasis:
+\begin{itemize}
+  \item explicit time-blind acceptance and FLG-based epoch control,
+  \item explicit server-keyless message path and raw-byte digest discipline,
+  \item revocation-root to barrier-update gating as a mandatory acceptance condition,
+  \item separate treatment of fast-path anchors and revocation cold path.
+\end{itemize}
+This is not a ``better/worse'' claim in the abstract; it is a design fit claim for high-concurrency asynchronous environments that prioritize deterministic acceptance behavior and operationally explicit revocation semantics.
+
+\subsection{Compared with sender-key fanout designs}
+Sender-key systems can provide excellent throughput but often centralize revocation complexity in server policy or out-of-band repair. \cityg codifies revocation transition rules in the protocol state machine itself, reducing reliance on implicit operational assumptions.
+
+\section{Implementation Guidance}
+\subsection{Non-negotiable engineering invariants}
+\begin{itemize}
+  \item Never re-encode digest-bound raw objects before identity checks.
+  \item Treat deterministic encoding as a security property, not formatting hygiene.
+  \item Persist uniqueness and anti-replay state crash-safely before use.
+  \item Keep updater pending-state activation digest-correlated and atomic.
+  \item Keep pairwise \((dk_t, pkhash_t)\) updates crash-safe.
+\end{itemize}
+
+\subsection{Migration from FS-only profile}
+A practical migration plan should proceed in phases:
+\begin{enumerate}
+  \item add header registry and state schema for barrier fields,
+  \item implement acceptance checks and error mapping in shadow mode,
+  \item ship barrier client code paths behind feature gates,
+  \item validate KATs and mixed offline/online recovery scenarios,
+  \item enforce revocation-change gating in production.
+\end{enumerate}
+
+\subsection{Test strategy}
+The profile's mandatory KAT set should be treated as conformance gates, not documentation examples. In addition to vector tests, teams should run:
+\begin{itemize}
+  \item parser differential tests for deterministic encoding rejection,
+  \item fault-injection on updater crash/restart windows,
+  \item adversarial tests for malformed ExpectedPairs and multi-match recovery.
+\end{itemize}
+
+\section{Limitations and Future Work}
+\begin{itemize}
+  \item Barrier merges can become heavy under large, bursty revocation sets; operational budgeting remains important.
+  \item Full verification depends on authenticated access to historical public tree states.
+  \item Formal verification artifacts can be expanded beyond present conformance/KAT structure.
+  \item Deniability is not a target of this profile due to explicit sender authentication requirements.
+\end{itemize}
+
+Future work includes deeper formalization of liveness under sustained adversarial churn, adaptive cover packing strategies, and reference interoperability suites across independent implementations.
+
+\section{Conclusion}
+\cityg demonstrates that large-scale asynchronous E2EE can be both security-rigorous and operations-conscious when acceptance semantics are treated as first-class cryptographic boundaries. The protocol's contribution is not a single primitive, but a coherent composition: time-blind FS progression, deterministic acceptance, explicit revocation-to-barrier gating, and client-verifiable cold-path recovery.
+
+For deployments where revocation correctness, server blindness, and high concurrency are all non-negotiable, this profile offers a practical and auditable path forward.
+
+\appendix
+\section{Normative Profile Reference}
+This whitepaper describes the final unified profile documented in:
+\begin{quote}
+\texttt{docs/specs.md} (\cityg Unified Spec, v0.1.1 final).
+\end{quote}
+The specification remains normative; this paper is explanatory.
+
+\section{Notation Summary}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.28\linewidth} X}
+\toprule
+Symbol / term & Meaning \\
+\midrule
+\texttt{fs\_ec} & Epoch counter carried on anchors \\
+\texttt{tau\_e} & Per-epoch FS-derived secret material \\
+\texttt{K\_barrier} & Barrier key bound to barrier version and revocation roots \\
+\texttt{ExpectedNodeSet} & Required internal-node publication set on updater path ancestors \\
+\texttt{ExpectedPairs} & Required ciphertext pair coverage from on-path source to copath resolution \\
+\bottomrule
+\end{tabularx}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
