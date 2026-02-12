@@ -522,6 +522,7 @@ If GroupState.barrier_initialized == true AND RRH == GroupState.barrier_roots_ha
 
 S10.5 Proof verification order (normative)
 * Verify proofs_commit.
+* If header[175] is present, the server MUST execute S11.12.1 steps A through H before running expensive cryptographic proof verification in this section.
 * Verify Smallwood (FS) -> ZK-VRF -> SRX (if applies).
 * Any failure rejects with deployment registry codes (e.g., 923/930).
 
@@ -552,10 +553,23 @@ right(i)  = 2*i+2
 parent(i) = floor((i-1)/2) for i > 0
 leaf_base = N_max - 1
 leaf_node(l) = leaf_base + l
+
+Leaf predicates (normative):
+is_leaf(i) := (i >= leaf_base)
+is_internal(i) := (i < leaf_base)
+Shorthand: throughout this document, the condition "i is leaf" is equivalent to is_leaf(i).
+
 sibling(i) = i+1 if i odd, else i-1 for i > 0
 
 Blank marker:
 pk_i is bstr: empty bstr means blank (BOTTOM), else ML-KEM ek (1184 bytes).
+
+Path helper (normative):
+direct_path(i) :=
+  if i == root_node then [i]
+  else [i] ++ direct_path(parent(i))
+The result is the ordered node sequence from i (inclusive) to root_node (inclusive)
+following parent links.
 
 Direct path blanking on revocation:
 Revoke leaf l -> blank pk at leaf_node(l) and all nodes on direct_path(leaf_node(l)) including root_node.
@@ -566,9 +580,18 @@ resolution(i):
   else if i is leaf then EMPTYSET
   else union(resolution(left(i)), resolution(right(i)))
 
+Deterministic enumeration note (normative):
+If an implementation needs to enumerate resolution(i) as an ordered list (e.g., to iterate targets),
+it MUST use increasing node-index order.
+
 S11.3 Public key hash (normative)
 H_pk(ek) := H_L("barrier/pk-hash", [ek])
 target_pk_hash := H_pk(ek)[0..15]
+
+NOTE (defense-in-depth):
+* target_pk_hash is a 16-byte hint used only for matching/filtering.
+* Security MUST NOT depend on target_pk_hash collision resistance: the full pkhash_t (32 bytes) is bound into AAD in S11.13.4,
+  and AEAD_Open MUST fail if the wrong key is used.
 
 S11.4 kem_tree_hash commitment (normative; internal pk included)
 TreeHash(i):
@@ -898,6 +921,9 @@ Clients MUST enforce:
 * S11.7 path_nodes validation
 * Define barrier_update_bytes := raw bytes of header[175].
 * length(barrier_update_bytes) <= max_barrier_update_bytes
+* Require BU.tree_size == N_max.
+* Require BU.barrier_version == header[176].
+* Require BU.revocation_roots_hash == revocation_roots_hash (computed per S11.1).
 Failure -> reject barrier_update locally with 960.7.
 
 S11.13.4 Recover derivation (normative)
@@ -989,6 +1015,7 @@ Upon observing acceptance of the merge carrying this barrier_update:
     * if n IN SelfPath (updater's SelfPath), store (dk_n, pkhash_n) as the atomic pair for node n
     * if n NOT IN SelfPath, ignore (defense-in-depth)
 * If mismatch: updater MUST NOT advance barrier_version locally and MUST surface 960.9 for diagnostics.
+  Note: this mismatch diagnostic is conservative; it can indicate active-server tampering OR a race/loss scenario where a different update path won before local activation correlation succeeded.
 
 S11.14.3 Pending state cleanup (MUST)
 * After successful acceptance correlation and activation, updater MUST delete/clear all pending_* state.

@@ -98,7 +98,7 @@ This separation prevents accidental ``server helpfulness'' from becoming a secre
 
 \section{Cryptographic and Encoding Discipline}
 \subsection{Primitive suite}
-The profile uses BLAKE3-based domain-separated hashing, HKDF-BLAKE3 with fixed output length 32, ChaCha20-Poly1305 AEAD, and ML-KEM-768 for cover operations. Deterministic CBOR (RFC 8949 profile) is mandatory for all critical structures \citep{rfc8949,rfc8439,fips203}.
+The profile uses BLAKE3-based domain-separated hashing, HKDF-BLAKE3 with fixed output length 32, ChaCha20-Poly1305 AEAD, and ML-KEM-768 for cover operations. Deterministic CBOR (RFC 8949 profile) is mandatory for all critical structures \citep{blake3,rfc8949,rfc8439,fips203}.
 
 \subsection{Why canonical encoding is first-class}
 In distributed cryptographic systems, parser-level ambiguity is often as dangerous as primitive breakage. \cityg therefore requires deterministic re-encoding checks and maps failures to explicit codes. It also distinguishes semantic objects from their raw transmitted bytes where identity is digest-bound (e.g., barrier update bytes).
@@ -128,12 +128,44 @@ The barrier is a committed public KEM tree with client-held private keys along s
   \item deterministic new internal public keys on updater path ancestors,
   \item node ciphertexts that transport ancestor path secrets to copath resolutions.
 \end{itemize}
+\paragraph{Intuition.}
+A barrier update moves secret material up the updater's direct path and ``fans out'' each on-path secret to the non-blank leaves in the sibling subtree (the copath resolution). Concretely, for each on-path source node, the updater encapsulates to every non-blank public key in the corresponding resolution set and wraps the 32-byte \texttt{path\_secret[source]} under the resulting KEM shared secret.
+
+\begin{figure}[t]
+\centering
+\begin{minipage}{0.92\linewidth}
+\small
+\begin{verbatim}
+          root
+           |
+        source s3   (new ek published)
+           |
+        source s2   (new ek published)
+           |
+        source s1   (new ek published)
+           |
+      leaf(u)  <-- updater
+
+For each step (child -> source), wrap path_secret[source] to every
+target in resolution(sibling(child)) computed on snapshot_pre.
+\end{verbatim}
+\end{minipage}
+\caption{KEM-tree cover intuition: on-path secrets are wrapped to copath
+resolution targets (non-blank nodes) to enable unique-match recovery.}
+\end{figure}
+
+\paragraph{Matching hint.}
+Each node ciphertext carries a 16-byte \texttt{target\_pk\_hash} prefix to cheaply filter candidates. Correctness and security do not depend on this prefix being collision-resistant: the full 32-byte public-key hash is bound into AEAD AAD during unwrap, so false matches fail closed.
 Clients recover a unique matching ciphertext, derive upward secrets, compute new \kbarrier, and update local key material.
 
 \subsection{Updater and recover semantics}
 The updater is explicitly excluded from running the generic recover path for its own update. Instead, it must persist pending activation state before publish, correlate accepted bytes by digest, then activate. This avoids false-local failures and crash-induced divergence.
 
+\subsection{SRX trigger semantics}
+The final profile makes SRX activation explicit and state-based: on MERGE anchors, SRX is required exactly when the current revocation-roots digest differs from the pivot digest (derived from persisted barrier state), and forbidden otherwise. This closes a class of ambiguous implementations where SRX could be over-applied or skipped silently. Operationally, SRX logic and barrier revocation gating are complementary: SRX controls proof obligations under revocation-root transitions, while barrier gating controls key-state advancement.
+
 \paragraph{Acceptance skeleton for a barrier-carrying merge.}
+For anchors carrying \texttt{barrier\_update}, the final profile requires structural/canonical/hash-chain barrier checks before expensive proof verification, then fail-fast proof verification, then atomic commit.
 \begin{enumerate}
   \item Parse deterministic header map; reject unknown keys or invalid maxima.
   \item Enforce anchor-type presence matrix and closed-world policy.
@@ -154,6 +186,7 @@ Under stable revocation roots, \texttt{JOIN} and \texttt{REGULAR} anchors do not
 When revocation roots change, \cityg introduces an explicit synchronization requirement: the next admissible transition must be a merge carrying barrier update and barrier version increment. This is intentional. It localizes revocation cost to a cold path and prevents accidental post-revocation plaintext recoverability under stale barrier keys.
 
 \subsection{Large-group complexity}
+\noindent Let \(h=\log_2(N_{\max})\), \(J=|\texttt{JoinSet}|\), \(R=|\texttt{RevokedLeafSet}|\), and \(P=|\texttt{ExpectedPairs}|\).
 \begin{table}[t]
 \centering
 \caption{Asymptotic cost profile (high-level)}
@@ -161,15 +194,18 @@ When revocation roots change, \cityg introduces an explicit synchronization requ
 \toprule
 Operation & Dominant work & Notes \\
 \midrule
-Join/regular acceptance & Header/proof checks, O(1) state writes & Fast path when revocation roots unchanged \\
-Barrier merge acceptance & Tree reconstruction + hash-chain + ExpectedPairs & Cold path; cost scales with change set and coverage \\
-Client recover (non-updater) & Match scan + one successful decap + path derivation & Fail-closed on 0 or multi-match \\
-Updater rekey & Path secret derivation + KEM encaps per target pair & Burst cost concentrated on revocation events \\
+Join/regular acceptance & Header/proof checks + O(1) state writes & Fast path when revocation roots unchanged \\
+Barrier merge acceptance & \(O(N_{\max})\) tree/auth work + \(O((J+R)\cdot h)\) path blanking + \(O(P)\) pair validation & Cold path; cost scales with tree size and revocation coverage \\
+Client recover (non-updater) & \(O(P)\) candidate scan + one decap + \(O(h)\) upward derivation & Fail-closed on 0 or multi-match \\
+Updater rekey & \(O(h)\) path-secret derivation + \(O(P)\) KEM encaps/wrap operations & Burst cost concentrated on revocation events \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
 The design choice is clear: optimize daily throughput; pay structured complexity only when revocation semantics demand it.
+
+\paragraph{Concrete scale example.}
+If a deployment provisions \(N_{\max}=2^{20}\) (about \(1{,}048{,}576\) leaves), then \(h=20\). A full barrier merge necessarily touches the whole public tree for snapshot authentication and commitment recomputation (\(O(N_{\max})\) hashing) and then performs per-join/per-revocation path blanking work on the order of \((J+R)\cdot h\). The ciphertext fanout term \(P\) is workload-dependent: in the worst case where almost all leaves are non-blank, \(P\) can approach \(O(N_{\max})\); in typical operation it is smaller. The key point is that this burst cost is paid only on revocation-root transitions, not on daily anchors.
 
 \section{Security Analysis}
 \subsection{Property matrix}
@@ -223,6 +259,20 @@ Sender-key systems can provide excellent throughput but often centralize revocat
   \item Keep pairwise \((dk_t, pkhash_t)\) updates crash-safe.
 \end{itemize}
 
+\subsection{Verification levels: full chain-check vs recover-only clients}
+The profile supports two verification levels for PRS barrier processing \citep{citygSpec2026}. The difference is not about whether recovery can succeed, but about what classes of active-server behavior can be detected locally.
+\begin{itemize}
+  \item \textbf{FULL-verifying clients} can fetch authenticated historical public-tree snapshots. The snapshot-fetch endpoint is:\newline \texttt{FetchBarrierPublicTree}.\newline They perform mandatory chain-checks on \texttt{kem\_tree\_hash\_before} and \texttt{kem\_tree\_hash\_after}. FULL clients also verify deterministically derived internal public keys where derivable on their self path, providing strong protection against public-tree equivocation.
+  \item \textbf{Recover-only clients} may lack snapshot fetch capability (e.g., due to storage or API restrictions). They still enforce deterministic encoding/canonicalization checks, path validation, fail-closed unique-match recovery, and deterministic local key-storage rules, but cannot locally authenticate historical public-tree snapshots.
+\end{itemize}
+Deployments SHOULD clearly label which client tiers can claim FULL verification, and snapshot-fetch endpoints SHOULD be authenticated and audited.
+
+\subsection{Storage optimization: \texttt{pkhash\_t} instead of full \texttt{ek\_t}}
+The profile requires clients to store \((dk_t, pkhash_t)\) pairs on self-path nodes, where \texttt{pkhash\_t = H\_pk(ek\_t)}. This design is materially smaller than persisting full ML-KEM public keys per stored node: \(32\) bytes for \texttt{pkhash\_t} instead of \(1184\) bytes for \texttt{ek\_t}. The optimization keeps match/AAD validation deterministic while reducing persistent footprint and write amplification, which matters for constrained devices and high-update groups.
+
+\subsection{Why crash-safety is a cryptographic requirement}
+Three crash-safety rules are security-critical, not optional operational hygiene. First, \texttt{msg\_index} uniqueness state must be durable before encryption to prevent nonce/key schedule reuse after restart. Second, client updates to \((dk_t, pkhash_t)\) must be atomic so match/AAD construction cannot drift into incoherent states. Third, updater persist-before-publish and digest-correlated activation are required to avoid local key-state rollback or split-brain activation under crash/restart races. Without these guarantees, confidentiality and post-revocation properties can be violated by implementation behavior even when primitives are sound.
+
 \subsection{Migration from FS-only profile}
 A practical migration plan should proceed in phases:
 \begin{enumerate}
@@ -239,10 +289,12 @@ The profile's mandatory KAT set should be treated as conformance gates, not docu
   \item parser differential tests for deterministic encoding rejection,
   \item fault-injection on updater crash/restart windows,
   \item adversarial tests for malformed ExpectedPairs and multi-match recovery.
+  \item CI builds should fail on spec/whitepaper/bibliography version mismatches and on undefined citations after bibtex/pdflatex passes.
 \end{itemize}
 
 \section{Limitations and Future Work}
 \begin{itemize}
+  \item \(N_{\max}\) is fixed for the lifetime of a group in this profile; deployments must provision tree capacity up front.
   \item Barrier merges can become heavy under large, bursty revocation sets; operational budgeting remains important.
   \item Full verification depends on authenticated access to historical public tree states.
   \item Formal verification artifacts can be expanded beyond present conformance/KAT structure.
@@ -263,6 +315,7 @@ This whitepaper describes the final unified profile documented in:
 \texttt{docs/specs.md} (\cityg Unified Spec, v0.1.1 final).
 \end{quote}
 The specification remains normative; this paper is explanatory.
+Normative requirement-language conventions in the specification follow RFC terminology conventions \citep{rfc2119,rfc8174}.
 
 \section{Notation Summary}
 \begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.28\linewidth} X}
