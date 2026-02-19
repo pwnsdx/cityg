@@ -862,6 +862,9 @@ impl CityGServer {
         bundle: &ClientEpochBundle,
     ) -> Result<ServerOutcome, CityGError> {
         let state_before = roster.groups.get(bundle.gid()).cloned().unwrap_or_default();
+        let delta = bundle.membership_delta()?;
+        let barrier_validation =
+            validate_barrier_update_against_roster(&state_before, &bundle.header_map, &delta)?;
 
         // Keep barrier acceptance/state logic on a single deterministic path:
         // groups without explicit prior state are treated as default-initialized.
@@ -897,13 +900,6 @@ impl CityGServer {
         group.pcs_refresh_min_delta_group_ec = barrier_state.pcs_refresh_min_delta_group_ec.max(1);
         group.pcs_refresh_slot_width_ec = barrier_state.pcs_refresh_slot_width_ec.max(1);
 
-        let delta = bundle.membership_delta()?;
-        let barrier_validation =
-            match validate_barrier_update_against_roster(&state_before, &bundle.header_map, &delta)
-            {
-                Ok(result) => result,
-                Err(_) => None,
-            };
         let barrier_version = ctx
             .barrier_group_state(bundle.gid())
             .map(|state| state.barrier_version)

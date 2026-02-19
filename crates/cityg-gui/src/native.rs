@@ -18,7 +18,7 @@ use anchor_seed::{
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use blake3::hash as blake3_hash;
 use ciborium::value::{Integer, Value};
-use cityg_api_client::{CitygApiClient, Error as ApiClientError, MergeTicket};
+use cityg_api_client::{BarrierJoinRecord, CitygApiClient, Error as ApiClientError, MergeTicket};
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
 use cityg_config::CityGConfig;
@@ -88,6 +88,7 @@ fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
 }
 
 const DEFAULT_BARRIER_N_MAX: u64 = 1_024;
+const DEFAULT_MAX_BARRIER_UPDATE_BYTES: u64 = 1_048_576;
 const BARRIER_TREE_INFO: &[u8] = b"city-g|barrier/tree|v1";
 const BARRIER_KEY_INFO: &[u8] = b"city-g|barrier/key|v1";
 const BARRIER_KEYGEN_D_INFO: &[u8] = b"city-g|barrier/keygen-d|v1";
@@ -109,16 +110,24 @@ struct BarrierUpdateDigestPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
 struct BarrierPkHashPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
 
 #[derive(Serialize)]
-struct BarrierTreeLeafHashPreimage<'a>(u64, u64, #[serde(with = "serde_bytes")] &'a [u8]);
+struct BarrierTreeLeafHashPreimage<'a> {
+    n_max: u64,
+    node_index: u64,
+    #[serde(with = "serde_bytes")]
+    pk: &'a [u8],
+}
 
 #[derive(Serialize)]
-struct BarrierTreeNodeHashPreimage<'a>(
-    u64,
-    u64,
-    #[serde(with = "serde_bytes")] &'a [u8],
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-);
+struct BarrierTreeNodeHashPreimage<'a> {
+    n_max: u64,
+    node_index: u64,
+    #[serde(with = "serde_bytes")]
+    pk: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    left_hash: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    right_hash: &'a [u8; 32],
+}
 
 #[derive(Serialize)]
 struct BarrierWrapNoncePreimage(u64, u64);
@@ -274,7 +283,11 @@ fn compute_barrier_tree_hash_recursive(
     if node >= leaf_base {
         return h_l(
             "barrier/tree/leaf-hash",
-            &BarrierTreeLeafHashPreimage(n_max, node, pk.as_slice()),
+            &BarrierTreeLeafHashPreimage {
+                n_max,
+                node_index: node,
+                pk: pk.as_slice(),
+            },
         )
         .map_err(|err| anyhow!("compute barrier leaf hash: {err}"));
     }
@@ -291,7 +304,13 @@ fn compute_barrier_tree_hash_recursive(
     let right_hash = compute_barrier_tree_hash_recursive(right, leaf_base, n_max, pk_entries)?;
     h_l(
         "barrier/tree/node-hash",
-        &BarrierTreeNodeHashPreimage(n_max, node, pk.as_slice(), &left_hash, &right_hash),
+        &BarrierTreeNodeHashPreimage {
+            n_max,
+            node_index: node,
+            pk: pk.as_slice(),
+            left_hash: &left_hash,
+            right_hash: &right_hash,
+        },
     )
     .map_err(|err| anyhow!("compute barrier node hash: {err}"))
 }
@@ -305,6 +324,69 @@ fn sibling_node(node: u64) -> Option<u64> {
     } else {
         Some(node + 1)
     }
+}
+
+fn blank_leaf_and_path(snapshot: &mut [Vec<u8>], leaf_node: u64) -> Result<()> {
+    let mut node = leaf_node;
+    loop {
+        let index =
+            usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
+        let slot = snapshot
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+        slot.clear();
+        if node == 0 {
+            break;
+        }
+        node = (node - 1) / 2;
+    }
+    Ok(())
+}
+
+fn blank_internal_path_from_leaf(snapshot: &mut [Vec<u8>], leaf_node: u64) -> Result<()> {
+    let mut node = leaf_node;
+    while node > 0 {
+        node = (node - 1) / 2;
+        let index =
+            usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
+        let slot = snapshot
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+        slot.clear();
+    }
+    Ok(())
+}
+
+fn apply_join_set_to_snapshot(
+    snapshot: &mut [Vec<u8>],
+    n_max: u64,
+    join_records: &[BarrierJoinRecord],
+) -> Result<()> {
+    let leaf_base = n_max.saturating_sub(1);
+    for record in join_records {
+        let leaf_node = leaf_base.saturating_add(u64::from(record.leaf_index));
+        let index =
+            usize::try_from(leaf_node).map_err(|_| anyhow!("barrier node index out of range"))?;
+        let slot = snapshot
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+        *slot = record.ek_leaf.clone();
+        blank_internal_path_from_leaf(snapshot, leaf_node)?;
+    }
+    Ok(())
+}
+
+fn apply_revoked_set_to_snapshot(
+    snapshot: &mut [Vec<u8>],
+    n_max: u64,
+    revoked_indices: &[u32],
+) -> Result<()> {
+    let leaf_base = n_max.saturating_sub(1);
+    for leaf_index in revoked_indices {
+        let leaf_node = leaf_base.saturating_add(u64::from(*leaf_index));
+        blank_leaf_and_path(snapshot, leaf_node)?;
+    }
+    Ok(())
 }
 
 fn collect_resolution_targets(
@@ -363,10 +445,25 @@ fn to_array16(label: &str, bytes: Vec<u8>) -> Result<[u8; 16]> {
         .map_err(|_| anyhow!("{label} must be 16 bytes"))
 }
 
+fn normalize_max_barrier_update_bytes(limit: u64) -> Result<usize> {
+    if limit == 0 {
+        return Err(anyhow!("max_barrier_update_bytes must be positive"));
+    }
+    usize::try_from(limit).map_err(|_| anyhow!("max_barrier_update_bytes is too large"))
+}
+
 fn parse_barrier_update_for_recover(
     raw_update: &[u8],
     expected_n_max: u64,
+    max_barrier_update_bytes: usize,
 ) -> Result<ParsedBarrierUpdate> {
+    if raw_update.len() > max_barrier_update_bytes {
+        return Err(anyhow!(
+            "barrier_update exceeds max_barrier_update_bytes: {} > {}",
+            raw_update.len(),
+            max_barrier_update_bytes
+        ));
+    }
     if expected_n_max == 0 || !expected_n_max.is_power_of_two() {
         return Err(anyhow!("barrier n_max must be a non-zero power of two"));
     }
@@ -616,6 +713,7 @@ fn try_recover_barrier_from_header(
     header_map: &BTreeMap<u64, Value>,
     weid: &[u8; 32],
     fs_ec: u64,
+    max_barrier_update_bytes: usize,
 ) -> Result<Option<BarrierRecoverResult>> {
     let raw_update = match header_map.get(&hdr::HDR_BARRIER_UPDATE) {
         Some(Value::Bytes(bytes)) => bytes.as_slice(),
@@ -624,7 +722,7 @@ fn try_recover_barrier_from_header(
     };
 
     let n_max = session.barrier_state.n_max.max(1);
-    let parsed = parse_barrier_update_for_recover(raw_update, n_max)?;
+    let parsed = parse_barrier_update_for_recover(raw_update, n_max, max_barrier_update_bytes)?;
 
     if parsed.prev_barrier_version.saturating_add(1) != parsed.barrier_version {
         return Err(anyhow!("barrier version progression is invalid"));
@@ -7765,12 +7863,13 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         .map_err(|_| anyhow!("fs_epoch_commit length"))?;
     let fs_dev_prev_commit: [u8; 32] = bundle
         .header_map
-        .get(&hdr::HDR_FS_DEV_PREV_COMMIT)
+        .get(&hdr::HDR_FS_DEV_COMMIT)
+        .or_else(|| bundle.header_map.get(&hdr::HDR_FS_DEV_PREV_COMMIT))
         .and_then(Value::as_bytes)
         .map(|bytes| bytes.as_slice())
-        .ok_or_else(|| anyhow!("join bundle missing fs_dev_prev_commit"))?
+        .ok_or_else(|| anyhow!("join bundle missing fs_dev commit"))?
         .try_into()
-        .map_err(|_| anyhow!("fs_dev_prev_commit length"))?;
+        .map_err(|_| anyhow!("fs_dev commit length"))?;
     let regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
     let fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
         derive_fs_fingerprint_from_fields(
@@ -7886,7 +7985,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         k_barrier: _,
         kem_tree_hash_after,
         n_max,
-        max_barrier_update_bytes: _,
+        max_barrier_update_bytes,
     } = ticket;
 
     let srx_inputs = SrxInputsOwned::from_cbor(&srx_cbor)
@@ -7920,9 +8019,11 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
     let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &tswe_salt_hash)?;
     let revocation_roots_hash =
         compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
-    let kem_tree_hash_before = bytes32("kem_tree_hash_after", &kem_tree_hash_after)?;
+    let committed_revocation_roots_hash =
+        compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+    let snapshot_hash = bytes32("kem_tree_hash_after", &kem_tree_hash_after)?;
     let barrier_tree_snapshot = client
-        .barrier_fetch_public_tree(&room_id, &kem_tree_hash_before)
+        .barrier_fetch_public_tree(&room_id, &snapshot_hash)
         .await
         .context("fetch barrier public tree snapshot")?;
     let barrier_n_max = if n_max == 0 {
@@ -7941,6 +8042,29 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
             barrier_tree_snapshot.n_max
         ));
     }
+    let join_records = client
+        .barrier_resolve_joins_since(&room_id, barrier_version)
+        .await
+        .context("resolve barrier joins since previous version")?;
+    let committed_revoked_indices = client
+        .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
+        .await
+        .context("resolve committed barrier revoked leaf indices")?;
+    let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
+    apply_join_set_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        barrier_n_max,
+        join_records.as_slice(),
+    )?;
+    apply_revoked_set_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        barrier_n_max,
+        committed_revoked_indices.as_slice(),
+    )?;
+    let leaf_base = barrier_n_max.saturating_sub(1);
+    let revoked_leaf_node = leaf_base.saturating_add(cover_leaf_index);
+    blank_leaf_and_path(snapshot_pre.as_mut_slice(), revoked_leaf_node)?;
+    let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let next_barrier_version = barrier_version.saturating_add(1);
     let barrier_update = build_barrier_update_bytes(
         &gid,
@@ -7950,8 +8074,16 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         barrier_version,
         revocation_roots_hash,
         kem_tree_hash_before,
-        barrier_tree_snapshot.pk_entries.as_slice(),
+        snapshot_pre.as_slice(),
     )?;
+    let max_barrier_update_bytes = normalize_max_barrier_update_bytes(max_barrier_update_bytes)?;
+    if barrier_update.raw_update.len() > max_barrier_update_bytes {
+        return Err(anyhow!(
+            "barrier_update exceeds max_barrier_update_bytes: {} > {}",
+            barrier_update.raw_update.len(),
+            max_barrier_update_bytes
+        ));
+    }
     header.insert(
         hdr::HDR_BARRIER_UPDATE,
         Value::Bytes(barrier_update.raw_update.clone()),
@@ -8145,7 +8277,7 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
         k_barrier: _,
         kem_tree_hash_after,
         n_max,
-        max_barrier_update_bytes: _,
+        max_barrier_update_bytes,
     } = ticket;
 
     if !srx_cbor.is_empty() {
@@ -8181,9 +8313,11 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
     let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &tswe_salt_hash)?;
     let revocation_roots_hash =
         compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
-    let kem_tree_hash_before = bytes32("kem_tree_hash_after", &kem_tree_hash_after)?;
+    let committed_revocation_roots_hash =
+        compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+    let snapshot_hash = bytes32("kem_tree_hash_after", &kem_tree_hash_after)?;
     let barrier_tree_snapshot = client
-        .barrier_fetch_public_tree(&room_id, &kem_tree_hash_before)
+        .barrier_fetch_public_tree(&room_id, &snapshot_hash)
         .await
         .context("fetch barrier public tree snapshot")?;
     let barrier_n_max = if n_max == 0 {
@@ -8202,6 +8336,26 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
             barrier_tree_snapshot.n_max
         ));
     }
+    let join_records = client
+        .barrier_resolve_joins_since(&room_id, barrier_version)
+        .await
+        .context("resolve barrier joins since previous version")?;
+    let committed_revoked_indices = client
+        .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
+        .await
+        .context("resolve committed barrier revoked leaf indices")?;
+    let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
+    apply_join_set_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        barrier_n_max,
+        join_records.as_slice(),
+    )?;
+    apply_revoked_set_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        barrier_n_max,
+        committed_revoked_indices.as_slice(),
+    )?;
+    let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let next_barrier_version = barrier_version.saturating_add(1);
     let barrier_update = build_barrier_update_bytes(
         &gid,
@@ -8211,8 +8365,16 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
         barrier_version,
         revocation_roots_hash,
         kem_tree_hash_before,
-        barrier_tree_snapshot.pk_entries.as_slice(),
+        snapshot_pre.as_slice(),
     )?;
+    let max_barrier_update_bytes = normalize_max_barrier_update_bytes(max_barrier_update_bytes)?;
+    if barrier_update.raw_update.len() > max_barrier_update_bytes {
+        return Err(anyhow!(
+            "barrier_update exceeds max_barrier_update_bytes: {} > {}",
+            barrier_update.raw_update.len(),
+            max_barrier_update_bytes
+        ));
+    }
     let k_fs_after_pcs = derive_k_fs_after_pcs(
         &k_fs_current,
         &we_epoch_id,
@@ -8821,6 +8983,8 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     } else {
         ticket.n_max
     };
+    let ticket_max_barrier_update_bytes =
+        normalize_max_barrier_update_bytes(ticket.max_barrier_update_bytes)?;
     if ticket.cover_leaf_index >= ticket_n_max {
         return Err(anyhow!(
             "merge ticket cover_leaf_index out of range: {} >= {}",
@@ -8924,7 +9088,9 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT) {
         session.fs_epoch_commit = commit;
     }
-    if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT) {
+    if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
+        .or_else(|| header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT))
+    {
         session.fs_dev_prev_commit = commit;
     }
     if let Some(barrier_version) = header_u64(&bundle.header_map, hdr::HDR_BARRIER_VERSION) {
@@ -8971,6 +9137,7 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
                 &bundle.header_map,
                 &session.we_epoch_id,
                 session.fs_ec,
+                ticket_max_barrier_update_bytes,
             ) {
                 Ok(Some(recovered)) => {
                     if recovered.kem_tree_hash_after != ticket_kem_tree_hash_after {
@@ -10065,8 +10232,69 @@ mod tests {
             &header,
             &session.we_epoch_id,
             session.fs_ec,
+            DEFAULT_MAX_BARRIER_UPDATE_BYTES as usize,
         )?;
         assert!(recovered.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn try_recover_barrier_from_header_rejects_oversized_update()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = build_test_session(0xC12, "http://127.0.0.1:9", "room-c2", "cora")?;
+        session.barrier_state.n_max = 8;
+        session.barrier_state.cover_leaf_index = 3;
+        session.barrier_state.barrier_version = 4;
+        session.barrier_state.kem_tree_hash_after = [0xAA; 32];
+
+        let revoked_since_root = [0x11; 32];
+        let revoked_root = [0x22; 32];
+        let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+        let new_public_keys = vec![
+            NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+            NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+            NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        ];
+        let cover =
+            KemTreeCoverPayloadWire(3, vec![10, 4, 1, 0], None, Vec::new(), new_public_keys);
+        let cover_bytes = to_cbor_vec(&cover)?;
+        let update = BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            5,
+            4,
+            8,
+            rrh.to_vec(),
+            session.barrier_state.kem_tree_hash_after.to_vec(),
+            [0xBB; 32].to_vec(),
+            cover_bytes,
+        );
+        let update_bytes = to_cbor_vec(&update)?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(update_bytes.clone()));
+        header.insert(
+            hdr::HDR_REVOKED_SINCE_ROOT,
+            Value::Bytes(revoked_since_root.to_vec()),
+        );
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
+        );
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0xDD; 32]));
+
+        let err = try_recover_barrier_from_header(
+            &session,
+            &header,
+            &session.we_epoch_id,
+            session.fs_ec,
+            update_bytes.len().saturating_sub(1),
+        )
+        .expect_err("oversized barrier_update must be rejected");
+        assert!(
+            err.to_string().contains("exceeds max_barrier_update_bytes"),
+            "unexpected error: {err}"
+        );
         Ok(())
     }
 
@@ -10178,9 +10406,14 @@ mod tests {
         );
         header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0xEE; 32]));
 
-        let recovered =
-            try_recover_barrier_from_header(&session, &header, &session.we_epoch_id, fs_ec)?
-                .ok_or_else(|| anyhow!("expected recover result"))?;
+        let recovered = try_recover_barrier_from_header(
+            &session,
+            &header,
+            &session.we_epoch_id,
+            fs_ec,
+            DEFAULT_MAX_BARRIER_UPDATE_BYTES as usize,
+        )?
+        .ok_or_else(|| anyhow!("expected recover result"))?;
 
         let barrier_salt = h_l("barrier/derive/salt", &BarrierDeriveSaltPreimage(9, &rrh))?;
         let expected_k_barrier = hkdf_blake3(&barrier_salt, &ps_0, BARRIER_KEY_INFO);
@@ -10309,9 +10542,14 @@ mod tests {
         );
         header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0xEF; 32]));
 
-        let err =
-            try_recover_barrier_from_header(&session, &header, &session.we_epoch_id, session.fs_ec)
-                .expect_err("ek_n mismatch must fail closed");
+        let err = try_recover_barrier_from_header(
+            &session,
+            &header,
+            &session.we_epoch_id,
+            session.fs_ec,
+            DEFAULT_MAX_BARRIER_UPDATE_BYTES as usize,
+        )
+        .expect_err("ek_n mismatch must fail closed");
         assert!(
             err.to_string().contains("new_public_keys mismatch"),
             "unexpected error for ek_n mismatch: {err}"
@@ -10430,9 +10668,14 @@ mod tests {
         bad_pkhash[31] ^= 0x01;
         session.barrier_state.pkhash_leaf = bad_pkhash;
 
-        let err =
-            try_recover_barrier_from_header(&session, &header, &session.we_epoch_id, session.fs_ec)
-                .expect_err("AAD mismatch from pkhash_t must fail closed");
+        let err = try_recover_barrier_from_header(
+            &session,
+            &header,
+            &session.we_epoch_id,
+            session.fs_ec,
+            DEFAULT_MAX_BARRIER_UPDATE_BYTES as usize,
+        )
+        .expect_err("AAD mismatch from pkhash_t must fail closed");
         assert!(
             err.to_string().contains("candidate unwrap/decrypt failure"),
             "unexpected error for pkhash_t AAD mismatch: {err}"
@@ -10546,6 +10789,7 @@ mod tests {
             &header,
             &session.we_epoch_id,
             session.fs_ec,
+            DEFAULT_MAX_BARRIER_UPDATE_BYTES as usize,
         )?;
         assert!(
             recovered.is_none(),

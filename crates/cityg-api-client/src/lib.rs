@@ -2043,8 +2043,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_proto_with_retry_rejects_missing_message_token()
-    -> Result<(), Box<dyn StdError>> {
+    async fn post_proto_with_retry_rejects_missing_message_token() -> Result<(), Box<dyn StdError>>
+    {
         let (base_url, handle) = start_auth_header_server().await?;
         let client = CitygApiClient::new(base_url);
         let err = client

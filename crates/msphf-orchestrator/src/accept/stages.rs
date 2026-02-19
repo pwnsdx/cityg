@@ -30,7 +30,6 @@ pub(super) fn ensure_merge_join_keys_absent(
     for key in [
         super::HDR_HP_BYTES,
         super::HDR_POP_ALG,
-        super::HDR_POP_PK,
         super::HDR_POP_SIG,
         super::HDR_BOOTSTRAP_ALG,
         super::HDR_BOOTSTRAP_SIG,
@@ -731,6 +730,14 @@ mod tests {
 
         let err = ensure_merge_join_keys_absent(&header).expect_err("join keys must be rejected");
         expect_freeze(err, FREEZE_MERGE_JOIN_KEYS);
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_merge_join_keys_absent_allows_author_device_pk() -> Result<()> {
+        let mut header = base_header();
+        header.insert(super::HDR_POP_PK, Value::Bytes(vec![0xA5; 32]));
+        ensure_merge_join_keys_absent(&header)?;
         Ok(())
     }
 

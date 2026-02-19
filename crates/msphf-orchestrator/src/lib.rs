@@ -3113,14 +3113,13 @@ pub fn joiner_kgen_merge_or<'a>(
         result.header_map.remove(&HDR_FS_PURGE_TIMES);
     }
 
-    for key in [
-        HDR_HP_BYTES,
-        HDR_HP_COMMIT,
-        HDR_POP_ALG,
-        HDR_POP_PK,
-        HDR_POP_SIG,
-    ] {
+    for key in [HDR_HP_BYTES, HDR_HP_COMMIT, HDR_POP_ALG, HDR_POP_SIG] {
         result.header_map.remove(&key);
+    }
+    if let Some(pop_keys) = params.pop_keys.as_ref() {
+        result
+            .header_map
+            .insert(HDR_POP_PK, Value::Bytes(pop_keys.public_key.to_vec()));
     }
 
     let pivot = select_pivot_parity(retired_parities)?;
@@ -5516,7 +5515,6 @@ mod tests {
         for key in [
             HDR_HP_BYTES,
             HDR_POP_ALG,
-            HDR_POP_PK,
             HDR_POP_SIG,
             HDR_SRX_MODE,
             HDR_SRX_COMMIT,
@@ -5529,6 +5527,10 @@ mod tests {
                 "expected key {key} to be stripped from merge header",
             );
         }
+        assert!(
+            result.header_map.contains_key(&HDR_POP_PK),
+            "expected author device key to be retained on merge header"
+        );
 
         let Value::Bytes(rho_bytes) = result
             .header_map

@@ -73,12 +73,48 @@ impl AcceptanceContext {
             FREEZE_FS_JOIN_MISSING,
             "fs_checkpoint_ec",
         )?;
-        let _barrier_version = header_u64_or_freeze(
+        let fs_ec = header_u64_or_freeze(header_map, HDR_FS_EC, FREEZE_FS_JOIN_MISSING, "fs_ec")?;
+        let barrier_version = header_u64_or_freeze(
             header_map,
             HDR_BARRIER_VERSION,
             FREEZE_FS_JOIN_MISSING,
             "barrier_version",
         )?;
+        let fs_epoch_commit = header_bytes32_or_freeze(
+            header_map,
+            HDR_FS_EPOCH_COMMIT,
+            FREEZE_FS_JOIN_MISSING,
+            "fs_epoch_commit",
+        )?;
+        let fs_dev_prev_commit = header_bytes32_or_freeze(
+            header_map,
+            HDR_FS_DEV_PREV_COMMIT,
+            FREEZE_FS_JOIN_MISSING,
+            "fs_dev_prev_commit",
+        )?;
+        let fs_dev_commit = header_bytes32_or_freeze(
+            header_map,
+            HDR_FS_DEV_COMMIT,
+            FREEZE_FS_JOIN_MISSING,
+            "fs_dev_commit",
+        )?;
+        let pop_pk_bytes = header_map
+            .get(&HDR_POP_PK)
+            .and_then(Value::as_bytes)
+            .map(ToOwned::to_owned);
+        let barrier_update_digest = compute_barrier_update_digest(header_map)?;
+        if let Some(pop_pk_bytes) = pop_pk_bytes.as_deref() {
+            let device_state = self.device_chain_get(parts.gid, pop_pk_bytes);
+            self.verify_device_chain_state(
+                pop_pk_bytes,
+                fs_ec,
+                &fs_dev_prev_commit,
+                &fs_dev_commit,
+                device_state,
+                barrier_version,
+                &barrier_update_digest,
+            )?;
+        }
 
         let fs_evolution_boundary = match header_map.get(&HDR_FS_EVOLUTION_BOUNDARY) {
             Some(Value::Bool(flag)) => *flag,
@@ -576,31 +612,6 @@ impl AcceptanceContext {
             self.srx_root_sw()
         };
 
-        let fs_epoch_commit = header_map
-            .get(&HDR_FS_EPOCH_COMMIT)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) if bytes.len() == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(bytes);
-                    Some(arr)
-                }
-                _ => None,
-            });
-        let fs_dev_commit = header_map
-            .get(&HDR_FS_DEV_COMMIT)
-            .and_then(|value| match value {
-                Value::Bytes(bytes) if bytes.len() == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(bytes);
-                    Some(arr)
-                }
-                _ => None,
-            });
-        let fs_ec_opt = header_map.get(&HDR_FS_EC).and_then(|value| match value {
-            Value::Integer(int) => u64::try_from(*int).ok(),
-            _ => None,
-        });
-
         let parity = PivotParity {
             gid: parts.gid.to_vec(),
             cat: parts.cat.to_vec(),
@@ -630,9 +641,9 @@ impl AcceptanceContext {
             srx_root_sw,
             is_join: false,
             hp_envelope: hp_envelope_candidate.unwrap_or_else(|| pivot_parity.hp_envelope.clone()),
-            fs_epoch_commit,
-            fs_ec: fs_ec_opt,
-            fs_dev_commit,
+            fs_epoch_commit: Some(fs_epoch_commit),
+            fs_ec: Some(fs_ec),
+            fs_dev_commit: Some(fs_dev_commit),
         };
         if srx_required_for_merge {
             if self.srx_root_sw() != Some(srx_root_sw_before) {
@@ -642,8 +653,13 @@ impl AcceptanceContext {
         }
         self.pivot_store.insert(parity, now);
 
+        if let Some(pop_pk_bytes) = pop_pk_bytes.as_deref() {
+            let entry = self.device_chain_entry_mut(parts.gid, pop_pk_bytes);
+            entry.last_commit = Some(fs_dev_commit);
+            entry.last_ec = fs_ec;
+        }
         self.set_last_checkpoint_ec(fs_checkpoint_ec);
-        self.record_accepted_ec(fs_checkpoint_ec);
+        self.record_accepted_ec(fs_ec);
 
         Ok(AcceptanceOutcome {
             kind: AcceptanceKind::Merge {
@@ -659,9 +675,9 @@ impl AcceptanceContext {
             accept_seq,
             accept_time: now,
             mh_note,
-            fs_epoch_commit,
-            fs_ec: fs_ec_opt,
-            fs_dev_commit,
+            fs_epoch_commit: Some(fs_epoch_commit),
+            fs_ec: Some(fs_ec),
+            fs_dev_commit: Some(fs_dev_commit),
         })
     }
 }
@@ -692,7 +708,7 @@ mod tests {
     type PreparedMergeHeader = (BTreeMap<u64, Value>, Vec<[u8; 32]>);
 
     fn build_merge_fixture() -> Result<MergeFixture> {
-        let (parts, params, join_joiner) = sample_parts_params_joiner();
+        let (parts, mut params, join_joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (header, _, witness) = header_ready_with_pop(&join_joiner, &parts, &pop_pk, &pop_sk);
 
@@ -700,6 +716,12 @@ mod tests {
         configure_bootstrap(&mut ctx);
         seed_capss_with(&mut ctx, &witness);
         accept_with_header(&mut ctx, &parts, &header)?;
+
+        let device_state = ctx
+            .device_chain_get(parts.gid, &pop_pk)
+            .expect("join fixture must seed device-chain state");
+        params.fs_join.fs_ec = device_state.last_ec;
+        params.fs_join.fs_dev_prev_commit = device_state.last_commit.unwrap_or([0u8; 32]);
 
         let mut parent_root = [0u8; 32];
         parent_root.copy_from_slice(parts.parent_root);
@@ -1116,7 +1138,45 @@ mod tests {
         assert_eq!(outcome.mh_note, merge_joiner.mh_note);
         assert_eq!(outcome.we_epoch_id, merge_joiner.we_epoch_id);
         assert_eq!(outcome.seed_ctx_hash, merge_joiner.seed_ctx_hash);
+        if let Some(expected_pop_pk) = header.get(&HDR_POP_PK).and_then(Value::as_bytes) {
+            let expected_fs_ec = match header.get(&HDR_FS_EC) {
+                Some(Value::Integer(value)) => {
+                    u64::try_from(*value).expect("merge fs_ec must be non-negative")
+                }
+                _ => panic!("merge header must contain fs_ec"),
+            };
+            let mut expected_dev_commit = [0u8; 32];
+            expected_dev_commit.copy_from_slice(
+                header
+                    .get(&HDR_FS_DEV_COMMIT)
+                    .and_then(Value::as_bytes)
+                    .expect("merge header must contain fs_dev_commit"),
+            );
+            let device_state = ctx
+                .device_chain_get(parts.gid, expected_pop_pk)
+                .expect("merge acceptance must update device chain when pop pk is present");
+            assert_eq!(device_state.last_ec, expected_fs_ec);
+            assert_eq!(device_state.last_commit, Some(expected_dev_commit));
+        }
         Ok(())
+    }
+
+    #[test]
+    fn merge_anchor_rejects_fs_dev_chain_bind_mismatch() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let (pop_pk, _) = sample_pop_keys();
+        header.insert(HDR_POP_PK, Value::Bytes(pop_pk));
+        header.insert(HDR_FS_DEV_COMMIT, Value::Bytes([0xA5; 32].to_vec()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_FS_DEV_CHAIN_BIND_MISMATCH,
+        )
     }
 
     #[test]

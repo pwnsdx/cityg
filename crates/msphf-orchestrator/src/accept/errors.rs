@@ -175,6 +175,7 @@ pub const FREEZE_BARRIER_UPDATE_MALFORMED: FreezeError = FreezeError {
     reason: "barrier_update_malformed",
 };
 
+#[allow(dead_code)]
 pub const FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE: FreezeError = FreezeError {
     code: 9608,
     reason: "barrier_tree_hash_chain_failure",
@@ -195,7 +196,8 @@ pub const FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED: FreezeError = FreezeError {
     reason: "pcs_refresh_rate_limited",
 };
 
-pub const FREEZE_BARRIER_PCS_REFRESH_SLOT_CONFLICT: FreezeError = FreezeError {
-    code: 96013,
-    reason: "pcs_refresh_slot_conflict",
-};
+pub const FREEZE_BARRIER_PCS_REFRESH_FORBIDDEN_WHILE_PENDING_REVOCATIONS: FreezeError =
+    FreezeError {
+        code: 96013,
+        reason: "pcs_refresh_forbidden_while_pending_revocations",
+    };

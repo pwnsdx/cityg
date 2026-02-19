@@ -8,7 +8,9 @@ use anchor_seed::{
 };
 use anyhow::{Context, Result, anyhow};
 use ciborium::value::{Integer, Value};
-use cityg_api_client::{CitygApiClient, Error as ApiClientError, IdentityBinding};
+use cityg_api_client::{
+    BarrierJoinRecord, CitygApiClient, Error as ApiClientError, IdentityBinding,
+};
 #[cfg(test)]
 use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
@@ -114,16 +116,24 @@ struct BarrierRootsPreimage<'a>(
 );
 
 #[derive(Serialize)]
-struct BarrierTreeLeafHashPreimage<'a>(u64, u64, #[serde(with = "serde_bytes")] &'a [u8]);
+struct BarrierTreeLeafHashPreimage<'a> {
+    n_max: u64,
+    node_index: u64,
+    #[serde(with = "serde_bytes")]
+    pk: &'a [u8],
+}
 
 #[derive(Serialize)]
-struct BarrierTreeNodeHashPreimage<'a>(
-    u64,
-    u64,
-    #[serde(with = "serde_bytes")] &'a [u8],
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-);
+struct BarrierTreeNodeHashPreimage<'a> {
+    n_max: u64,
+    node_index: u64,
+    #[serde(with = "serde_bytes")]
+    pk: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    left_hash: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    right_hash: &'a [u8; 32],
+}
 
 #[derive(Serialize)]
 struct BarrierPkHashPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
@@ -170,7 +180,11 @@ fn compute_barrier_tree_hash_recursive(
     if node >= leaf_base {
         return h_l(
             "barrier/tree/leaf-hash",
-            &BarrierTreeLeafHashPreimage(n_max, node, pk.as_slice()),
+            &BarrierTreeLeafHashPreimage {
+                n_max,
+                node_index: node,
+                pk: pk.as_slice(),
+            },
         )
         .map_err(|err| anyhow!("compute barrier leaf hash: {err}"));
     }
@@ -187,7 +201,13 @@ fn compute_barrier_tree_hash_recursive(
     let right_hash = compute_barrier_tree_hash_recursive(right, leaf_base, n_max, pk_entries)?;
     h_l(
         "barrier/tree/node-hash",
-        &BarrierTreeNodeHashPreimage(n_max, node, pk.as_slice(), &left_hash, &right_hash),
+        &BarrierTreeNodeHashPreimage {
+            n_max,
+            node_index: node,
+            pk: pk.as_slice(),
+            left_hash: &left_hash,
+            right_hash: &right_hash,
+        },
     )
     .map_err(|err| anyhow!("compute barrier node hash: {err}"))
 }
@@ -206,6 +226,69 @@ fn sibling_node(node: u64) -> Option<u64> {
     } else {
         Some(node + 1)
     }
+}
+
+fn blank_leaf_and_path(snapshot: &mut [Vec<u8>], leaf_node: u64) -> Result<()> {
+    let mut node = leaf_node;
+    loop {
+        let index =
+            usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
+        let slot = snapshot
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+        slot.clear();
+        if node == 0 {
+            break;
+        }
+        node = (node - 1) / 2;
+    }
+    Ok(())
+}
+
+fn blank_internal_path_from_leaf(snapshot: &mut [Vec<u8>], leaf_node: u64) -> Result<()> {
+    let mut node = leaf_node;
+    while node > 0 {
+        node = (node - 1) / 2;
+        let index =
+            usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
+        let slot = snapshot
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+        slot.clear();
+    }
+    Ok(())
+}
+
+fn apply_join_set_to_snapshot(
+    snapshot: &mut [Vec<u8>],
+    n_max: u64,
+    join_records: &[BarrierJoinRecord],
+) -> Result<()> {
+    let leaf_base = n_max.saturating_sub(1);
+    for record in join_records {
+        let leaf_node = leaf_base.saturating_add(u64::from(record.leaf_index));
+        let index =
+            usize::try_from(leaf_node).map_err(|_| anyhow!("barrier node index out of range"))?;
+        let slot = snapshot
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+        *slot = record.ek_leaf.clone();
+        blank_internal_path_from_leaf(snapshot, leaf_node)?;
+    }
+    Ok(())
+}
+
+fn apply_revoked_set_to_snapshot(
+    snapshot: &mut [Vec<u8>],
+    n_max: u64,
+    revoked_indices: &[u32],
+) -> Result<()> {
+    let leaf_base = n_max.saturating_sub(1);
+    for leaf_index in revoked_indices {
+        let leaf_node = leaf_base.saturating_add(u64::from(*leaf_index));
+        blank_leaf_and_path(snapshot, leaf_node)?;
+    }
+    Ok(())
 }
 
 fn collect_resolution_targets(
@@ -876,9 +959,10 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         "fs_dev_prev_commit",
         stored
             .header_map
-            .get(&hdr::HDR_FS_DEV_PREV_COMMIT)
+            .get(&hdr::HDR_FS_DEV_COMMIT)
+            .or_else(|| stored.header_map.get(&hdr::HDR_FS_DEV_PREV_COMMIT))
             .and_then(Value::as_bytes)
-            .ok_or(anyhow!("stored bundle missing fs_dev_prev_commit"))?,
+            .ok_or(anyhow!("stored bundle missing fs_dev commit"))?,
     )?;
 
     let snapshot = fs_state.snapshot();
@@ -993,12 +1077,14 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let revoked_since_root_arr = bytes32("revoked_since_root", &ticket.revoked_since_root)?;
     let revoked_root_arr = bytes32("revoked_root", &ticket.revoked_root)?;
     let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
-    let kem_tree_hash_before = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
+    let snapshot_hash = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
     let next_barrier_version = ticket.barrier_version.saturating_add(1);
     let revocation_roots_hash =
         compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
+    let committed_revocation_roots_hash =
+        compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
     let barrier_tree_snapshot = client
-        .barrier_fetch_public_tree(&session.room_id, &kem_tree_hash_before)
+        .barrier_fetch_public_tree(&session.room_id, &snapshot_hash)
         .await
         .context("fetch barrier public tree snapshot")?;
     let barrier_n_max = if ticket.n_max == 0 {
@@ -1019,6 +1105,29 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             barrier_tree_snapshot.n_max
         ));
     }
+    let join_records = client
+        .barrier_resolve_joins_since(&session.room_id, ticket.barrier_version)
+        .await
+        .context("resolve barrier joins since previous version")?;
+    let committed_revoked_indices = client
+        .barrier_resolve_revoked_leaves(&session.room_id, &committed_revocation_roots_hash)
+        .await
+        .context("resolve committed barrier revoked leaf indices")?;
+    let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
+    apply_join_set_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        barrier_n_max,
+        join_records.as_slice(),
+    )?;
+    apply_revoked_set_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        barrier_n_max,
+        committed_revoked_indices.as_slice(),
+    )?;
+    let leaf_base = barrier_n_max.saturating_sub(1);
+    let revoked_leaf_node = leaf_base.saturating_add(ticket.cover_leaf_index);
+    blank_leaf_and_path(snapshot_pre.as_mut_slice(), revoked_leaf_node)?;
+    let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let barrier_update = build_barrier_update_bytes(
         barrier_n_max,
         ticket.cover_leaf_index,
@@ -1026,7 +1135,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         ticket.barrier_version,
         revocation_roots_hash,
         kem_tree_hash_before,
-        barrier_tree_snapshot.pk_entries.as_slice(),
+        snapshot_pre.as_slice(),
     )?;
     header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(barrier_update));
     header.insert(
@@ -1226,7 +1335,6 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     for key in [
         hdr::HDR_HP_BYTES,
         hdr::HDR_POP_ALG,
-        hdr::HDR_POP_PK,
         hdr::HDR_POP_SIG,
         hdr::HDR_BOOTSTRAP_ALG,
         hdr::HDR_BOOTSTRAP_PK,

@@ -803,13 +803,8 @@ impl AcceptanceContext {
         };
 
         if state.barrier_initialized && has_barrier_update {
-            let Some(parsed_update) = decision.parsed_barrier_update.as_ref() else {
+            if decision.parsed_barrier_update.is_none() {
                 return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
-            };
-            if parsed_update.kem_tree_hash_before != state.kem_tree_hash_after {
-                return Err(AcceptanceError::Freeze(
-                    FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
-                ));
             }
         }
 
@@ -836,6 +831,11 @@ impl AcceptanceContext {
         let revocation_changed = revocation_roots_hash != state.barrier_roots_hash;
 
         if revocation_changed {
+            if barrier_update_reason == Some(1) {
+                return Err(AcceptanceError::Freeze(
+                    FREEZE_BARRIER_PCS_REFRESH_FORBIDDEN_WHILE_PENDING_REVOCATIONS,
+                ));
+            }
             let Some(parsed_update) = decision.parsed_barrier_update.as_ref() else {
                 return Err(AcceptanceError::Freeze(
                     FREEZE_BARRIER_UPDATE_REQUIRED_ON_REVOCATION_CHANGE,
@@ -881,7 +881,7 @@ impl AcceptanceContext {
                 let slot_width = state.pcs_refresh_slot_width_ec.max(1);
                 if fs_ec / slot_width == last_group_refresh / slot_width {
                     return Err(AcceptanceError::Freeze(
-                        FREEZE_BARRIER_PCS_REFRESH_SLOT_CONFLICT,
+                        FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED,
                     ));
                 }
             }
@@ -4114,7 +4114,7 @@ mod tests {
         let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
         assert!(matches!(
             result,
-            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_PCS_REFRESH_SLOT_CONFLICT
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED
         ));
 
         ctx.barrier_group_state_entry_mut(gid)
@@ -4271,6 +4271,14 @@ mod tests {
             Err(AcceptanceError::Freeze(code))
                 if code == FREEZE_BARRIER_UPDATE_REQUIRED_ON_REVOCATION_CHANGE
         ));
+
+        insert_valid_barrier_update(&mut header, 1_024, 0, 3, 3, [0xAA; 32], 1)?;
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code))
+                if code == FREEZE_BARRIER_PCS_REFRESH_FORBIDDEN_WHILE_PENDING_REVOCATIONS
+        ));
         Ok(())
     }
 
@@ -4378,7 +4386,8 @@ mod tests {
     }
 
     #[test]
-    fn barrier_update_hash_chain_mismatch_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    fn barrier_update_hash_chain_is_not_gated_in_acceptance()
+    -> Result<(), Box<dyn std::error::Error>> {
         let gid = b"gid-hash-chain-mismatch".as_slice();
         let mut ctx = AcceptanceContext::with_defaults();
 
@@ -4402,11 +4411,10 @@ mod tests {
         ctx.insert_barrier_group_state(gid, state);
 
         let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
-        assert!(matches!(
-            result,
-            Err(AcceptanceError::Freeze(code))
-                if code == FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE
-        ));
+        assert!(
+            result.is_ok(),
+            "hash-chain checks run in barrier validators; gating should not reject solely on kem_tree_hash_before"
+        );
         Ok(())
     }
 
