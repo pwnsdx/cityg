@@ -484,6 +484,59 @@ mod tests {
     }
 
     #[test]
+    fn parse_barrier_update_rejects_non_32_hash_fields() -> Result<(), AcceptanceError> {
+        let mut header = make_valid_header()?;
+        let mut update = extract_update(&header)?;
+        update.4 = vec![0x11; 31];
+        replace_update(&mut header, &update)?;
+        assert!(parse_barrier_update_from_header(&header, 8, 1_000_000).is_err());
+
+        let mut header = make_valid_header()?;
+        let mut update = extract_update(&header)?;
+        update.5 = vec![0x22; 33];
+        replace_update(&mut header, &update)?;
+        assert!(parse_barrier_update_from_header(&header, 8, 1_000_000).is_err());
+
+        let mut header = make_valid_header()?;
+        let mut update = extract_update(&header)?;
+        update.6 = vec![0x33; 0];
+        replace_update(&mut header, &update)?;
+        assert!(parse_barrier_update_from_header(&header, 8, 1_000_000).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_barrier_update_accepts_sorted_revoked_hint() -> Result<(), AcceptanceError> {
+        let mut header = make_valid_header()?;
+        let mut update = extract_update(&header)?;
+        let mut cover: KemTreeCoverPayloadWire = parse_deterministic(update.7.as_slice())?;
+        cover.2 = Some(vec![0, 2, 7]);
+        update.7 = to_cbor_vec(&cover).map_err(|_| malformed())?;
+        replace_update(&mut header, &update)?;
+        let parsed = parse_barrier_update_from_header(&header, 8, 1_000_000)?;
+        assert_eq!(parsed.barrier_version, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_barrier_update_rejects_out_of_range_node_ciphertext() -> Result<(), AcceptanceError> {
+        let mut header = make_valid_header()?;
+        let mut update = extract_update(&header)?;
+        let mut cover: KemTreeCoverPayloadWire = parse_deterministic(update.7.as_slice())?;
+        cover.3 = vec![NodeCiphertextWire(
+            15, // max index for n_max=8 is 14
+            3,
+            vec![0xAA; 16],
+            vec![0xBB; ml_kem_ciphertext_bytes()],
+            vec![0xCC; 48],
+        )];
+        update.7 = to_cbor_vec(&cover).map_err(|_| malformed())?;
+        replace_update(&mut header, &update)?;
+        assert!(parse_barrier_update_from_header(&header, 8, 1_000_000).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn parse_deterministic_rejects_non_canonical_cbor() {
         // [1] encoded with non-shortest uint form (0x18 0x01).
         let non_canonical = [0x81u8, 0x18, 0x01];

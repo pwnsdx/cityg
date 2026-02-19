@@ -5631,6 +5631,32 @@ mod tests {
     }
 
     #[test]
+    fn joiner_merge_requires_pop_keys_even_with_header_pop_pk()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = sample_fixture();
+        let mut params = fixture.params();
+        params.pop_keys = None;
+
+        let mut header_seed = sample_header();
+        let (header_pop_pk, _) = crate::accept::fixtures::sample_pop_keys();
+        header_seed.insert(HDR_POP_PK, Value::Bytes(header_pop_pk));
+
+        let pivot = parity_from_parts(&fixture.parts, 9, 0x21, 0x31, 0x41, 0x51, 0x61);
+        let retired = vec![pivot];
+        let err = joiner_kgen_merge_or(
+            header_seed,
+            &retired,
+            None,
+            fixture.parts.clone(),
+            params,
+            None,
+        )
+        .expect_err("merge generation must require params.pop_keys");
+        assert!(format!("{err:?}").contains("merge requires pop_public_key"));
+        Ok(())
+    }
+
+    #[test]
     fn joiner_merge_from_acceptances_collects_heads() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let params = fixture.params();
