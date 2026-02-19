@@ -13,6 +13,7 @@ impl AcceptanceContext {
         we_epoch_id_claim: [u8; 32],
         header_map: &BTreeMap<u64, Value>,
         mh_note: Option<String>,
+        barrier_update_digest: [u8; 32],
         now: AcceptInstant,
     ) -> Result<AcceptanceOutcome, AcceptanceError> {
         ensure_tswe_alg(header_map)?;
@@ -105,6 +106,7 @@ impl AcceptanceContext {
         let mut fs_dev_commit_opt: Option<[u8; 32]> = None;
         #[allow(unused_assignments)]
         let mut fs_dev_prev_commit_opt: Option<[u8; 32]> = None;
+        let barrier_version: u64;
 
         {
             let _ = header_map
@@ -169,6 +171,12 @@ impl AcceptanceContext {
                 FREEZE_FS_JOIN_MISSING,
                 "fs_dev_commit",
             )?;
+            barrier_version = header_u64_or_freeze(
+                header_map,
+                HDR_BARRIER_VERSION,
+                FREEZE_FS_JOIN_MISSING,
+                "barrier_version",
+            )?;
 
             let device_key_state = self.device_chain_get(parts.gid, &pop_pk_bytes);
             self.verify_device_chain_state(
@@ -177,6 +185,8 @@ impl AcceptanceContext {
                 &fs_dev_prev_commit,
                 &fs_dev_commit,
                 device_key_state,
+                barrier_version,
+                &barrier_update_digest,
             )?;
 
             fs_epoch_commit_opt = Some(fs_epoch_commit);
@@ -398,6 +408,8 @@ impl AcceptanceContext {
             &fs_dev_prev_commit,
             &fs_dev_commit,
             fresh_device_state,
+            barrier_version,
+            &barrier_update_digest,
         )?;
         {
             let entry = self.device_chain_entry_mut(parts.gid, &pop_pk_bytes);

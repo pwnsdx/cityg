@@ -29,6 +29,7 @@ rand = "0.8"
 pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
 pqcrypto-kyber = { version = "0.8", default-features = false, features = ["std"] }
 pqcrypto-traits = "0.3"
+ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }
 hex = "0.4"
 ciborium = "0.2"
 dirs = "5"

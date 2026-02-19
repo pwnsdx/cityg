@@ -11,7 +11,7 @@ use serde::Serialize;
 const VOLATILE_KEYS: [u64; 6] = [11, 16, 43, 46, 89, 91];
 /// Header keys that must never appear in `ANCHOR_SEED_CTX`.
 // The unified spec excludes proof (95, 118, 119, 125), SRX (120–124) and bootstrap (130–132) keys.
-// FS metadata (139–142) and device-chain keys (152–153) are retained per docs/specs-unified-fs.md §12.0.
+// FS metadata (139–142) and device-chain keys (152–153) are retained per docs/specs.md.
 const FORBIDDEN_SEED_CTX_KEYS: &[u64] = &[
     93, 94, // rho commit and seed bundle commit must be excluded
     95, 96, 97, 98, 99, 100, // msphf_hp + proof artifacts

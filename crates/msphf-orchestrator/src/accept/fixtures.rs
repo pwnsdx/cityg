@@ -200,6 +200,7 @@ pub(crate) fn params() -> OrchestrationParams<'static> {
         },
         fs_policy_version: "7",
         fs_epoch_base_ts: 0,
+        barrier_version: 0,
         fs_join: crate::FsJoinInputs {
             fs_ec: 0,
             fs_epoch_commit: [0xAA; 32],
@@ -216,6 +217,7 @@ pub(crate) fn sample_header() -> BTreeMap<u64, Value> {
     let (pk, _) = crate::kbroad_test_keys();
     map.insert(HDR_KBROAD_PUB, Value::Bytes(pk.to_vec()));
     map.insert(HDR_FS_POLICY_VERSION, Value::Integer(Integer::from(7u64)));
+    map.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(0u64)));
     map
 }
 
@@ -884,14 +886,19 @@ mod tests {
         let (inputs, proof) = sample_hp_inputs();
         assert_eq!(inputs.msphf_crs_id, RLWE_CRS_ID_DEFAULT);
         assert_eq!(inputs.params_id, RLWE_PARAMS_ID_MOCK);
-        assert!(!crate::proof_to_cbor(&proof).expect("proof to cbor").is_empty());
+        assert!(
+            !crate::proof_to_cbor(&proof)
+                .expect("proof to cbor")
+                .is_empty()
+        );
     }
 
     #[test]
     fn reseal_header_reinstates_bootstrap_material() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
-        let (mut header, expected_weid) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        let (mut header, expected_weid) =
+            header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         let _witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);
         header.remove(&HDR_BOOTSTRAP_SIG);
         header.remove(&HDR_BOOTSTRAP_PK);
@@ -909,8 +916,8 @@ mod tests {
     }
 
     #[test]
-    fn mutate_srx_payload_updates_commit_meta_and_preserves_leaf() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn mutate_srx_payload_updates_commit_meta_and_preserves_leaf()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut header = BTreeMap::new();
         let payload = empty_srx_payload_value();
         header.insert(HDR_SRX_PAYLOAD, Value::Bytes(encode_value(&payload)));
@@ -952,8 +959,8 @@ mod tests {
     }
 
     #[test]
-    fn mutate_srx_payload_preserving_leaf_auto_keeps_expected_leaf() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn mutate_srx_payload_preserving_leaf_auto_keeps_expected_leaf()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut header = BTreeMap::new();
         let payload = empty_srx_payload_value();
         header.insert(HDR_SRX_PAYLOAD, Value::Bytes(encode_value(&payload)));
@@ -968,12 +975,8 @@ mod tests {
             |_| {},
         );
 
-        let expected_leaf = crate::compute_leaf_id(
-            crate::LeafIdMode::PerGroup,
-            &gid,
-            "ML-DSA-65",
-            &pop_pk,
-        )?;
+        let expected_leaf =
+            crate::compute_leaf_id(crate::LeafIdMode::PerGroup, &gid, "ML-DSA-65", &pop_pk)?;
         let payload_bytes = match header.get(&HDR_SRX_PAYLOAD) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => panic!("payload bytes missing"),

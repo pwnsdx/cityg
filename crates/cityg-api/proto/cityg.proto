@@ -232,12 +232,25 @@ message JoinTicketResponse {
   bytes bootstrap_public = 20;
   optional IdentityBinding confirmed_binding = 21;  // Server confirms the binding
   uint64 kbroad_generation = 22;
+  uint64 barrier_version = 23;
+  string profile_version = 24;
+  uint64 cover_leaf_index = 25;
+  bytes k_barrier = 26;
+  bytes kem_tree_hash_after = 27;
+  uint64 n_max = 28;
+  uint64 max_barrier_update_bytes = 29;
 }
 
 message MergeTicketRequest {
   reserved 1000 to 1999;
   string room_id = 1;
   bytes leaf_id = 2;
+  MergeTicketIntent intent = 3;
+}
+
+enum MergeTicketIntent {
+  MERGE_TICKET_INTENT_LEAVE = 0;
+  MERGE_TICKET_INTENT_REFRESH = 1;
 }
 
 message MergeTicketResponse {
@@ -262,6 +275,55 @@ message MergeTicketResponse {
   string fs_policy_version = 18;
   uint64 fs_epoch_base_ts = 19;
   uint64 kbroad_generation = 20;
+  uint64 barrier_version = 21;
+  string profile_version = 22;
+  uint64 cover_leaf_index = 23;
+  bytes k_barrier = 24;
+  bytes kem_tree_hash_after = 25;
+  uint64 n_max = 26;
+  uint64 max_barrier_update_bytes = 27;
+}
+
+message BarrierResolveRevokedLeavesRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  bytes revocation_roots_hash = 2;
+}
+
+message BarrierResolveRevokedLeavesResponse {
+  reserved 1000 to 1999;
+  repeated uint32 leaf_indices = 1;
+}
+
+message BarrierJoinLeafRecord {
+  reserved 1000 to 1999;
+  bytes device_pk = 1;
+  uint32 leaf_index = 2;
+  bytes ek_leaf = 3;
+}
+
+message BarrierResolveJoinsSinceRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  uint64 prev_barrier_version = 2;
+}
+
+message BarrierResolveJoinsSinceResponse {
+  reserved 1000 to 1999;
+  repeated BarrierJoinLeafRecord records = 1;
+}
+
+message BarrierFetchPublicTreeRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  bytes kem_tree_hash_after = 2;
+}
+
+message BarrierFetchPublicTreeResponse {
+  reserved 1000 to 1999;
+  uint64 n_max = 1;
+  bytes kem_tree_hash_after = 2;
+  repeated bytes pk_entries = 3;
 }
 
 message BootstrapRoomRequest {

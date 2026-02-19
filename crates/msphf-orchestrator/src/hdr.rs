@@ -35,6 +35,10 @@ pub const HDR_ROLLUP_FS_MODE: u64 = 138;
 pub const HDR_BOOTSTRAP_ALG: u64 = 170;
 pub const HDR_BOOTSTRAP_SIG: u64 = 171;
 pub const HDR_BOOTSTRAP_PK: u64 = 172;
+pub const HDR_BARRIER_UPDATE: u64 = 175;
+pub const HDR_BARRIER_VERSION: u64 = 176;
+pub const HDR_BARRIER_LEAF_PK: u64 = 177;
+pub const HDR_BARRIER_UPDATE_REASON: u64 = 178;
 pub const HDR_POLICY_VERSION: u64 = 140; // legacy policy version field (pre-FS profiles)
 pub const HDR_FS_POLICY_VERSION: u64 = 139;
 pub const HDR_FS_EC: u64 = 141;
@@ -49,6 +53,7 @@ pub const HDR_VRF_MASK_A: u64 = 154;
 pub const HDR_VRF_MASK_B: u64 = 155;
 pub const HDR_VRF_PUBLIC_KEY: u64 = 156;
 pub const HDR_FS_CHECKPOINT_EC: u64 = 148;
+pub const HDR_REVOKED_SINCE_ROOT: u64 = 112;
 pub const HDR_REVOKED_ROOT: u64 = 113;
 
 #[cfg(test)]
@@ -95,6 +100,10 @@ mod tests {
             HDR_BOOTSTRAP_ALG,
             HDR_BOOTSTRAP_SIG,
             HDR_BOOTSTRAP_PK,
+            HDR_BARRIER_UPDATE,
+            HDR_BARRIER_VERSION,
+            HDR_BARRIER_LEAF_PK,
+            HDR_BARRIER_UPDATE_REASON,
             HDR_POLICY_VERSION,
             HDR_FS_POLICY_VERSION,
             HDR_FS_EC,
@@ -109,6 +118,7 @@ mod tests {
             HDR_VRF_MASK_B,
             HDR_VRF_PUBLIC_KEY,
             HDR_FS_CHECKPOINT_EC,
+            HDR_REVOKED_SINCE_ROOT,
             HDR_REVOKED_ROOT,
         ];
 

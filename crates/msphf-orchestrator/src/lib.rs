@@ -66,8 +66,8 @@ pub use accept::SrxBenchHarness;
 pub use accept::fixtures;
 pub use accept::{
     AcceptanceContext, AcceptanceError, AcceptanceKind, AcceptanceOptions, AcceptanceOutcome,
-    AnnexMTelemetryReport, AnnexMTelemetryRow, BootstrapPolicy, FsPolicyConfig, TelemetryCounters,
-    TelemetryKey, build_bootstrap_digest,
+    AnnexMTelemetryReport, AnnexMTelemetryRow, BarrierGroupState, BootstrapPolicy,
+    DeviceChainState, FsPolicyConfig, TelemetryCounters, TelemetryKey, build_bootstrap_digest,
 };
 pub use hdr::*;
 pub use policy::{
@@ -267,27 +267,119 @@ pub fn compute_proofs_commit_bytes(
 }
 
 #[derive(Serialize)]
-struct FsDevChainPreimage<'a> {
+struct FsDevChainV2Preimage<'a> {
     #[serde(with = "serde_bytes")]
     device_pk: &'a [u8],
     fs_ec: u64,
     #[serde(with = "serde_bytes")]
     prev_commit: &'a [u8; 32],
+    barrier_version: u64,
+    #[serde(with = "serde_bytes")]
+    barrier_update_digest: &'a [u8; 32],
 }
 
-fn compute_fs_dev_commit(
+#[derive(Serialize)]
+struct BarrierUpdateDigestArgs<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+
+fn parse_barrier_version_for_fs_dev_chain(
+    header_map: &BTreeMap<u64, Value>,
+) -> Result<u64, MsphfError> {
+    match header_map.get(&HDR_BARRIER_VERSION) {
+        None => Err(MsphfError::invalid_input("missing barrier_version")),
+        Some(Value::Integer(value)) => u64::try_from(*value)
+            .map_err(|_| MsphfError::invalid_input("barrier_version out of range")),
+        Some(_) => Err(MsphfError::invalid_input("barrier_version must be uint")),
+    }
+}
+
+fn barrier_update_digest_for_fs_dev_chain(
+    header_map: &BTreeMap<u64, Value>,
+) -> Result<[u8; 32], MsphfError> {
+    match header_map.get(&HDR_BARRIER_UPDATE) {
+        None => Ok([0u8; 32]),
+        Some(Value::Bytes(raw_bytes)) => {
+            h_l("barrier/update/digest", &BarrierUpdateDigestArgs(raw_bytes))
+        }
+        Some(_) => Err(MsphfError::invalid_input("barrier_update must be bytes")),
+    }
+}
+
+/// Compute the v2 device-chain commit that binds barrier state.
+pub fn compute_fs_dev_commit_v2(
     device_pk: &[u8],
     fs_ec: u64,
     prev_commit: &[u8; 32],
+    barrier_version: u64,
+    barrier_update_digest: &[u8; 32],
 ) -> Result<[u8; 32], MsphfError> {
     h_l(
-        "fs/dev/chain",
-        &FsDevChainPreimage {
+        "fs/dev/chain/v2",
+        &FsDevChainV2Preimage {
             device_pk,
             fs_ec,
             prev_commit,
+            barrier_version,
+            barrier_update_digest,
         },
     )
+}
+
+#[cfg(test)]
+mod fs_dev_chain_v2_tests {
+    use super::{barrier_update_digest_for_fs_dev_chain, compute_fs_dev_commit_v2};
+    use crate::hdr::HDR_BARRIER_UPDATE;
+    use ciborium::value::{Integer, Value};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn v2_commit_changes_when_barrier_fields_change() -> Result<(), Box<dyn std::error::Error>> {
+        let device_pk = [0xA5u8; 48];
+        let fs_ec = 42u64;
+        let prev_commit = [0x11u8; 32];
+        let barrier_update_digest = [0x22u8; 32];
+        let barrier_update_digest_alt = [0x23u8; 32];
+
+        let v2_a =
+            compute_fs_dev_commit_v2(&device_pk, fs_ec, &prev_commit, 3, &barrier_update_digest)?;
+        let v2_b =
+            compute_fs_dev_commit_v2(&device_pk, fs_ec, &prev_commit, 4, &barrier_update_digest)?;
+        let v2_c = compute_fs_dev_commit_v2(
+            &device_pk,
+            fs_ec,
+            &prev_commit,
+            3,
+            &barrier_update_digest_alt,
+        )?;
+
+        assert_ne!(v2_a, v2_b, "barrier_version must influence v2 commit");
+        assert_ne!(v2_a, v2_c, "barrier_update_digest must influence v2 commit");
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_update_digest_helper_enforces_type_and_changes_on_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut header = BTreeMap::new();
+        assert_eq!(
+            barrier_update_digest_for_fs_dev_chain(&header)?,
+            [0u8; 32],
+            "absent barrier_update must map to ZERO32"
+        );
+
+        header.insert(HDR_BARRIER_UPDATE, Value::Bytes(vec![0xAA, 0xBB, 0xCC]));
+        let digest = barrier_update_digest_for_fs_dev_chain(&header)?;
+        assert_ne!(
+            digest, [0u8; 32],
+            "present barrier_update must influence digest"
+        );
+
+        header.insert(HDR_BARRIER_UPDATE, Value::Integer(Integer::from(7u64)));
+        assert!(
+            barrier_update_digest_for_fs_dev_chain(&header).is_err(),
+            "non-bytes barrier_update must fail"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -795,6 +887,7 @@ pub struct OrchestrationParams<'a> {
     pub vrf_public_key: Option<&'a [u8]>,
     pub fs_policy_version: &'a str,
     pub fs_epoch_base_ts: u64,
+    pub barrier_version: u64,
     pub fs_join: FsJoinInputs,
     pub fs_merge: FsMergeInputs,
 }
@@ -973,6 +1066,8 @@ impl ForwardSecrecyState {
         &mut self,
         device_pk: &[u8],
         we_epoch_id: &[u8; 32],
+        barrier_version: u64,
+        barrier_update_digest: &[u8; 32],
     ) -> Result<FsJoinArtifacts, MsphfError> {
         self.tau_cache.prune();
         let fs_ec = self.fs_ec;
@@ -984,7 +1079,13 @@ impl ForwardSecrecyState {
         let epoch_sk = hkdf_blake3(&epoch_sk_salt, &self.k_fs, b"city-g|fs/epoch/sk|v1");
 
         let fs_epoch_commit = fs_epoch_commit_hash(&epoch_sk)?;
-        let fs_dev_commit = compute_fs_dev_commit(device_pk, fs_ec, &fs_dev_prev_commit)?;
+        let fs_dev_commit = compute_fs_dev_commit_v2(
+            device_pk,
+            fs_ec,
+            &fs_dev_prev_commit,
+            barrier_version,
+            barrier_update_digest,
+        )?;
 
         let next_key = evolve_k_fs(&self.k_fs, we_epoch_id, fs_ec + 1)?;
         self.k_fs.zeroize();
@@ -2467,6 +2568,22 @@ pub fn joiner_kgen_or<'a>(
         HDR_FS_EPOCH_BASE_TS,
         Value::Integer(Integer::from(params.fs_epoch_base_ts)),
     );
+    match header_map.get(&HDR_BARRIER_VERSION) {
+        None => {
+            header_map.insert(
+                HDR_BARRIER_VERSION,
+                Value::Integer(Integer::from(params.barrier_version)),
+            );
+        }
+        Some(Value::Integer(value)) => {
+            let parsed = u64::try_from(*value)
+                .map_err(|_| MsphfError::invalid_input("barrier_version out of range"))?;
+            if parsed != params.barrier_version {
+                return Err(MsphfError::invalid_input("barrier_version mismatch"));
+            }
+        }
+        Some(_) => return Err(MsphfError::invalid_input("barrier_version must be uint")),
+    }
     let device_pk_bytes = if let Some(pop) = &params.pop_keys {
         pop.public_key.to_vec()
     } else {
@@ -2475,11 +2592,15 @@ pub fn joiner_kgen_or<'a>(
             _ => return Err(MsphfError::invalid_input("fs_join requires pop_public_key")),
         }
     };
+    let barrier_version_for_fs = parse_barrier_version_for_fs_dev_chain(&header_map)?;
+    let barrier_update_digest_for_fs = barrier_update_digest_for_fs_dev_chain(&header_map)?;
     let mut fs_inputs = params.fs_join;
-    let mut fs_dev_commit = compute_fs_dev_commit(
+    let mut fs_dev_commit = compute_fs_dev_commit_v2(
         &device_pk_bytes,
         fs_inputs.fs_ec,
         &fs_inputs.fs_dev_prev_commit,
+        barrier_version_for_fs,
+        &barrier_update_digest_for_fs,
     )?;
     header_map.insert(HDR_FS_EC, Value::Integer(Integer::from(fs_inputs.fs_ec)));
     header_map.insert(
@@ -2513,7 +2634,12 @@ pub fn joiner_kgen_or<'a>(
 
         for _ in 0..4 {
             let mut work_state = original_state.clone();
-            let artifacts = work_state.prepare_join(&device_pk_bytes, &we_epoch_id)?;
+            let artifacts = work_state.prepare_join(
+                &device_pk_bytes,
+                &we_epoch_id,
+                barrier_version_for_fs,
+                &barrier_update_digest_for_fs,
+            )?;
             final_inputs = artifacts.inputs;
             final_dev_commit = artifacts.fs_dev_commit;
             final_secret = Some(artifacts.epoch_sk);
@@ -2549,6 +2675,7 @@ pub fn joiner_kgen_or<'a>(
             we_epoch_id = new_we_epoch_id;
         }
 
+        final_state.fs_dev_commit = final_dev_commit;
         *state_ref = final_state;
         fs_inputs = final_inputs;
         fs_dev_commit = final_dev_commit;
@@ -3499,7 +3626,10 @@ mod tests {
         header.insert(hdr::HDR_MH_HEADS, Value::Array(Vec::new()));
         assert!(parse_merge_metadata(&header).is_err());
 
-        header.insert(hdr::HDR_MH_HEADS, Value::Array(vec![Value::Integer(7u64.into())]));
+        header.insert(
+            hdr::HDR_MH_HEADS,
+            Value::Array(vec![Value::Integer(7u64.into())]),
+        );
         assert!(parse_merge_metadata(&header).is_err());
 
         header.insert(
@@ -3510,11 +3640,17 @@ mod tests {
 
         header.insert(
             hdr::HDR_MH_HEADS,
-            Value::Array(vec![Value::Bytes(vec![0x22; 32]), Value::Bytes(vec![0x11; 32])]),
+            Value::Array(vec![
+                Value::Bytes(vec![0x22; 32]),
+                Value::Bytes(vec![0x11; 32]),
+            ]),
         );
         assert!(parse_merge_metadata(&header).is_err());
 
-        header.insert(hdr::HDR_MH_HEADS, Value::Array(vec![Value::Bytes(vec![0x33; 32])]));
+        header.insert(
+            hdr::HDR_MH_HEADS,
+            Value::Array(vec![Value::Bytes(vec![0x33; 32])]),
+        );
         header.insert(102, Value::Integer(1u64.into()));
         assert!(parse_merge_metadata(&header).is_err());
 
@@ -3578,8 +3714,12 @@ mod tests {
             plaintext
         );
 
-        assert!(encrypt_hp_bytes(&vec![0x55; MAX_HP_BYTES + 1], &xk_hash, &hp_commit, &key).is_err());
-        assert!(decrypt_hp_bytes(&vec![0x00; AEAD_TAG_LEN - 1], &xk_hash, &hp_commit, &key).is_err());
+        assert!(
+            encrypt_hp_bytes(&vec![0x55; MAX_HP_BYTES + 1], &xk_hash, &hp_commit, &key).is_err()
+        );
+        assert!(
+            decrypt_hp_bytes(&vec![0x00; AEAD_TAG_LEN - 1], &xk_hash, &hp_commit, &key).is_err()
+        );
         let mut wrong_key = key;
         wrong_key[0] ^= 0x01;
         assert!(decrypt_hp_bytes(&ciphertext, &xk_hash, &hp_commit, &wrong_key).is_err());
@@ -3835,8 +3975,8 @@ mod tests {
     }
 
     #[test]
-    fn joiner_kgen_with_forward_state_emits_fs_artifacts()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn joiner_kgen_with_forward_state_emits_fs_artifacts() -> Result<(), Box<dyn std::error::Error>>
+    {
         let fixture = sample_fixture();
         let mut state = ForwardSecrecyState::new([0x9A; 32]);
         state.set_last_we_epoch_id([0x55; 32]);
@@ -3904,8 +4044,14 @@ mod tests {
             pox_r_commit: parts.pox_r_commit,
         };
         assert!(
-            populate_merge_srx_complete(&mut BTreeMap::new(), &bad_join_parts, &rich_params, &srx_before)
-            .is_err());
+            populate_merge_srx_complete(
+                &mut BTreeMap::new(),
+                &bad_join_parts,
+                &rich_params,
+                &srx_before
+            )
+            .is_err()
+        );
 
         let mut wrong_since_root = [0u8; 32];
         wrong_since_root.copy_from_slice(parts.revoked_since_prev_root);
@@ -3921,8 +4067,14 @@ mod tests {
             pox_r_commit: parts.pox_r_commit,
         };
         assert!(
-            populate_merge_srx_complete(&mut BTreeMap::new(), &bad_since_parts, &rich_params, &srx_before)
-            .is_err());
+            populate_merge_srx_complete(
+                &mut BTreeMap::new(),
+                &bad_since_parts,
+                &rich_params,
+                &srx_before
+            )
+            .is_err()
+        );
 
         let mut frontier_params = rich_params.clone();
         let mut frontier_srx = frontier_params
@@ -3948,8 +4100,10 @@ mod tests {
             first_anchor.left_ref = Some(u32::MAX);
         }
         bad_ref_params.srx = Some(bad_ref_srx);
-        assert!(populate_merge_srx_complete(&mut BTreeMap::new(), &parts, &bad_ref_params, &srx_before)
-            .is_err());
+        assert!(
+            populate_merge_srx_complete(&mut BTreeMap::new(), &parts, &bad_ref_params, &srx_before)
+                .is_err()
+        );
         Ok(())
     }
 
@@ -4337,7 +4491,11 @@ mod tests {
                 Value::Text("rpo-256/v1".to_string()),
                 "merkle_ds_id mismatch",
             ),
-            (92u64, Value::Integer(Integer::from(1u64)), "merkle_ds_id must be text"),
+            (
+                92u64,
+                Value::Integer(Integer::from(1u64)),
+                "merkle_ds_id must be text",
+            ),
             (
                 98u64,
                 Value::Text("wrong-crs".to_string()),
@@ -4350,7 +4508,11 @@ mod tests {
                 Value::Text("wrong-params".to_string()),
                 "msphf_params_id mismatch",
             ),
-            (106u64, Value::Bytes(vec![0xAA; 31]), "msphf_params_id length"),
+            (
+                106u64,
+                Value::Bytes(vec![0xAA; 31]),
+                "msphf_params_id length",
+            ),
             (106u64, Value::Null, "msphf_params_id invalid type"),
         ];
 
@@ -4439,6 +4601,7 @@ mod tests {
                 },
                 fs_policy_version: "7",
                 fs_epoch_base_ts: 0,
+                barrier_version: 0,
                 fs_join: FsJoinInputs {
                     fs_ec: 0,
                     fs_epoch_commit,
@@ -4736,6 +4899,7 @@ mod tests {
         let (pk, _) = sample_kbroad_keys();
         map.insert(105, Value::Bytes(pk.to_vec()));
         map.insert(HDR_FS_POLICY_VERSION, Value::Integer(Integer::from(7u64)));
+        map.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(0u64)));
         map
     }
 
@@ -6076,7 +6240,9 @@ mod tests {
 
         let heads = [[0x01; 32], [0x02; 32]];
         set_merge_heads(&mut header, &heads, Some(""))?;
-        assert!(matches!(header.get(&hdr::HDR_MH_HEADS), Some(Value::Array(values)) if values.len() == 2));
+        assert!(
+            matches!(header.get(&hdr::HDR_MH_HEADS), Some(Value::Array(values)) if values.len() == 2)
+        );
         assert!(!header.contains_key(&102));
         Ok(())
     }
@@ -6133,8 +6299,8 @@ mod tests {
     }
 
     #[test]
-    fn process_anchor_or_handles_second_acceptance_outcome() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn process_anchor_or_handles_second_acceptance_outcome()
+    -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let params = fixture.params();
         let mut accept_ctx = acceptance_ctx(&fixture);

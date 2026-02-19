@@ -73,6 +73,12 @@ impl AcceptanceContext {
             FREEZE_FS_JOIN_MISSING,
             "fs_checkpoint_ec",
         )?;
+        let _barrier_version = header_u64_or_freeze(
+            header_map,
+            HDR_BARRIER_VERSION,
+            FREEZE_FS_JOIN_MISSING,
+            "barrier_version",
+        )?;
 
         let fs_evolution_boundary = match header_map.get(&HDR_FS_EVOLUTION_BOUNDARY) {
             Some(Value::Bool(flag)) => *flag,
@@ -943,10 +949,7 @@ mod tests {
             msphf_core::hash::h_l("msphf/rollup/prov", &RollupCommit(&encoded_provenance))?;
 
         let mut encoded_vcks = Vec::new();
-        let vck_values: Vec<Value> = vcks
-            .iter()
-            .map(|vck| Value::Bytes(vck.to_vec()))
-            .collect();
+        let vck_values: Vec<Value> = vcks.iter().map(|vck| Value::Bytes(vck.to_vec())).collect();
         ciborium::ser::into_writer(&Value::Array(vck_values), &mut encoded_vcks)?;
         let vck_commit = msphf_core::hash::h_l("msphf/rollup/vck", &RollupCommit(&encoded_vcks))?;
 
@@ -979,14 +982,14 @@ mod tests {
         let now = ctx.next_accept_instant();
         let err = ctx
             .accept_anchor_merge(
-            parts,
-            joiner.we_epoch_id,
-            header,
-            retired_heads,
-            joiner.mh_note.clone(),
-            now,
-        )
-        .expect_err("expected merge freeze");
+                parts,
+                joiner.we_epoch_id,
+                header,
+                retired_heads,
+                joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("expected merge freeze");
         assert_freeze(err, expected);
         Ok(())
     }
@@ -1002,14 +1005,14 @@ mod tests {
 
         let err = ctx
             .accept_anchor_merge(
-            &parts,
-            merge_joiner.we_epoch_id,
-            &header,
-            retired_heads,
-            merge_joiner.mh_note.clone(),
-            now,
-        )
-        .expect_err("non-map purge metadata should freeze");
+                &parts,
+                merge_joiner.we_epoch_id,
+                &header,
+                retired_heads,
+                merge_joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("non-map purge metadata should freeze");
         assert_freeze(err, FREEZE_HASH_CBOR);
         Ok(())
     }
@@ -1027,14 +1030,14 @@ mod tests {
 
         let err = ctx
             .accept_anchor_merge(
-            &parts,
-            merge_joiner.we_epoch_id,
-            &header,
-            retired_heads,
-            merge_joiner.mh_note.clone(),
-            now,
-        )
-        .expect_err("pivot mismatch should freeze");
+                &parts,
+                merge_joiner.we_epoch_id,
+                &header,
+                retired_heads,
+                merge_joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("pivot mismatch should freeze");
         assert_freeze(err, FREEZE_MH_HEADS_INVALID);
         Ok(())
     }
@@ -1066,14 +1069,14 @@ mod tests {
 
         let err = ctx
             .accept_anchor_merge(
-            &parts,
-            merge_joiner.we_epoch_id,
-            &header,
-            heads,
-            merge_joiner.mh_note.clone(),
-            now,
-        )
-        .expect_err("empty vrf proof should freeze");
+                &parts,
+                merge_joiner.we_epoch_id,
+                &header,
+                heads,
+                merge_joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("empty vrf proof should freeze");
         assert_freeze(err, FREEZE_VRF_INVALID);
         Ok(())
     }
@@ -1127,14 +1130,14 @@ mod tests {
 
         let err = ctx
             .accept_anchor_merge(
-            &parts,
-            merge_joiner.we_epoch_id,
-            &header,
-            heads,
-            merge_joiner.mh_note.clone(),
-            now,
-        )
-        .expect_err("missing checkpoint ec must freeze");
+                &parts,
+                merge_joiner.we_epoch_id,
+                &header,
+                heads,
+                merge_joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("missing checkpoint ec must freeze");
         assert_freeze(err, FREEZE_FS_JOIN_MISSING);
         Ok(())
     }
@@ -1153,14 +1156,14 @@ mod tests {
 
         let err = ctx
             .accept_anchor_merge(
-            &parts,
-            merge_joiner.we_epoch_id,
-            &header,
-            heads,
-            merge_joiner.mh_note.clone(),
-            now,
-        )
-        .expect_err("tampered checkpoint ec must freeze");
+                &parts,
+                merge_joiner.we_epoch_id,
+                &header,
+                heads,
+                merge_joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("tampered checkpoint ec must freeze");
         assert_freeze(err, FREEZE_FS_CHECKPOINT_BACKDATE);
         Ok(())
     }
@@ -1177,14 +1180,14 @@ mod tests {
 
         let err = ctx
             .accept_anchor_merge(
-            &parts,
-            merge_joiner.we_epoch_id,
-            &header,
-            retired_heads,
-            merge_joiner.mh_note.clone(),
-            now,
-        )
-        .expect_err("srx with unchanged roots should freeze");
+                &parts,
+                merge_joiner.we_epoch_id,
+                &header,
+                retired_heads,
+                merge_joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("srx with unchanged roots should freeze");
         assert_freeze(err, FREEZE_SRX_INVALID);
         Ok(())
     }
@@ -1202,14 +1205,14 @@ mod tests {
 
         let err = ctx
             .accept_anchor_merge(
-            &parts,
-            merge_joiner.we_epoch_id,
-            &header,
-            retired_heads,
-            merge_joiner.mh_note.clone(),
-            now,
-        )
-        .expect_err("vck without provenance should freeze");
+                &parts,
+                merge_joiner.we_epoch_id,
+                &header,
+                retired_heads,
+                merge_joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("vck without provenance should freeze");
         assert_freeze(err, FREEZE_MH_HEADS_INVALID);
         Ok(())
     }
@@ -1229,14 +1232,14 @@ mod tests {
 
         let err = ctx
             .accept_anchor_merge(
-            &parts,
-            merge_joiner.we_epoch_id,
-            &header,
-            retired_heads,
-            merge_joiner.mh_note.clone(),
-            now,
-        )
-        .expect_err("capss mismatch should freeze");
+                &parts,
+                merge_joiner.we_epoch_id,
+                &header,
+                retired_heads,
+                merge_joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("capss mismatch should freeze");
         assert_freeze(err, FREEZE_CAPSS_INVALID);
         Ok(())
     }
@@ -1285,11 +1288,103 @@ mod tests {
     }
 
     #[test]
+    fn merge_anchor_rejects_invalid_or_missing_fs_policy_version() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+
+        header.remove(&HDR_FS_POLICY_VERSION);
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_FS_JOIN_MISSING,
+        )?;
+
+        header.insert(HDR_FS_POLICY_VERSION, Value::Text("v7".to_string()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_FS_JOIN_MISSING,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_fs_policy_version_conflict_with_context() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        ctx.set_fs_policy_version(Some("999".to_string()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_FS_POLICY_VERSION_UNSUPPORTED,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_non_bool_or_missing_fs_boundary_flag() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(HDR_FS_EVOLUTION_BOUNDARY, Value::Text("true".to_string()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_MH_HEADS_INVALID,
+        )?;
+
+        header.remove(&HDR_FS_EVOLUTION_BOUNDARY);
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_MH_HEADS_INVALID,
+        )
+    }
+
+    #[test]
     fn merge_anchor_rejects_root_binding_mismatches() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         let (mut header, heads) =
             ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
         header.insert(110, Value::Bytes([0xA1; 32].to_vec()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_FIELD_MISSING,
+        )?;
+
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(112, Value::Bytes([0xC3; 32].to_vec()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_FIELD_MISSING,
+        )?;
+
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(113, Value::Bytes([0xD4; 32].to_vec()));
         expect_merge_freeze(
             &mut ctx,
             &parts,
@@ -1391,14 +1486,14 @@ mod tests {
         let weid_claim = compute_we_epoch_id_from_header(&mutated_parts, &header)?;
         let err = ctx
             .accept_anchor_merge(
-            &mutated_parts,
-            weid_claim,
-            &header,
-            heads,
-            merge_joiner.mh_note.clone(),
-            now,
-        )
-        .expect_err("expected roots-changed merge to freeze without SRX");
+                &mutated_parts,
+                weid_claim,
+                &header,
+                heads,
+                merge_joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("expected roots-changed merge to freeze without SRX");
         assert_freeze(err, FREEZE_SRX_REQUIRED);
         Ok(())
     }

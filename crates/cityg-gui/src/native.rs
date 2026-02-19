@@ -35,7 +35,16 @@ use gpui::{
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
-use msphf_core::{ds, hash::h_l, merkle::canonical_set_root};
+use ml_kem::{
+    ExpandedDecapsulationKey as MlKemExpandedDecapsulationKey,
+    ExpandedKeyEncoding as MlKemExpandedKeyEncoding, Seed as MlKemSeed,
+    kem::{Decapsulate as MlKemDecapsulate, KeyExport as MlKemKeyExport},
+    ml_kem_768,
+    ml_kem_768::DecapsulationKey as MlKem768DecapsulationKey,
+};
+use msphf_core::{
+    ds, hash::h_l, hkdf::hkdf_blake3, merkle::canonical_set_root, serde_utils::to_cbor_vec,
+};
 use msphf_orchestrator::CapssWitnessBundle;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
@@ -50,7 +59,10 @@ use pqcrypto_dilithium::{
     dilithium5,
 };
 use pqcrypto_kyber::kyber768;
-use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey};
+use pqcrypto_traits::kem::{
+    Ciphertext as KemCiphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey,
+    SharedSecret as KemSharedSecret,
+};
 use pqcrypto_traits::sign::{
     DetachedSignature, PublicKey as DilithiumPublicKey, SecretKey as DilithiumSecretKey,
 };
@@ -73,6 +85,1061 @@ fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
         .map_err(|err| anyhow!("generate VRF params: {err}"))?;
     msphf_orchestrator::lb::generate_keypair(&params, key_seed)
         .map_err(|err| anyhow!("generate VRF keypair: {err}"))
+}
+
+const DEFAULT_BARRIER_N_MAX: u64 = 1_024;
+const BARRIER_TREE_INFO: &[u8] = b"city-g|barrier/tree|v1";
+const BARRIER_KEY_INFO: &[u8] = b"city-g|barrier/key|v1";
+const BARRIER_KEYGEN_D_INFO: &[u8] = b"city-g|barrier/keygen-d|v1";
+const BARRIER_KEYGEN_Z_INFO: &[u8] = b"city-g|barrier/keygen-z|v1";
+const FS_PCS_INFO: &[u8] = b"city-g|fs/pcs|v1";
+const ML_KEM_SEED_BYTES: usize = 64;
+const ML_KEM_EXPANDED_DK_BYTES: usize = 2400;
+
+#[derive(Serialize)]
+struct BarrierRootsPreimage<'a>(
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+);
+
+#[derive(Serialize)]
+struct BarrierUpdateDigestPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+
+#[derive(Serialize)]
+struct BarrierPkHashPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+
+#[derive(Serialize)]
+struct BarrierTreeLeafHashPreimage<'a>(u64, u64, #[serde(with = "serde_bytes")] &'a [u8]);
+
+#[derive(Serialize)]
+struct BarrierTreeNodeHashPreimage<'a>(
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] &'a [u8],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+);
+
+#[derive(Serialize)]
+struct BarrierWrapNoncePreimage(u64, u64);
+
+#[derive(Serialize)]
+struct BarrierWrapAadPreimage<'a>(
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    u64,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    u64,
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+);
+
+#[derive(Serialize)]
+struct BarrierTreePathSaltPreimage(u64);
+
+#[derive(Serialize)]
+struct BarrierDeriveSaltPreimage<'a>(u64, #[serde(with = "serde_bytes")] &'a [u8; 32]);
+
+#[derive(Serialize)]
+struct FsPcsSaltPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8; 32], u64, u64);
+
+#[derive(Serialize)]
+struct BarrierKeygenSaltPreimage<'a>(u64, #[serde(with = "serde_bytes")] &'a [u8; 32], u64, u64);
+
+#[derive(Clone, Serialize, Deserialize)]
+struct BarrierUpdateWire(
+    String,
+    u64,
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Clone, Serialize, Deserialize)]
+struct KemTreeCoverPayloadWire(
+    u64,
+    Vec<u64>,
+    Option<Vec<u64>>,
+    Vec<NodeCiphertextWire>,
+    Vec<NewPublicKeyWire>,
+);
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NodeCiphertextWire(
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NewPublicKeyWire(u64, #[serde(with = "serde_bytes")] Vec<u8>);
+
+#[derive(Clone, Debug)]
+struct ParsedNodeCiphertext {
+    source_node: u64,
+    target_node: u64,
+    target_pk_hash: [u8; 16],
+    kem_ct: Vec<u8>,
+    wrapped_ps: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct ParsedBarrierUpdate {
+    barrier_version: u64,
+    prev_barrier_version: u64,
+    tree_size: u64,
+    revocation_roots_hash: [u8; 32],
+    kem_tree_hash_before: [u8; 32],
+    kem_tree_hash_after: [u8; 32],
+    updater_leaf: u64,
+    path_nodes: Vec<u64>,
+    node_ciphertexts: Vec<ParsedNodeCiphertext>,
+    new_public_keys: BTreeMap<u64, Vec<u8>>,
+}
+
+#[derive(Clone, Debug)]
+struct BarrierRecoverResult {
+    k_barrier_new: [u8; 32],
+    kem_tree_hash_after: [u8; 32],
+    k_fs_after_pcs: Option<[u8; 32]>,
+    derived_node_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
+}
+
+#[derive(Clone, Debug)]
+struct BarrierUpdateBuildResult {
+    raw_update: Vec<u8>,
+    barrier_update_digest: [u8; 32],
+    kem_tree_hash_after: [u8; 32],
+    k_barrier_new: [u8; 32],
+    on_path_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
+}
+
+fn compute_revocation_roots_hash(
+    revoked_since_root: &[u8; 32],
+    revoked_root: &[u8; 32],
+) -> Result<[u8; 32]> {
+    h_l(
+        "barrier/roots",
+        &BarrierRootsPreimage(revoked_since_root, revoked_root),
+    )
+    .map_err(|err| anyhow!("compute revocation_roots_hash: {err}"))
+}
+
+fn compute_barrier_pkhash(ek: &[u8]) -> Result<[u8; 32]> {
+    h_l("barrier/pk-hash", &BarrierPkHashPreimage(ek))
+        .map_err(|err| anyhow!("compute barrier/pk-hash: {err}"))
+}
+
+fn compute_barrier_update_digest(raw_update: &[u8]) -> Result<[u8; 32]> {
+    h_l(
+        "barrier/update/digest",
+        &BarrierUpdateDigestPreimage(raw_update),
+    )
+    .map_err(|err| anyhow!("compute barrier_update_digest: {err}"))
+}
+
+fn compute_barrier_tree_hash(n_max: u64, pk_entries: &[Vec<u8>]) -> Result<[u8; 32]> {
+    let n_max_usize =
+        usize::try_from(n_max).map_err(|_| anyhow!("barrier tree n_max too large"))?;
+    let expected_len = n_max_usize
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| anyhow!("barrier tree size overflow"))?;
+    if pk_entries.len() != expected_len {
+        return Err(anyhow!(
+            "barrier tree size mismatch: expected {expected_len}, got {}",
+            pk_entries.len()
+        ));
+    }
+    let leaf_base = n_max.saturating_sub(1);
+    compute_barrier_tree_hash_recursive(0, leaf_base, n_max, pk_entries)
+}
+
+fn compute_barrier_tree_hash_recursive(
+    node: u64,
+    leaf_base: u64,
+    n_max: u64,
+    pk_entries: &[Vec<u8>],
+) -> Result<[u8; 32]> {
+    let node_index =
+        usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
+    let pk = pk_entries
+        .get(node_index)
+        .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+    if node >= leaf_base {
+        return h_l(
+            "barrier/tree/leaf-hash",
+            &BarrierTreeLeafHashPreimage(n_max, node, pk.as_slice()),
+        )
+        .map_err(|err| anyhow!("compute barrier leaf hash: {err}"));
+    }
+
+    let left = node
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(1))
+        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
+    let right = node
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(2))
+        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
+    let left_hash = compute_barrier_tree_hash_recursive(left, leaf_base, n_max, pk_entries)?;
+    let right_hash = compute_barrier_tree_hash_recursive(right, leaf_base, n_max, pk_entries)?;
+    h_l(
+        "barrier/tree/node-hash",
+        &BarrierTreeNodeHashPreimage(n_max, node, pk.as_slice(), &left_hash, &right_hash),
+    )
+    .map_err(|err| anyhow!("compute barrier node hash: {err}"))
+}
+
+fn sibling_node(node: u64) -> Option<u64> {
+    if node == 0 {
+        return None;
+    }
+    if node % 2 == 0 {
+        Some(node - 1)
+    } else {
+        Some(node + 1)
+    }
+}
+
+fn collect_resolution_targets(
+    snapshot: &[Vec<u8>],
+    node: u64,
+    leaf_base: u64,
+    targets: &mut Vec<u64>,
+) -> Result<()> {
+    let index = usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
+    let Some(pk) = snapshot.get(index) else {
+        return Ok(());
+    };
+    if !pk.is_empty() {
+        targets.push(node);
+        return Ok(());
+    }
+    if node >= leaf_base {
+        return Ok(());
+    }
+    let left = node
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(1))
+        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
+    let right = node
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(2))
+        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
+    collect_resolution_targets(snapshot, left, leaf_base, targets)?;
+    collect_resolution_targets(snapshot, right, leaf_base, targets)?;
+    Ok(())
+}
+
+fn parse_deterministic_cbor<T>(raw: &[u8], label: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned + Serialize,
+{
+    let decoded: T =
+        ciborium::de::from_reader(raw).map_err(|err| anyhow!("failed to parse {label}: {err}"))?;
+    let canonical = to_cbor_vec(&decoded)
+        .map_err(|err| anyhow!("failed to re-encode canonical {label}: {err}"))?;
+    if canonical.as_slice() != raw {
+        return Err(anyhow!("non-canonical {label} encoding"));
+    }
+    Ok(decoded)
+}
+
+fn to_array32(label: &str, bytes: Vec<u8>) -> Result<[u8; 32]> {
+    bytes
+        .try_into()
+        .map_err(|_| anyhow!("{label} must be 32 bytes"))
+}
+
+fn to_array16(label: &str, bytes: Vec<u8>) -> Result<[u8; 16]> {
+    bytes
+        .try_into()
+        .map_err(|_| anyhow!("{label} must be 16 bytes"))
+}
+
+fn parse_barrier_update_for_recover(
+    raw_update: &[u8],
+    expected_n_max: u64,
+) -> Result<ParsedBarrierUpdate> {
+    if expected_n_max == 0 || !expected_n_max.is_power_of_two() {
+        return Err(anyhow!("barrier n_max must be a non-zero power of two"));
+    }
+
+    let BarrierUpdateWire(
+        mode,
+        barrier_version,
+        prev_barrier_version,
+        tree_size,
+        revocation_roots_hash,
+        kem_tree_hash_before,
+        kem_tree_hash_after,
+        cover_payload,
+    ) = parse_deterministic_cbor(raw_update, "barrier_update")?;
+
+    if mode != "barrier-v1" {
+        return Err(anyhow!("unsupported barrier update mode: {mode}"));
+    }
+    if tree_size != expected_n_max {
+        return Err(anyhow!(
+            "barrier tree_size mismatch: expected {expected_n_max}, got {tree_size}"
+        ));
+    }
+
+    let KemTreeCoverPayloadWire(
+        updater_leaf,
+        path_nodes,
+        _revoked_leaf_indices_hint,
+        node_ciphertexts_wire,
+        new_public_keys,
+    ) = parse_deterministic_cbor(cover_payload.as_slice(), "barrier cover payload")?;
+
+    if updater_leaf >= expected_n_max {
+        return Err(anyhow!("barrier updater_leaf out of range"));
+    }
+
+    let expected_nodes = expected_n_max
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| anyhow!("barrier tree size overflow"))?;
+    let max_index = expected_nodes.saturating_sub(1);
+    let leaf_base = expected_n_max.saturating_sub(1);
+    let expected_leaf = leaf_base.saturating_add(updater_leaf);
+
+    if path_nodes.is_empty() {
+        return Err(anyhow!("barrier path_nodes must be non-empty"));
+    }
+    if path_nodes.first().copied() != Some(expected_leaf) {
+        return Err(anyhow!(
+            "barrier path_nodes must start at updater leaf node"
+        ));
+    }
+    if path_nodes.last().copied() != Some(0) {
+        return Err(anyhow!("barrier path_nodes must end at root node"));
+    }
+    let mut path_seen = HashSet::new();
+    for &node in &path_nodes {
+        if node > max_index {
+            return Err(anyhow!("barrier path node out of range"));
+        }
+        if !path_seen.insert(node) {
+            return Err(anyhow!("barrier path_nodes contains duplicate nodes"));
+        }
+    }
+    for pair in path_nodes.windows(2) {
+        let child = pair[0];
+        let parent = pair[1];
+        if child == 0 || (child - 1) / 2 != parent {
+            return Err(anyhow!("barrier path_nodes parent chain is invalid"));
+        }
+    }
+
+    let expected_public_nodes: HashSet<u64> = path_nodes.iter().copied().skip(1).collect();
+    if new_public_keys.len() != expected_public_nodes.len() {
+        return Err(anyhow!(
+            "barrier new_public_keys length does not match ExpectedNodeSet"
+        ));
+    }
+    let mut seen_public_nodes = HashSet::new();
+    let mut prev_public_node: Option<u64> = None;
+    let mut parsed_new_public_keys = BTreeMap::new();
+    for NewPublicKeyWire(node_index, ek) in &new_public_keys {
+        if *node_index > max_index {
+            return Err(anyhow!("barrier new_public_keys node out of range"));
+        }
+        if *node_index >= leaf_base {
+            return Err(anyhow!(
+                "barrier new_public_keys may reference only internal nodes"
+            ));
+        }
+        if ek.len() != kyber768::public_key_bytes() {
+            return Err(anyhow!(
+                "barrier new_public_keys ek must be ML-KEM-768 length"
+            ));
+        }
+        if prev_public_node.is_some_and(|prev| prev >= *node_index) {
+            return Err(anyhow!(
+                "barrier new_public_keys must be sorted by node index"
+            ));
+        }
+        prev_public_node = Some(*node_index);
+        if !seen_public_nodes.insert(*node_index) {
+            return Err(anyhow!(
+                "barrier new_public_keys contains duplicate node index"
+            ));
+        }
+        parsed_new_public_keys.insert(*node_index, ek.clone());
+    }
+    if seen_public_nodes != expected_public_nodes {
+        return Err(anyhow!(
+            "barrier new_public_keys must match ExpectedNodeSet exactly"
+        ));
+    }
+
+    let mut node_ciphertexts = Vec::with_capacity(node_ciphertexts_wire.len());
+    let mut prev_pair: Option<(u64, u64)> = None;
+    for NodeCiphertextWire(source_node, target_node, target_pk_hash, kem_ct, wrapped_ps) in
+        node_ciphertexts_wire
+    {
+        if source_node > max_index || target_node > max_index {
+            return Err(anyhow!("barrier node_ciphertext index out of range"));
+        }
+        if target_pk_hash.len() != 16 {
+            return Err(anyhow!("barrier target_pk_hash must be 16 bytes"));
+        }
+        if kem_ct.len() != kyber768::ciphertext_bytes() {
+            return Err(anyhow!("barrier kem_ct length mismatch"));
+        }
+        if wrapped_ps.len() != 48 {
+            return Err(anyhow!("barrier wrapped_ps must be 48 bytes"));
+        }
+        let pair = (source_node, target_node);
+        if prev_pair.is_some_and(|prev| prev >= pair) {
+            return Err(anyhow!(
+                "barrier node_ciphertexts must be sorted and duplicate-free"
+            ));
+        }
+        prev_pair = Some(pair);
+        node_ciphertexts.push(ParsedNodeCiphertext {
+            source_node,
+            target_node,
+            target_pk_hash: to_array16("target_pk_hash", target_pk_hash)?,
+            kem_ct,
+            wrapped_ps,
+        });
+    }
+
+    Ok(ParsedBarrierUpdate {
+        barrier_version,
+        prev_barrier_version,
+        tree_size,
+        revocation_roots_hash: to_array32("revocation_roots_hash", revocation_roots_hash)?,
+        kem_tree_hash_before: to_array32("kem_tree_hash_before", kem_tree_hash_before)?,
+        kem_tree_hash_after: to_array32("kem_tree_hash_after", kem_tree_hash_after)?,
+        updater_leaf,
+        path_nodes,
+        node_ciphertexts,
+        new_public_keys: parsed_new_public_keys,
+    })
+}
+
+fn self_path_nodes(n_max: u64, cover_leaf_index: u64) -> Vec<u64> {
+    let leaf_base = n_max.saturating_sub(1);
+    let mut path = vec![leaf_base.saturating_add(cover_leaf_index)];
+    while let Some(&node) = path.last() {
+        if node == 0 {
+            break;
+        }
+        path.push((node - 1) / 2);
+    }
+    path
+}
+
+fn derive_k_fs_after_pcs(
+    k_fs_before: &[u8; 32],
+    weid: &[u8; 32],
+    fs_ec: u64,
+    barrier_version: u64,
+    k_barrier_new: &[u8; 32],
+) -> Result<[u8; 32]> {
+    let mut ikm = [0u8; 64];
+    ikm[..32].copy_from_slice(k_fs_before);
+    ikm[32..].copy_from_slice(k_barrier_new);
+    let salt = h_l(
+        "fs/pcs/salt",
+        &FsPcsSaltPreimage(weid, fs_ec, barrier_version),
+    )
+    .map_err(|err| anyhow!("derive fs pcs salt: {err}"))?;
+    Ok(hkdf_blake3(&salt, &ikm, FS_PCS_INFO))
+}
+
+fn derive_internal_node_key_material(
+    path_secret: &[u8; 32],
+    barrier_version: u64,
+    revocation_roots_hash: &[u8; 32],
+    n_max: u64,
+    node: u64,
+) -> Result<(Vec<u8>, [u8; 32], Vec<u8>)> {
+    let d_salt = h_l(
+        "barrier/keygen/d_salt",
+        &BarrierKeygenSaltPreimage(barrier_version, revocation_roots_hash, n_max, node),
+    )
+    .map_err(|err| anyhow!("derive barrier keygen d_salt: {err}"))?;
+    let z_salt = h_l(
+        "barrier/keygen/z_salt",
+        &BarrierKeygenSaltPreimage(barrier_version, revocation_roots_hash, n_max, node),
+    )
+    .map_err(|err| anyhow!("derive barrier keygen z_salt: {err}"))?;
+    let d = hkdf_blake3(&d_salt, path_secret, BARRIER_KEYGEN_D_INFO);
+    let z = hkdf_blake3(&z_salt, path_secret, BARRIER_KEYGEN_Z_INFO);
+    let mut seed_bytes = [0u8; ML_KEM_SEED_BYTES];
+    seed_bytes[..32].copy_from_slice(&d);
+    seed_bytes[32..].copy_from_slice(&z);
+
+    let dk = MlKem768DecapsulationKey::from_seed(MlKemSeed::from(seed_bytes));
+    #[allow(deprecated)]
+    let dk_expanded = dk.to_expanded_bytes();
+    let ek_bytes = dk.encapsulation_key().to_bytes();
+    let pkhash = compute_barrier_pkhash(ek_bytes.as_slice())?;
+    Ok((
+        dk_expanded.as_slice().to_vec(),
+        pkhash,
+        ek_bytes.as_slice().to_vec(),
+    ))
+}
+
+fn decapsulate_internal_node_shared_secret(
+    dk_expanded_bytes: &[u8],
+    kem_ct: &[u8],
+) -> Result<[u8; 32]> {
+    let expanded: MlKemExpandedDecapsulationKey<ml_kem_768::MlKem768> = dk_expanded_bytes
+        .try_into()
+        .map_err(|_| anyhow!("internal dk_n must be 2400 bytes"))?;
+    #[allow(deprecated)]
+    let dk = MlKem768DecapsulationKey::from_expanded_bytes(&expanded)
+        .map_err(|_| anyhow!("invalid internal dk_n encoding"))?;
+    let shared = dk
+        .decapsulate_slice(kem_ct)
+        .map_err(|_| anyhow!("invalid internal node ciphertext"))?;
+    let mut ss = [0u8; 32];
+    ss.copy_from_slice(shared.as_slice());
+    Ok(ss)
+}
+
+fn try_recover_barrier_from_header(
+    session: &AppSession,
+    header_map: &BTreeMap<u64, Value>,
+    weid: &[u8; 32],
+    fs_ec: u64,
+) -> Result<Option<BarrierRecoverResult>> {
+    let raw_update = match header_map.get(&hdr::HDR_BARRIER_UPDATE) {
+        Some(Value::Bytes(bytes)) => bytes.as_slice(),
+        Some(_) => return Err(anyhow!("header barrier_update must be bytes")),
+        None => return Ok(None),
+    };
+
+    let n_max = session.barrier_state.n_max.max(1);
+    let parsed = parse_barrier_update_for_recover(raw_update, n_max)?;
+
+    if parsed.prev_barrier_version.saturating_add(1) != parsed.barrier_version {
+        return Err(anyhow!("barrier version progression is invalid"));
+    }
+    if parsed.tree_size != n_max {
+        return Err(anyhow!("barrier tree_size mismatch for local state"));
+    }
+    if parsed.kem_tree_hash_before != session.barrier_state.kem_tree_hash_after {
+        return Err(anyhow!("barrier hash-chain before-hash mismatch"));
+    }
+
+    let revoked_since_root = header_bytes32(header_map, hdr::HDR_REVOKED_SINCE_ROOT)
+        .ok_or_else(|| anyhow!("header revoked_since_prev_root is missing or malformed"))?;
+    let revoked_root = header_bytes32(header_map, hdr::HDR_REVOKED_ROOT)
+        .ok_or_else(|| anyhow!("header revoked_root is missing or malformed"))?;
+    let expected_rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+    if parsed.revocation_roots_hash != expected_rrh {
+        return Err(anyhow!("barrier revocation_roots_hash mismatch"));
+    }
+
+    let author_matches = header_map
+        .get(&hdr::HDR_POP_PK)
+        .and_then(Value::as_bytes)
+        .map(|pk| pk == session.pop_public_key.as_slice())
+        .unwrap_or(false);
+    if author_matches && parsed.updater_leaf == session.barrier_state.cover_leaf_index {
+        return Ok(None);
+    }
+
+    let self_path = self_path_nodes(n_max, session.barrier_state.cover_leaf_index);
+    let self_path_set: HashSet<u64> = self_path.iter().copied().collect();
+    let leaf_node = self_path
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow!("local self path is empty"))?;
+
+    let mut matches: Vec<(u64, u64, [u8; 32])> = Vec::new();
+    let mut candidate_decrypt_failure = false;
+    for node in &parsed.node_ciphertexts {
+        if !self_path_set.contains(&node.target_node) {
+            continue;
+        }
+
+        let (dk_bytes, pkhash_t) = if node.target_node == leaf_node {
+            (
+                session.barrier_state.dk_leaf.as_slice(),
+                session.barrier_state.pkhash_leaf,
+            )
+        } else if let Some(material) = session
+            .barrier_state
+            .dk_nodes
+            .get(&(node.target_node as u32))
+        {
+            (material.dk.as_slice(), material.pkhash)
+        } else {
+            continue;
+        };
+
+        let mut target_prefix = [0u8; 16];
+        target_prefix.copy_from_slice(&pkhash_t[..16]);
+        if target_prefix != node.target_pk_hash {
+            continue;
+        }
+
+        let ss = if node.target_node == leaf_node {
+            if dk_bytes.len() != kyber768::secret_key_bytes() {
+                continue;
+            }
+            let ct = match kyber768::Ciphertext::from_bytes(node.kem_ct.as_slice()) {
+                Ok(ct) => ct,
+                Err(_) => continue,
+            };
+            let dk = match kyber768::SecretKey::from_bytes(dk_bytes) {
+                Ok(sk) => sk,
+                Err(_) => continue,
+            };
+            let shared = kyber768::decapsulate(&ct, &dk);
+            let mut ss = [0u8; 32];
+            ss.copy_from_slice(shared.as_bytes());
+            ss
+        } else if dk_bytes.len() == ML_KEM_EXPANDED_DK_BYTES {
+            match decapsulate_internal_node_shared_secret(dk_bytes, node.kem_ct.as_slice()) {
+                Ok(ss) => ss,
+                Err(_) => {
+                    candidate_decrypt_failure = true;
+                    continue;
+                }
+            }
+        } else {
+            candidate_decrypt_failure = true;
+            continue;
+        };
+
+        let aad = to_cbor_vec(&BarrierWrapAadPreimage(
+            &session.gid,
+            parsed.barrier_version,
+            &parsed.revocation_roots_hash,
+            parsed.updater_leaf,
+            node.source_node,
+            node.target_node,
+            &pkhash_t,
+        ))
+        .map_err(|err| anyhow!("encode barrier wrap aad: {err}"))?;
+        let nonce_full = h_l(
+            "barrier/wrap/nonce",
+            &BarrierWrapNoncePreimage(node.source_node, node.target_node),
+        )
+        .map_err(|err| anyhow!("derive barrier wrap nonce: {err}"))?;
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&nonce_full[..12]);
+
+        use chacha20poly1305::{
+            ChaCha20Poly1305,
+            aead::{Aead, KeyInit, Payload},
+        };
+        let cipher = ChaCha20Poly1305::new((&ss).into());
+        let plaintext = match cipher.decrypt(
+            (&nonce).into(),
+            Payload {
+                msg: node.wrapped_ps.as_slice(),
+                aad: aad.as_slice(),
+            },
+        ) {
+            Ok(plaintext) => plaintext,
+            Err(_) => {
+                candidate_decrypt_failure = true;
+                continue;
+            }
+        };
+        if plaintext.len() != 32 {
+            candidate_decrypt_failure = true;
+            continue;
+        }
+        let mut path_secret = [0u8; 32];
+        path_secret.copy_from_slice(plaintext.as_slice());
+        matches.push((node.source_node, node.target_node, path_secret));
+    }
+
+    if matches.is_empty() {
+        if candidate_decrypt_failure {
+            return Err(anyhow!(
+                "barrier recover rejected: candidate unwrap/decrypt failure (960.7)"
+            ));
+        }
+        warn!(
+            code = 9606,
+            "barrier recover produced no matching ciphertext"
+        );
+        return Ok(None);
+    }
+    if matches.len() > 1 {
+        return Err(anyhow!("barrier recover rejected: multi-match (960.2)"));
+    }
+
+    let (source_node, target_node, source_secret) = matches.remove(0);
+    if !self_path_set.contains(&source_node) || !self_path_set.contains(&target_node) {
+        return Err(anyhow!(
+            "barrier recover rejected: off-path source/target (960.7)"
+        ));
+    }
+    let source_index = parsed
+        .path_nodes
+        .iter()
+        .position(|node| *node == source_node)
+        .ok_or_else(|| {
+            anyhow!("barrier recover rejected: source missing from path_nodes (960.7)")
+        })?;
+
+    let mut path_secrets = BTreeMap::new();
+    path_secrets.insert(source_node, source_secret);
+    for k in (source_index + 1)..parsed.path_nodes.len() {
+        let parent_node = parsed.path_nodes[k];
+        let child_node = parsed.path_nodes[k - 1];
+        let child_secret = path_secrets
+            .get(&child_node)
+            .ok_or_else(|| anyhow!("barrier recover missing child path secret"))?;
+        let salt = h_l(
+            "barrier/tree/path",
+            &BarrierTreePathSaltPreimage(parent_node),
+        )
+        .map_err(|err| anyhow!("derive barrier tree salt: {err}"))?;
+        let parent_secret = hkdf_blake3(&salt, child_secret, BARRIER_TREE_INFO);
+        path_secrets.insert(parent_node, parent_secret);
+    }
+
+    let root_secret = path_secrets
+        .get(&0)
+        .ok_or_else(|| anyhow!("barrier recover failed to derive root path secret"))?;
+    let barrier_salt = h_l(
+        "barrier/derive/salt",
+        &BarrierDeriveSaltPreimage(parsed.barrier_version, &parsed.revocation_roots_hash),
+    )
+    .map_err(|err| anyhow!("derive barrier key salt: {err}"))?;
+    let k_barrier_new = hkdf_blake3(&barrier_salt, root_secret, BARRIER_KEY_INFO);
+
+    let expected_node_set: HashSet<u64> = parsed.path_nodes.iter().copied().skip(1).collect();
+    let mut derived_node_key_material = BTreeMap::new();
+    for node in parsed.path_nodes.iter().copied().skip(source_index) {
+        if node == leaf_node || !self_path_set.contains(&node) {
+            continue;
+        }
+        let path_secret = path_secrets
+            .get(&node)
+            .ok_or_else(|| anyhow!("barrier recover missing path secret for node {node}"))?;
+        let (dk_bytes, pkhash, ek_bytes) = derive_internal_node_key_material(
+            path_secret,
+            parsed.barrier_version,
+            &parsed.revocation_roots_hash,
+            parsed.tree_size,
+            node,
+        )?;
+        if expected_node_set.contains(&node) {
+            let announced_ek = parsed.new_public_keys.get(&node).ok_or_else(|| {
+                anyhow!("barrier recover rejected: missing new_public_keys for node {node} (960.7)")
+            })?;
+            if announced_ek.as_slice() != ek_bytes.as_slice() {
+                return Err(anyhow!(
+                    "barrier recover rejected: new_public_keys mismatch for node {node} (960.7)"
+                ));
+            }
+        }
+        let node_index = u32::try_from(node).map_err(|_| anyhow!("barrier node index overflow"))?;
+        derived_node_key_material.insert(
+            node_index,
+            BarrierNodeKeyMaterial {
+                dk: dk_bytes,
+                pkhash,
+            },
+        );
+    }
+
+    let reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON);
+    let k_fs_after_pcs = if reason == Some(1) {
+        let k_fs_before = session.forward_state.snapshot().k_fs;
+        Some(derive_k_fs_after_pcs(
+            &k_fs_before,
+            weid,
+            fs_ec,
+            parsed.barrier_version,
+            &k_barrier_new,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(Some(BarrierRecoverResult {
+        k_barrier_new,
+        kem_tree_hash_after: parsed.kem_tree_hash_after,
+        k_fs_after_pcs,
+        derived_node_key_material,
+    }))
+}
+
+fn extract_barrier_update_digest(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]>> {
+    match header.get(&hdr::HDR_BARRIER_UPDATE) {
+        Some(Value::Bytes(raw)) => Ok(Some(compute_barrier_update_digest(raw)?)),
+        Some(_) => Err(anyhow!("header barrier_update must be bytes")),
+        None => Ok(None),
+    }
+}
+
+fn apply_forward_state_k_fs(session: &mut AppSession, k_fs: [u8; 32]) {
+    let snapshot = session.forward_state.snapshot();
+    let mut updated_state = ForwardSecrecyState::with_state(
+        k_fs,
+        snapshot.fs_ec,
+        snapshot.fs_dev_commit,
+        snapshot.last_weid,
+    );
+    updated_state.set_epoch_base_ts(session.fs_epoch_base_ts);
+    session.forward_state = updated_state;
+}
+
+fn apply_pending_barrier_activation(
+    session: &mut AppSession,
+    observed_barrier_version: u64,
+    accepted_digest: Option<[u8; 32]>,
+) -> Result<bool> {
+    let Some(pending) = session.barrier_state.pending.clone() else {
+        return Ok(false);
+    };
+
+    if observed_barrier_version < pending.barrier_version {
+        return Ok(false);
+    }
+
+    if let Some(digest) = accepted_digest {
+        if digest == pending.barrier_update_digest {
+            session.barrier_state.barrier_version = pending.barrier_version;
+            session.barrier_state.k_barrier = pending.k_barrier_new;
+            session.barrier_state.kem_tree_hash_after = pending.kem_tree_hash_after;
+            for (node, material) in pending.on_path_key_material {
+                session.barrier_state.dk_nodes.insert(node, material);
+            }
+            if let Some(k_fs_after_pcs) = pending.k_fs_after_pcs {
+                apply_forward_state_k_fs(session, k_fs_after_pcs);
+            }
+            session.barrier_state.pending = None;
+            return Ok(true);
+        }
+
+        warn!(
+            code = 9609,
+            pending_barrier_version = pending.barrier_version,
+            observed_barrier_version,
+            "pending barrier activation digest mismatch; dropping pending state"
+        );
+        session.barrier_state.pending = None;
+        return Ok(true);
+    }
+
+    if observed_barrier_version > pending.barrier_version {
+        session.barrier_state.pending = None;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn build_barrier_update_bytes(
+    gid: &[u8; 32],
+    n_max: u64,
+    updater_leaf: u64,
+    barrier_version: u64,
+    prev_barrier_version: u64,
+    revocation_roots_hash: [u8; 32],
+    kem_tree_hash_before: [u8; 32],
+    snapshot_pre: &[Vec<u8>],
+) -> Result<BarrierUpdateBuildResult> {
+    if n_max == 0 || !n_max.is_power_of_two() || updater_leaf >= n_max {
+        return Err(anyhow!("invalid barrier update tree parameters"));
+    }
+    let expected_nodes = usize::try_from(n_max)
+        .ok()
+        .and_then(|n| n.checked_mul(2))
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| anyhow!("invalid barrier n_max"))?;
+    if snapshot_pre.len() != expected_nodes {
+        return Err(anyhow!(
+            "barrier snapshot size mismatch: expected {expected_nodes}, got {}",
+            snapshot_pre.len()
+        ));
+    }
+
+    let leaf_base = n_max.saturating_sub(1);
+    let mut path_nodes = vec![leaf_base.saturating_add(updater_leaf)];
+    while let Some(&node) = path_nodes.last() {
+        if node == 0 {
+            break;
+        }
+        path_nodes.push((node - 1) / 2);
+    }
+
+    let mut path_secrets = BTreeMap::new();
+    let mut ps_leaf = [0u8; 32];
+    thread_rng().fill_bytes(&mut ps_leaf);
+    path_secrets.insert(path_nodes[0], ps_leaf);
+    for k in 1..path_nodes.len() {
+        let parent_node = path_nodes[k];
+        let child_node = path_nodes[k - 1];
+        let child_secret = path_secrets
+            .get(&child_node)
+            .ok_or_else(|| anyhow!("barrier path secret derivation missing child"))?;
+        let salt = h_l(
+            "barrier/tree/path",
+            &BarrierTreePathSaltPreimage(parent_node),
+        )
+        .map_err(|err| anyhow!("derive barrier tree/path salt: {err}"))?;
+        let parent_secret = hkdf_blake3(&salt, child_secret, BARRIER_TREE_INFO);
+        path_secrets.insert(parent_node, parent_secret);
+    }
+
+    let root_secret = path_secrets
+        .get(&0)
+        .ok_or_else(|| anyhow!("barrier path secret derivation missing root"))?;
+    let barrier_salt = h_l(
+        "barrier/derive/salt",
+        &BarrierDeriveSaltPreimage(barrier_version, &revocation_roots_hash),
+    )
+    .map_err(|err| anyhow!("derive barrier/derive/salt: {err}"))?;
+    let k_barrier_new = hkdf_blake3(&barrier_salt, root_secret, BARRIER_KEY_INFO);
+
+    let mut expected_nodes: Vec<u64> = path_nodes.iter().copied().skip(1).collect();
+    expected_nodes.sort_unstable();
+    let mut on_path_key_material = BTreeMap::new();
+    let mut new_public_keys = Vec::with_capacity(expected_nodes.len());
+    for node in expected_nodes {
+        let path_secret = path_secrets
+            .get(&node)
+            .ok_or_else(|| anyhow!("missing path secret for node {node}"))?;
+        let (dk_bytes, pkhash, ek_bytes) = derive_internal_node_key_material(
+            path_secret,
+            barrier_version,
+            &revocation_roots_hash,
+            n_max,
+            node,
+        )?;
+        let node_index = u32::try_from(node).map_err(|_| anyhow!("barrier node index overflow"))?;
+        on_path_key_material.insert(
+            node_index,
+            BarrierNodeKeyMaterial {
+                dk: dk_bytes,
+                pkhash,
+            },
+        );
+        new_public_keys.push(NewPublicKeyWire(node, ek_bytes));
+    }
+
+    let mut snapshot_post = snapshot_pre.to_vec();
+    for NewPublicKeyWire(node, ek) in &new_public_keys {
+        let idx = usize::try_from(*node).map_err(|_| anyhow!("barrier node index out of range"))?;
+        let slot = snapshot_post
+            .get_mut(idx)
+            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+        *slot = ek.clone();
+    }
+    let kem_tree_hash_after = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
+
+    let mut node_ciphertexts = Vec::new();
+    for step in 0..path_nodes.len().saturating_sub(1) {
+        let child_node = path_nodes[step];
+        let source_node = path_nodes[step + 1];
+        let sibling =
+            sibling_node(child_node).ok_or_else(|| anyhow!("barrier sibling missing for root"))?;
+        let mut targets = Vec::new();
+        collect_resolution_targets(snapshot_pre, sibling, leaf_base, &mut targets)?;
+        targets.sort_unstable();
+        for target_node in targets {
+            let target_index = usize::try_from(target_node)
+                .map_err(|_| anyhow!("barrier node index out of range"))?;
+            let target_pk = snapshot_pre
+                .get(target_index)
+                .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+            if target_pk.is_empty() {
+                return Err(anyhow!("barrier resolution produced blank target node"));
+            }
+            let target_pkhash = compute_barrier_pkhash(target_pk.as_slice())?;
+            let target_ek = kyber768::PublicKey::from_bytes(target_pk.as_slice())
+                .map_err(|_| anyhow!("invalid ML-KEM target public key in snapshot_pre"))?;
+            let (ss, kem_ct) = kyber768::encapsulate(&target_ek);
+
+            let aad = to_cbor_vec(&BarrierWrapAadPreimage(
+                gid,
+                barrier_version,
+                &revocation_roots_hash,
+                updater_leaf,
+                source_node,
+                target_node,
+                &target_pkhash,
+            ))
+            .map_err(|err| anyhow!("encode barrier wrap aad: {err}"))?;
+            let nonce_full = h_l(
+                "barrier/wrap/nonce",
+                &BarrierWrapNoncePreimage(source_node, target_node),
+            )
+            .map_err(|err| anyhow!("derive barrier wrap nonce: {err}"))?;
+            let mut nonce = [0u8; 12];
+            nonce.copy_from_slice(&nonce_full[..12]);
+
+            let source_secret = path_secrets
+                .get(&source_node)
+                .ok_or_else(|| anyhow!("missing path secret for source node {source_node}"))?;
+            use chacha20poly1305::{
+                ChaCha20Poly1305,
+                aead::{Aead, KeyInit, Payload},
+            };
+            let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+            let wrapped_ps = cipher
+                .encrypt(
+                    (&nonce).into(),
+                    Payload {
+                        msg: source_secret.as_slice(),
+                        aad: aad.as_slice(),
+                    },
+                )
+                .map_err(|_| anyhow!("barrier wrap encrypt failed"))?;
+            node_ciphertexts.push(NodeCiphertextWire(
+                source_node,
+                target_node,
+                target_pkhash[..16].to_vec(),
+                KemCiphertext::as_bytes(&kem_ct).to_vec(),
+                wrapped_ps,
+            ));
+        }
+    }
+    node_ciphertexts.sort_by_key(|entry| (entry.0, entry.1));
+
+    let cover_payload = KemTreeCoverPayloadWire(
+        updater_leaf,
+        path_nodes,
+        None,
+        node_ciphertexts,
+        new_public_keys,
+    );
+    let cover_bytes = to_cbor_vec(&cover_payload).context("encode barrier cover payload")?;
+
+    let update = BarrierUpdateWire(
+        "barrier-v1".to_string(),
+        barrier_version,
+        prev_barrier_version,
+        n_max,
+        revocation_roots_hash.to_vec(),
+        kem_tree_hash_before.to_vec(),
+        kem_tree_hash_after.to_vec(),
+        cover_bytes,
+    );
+    let raw_update = to_cbor_vec(&update).context("encode barrier update")?;
+    let barrier_update_digest = compute_barrier_update_digest(raw_update.as_slice())?;
+    Ok(BarrierUpdateBuildResult {
+        raw_update,
+        barrier_update_digest,
+        kem_tree_hash_after,
+        k_barrier_new,
+        on_path_key_material,
+    })
 }
 
 mod tokio_bridge {
@@ -267,6 +1334,7 @@ enum JoinStatus {
 enum LeaveStatus {
     Idle,
     Leaving,
+    Refreshing,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -507,6 +1575,7 @@ enum RetryAction {
     Join,
     Send,
     Leave,
+    Refresh,
 }
 
 #[derive(Clone, Default)]
@@ -801,7 +1870,56 @@ struct AppSession {
     fs_policy_version: String,
     fs_epoch_base_ts: u64,
     last_fetch_timestamp_ms: Option<u64>,
+    next_msg_index: u64,
     capss_witness: Vec<u8>,
+    barrier_state: BarrierSecretState,
+}
+
+#[derive(Clone)]
+struct BarrierSecretState {
+    barrier_version: u64,
+    k_barrier: [u8; 32],
+    kem_tree_hash_after: [u8; 32],
+    n_max: u64,
+    cover_leaf_index: u64,
+    dk_leaf: Vec<u8>,
+    pkhash_leaf: [u8; 32],
+    dk_nodes: BTreeMap<u32, BarrierNodeKeyMaterial>,
+    pending: Option<BarrierPendingState>,
+}
+
+impl Default for BarrierSecretState {
+    fn default() -> Self {
+        Self {
+            barrier_version: 0,
+            k_barrier: [0u8; 32],
+            kem_tree_hash_after: [0u8; 32],
+            n_max: DEFAULT_BARRIER_N_MAX,
+            cover_leaf_index: 0,
+            dk_leaf: Vec::new(),
+            pkhash_leaf: [0u8; 32],
+            dk_nodes: BTreeMap::new(),
+            pending: None,
+        }
+    }
+}
+
+#[derive(Clone, Default, Debug)]
+struct BarrierNodeKeyMaterial {
+    dk: Vec<u8>,
+    pkhash: [u8; 32],
+}
+
+#[derive(Clone, Default)]
+struct BarrierPendingState {
+    barrier_version: u64,
+    revocation_roots_hash: [u8; 32],
+    kem_tree_hash_after: [u8; 32],
+    k_barrier_new: [u8; 32],
+    k_fs_after_pcs: Option<[u8; 32]>,
+    barrier_update_reason: Option<u64>,
+    barrier_update_digest: [u8; 32],
+    on_path_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
 }
 
 impl AppModel {
@@ -3035,6 +4153,8 @@ impl AppModel {
 
     fn render_leave_controls(&self, cx: &mut ViewContext<Self>) -> Div {
         let leaving = matches!(self.leave_status, LeaveStatus::Leaving);
+        let refreshing = matches!(self.leave_status, LeaveStatus::Refreshing);
+        let membership_op_busy = leaving || refreshing;
         let mut leave_button = div()
             .px(px(12.0))
             .py(px(8.0))
@@ -3044,19 +4164,51 @@ impl AppModel {
             .text_color(rgb(0xfafafa))
             .bg(if leaving {
                 rgb(0x5a4552)
+            } else if membership_op_busy {
+                rgb(0x4b3f45)
             } else {
                 rgb(0xbb4f68)
             })
-            .cursor(if leaving {
+            .cursor(if membership_op_busy {
                 CursorStyle::Arrow
             } else {
                 CursorStyle::PointingHand
             })
             .child(if leaving { "Leaving…" } else { "Leave room" });
 
-        if !leaving {
+        if !membership_op_busy {
             leave_button =
                 leave_button.on_mouse_down(MouseButton::Left, cx.listener(Self::on_leave_clicked));
+        }
+
+        let mut refresh_button = div()
+            .px(px(12.0))
+            .py(px(8.0))
+            .rounded(px(12.0))
+            .text_size(px(14.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(0xfafafa))
+            .bg(if refreshing {
+                rgb(0x42516d)
+            } else if membership_op_busy {
+                rgb(0x3b4559)
+            } else {
+                rgb(0x4f79bb)
+            })
+            .cursor(if membership_op_busy {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::PointingHand
+            })
+            .child(if refreshing {
+                "Refreshing…"
+            } else {
+                "PCS refresh"
+            });
+
+        if !membership_op_busy {
+            refresh_button = refresh_button
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_refresh_clicked));
         }
 
         let reset_button = div()
@@ -3088,6 +4240,7 @@ impl AppModel {
                     .child("Session controls"),
             )
             .child(leave_button)
+            .child(refresh_button)
             .child(reset_button)
     }
 
@@ -3729,6 +4882,7 @@ impl AppModel {
                     .detach();
                 }
             }
+            Some(RetryAction::Refresh) => self.start_pcs_refresh(cx),
             None => {}
         }
         self.clear_error();
@@ -3995,7 +5149,7 @@ impl AppModel {
     }
 
     fn start_send(&mut self, cx: &mut ViewContext<Self>) {
-        let Some(session) = self.session.clone() else {
+        let Some(session_snapshot) = self.session.clone() else {
             return;
         };
         if !self.composer.is_ready() {
@@ -4009,7 +5163,25 @@ impl AppModel {
         if plaintext.is_empty() {
             return;
         }
-        let pending_id = self.queue_pending_message(&session, &plaintext);
+        let pending_id = self.queue_pending_message(&session_snapshot, &plaintext);
+        let (msg_index, persist_error) = {
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            let msg_index = session.next_msg_index;
+            session.next_msg_index = session.next_msg_index.saturating_add(1);
+            (msg_index, persist_session(session).err())
+        };
+        if let Some(err) = persist_error {
+            self.set_error(
+                &anyhow!("failed to persist msg_index anti-replay state: {err}"),
+                "send",
+                Some(RetryAction::Send),
+            );
+            self.send_status = SendStatus::Idle;
+            self.mark_pending_message_failed(pending_id);
+            return;
+        }
 
         self.composer.clear();
         self.composer.focus();
@@ -4019,7 +5191,7 @@ impl AppModel {
         self.info_message = None;
         cx.notify();
 
-        let params = SendParams::from_session(&session, plaintext);
+        let params = SendParams::from_session(&session_snapshot, plaintext, msg_index);
         let task = Tokio::spawn_result(cx, async move { perform_send(params).await });
 
         cx.spawn(async move |this, cx| {
@@ -4078,7 +5250,7 @@ impl AppModel {
     }
 
     fn on_leave_clicked(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
-        if matches!(self.leave_status, LeaveStatus::Leaving) {
+        if !matches!(self.leave_status, LeaveStatus::Idle) {
             return;
         }
         let session = match &self.session {
@@ -4102,6 +5274,58 @@ impl AppModel {
             });
         })
         .detach();
+    }
+
+    fn on_refresh_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.start_pcs_refresh(cx);
+    }
+
+    fn start_pcs_refresh(&mut self, cx: &mut ViewContext<Self>) {
+        if !matches!(self.leave_status, LeaveStatus::Idle) {
+            return;
+        }
+        let Some(session) = &self.session else {
+            return;
+        };
+
+        let request = LeaveRequest::from_session(session);
+        self.leave_status = LeaveStatus::Refreshing;
+        self.last_error = None;
+        self.info_message = None;
+        cx.notify();
+
+        let task = Tokio::spawn_result(cx, async move { perform_pcs_refresh(request).await });
+
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |model, cx| {
+                model.on_refresh_finished(outcome, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn on_refresh_finished(&mut self, result: anyhow::Result<()>, cx: &mut ViewContext<Self>) {
+        self.leave_status = LeaveStatus::Idle;
+        match result {
+            Ok(()) => {
+                self.clear_error();
+                self.info_message =
+                    Some("PCS refresh submitted. Syncing latest epoch…".to_string());
+                self.show_success("PCS refresh submitted", cx);
+                self.schedule_epoch_sync(cx, "Syncing latest epoch after PCS refresh…");
+            }
+            Err(err) => {
+                self.set_error(&err, "refresh", Some(RetryAction::Refresh));
+                self.info_message = None;
+            }
+        }
     }
 
     fn on_leave_finished(&mut self, result: anyhow::Result<()>, cx: &mut ViewContext<Self>) {
@@ -4649,6 +5873,8 @@ struct LeaveRequest {
     fs_ec: u64,
     fs_epoch_commit: [u8; 32],
     fs_dev_prev_commit: [u8; 32],
+    k_fs_current: [u8; 32],
+    we_epoch_id: [u8; 32],
 }
 
 #[derive(Clone)]
@@ -4682,8 +5908,29 @@ impl LeaveRequest {
             fs_ec: session.fs_ec,
             fs_epoch_commit: session.fs_epoch_commit,
             fs_dev_prev_commit: session.fs_dev_prev_commit,
+            k_fs_current: session.forward_state.snapshot().k_fs,
+            we_epoch_id: session.we_epoch_id,
         }
     }
+}
+
+fn persist_pending_barrier_state_before_publish(
+    request: &LeaveRequest,
+    pending: BarrierPendingState,
+) -> Result<()> {
+    let Some(mut session) = load_session_at(&request.server_url, &request.room_id)? else {
+        warn!("session snapshot missing before barrier publish; skipping pending persist");
+        return Ok(());
+    };
+    if session.gid != request.gid || session.leaf_id != request.leaf_id {
+        warn!(
+            "session snapshot identity mismatch before barrier publish; skipping pending persist"
+        );
+        return Ok(());
+    }
+    session.barrier_state.pending = Some(pending);
+    persist_session(&session).context("persist pending barrier state before publish")?;
+    Ok(())
 }
 
 impl MembersParams {
@@ -4702,8 +5949,13 @@ impl MembersParams {
 #[derive(Clone)]
 struct SendParams {
     server_url: String,
+    gid: [u8; 32],
     we_epoch_id: [u8; 32],
     epoch_key: [u8; 32],
+    fs_ec: u64,
+    barrier_version: u64,
+    k_barrier: [u8; 32],
+    msg_index: u64,
     leaf_id: [u8; 32],
     alias: String,
     plaintext: String,
@@ -4712,11 +5964,16 @@ struct SendParams {
 }
 
 impl SendParams {
-    fn from_session(session: &AppSession, plaintext: String) -> Self {
+    fn from_session(session: &AppSession, plaintext: String, msg_index: u64) -> Self {
         Self {
             server_url: session.server_url.clone(),
+            gid: session.gid,
             we_epoch_id: session.we_epoch_id,
             epoch_key: session.epoch_key,
+            fs_ec: session.fs_ec,
+            barrier_version: session.barrier_state.barrier_version,
+            k_barrier: session.barrier_state.k_barrier,
+            msg_index,
             leaf_id: session.leaf_id,
             alias: session.alias.clone(),
             plaintext,
@@ -4729,8 +5986,12 @@ impl SendParams {
 #[derive(Clone)]
 struct FetchParams {
     server_url: String,
+    gid: [u8; 32],
     we_epoch_id: [u8; 32],
     epoch_key: [u8; 32],
+    fs_ec: u64,
+    barrier_version: u64,
+    k_barrier: [u8; 32],
     leaf_id: [u8; 32],
     since: Option<u64>,
 }
@@ -4739,8 +6000,12 @@ impl FetchParams {
     fn from_session(session: &AppSession, since: Option<u64>) -> Self {
         Self {
             server_url: session.server_url.clone(),
+            gid: session.gid,
             we_epoch_id: session.we_epoch_id,
             epoch_key: session.epoch_key,
+            fs_ec: session.fs_ec,
+            barrier_version: session.barrier_state.barrier_version,
+            k_barrier: session.barrier_state.k_barrier,
             leaf_id: session.leaf_id,
             since,
         }
@@ -4802,9 +6067,13 @@ struct PersistedSession {
     #[serde(default)]
     last_fetch_timestamp_ms: Option<u64>,
     #[serde(default)]
+    next_msg_index: u64,
+    #[serde(default)]
     capss_witness_hex: String,
     #[serde(default)]
     regular_fingerprint_hex: String,
+    #[serde(default)]
+    barrier_state: PersistedBarrierState,
 }
 
 const ALIAS_STORE_VERSION: u32 = 2;
@@ -4881,6 +6150,10 @@ fn configured_client_message_token() -> Option<String> {
         .or_else(|| read_nonempty_env("CITYG_SERVER_MESSAGE_AUTH_TOKEN"))
 }
 
+fn default_barrier_n_max() -> u64 {
+    DEFAULT_BARRIER_N_MAX
+}
+
 fn new_api_client(server_url: &str) -> CitygApiClient {
     let mut client = CitygApiClient::new(server_url);
     if let Some(token) = configured_client_admin_token() {
@@ -4899,6 +6172,56 @@ struct PersistedForwardState {
     fs_dev_commit_hex: String,
     #[serde(default)]
     fs_last_weid_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedBarrierState {
+    #[serde(default)]
+    barrier_version: u64,
+    #[serde(default)]
+    k_barrier_hex: String,
+    #[serde(default)]
+    kem_tree_hash_after_hex: String,
+    #[serde(default = "default_barrier_n_max")]
+    n_max: u64,
+    #[serde(default)]
+    cover_leaf_index: u64,
+    #[serde(default)]
+    dk_leaf_hex: String,
+    #[serde(default)]
+    pkhash_leaf_hex: String,
+    #[serde(default)]
+    dk_nodes: BTreeMap<u32, PersistedBarrierNodeKeyMaterial>,
+    #[serde(default)]
+    pending: Option<PersistedBarrierPendingState>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedBarrierNodeKeyMaterial {
+    #[serde(default)]
+    dk_hex: String,
+    #[serde(default)]
+    pkhash_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedBarrierPendingState {
+    #[serde(default)]
+    barrier_version: u64,
+    #[serde(default)]
+    revocation_roots_hash_hex: String,
+    #[serde(default)]
+    kem_tree_hash_after_hex: String,
+    #[serde(default)]
+    k_barrier_new_hex: String,
+    #[serde(default)]
+    k_fs_after_pcs_hex: String,
+    #[serde(default)]
+    barrier_update_reason: Option<u64>,
+    #[serde(default)]
+    barrier_update_digest_hex: String,
+    #[serde(default)]
+    on_path_key_material: BTreeMap<u32, PersistedBarrierNodeKeyMaterial>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -4931,6 +6254,147 @@ struct LastSessionPointer {
     room_id: String,
 }
 
+impl PersistedBarrierNodeKeyMaterial {
+    fn from_runtime(material: &BarrierNodeKeyMaterial) -> Self {
+        Self {
+            dk_hex: hex_encode(&material.dk),
+            pkhash_hex: hex_encode(material.pkhash),
+        }
+    }
+
+    fn into_runtime(self, field_prefix: &str) -> Result<BarrierNodeKeyMaterial> {
+        let dk = decode_hex_vec(&format!("{field_prefix}.dk_hex"), &self.dk_hex)?;
+        let pkhash = decode_hex32_or_zero(&format!("{field_prefix}.pkhash_hex"), &self.pkhash_hex)?;
+        Ok(BarrierNodeKeyMaterial { dk, pkhash })
+    }
+}
+
+impl PersistedBarrierPendingState {
+    fn from_runtime(pending: &BarrierPendingState) -> Self {
+        let on_path_key_material = pending
+            .on_path_key_material
+            .iter()
+            .map(|(node, material)| {
+                (
+                    *node,
+                    PersistedBarrierNodeKeyMaterial::from_runtime(material),
+                )
+            })
+            .collect();
+        Self {
+            barrier_version: pending.barrier_version,
+            revocation_roots_hash_hex: hex_encode(pending.revocation_roots_hash),
+            kem_tree_hash_after_hex: hex_encode(pending.kem_tree_hash_after),
+            k_barrier_new_hex: hex_encode(pending.k_barrier_new),
+            k_fs_after_pcs_hex: pending.k_fs_after_pcs.map(hex_encode).unwrap_or_default(),
+            barrier_update_reason: pending.barrier_update_reason,
+            barrier_update_digest_hex: hex_encode(pending.barrier_update_digest),
+            on_path_key_material,
+        }
+    }
+
+    fn into_runtime(self) -> Result<BarrierPendingState> {
+        let mut on_path_key_material = BTreeMap::new();
+        for (node, material) in self.on_path_key_material {
+            on_path_key_material.insert(
+                node,
+                material.into_runtime(&format!(
+                    "barrier_state.pending.on_path_key_material[{node}]"
+                ))?,
+            );
+        }
+        let k_fs_after_pcs = if self.k_fs_after_pcs_hex.is_empty() {
+            None
+        } else {
+            Some(decode_hex32(
+                "barrier_state.pending.k_fs_after_pcs_hex",
+                &self.k_fs_after_pcs_hex,
+            )?)
+        };
+        Ok(BarrierPendingState {
+            barrier_version: self.barrier_version,
+            revocation_roots_hash: decode_hex32_or_zero(
+                "barrier_state.pending.revocation_roots_hash_hex",
+                &self.revocation_roots_hash_hex,
+            )?,
+            kem_tree_hash_after: decode_hex32_or_zero(
+                "barrier_state.pending.kem_tree_hash_after_hex",
+                &self.kem_tree_hash_after_hex,
+            )?,
+            k_barrier_new: decode_hex32_or_zero(
+                "barrier_state.pending.k_barrier_new_hex",
+                &self.k_barrier_new_hex,
+            )?,
+            k_fs_after_pcs,
+            barrier_update_reason: self.barrier_update_reason,
+            barrier_update_digest: decode_hex32_or_zero(
+                "barrier_state.pending.barrier_update_digest_hex",
+                &self.barrier_update_digest_hex,
+            )?,
+            on_path_key_material,
+        })
+    }
+}
+
+impl PersistedBarrierState {
+    fn from_runtime(state: &BarrierSecretState) -> Self {
+        let dk_nodes = state
+            .dk_nodes
+            .iter()
+            .map(|(node, material)| {
+                (
+                    *node,
+                    PersistedBarrierNodeKeyMaterial::from_runtime(material),
+                )
+            })
+            .collect();
+        Self {
+            barrier_version: state.barrier_version,
+            k_barrier_hex: hex_encode(state.k_barrier),
+            kem_tree_hash_after_hex: hex_encode(state.kem_tree_hash_after),
+            n_max: state.n_max.max(1),
+            cover_leaf_index: state.cover_leaf_index,
+            dk_leaf_hex: hex_encode(&state.dk_leaf),
+            pkhash_leaf_hex: hex_encode(state.pkhash_leaf),
+            dk_nodes,
+            pending: state
+                .pending
+                .as_ref()
+                .map(PersistedBarrierPendingState::from_runtime),
+        }
+    }
+
+    fn into_runtime(self) -> Result<BarrierSecretState> {
+        let mut dk_nodes = BTreeMap::new();
+        for (node, material) in self.dk_nodes {
+            dk_nodes.insert(
+                node,
+                material.into_runtime(&format!("barrier_state.dk_nodes[{node}]"))?,
+            );
+        }
+        Ok(BarrierSecretState {
+            barrier_version: self.barrier_version,
+            k_barrier: decode_hex32_or_zero("barrier_state.k_barrier_hex", &self.k_barrier_hex)?,
+            kem_tree_hash_after: decode_hex32_or_zero(
+                "barrier_state.kem_tree_hash_after_hex",
+                &self.kem_tree_hash_after_hex,
+            )?,
+            n_max: self.n_max.max(1),
+            cover_leaf_index: self.cover_leaf_index,
+            dk_leaf: decode_hex_vec("barrier_state.dk_leaf_hex", &self.dk_leaf_hex)?,
+            pkhash_leaf: decode_hex32_or_zero(
+                "barrier_state.pkhash_leaf_hex",
+                &self.pkhash_leaf_hex,
+            )?,
+            dk_nodes,
+            pending: self
+                .pending
+                .map(PersistedBarrierPendingState::into_runtime)
+                .transpose()?,
+        })
+    }
+}
+
 impl PersistedSession {
     fn from_session(session: &AppSession) -> Self {
         let snapshot = session.forward_state.snapshot();
@@ -4941,7 +6405,7 @@ impl PersistedSession {
             .as_millis() as u64;
 
         Self {
-            version: 7, // Version 7: Persist room KBROAD secret for redacted epoch sync.
+            version: 8, // Version 8: Persist barrier secret/pending client state.
             server_url: session.server_url.clone(),
             room_id: session.room_id.clone(),
             alias: session.alias.clone(),
@@ -4984,12 +6448,14 @@ impl PersistedSession {
                 fs_last_weid_hex: hex_encode(snapshot.last_weid),
             },
             last_fetch_timestamp_ms: session.last_fetch_timestamp_ms,
+            next_msg_index: session.next_msg_index,
             capss_witness_hex: hex_encode(&session.capss_witness),
             regular_fingerprint_hex: session
                 .regular_fingerprint
                 .as_ref()
                 .map(hex_encode)
                 .unwrap_or_default(),
+            barrier_state: PersistedBarrierState::from_runtime(&session.barrier_state),
         }
     }
 
@@ -5033,13 +6499,15 @@ impl PersistedSession {
             fs_epoch_rotation_interval_secs,
             forward_state,
             last_fetch_timestamp_ms,
+            next_msg_index,
             capss_witness_hex,
             regular_fingerprint_hex,
+            barrier_state,
         } = self;
 
-        if !(version == 4 || version == 5 || version == 6 || version == 7) {
+        if !(version == 4 || version == 5 || version == 6 || version == 7 || version == 8) {
             return Err(anyhow!(
-                "unsupported session file version {version} (expected 4, 5, 6, or 7 with ML-DSA-65 authentication)"
+                "unsupported session file version {version} (expected 4, 5, 6, 7, or 8 with ML-DSA-65 authentication)"
             ));
         }
 
@@ -5067,6 +6535,7 @@ impl PersistedSession {
         let fs_epoch_commit = decode_hex32("fs_epoch_commit_hex", &fs_epoch_commit_hex)?;
         let fs_dev_prev_commit = decode_hex32("fs_dev_prev_commit_hex", &fs_dev_prev_commit_hex)?;
         let capss_witness = decode_hex_vec("capss_witness_hex", &capss_witness_hex)?;
+        let barrier_state = barrier_state.into_runtime()?;
         let regular_fingerprint = if regular_fingerprint_hex.is_empty() {
             None
         } else {
@@ -5139,7 +6608,9 @@ impl PersistedSession {
             fs_policy_version,
             fs_epoch_base_ts,
             last_fetch_timestamp_ms,
+            next_msg_index,
             capss_witness,
+            barrier_state,
         };
 
         session.fs_fingerprint = derive_fs_fingerprint_from_fields(
@@ -5689,6 +7160,14 @@ fn decode_hex32(name: &str, value: &str) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("{name} must decode to 32 bytes, got {}", bytes.len()))
 }
 
+fn decode_hex32_or_zero(name: &str, value: &str) -> Result<[u8; 32]> {
+    if value.is_empty() {
+        Ok([0u8; 32])
+    } else {
+        decode_hex32(name, value)
+    }
+}
+
 fn decode_hex_vec(name: &str, value: &str) -> Result<Vec<u8>> {
     if value.is_empty() {
         return Ok(Vec::new());
@@ -6143,6 +7622,14 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let mut header_map = BTreeMap::new();
     header_map.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
     header_map.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
+    let (barrier_leaf_ek, barrier_leaf_dk) = kyber768::keypair();
+    let barrier_leaf_ek_bytes = KemPublicKey::as_bytes(&barrier_leaf_ek).to_vec();
+    let barrier_leaf_dk_bytes = KemSecretKey::as_bytes(&barrier_leaf_dk).to_vec();
+    let barrier_pkhash_leaf = compute_barrier_pkhash(barrier_leaf_ek_bytes.as_slice())?;
+    header_map.insert(
+        hdr::HDR_BARRIER_LEAF_PK,
+        Value::Bytes(barrier_leaf_ek_bytes.clone()),
+    );
 
     let mut k_fs = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut k_fs);
@@ -6189,6 +7676,20 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         ticket.fs_policy_version
     };
     let fs_epoch_base_ts = ticket.fs_epoch_base_ts;
+    let k_barrier = bytes32("k_barrier", &ticket.k_barrier)?;
+    let kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
+    let barrier_n_max = if ticket.n_max == 0 {
+        DEFAULT_BARRIER_N_MAX
+    } else {
+        ticket.n_max
+    };
+    if ticket.cover_leaf_index >= barrier_n_max {
+        return Err(anyhow!(
+            "cover_leaf_index out of range for barrier tree: {} >= {}",
+            ticket.cover_leaf_index,
+            barrier_n_max
+        ));
+    }
 
     let params = OrchestrationParams {
         msphf_crs_id: msphf_crs_id.as_str(),
@@ -6208,6 +7709,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         vrf_public_key: Some(vrf_public_key.as_slice()),
         fs_policy_version: fs_policy_version.as_str(),
         fs_epoch_base_ts,
+        barrier_version: ticket.barrier_version,
         fs_join: FsJoinInputs::default(),
         fs_merge: FsMergeInputs::default(),
     };
@@ -6318,13 +7820,25 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         fs_policy_version,
         fs_epoch_base_ts,
         last_fetch_timestamp_ms: None,
+        next_msg_index: 0,
         capss_witness: capss_witness_bytes,
+        barrier_state: BarrierSecretState {
+            barrier_version: ticket.barrier_version,
+            k_barrier,
+            kem_tree_hash_after,
+            n_max: barrier_n_max,
+            cover_leaf_index: ticket.cover_leaf_index,
+            dk_leaf: barrier_leaf_dk_bytes,
+            pkhash_leaf: barrier_pkhash_leaf,
+            ..BarrierSecretState::default()
+        },
     };
 
     Ok(session)
 }
 
 async fn perform_leave(request: LeaveRequest) -> Result<()> {
+    let persist_request = request.clone();
     let LeaveRequest {
         server_url,
         room_id,
@@ -6367,6 +7881,12 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         fs_policy_version,
         fs_epoch_base_ts,
         kbroad_generation: _,
+        barrier_version,
+        cover_leaf_index,
+        k_barrier: _,
+        kem_tree_hash_after,
+        n_max,
+        max_barrier_update_bytes: _,
     } = ticket;
 
     let srx_inputs = SrxInputsOwned::from_cbor(&srx_cbor)
@@ -6382,6 +7902,77 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
 
     let pop_secret =
         Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
+
+    let witness_bytes = if witness_cbor.is_empty() {
+        None
+    } else {
+        Some(witness_cbor.as_slice())
+    };
+
+    let parities = hydrate_parities(&raw_parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit);
+
+    let pivot = select_pivot_parity(&parities)
+        .ok_or_else(|| anyhow!("merge ticket did not include any pivot parities"))?;
+    let parent_root_arr = bytes32("parent_root", &parent_root)?;
+    let join_delta_root_arr = bytes32("join_delta_root", &join_delta_root)?;
+    let revoked_since_root_arr = bytes32("revoked_since_root", &revoked_since_root)?;
+    let revoked_root_arr = bytes32("revoked_root", &revoked_root)?;
+    let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &tswe_salt_hash)?;
+    let revocation_roots_hash =
+        compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
+    let kem_tree_hash_before = bytes32("kem_tree_hash_after", &kem_tree_hash_after)?;
+    let barrier_tree_snapshot = client
+        .barrier_fetch_public_tree(&room_id, &kem_tree_hash_before)
+        .await
+        .context("fetch barrier public tree snapshot")?;
+    let barrier_n_max = if n_max == 0 {
+        DEFAULT_BARRIER_N_MAX
+    } else {
+        n_max
+    };
+    if cover_leaf_index >= barrier_n_max {
+        return Err(anyhow!(
+            "cover_leaf_index out of range for barrier tree: {cover_leaf_index} >= {barrier_n_max}"
+        ));
+    }
+    if barrier_tree_snapshot.n_max != barrier_n_max {
+        return Err(anyhow!(
+            "barrier tree snapshot n_max mismatch: expected {barrier_n_max}, got {}",
+            barrier_tree_snapshot.n_max
+        ));
+    }
+    let next_barrier_version = barrier_version.saturating_add(1);
+    let barrier_update = build_barrier_update_bytes(
+        &gid,
+        barrier_n_max,
+        cover_leaf_index,
+        next_barrier_version,
+        barrier_version,
+        revocation_roots_hash,
+        kem_tree_hash_before,
+        barrier_tree_snapshot.pk_entries.as_slice(),
+    )?;
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE,
+        Value::Bytes(barrier_update.raw_update.clone()),
+    );
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE_REASON,
+        Value::Integer(Integer::from(0u64)),
+    );
+    persist_pending_barrier_state_before_publish(
+        &persist_request,
+        BarrierPendingState {
+            barrier_version: next_barrier_version,
+            revocation_roots_hash,
+            kem_tree_hash_after: barrier_update.kem_tree_hash_after,
+            k_barrier_new: barrier_update.k_barrier_new,
+            k_fs_after_pcs: None,
+            barrier_update_reason: Some(0),
+            barrier_update_digest: barrier_update.barrier_update_digest,
+            on_path_key_material: barrier_update.on_path_key_material.clone(),
+        },
+    )?;
 
     let params = OrchestrationParams {
         msphf_crs_id: msphf_crs_id.as_str(),
@@ -6401,6 +7992,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         vrf_public_key: Some(vrf_public_key.as_slice()),
         fs_policy_version: fs_policy_version.as_str(),
         fs_epoch_base_ts,
+        barrier_version: next_barrier_version,
         fs_join: FsJoinInputs {
             fs_ec,
             fs_epoch_commit,
@@ -6408,22 +8000,6 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         },
         fs_merge: FsMergeInputs::default(),
     };
-
-    let witness_bytes = if witness_cbor.is_empty() {
-        None
-    } else {
-        Some(witness_cbor.as_slice())
-    };
-
-    let parities = hydrate_parities(&raw_parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit);
-
-    let pivot = select_pivot_parity(&parities)
-        .ok_or_else(|| anyhow!("merge ticket did not include any pivot parities"))?;
-    let parent_root_arr = bytes32("parent_root", &parent_root)?;
-    let join_delta_root_arr = bytes32("join_delta_root", &join_delta_root)?;
-    let revoked_since_root_arr = bytes32("revoked_since_root", &revoked_since_root)?;
-    let revoked_root_arr = bytes32("revoked_root", &revoked_root)?;
-    let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &tswe_salt_hash)?;
 
     let parts = AnchorInstanceParts {
         gid: &gid,
@@ -6515,6 +8091,274 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         .accept_epoch_bundle(&bundle)
         .await
         .context("server rejected merge bundle")?;
+
+    Ok(())
+}
+
+async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
+    let persist_request = request.clone();
+    let LeaveRequest {
+        server_url,
+        room_id,
+        gid,
+        leaf_id,
+        pop_public_key,
+        pop_secret_key,
+        vrf_secret_key,
+        vrf_public_key,
+        fs_ec,
+        fs_epoch_commit,
+        fs_dev_prev_commit,
+        k_fs_current,
+        we_epoch_id,
+    } = request;
+
+    let client = new_api_client(&server_url);
+    let ticket = client
+        .merge_ticket_refresh(&room_id, &leaf_id)
+        .await
+        .context("failed to obtain refresh merge ticket")?;
+
+    let MergeTicket {
+        we_epoch_id: _,
+        parities: raw_parities,
+        witness_cbor,
+        srx_cbor,
+        proof_mode,
+        vrf_id,
+        policy_version,
+        cat,
+        parent_root,
+        join_delta_root,
+        revoked_since_root,
+        revoked_root,
+        tswe_salt_hash,
+        pox_r_commit,
+        kbroad_public,
+        msphf_crs_id,
+        msphf_params_id,
+        fs_policy_version,
+        fs_epoch_base_ts,
+        kbroad_generation: _,
+        barrier_version,
+        cover_leaf_index,
+        k_barrier: _,
+        kem_tree_hash_after,
+        n_max,
+        max_barrier_update_bytes: _,
+    } = ticket;
+
+    if !srx_cbor.is_empty() {
+        return Err(anyhow!(
+            "refresh merge ticket unexpectedly contained SRX payload"
+        ));
+    }
+
+    let mut header = BTreeMap::new();
+    header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+    header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
+
+    let cat_arr = bytes32("cat", &cat)?;
+    let pox_r_commit_arr = bytes32("pox_r_commit", &pox_r_commit)?;
+
+    let pop_secret =
+        Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
+
+    let witness_bytes = if witness_cbor.is_empty() {
+        None
+    } else {
+        Some(witness_cbor.as_slice())
+    };
+
+    let parities = hydrate_parities(&raw_parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit);
+
+    let pivot = select_pivot_parity(&parities)
+        .ok_or_else(|| anyhow!("merge ticket did not include any pivot parities"))?;
+    let parent_root_arr = bytes32("parent_root", &parent_root)?;
+    let join_delta_root_arr = bytes32("join_delta_root", &join_delta_root)?;
+    let revoked_since_root_arr = bytes32("revoked_since_root", &revoked_since_root)?;
+    let revoked_root_arr = bytes32("revoked_root", &revoked_root)?;
+    let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &tswe_salt_hash)?;
+    let revocation_roots_hash =
+        compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
+    let kem_tree_hash_before = bytes32("kem_tree_hash_after", &kem_tree_hash_after)?;
+    let barrier_tree_snapshot = client
+        .barrier_fetch_public_tree(&room_id, &kem_tree_hash_before)
+        .await
+        .context("fetch barrier public tree snapshot")?;
+    let barrier_n_max = if n_max == 0 {
+        DEFAULT_BARRIER_N_MAX
+    } else {
+        n_max
+    };
+    if cover_leaf_index >= barrier_n_max {
+        return Err(anyhow!(
+            "cover_leaf_index out of range for barrier tree: {cover_leaf_index} >= {barrier_n_max}"
+        ));
+    }
+    if barrier_tree_snapshot.n_max != barrier_n_max {
+        return Err(anyhow!(
+            "barrier tree snapshot n_max mismatch: expected {barrier_n_max}, got {}",
+            barrier_tree_snapshot.n_max
+        ));
+    }
+    let next_barrier_version = barrier_version.saturating_add(1);
+    let barrier_update = build_barrier_update_bytes(
+        &gid,
+        barrier_n_max,
+        cover_leaf_index,
+        next_barrier_version,
+        barrier_version,
+        revocation_roots_hash,
+        kem_tree_hash_before,
+        barrier_tree_snapshot.pk_entries.as_slice(),
+    )?;
+    let k_fs_after_pcs = derive_k_fs_after_pcs(
+        &k_fs_current,
+        &we_epoch_id,
+        fs_ec,
+        next_barrier_version,
+        &barrier_update.k_barrier_new,
+    )?;
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE,
+        Value::Bytes(barrier_update.raw_update.clone()),
+    );
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE_REASON,
+        Value::Integer(Integer::from(1u64)),
+    );
+    persist_pending_barrier_state_before_publish(
+        &persist_request,
+        BarrierPendingState {
+            barrier_version: next_barrier_version,
+            revocation_roots_hash,
+            kem_tree_hash_after: barrier_update.kem_tree_hash_after,
+            k_barrier_new: barrier_update.k_barrier_new,
+            k_fs_after_pcs: Some(k_fs_after_pcs),
+            barrier_update_reason: Some(1),
+            barrier_update_digest: barrier_update.barrier_update_digest,
+            on_path_key_material: barrier_update.on_path_key_material.clone(),
+        },
+    )?;
+
+    let params = OrchestrationParams {
+        msphf_crs_id: msphf_crs_id.as_str(),
+        params_id: msphf_params_id.as_str(),
+        srx: None,
+        srx_mode: SrxMode::Complete,
+        pop_keys: Some(PopKeypair {
+            algorithm: "ML-DSA-65",
+            public_key: pop_public_key.as_slice(),
+            secret_key: pop_secret.as_ref(),
+        }),
+        leaf_id_mode: LeafIdMode::PerGroup,
+        proof_mode: proof_mode.as_str(),
+        vrf_id: vrf_id.as_str(),
+        policy_version: policy_version.as_str(),
+        vrf_secret_key: Some(vrf_secret_key.as_slice()),
+        vrf_public_key: Some(vrf_public_key.as_slice()),
+        fs_policy_version: fs_policy_version.as_str(),
+        fs_epoch_base_ts,
+        barrier_version: next_barrier_version,
+        fs_join: FsJoinInputs {
+            fs_ec,
+            fs_epoch_commit,
+            fs_dev_prev_commit,
+        },
+        fs_merge: FsMergeInputs::default(),
+    };
+
+    let parts = AnchorInstanceParts {
+        gid: &gid,
+        cat: cat_arr.as_slice(),
+        tswe_salt_hash: tswe_salt_hash_arr.as_slice(),
+        parent_root: parent_root_arr.as_slice(),
+        join_delta_root: join_delta_root_arr.as_slice(),
+        revoked_since_prev_root: revoked_since_root_arr.as_slice(),
+        revoked_root: revoked_root_arr.as_slice(),
+        pox_r_commit: Some(pox_r_commit_arr.as_slice()),
+    };
+
+    let mut bundle =
+        CityGClient::generate_merge(header, parts, params, &parities, None, witness_bytes)
+            .context("failed to build refresh merge bundle")?;
+
+    strip_rollup_metadata(&mut bundle.header_map);
+    apply_pivot_alignment(&mut bundle.header_map, pivot);
+
+    let anchor_ctx =
+        build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
+    let seed_ctx_hash = compute_seed_ctx_hash(&anchor_ctx).context("compute seed_ctx_hash")?;
+    let seed_commit = compute_seed_commit(
+        &anchor_ctx,
+        &SeedCommitFields {
+            gid: &gid,
+            cat: cat_arr.as_slice(),
+            we_epoch_id: bundle.we_epoch_id,
+        },
+    )
+    .context("compute seed_commit")?;
+    let seed_bundle_commit = compute_seed_bundle_commit(
+        &anchor_ctx,
+        &bundle.hp_binding.rho_commit,
+        &gid,
+        cat_arr.as_slice(),
+        &parent_root_arr,
+    )
+    .context("compute seed_bundle_commit")?;
+    let derived_we_epoch_id =
+        derive_we_epoch_id(&gid, &parent_root_arr, &seed_ctx_hash).context("derive we_epoch_id")?;
+
+    bundle.anchor.anchor_hdr_ctx = anchor_ctx.clone();
+    bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
+    bundle.hp_binding.seed_commit = seed_commit;
+    bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
+    bundle.we_epoch_id = derived_we_epoch_id;
+    bundle
+        .header_map
+        .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
+    bundle.header_map.insert(
+        hdr::HDR_RHO_COMMIT,
+        Value::Bytes(bundle.hp_binding.rho_commit.to_vec()),
+    );
+    bundle.header_map.insert(
+        hdr::HDR_SEED_BUNDLE_COMMIT,
+        Value::Bytes(seed_bundle_commit.to_vec()),
+    );
+
+    if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
+        bundle
+            .header_map
+            .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
+    }
+
+    if let Some(recomputed) = recompute_proofs_commit(&bundle.header_map)
+        .ok()
+        .map(|arr| arr.to_vec())
+    {
+        bundle
+            .header_map
+            .insert(hdr::HDR_PROOFS_COMMIT, Value::Bytes(recomputed));
+    }
+
+    match client.refresh_pivot(&bundle).await {
+        Ok(_) => {}
+        Err(ApiClientError::HttpStatus {
+            status, message, ..
+        }) if status.is_server_error()
+            && (message.contains("pivot head missing")
+                || message.contains("refresh payload diverges from stored parity")) =>
+        {
+            warn!("refresh pivot skipped: {message}");
+        }
+        Err(err) => return Err(err).context("refresh pivot parity"),
+    }
+
+    client
+        .accept_epoch_bundle(&bundle)
+        .await
+        .context("server rejected refresh merge bundle")?;
 
     Ok(())
 }
@@ -6743,8 +8587,13 @@ async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
 async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
     let SendParams {
         server_url,
+        gid,
         we_epoch_id,
         epoch_key,
+        fs_ec,
+        barrier_version,
+        k_barrier,
+        msg_index,
         leaf_id,
         alias,
         plaintext,
@@ -6774,8 +8623,19 @@ async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
     );
 
     // Encrypt the authenticated message
-    let ciphertext =
-        encrypt_message(&authenticated_msg, &epoch_key).context("failed to encrypt message")?;
+    let ciphertext = encrypt_message_v2(
+        &authenticated_msg,
+        &MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            fs_ec,
+            barrier_version,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        },
+        msg_index,
+    )
+    .context("failed to encrypt message")?;
 
     // Send with leaf_id as sender identifier
     let client = new_api_client(&server_url);
@@ -6798,8 +8658,12 @@ async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
 async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
     let FetchParams {
         server_url,
+        gid,
         we_epoch_id,
         epoch_key,
+        fs_ec,
+        barrier_version,
+        k_barrier,
         leaf_id,
         since,
     } = params;
@@ -6821,7 +8685,17 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
         }
 
         // Decrypt using ChaCha20-Poly1305
-        let authenticated_msg = match decrypt_message(&message.ciphertext, &epoch_key) {
+        let authenticated_msg = match decrypt_message_v2(
+            &message.ciphertext,
+            &MessageCryptoContext {
+                gid: &gid,
+                we_epoch_id: &we_epoch_id,
+                fs_ec,
+                barrier_version,
+                epoch_key: &epoch_key,
+                k_barrier: &k_barrier,
+            },
+        ) {
             Ok(bytes) => bytes,
             Err(e) => {
                 // Skip messages that fail decryption (might be from different epoch or corrupted)
@@ -6937,14 +8811,42 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
 async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome> {
     let client = new_api_client(&session.server_url);
     let ticket = client
-        .merge_ticket(&session.room_id, &session.leaf_id)
+        .merge_ticket_refresh(&session.room_id, &session.leaf_id)
         .await
         .context("failed to fetch merge ticket for epoch sync")?;
+    let ticket_k_barrier = bytes32("k_barrier", &ticket.k_barrier)?;
+    let ticket_kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
+    let ticket_n_max = if ticket.n_max == 0 {
+        DEFAULT_BARRIER_N_MAX
+    } else {
+        ticket.n_max
+    };
+    if ticket.cover_leaf_index >= ticket_n_max {
+        return Err(anyhow!(
+            "merge ticket cover_leaf_index out of range: {} >= {}",
+            ticket.cover_leaf_index,
+            ticket_n_max
+        ));
+    }
+    let barrier_changed = session.barrier_state.barrier_version != ticket.barrier_version
+        || session.barrier_state.k_barrier != ticket_k_barrier
+        || session.barrier_state.kem_tree_hash_after != ticket_kem_tree_hash_after
+        || session.barrier_state.n_max != ticket_n_max
+        || session.barrier_state.cover_leaf_index != ticket.cover_leaf_index;
+    session.barrier_state.barrier_version = ticket.barrier_version;
+    session.barrier_state.n_max = ticket_n_max;
+    session.barrier_state.cover_leaf_index = ticket.cover_leaf_index;
+    let pending_changed_without_bundle =
+        apply_pending_barrier_activation(&mut session, ticket.barrier_version, None)?;
 
     if ticket.we_epoch_id == session.we_epoch_id {
+        if !pending_changed_without_bundle {
+            session.barrier_state.k_barrier = ticket_k_barrier;
+        }
+        session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
         return Ok(EpochSyncOutcome {
             session,
-            changed: false,
+            changed: barrier_changed || pending_changed_without_bundle,
         });
     }
 
@@ -7025,6 +8927,9 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT) {
         session.fs_dev_prev_commit = commit;
     }
+    if let Some(barrier_version) = header_u64(&bundle.header_map, hdr::HDR_BARRIER_VERSION) {
+        session.barrier_state.barrier_version = barrier_version;
+    }
     if let Some(base_ts) = header_u64(&bundle.header_map, hdr::HDR_FS_EPOCH_BASE_TS) {
         session.fs_epoch_base_ts = base_ts;
     }
@@ -7044,6 +8949,57 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     if let Some(secret) = active_kbroad_secret {
         session.kbroad_secret = secret;
     }
+
+    let accepted_digest = extract_barrier_update_digest(&bundle.header_map)?;
+    let pending_before = session.barrier_state.pending.clone();
+    let _pending_changed_with_bundle =
+        apply_pending_barrier_activation(&mut session, ticket.barrier_version, accepted_digest)?;
+    let pending_applied = matches!(
+        (pending_before.as_ref(), accepted_digest),
+        (Some(pending), Some(digest))
+            if digest == pending.barrier_update_digest && ticket.barrier_version >= pending.barrier_version
+    );
+
+    if !pending_applied {
+        let has_barrier_update = matches!(
+            bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE),
+            Some(Value::Bytes(_))
+        );
+        if has_barrier_update {
+            match try_recover_barrier_from_header(
+                &session,
+                &bundle.header_map,
+                &session.we_epoch_id,
+                session.fs_ec,
+            ) {
+                Ok(Some(recovered)) => {
+                    if recovered.kem_tree_hash_after != ticket_kem_tree_hash_after {
+                        return Err(anyhow!(
+                            "barrier recover hash-chain mismatch: recovered hash does not match merge ticket"
+                        ));
+                    }
+                    session.barrier_state.k_barrier = recovered.k_barrier_new;
+                    for (node, material) in recovered.derived_node_key_material {
+                        session.barrier_state.dk_nodes.insert(node, material);
+                    }
+                    if let Some(k_fs_after_pcs) = recovered.k_fs_after_pcs {
+                        apply_forward_state_k_fs(&mut session, k_fs_after_pcs);
+                    }
+                }
+                Ok(None) => {
+                    return Err(anyhow!(
+                        "barrier recover produced no match (960.6) for a barrier update"
+                    ));
+                }
+                Err(err) => {
+                    return Err(anyhow!("barrier recover failed (960.7): {err}"));
+                }
+            }
+        } else {
+            session.barrier_state.k_barrier = ticket_k_barrier;
+        }
+    }
+    session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
 
     session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
@@ -7547,6 +9503,178 @@ fn verify_message_signature(
     Ok(())
 }
 
+const PAYLOAD_ENVELOPE_V2_MODE: &str = "fs-hybrid-msg-v2";
+const PAYLOAD_MSG_EPOCH_INFO: &[u8] = b"city-g|fs/msg/epoch|v2";
+const PAYLOAD_MSG_KEY_INFO: &[u8] = b"city-g|fs/msg/key|v2";
+
+#[derive(Clone, Copy)]
+struct MessageCryptoContext<'a> {
+    gid: &'a [u8; 32],
+    we_epoch_id: &'a [u8; 32],
+    fs_ec: u64,
+    barrier_version: u64,
+    epoch_key: &'a [u8; 32],
+    k_barrier: &'a [u8; 32],
+}
+
+#[derive(Serialize)]
+struct MsgEpochSaltArgs<'a> {
+    #[serde(with = "serde_bytes")]
+    we_epoch_id: &'a [u8; 32],
+    fs_ec: u64,
+    barrier_version: u64,
+    #[serde(with = "serde_bytes")]
+    k_barrier: &'a [u8; 32],
+}
+
+#[derive(Serialize)]
+struct MsgKeySaltArgs<'a> {
+    #[serde(with = "serde_bytes")]
+    we_epoch_id: &'a [u8; 32],
+    fs_ec: u64,
+    msg_index: u64,
+}
+
+#[derive(Serialize)]
+struct MsgNonceArgs<'a> {
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    we_epoch_id: &'a [u8; 32],
+    fs_ec: u64,
+    barrier_version: u64,
+    msg_index: u64,
+}
+
+#[derive(Serialize)]
+struct MsgAad<'a>(
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    u64,
+    u64,
+    u64,
+);
+
+#[derive(Serialize, Deserialize)]
+struct PayloadEnvelopeV2(String, u64, #[serde(with = "serde_bytes")] Vec<u8>);
+
+fn derive_msg_key_material(context: &MessageCryptoContext<'_>, msg_index: u64) -> Result<[u8; 32]> {
+    let epoch_salt = h_l(
+        "fs/msg/epoch_salt",
+        &MsgEpochSaltArgs {
+            we_epoch_id: context.we_epoch_id,
+            fs_ec: context.fs_ec,
+            barrier_version: context.barrier_version,
+            k_barrier: context.k_barrier,
+        },
+    )
+    .context("derive fs/msg/epoch_salt")?;
+    let k_msg_epoch = hkdf_blake3(&epoch_salt, context.epoch_key, PAYLOAD_MSG_EPOCH_INFO);
+
+    let key_salt = h_l(
+        "fs/msg/key_salt",
+        &MsgKeySaltArgs {
+            we_epoch_id: context.we_epoch_id,
+            fs_ec: context.fs_ec,
+            msg_index,
+        },
+    )
+    .context("derive fs/msg/key_salt")?;
+    Ok(hkdf_blake3(&key_salt, &k_msg_epoch, PAYLOAD_MSG_KEY_INFO))
+}
+
+fn derive_msg_nonce(context: &MessageCryptoContext<'_>, msg_index: u64) -> Result<[u8; 12]> {
+    let nonce_bytes = h_l(
+        "fs/msg/nonce",
+        &MsgNonceArgs {
+            gid: context.gid,
+            we_epoch_id: context.we_epoch_id,
+            fs_ec: context.fs_ec,
+            barrier_version: context.barrier_version,
+            msg_index,
+        },
+    )
+    .context("derive fs/msg/nonce")?;
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&nonce_bytes[..12]);
+    Ok(nonce)
+}
+
+fn message_aad(context: &MessageCryptoContext<'_>, msg_index: u64) -> Result<Vec<u8>> {
+    to_cbor_vec(&MsgAad(
+        context.gid,
+        context.we_epoch_id,
+        context.fs_ec,
+        context.barrier_version,
+        msg_index,
+    ))
+    .context("encode message aad")
+}
+
+fn encrypt_message_v2(
+    plaintext: &[u8],
+    context: &MessageCryptoContext<'_>,
+    msg_index: u64,
+) -> Result<Vec<u8>> {
+    use chacha20poly1305::{
+        ChaCha20Poly1305,
+        aead::{Aead, KeyInit, Payload},
+    };
+
+    let key = derive_msg_key_material(context, msg_index)?;
+    let nonce = derive_msg_nonce(context, msg_index)?;
+    let aad = message_aad(context, msg_index)?;
+    let cipher = ChaCha20Poly1305::new((&key).into());
+    let ct_payload = cipher
+        .encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|e| anyhow!("encryption failed: {}", e))?;
+
+    to_cbor_vec(&PayloadEnvelopeV2(
+        PAYLOAD_ENVELOPE_V2_MODE.to_string(),
+        msg_index,
+        ct_payload,
+    ))
+    .context("encode payload envelope v2")
+}
+
+fn decrypt_message_v2(data: &[u8], context: &MessageCryptoContext<'_>) -> Result<Vec<u8>> {
+    use chacha20poly1305::{
+        ChaCha20Poly1305,
+        aead::{Aead, KeyInit, Payload},
+    };
+
+    let envelope: PayloadEnvelopeV2 =
+        ciborium::de::from_reader(data).context("decode payload envelope v2")?;
+    let canonical_bytes = to_cbor_vec(&envelope).context("re-encode payload envelope v2")?;
+    if canonical_bytes.as_slice() != data {
+        return Err(anyhow!("payload envelope v2 is not deterministic CBOR"));
+    }
+    if envelope.0 != PAYLOAD_ENVELOPE_V2_MODE {
+        return Err(anyhow!("unexpected payload envelope mode"));
+    }
+    let msg_index = envelope.1;
+    let ct_payload = envelope.2;
+    let key = derive_msg_key_material(context, msg_index)?;
+    let nonce = derive_msg_nonce(context, msg_index)?;
+    let aad = message_aad(context, msg_index)?;
+    let cipher = ChaCha20Poly1305::new((&key).into());
+    cipher
+        .decrypt(
+            (&nonce).into(),
+            Payload {
+                msg: &ct_payload,
+                aad: &aad,
+            },
+        )
+        .map_err(|e| anyhow!("decryption failed: {}", e))
+}
+
 fn encrypt_message(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
     use chacha20poly1305::{
         ChaCha20Poly1305,
@@ -7725,6 +9853,7 @@ mod tests {
             },
         };
         let capss_witness_bytes = encode_capss_witness(&capss_witness_bundle)?;
+        let barrier_state = BarrierSecretState::default();
 
         let mut session = AppSession {
             server_url: server_url.to_string(),
@@ -7766,7 +9895,9 @@ mod tests {
             fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
+            next_msg_index: 0,
             capss_witness: capss_witness_bytes,
+            barrier_state,
         };
         session.fs_fingerprint = derive_fs_fingerprint_from_fields(
             session.fs_policy_version.as_str(),
@@ -7775,6 +9906,652 @@ mod tests {
             session.fs_epoch_base_ts,
         );
         Ok(session)
+    }
+
+    #[test]
+    fn pending_barrier_activation_applies_on_digest_match() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut session = build_test_session(0xA11, "http://127.0.0.1:9", "room-a", "alice")?;
+        let mut on_path = BTreeMap::new();
+        on_path.insert(
+            7,
+            BarrierNodeKeyMaterial {
+                dk: vec![0x11; 32],
+                pkhash: [0x22; 32],
+            },
+        );
+        let raw_update = vec![0xAB, 0xCD, 0xEF];
+        let digest = compute_barrier_update_digest(raw_update.as_slice())?;
+        session.barrier_state.pending = Some(BarrierPendingState {
+            barrier_version: 9,
+            revocation_roots_hash: [0x33; 32],
+            kem_tree_hash_after: [0x44; 32],
+            k_barrier_new: [0x55; 32],
+            k_fs_after_pcs: Some([0x66; 32]),
+            barrier_update_reason: Some(1),
+            barrier_update_digest: digest,
+            on_path_key_material: on_path,
+        });
+
+        let changed = apply_pending_barrier_activation(&mut session, 9, Some(digest))?;
+        assert!(changed);
+        assert!(session.barrier_state.pending.is_none());
+        assert_eq!(session.barrier_state.barrier_version, 9);
+        assert_eq!(session.barrier_state.k_barrier, [0x55; 32]);
+        assert_eq!(session.barrier_state.kem_tree_hash_after, [0x44; 32]);
+        assert_eq!(
+            session
+                .barrier_state
+                .dk_nodes
+                .get(&7)
+                .expect("node material persisted")
+                .pkhash,
+            [0x22; 32]
+        );
+        assert_eq!(session.forward_state.snapshot().k_fs, [0x66; 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_barrier_activation_drops_state_when_overtaken()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = build_test_session(0xB22, "http://127.0.0.1:9", "room-b", "bob")?;
+        session.barrier_state.pending = Some(BarrierPendingState {
+            barrier_version: 5,
+            revocation_roots_hash: [0x11; 32],
+            kem_tree_hash_after: [0x22; 32],
+            k_barrier_new: [0x33; 32],
+            k_fs_after_pcs: None,
+            barrier_update_reason: Some(1),
+            barrier_update_digest: [0x44; 32],
+            on_path_key_material: BTreeMap::new(),
+        });
+
+        let changed = apply_pending_barrier_activation(&mut session, 6, None)?;
+        assert!(changed);
+        assert!(session.barrier_state.pending.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn pending_barrier_activation_drops_state_on_digest_mismatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = build_test_session(0xB3, "http://127.0.0.1:9", "room-b2", "bob")?;
+        session.barrier_state.pending = Some(BarrierPendingState {
+            barrier_version: 7,
+            revocation_roots_hash: [0x51; 32],
+            kem_tree_hash_after: [0x61; 32],
+            k_barrier_new: [0x71; 32],
+            k_fs_after_pcs: Some([0x81; 32]),
+            barrier_update_reason: Some(1),
+            barrier_update_digest: [0x91; 32],
+            on_path_key_material: BTreeMap::new(),
+        });
+
+        let changed = apply_pending_barrier_activation(&mut session, 7, Some([0x92; 32]))?;
+        assert!(changed);
+        assert!(session.barrier_state.pending.is_none());
+        assert_eq!(session.barrier_state.barrier_version, 0);
+        assert_eq!(session.forward_state.snapshot().k_fs, [0xAAu8; 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn extract_barrier_update_digest_uses_raw_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let mut header = BTreeMap::new();
+        let raw = vec![0x01, 0x02, 0x03, 0x04];
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(raw.clone()));
+        assert_eq!(
+            extract_barrier_update_digest(&header)?,
+            Some(compute_barrier_update_digest(raw.as_slice())?)
+        );
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Integer(Integer::from(7u64)));
+        assert!(extract_barrier_update_digest(&header).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn try_recover_barrier_from_header_returns_none_without_matches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = build_test_session(0xC11, "http://127.0.0.1:9", "room-c", "carol")?;
+        session.barrier_state.n_max = 8;
+        session.barrier_state.cover_leaf_index = 3;
+        session.barrier_state.barrier_version = 4;
+        session.barrier_state.kem_tree_hash_after = [0xAA; 32];
+
+        let (leaf_ek, leaf_dk) = kyber768::keypair();
+        session.barrier_state.dk_leaf = KemSecretKey::as_bytes(&leaf_dk).to_vec();
+        session.barrier_state.pkhash_leaf =
+            compute_barrier_pkhash(KemPublicKey::as_bytes(&leaf_ek))?;
+
+        let revoked_since_root = [0x11; 32];
+        let revoked_root = [0x22; 32];
+        let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+        let new_public_keys = vec![
+            NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+            NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+            NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        ];
+        let cover =
+            KemTreeCoverPayloadWire(3, vec![10, 4, 1, 0], None, Vec::new(), new_public_keys);
+        let cover_bytes = to_cbor_vec(&cover)?;
+        let update = BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            5,
+            4,
+            8,
+            rrh.to_vec(),
+            session.barrier_state.kem_tree_hash_after.to_vec(),
+            [0xBB; 32].to_vec(),
+            cover_bytes,
+        );
+        let update_bytes = to_cbor_vec(&update)?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(update_bytes));
+        header.insert(
+            hdr::HDR_REVOKED_SINCE_ROOT,
+            Value::Bytes(revoked_since_root.to_vec()),
+        );
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
+        );
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0xDD; 32]));
+
+        let recovered = try_recover_barrier_from_header(
+            &session,
+            &header,
+            &session.we_epoch_id,
+            session.fs_ec,
+        )?;
+        assert!(recovered.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use chacha20poly1305::{
+            ChaCha20Poly1305,
+            aead::{Aead, KeyInit, Payload},
+        };
+
+        let mut session = build_test_session(0xD44, "http://127.0.0.1:9", "room-d", "diana")?;
+        session.barrier_state.n_max = 8;
+        session.barrier_state.cover_leaf_index = 3;
+        session.barrier_state.barrier_version = 8;
+        session.barrier_state.kem_tree_hash_after = [0xAA; 32];
+        let fs_ec = 31;
+
+        let (leaf_ek, leaf_dk) = kyber768::keypair();
+        let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
+        session.barrier_state.dk_leaf = KemSecretKey::as_bytes(&leaf_dk).to_vec();
+        session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+
+        let revoked_since_root = [0x31; 32];
+        let revoked_root = [0x32; 32];
+        let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+
+        let source_node = 4u64;
+        let target_node = 10u64;
+        let path_secret_source = [0x44; 32];
+        let salt_1 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(1))?;
+        let ps_1 = hkdf_blake3(&salt_1, &path_secret_source, BARRIER_TREE_INFO);
+        let salt_0 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(0))?;
+        let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
+        let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
+        let (ss, ct) = kyber768::encapsulate(&target_pk);
+        let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+        let aad = to_cbor_vec(&BarrierWrapAadPreimage(
+            &session.gid,
+            9,
+            &rrh,
+            3,
+            source_node,
+            target_node,
+            &target_pkhash,
+        ))?;
+        let nonce_full = h_l(
+            "barrier/wrap/nonce",
+            &BarrierWrapNoncePreimage(source_node, target_node),
+        )?;
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&nonce_full[..12]);
+        let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+        let wrapped_ps = cipher.encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: path_secret_source.as_slice(),
+                aad: aad.as_slice(),
+            },
+        )?;
+
+        let mut target_prefix = [0u8; 16];
+        target_prefix.copy_from_slice(&target_pkhash[..16]);
+        let node_ciphertexts = vec![NodeCiphertextWire(
+            source_node,
+            target_node,
+            target_prefix.to_vec(),
+            KemCiphertext::as_bytes(&ct).to_vec(),
+            wrapped_ps,
+        )];
+        let (_, _, ek_0) = derive_internal_node_key_material(&ps_0, 9, &rrh, 8, 0)?;
+        let (_, _, ek_1) = derive_internal_node_key_material(&ps_1, 9, &rrh, 8, 1)?;
+        let (_, _, ek_4) = derive_internal_node_key_material(&path_secret_source, 9, &rrh, 8, 4)?;
+        let new_public_keys = vec![
+            NewPublicKeyWire(0, ek_0),
+            NewPublicKeyWire(1, ek_1),
+            NewPublicKeyWire(4, ek_4),
+        ];
+        let cover = KemTreeCoverPayloadWire(
+            3,
+            vec![10, 4, 1, 0],
+            None,
+            node_ciphertexts,
+            new_public_keys,
+        );
+        let cover_bytes = to_cbor_vec(&cover)?;
+        let update = BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            9,
+            8,
+            8,
+            rrh.to_vec(),
+            session.barrier_state.kem_tree_hash_after.to_vec(),
+            [0xBB; 32].to_vec(),
+            cover_bytes,
+        );
+        let update_bytes = to_cbor_vec(&update)?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(update_bytes));
+        header.insert(
+            hdr::HDR_REVOKED_SINCE_ROOT,
+            Value::Bytes(revoked_since_root.to_vec()),
+        );
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0xEE; 32]));
+
+        let recovered =
+            try_recover_barrier_from_header(&session, &header, &session.we_epoch_id, fs_ec)?
+                .ok_or_else(|| anyhow!("expected recover result"))?;
+
+        let barrier_salt = h_l("barrier/derive/salt", &BarrierDeriveSaltPreimage(9, &rrh))?;
+        let expected_k_barrier = hkdf_blake3(&barrier_salt, &ps_0, BARRIER_KEY_INFO);
+        assert_eq!(recovered.k_barrier_new, expected_k_barrier);
+        assert_eq!(recovered.derived_node_key_material.len(), 3);
+        assert!(recovered.derived_node_key_material.contains_key(&0));
+        assert!(recovered.derived_node_key_material.contains_key(&1));
+        assert!(recovered.derived_node_key_material.contains_key(&4));
+
+        let expected_k_fs_after_pcs = derive_k_fs_after_pcs(
+            &session.forward_state.snapshot().k_fs,
+            &session.we_epoch_id,
+            fs_ec,
+            9,
+            &expected_k_barrier,
+        )?;
+        assert_eq!(recovered.k_fs_after_pcs, Some(expected_k_fs_after_pcs));
+        Ok(())
+    }
+
+    #[test]
+    fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use chacha20poly1305::{
+            ChaCha20Poly1305,
+            aead::{Aead, KeyInit, Payload},
+        };
+
+        let mut session = build_test_session(0xD4E, "http://127.0.0.1:9", "room-f", "frank")?;
+        session.barrier_state.n_max = 8;
+        session.barrier_state.cover_leaf_index = 3;
+        session.barrier_state.barrier_version = 8;
+        session.barrier_state.kem_tree_hash_after = [0xAA; 32];
+
+        let (leaf_ek, leaf_dk) = kyber768::keypair();
+        let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
+        session.barrier_state.dk_leaf = KemSecretKey::as_bytes(&leaf_dk).to_vec();
+        session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+
+        let revoked_since_root = [0x31; 32];
+        let revoked_root = [0x32; 32];
+        let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+
+        let source_node = 4u64;
+        let target_node = 10u64;
+        let path_secret_source = [0x44; 32];
+        let salt_1 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(1))?;
+        let ps_1 = hkdf_blake3(&salt_1, &path_secret_source, BARRIER_TREE_INFO);
+        let salt_0 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(0))?;
+        let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
+        let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
+        let (ss, ct) = kyber768::encapsulate(&target_pk);
+        let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+        let aad = to_cbor_vec(&BarrierWrapAadPreimage(
+            &session.gid,
+            9,
+            &rrh,
+            3,
+            source_node,
+            target_node,
+            &target_pkhash,
+        ))?;
+        let nonce_full = h_l(
+            "barrier/wrap/nonce",
+            &BarrierWrapNoncePreimage(source_node, target_node),
+        )?;
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&nonce_full[..12]);
+        let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+        let wrapped_ps = cipher.encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: path_secret_source.as_slice(),
+                aad: aad.as_slice(),
+            },
+        )?;
+
+        let mut target_prefix = [0u8; 16];
+        target_prefix.copy_from_slice(&target_pkhash[..16]);
+        let node_ciphertexts = vec![NodeCiphertextWire(
+            source_node,
+            target_node,
+            target_prefix.to_vec(),
+            KemCiphertext::as_bytes(&ct).to_vec(),
+            wrapped_ps,
+        )];
+        let (_, _, ek_0) = derive_internal_node_key_material(&ps_0, 9, &rrh, 8, 0)?;
+        let (_, _, mut ek_1) = derive_internal_node_key_material(&ps_1, 9, &rrh, 8, 1)?;
+        let (_, _, ek_4) = derive_internal_node_key_material(&path_secret_source, 9, &rrh, 8, 4)?;
+        ek_1[0] ^= 0xA5;
+        let new_public_keys = vec![
+            NewPublicKeyWire(0, ek_0),
+            NewPublicKeyWire(1, ek_1),
+            NewPublicKeyWire(4, ek_4),
+        ];
+        let cover = KemTreeCoverPayloadWire(
+            3,
+            vec![10, 4, 1, 0],
+            None,
+            node_ciphertexts,
+            new_public_keys,
+        );
+        let cover_bytes = to_cbor_vec(&cover)?;
+        let update = BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            9,
+            8,
+            8,
+            rrh.to_vec(),
+            session.barrier_state.kem_tree_hash_after.to_vec(),
+            [0xBB; 32].to_vec(),
+            cover_bytes,
+        );
+        let update_bytes = to_cbor_vec(&update)?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(update_bytes));
+        header.insert(
+            hdr::HDR_REVOKED_SINCE_ROOT,
+            Value::Bytes(revoked_since_root.to_vec()),
+        );
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0xEF; 32]));
+
+        let err =
+            try_recover_barrier_from_header(&session, &header, &session.we_epoch_id, session.fs_ec)
+                .expect_err("ek_n mismatch must fail closed");
+        assert!(
+            err.to_string().contains("new_public_keys mismatch"),
+            "unexpected error for ek_n mismatch: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use chacha20poly1305::{
+            ChaCha20Poly1305,
+            aead::{Aead, KeyInit, Payload},
+        };
+
+        let mut session = build_test_session(0xD4F, "http://127.0.0.1:9", "room-g", "gina")?;
+        session.barrier_state.n_max = 8;
+        session.barrier_state.cover_leaf_index = 3;
+        session.barrier_state.barrier_version = 8;
+        session.barrier_state.kem_tree_hash_after = [0xAA; 32];
+
+        let (leaf_ek, leaf_dk) = kyber768::keypair();
+        let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
+        session.barrier_state.dk_leaf = KemSecretKey::as_bytes(&leaf_dk).to_vec();
+        let correct_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+        session.barrier_state.pkhash_leaf = correct_pkhash;
+
+        let revoked_since_root = [0x31; 32];
+        let revoked_root = [0x32; 32];
+        let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+
+        let source_node = 4u64;
+        let target_node = 10u64;
+        let path_secret_source = [0x44; 32];
+        let salt_1 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(1))?;
+        let ps_1 = hkdf_blake3(&salt_1, &path_secret_source, BARRIER_TREE_INFO);
+        let salt_0 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(0))?;
+        let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
+        let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
+        let (ss, ct) = kyber768::encapsulate(&target_pk);
+        let aad = to_cbor_vec(&BarrierWrapAadPreimage(
+            &session.gid,
+            9,
+            &rrh,
+            3,
+            source_node,
+            target_node,
+            &correct_pkhash,
+        ))?;
+        let nonce_full = h_l(
+            "barrier/wrap/nonce",
+            &BarrierWrapNoncePreimage(source_node, target_node),
+        )?;
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&nonce_full[..12]);
+        let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+        let wrapped_ps = cipher.encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: path_secret_source.as_slice(),
+                aad: aad.as_slice(),
+            },
+        )?;
+
+        let mut target_prefix = [0u8; 16];
+        target_prefix.copy_from_slice(&correct_pkhash[..16]);
+        let node_ciphertexts = vec![NodeCiphertextWire(
+            source_node,
+            target_node,
+            target_prefix.to_vec(),
+            KemCiphertext::as_bytes(&ct).to_vec(),
+            wrapped_ps,
+        )];
+        let (_, _, ek_0) = derive_internal_node_key_material(&ps_0, 9, &rrh, 8, 0)?;
+        let (_, _, ek_1) = derive_internal_node_key_material(&ps_1, 9, &rrh, 8, 1)?;
+        let (_, _, ek_4) = derive_internal_node_key_material(&path_secret_source, 9, &rrh, 8, 4)?;
+        let new_public_keys = vec![
+            NewPublicKeyWire(0, ek_0),
+            NewPublicKeyWire(1, ek_1),
+            NewPublicKeyWire(4, ek_4),
+        ];
+        let cover = KemTreeCoverPayloadWire(
+            3,
+            vec![10, 4, 1, 0],
+            None,
+            node_ciphertexts,
+            new_public_keys,
+        );
+        let cover_bytes = to_cbor_vec(&cover)?;
+        let update = BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            9,
+            8,
+            8,
+            rrh.to_vec(),
+            session.barrier_state.kem_tree_hash_after.to_vec(),
+            [0xBB; 32].to_vec(),
+            cover_bytes,
+        );
+        let update_bytes = to_cbor_vec(&update)?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(update_bytes));
+        header.insert(
+            hdr::HDR_REVOKED_SINCE_ROOT,
+            Value::Bytes(revoked_since_root.to_vec()),
+        );
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0xEF; 32]));
+
+        let mut bad_pkhash = correct_pkhash;
+        bad_pkhash[31] ^= 0x01;
+        session.barrier_state.pkhash_leaf = bad_pkhash;
+
+        let err =
+            try_recover_barrier_from_header(&session, &header, &session.we_epoch_id, session.fs_ec)
+                .expect_err("AAD mismatch from pkhash_t must fail closed");
+        assert!(
+            err.to_string().contains("candidate unwrap/decrypt failure"),
+            "unexpected error for pkhash_t AAD mismatch: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn try_recover_barrier_from_header_rejects_when_client_pkhash_t_mismatches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use chacha20poly1305::{
+            ChaCha20Poly1305,
+            aead::{Aead, KeyInit, Payload},
+        };
+
+        let mut session = build_test_session(0xD45, "http://127.0.0.1:9", "room-e", "erin")?;
+        session.barrier_state.n_max = 8;
+        session.barrier_state.cover_leaf_index = 3;
+        session.barrier_state.barrier_version = 8;
+        session.barrier_state.kem_tree_hash_after = [0xAA; 32];
+
+        let (leaf_ek, leaf_dk) = kyber768::keypair();
+        let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
+        session.barrier_state.dk_leaf = KemSecretKey::as_bytes(&leaf_dk).to_vec();
+        let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+        session.barrier_state.pkhash_leaf = target_pkhash;
+
+        let revoked_since_root = [0x31; 32];
+        let revoked_root = [0x32; 32];
+        let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+
+        let source_node = 4u64;
+        let target_node = 10u64;
+        let path_secret_source = [0x44; 32];
+        let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
+        let (ss, ct) = kyber768::encapsulate(&target_pk);
+        let aad = to_cbor_vec(&BarrierWrapAadPreimage(
+            &session.gid,
+            9,
+            &rrh,
+            3,
+            source_node,
+            target_node,
+            &target_pkhash,
+        ))?;
+        let nonce_full = h_l(
+            "barrier/wrap/nonce",
+            &BarrierWrapNoncePreimage(source_node, target_node),
+        )?;
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&nonce_full[..12]);
+        let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+        let wrapped_ps = cipher.encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: path_secret_source.as_slice(),
+                aad: aad.as_slice(),
+            },
+        )?;
+
+        let mut target_prefix = [0u8; 16];
+        target_prefix.copy_from_slice(&target_pkhash[..16]);
+        let node_ciphertexts = vec![NodeCiphertextWire(
+            source_node,
+            target_node,
+            target_prefix.to_vec(),
+            KemCiphertext::as_bytes(&ct).to_vec(),
+            wrapped_ps,
+        )];
+        let new_public_keys = vec![
+            NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+            NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+            NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        ];
+        let cover = KemTreeCoverPayloadWire(
+            3,
+            vec![10, 4, 1, 0],
+            None,
+            node_ciphertexts,
+            new_public_keys,
+        );
+        let cover_bytes = to_cbor_vec(&cover)?;
+        let update = BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            9,
+            8,
+            8,
+            rrh.to_vec(),
+            session.barrier_state.kem_tree_hash_after.to_vec(),
+            [0xBB; 32].to_vec(),
+            cover_bytes,
+        );
+        let update_bytes = to_cbor_vec(&update)?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(update_bytes));
+        header.insert(
+            hdr::HDR_REVOKED_SINCE_ROOT,
+            Value::Bytes(revoked_since_root.to_vec()),
+        );
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0xEF; 32]));
+
+        session.barrier_state.pkhash_leaf = [0xFF; 32];
+        let recovered = try_recover_barrier_from_header(
+            &session,
+            &header,
+            &session.we_epoch_id,
+            session.fs_ec,
+        )?;
+        assert!(
+            recovered.is_none(),
+            "pkhash mismatch must prevent barrier recovery"
+        );
+        Ok(())
     }
 
     struct EnvVarRestore {
@@ -10851,7 +13628,52 @@ mod tests {
             fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
+            next_msg_index: 0,
             capss_witness: capss_witness_bytes.clone(),
+            barrier_state: BarrierSecretState::default(),
+        };
+        let mut barrier_dk_nodes = BTreeMap::new();
+        barrier_dk_nodes.insert(
+            1,
+            BarrierNodeKeyMaterial {
+                dk: random_vec(kyber768::secret_key_bytes()),
+                pkhash: array(0x24),
+            },
+        );
+        let mut pending_on_path = BTreeMap::new();
+        pending_on_path.insert(
+            0,
+            BarrierNodeKeyMaterial {
+                dk: random_vec(kyber768::secret_key_bytes()),
+                pkhash: array(0x2A),
+            },
+        );
+        pending_on_path.insert(
+            1,
+            BarrierNodeKeyMaterial {
+                dk: random_vec(kyber768::secret_key_bytes()),
+                pkhash: array(0x2B),
+            },
+        );
+        session.barrier_state = BarrierSecretState {
+            barrier_version: 5,
+            k_barrier: array(0x21),
+            kem_tree_hash_after: array(0x22),
+            n_max: 8,
+            cover_leaf_index: 3,
+            dk_leaf: random_vec(kyber768::secret_key_bytes()),
+            pkhash_leaf: array(0x23),
+            dk_nodes: barrier_dk_nodes,
+            pending: Some(BarrierPendingState {
+                barrier_version: 6,
+                revocation_roots_hash: array(0x25),
+                kem_tree_hash_after: array(0x26),
+                k_barrier_new: array(0x27),
+                k_fs_after_pcs: Some(array(0x28)),
+                barrier_update_reason: Some(1),
+                barrier_update_digest: array(0x29),
+                on_path_key_material: pending_on_path,
+            }),
         };
         session.fs_fingerprint = derive_fs_fingerprint_from_fields(
             session.fs_policy_version.as_str(),
@@ -10921,6 +13743,7 @@ mod tests {
             loaded.last_fetch_timestamp_ms,
             session.last_fetch_timestamp_ms
         );
+        assert_eq!(loaded.next_msg_index, session.next_msg_index);
 
         assert_eq!(
             loaded.forward_state.snapshot(),
@@ -10944,6 +13767,88 @@ mod tests {
             "epoch timestamp should be preserved within 1 second"
         );
         assert_eq!(loaded.capss_witness, capss_witness_bytes);
+        assert_eq!(
+            loaded.barrier_state.barrier_version,
+            session.barrier_state.barrier_version
+        );
+        assert_eq!(
+            loaded.barrier_state.k_barrier,
+            session.barrier_state.k_barrier
+        );
+        assert_eq!(
+            loaded.barrier_state.kem_tree_hash_after,
+            session.barrier_state.kem_tree_hash_after
+        );
+        assert_eq!(loaded.barrier_state.n_max, session.barrier_state.n_max);
+        assert_eq!(
+            loaded.barrier_state.cover_leaf_index,
+            session.barrier_state.cover_leaf_index
+        );
+        assert_eq!(loaded.barrier_state.dk_leaf, session.barrier_state.dk_leaf);
+        assert_eq!(
+            loaded.barrier_state.pkhash_leaf,
+            session.barrier_state.pkhash_leaf
+        );
+        assert_eq!(
+            loaded.barrier_state.dk_nodes.len(),
+            session.barrier_state.dk_nodes.len()
+        );
+        for (node, expected) in &session.barrier_state.dk_nodes {
+            let actual = loaded
+                .barrier_state
+                .dk_nodes
+                .get(node)
+                .ok_or_else(|| anyhow!("missing dk_nodes entry for node {node}"))?;
+            assert_eq!(actual.dk, expected.dk);
+            assert_eq!(actual.pkhash, expected.pkhash);
+        }
+        let loaded_pending = loaded
+            .barrier_state
+            .pending
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing persisted barrier pending state"))?;
+        let expected_pending = session
+            .barrier_state
+            .pending
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing expected barrier pending state"))?;
+        assert_eq!(
+            loaded_pending.barrier_version,
+            expected_pending.barrier_version
+        );
+        assert_eq!(
+            loaded_pending.revocation_roots_hash,
+            expected_pending.revocation_roots_hash
+        );
+        assert_eq!(
+            loaded_pending.kem_tree_hash_after,
+            expected_pending.kem_tree_hash_after
+        );
+        assert_eq!(loaded_pending.k_barrier_new, expected_pending.k_barrier_new);
+        assert_eq!(
+            loaded_pending.k_fs_after_pcs,
+            expected_pending.k_fs_after_pcs
+        );
+        assert_eq!(
+            loaded_pending.barrier_update_reason,
+            expected_pending.barrier_update_reason
+        );
+        assert_eq!(
+            loaded_pending.barrier_update_digest,
+            expected_pending.barrier_update_digest
+        );
+        assert_eq!(
+            loaded_pending.on_path_key_material.len(),
+            expected_pending.on_path_key_material.len()
+        );
+        for (node, expected) in &expected_pending.on_path_key_material {
+            let actual = loaded_pending
+                .on_path_key_material
+                .get(node)
+                .ok_or_else(|| anyhow!("missing pending key material for node {node}"))?;
+            assert_eq!(actual.dk, expected.dk);
+            assert_eq!(actual.pkhash, expected.pkhash);
+        }
 
         let decoded = decode_capss_witness(&loaded.capss_witness)?;
         assert_eq!(decoded, capss_witness_bundle);
@@ -11064,7 +13969,17 @@ mod tests {
         .await?;
         let sync = perform_epoch_sync(alice.clone()).await?;
 
-        assert!(!sync.changed, "sync should be a no-op on current head");
+        let barrier_delta = sync.session.barrier_state.barrier_version
+            != alice.barrier_state.barrier_version
+            || sync.session.barrier_state.k_barrier != alice.barrier_state.k_barrier
+            || sync.session.barrier_state.kem_tree_hash_after
+                != alice.barrier_state.kem_tree_hash_after
+            || sync.session.barrier_state.n_max != alice.barrier_state.n_max
+            || sync.session.barrier_state.cover_leaf_index != alice.barrier_state.cover_leaf_index;
+        assert_eq!(
+            sync.changed, barrier_delta,
+            "sync.changed should reflect barrier-only reconciliation when head is unchanged"
+        );
         assert_eq!(sync.session.we_epoch_id, alice.we_epoch_id);
         assert_eq!(sync.session.epoch_key, alice.epoch_key);
 
@@ -11203,7 +14118,7 @@ mod tests {
         );
 
         let plaintext = "hello-from-bob".to_string();
-        let sent = perform_send(SendParams::from_session(&bob, plaintext.clone())).await?;
+        let sent = perform_send(SendParams::from_session(&bob, plaintext.clone(), 0)).await?;
         assert_eq!(sent.plaintext, plaintext);
         assert_eq!(sent.sender_leaf, Some(bob.leaf_id));
 
@@ -11571,6 +14486,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn perform_join_populates_barrier_leaf_key_material()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_with_seed_demo_room(port, false).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x8Fu8; 32]);
+        new_api_client(&server_url)
+            .bootstrap_room(&room_id, demo::kbroad_public())
+            .await?;
+
+        let session = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "barrier-keys".to_string(),
+        })
+        .await?;
+
+        assert_eq!(
+            session.barrier_state.dk_leaf.len(),
+            kyber768::secret_key_bytes(),
+            "join should persist ML-KEM leaf private key material"
+        );
+        assert_ne!(
+            session.barrier_state.pkhash_leaf, [0u8; 32],
+            "join should persist non-zero leaf public key hash"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn perform_join_bootstraps_unprovisioned_room() -> Result<(), Box<dyn std::error::Error>>
     {
         let _env_lock = ENV_VAR_LOCK
@@ -11861,7 +14811,7 @@ mod tests {
         );
 
         let marker = "valid-message-marker".to_string();
-        perform_send(SendParams::from_session(&alice, marker.clone())).await?;
+        perform_send(SendParams::from_session(&alice, marker.clone(), 0)).await?;
 
         let fetched = perform_fetch(FetchParams::from_session(&alice, None)).await?;
         assert!(
@@ -11907,6 +14857,74 @@ mod tests {
         let decrypted = decrypt_message(&ciphertext, &key)?;
 
         assert_eq!(decrypted, plaintext);
+        Ok(())
+    }
+
+    #[test]
+    fn payload_envelope_v2_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let gid = [0x11u8; 32];
+        let we_epoch_id = [0x22u8; 32];
+        let epoch_key = [0x33u8; 32];
+        let k_barrier = [0x44u8; 32];
+        let context = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            fs_ec: 9,
+            barrier_version: 5,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let plaintext = b"payload-v2-roundtrip";
+        let envelope = encrypt_message_v2(plaintext, &context, 7)?;
+        let decrypted = decrypt_message_v2(&envelope, &context)?;
+        assert_eq!(decrypted, plaintext);
+        Ok(())
+    }
+
+    #[test]
+    fn payload_envelope_v2_context_mismatch_fails() -> Result<(), Box<dyn std::error::Error>> {
+        let gid = [0x51u8; 32];
+        let we_epoch_id = [0x52u8; 32];
+        let epoch_key = [0x53u8; 32];
+        let k_barrier = [0x54u8; 32];
+        let good_context = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            fs_ec: 12,
+            barrier_version: 4,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let bad_context = MessageCryptoContext {
+            barrier_version: 5,
+            ..good_context
+        };
+        let envelope = encrypt_message_v2(b"context-bound", &good_context, 1)?;
+        assert!(
+            decrypt_message_v2(&envelope, &bad_context).is_err(),
+            "barrier_version mismatch must fail decryption"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn payload_envelope_v2_msg_index_changes_ciphertext() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let gid = [0x61u8; 32];
+        let we_epoch_id = [0x62u8; 32];
+        let epoch_key = [0x63u8; 32];
+        let k_barrier = [0x64u8; 32];
+        let context = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            fs_ec: 3,
+            barrier_version: 1,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let payload_a = encrypt_message_v2(b"same-plaintext", &context, 1)?;
+        let payload_b = encrypt_message_v2(b"same-plaintext", &context, 2)?;
+        assert_ne!(payload_a, payload_b, "msg_index must influence ciphertext");
         Ok(())
     }
 
@@ -12949,7 +15967,9 @@ mod tests {
             fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
+            next_msg_index: 0,
             capss_witness: capss_witness_bytes,
+            barrier_state: BarrierSecretState::default(),
         };
         session.fs_fingerprint = derive_fs_fingerprint_from_fields(
             session.fs_policy_version.as_str(),

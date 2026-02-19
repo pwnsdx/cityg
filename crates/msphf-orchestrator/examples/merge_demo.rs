@@ -133,6 +133,7 @@ fn merge_params() -> OrchestrationParams<'static> {
         vrf_public_key: Some(vrf_public_key),
         fs_policy_version: "7",
         fs_epoch_base_ts: 0,
+        barrier_version: 0,
         fs_join: FsJoinInputs::default(),
         fs_merge: FsMergeInputs {
             fs_purge_times: Some((0, 0)),

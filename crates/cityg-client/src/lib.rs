@@ -38,6 +38,7 @@
 //!     msphf_crs_id: "rlwe-merkle/v1",
 //!     params_id: "rlwe-params/mock",
 //!     proof_mode: "lin+zkvrf",
+//!     barrier_version: 0,
 //!     // ... other fields
 //! };
 //!
@@ -859,6 +860,7 @@ mod tests {
             vrf_public_key: None,
             fs_policy_version: "7",
             fs_epoch_base_ts: 0,
+            barrier_version: 0,
             fs_join: FsJoinInputs::default(),
             fs_merge: FsMergeInputs::default(),
         };
@@ -1027,6 +1029,16 @@ mod tests {
     fn membership_delta_parser_handles_missing_and_malformed_variants()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut bundle = demo_bundle_alice()?;
+        let original_pop_alg = bundle
+            .header_map
+            .get(&HDR_POP_ALG)
+            .cloned()
+            .expect("demo bundle should include pop_alg");
+        let original_pop_pk = bundle
+            .header_map
+            .get(&HDR_POP_PK)
+            .cloned()
+            .expect("demo bundle should include pop_pk");
 
         bundle
             .header_map
@@ -1035,6 +1047,26 @@ mod tests {
             bundle.membership_delta()?.joined,
             vec![demo_member_leaf("alice")]
         );
+
+        bundle
+            .header_map
+            .insert(HDR_POP_ALG, Value::Bytes(vec![1, 2, 3]));
+        assert!(bundle.membership_delta().is_err());
+        bundle.header_map.remove(&HDR_POP_ALG);
+        assert!(bundle.membership_delta().is_err());
+        bundle
+            .header_map
+            .insert(HDR_POP_ALG, original_pop_alg.clone());
+
+        bundle
+            .header_map
+            .insert(HDR_POP_PK, Value::Text("bad-pop".to_string()));
+        assert!(bundle.membership_delta().is_err());
+        bundle.header_map.remove(&HDR_POP_PK);
+        assert!(bundle.membership_delta().is_err());
+        bundle
+            .header_map
+            .insert(HDR_POP_PK, original_pop_pk.clone());
 
         bundle.header_map.insert(
             msphf_orchestrator::hdr::HDR_MH_HEADS,
@@ -1261,6 +1293,7 @@ mod tests {
             vrf_public_key: Some(vrf_public_key),
             fs_policy_version: "7",
             fs_epoch_base_ts: 0,
+            barrier_version: 0,
             fs_join: FsJoinInputs::default(),
             fs_merge: FsMergeInputs::default(),
         };
@@ -1360,6 +1393,7 @@ mod tests {
             vrf_public_key: Some(vrf_public_key),
             fs_policy_version: "7",
             fs_epoch_base_ts: 0,
+            barrier_version: 0,
             fs_join: FsJoinInputs::default(),
             fs_merge: FsMergeInputs::default(),
         };

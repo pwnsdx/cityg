@@ -63,8 +63,8 @@
 
 #[cfg(test)]
 use std::sync::{
-    atomic::{AtomicIsize, Ordering},
     Mutex, MutexGuard, OnceLock,
+    atomic::{AtomicIsize, Ordering},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -79,12 +79,14 @@ use cityg_client::witness;
 use cityg_client::{CityGError, ClientEpochBundle, GroupMembership, MembershipDelta};
 use msphf_core::merkle::canonical_set_root;
 use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
+use msphf_core::{hash::h_l, serde_utils::to_cbor_vec};
 use msphf_orchestrator::mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW};
 use msphf_orchestrator::process_anchor_or;
 use msphf_orchestrator::{
-    self, compute_proofs_commit_bytes, hdr, AcceptanceContext, AcceptanceOptions, BootstrapPolicy,
-    PivotParity, ReceiverCache, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
+    self, AcceptanceContext, AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE,
+    DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes, hdr,
 };
+use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 
 /// Re-export commonly used client-side bundle types for convenience.
@@ -250,6 +252,18 @@ pub struct JoinTicketBundle {
     pub kbroad_public: Vec<u8>,
     /// Monotonic KBROAD generation for this group.
     pub kbroad_generation: u64,
+    /// Current barrier version for this group.
+    pub barrier_version: u64,
+    /// Cover leaf index allocated to the joining device.
+    pub cover_leaf_index: u64,
+    /// Provisioned barrier secret for payload key schedule binding.
+    pub k_barrier: [u8; 32],
+    /// Current committed barrier tree hash.
+    pub kem_tree_hash_after: [u8; 32],
+    /// Fixed barrier tree capacity.
+    pub n_max: u64,
+    /// Deployment-wide barrier update size limit.
+    pub max_barrier_update_bytes: u64,
 }
 
 /// Merge ticket bundle provided to existing members during leave/rekey flow.
@@ -291,9 +305,128 @@ pub struct MergeTicketBundle {
     pub fs_epoch_base_ts: u64,
     pub kbroad_public: Vec<u8>,
     pub kbroad_generation: u64,
+    pub barrier_version: u64,
+    pub cover_leaf_index: u64,
+    pub k_barrier: [u8; 32],
+    pub kem_tree_hash_after: [u8; 32],
+    pub n_max: u64,
+    pub max_barrier_update_bytes: u64,
+}
+
+/// Intent used when preparing a merge ticket for an existing member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeTicketIntent {
+    /// Merge ticket drives a controlled self-revocation (leave).
+    Leave,
+    /// Merge ticket drives a non-leaving proactive PCS refresh.
+    Refresh,
+}
+
+/// Join-leaf record returned by barrier membership enumeration APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BarrierJoinLeafRecord {
+    /// Device public key associated with the join leaf.
+    pub device_pk: Vec<u8>,
+    /// Cover leaf index (0-based) for the member.
+    pub leaf_index: u32,
+    /// Barrier leaf ML-KEM public key (ek, 1184 bytes when provisioned).
+    pub ek_leaf: Vec<u8>,
+}
+
+/// Public-tree snapshot returned by barrier tree APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BarrierPublicTreeSnapshot {
+    /// Fixed tree size for the group (power-of-two leaf capacity).
+    pub n_max: u64,
+    /// Requested tree commitment after barrier activation.
+    pub kem_tree_hash_after: [u8; 32],
+    /// Heap-indexed public key entries (`2*n_max-1` length).
+    pub pk_entries: Vec<Vec<u8>>,
 }
 
 impl CityGServer {
+    fn initialize_group_barrier_bootstrap_state(
+        &mut self,
+        gid: &[u8; 32],
+    ) -> Result<(), CityGError> {
+        let has_history = self.roster.has_history(gid);
+        let (
+            barrier_initialized,
+            barrier_version,
+            barrier_roots_hash,
+            kem_tree_hash_after,
+            n_max,
+            last_pcs_refresh_ec,
+            pcs_refresh_min_delta_device_ec,
+            pcs_refresh_min_delta_group_ec,
+            pcs_refresh_slot_width_ec,
+        ) = {
+            let state = self.roster.groups.entry(gid.to_vec()).or_default();
+            if state.k_barrier == [0u8; 32] {
+                state.k_barrier = random_barrier_key();
+            }
+            if !state.barrier_initialized && !has_history {
+                let zero = [0u8; 32];
+                let revocation_roots_hash = compute_revocation_roots_hash(&zero, &zero)?;
+                let n_max = state.n_max.max(1);
+                let blank_entries = build_all_blank_pk_entries(n_max)?;
+                let kem_tree_hash_after = compute_barrier_tree_hash(n_max, &blank_entries)?;
+                state.barrier_initialized = true;
+                state.barrier_version = 0;
+                state.barrier_roots_hash = revocation_roots_hash;
+                state.kem_tree_hash_after = kem_tree_hash_after;
+                state.n_max = n_max;
+                state.barrier_pk_entries = blank_entries;
+            }
+            (
+                state.barrier_initialized,
+                state.barrier_version,
+                state.barrier_roots_hash,
+                state.kem_tree_hash_after,
+                state.n_max.max(1),
+                state.last_pcs_refresh_ec,
+                state.pcs_refresh_min_delta_device_ec.max(1),
+                state.pcs_refresh_min_delta_group_ec.max(1),
+                state.pcs_refresh_slot_width_ec.max(1),
+            )
+        };
+
+        let mut ctx_state = self
+            .ctx
+            .barrier_group_state(gid)
+            .cloned()
+            .unwrap_or_default();
+        ctx_state.barrier_initialized = barrier_initialized;
+        ctx_state.barrier_version = barrier_version;
+        ctx_state.barrier_roots_hash = barrier_roots_hash;
+        ctx_state.kem_tree_hash_after = kem_tree_hash_after;
+        ctx_state.n_max = n_max;
+        ctx_state.last_pcs_refresh_ec = last_pcs_refresh_ec;
+        ctx_state.pcs_refresh_min_delta_device_ec = pcs_refresh_min_delta_device_ec;
+        ctx_state.pcs_refresh_min_delta_group_ec = pcs_refresh_min_delta_group_ec;
+        ctx_state.pcs_refresh_slot_width_ec = pcs_refresh_slot_width_ec;
+        self.ctx
+            .insert_barrier_group_state(gid.as_slice(), ctx_state);
+        Ok(())
+    }
+
+    fn initialize_registered_groups_barrier_state(&mut self) -> Result<(), CityGError> {
+        let gids: Vec<[u8; 32]> = self
+            .ctx
+            .kbroad_registry()
+            .map(|registry| {
+                registry
+                    .keys()
+                    .filter_map(|gid| gid.as_slice().try_into().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for gid in gids {
+            self.initialize_group_barrier_bootstrap_state(&gid)?;
+        }
+        Ok(())
+    }
+
     pub fn register_group(
         &mut self,
         gid: &[u8; 32],
@@ -308,9 +441,12 @@ impl CityGServer {
         }
         registry.insert(gid.to_vec(), kbroad_public);
         self.ctx.set_kbroad_registry(Some(registry));
-        let state = self.roster.groups.entry(gid.to_vec()).or_default();
-        state.rotation_required = false;
-        state.kbroad_generation = 0;
+        {
+            let state = self.roster.groups.entry(gid.to_vec()).or_default();
+            state.rotation_required = false;
+            state.kbroad_generation = 0;
+        }
+        self.initialize_group_barrier_bootstrap_state(gid)?;
         self.persist_kbroad_state()?;
         Ok(())
     }
@@ -341,6 +477,22 @@ impl CityGServer {
 
     pub fn kbroad_rotation_required(&self, gid: &[u8; 32]) -> bool {
         self.roster.kbroad_rotation_required(gid)
+    }
+
+    fn ensure_group_barrier_secret(&mut self, gid: &[u8; 32]) -> Result<[u8; 32], CityGError> {
+        let mut changed = false;
+        let key = {
+            let state = self.roster.groups.entry(gid.to_vec()).or_default();
+            if state.k_barrier == [0u8; 32] {
+                state.k_barrier = random_barrier_key();
+                changed = true;
+            }
+            state.k_barrier
+        };
+        if changed {
+            self.persist_kbroad_state()?;
+        }
+        Ok(key)
     }
 
     pub fn new(config: ServerConfig) -> Self {
@@ -386,6 +538,9 @@ impl CityGServer {
         if let Some(state) = persisted_kbroad_state {
             server.apply_persisted_kbroad_state(&state);
         }
+        if let Err(err) = server.initialize_registered_groups_barrier_state() {
+            eprintln!("cityg-server: barrier bootstrap initialization failed: {err:?}");
+        }
         server
     }
 
@@ -401,11 +556,9 @@ impl CityGServer {
         if self.roster.kbroad_rotation_required(gid) {
             return Err(CityGError::InvalidInput(KBROAD_ROTATION_REQUIRED_ERR));
         }
-        let revoked_root = [0u8; 32];
-        let revoked_since_root = [0u8; 32];
         let pox_r_commit = witness::demo_pox_commit();
 
-        let (parent_root, leaf_id, join_delta_root, tswe_salt_hash, witness_cbor, srx_cbor) = {
+        let (parent_root, leaf_id, parent_leaves) = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
             let mut parent_leaves: Vec<[u8; 32]> = state
                 .latest_snapshot()
@@ -430,29 +583,30 @@ impl CityGServer {
             } else {
                 canonical_set_root(&parent_leaves)?
             };
-            let join_leaves = [leaf_id];
-
-            let join_delta_root = witness::join_delta_root(&join_leaves)?;
-            let (canonical_witness, srx_owned) = witness::build_branch_b_artifacts(
-                &parent_leaves,
-                &join_leaves,
-                parent_root,
-                revoked_since_root,
-            )?;
-            let witness_cbor = witness::witness_to_cbor(&canonical_witness)?;
-            let srx_cbor = srx_owned.to_cbor()?;
-
-            let tswe_salt_hash = msphf_core::instance::tswe_salt_hash(gid, &parent_root)?;
-
-            (
-                parent_root,
-                leaf_id,
-                join_delta_root,
-                tswe_salt_hash,
-                witness_cbor,
-                srx_cbor,
-            )
+            (parent_root, leaf_id, parent_leaves)
         };
+        let mut revoked_all = self.roster.revoked(gid);
+        revoked_all.sort();
+        revoked_all.dedup();
+        let (revoked_since_root, revoked_root) = if revoked_all.is_empty() {
+            ([0u8; 32], [0u8; 32])
+        } else {
+            let root = canonical_set_root(&revoked_all)?;
+            (root, root)
+        };
+
+        let join_leaves = [leaf_id];
+        let join_delta_root = witness::join_delta_root(&join_leaves)?;
+        let (canonical_witness, srx_owned) = witness::build_branch_b_artifacts(
+            &parent_leaves,
+            &join_leaves,
+            parent_root,
+            revoked_since_root,
+        )?;
+        let witness_cbor = witness::witness_to_cbor(&canonical_witness)?;
+        let srx_cbor = srx_owned.to_cbor()?;
+
+        let tswe_salt_hash = msphf_core::instance::tswe_salt_hash(gid, &parent_root)?;
 
         let kbroad_public = self
             .ctx
@@ -460,6 +614,16 @@ impl CityGServer {
             .and_then(|registry| registry.get(&gid.to_vec()).cloned())
             .ok_or(CityGError::InvalidInput("kbroad key missing"))?;
         let kbroad_generation = self.roster.kbroad_generation(gid);
+        let barrier_state = self
+            .ctx
+            .barrier_group_state(gid)
+            .cloned()
+            .unwrap_or_default();
+        let k_barrier = self.ensure_group_barrier_secret(gid)?;
+        let barrier_version = barrier_state.barrier_version;
+        let cover_leaf_index = u64::from(cover_leaf_index(&leaf_id, barrier_state.n_max.max(1)));
+        let max_barrier_update_bytes =
+            u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
 
         Ok(JoinTicketBundle {
             gid: *gid,
@@ -475,6 +639,12 @@ impl CityGServer {
             srx_cbor,
             kbroad_public,
             kbroad_generation,
+            barrier_version,
+            cover_leaf_index,
+            k_barrier,
+            kem_tree_hash_after: barrier_state.kem_tree_hash_after,
+            n_max: barrier_state.n_max.max(1),
+            max_barrier_update_bytes,
         })
     }
 
@@ -482,6 +652,23 @@ impl CityGServer {
         &mut self,
         gid: &[u8; 32],
         leaf_id: &[u8; 32],
+    ) -> Result<MergeTicketBundle, CityGError> {
+        self.build_merge_ticket_with_intent(gid, leaf_id, MergeTicketIntent::Leave)
+    }
+
+    pub fn build_merge_ticket_for_refresh(
+        &mut self,
+        gid: &[u8; 32],
+        leaf_id: &[u8; 32],
+    ) -> Result<MergeTicketBundle, CityGError> {
+        self.build_merge_ticket_with_intent(gid, leaf_id, MergeTicketIntent::Refresh)
+    }
+
+    fn build_merge_ticket_with_intent(
+        &mut self,
+        gid: &[u8; 32],
+        leaf_id: &[u8; 32],
+        intent: MergeTicketIntent,
     ) -> Result<MergeTicketBundle, CityGError> {
         if self.roster.kbroad_rotation_required(gid) {
             return Err(CityGError::InvalidInput(KBROAD_ROTATION_REQUIRED_ERR));
@@ -502,31 +689,51 @@ impl CityGServer {
             return Err(CityGError::InvalidInput("leaf not present in roster"));
         }
 
-        let mut revoked_since = vec![*leaf_id];
-        revoked_since.sort();
+        let (revoked_since, revoked_all, srx_cbor): (Vec<[u8; 32]>, Vec<[u8; 32]>, Vec<u8>) =
+            match intent {
+                MergeTicketIntent::Leave => {
+                    let mut revoked_since = vec![*leaf_id];
+                    revoked_since.sort();
 
-        let mut revoked_all = self.roster.revoked(gid);
-        if !revoked_all.iter().any(|leaf| leaf == leaf_id) {
-            revoked_all.push(*leaf_id);
-        }
-        revoked_all.sort();
-        revoked_all.dedup();
+                    let mut revoked_all = self.roster.revoked(gid);
+                    if !revoked_all.iter().any(|leaf| leaf == leaf_id) {
+                        revoked_all.push(*leaf_id);
+                    }
+                    revoked_all.sort();
+                    revoked_all.dedup();
+
+                    let revoked_root = canonical_set_root(&revoked_all)?;
+                    let join_leaves: Vec<[u8; 32]> = Vec::new();
+                    let srx_owned = witness::build_merge_srx_inputs(
+                        &members,
+                        &join_leaves,
+                        parent_root,
+                        &revoked_since,
+                        &revoked_all,
+                        revoked_root,
+                    )?;
+                    (revoked_since, revoked_all, srx_owned.to_cbor()?)
+                }
+                MergeTicketIntent::Refresh => {
+                    let mut revoked_all = self.roster.revoked(gid);
+                    revoked_all.sort();
+                    revoked_all.dedup();
+                    (revoked_all.clone(), revoked_all, Vec::new())
+                }
+            };
 
         let join_leaves: Vec<[u8; 32]> = Vec::new();
-
         let join_delta_root = witness::join_delta_root(&join_leaves)?;
-        let revoked_since_root = canonical_set_root(&revoked_since)?;
-        let revoked_root = canonical_set_root(&revoked_all)?;
-
-        let srx_owned = witness::build_merge_srx_inputs(
-            &members,
-            &join_leaves,
-            parent_root,
-            &revoked_since,
-            &revoked_all,
-            revoked_root,
-        )?;
-        let srx_cbor = srx_owned.to_cbor()?;
+        let revoked_since_root = if revoked_since.is_empty() {
+            [0u8; 32]
+        } else {
+            canonical_set_root(&revoked_since)?
+        };
+        let revoked_root = if revoked_all.is_empty() {
+            [0u8; 32]
+        } else {
+            canonical_set_root(&revoked_all)?
+        };
 
         let tswe_salt_hash = msphf_core::instance::tswe_salt_hash(gid, &parent_root)?;
         let pox_r_commit = witness::demo_pox_commit();
@@ -536,7 +743,7 @@ impl CityGServer {
             return Err(CityGError::InvalidInput("no pivot parity available"));
         }
 
-        parities.sort_by(|a, b| match a.accept_seq.cmp(&b.accept_seq) {
+        parities.sort_by(|a, b| match b.accept_seq.cmp(&a.accept_seq) {
             core::cmp::Ordering::Equal => a.we_epoch_id.cmp(&b.we_epoch_id),
             other => other,
         });
@@ -548,6 +755,16 @@ impl CityGServer {
             .and_then(|registry| registry.get(&gid.to_vec()).cloned())
             .ok_or(CityGError::InvalidInput("kbroad key missing"))?;
         let kbroad_generation = self.roster.kbroad_generation(gid);
+        let barrier_state = self
+            .ctx
+            .barrier_group_state(gid)
+            .cloned()
+            .unwrap_or_default();
+        let k_barrier = self.ensure_group_barrier_secret(gid)?;
+        let barrier_version = barrier_state.barrier_version;
+        let cover_leaf_index = u64::from(cover_leaf_index(leaf_id, barrier_state.n_max.max(1)));
+        let max_barrier_update_bytes =
+            u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
 
         let pivot = &parities[0];
         let proof_mode = pivot.proof_mode.clone();
@@ -588,6 +805,12 @@ impl CityGServer {
             fs_epoch_base_ts,
             kbroad_public,
             kbroad_generation,
+            barrier_version,
+            cover_leaf_index,
+            k_barrier,
+            kem_tree_hash_after: barrier_state.kem_tree_hash_after,
+            n_max: barrier_state.n_max.max(1),
+            max_barrier_update_bytes,
         })
     }
 
@@ -638,6 +861,12 @@ impl CityGServer {
         roster: &mut GroupRoster,
         bundle: &ClientEpochBundle,
     ) -> Result<ServerOutcome, CityGError> {
+        let state_before = roster.groups.get(bundle.gid()).cloned().unwrap_or_default();
+
+        // Keep barrier acceptance/state logic on a single deterministic path:
+        // groups without explicit prior state are treated as default-initialized.
+        let _ = ctx.barrier_group_state_entry_mut(bundle.gid());
+
         let anchor = bundle.anchor_instance();
         let binding_inputs = bundle.hp_binding_inputs();
         let witness_bytes = bundle.witness_bytes().unwrap_or(&[]);
@@ -652,23 +881,107 @@ impl CityGServer {
             witness_bytes,
         )?;
 
+        let barrier_state = ctx
+            .barrier_group_state(bundle.gid())
+            .ok_or(CityGError::InvalidInput("context barrier state missing"))?
+            .clone();
+        let group = roster.groups.entry(bundle.gid().to_vec()).or_default();
+        group.barrier_initialized = barrier_state.barrier_initialized;
+        group.barrier_version = barrier_state.barrier_version;
+        group.barrier_roots_hash = barrier_state.barrier_roots_hash;
+        group.kem_tree_hash_after = barrier_state.kem_tree_hash_after;
+        group.n_max = barrier_state.n_max.max(1);
+        group.last_pcs_refresh_ec = barrier_state.last_pcs_refresh_ec;
+        group.pcs_refresh_min_delta_device_ec =
+            barrier_state.pcs_refresh_min_delta_device_ec.max(1);
+        group.pcs_refresh_min_delta_group_ec = barrier_state.pcs_refresh_min_delta_group_ec.max(1);
+        group.pcs_refresh_slot_width_ec = barrier_state.pcs_refresh_slot_width_ec.max(1);
+
         let delta = bundle.membership_delta()?;
+        let barrier_validation =
+            match validate_barrier_update_against_roster(&state_before, &bundle.header_map, &delta)
+            {
+                Ok(result) => result,
+                Err(_) => None,
+            };
+        let barrier_version = ctx
+            .barrier_group_state(bundle.gid())
+            .map(|state| state.barrier_version)
+            .unwrap_or(0);
+        let maybe_device_pk = bundle
+            .header_map
+            .get(&hdr::HDR_POP_PK)
+            .and_then(Value::as_bytes)
+            .map(ToOwned::to_owned);
+        let maybe_barrier_leaf_pk = bundle
+            .header_map
+            .get(&hdr::HDR_BARRIER_LEAF_PK)
+            .and_then(Value::as_bytes)
+            .map(ToOwned::to_owned);
         let new_root = roster.apply_delta(bundle.gid(), &bundle.anchor.parent_root, &delta)?;
+
+        if !delta.joined.is_empty() || !delta.revoked.is_empty() {
+            let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
+            for leaf in &delta.joined {
+                let leaf_index = cover_leaf_index(leaf, state.n_max.max(1));
+                let device_pk = maybe_device_pk.clone().unwrap_or_else(|| leaf.to_vec());
+                let ek_leaf = maybe_barrier_leaf_pk.clone().unwrap_or_default();
+                state.join_history.push(JoinLeafHistoryRecord {
+                    barrier_version,
+                    leaf_index,
+                    device_pk: device_pk.clone(),
+                    ek_leaf: ek_leaf.clone(),
+                });
+                state.leaf_device_pk.insert(*leaf, device_pk);
+                if !ek_leaf.is_empty() {
+                    state.leaf_barrier_public.insert(*leaf, ek_leaf);
+                }
+            }
+            for leaf in &delta.revoked {
+                state.leaf_device_pk.remove(leaf);
+                state.leaf_barrier_public.remove(leaf);
+            }
+            if barrier_validation.is_none() {
+                state.kem_tree_hash_after = compute_group_barrier_tree_hash(state)?;
+            }
+        }
+        if let Some(validation) = barrier_validation.as_ref() {
+            let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
+            state.barrier_pk_entries = validation.snapshot_post.clone();
+            state.kem_tree_hash_after = validation.parsed.kem_tree_hash_after;
+            state.n_max = validation.parsed.tree_size.max(1);
+        }
+        if let Some(state) = roster.groups.get(bundle.gid()) {
+            let ctx_state = ctx.barrier_group_state_entry_mut(bundle.gid());
+            ctx_state.barrier_initialized = state.barrier_initialized;
+            ctx_state.barrier_version = state.barrier_version;
+            ctx_state.barrier_roots_hash = state.barrier_roots_hash;
+            ctx_state.kem_tree_hash_after = state.kem_tree_hash_after;
+            ctx_state.n_max = state.n_max.max(1);
+            ctx_state.last_pcs_refresh_ec = state.last_pcs_refresh_ec;
+            ctx_state.pcs_refresh_min_delta_device_ec =
+                state.pcs_refresh_min_delta_device_ec.max(1);
+            ctx_state.pcs_refresh_min_delta_group_ec = state.pcs_refresh_min_delta_group_ec.max(1);
+            ctx_state.pcs_refresh_slot_width_ec = state.pcs_refresh_slot_width_ec.max(1);
+        }
 
         // Keep at least one pivot parity available on the resulting root so members
         // can always fetch a merge ticket for subsequent membership changes.
-        let parities_for_new = ctx.pivot_parities_for(bundle.gid(), &new_root);
-        if parities_for_new.is_empty() {
-            let mut mirrored = ctx
-                .pivot_parities_for(bundle.gid(), &bundle.anchor.parent_root)
-                .into_iter()
-                .find(|parity| parity.we_epoch_id == acceptance.outcome.we_epoch_id)
-                .unwrap_or_else(|| acceptance.pivot_parity.clone());
-            if mirrored.parent_root != new_root {
-                mirrored.parent_root = new_root;
-            }
-            ctx.insert_pivot_parity(mirrored, acceptance.outcome.accept_time);
+        let mut mirrored = ctx
+            .pivot_parities_for(bundle.gid(), &bundle.anchor.parent_root)
+            .into_iter()
+            .find(|parity| parity.we_epoch_id == acceptance.outcome.we_epoch_id)
+            .unwrap_or_else(|| acceptance.pivot_parity.clone());
+        if mirrored.parent_root != new_root {
+            mirrored.parent_root = new_root;
         }
+        // Keep parity roots aligned with the accepted anchor when mirroring to
+        // a new parent root; otherwise downstream tickets can diverge from the
+        // barrier state after revocation-changing merges.
+        mirrored.join_delta_root = bundle.anchor.join_delta_root;
+        mirrored.revoked_since_root = bundle.anchor.revoked_since_prev_root;
+        mirrored.revoked_root = bundle.anchor.revoked_root;
+        ctx.insert_pivot_parity(mirrored, acceptance.outcome.accept_time);
         if !delta.revoked.is_empty() {
             roster.mark_kbroad_rotation_required(bundle.gid());
         }
@@ -699,6 +1012,34 @@ impl CityGServer {
             let group = self.roster.groups.entry(gid.clone()).or_default();
             group.kbroad_generation = room_state.kbroad_generation;
             group.rotation_required = room_state.rotation_required;
+            group.barrier_initialized = room_state.barrier_initialized;
+            group.barrier_version = room_state.barrier_version;
+            group.k_barrier = room_state.k_barrier;
+            group.barrier_roots_hash = room_state.barrier_roots_hash;
+            group.kem_tree_hash_after = room_state.kem_tree_hash_after;
+            group.n_max = room_state.n_max.max(1);
+            group.barrier_pk_entries = room_state.barrier_pk_entries.clone();
+            group.last_pcs_refresh_ec = room_state.last_pcs_refresh_ec;
+            group.pcs_refresh_min_delta_device_ec =
+                room_state.pcs_refresh_min_delta_device_ec.max(1);
+            group.pcs_refresh_min_delta_group_ec = room_state.pcs_refresh_min_delta_group_ec.max(1);
+            group.pcs_refresh_slot_width_ec = room_state.pcs_refresh_slot_width_ec.max(1);
+            self.ctx.insert_barrier_group_state(
+                gid.as_slice(),
+                msphf_orchestrator::BarrierGroupState {
+                    barrier_initialized: group.barrier_initialized,
+                    barrier_version: group.barrier_version,
+                    barrier_roots_hash: group.barrier_roots_hash,
+                    kem_tree_hash_after: group.kem_tree_hash_after,
+                    n_max: group.n_max,
+                    max_barrier_update_bytes: msphf_orchestrator::BarrierGroupState::default()
+                        .max_barrier_update_bytes,
+                    last_pcs_refresh_ec: group.last_pcs_refresh_ec,
+                    pcs_refresh_min_delta_device_ec: group.pcs_refresh_min_delta_device_ec,
+                    pcs_refresh_min_delta_group_ec: group.pcs_refresh_min_delta_group_ec,
+                    pcs_refresh_slot_width_ec: group.pcs_refresh_slot_width_ec,
+                },
+            );
         }
         self.ctx.set_kbroad_registry(Some(registry));
     }
@@ -712,6 +1053,71 @@ impl CityGServer {
                     kbroad_public,
                     kbroad_generation: self.roster.kbroad_generation(gid.as_slice()),
                     rotation_required: self.roster.kbroad_rotation_required(gid.as_slice()),
+                    barrier_initialized: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.barrier_initialized)
+                        .unwrap_or(false),
+                    barrier_version: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.barrier_version)
+                        .unwrap_or(0),
+                    k_barrier: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.k_barrier)
+                        .unwrap_or([0u8; 32]),
+                    barrier_roots_hash: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.barrier_roots_hash)
+                        .unwrap_or([0u8; 32]),
+                    kem_tree_hash_after: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.kem_tree_hash_after)
+                        .unwrap_or([0u8; 32]),
+                    barrier_pk_entries: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.barrier_pk_entries.clone())
+                        .unwrap_or_default(),
+                    n_max: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.n_max.max(1))
+                        .unwrap_or(DEFAULT_BARRIER_N_MAX),
+                    last_pcs_refresh_ec: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .and_then(|state| state.last_pcs_refresh_ec),
+                    pcs_refresh_min_delta_device_ec: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.pcs_refresh_min_delta_device_ec.max(1))
+                        .unwrap_or_else(default_pcs_refresh_min_delta_device_ec),
+                    pcs_refresh_min_delta_group_ec: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.pcs_refresh_min_delta_group_ec.max(1))
+                        .unwrap_or_else(default_pcs_refresh_min_delta_group_ec),
+                    pcs_refresh_slot_width_ec: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.pcs_refresh_slot_width_ec.max(1))
+                        .unwrap_or_else(default_pcs_refresh_slot_width_ec),
                 };
                 (gid, room)
             })
@@ -733,6 +1139,9 @@ impl CityGServer {
         );
         self.receiver = ReceiverCache::new(self.window_ttl);
         self.roster = GroupRoster::default();
+        if let Err(err) = self.initialize_registered_groups_barrier_state() {
+            eprintln!("cityg-server: barrier bootstrap initialization failed: {err:?}");
+        }
     }
 
     fn recover_from_state(&mut self, path: &Path) -> Result<(), CityGError> {
@@ -880,6 +1289,695 @@ impl CityGServer {
     pub fn latest_parent_root(&self, gid: &[u8]) -> Option<[u8; 32]> {
         self.roster.latest_root(gid)
     }
+
+    pub fn barrier_roots_hash(&self, gid: &[u8]) -> Option<[u8; 32]> {
+        self.roster
+            .groups
+            .get(gid)
+            .map(|state| state.barrier_roots_hash)
+    }
+
+    pub fn barrier_kem_tree_hash_after(&self, gid: &[u8]) -> Option<[u8; 32]> {
+        self.roster
+            .groups
+            .get(gid)
+            .map(|state| state.kem_tree_hash_after)
+    }
+
+    pub fn barrier_n_max(&self, gid: &[u8]) -> Option<u64> {
+        self.roster.groups.get(gid).map(|state| state.n_max)
+    }
+
+    pub fn resolve_revoked_leaf_indices(
+        &self,
+        gid: &[u8; 32],
+        revocation_roots_hash: &[u8; 32],
+    ) -> Result<Vec<u32>, CityGError> {
+        let state = self
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        if state.barrier_roots_hash != *revocation_roots_hash {
+            return Err(CityGError::InvalidInput(
+                "revocation_roots_hash does not match committed barrier roots",
+            ));
+        }
+        let mut indices: Vec<u32> = state
+            .revoked
+            .iter()
+            .map(|leaf| cover_leaf_index(leaf, state.n_max.max(1)))
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+        Ok(indices)
+    }
+
+    pub fn resolve_joins_since(
+        &self,
+        gid: &[u8; 32],
+        prev_barrier_version: u64,
+    ) -> Result<Vec<BarrierJoinLeafRecord>, CityGError> {
+        let state = self
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        let mut by_leaf: BTreeMap<u32, BarrierJoinLeafRecord> = BTreeMap::new();
+        if prev_barrier_version == 0 && state.barrier_version == 0 {
+            if let Some(snapshot) = state.latest_snapshot() {
+                for leaf in snapshot.members() {
+                    let leaf_index = cover_leaf_index(leaf, state.n_max.max(1));
+                    by_leaf.insert(
+                        leaf_index,
+                        BarrierJoinLeafRecord {
+                            device_pk: state
+                                .leaf_device_pk
+                                .get(leaf)
+                                .cloned()
+                                .unwrap_or_else(|| leaf.to_vec()),
+                            leaf_index,
+                            ek_leaf: state
+                                .leaf_barrier_public
+                                .get(leaf)
+                                .cloned()
+                                .unwrap_or_default(),
+                        },
+                    );
+                }
+            }
+            return Ok(by_leaf.into_values().collect());
+        }
+        for record in &state.join_history {
+            if record.barrier_version > prev_barrier_version {
+                by_leaf.insert(
+                    record.leaf_index,
+                    BarrierJoinLeafRecord {
+                        device_pk: record.device_pk.clone(),
+                        leaf_index: record.leaf_index,
+                        ek_leaf: record.ek_leaf.clone(),
+                    },
+                );
+            }
+        }
+        Ok(by_leaf.into_values().collect())
+    }
+
+    pub fn fetch_barrier_public_tree(
+        &self,
+        gid: &[u8; 32],
+        kem_tree_hash_after: &[u8; 32],
+    ) -> Result<BarrierPublicTreeSnapshot, CityGError> {
+        let state = self
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        let pk_entries = build_pk_entries(state)?;
+        let computed_hash = compute_barrier_tree_hash(state.n_max, &pk_entries)?;
+        if computed_hash != *kem_tree_hash_after {
+            return Err(CityGError::InvalidInput(
+                "barrier tree snapshot auth failure",
+            ));
+        }
+        Ok(BarrierPublicTreeSnapshot {
+            n_max: state.n_max,
+            kem_tree_hash_after: computed_hash,
+            pk_entries,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct BarrierTreeLeafHashArgs<'a> {
+    n_max: u64,
+    node_index: u64,
+    #[serde(with = "serde_bytes")]
+    pk: &'a [u8],
+}
+
+#[derive(Serialize)]
+struct BarrierTreeNodeHashArgs<'a> {
+    n_max: u64,
+    node_index: u64,
+    #[serde(with = "serde_bytes")]
+    pk: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    left_hash: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    right_hash: &'a [u8; 32],
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct BarrierUpdateWire(
+    String,
+    u64,
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Clone, Serialize, Deserialize)]
+struct KemTreeCoverPayloadWire(
+    u64,
+    Vec<u64>,
+    Option<Vec<u64>>,
+    Vec<NodeCiphertextWire>,
+    Vec<NewPublicKeyWire>,
+);
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NodeCiphertextWire(
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NewPublicKeyWire(u64, #[serde(with = "serde_bytes")] Vec<u8>);
+
+#[derive(Clone)]
+struct ParsedNodeCiphertext {
+    source_node: u64,
+    target_node: u64,
+    target_pk_hash: [u8; 16],
+}
+
+#[derive(Clone)]
+struct ParsedBarrierUpdate {
+    prev_barrier_version: u64,
+    tree_size: u64,
+    revocation_roots_hash: [u8; 32],
+    kem_tree_hash_before: [u8; 32],
+    kem_tree_hash_after: [u8; 32],
+    path_nodes: Vec<u64>,
+    node_ciphertexts: Vec<ParsedNodeCiphertext>,
+    new_public_keys: Vec<(u64, Vec<u8>)>,
+}
+
+#[derive(Clone)]
+struct BarrierUpdateValidationOutcome {
+    parsed: ParsedBarrierUpdate,
+    snapshot_post: Vec<Vec<u8>>,
+}
+
+#[derive(Serialize)]
+struct BarrierPkHashArgs<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+
+fn parse_deterministic_cbor<T>(raw: &[u8]) -> Result<T, CityGError>
+where
+    T: for<'de> Deserialize<'de> + Serialize,
+{
+    let decoded: T = ciborium::de::from_reader(raw)
+        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+    let canonical =
+        to_cbor_vec(&decoded).map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+    if canonical.as_slice() != raw {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+    Ok(decoded)
+}
+
+fn vec_to_32(bytes: Vec<u8>) -> Result<[u8; 32], CityGError> {
+    bytes
+        .try_into()
+        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))
+}
+
+fn vec_to_16(bytes: Vec<u8>) -> Result<[u8; 16], CityGError> {
+    bytes
+        .try_into()
+        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))
+}
+
+fn parse_barrier_update(
+    header: &BTreeMap<u64, Value>,
+    expected_n_max: u64,
+) -> Result<Option<ParsedBarrierUpdate>, CityGError> {
+    let Some(Value::Bytes(raw_update)) = header.get(&hdr::HDR_BARRIER_UPDATE) else {
+        return Ok(None);
+    };
+
+    if expected_n_max == 0 || !expected_n_max.is_power_of_two() {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+
+    let BarrierUpdateWire(
+        mode,
+        _barrier_version,
+        prev_barrier_version,
+        tree_size,
+        revocation_roots_hash,
+        kem_tree_hash_before,
+        kem_tree_hash_after,
+        cover_payload,
+    ) = parse_deterministic_cbor(raw_update.as_slice())?;
+
+    if mode != "barrier-v1" || tree_size != expected_n_max {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+
+    let KemTreeCoverPayloadWire(
+        updater_leaf,
+        path_nodes,
+        revoked_leaf_indices_hint,
+        node_ciphertexts,
+        new_public_keys,
+    ) = parse_deterministic_cbor(cover_payload.as_slice())?;
+
+    let max_index = expected_n_max
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(2))
+        .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+    let leaf_base = expected_n_max.saturating_sub(1);
+
+    if path_nodes.is_empty() || updater_leaf >= expected_n_max {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+    let expected_leaf = leaf_base
+        .checked_add(updater_leaf)
+        .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+    if path_nodes.first().copied() != Some(expected_leaf) || path_nodes.last().copied() != Some(0) {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+    let mut seen_path = BTreeSet::new();
+    for node in &path_nodes {
+        if *node > max_index || !seen_path.insert(*node) {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
+    }
+    for pair in path_nodes.windows(2) {
+        let child = pair[0];
+        let parent = pair[1];
+        if child == 0 || (child - 1) / 2 != parent {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
+    }
+    if let Some(hint) = revoked_leaf_indices_hint {
+        let mut prev: Option<u64> = None;
+        for value in hint {
+            if prev.is_some_and(|p| p >= value) {
+                return Err(CityGError::InvalidInput("barrier_update malformed"));
+            }
+            prev = Some(value);
+        }
+    }
+
+    let expected_set: BTreeSet<u64> = path_nodes.iter().copied().skip(1).collect();
+    if new_public_keys.len() != expected_set.len() {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+    let mut prev_node: Option<u64> = None;
+    let mut seen_keys = BTreeSet::new();
+    let mut normalized_keys = Vec::with_capacity(new_public_keys.len());
+    for NewPublicKeyWire(node, ek) in new_public_keys {
+        if node > max_index || node >= leaf_base || ek.len() != 1184 {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
+        if prev_node.is_some_and(|p| p >= node) || !seen_keys.insert(node) {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
+        prev_node = Some(node);
+        normalized_keys.push((node, ek));
+    }
+    if seen_keys != expected_set {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+
+    let mut prev_pair: Option<(u64, u64)> = None;
+    let mut normalized_ciphertexts = Vec::with_capacity(node_ciphertexts.len());
+    for NodeCiphertextWire(source, target, target_pk_hash, kem_ct, wrapped_ps) in node_ciphertexts {
+        if source > max_index
+            || target > max_index
+            || target_pk_hash.len() != 16
+            || kem_ct.len() != 1088
+            || wrapped_ps.len() != 48
+        {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
+        let pair = (source, target);
+        if prev_pair.is_some_and(|p| p >= pair) {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
+        prev_pair = Some(pair);
+        normalized_ciphertexts.push(ParsedNodeCiphertext {
+            source_node: source,
+            target_node: target,
+            target_pk_hash: vec_to_16(target_pk_hash)?,
+        });
+    }
+
+    Ok(Some(ParsedBarrierUpdate {
+        prev_barrier_version,
+        tree_size,
+        revocation_roots_hash: vec_to_32(revocation_roots_hash)?,
+        kem_tree_hash_before: vec_to_32(kem_tree_hash_before)?,
+        kem_tree_hash_after: vec_to_32(kem_tree_hash_after)?,
+        path_nodes,
+        node_ciphertexts: normalized_ciphertexts,
+        new_public_keys: normalized_keys,
+    }))
+}
+
+fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
+    let n_max = usize::try_from(state.n_max)
+        .map_err(|_| CityGError::InvalidInput("barrier n_max does not fit usize"))?;
+    if n_max == 0 {
+        return Err(CityGError::InvalidInput("barrier n_max must be positive"));
+    }
+    let expected_len = n_max.saturating_mul(2).saturating_sub(1);
+    if state.barrier_pk_entries.len() == expected_len {
+        return Ok(state.barrier_pk_entries.clone());
+    }
+
+    let leaf_base = n_max.saturating_sub(1);
+    let mut pk_entries = vec![Vec::new(); expected_len];
+    if let Some(snapshot) = state.latest_snapshot() {
+        for leaf in snapshot.members() {
+            let index = cover_leaf_index(leaf, state.n_max.max(1)) as usize;
+            if index >= n_max {
+                continue;
+            }
+            if let Some(ek_leaf) = state.leaf_barrier_public.get(leaf) {
+                pk_entries[leaf_base + index] = ek_leaf.clone();
+            }
+        }
+    }
+    Ok(pk_entries)
+}
+
+fn compute_group_barrier_tree_hash(state: &GroupState) -> Result<[u8; 32], CityGError> {
+    let pk_entries = build_pk_entries(state)?;
+    compute_barrier_tree_hash(state.n_max, &pk_entries)
+}
+
+fn compute_barrier_tree_hash(n_max: u64, pk_entries: &[Vec<u8>]) -> Result<[u8; 32], CityGError> {
+    let n_max_usize =
+        usize::try_from(n_max).map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
+    let expected_len = n_max_usize
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or(CityGError::InvalidInput("barrier tree size overflow"))?;
+    if pk_entries.len() != expected_len {
+        return Err(CityGError::InvalidInput("barrier tree size mismatch"));
+    }
+    compute_barrier_tree_hash_recursive(0, n_max, n_max_usize, pk_entries)
+}
+
+fn compute_barrier_tree_hash_recursive(
+    node_index: usize,
+    n_max: u64,
+    n_max_usize: usize,
+    pk_entries: &[Vec<u8>],
+) -> Result<[u8; 32], CityGError> {
+    let leaf_base = n_max_usize.saturating_sub(1);
+    let pk = pk_entries
+        .get(node_index)
+        .ok_or(CityGError::InvalidInput("barrier node index out of range"))?;
+    let node_u64 = node_index as u64;
+    if node_index >= leaf_base {
+        return h_l(
+            "barrier/tree/leaf-hash",
+            &BarrierTreeLeafHashArgs {
+                n_max,
+                node_index: node_u64,
+                pk,
+            },
+        )
+        .map_err(CityGError::from);
+    }
+    let left = node_index
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(1))
+        .ok_or(CityGError::InvalidInput("barrier tree index overflow"))?;
+    let right = node_index
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(2))
+        .ok_or(CityGError::InvalidInput("barrier tree index overflow"))?;
+    let left_hash = compute_barrier_tree_hash_recursive(left, n_max, n_max_usize, pk_entries)?;
+    let right_hash = compute_barrier_tree_hash_recursive(right, n_max, n_max_usize, pk_entries)?;
+    h_l(
+        "barrier/tree/node-hash",
+        &BarrierTreeNodeHashArgs {
+            n_max,
+            node_index: node_u64,
+            pk,
+            left_hash: &left_hash,
+            right_hash: &right_hash,
+        },
+    )
+    .map_err(CityGError::from)
+}
+
+fn compute_barrier_pkhash(ek: &[u8]) -> Result<[u8; 32], CityGError> {
+    h_l("barrier/pk-hash", &BarrierPkHashArgs(ek)).map_err(CityGError::from)
+}
+
+fn direct_path_nodes(mut node: usize) -> Vec<usize> {
+    let mut out = vec![node];
+    while node > 0 {
+        node = (node - 1) / 2;
+        out.push(node);
+    }
+    out
+}
+
+fn blank_internal_path_from_leaf(pk_entries: &mut [Vec<u8>], leaf_node: usize) {
+    for node in direct_path_nodes(leaf_node).into_iter().skip(1) {
+        if let Some(slot) = pk_entries.get_mut(node) {
+            slot.clear();
+        }
+    }
+}
+
+fn blank_leaf_and_path(pk_entries: &mut [Vec<u8>], leaf_node: usize) {
+    for node in direct_path_nodes(leaf_node) {
+        if let Some(slot) = pk_entries.get_mut(node) {
+            slot.clear();
+        }
+    }
+}
+
+fn sibling_node(node: usize) -> Option<usize> {
+    if node == 0 {
+        return None;
+    }
+    if node % 2 == 0 {
+        Some(node.saturating_sub(1))
+    } else {
+        Some(node.saturating_add(1))
+    }
+}
+
+fn collect_resolution_nodes(
+    pk_entries: &[Vec<u8>],
+    node: usize,
+    leaf_base: usize,
+    out: &mut Vec<usize>,
+) {
+    if node >= pk_entries.len() {
+        return;
+    }
+    if !pk_entries[node].is_empty() {
+        out.push(node);
+        return;
+    }
+    if node >= leaf_base {
+        return;
+    }
+    let left = node.saturating_mul(2).saturating_add(1);
+    let right = node.saturating_mul(2).saturating_add(2);
+    collect_resolution_nodes(pk_entries, left, leaf_base, out);
+    collect_resolution_nodes(pk_entries, right, leaf_base, out);
+}
+
+fn collect_expected_pairs(
+    pk_entries: &[Vec<u8>],
+    path_nodes: &[u64],
+    n_max: u64,
+) -> Result<Vec<(u64, u64)>, CityGError> {
+    if path_nodes.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let leaf_base = usize::try_from(n_max.saturating_sub(1))
+        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+    let mut pairs = Vec::new();
+    for index in 0..path_nodes.len().saturating_sub(1) {
+        let child = usize::try_from(path_nodes[index])
+            .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+        let source = path_nodes[index + 1];
+        let Some(sibling) = sibling_node(child) else {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        };
+        let mut targets = Vec::new();
+        collect_resolution_nodes(pk_entries, sibling, leaf_base, &mut targets);
+        targets.sort_unstable();
+        for target in targets {
+            pairs.push((
+                source,
+                u64::try_from(target)
+                    .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
+            ));
+        }
+    }
+    pairs.sort_unstable();
+    Ok(pairs)
+}
+
+fn compute_revocation_roots_hash(
+    revoked_since_root: &[u8; 32],
+    revoked_root: &[u8; 32],
+) -> Result<[u8; 32], CityGError> {
+    #[derive(Serialize)]
+    struct Preimage<'a>(
+        #[serde(with = "serde_bytes")] &'a [u8; 32],
+        #[serde(with = "serde_bytes")] &'a [u8; 32],
+    );
+    h_l("barrier/roots", &Preimage(revoked_since_root, revoked_root)).map_err(CityGError::from)
+}
+
+fn build_all_blank_pk_entries(n_max: u64) -> Result<Vec<Vec<u8>>, CityGError> {
+    let n_max_usize =
+        usize::try_from(n_max).map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
+    let len = n_max_usize
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or(CityGError::InvalidInput("barrier tree size overflow"))?;
+    Ok(vec![Vec::new(); len])
+}
+
+fn validate_barrier_update_against_roster(
+    state_before: &GroupState,
+    header: &BTreeMap<u64, Value>,
+    delta: &MembershipDelta,
+) -> Result<Option<BarrierUpdateValidationOutcome>, CityGError> {
+    let Some(parsed) = parse_barrier_update(header, state_before.n_max.max(1))? else {
+        return Ok(None);
+    };
+
+    let mut snapshot_base = if state_before.barrier_initialized {
+        build_pk_entries(state_before)?
+    } else {
+        build_all_blank_pk_entries(state_before.n_max.max(1))?
+    };
+    let leaf_base = usize::try_from(state_before.n_max.saturating_sub(1))
+        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+
+    // JoinSet: all joins activated after prev_barrier_version plus joins in current delta.
+    let mut by_leaf: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    if parsed.prev_barrier_version == 0 && state_before.barrier_version == 0 {
+        if let Some(snapshot) = state_before.latest_snapshot() {
+            for leaf in snapshot.members() {
+                let leaf_index = cover_leaf_index(leaf, state_before.n_max.max(1));
+                let ek_leaf = state_before
+                    .leaf_barrier_public
+                    .get(leaf)
+                    .cloned()
+                    .unwrap_or_default();
+                by_leaf.insert(leaf_index, ek_leaf);
+            }
+        }
+    } else {
+        for record in &state_before.join_history {
+            if record.barrier_version > parsed.prev_barrier_version {
+                by_leaf.insert(record.leaf_index, record.ek_leaf.clone());
+            }
+        }
+    }
+    let join_ek = header
+        .get(&hdr::HDR_BARRIER_LEAF_PK)
+        .and_then(Value::as_bytes)
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    for leaf in &delta.joined {
+        let leaf_index = cover_leaf_index(leaf, state_before.n_max.max(1));
+        by_leaf.insert(leaf_index, join_ek.clone());
+    }
+    for (leaf_index, ek_leaf) in by_leaf {
+        let leaf_node = leaf_base.saturating_add(leaf_index as usize);
+        if let Some(slot) = snapshot_base.get_mut(leaf_node) {
+            *slot = ek_leaf;
+        }
+        blank_internal_path_from_leaf(&mut snapshot_base, leaf_node);
+    }
+
+    // RevokedLeafSet: committed revoked set plus current delta revocations.
+    let mut revoked_set = state_before.revoked.clone();
+    for leaf in &delta.revoked {
+        revoked_set.insert(*leaf);
+    }
+    let mut revoked_indices = BTreeSet::new();
+    for leaf in revoked_set {
+        revoked_indices.insert(cover_leaf_index(&leaf, state_before.n_max.max(1)) as usize);
+    }
+    for revoked_index in revoked_indices {
+        let leaf_node = leaf_base.saturating_add(revoked_index);
+        blank_leaf_and_path(&mut snapshot_base, leaf_node);
+    }
+
+    let expected_before =
+        compute_barrier_tree_hash(state_before.n_max.max(1), snapshot_base.as_slice())?;
+    if expected_before != parsed.kem_tree_hash_before {
+        return Err(CityGError::InvalidInput("barrier tree hash chain failure"));
+    }
+
+    let revocation_roots_hash = compute_revocation_roots_hash(
+        &header_bytes32(header, 112, "missing revoked_since_root")?,
+        &header_bytes32(header, hdr::HDR_REVOKED_ROOT, "missing revoked_root")?,
+    )?;
+    if parsed.revocation_roots_hash != revocation_roots_hash {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+
+    let mut snapshot_post = snapshot_base.clone();
+    for (node, ek) in &parsed.new_public_keys {
+        let index = usize::try_from(*node)
+            .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+        let slot = snapshot_post
+            .get_mut(index)
+            .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+        *slot = ek.clone();
+    }
+    let expected_after =
+        compute_barrier_tree_hash(state_before.n_max.max(1), snapshot_post.as_slice())?;
+    if expected_after != parsed.kem_tree_hash_after {
+        return Err(CityGError::InvalidInput("barrier tree hash chain failure"));
+    }
+
+    let expected_pairs = collect_expected_pairs(
+        snapshot_base.as_slice(),
+        parsed.path_nodes.as_slice(),
+        state_before.n_max.max(1),
+    )?;
+    let actual_pairs: Vec<(u64, u64)> = parsed
+        .node_ciphertexts
+        .iter()
+        .map(|node| (node.source_node, node.target_node))
+        .collect();
+    if actual_pairs != expected_pairs {
+        return Err(CityGError::InvalidInput("barrier expectedpairs failure"));
+    }
+    for node in &parsed.node_ciphertexts {
+        let target_index = usize::try_from(node.target_node)
+            .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+        let target_pk = snapshot_base
+            .get(target_index)
+            .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+        let target_pkhash = compute_barrier_pkhash(target_pk.as_slice())?;
+        if node.target_pk_hash.as_slice() != &target_pkhash[..16] {
+            return Err(CityGError::InvalidInput("barrier expectedpairs failure"));
+        }
+    }
+
+    Ok(Some(BarrierUpdateValidationOutcome {
+        parsed,
+        snapshot_post,
+    }))
 }
 
 fn header_bytes32(
@@ -976,8 +2074,8 @@ mod tests {
     use ciborium::value::Value;
     use cityg_client::ClientEpochBundle;
     use msphf_core::hash::h_l;
-    use msphf_orchestrator::{hdr, mhw::HeadRecord, AcceptanceOptions, BootstrapPolicy};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use msphf_orchestrator::{AcceptanceOptions, BootstrapPolicy, hdr, mhw::HeadRecord};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
     use serde::Serialize;
     use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Duration};
     use tempfile::tempdir;
@@ -1045,8 +2143,8 @@ mod tests {
     }
 
     #[test]
-    fn register_group_rejects_gid_with_existing_history_even_if_registry_is_missing(
-    ) -> Result<(), CityGError> {
+    fn register_group_rejects_gid_with_existing_history_even_if_registry_is_missing()
+    -> Result<(), CityGError> {
         let gid = [0xCA; 32];
         let leaf = cityg_client::demo::demo_member_leaf("history-owner");
         let mut server = CityGServer::new(ServerConfig::new());
@@ -1141,6 +2239,7 @@ mod tests {
         let gid = [0xC1; 32];
         let initial_key = vec![0x44; 16];
         let rotated_key = vec![0x66; 16];
+        let persisted_k_barrier: [u8; 32];
 
         {
             let mut cfg = ServerConfig::new();
@@ -1152,6 +2251,23 @@ mod tests {
             assert_eq!(generation, 1);
             assert_eq!(server.kbroad_generation(&gid), 1);
             assert!(!server.kbroad_rotation_required(&gid));
+            let state = server
+                .roster
+                .groups
+                .get_mut(gid.as_slice())
+                .expect("registered group state must exist");
+            state.barrier_initialized = true;
+            state.barrier_version = 9;
+            state.barrier_roots_hash = [0xAB; 32];
+            state.kem_tree_hash_after = [0xCD; 32];
+            state.n_max = 2048;
+            state.last_pcs_refresh_ec = Some(77);
+            state.pcs_refresh_min_delta_device_ec = 3;
+            state.pcs_refresh_min_delta_group_ec = 4;
+            state.pcs_refresh_slot_width_ec = 5;
+            persisted_k_barrier = state.k_barrier;
+            assert_ne!(persisted_k_barrier, [0u8; 32]);
+            server.persist_kbroad_state()?;
         }
 
         let mut cfg = ServerConfig::new();
@@ -1162,6 +2278,21 @@ mod tests {
         let ticket = server.build_join_ticket(&gid)?;
         assert_eq!(ticket.kbroad_public, rotated_key);
         assert_eq!(ticket.kbroad_generation, 1);
+        let state = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .expect("recovered group state must exist");
+        assert!(state.barrier_initialized);
+        assert_eq!(state.barrier_version, 9);
+        assert_eq!(state.barrier_roots_hash, [0xAB; 32]);
+        assert_eq!(state.kem_tree_hash_after, [0xCD; 32]);
+        assert_eq!(state.k_barrier, persisted_k_barrier);
+        assert_eq!(state.n_max, 2048);
+        assert_eq!(state.last_pcs_refresh_ec, Some(77));
+        assert_eq!(state.pcs_refresh_min_delta_device_ec, 3);
+        assert_eq!(state.pcs_refresh_min_delta_group_ec, 4);
+        assert_eq!(state.pcs_refresh_slot_width_ec, 5);
         let duplicate = server
             .register_group(&gid, initial_key)
             .expect_err("restart must preserve registered room kbroad key");
@@ -1169,6 +2300,25 @@ mod tests {
             duplicate,
             CityGError::InvalidInput("kbroad key already registered")
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn group_state_defaults_include_barrier_policy_bounds() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0xD1; 32];
+        server.register_group(&gid, vec![0x11; 16])?;
+        let state = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .expect("group should exist after registration");
+        assert_ne!(state.k_barrier, [0u8; 32]);
+        assert_eq!(state.n_max, super::DEFAULT_BARRIER_N_MAX);
+        assert!(state.n_max.is_power_of_two());
+        assert!(state.pcs_refresh_min_delta_device_ec >= 1);
+        assert!(state.pcs_refresh_min_delta_group_ec >= 1);
+        assert!(state.pcs_refresh_slot_width_ec >= 1);
         Ok(())
     }
 
@@ -1189,6 +2339,8 @@ mod tests {
         let first = server.build_join_ticket(&gid)?;
         let second = server.build_join_ticket(&gid)?;
         assert!(super::leaf_index(&second.leaf_id) > super::leaf_index(&first.leaf_id));
+        assert_ne!(first.k_barrier, [0u8; 32]);
+        assert_eq!(first.k_barrier, second.k_barrier);
 
         let mut demo_server = super::demo::demo_server();
         let bundle = cityg_client::demo::demo_bundle("alice")?;
@@ -1202,8 +2354,8 @@ mod tests {
     }
 
     #[test]
-    fn build_join_ticket_with_leaf_uses_requested_leaf_and_rejects_duplicates(
-    ) -> Result<(), CityGError> {
+    fn build_join_ticket_with_leaf_uses_requested_leaf_and_rejects_duplicates()
+    -> Result<(), CityGError> {
         let mut server = super::demo::demo_server();
         let gid = cityg_client::demo::DEMO_GID;
         let requested_leaf = cityg_client::demo::demo_member_leaf("bound-leaf");
@@ -1315,6 +2467,34 @@ mod tests {
     }
 
     #[test]
+    fn build_merge_ticket_for_refresh_keeps_revocation_roots_stable() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let leaf_id = cityg_client::demo::demo_member_leaf("alice");
+        let leave_ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+        let refresh_ticket = server.build_merge_ticket_for_refresh(&gid, &leaf_id)?;
+
+        assert_eq!(
+            refresh_ticket.join_delta_root,
+            cityg_client::witness::join_delta_root(&[])?
+        );
+        assert_eq!(
+            refresh_ticket.revoked_since_root,
+            refresh_ticket.revoked_root
+        );
+        assert_eq!(refresh_ticket.srx_cbor, Vec::<u8>::new());
+
+        assert_ne!(
+            leave_ticket.revoked_root, refresh_ticket.revoked_root,
+            "leave ticket should stage self-revocation while refresh ticket must not"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn header_helpers_cover_defaults_and_type_validation() {
         let mut map = BTreeMap::new();
         map.insert(1, Value::Bytes(vec![0x11; 32]));
@@ -1369,6 +2549,652 @@ mod tests {
             super::header_string(&map, 4, None),
             Err(CityGError::InvalidInput("pivot field missing"))
         ));
+    }
+
+    #[test]
+    fn parse_deterministic_cbor_rejects_noncanonical_map_bytes() {
+        // Non-canonical key order for map {1:1, 0:0}; canonical form must sort keys.
+        let noncanonical = vec![0xA2, 0x01, 0x01, 0x00, 0x00];
+        let parsed = super::parse_deterministic_cbor::<BTreeMap<u8, u8>>(&noncanonical);
+        assert!(matches!(
+            parsed,
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+    }
+
+    #[test]
+    fn barrier_tree_helpers_cover_resolution_and_size_errors() -> Result<(), CityGError> {
+        let base = super::build_all_blank_pk_entries(4)?;
+        assert_eq!(base.len(), 7);
+        assert!(super::collect_expected_pairs(base.as_slice(), &[3, 1, 0], 4)?.is_empty());
+
+        let mut with_target = base.clone();
+        with_target[4] = vec![0x44; 1184];
+        let pairs = super::collect_expected_pairs(with_target.as_slice(), &[3, 1, 0], 4)?;
+        assert_eq!(pairs, vec![(1, 4)]);
+
+        assert!(matches!(
+            super::compute_barrier_tree_hash(0, &[]),
+            Err(CityGError::InvalidInput(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn validate_barrier_update_accepts_expected_pairs_and_pkhash_binding() -> Result<(), CityGError>
+    {
+        let mut state = super::GroupState::default();
+        state.n_max = 4;
+        state.barrier_initialized = true;
+        state.barrier_version = 1;
+        state.barrier_pk_entries = super::build_all_blank_pk_entries(state.n_max)?;
+        let leaf = cityg_client::demo::demo_member_leaf("barrier-expected-pairs");
+        let join_ek = vec![0xA5; 1184];
+        let delta = cityg_client::MembershipDelta {
+            joined: vec![leaf],
+            revoked: Vec::new(),
+        };
+        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max.max(1));
+        let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
+            .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
+        let leaf_node = leaf_base
+            + usize::try_from(updater_leaf)
+                .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
+        let sibling_node = super::sibling_node(leaf_node)
+            .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
+        let parent_node = (leaf_node - 1) / 2;
+        let path_nodes = vec![leaf_node as u64, parent_node as u64, 0];
+
+        let target_ek = vec![0x91; 1184];
+        state.barrier_pk_entries[sibling_node] = target_ek.clone();
+        state.kem_tree_hash_after =
+            super::compute_barrier_tree_hash(state.n_max, state.barrier_pk_entries.as_slice())?;
+
+        let mut snapshot_pre = state.barrier_pk_entries.clone();
+        snapshot_pre[leaf_node] = join_ek.clone();
+        super::blank_internal_path_from_leaf(snapshot_pre.as_mut_slice(), leaf_node);
+        let kem_before = super::compute_barrier_tree_hash(state.n_max, snapshot_pre.as_slice())?;
+
+        let mut snapshot_post = snapshot_pre.clone();
+        let ek_root = vec![0x11; 1184];
+        let ek_parent = vec![0x22; 1184];
+        snapshot_post[0] = ek_root.clone();
+        snapshot_post[parent_node] = ek_parent.clone();
+        let kem_after = super::compute_barrier_tree_hash(state.n_max, snapshot_post.as_slice())?;
+
+        let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
+        let cover_payload = super::KemTreeCoverPayloadWire(
+            u64::from(updater_leaf),
+            path_nodes,
+            None,
+            vec![super::NodeCiphertextWire(
+                parent_node as u64,
+                sibling_node as u64,
+                target_pkhash[..16].to_vec(),
+                vec![0x33; 1088],
+                vec![0x44; 48],
+            )],
+            vec![
+                super::NewPublicKeyWire(0, ek_root),
+                super::NewPublicKeyWire(parent_node as u64, ek_parent),
+            ],
+        );
+        let cover_payload_bytes = super::to_cbor_vec(&cover_payload)?;
+
+        let revoked_since = [0u8; 32];
+        let revoked_root = [0u8; 32];
+        let revocation_roots_hash =
+            super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
+        let barrier_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            2,
+            1,
+            state.n_max,
+            revocation_roots_hash.to_vec(),
+            kem_before.to_vec(),
+            kem_after.to_vec(),
+            cover_payload_bytes,
+        );
+
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(112, Value::Bytes(revoked_since.to_vec()));
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(hdr::HDR_BARRIER_LEAF_PK, Value::Bytes(join_ek));
+
+        let validation = super::validate_barrier_update_against_roster(&state, &header, &delta)?
+            .ok_or(CityGError::InvalidInput("missing parsed barrier update"))?;
+        assert_eq!(validation.parsed.tree_size, state.n_max);
+        assert_eq!(validation.parsed.kem_tree_hash_before, kem_before);
+        assert_eq!(validation.parsed.kem_tree_hash_after, kem_after);
+        assert_eq!(validation.snapshot_post, snapshot_post);
+        Ok(())
+    }
+
+    #[test]
+    fn validate_barrier_update_rejects_expected_pairs_mismatch() -> Result<(), CityGError> {
+        let mut state = super::GroupState::default();
+        state.n_max = 4;
+        state.barrier_initialized = true;
+        state.barrier_version = 1;
+        state.barrier_pk_entries = super::build_all_blank_pk_entries(state.n_max)?;
+
+        let leaf = cityg_client::demo::demo_member_leaf("barrier-pairs-mismatch");
+        let join_ek = vec![0xA5; 1184];
+        let delta = cityg_client::MembershipDelta {
+            joined: vec![leaf],
+            revoked: Vec::new(),
+        };
+        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max.max(1));
+        let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
+            .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
+        let leaf_node = leaf_base
+            + usize::try_from(updater_leaf)
+                .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
+        let sibling_node = super::sibling_node(leaf_node)
+            .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
+        let parent_node = (leaf_node - 1) / 2;
+        let path_nodes = vec![leaf_node as u64, parent_node as u64, 0];
+        state.barrier_pk_entries[sibling_node] = vec![0x91; 1184];
+
+        let mut snapshot_pre = state.barrier_pk_entries.clone();
+        snapshot_pre[leaf_node] = join_ek.clone();
+        super::blank_internal_path_from_leaf(snapshot_pre.as_mut_slice(), leaf_node);
+        let kem_before = super::compute_barrier_tree_hash(state.n_max, snapshot_pre.as_slice())?;
+
+        let mut snapshot_post = snapshot_pre.clone();
+        snapshot_post[0] = vec![0x11; 1184];
+        snapshot_post[parent_node] = vec![0x22; 1184];
+        let kem_after = super::compute_barrier_tree_hash(state.n_max, snapshot_post.as_slice())?;
+
+        let revoked_since = [0u8; 32];
+        let revoked_root = [0u8; 32];
+        let revocation_roots_hash =
+            super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
+        let cover_payload = super::KemTreeCoverPayloadWire(
+            u64::from(updater_leaf),
+            path_nodes,
+            None,
+            vec![super::NodeCiphertextWire(
+                parent_node as u64,
+                leaf_node as u64,
+                vec![0x55; 16],
+                vec![0x66; 1088],
+                vec![0x77; 48],
+            )],
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(parent_node as u64, vec![0x22; 1184]),
+            ],
+        );
+        let barrier_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            2,
+            1,
+            state.n_max,
+            revocation_roots_hash.to_vec(),
+            kem_before.to_vec(),
+            kem_after.to_vec(),
+            super::to_cbor_vec(&cover_payload)?,
+        );
+
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(112, Value::Bytes(revoked_since.to_vec()));
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(hdr::HDR_BARRIER_LEAF_PK, Value::Bytes(join_ek));
+
+        let err = match super::validate_barrier_update_against_roster(&state, &header, &delta) {
+            Ok(_) => {
+                return Err(CityGError::InvalidInput(
+                    "mismatched ExpectedPairs must be rejected",
+                ));
+            }
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("barrier expectedpairs failure")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_snapshot_helpers_cover_fallback_and_parser_paths() -> Result<(), CityGError> {
+        let mut state = super::GroupState::default();
+        state.n_max = 4;
+        let leaf = cityg_client::demo::demo_member_leaf("barrier-snapshot-fallback");
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![leaf],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[leaf])?;
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        let leaf_ek = vec![0x5A; 1184];
+        state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
+
+        let pk_entries = super::build_pk_entries(&state)?;
+        assert_eq!(pk_entries.len(), 7);
+        let leaf_index = usize::try_from(super::cover_leaf_index(&leaf, state.n_max.max(1)))
+            .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
+        assert_eq!(pk_entries[3 + leaf_index], leaf_ek);
+        let group_hash = super::compute_group_barrier_tree_hash(&state)?;
+        let direct_hash = super::compute_barrier_tree_hash(state.n_max, pk_entries.as_slice())?;
+        assert_eq!(group_hash, direct_hash);
+
+        let mut header = BTreeMap::new();
+        assert!(super::parse_barrier_update(&header, 4)?.is_none());
+
+        let cover_payload = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 1, 0],
+            Some(vec![2, 1]), // unsorted hint -> malformed
+            Vec::new(),
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+            ],
+        );
+        let barrier_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0u8; 32],
+            vec![0u8; 32],
+            vec![0u8; 32],
+            super::to_cbor_vec(&cover_payload)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+
+        assert!(matches!(
+            super::parse_barrier_update(&header, 3),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn validate_barrier_update_uses_genesis_snapshot_joinset() -> Result<(), CityGError> {
+        let mut state = super::GroupState::default();
+        state.n_max = 4;
+        state.barrier_initialized = false;
+        state.barrier_version = 0;
+
+        let leaf = cityg_client::demo::demo_member_leaf("barrier-genesis-joinset");
+        let leaf_ek = vec![0x73; 1184];
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![leaf],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[leaf])?;
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
+
+        let updater_leaf = u64::from(super::cover_leaf_index(&leaf, state.n_max.max(1)));
+        let leaf_node = state.n_max.saturating_sub(1) + updater_leaf;
+        let parent_node = (leaf_node - 1) / 2;
+        let path_nodes = vec![leaf_node, parent_node, 0];
+
+        let mut snapshot_pre = super::build_all_blank_pk_entries(state.n_max)?;
+        snapshot_pre[usize::try_from(leaf_node).unwrap_or(0)] = leaf_ek.clone();
+        super::blank_internal_path_from_leaf(
+            snapshot_pre.as_mut_slice(),
+            usize::try_from(leaf_node).unwrap_or(0),
+        );
+        let kem_before = super::compute_barrier_tree_hash(state.n_max, snapshot_pre.as_slice())?;
+        let mut snapshot_post = snapshot_pre.clone();
+        snapshot_post[0] = vec![0x11; 1184];
+        snapshot_post[usize::try_from(parent_node).unwrap_or(0)] = vec![0x22; 1184];
+        let kem_after = super::compute_barrier_tree_hash(state.n_max, snapshot_post.as_slice())?;
+
+        let revoked_since = [0u8; 32];
+        let revoked_root = [0u8; 32];
+        let revocation_roots_hash =
+            super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
+        let cover_payload = super::KemTreeCoverPayloadWire(
+            updater_leaf,
+            path_nodes,
+            None,
+            Vec::new(),
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(parent_node, vec![0x22; 1184]),
+            ],
+        );
+        let barrier_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            0,
+            0,
+            state.n_max,
+            revocation_roots_hash.to_vec(),
+            kem_before.to_vec(),
+            kem_after.to_vec(),
+            super::to_cbor_vec(&cover_payload)?,
+        );
+
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(112, Value::Bytes(revoked_since.to_vec()));
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+
+        let delta = cityg_client::MembershipDelta {
+            joined: Vec::new(),
+            revoked: Vec::new(),
+        };
+        let validation = super::validate_barrier_update_against_roster(&state, &header, &delta)?
+            .ok_or(CityGError::InvalidInput(
+                "expected validated barrier update",
+            ))?;
+        assert_eq!(validation.parsed.prev_barrier_version, 0);
+        assert_eq!(validation.parsed.tree_size, state.n_max);
+        assert_eq!(validation.snapshot_post, snapshot_post);
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_helpers_cover_remaining_error_paths() -> Result<(), CityGError> {
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Integer(1.into()));
+        assert!(matches!(super::parse_barrier_update(&header, 4), Ok(None)));
+
+        let delta = cityg_client::MembershipDelta {
+            joined: Vec::new(),
+            revoked: Vec::new(),
+        };
+        let state = super::GroupState::default();
+        assert!(
+            super::validate_barrier_update_against_roster(&state, &BTreeMap::new(), &delta)?
+                .is_none()
+        );
+
+        let empty_tree = super::build_all_blank_pk_entries(4)?;
+        assert!(matches!(
+            super::collect_expected_pairs(empty_tree.as_slice(), &[0, 0], 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+        assert!(matches!(
+            super::compute_barrier_tree_hash(4, &empty_tree[..6]),
+            Err(CityGError::InvalidInput("barrier tree size mismatch"))
+        ));
+        assert!(matches!(
+            super::build_all_blank_pk_entries(u64::MAX),
+            Err(CityGError::InvalidInput(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_barrier_update_accepts_sorted_hint_and_ciphertexts() -> Result<(), CityGError> {
+        let cover_payload = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 1, 0],
+            Some(vec![1, 2]),
+            vec![super::NodeCiphertextWire(
+                1,
+                4,
+                vec![0xAA; 16],
+                vec![0xBB; 1088],
+                vec![0xCC; 48],
+            )],
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+            ],
+        );
+        let barrier_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            7,
+            6,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&cover_payload)?,
+        );
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        let parsed = super::parse_barrier_update(&header, 4)?
+            .ok_or(CityGError::InvalidInput("expected parsed update"))?;
+        assert_eq!(parsed.prev_barrier_version, 6);
+        assert_eq!(parsed.path_nodes, vec![3, 1, 0]);
+        assert_eq!(parsed.node_ciphertexts.len(), 1);
+        assert_eq!(parsed.new_public_keys.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_barrier_update_rejects_new_public_keys_expected_set_mismatch() -> Result<(), CityGError>
+    {
+        let cover_missing = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 1, 0],
+            None,
+            Vec::new(),
+            vec![super::NewPublicKeyWire(0, vec![0x11; 1184])],
+        );
+        let update_missing = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&cover_missing)?,
+        );
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&update_missing)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let cover_extra = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 1, 0],
+            None,
+            Vec::new(),
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+                super::NewPublicKeyWire(2, vec![0x33; 1184]),
+            ],
+        );
+        let update_extra = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&cover_extra)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&update_extra)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), CityGError> {
+        let mut state = super::GroupState::default();
+        state.n_max = 4;
+        state.barrier_initialized = false;
+        state.barrier_version = 0;
+
+        let leaf = cityg_client::demo::demo_member_leaf("barrier-mismatch-matrix");
+        let leaf_ek = vec![0x33; 1184];
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![leaf],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[leaf])?;
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
+
+        let updater_leaf = u64::from(super::cover_leaf_index(&leaf, state.n_max.max(1)));
+        let leaf_node = state.n_max.saturating_sub(1) + updater_leaf;
+        let parent_node = (leaf_node - 1) / 2;
+        let path_nodes = vec![leaf_node, parent_node, 0];
+        let mut snapshot_pre = super::build_all_blank_pk_entries(state.n_max)?;
+        snapshot_pre[usize::try_from(leaf_node).unwrap_or(0)] = leaf_ek;
+        super::blank_internal_path_from_leaf(
+            snapshot_pre.as_mut_slice(),
+            usize::try_from(leaf_node).unwrap_or(0),
+        );
+        let kem_before = super::compute_barrier_tree_hash(state.n_max, snapshot_pre.as_slice())?;
+        let mut snapshot_post = snapshot_pre.clone();
+        snapshot_post[0] = vec![0x11; 1184];
+        snapshot_post[usize::try_from(parent_node).unwrap_or(0)] = vec![0x22; 1184];
+        let kem_after = super::compute_barrier_tree_hash(state.n_max, snapshot_post.as_slice())?;
+
+        let revoked_since = [0u8; 32];
+        let revoked_root = [0u8; 32];
+        let rrh = super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
+        let cover_payload = super::KemTreeCoverPayloadWire(
+            updater_leaf,
+            path_nodes,
+            None,
+            Vec::new(),
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(parent_node, vec![0x22; 1184]),
+            ],
+        );
+        let cover_payload_bytes = super::to_cbor_vec(&cover_payload)?;
+
+        let mut header = BTreeMap::new();
+        header.insert(112, Value::Bytes(revoked_since.to_vec()));
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+
+        let before_bad = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            0,
+            0,
+            state.n_max,
+            rrh.to_vec(),
+            vec![0x99; 32],
+            kem_after.to_vec(),
+            cover_payload_bytes.clone(),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&before_bad)?),
+        );
+        let err = super::validate_barrier_update_against_roster(
+            &state,
+            &header,
+            &cityg_client::MembershipDelta {
+                joined: Vec::new(),
+                revoked: Vec::new(),
+            },
+        )
+        .err()
+        .ok_or(CityGError::InvalidInput(
+            "bad kem_tree_hash_before must fail",
+        ))?;
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("barrier tree hash chain failure")
+        ));
+
+        let roots_bad = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            0,
+            0,
+            state.n_max,
+            vec![0x88; 32],
+            kem_before.to_vec(),
+            kem_after.to_vec(),
+            cover_payload_bytes.clone(),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&roots_bad)?),
+        );
+        let err = super::validate_barrier_update_against_roster(
+            &state,
+            &header,
+            &cityg_client::MembershipDelta {
+                joined: Vec::new(),
+                revoked: Vec::new(),
+            },
+        )
+        .err()
+        .ok_or(CityGError::InvalidInput(
+            "bad revocation_roots_hash must fail",
+        ))?;
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("barrier_update malformed")
+        ));
+
+        let after_bad = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            0,
+            0,
+            state.n_max,
+            rrh.to_vec(),
+            kem_before.to_vec(),
+            vec![0x77; 32],
+            cover_payload_bytes,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&after_bad)?),
+        );
+        let err = super::validate_barrier_update_against_roster(
+            &state,
+            &header,
+            &cityg_client::MembershipDelta {
+                joined: Vec::new(),
+                revoked: Vec::new(),
+            },
+        )
+        .err()
+        .ok_or(CityGError::InvalidInput(
+            "bad kem_tree_hash_after must fail",
+        ))?;
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("barrier tree hash chain failure")
+        ));
+        Ok(())
     }
 
     #[test]
@@ -1642,8 +3468,8 @@ mod tests {
     }
 
     #[test]
-    fn recovery_error_does_not_leave_server_replaying_or_disable_journaling(
-    ) -> Result<(), CityGError> {
+    fn recovery_error_does_not_leave_server_replaying_or_disable_journaling()
+    -> Result<(), CityGError> {
         let _guard = super::journal_serial_guard();
         let dir = tempdir()?;
         let journal_path = dir.path().join("corrupt.journal");
@@ -1877,6 +3703,193 @@ mod tests {
         assert_eq!(ticket.revoked_since_root, expected_since_root);
         assert_eq!(ticket.revoked_root, expected_since_root);
         Ok(())
+    }
+
+    #[test]
+    fn resolve_joins_since_reports_join_metadata() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let records = server.resolve_joins_since(&cityg_client::demo::DEMO_GID, 0)?;
+        assert!(!records.is_empty(), "expected at least one join record");
+        let record = &records[0];
+        assert!(record.leaf_index > 0);
+        assert!(!record.device_pk.is_empty());
+        assert!(
+            record.ek_leaf.is_empty() || record.ek_leaf.len() == 1184,
+            "ek_leaf should be absent or ML-KEM-768 size"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_barrier_public_tree_enforces_snapshot_auth() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let group = server
+            .roster
+            .groups
+            .get(cityg_client::demo::DEMO_GID.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        let expected_hash = group.kem_tree_hash_after;
+        let n_max = group.n_max;
+
+        let snapshot =
+            server.fetch_barrier_public_tree(&cityg_client::demo::DEMO_GID, &expected_hash)?;
+        assert_eq!(snapshot.n_max, n_max);
+        assert_eq!(snapshot.kem_tree_hash_after, expected_hash);
+        assert_eq!(
+            snapshot.pk_entries.len() as u64,
+            n_max.saturating_mul(2).saturating_sub(1)
+        );
+
+        let err = server
+            .fetch_barrier_public_tree(&cityg_client::demo::DEMO_GID, &[0xFF; 32])
+            .expect_err("mismatched hash must fail");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("barrier tree snapshot auth failure")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn merge_ticket_hash_matches_fetchable_tree_snapshot() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let alice = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&alice)?;
+
+        let ticket = server.build_merge_ticket(
+            &cityg_client::demo::DEMO_GID,
+            &cityg_client::demo::demo_member_leaf("alice"),
+        )?;
+        let snapshot = server.fetch_barrier_public_tree(
+            &cityg_client::demo::DEMO_GID,
+            &ticket.kem_tree_hash_after,
+        )?;
+        assert_eq!(snapshot.kem_tree_hash_after, ticket.kem_tree_hash_after);
+        assert_eq!(snapshot.n_max, ticket.n_max.max(1));
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_barrier_state_is_mirrored_to_roster() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let gid = cityg_client::demo::DEMO_GID.as_slice();
+        let ctx_state = server
+            .ctx
+            .barrier_group_state(gid)
+            .ok_or(CityGError::InvalidInput("context barrier state missing"))?
+            .clone();
+        let roster_state = server
+            .roster
+            .groups
+            .get(gid)
+            .ok_or(CityGError::InvalidInput("roster group missing"))?;
+
+        assert_eq!(
+            roster_state.barrier_initialized,
+            ctx_state.barrier_initialized
+        );
+        assert_eq!(roster_state.barrier_version, ctx_state.barrier_version);
+        assert_eq!(
+            roster_state.barrier_roots_hash,
+            ctx_state.barrier_roots_hash
+        );
+        assert_eq!(
+            roster_state.kem_tree_hash_after,
+            ctx_state.kem_tree_hash_after
+        );
+        assert_eq!(roster_state.n_max, ctx_state.n_max);
+        assert_eq!(
+            roster_state.last_pcs_refresh_ec,
+            ctx_state.last_pcs_refresh_ec
+        );
+        assert_eq!(
+            roster_state.pcs_refresh_min_delta_device_ec,
+            ctx_state.pcs_refresh_min_delta_device_ec
+        );
+        assert_eq!(
+            roster_state.pcs_refresh_min_delta_group_ec,
+            ctx_state.pcs_refresh_min_delta_group_ec
+        );
+        assert_eq!(
+            roster_state.pcs_refresh_slot_width_ec,
+            ctx_state.pcs_refresh_slot_width_ec
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_revoked_leaf_indices_requires_matching_roots_hash() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let (leaf, roots_hash) = {
+            let group = server
+                .roster
+                .groups
+                .get_mut(cityg_client::demo::DEMO_GID.as_slice())
+                .ok_or(CityGError::InvalidInput("group not found"))?;
+            let root = group.barrier_roots_hash;
+            let leaf = group
+                .latest_snapshot()
+                .and_then(|snapshot| snapshot.members().next().copied())
+                .ok_or(CityGError::InvalidInput("missing membership snapshot"))?;
+            group.revoked.insert(leaf);
+            (leaf, root)
+        };
+
+        let indices =
+            server.resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &roots_hash)?;
+        let n_max = server
+            .roster
+            .groups
+            .get(cityg_client::demo::DEMO_GID.as_slice())
+            .map(|group| group.n_max)
+            .unwrap_or(super::DEFAULT_BARRIER_N_MAX);
+        assert_eq!(indices, vec![super::cover_leaf_index(&leaf, n_max)]);
+
+        let err = server
+            .resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &[0x42; 32])
+            .expect_err("mismatched roots hash must fail");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(
+                "revocation_roots_hash does not match committed barrier roots"
+            )
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_helpers_report_missing_group_state() {
+        let server = super::demo::demo_server();
+        let gid = [0xE1; 32];
+
+        assert!(matches!(
+            server.resolve_revoked_leaf_indices(&gid, &[0u8; 32]),
+            Err(CityGError::InvalidInput("group not found"))
+        ));
+        assert!(matches!(
+            server.resolve_joins_since(&gid, 0),
+            Err(CityGError::InvalidInput("group not found"))
+        ));
+        assert!(matches!(
+            server.fetch_barrier_public_tree(&gid, &[0u8; 32]),
+            Err(CityGError::InvalidInput("group not found"))
+        ));
+
+        assert_eq!(server.barrier_roots_hash(gid.as_slice()), None);
+        assert_eq!(server.barrier_kem_tree_hash_after(gid.as_slice()), None);
+        assert_eq!(server.barrier_n_max(gid.as_slice()), None);
     }
 }
 
@@ -2154,7 +4167,7 @@ impl GroupRoster {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct GroupState {
     latest_root: Option<[u8; 32]>,
     snapshots: BTreeMap<[u8; 32], GroupMembership>,
@@ -2162,6 +4175,55 @@ struct GroupState {
     next_index: u32,
     kbroad_generation: u64,
     rotation_required: bool,
+    barrier_initialized: bool,
+    barrier_version: u64,
+    k_barrier: [u8; 32],
+    barrier_roots_hash: [u8; 32],
+    kem_tree_hash_after: [u8; 32],
+    n_max: u64,
+    last_pcs_refresh_ec: Option<u64>,
+    pcs_refresh_min_delta_device_ec: u64,
+    pcs_refresh_min_delta_group_ec: u64,
+    pcs_refresh_slot_width_ec: u64,
+    join_history: Vec<JoinLeafHistoryRecord>,
+    leaf_device_pk: BTreeMap<[u8; 32], Vec<u8>>,
+    leaf_barrier_public: BTreeMap<[u8; 32], Vec<u8>>,
+    barrier_pk_entries: Vec<Vec<u8>>,
+}
+
+impl Default for GroupState {
+    fn default() -> Self {
+        Self {
+            latest_root: None,
+            snapshots: BTreeMap::new(),
+            revoked: BTreeSet::new(),
+            next_index: 0,
+            kbroad_generation: 0,
+            rotation_required: false,
+            barrier_initialized: false,
+            barrier_version: 0,
+            k_barrier: [0u8; 32],
+            barrier_roots_hash: [0u8; 32],
+            kem_tree_hash_after: [0u8; 32],
+            n_max: DEFAULT_BARRIER_N_MAX,
+            last_pcs_refresh_ec: None,
+            pcs_refresh_min_delta_device_ec: default_pcs_refresh_min_delta_device_ec(),
+            pcs_refresh_min_delta_group_ec: default_pcs_refresh_min_delta_group_ec(),
+            pcs_refresh_slot_width_ec: default_pcs_refresh_slot_width_ec(),
+            join_history: Vec::new(),
+            leaf_device_pk: BTreeMap::new(),
+            leaf_barrier_public: BTreeMap::new(),
+            barrier_pk_entries: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct JoinLeafHistoryRecord {
+    barrier_version: u64,
+    leaf_index: u32,
+    device_pk: Vec<u8>,
+    ek_leaf: Vec<u8>,
 }
 
 impl GroupState {
@@ -2194,11 +4256,57 @@ impl GroupState {
 
 type PersistedKbroadState = BTreeMap<Vec<u8>, PersistedKbroadRoomState>;
 
+const DEFAULT_BARRIER_N_MAX: u64 = 1_024;
+
+fn default_barrier_n_max() -> u64 {
+    DEFAULT_BARRIER_N_MAX
+}
+
+fn default_pcs_refresh_min_delta_device_ec() -> u64 {
+    1
+}
+
+fn default_pcs_refresh_min_delta_group_ec() -> u64 {
+    1
+}
+
+fn default_pcs_refresh_slot_width_ec() -> u64 {
+    1
+}
+
+fn random_barrier_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    key
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct PersistedKbroadRoomState {
     kbroad_public: Vec<u8>,
     kbroad_generation: u64,
     rotation_required: bool,
+    #[serde(default)]
+    barrier_initialized: bool,
+    #[serde(default)]
+    barrier_version: u64,
+    #[serde(default)]
+    k_barrier: [u8; 32],
+    #[serde(default)]
+    barrier_roots_hash: [u8; 32],
+    #[serde(default)]
+    kem_tree_hash_after: [u8; 32],
+    #[serde(default)]
+    barrier_pk_entries: Vec<Vec<u8>>,
+    #[serde(default = "default_barrier_n_max")]
+    n_max: u64,
+    #[serde(default)]
+    last_pcs_refresh_ec: Option<u64>,
+    #[serde(default = "default_pcs_refresh_min_delta_device_ec")]
+    pcs_refresh_min_delta_device_ec: u64,
+    #[serde(default = "default_pcs_refresh_min_delta_group_ec")]
+    pcs_refresh_min_delta_group_ec: u64,
+    #[serde(default = "default_pcs_refresh_slot_width_ec")]
+    pcs_refresh_slot_width_ec: u64,
 }
 
 fn kbroad_state_path_for_journal(journal_path: &Path) -> PathBuf {
@@ -2246,6 +4354,11 @@ fn is_zero_root(root: &[u8; 32]) -> bool {
 fn leaf_index(leaf: &[u8; 32]) -> u32 {
     let bytes: [u8; 4] = leaf[28..32].try_into().unwrap_or_default();
     u32::from_be_bytes(bytes)
+}
+
+fn cover_leaf_index(leaf: &[u8; 32], n_max: u64) -> u32 {
+    let n_max = n_max.max(1).min(u32::MAX as u64) as u32;
+    leaf_index(leaf) % n_max
 }
 
 #[derive(Debug)]

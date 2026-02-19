@@ -130,13 +130,17 @@ use cityg_client::{CityGError as ClientError, ClientEpochBundle, pivot::pivot_pa
 use msphf_orchestrator::PivotParity;
 pub use pb::IdentityBinding;
 use pb::{
-    AcceptEpochRequest, AcceptEpochResponse, BootstrapRoomRequest, BootstrapRoomResponse,
+    AcceptEpochRequest, AcceptEpochResponse, BarrierFetchPublicTreeRequest,
+    BarrierFetchPublicTreeResponse, BarrierResolveJoinsSinceRequest,
+    BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
+    BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest, BootstrapRoomResponse,
     ConfigureWindowRequest, ConfigureWindowResponse, FetchMessagesRequest, FetchMessagesResponse,
     GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetTelemetryResponse,
     GetWindowRequest, GetWindowResponse, JoinTicketRequest, JoinTicketResponse, MembersRequest,
-    MembersResponse, MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest,
-    RefreshPivotResponse, RotateRoomKbroadRequest, RotateRoomKbroadResponse, SearchMembersRequest,
-    SearchMembersResponse, SendMessageRequest, SendMessageResponse,
+    MembersResponse, MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest,
+    MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse, RotateRoomKbroadRequest,
+    RotateRoomKbroadResponse, SearchMembersRequest, SearchMembersResponse, SendMessageRequest,
+    SendMessageResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -150,6 +154,7 @@ use tracing::warn;
 
 const ADMIN_TOKEN_HEADER: &str = "x-cityg-admin-token";
 const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
+const EXPECTED_PROFILE_VERSION: &str = "v0.1.2";
 
 /// HTTP client for the City-G API server.
 ///
@@ -662,7 +667,10 @@ impl CitygApiClient {
             alias: alias.to_string(),
             identity_binding,
         };
-        self.post_proto("/v1/rooms/join_ticket", request).await
+        let response: JoinTicketResponse =
+            self.post_proto("/v1/rooms/join_ticket", request).await?;
+        ensure_profile_version(&response.profile_version)?;
+        Ok(response)
     }
 
     /// Requests a merge ticket for an existing member.
@@ -703,12 +711,35 @@ impl CitygApiClient {
         room_id: &str,
         leaf_id: &[u8; 32],
     ) -> Result<MergeTicket, Error> {
+        self.merge_ticket_with_intent(room_id, leaf_id, MergeTicketIntent::Leave)
+            .await
+    }
+
+    /// Requests a merge ticket for a non-leaving PCS refresh.
+    pub async fn merge_ticket_refresh(
+        &self,
+        room_id: &str,
+        leaf_id: &[u8; 32],
+    ) -> Result<MergeTicket, Error> {
+        self.merge_ticket_with_intent(room_id, leaf_id, MergeTicketIntent::Refresh)
+            .await
+    }
+
+    /// Requests a merge ticket with explicit intent.
+    pub async fn merge_ticket_with_intent(
+        &self,
+        room_id: &str,
+        leaf_id: &[u8; 32],
+        intent: MergeTicketIntent,
+    ) -> Result<MergeTicket, Error> {
         let request = MergeTicketRequest {
             room_id: room_id.to_string(),
             leaf_id: leaf_id.to_vec(),
+            intent: intent.as_proto(),
         };
         let response: MergeTicketResponse =
             self.post_proto("/v1/rooms/merge_ticket", request).await?;
+        ensure_profile_version(&response.profile_version)?;
 
         let we_epoch_id = array32(&response.we_epoch_id)?;
         let mut parities = Vec::with_capacity(response.pivot_parity_cbor.len());
@@ -745,6 +776,72 @@ impl CitygApiClient {
             fs_policy_version: response.fs_policy_version,
             fs_epoch_base_ts: response.fs_epoch_base_ts,
             kbroad_generation: response.kbroad_generation,
+            barrier_version: response.barrier_version,
+            cover_leaf_index: response.cover_leaf_index,
+            k_barrier: array32(&response.k_barrier)?,
+            kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
+            n_max: response.n_max,
+            max_barrier_update_bytes: response.max_barrier_update_bytes,
+        })
+    }
+
+    /// Resolves revoked cover leaf indices for a committed revocation roots hash.
+    pub async fn barrier_resolve_revoked_leaves(
+        &self,
+        room_id: &str,
+        revocation_roots_hash: &[u8; 32],
+    ) -> Result<Vec<u32>, Error> {
+        let request = BarrierResolveRevokedLeavesRequest {
+            room_id: room_id.to_string(),
+            revocation_roots_hash: revocation_roots_hash.to_vec(),
+        };
+        let response: BarrierResolveRevokedLeavesResponse = self
+            .post_proto("/v1/barrier/resolve_revoked_leaves", request)
+            .await?;
+        Ok(response.leaf_indices)
+    }
+
+    /// Resolves join records that became active after `prev_barrier_version`.
+    pub async fn barrier_resolve_joins_since(
+        &self,
+        room_id: &str,
+        prev_barrier_version: u64,
+    ) -> Result<Vec<BarrierJoinRecord>, Error> {
+        let request = BarrierResolveJoinsSinceRequest {
+            room_id: room_id.to_string(),
+            prev_barrier_version,
+        };
+        let response: BarrierResolveJoinsSinceResponse = self
+            .post_proto("/v1/barrier/resolve_joins_since", request)
+            .await?;
+        Ok(response
+            .records
+            .into_iter()
+            .map(|record| BarrierJoinRecord {
+                device_pk: record.device_pk,
+                leaf_index: record.leaf_index,
+                ek_leaf: record.ek_leaf,
+            })
+            .collect())
+    }
+
+    /// Fetches a barrier public-tree snapshot for a committed tree hash.
+    pub async fn barrier_fetch_public_tree(
+        &self,
+        room_id: &str,
+        kem_tree_hash_after: &[u8; 32],
+    ) -> Result<BarrierPublicTree, Error> {
+        let request = BarrierFetchPublicTreeRequest {
+            room_id: room_id.to_string(),
+            kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+        };
+        let response: BarrierFetchPublicTreeResponse = self
+            .post_proto("/v1/barrier/fetch_public_tree", request)
+            .await?;
+        Ok(BarrierPublicTree {
+            n_max: response.n_max,
+            kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
+            pk_entries: response.pk_entries,
         })
     }
 
@@ -1051,8 +1148,9 @@ impl CitygApiClient {
     pub async fn refresh_pivot(&self, bundle: &ClientEpochBundle) -> Result<(), Error> {
         let bytes = bundle.to_cbor()?;
         let request = RefreshPivotRequest { bundle_cbor: bytes };
-        let _: RefreshPivotResponse = self.post_proto("/v1/pivot/refresh", request).await?;
-        Ok(())
+        self.post_proto::<RefreshPivotResponse>("/v1/pivot/refresh", request)
+            .await
+            .map(|_| ())
     }
 
     async fn post_proto<R>(&self, path: &str, request: impl Message) -> Result<R, Error>
@@ -1076,15 +1174,8 @@ impl CitygApiClient {
         R: Message + Default,
     {
         let url = format!("{}{}", self.base_url, path);
-        let mut buf = Vec::with_capacity(request.encoded_len());
-
-        // Handle encoding error gracefully
-        if let Err(e) = request.encode(&mut buf) {
-            return Err(Error::Parse(format!(
-                "failed to encode protobuf request: {}",
-                e
-            )));
-        }
+        let buf = request.encode_to_vec();
+        let mut last_network_error: Option<reqwest::Error> = None;
 
         for attempt in 0..=max_retries {
             let mut req = self
@@ -1121,6 +1212,7 @@ impl CitygApiClient {
                             e,
                             backoff
                         );
+                        last_network_error = Some(e);
                         tokio::time::sleep(backoff).await;
                     } else {
                         warn!(
@@ -1130,14 +1222,19 @@ impl CitygApiClient {
                             path,
                             e
                         );
-                        return Err(Error::Http(e));
+                        last_network_error = Some(e);
                     }
                 }
             }
         }
 
-        // This should be unreachable because all error paths return above
-        unreachable!("all retry attempts exhausted but no error was captured")
+        if let Some(err) = last_network_error {
+            Err(Error::Http(err))
+        } else {
+            Err(Error::Parse(
+                "retry loop exhausted without a captured response error".to_string(),
+            ))
+        }
     }
 
     async fn decode_response<R>(response: reqwest::Response) -> Result<R, Error>
@@ -1161,6 +1258,38 @@ impl CitygApiClient {
 
     fn requires_message_auth(path: &str) -> bool {
         matches!(path, "/v1/send_message" | "/v1/messages")
+    }
+}
+
+/// Join record returned by barrier join enumeration endpoints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BarrierJoinRecord {
+    pub device_pk: Vec<u8>,
+    pub leaf_index: u32,
+    pub ek_leaf: Vec<u8>,
+}
+
+/// Barrier public-tree snapshot returned by snapshot fetch endpoints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BarrierPublicTree {
+    pub n_max: u64,
+    pub kem_tree_hash_after: [u8; 32],
+    pub pk_entries: Vec<Vec<u8>>,
+}
+
+/// Merge ticket containing all data needed to create a new epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeTicketIntent {
+    Leave,
+    Refresh,
+}
+
+impl MergeTicketIntent {
+    fn as_proto(self) -> i32 {
+        match self {
+            Self::Leave => PbMergeTicketIntent::Leave as i32,
+            Self::Refresh => PbMergeTicketIntent::Refresh as i32,
+        }
     }
 }
 
@@ -1220,12 +1349,27 @@ pub struct MergeTicket {
     pub fs_policy_version: String,
     pub fs_epoch_base_ts: u64,
     pub kbroad_generation: u64,
+    pub barrier_version: u64,
+    pub cover_leaf_index: u64,
+    pub k_barrier: [u8; 32],
+    pub kem_tree_hash_after: [u8; 32],
+    pub n_max: u64,
+    pub max_barrier_update_bytes: u64,
 }
 
 fn array32(bytes: &[u8]) -> Result<[u8; 32], Error> {
     bytes
         .try_into()
         .map_err(|_| Error::Parse("invalid 32-byte field".to_string()))
+}
+
+fn ensure_profile_version(version: &str) -> Result<(), Error> {
+    if version == EXPECTED_PROFILE_VERSION {
+        return Ok(());
+    }
+    Err(Error::Parse(format!(
+        "profile_version mismatch: expected {EXPECTED_PROFILE_VERSION}, got {version}"
+    )))
 }
 
 #[allow(dead_code)]
@@ -1270,14 +1414,17 @@ mod tests {
     use super::*;
     use axum::{
         Router,
-        http::{StatusCode as HttpStatusCode, Uri, header},
+        http::{HeaderMap, StatusCode as HttpStatusCode, Uri, header},
         response::{IntoResponse, Response},
         routing::{get, post},
     };
+    use cityg_client::demo::demo_bundle_alice;
     use pb::{
-        BootstrapRoomResponse, ConfigureWindowResponse, FetchMessagesResponse, GetBundleResponse,
-        GetTelemetryResponse, GetWindowResponse, JoinTicketResponse, MembersResponse,
-        MergeTicketResponse, RotateRoomKbroadResponse, SearchMembersResponse, SendMessageResponse,
+        AcceptEpochResponse, BarrierFetchPublicTreeResponse, BarrierResolveJoinsSinceResponse,
+        BarrierResolveRevokedLeavesResponse, BootstrapRoomResponse, ConfigureWindowResponse,
+        FetchMessagesResponse, GetBundleResponse, GetTelemetryResponse, GetWindowResponse,
+        JoinTicketResponse, MembersResponse, MergeTicketResponse, RefreshPivotResponse,
+        RotateRoomKbroadResponse, SearchMembersResponse, SeedHeadResponse, SendMessageResponse,
     };
     use prost::Message;
     use std::{error::Error as StdError, net::SocketAddr};
@@ -1309,6 +1456,13 @@ mod tests {
             fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 0,
             kbroad_generation: 0,
+            barrier_version: 0,
+            profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+            cover_leaf_index: 0,
+            k_barrier: vec![0x08; 32],
+            kem_tree_hash_after: vec![0x09; 32],
+            n_max: 1024,
+            max_barrier_update_bytes: 1_048_576,
         }
     }
 
@@ -1330,12 +1484,35 @@ mod tests {
             "/v1/rooms/rotate_kbroad" => encode_proto(RotateRoomKbroadResponse::default()),
             "/v1/members" => encode_proto(MembersResponse::default()),
             "/v1/members/search" => encode_proto(SearchMembersResponse::default()),
-            "/v1/rooms/join_ticket" => encode_proto(JoinTicketResponse::default()),
+            "/v1/rooms/join_ticket" => encode_proto(JoinTicketResponse {
+                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                ..JoinTicketResponse::default()
+            }),
             "/v1/rooms/merge_ticket" => encode_proto(merge_ticket_ok_payload()),
+            "/v1/accept_epoch" => encode_proto(AcceptEpochResponse::default()),
+            "/v1/barrier/resolve_revoked_leaves" => {
+                encode_proto(BarrierResolveRevokedLeavesResponse {
+                    leaf_indices: vec![1, 7],
+                })
+            }
+            "/v1/barrier/resolve_joins_since" => encode_proto(BarrierResolveJoinsSinceResponse {
+                records: vec![pb::BarrierJoinLeafRecord {
+                    device_pk: vec![0xAA; 32],
+                    leaf_index: 9,
+                    ek_leaf: vec![0xBB; 1184],
+                }],
+            }),
+            "/v1/barrier/fetch_public_tree" => encode_proto(BarrierFetchPublicTreeResponse {
+                n_max: 8,
+                kem_tree_hash_after: vec![0xCC; 32],
+                pk_entries: vec![Vec::new(); 15],
+            }),
             "/v1/send_message" => encode_proto(SendMessageResponse::default()),
             "/v1/messages" => encode_proto(FetchMessagesResponse::default()),
             "/v1/bundle" => encode_proto(GetBundleResponse::default()),
             "/v1/config/window" => encode_proto(ConfigureWindowResponse::default()),
+            "/v1/pivot/refresh" => encode_proto(RefreshPivotResponse::default()),
+            "/v1/debug/window/seed" => encode_proto(SeedHeadResponse::default()),
             "/v1/telemetry" => encode_proto(GetTelemetryResponse::default()),
             "/v1/window" => encode_proto(GetWindowResponse::default()),
             _ => {
@@ -1384,6 +1561,140 @@ mod tests {
         Ok((base, handle))
     }
 
+    async fn profile_mismatch_post(uri: Uri) -> Response {
+        let payload = match uri.path() {
+            "/v1/rooms/join_ticket" => encode_proto(JoinTicketResponse {
+                profile_version: "v0.1.0".to_string(),
+                ..JoinTicketResponse::default()
+            }),
+            "/v1/rooms/merge_ticket" => {
+                let mut response = merge_ticket_ok_payload();
+                response.profile_version = "v0.1.0".to_string();
+                encode_proto(response)
+            }
+            _ => {
+                return (
+                    HttpStatusCode::NOT_FOUND,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    br#"{"message":"resource not found","freeze_code":404}"#.to_vec(),
+                )
+                    .into_response();
+            }
+        };
+
+        (
+            HttpStatusCode::OK,
+            [(header::CONTENT_TYPE, "application/x-protobuf")],
+            payload,
+        )
+            .into_response()
+    }
+
+    async fn start_profile_mismatch_server()
+    -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn StdError>> {
+        let app = Router::new()
+            .route("/health", get(mock_health))
+            .route("/*path", post(profile_mismatch_post));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((base, handle))
+    }
+
+    async fn start_merge_ticket_server(
+        payload: MergeTicketResponse,
+    ) -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn StdError>> {
+        let app = Router::new().route(
+            "/v1/rooms/merge_ticket",
+            post(move || {
+                let payload = payload.clone();
+                async move {
+                    (
+                        HttpStatusCode::OK,
+                        [(header::CONTENT_TYPE, "application/x-protobuf")],
+                        encode_proto(payload),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((base, handle))
+    }
+
+    async fn auth_header_post(uri: Uri, headers: HeaderMap) -> Response {
+        match uri.path() {
+            "/v1/config/window" => {
+                if headers
+                    .get(ADMIN_TOKEN_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    == Some("admin-secret")
+                {
+                    (
+                        HttpStatusCode::OK,
+                        [(header::CONTENT_TYPE, "application/x-protobuf")],
+                        encode_proto(ConfigureWindowResponse::default()),
+                    )
+                        .into_response()
+                } else {
+                    (
+                        HttpStatusCode::UNAUTHORIZED,
+                        [(header::CONTENT_TYPE, "application/json")],
+                        br#"{"message":"missing admin token"}"#.to_vec(),
+                    )
+                        .into_response()
+                }
+            }
+            "/v1/send_message" => {
+                if headers
+                    .get(MESSAGE_AUTH_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    == Some("msg-secret")
+                {
+                    (
+                        HttpStatusCode::OK,
+                        [(header::CONTENT_TYPE, "application/x-protobuf")],
+                        encode_proto(SendMessageResponse::default()),
+                    )
+                        .into_response()
+                } else {
+                    (
+                        HttpStatusCode::UNAUTHORIZED,
+                        [(header::CONTENT_TYPE, "application/json")],
+                        br#"{"message":"missing message token"}"#.to_vec(),
+                    )
+                        .into_response()
+                }
+            }
+            _ => (
+                HttpStatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "application/json")],
+                br#"{"message":"resource not found","freeze_code":404}"#.to_vec(),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn start_auth_header_server()
+    -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn StdError>> {
+        let app = Router::new().route("/*path", post(auth_header_post));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((base, handle))
+    }
+
     #[test]
     fn array32_parses_exact_length() -> Result<(), String> {
         let input = [0x11u8; 32];
@@ -1395,10 +1706,7 @@ mod tests {
     #[test]
     fn array32_rejects_short_input() {
         let err = array32(&[0x11; 31]).expect_err("short array should fail");
-        match err {
-            Error::Parse(msg) => assert!(msg.contains("invalid 32-byte field")),
-            other => panic!("expected parse error, got {other:?}"),
-        }
+        assert!(matches!(err, Error::Parse(msg) if msg.contains("invalid 32-byte field")));
     }
 
     #[test]
@@ -1441,32 +1749,40 @@ mod tests {
             StatusCode::BAD_REQUEST,
             br#"{"message":"invalid input","freeze_code":17,"freeze_reason":"bad_field"}"#.to_vec(),
         );
-        match err {
+        assert!(matches!(
+            err,
             Error::HttpStatus {
-                status,
+                status: StatusCode::BAD_REQUEST,
                 message,
-                freeze_code,
+                freeze_code: Some(17),
                 freeze_reason,
-                failed_index,
-            } => {
-                assert_eq!(status, StatusCode::BAD_REQUEST);
-                assert_eq!(message, "invalid input");
-                assert_eq!(freeze_code, Some(17));
-                assert_eq!(freeze_reason.as_deref(), Some("bad_field"));
-                assert_eq!(failed_index, None);
-            }
-            other => panic!("expected HttpStatus error, got {other:?}"),
-        }
+                failed_index: None,
+            } if message == "invalid input" && freeze_reason.as_deref() == Some("bad_field")
+        ));
+    }
+
+    #[test]
+    fn profile_version_validator_accepts_expected_and_rejects_mismatch() {
+        assert!(ensure_profile_version(EXPECTED_PROFILE_VERSION).is_ok());
+        let err = ensure_profile_version("v0.1.0").expect_err("mismatch must fail closed");
+        assert!(
+            matches!(err, Error::Parse(message) if message.contains("profile_version mismatch"))
+        );
     }
 
     #[tokio::test]
     async fn wrappers_roundtrip_against_mock_server() -> Result<(), Box<dyn StdError>> {
         let (base_url, handle) = start_mock_server().await?;
         let client = CitygApiClient::with_http_client(base_url, Client::new());
+        let demo_bundle = demo_bundle_alice()?;
 
         client.health().await?;
         client.bootstrap_room("room-1", &[0xAB; 32]).await?;
         let _ = client.rotate_room_kbroad("room-1", &[0xBC; 32]).await?;
+        let _ = client.accept_epoch_bundle(&demo_bundle).await?;
+        client.refresh_pivot(&demo_bundle).await?;
+        #[cfg(any(debug_assertions, feature = "debug-api"))]
+        client.debug_seed_window_head(&demo_bundle).await?;
 
         let gid = [0x33u8; 32];
         let _ = client.members(&gid, None).await?;
@@ -1482,6 +1798,32 @@ mod tests {
         assert_eq!(merge.we_epoch_id, [0x01; 32]);
         assert_eq!(merge.parent_root, [0x03; 32]);
         assert_eq!(merge.kbroad_generation, 0);
+        assert_eq!(merge.cover_leaf_index, 0);
+        assert_eq!(merge.k_barrier, [0x08; 32]);
+        assert_eq!(merge.kem_tree_hash_after, [0x09; 32]);
+        assert_eq!(merge.n_max, 1024);
+        assert_eq!(merge.max_barrier_update_bytes, 1_048_576);
+        let refresh_merge = client.merge_ticket_refresh("room-1", &[0x01; 32]).await?;
+        assert_eq!(refresh_merge.we_epoch_id, [0x01; 32]);
+        let refresh_with_intent = client
+            .merge_ticket_with_intent("room-1", &[0x01; 32], MergeTicketIntent::Refresh)
+            .await?;
+        assert_eq!(refresh_with_intent.we_epoch_id, [0x01; 32]);
+
+        let revoked = client
+            .barrier_resolve_revoked_leaves("room-1", &[0xCC; 32])
+            .await?;
+        assert_eq!(revoked, vec![1, 7]);
+        let joins = client.barrier_resolve_joins_since("room-1", 3).await?;
+        assert_eq!(joins.len(), 1);
+        assert_eq!(joins[0].leaf_index, 9);
+        assert_eq!(joins[0].ek_leaf.len(), 1184);
+        let tree = client
+            .barrier_fetch_public_tree("room-1", &[0xCC; 32])
+            .await?;
+        assert_eq!(tree.n_max, 8);
+        assert_eq!(tree.kem_tree_hash_after, [0xCC; 32]);
+        assert_eq!(tree.pk_entries.len(), 15);
 
         let _ = client
             .send_message(&[0x22; 32], b"ciphertext", Some(&[0xAA; 32]))
@@ -1492,6 +1834,107 @@ mod tests {
         let _ = client.telemetry().await?;
         let _ = client.configure_window(Some(8), Some(120_000)).await?;
 
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_profile_version_mismatch() -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_profile_mismatch_server().await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("profile mismatch must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("profile_version mismatch")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_rejects_profile_version_mismatch() -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_profile_mismatch_server().await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("profile mismatch must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("profile_version mismatch")
+        ));
+        let req = MembersRequest {
+            gid: vec![0x01; 32],
+            parent_root: Vec::new(),
+            offset: None,
+            limit: None,
+        };
+        let not_found = client
+            .post_proto_with_retry::<MembersResponse>("/v1/unknown", req, 0)
+            .await
+            .expect_err("unknown path should return HttpStatus");
+        assert!(matches!(
+            not_found,
+            Error::HttpStatus {
+                status: StatusCode::NOT_FOUND,
+                freeze_code: Some(404),
+                ..
+            }
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_rejects_invalid_k_barrier_length() -> Result<(), Box<dyn StdError>> {
+        let mut payload = merge_ticket_ok_payload();
+        payload.k_barrier = vec![0x08; 31];
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("invalid k_barrier length must fail");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("invalid 32-byte field")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_rejects_invalid_kem_tree_hash_length() -> Result<(), Box<dyn StdError>> {
+        let mut payload = merge_ticket_ok_payload();
+        payload.kem_tree_hash_after = vec![0x09; 31];
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("invalid kem_tree_hash_after length must fail");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("invalid 32-byte field")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_rejects_invalid_pivot_parity_entry() -> Result<(), Box<dyn StdError>> {
+        let mut payload = merge_ticket_ok_payload();
+        payload.pivot_parity_cbor = vec![vec![0x01]];
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("invalid pivot parity must fail");
+        assert!(matches!(err, Error::Bundle(_)));
         handle.abort();
         Ok(())
     }
@@ -1563,6 +2006,104 @@ mod tests {
         assert!(matches!(err, Error::Http(_)));
     }
 
+    #[tokio::test]
+    async fn post_proto_with_retry_attaches_admin_and_message_auth_headers()
+    -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_auth_header_server().await?;
+        let client = CitygApiClient::new(base_url)
+            .with_admin_token("admin-secret")
+            .with_message_auth_token("msg-secret");
+
+        let _ = client.configure_window(Some(4), Some(60_000)).await?;
+        let _ = client
+            .send_message(&[0x22; 32], b"ciphertext", Some(&[0xAA; 32]))
+            .await?;
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_proto_with_retry_rejects_missing_admin_token() -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_auth_header_server().await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .configure_window(Some(4), Some(60_000))
+            .await
+            .expect_err("missing admin token must be rejected");
+        assert!(matches!(
+            err,
+            Error::HttpStatus {
+                status: StatusCode::UNAUTHORIZED,
+                ..
+            }
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_proto_with_retry_rejects_missing_message_token()
+    -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_auth_header_server().await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .send_message(&[0x22; 32], b"ciphertext", Some(&[0xAA; 32]))
+            .await
+            .expect_err("missing message token must be rejected");
+        assert!(matches!(
+            err,
+            Error::HttpStatus {
+                status: StatusCode::UNAUTHORIZED,
+                ..
+            }
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn auth_header_server_unknown_route_returns_not_found() -> Result<(), Box<dyn StdError>> {
+        let (base_url, handle) = start_auth_header_server().await?;
+        let client = CitygApiClient::new(base_url);
+        let request = MembersRequest {
+            gid: vec![0x01; 32],
+            parent_root: Vec::new(),
+            offset: None,
+            limit: None,
+        };
+        let err = client
+            .post_proto_with_retry::<MembersResponse>("/v1/unknown", request, 0)
+            .await
+            .expect_err("unknown path should return not found");
+        assert!(matches!(
+            err,
+            Error::HttpStatus {
+                status: StatusCode::NOT_FOUND,
+                freeze_code: Some(404),
+                ..
+            }
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_proto_with_retry_returns_non_retryable_builder_error() {
+        let client = CitygApiClient::new("http://[::1".to_string());
+        let request = MembersRequest {
+            gid: vec![0x01; 32],
+            parent_root: Vec::new(),
+            offset: None,
+            limit: None,
+        };
+        let err = client
+            .post_proto_with_retry::<MembersResponse>("/v1/members", request, 2)
+            .await
+            .expect_err("invalid URL should fail without retries");
+        assert!(matches!(err, Error::Http(http_err) if http_err.is_builder()));
+    }
+
     #[test]
     fn parses_failed_index_from_error_payload() -> Result<(), String> {
         let body = br#"{
@@ -1575,7 +2116,7 @@ mod tests {
         .to_vec();
         let err = build_http_error(StatusCode::BAD_REQUEST, body);
         let Error::HttpStatus { failed_index, .. } = err else {
-            return Err("expected HttpStatus error".to_string());
+            panic!("expected HttpStatus error");
         };
         assert_eq!(failed_index, Some(5));
         Ok(())

@@ -43,6 +43,7 @@ let params = OrchestrationParams {
     proof_mode: "lin+zkvrf",
     vrf_id: "lb-vrf/v1",
     fs_policy_version: "7",
+    barrier_version: 0,
     // ... other params
 };
 

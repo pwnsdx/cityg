@@ -10,6 +10,38 @@ pub type DeviceKey = (Vec<u8>, Vec<u8>);
 pub struct DeviceChainState {
     pub last_commit: Option<[u8; 32]>,
     pub last_ec: u64,
+    pub last_pcs_refresh_ec: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BarrierGroupState {
+    pub barrier_initialized: bool,
+    pub barrier_version: u64,
+    pub barrier_roots_hash: [u8; 32],
+    pub kem_tree_hash_after: [u8; 32],
+    pub n_max: u64,
+    pub max_barrier_update_bytes: usize,
+    pub last_pcs_refresh_ec: Option<u64>,
+    pub pcs_refresh_min_delta_device_ec: u64,
+    pub pcs_refresh_min_delta_group_ec: u64,
+    pub pcs_refresh_slot_width_ec: u64,
+}
+
+impl Default for BarrierGroupState {
+    fn default() -> Self {
+        Self {
+            barrier_initialized: false,
+            barrier_version: 0,
+            barrier_roots_hash: [0u8; 32],
+            kem_tree_hash_after: [0u8; 32],
+            n_max: 1_024,
+            max_barrier_update_bytes: 1_048_576,
+            last_pcs_refresh_ec: None,
+            pcs_refresh_min_delta_device_ec: 1,
+            pcs_refresh_min_delta_group_ec: 1,
+            pcs_refresh_slot_width_ec: 1,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -124,5 +156,19 @@ mod tests {
         assert_eq!(caps.anchor_max, 6);
         assert_eq!(caps.first_device, 7);
         assert_eq!(caps.device_max, 8);
+    }
+
+    #[test]
+    fn barrier_group_state_defaults_are_profile_compatible() {
+        let state = BarrierGroupState::default();
+        assert!(!state.barrier_initialized);
+        assert_eq!(state.barrier_version, 0);
+        assert_eq!(state.n_max, 1_024);
+        assert!(state.n_max.is_power_of_two());
+        assert!(state.max_barrier_update_bytes > 0);
+        assert_eq!(state.pcs_refresh_min_delta_device_ec, 1);
+        assert_eq!(state.pcs_refresh_min_delta_group_ec, 1);
+        assert_eq!(state.pcs_refresh_slot_width_ec, 1);
+        assert_eq!(state.last_pcs_refresh_ec, None);
     }
 }

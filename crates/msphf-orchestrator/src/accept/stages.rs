@@ -870,8 +870,7 @@ mod tests {
         ] {
             let mut header = base_header();
             header.insert(key, value);
-            let err = ensure_bootstrap_absent(&header)
-                .expect_err("bootstrap field should freeze");
+            let err = ensure_bootstrap_absent(&header).expect_err("bootstrap field should freeze");
             expect_freeze(err, FREEZE_BOOTSTRAP_INVALID);
         }
         Ok(())
@@ -1312,8 +1311,11 @@ mod tests {
         );
 
         let header = joiner.header_map.clone();
-        let deprecated_vrf =
-            BTreeSet::from([header.get(&HDR_VRF_ID).and_then(Value::as_text).unwrap().to_string()]);
+        let deprecated_vrf = BTreeSet::from([header
+            .get(&HDR_VRF_ID)
+            .and_then(Value::as_text)
+            .unwrap()
+            .to_string()]);
         expect_proofs_freeze(
             ensure_proofs(&header, None, &empty, None, &deprecated_vrf),
             FREEZE_SUITE_DEPRECATED,

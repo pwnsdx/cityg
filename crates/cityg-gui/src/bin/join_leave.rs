@@ -15,14 +15,14 @@ use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
 use futures::StreamExt;
 use hex::decode as hex_decode;
-use msphf_core::{ds, hash::h_l};
+use msphf_core::{ds, hash::h_l, serde_utils::to_cbor_vec};
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
     OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
 };
 use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
 use pqcrypto_kyber::kyber768;
-use pqcrypto_traits::kem::PublicKey as KemPublicKeyTrait;
+use pqcrypto_traits::kem::{PublicKey as KemPublicKeyTrait, SecretKey as KemSecretKeyTrait};
 use pqcrypto_traits::sign::{
     DetachedSignature as DilithiumDetachedSignatureTrait, PublicKey as DilithiumPublicKeyTrait,
 };
@@ -103,6 +103,280 @@ fn bytes32(name: &str, input: &[u8]) -> Result<[u8; 32]> {
     input
         .try_into()
         .map_err(|_| anyhow!("{name} must be 32 bytes, got {}", input.len()))
+}
+
+const DEFAULT_BARRIER_N_MAX: u64 = 1_024;
+
+#[derive(Serialize)]
+struct BarrierRootsPreimage<'a>(
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+);
+
+#[derive(Serialize)]
+struct BarrierTreeLeafHashPreimage<'a>(u64, u64, #[serde(with = "serde_bytes")] &'a [u8]);
+
+#[derive(Serialize)]
+struct BarrierTreeNodeHashPreimage<'a>(
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] &'a [u8],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+);
+
+#[derive(Serialize)]
+struct BarrierPkHashPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+
+fn compute_revocation_roots_hash(
+    revoked_since_root: &[u8; 32],
+    revoked_root: &[u8; 32],
+) -> Result<[u8; 32]> {
+    h_l(
+        "barrier/roots",
+        &BarrierRootsPreimage(revoked_since_root, revoked_root),
+    )
+    .map_err(|err| anyhow!("compute revocation_roots_hash: {err}"))
+}
+
+fn compute_barrier_tree_hash(n_max: u64, pk_entries: &[Vec<u8>]) -> Result<[u8; 32]> {
+    let n_max_usize =
+        usize::try_from(n_max).map_err(|_| anyhow!("barrier tree n_max too large"))?;
+    let expected_len = n_max_usize
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| anyhow!("barrier tree size overflow"))?;
+    if pk_entries.len() != expected_len {
+        return Err(anyhow!(
+            "barrier tree size mismatch: expected {expected_len}, got {}",
+            pk_entries.len()
+        ));
+    }
+    let leaf_base = n_max.saturating_sub(1);
+    compute_barrier_tree_hash_recursive(0, leaf_base, n_max, pk_entries)
+}
+
+fn compute_barrier_tree_hash_recursive(
+    node: u64,
+    leaf_base: u64,
+    n_max: u64,
+    pk_entries: &[Vec<u8>],
+) -> Result<[u8; 32]> {
+    let node_index =
+        usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
+    let pk = pk_entries
+        .get(node_index)
+        .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+    if node >= leaf_base {
+        return h_l(
+            "barrier/tree/leaf-hash",
+            &BarrierTreeLeafHashPreimage(n_max, node, pk.as_slice()),
+        )
+        .map_err(|err| anyhow!("compute barrier leaf hash: {err}"));
+    }
+
+    let left = node
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(1))
+        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
+    let right = node
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(2))
+        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
+    let left_hash = compute_barrier_tree_hash_recursive(left, leaf_base, n_max, pk_entries)?;
+    let right_hash = compute_barrier_tree_hash_recursive(right, leaf_base, n_max, pk_entries)?;
+    h_l(
+        "barrier/tree/node-hash",
+        &BarrierTreeNodeHashPreimage(n_max, node, pk.as_slice(), &left_hash, &right_hash),
+    )
+    .map_err(|err| anyhow!("compute barrier node hash: {err}"))
+}
+
+fn compute_barrier_pkhash(ek: &[u8]) -> Result<[u8; 32]> {
+    h_l("barrier/pk-hash", &BarrierPkHashPreimage(ek))
+        .map_err(|err| anyhow!("compute barrier pk hash: {err}"))
+}
+
+fn sibling_node(node: u64) -> Option<u64> {
+    if node == 0 {
+        return None;
+    }
+    if node % 2 == 0 {
+        Some(node - 1)
+    } else {
+        Some(node + 1)
+    }
+}
+
+fn collect_resolution_targets(
+    snapshot: &[Vec<u8>],
+    node: u64,
+    leaf_base: u64,
+    targets: &mut Vec<u64>,
+) -> Result<()> {
+    let index = usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
+    let Some(pk) = snapshot.get(index) else {
+        return Ok(());
+    };
+    if !pk.is_empty() {
+        targets.push(node);
+        return Ok(());
+    }
+    if node >= leaf_base {
+        return Ok(());
+    }
+    let left = node
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(1))
+        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
+    let right = node
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(2))
+        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
+    collect_resolution_targets(snapshot, left, leaf_base, targets)?;
+    collect_resolution_targets(snapshot, right, leaf_base, targets)?;
+    Ok(())
+}
+
+fn build_barrier_update_bytes(
+    n_max: u64,
+    updater_leaf: u64,
+    barrier_version: u64,
+    prev_barrier_version: u64,
+    revocation_roots_hash: [u8; 32],
+    kem_tree_hash_before: [u8; 32],
+    snapshot_pre: &[Vec<u8>],
+) -> Result<Vec<u8>> {
+    if n_max == 0 || !n_max.is_power_of_two() || updater_leaf >= n_max {
+        return Err(anyhow!("invalid barrier update tree parameters"));
+    }
+    let expected_nodes = usize::try_from(n_max)
+        .ok()
+        .and_then(|n| n.checked_mul(2))
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| anyhow!("invalid barrier n_max"))?;
+    if snapshot_pre.len() != expected_nodes {
+        return Err(anyhow!(
+            "barrier snapshot size mismatch: expected {expected_nodes}, got {}",
+            snapshot_pre.len()
+        ));
+    }
+
+    #[derive(Serialize)]
+    struct NewPublicKeyWire(u64, #[serde(with = "serde_bytes")] Vec<u8>);
+
+    #[derive(Serialize)]
+    struct KemTreeCoverPayloadWire(
+        u64,
+        Vec<u64>,
+        Option<Vec<u64>>,
+        Vec<NodeCiphertextWire>,
+        Vec<NewPublicKeyWire>,
+    );
+
+    #[derive(Serialize)]
+    struct NodeCiphertextWire(
+        u64,
+        u64,
+        #[serde(with = "serde_bytes")] Vec<u8>,
+        #[serde(with = "serde_bytes")] Vec<u8>,
+        #[serde(with = "serde_bytes")] Vec<u8>,
+    );
+
+    #[derive(Serialize)]
+    struct BarrierUpdateWire(
+        String,
+        u64,
+        u64,
+        u64,
+        #[serde(with = "serde_bytes")] Vec<u8>,
+        #[serde(with = "serde_bytes")] Vec<u8>,
+        #[serde(with = "serde_bytes")] Vec<u8>,
+        #[serde(with = "serde_bytes")] Vec<u8>,
+    );
+
+    let leaf_base = n_max.saturating_sub(1);
+    let mut path_nodes = vec![leaf_base.saturating_add(updater_leaf)];
+    while let Some(&node) = path_nodes.last() {
+        if node == 0 {
+            break;
+        }
+        path_nodes.push((node - 1) / 2);
+    }
+
+    let mut expected_nodes: Vec<u64> = path_nodes.iter().copied().skip(1).collect();
+    expected_nodes.sort_unstable();
+
+    let new_public_keys = expected_nodes
+        .into_iter()
+        .map(|node| {
+            let marker = (node as u8).wrapping_add(1);
+            NewPublicKeyWire(node, vec![marker; kyber768::public_key_bytes()])
+        })
+        .collect::<Vec<_>>();
+
+    let mut snapshot_post = snapshot_pre.to_vec();
+    for NewPublicKeyWire(node, ek) in &new_public_keys {
+        let idx = usize::try_from(*node).map_err(|_| anyhow!("barrier node index out of range"))?;
+        let slot = snapshot_post
+            .get_mut(idx)
+            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+        *slot = ek.clone();
+    }
+    let kem_tree_hash_after = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
+
+    let mut node_ciphertexts = Vec::new();
+    for step in 0..path_nodes.len().saturating_sub(1) {
+        let child_node = path_nodes[step];
+        let source_node = path_nodes[step + 1];
+        let sibling =
+            sibling_node(child_node).ok_or_else(|| anyhow!("barrier sibling missing for root"))?;
+        let mut targets = Vec::new();
+        collect_resolution_targets(snapshot_pre, sibling, leaf_base, &mut targets)?;
+        targets.sort_unstable();
+        for target_node in targets {
+            let target_index = usize::try_from(target_node)
+                .map_err(|_| anyhow!("barrier node index out of range"))?;
+            let target_pk = snapshot_pre
+                .get(target_index)
+                .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+            let target_pkhash = compute_barrier_pkhash(target_pk.as_slice())?;
+            let mut kem_ct = vec![0u8; kyber768::ciphertext_bytes()];
+            let mut wrapped_ps = vec![0u8; 48];
+            let mut rng = thread_rng();
+            rng.fill_bytes(kem_ct.as_mut_slice());
+            rng.fill_bytes(wrapped_ps.as_mut_slice());
+            node_ciphertexts.push(NodeCiphertextWire(
+                source_node,
+                target_node,
+                target_pkhash[..16].to_vec(),
+                kem_ct,
+                wrapped_ps,
+            ));
+        }
+    }
+    node_ciphertexts.sort_by_key(|entry| (entry.0, entry.1));
+
+    let cover_payload = KemTreeCoverPayloadWire(
+        updater_leaf,
+        path_nodes,
+        None,
+        node_ciphertexts,
+        new_public_keys,
+    );
+    let cover_bytes = to_cbor_vec(&cover_payload).context("encode barrier cover payload")?;
+
+    let update = BarrierUpdateWire(
+        "barrier-v1".to_string(),
+        barrier_version,
+        prev_barrier_version,
+        n_max,
+        revocation_roots_hash.to_vec(),
+        kem_tree_hash_before.to_vec(),
+        kem_tree_hash_after.to_vec(),
+        cover_bytes,
+    );
+    to_cbor_vec(&update).context("encode barrier update")
 }
 
 #[derive(Serialize)]
@@ -360,7 +634,8 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             perform_leave(session, verbose).await?;
             println!("leave ok");
         }
-    } else {
+    } else if count > 1 {
+        let mut sessions = Vec::with_capacity(count);
         for i in 0..count {
             let alias = if count == 1 {
                 alias_base.clone()
@@ -371,9 +646,25 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             let session = perform_join(&server_url, &room_id, &alias).await?;
             println!("join ok: weid={}", hex::encode(session.we_epoch_id));
             log_fingerprints(&session);
-            perform_leave(&session, verbose).await?;
+            sessions.push(session);
+        }
+
+        for (idx, session) in sessions.iter().enumerate() {
+            println!(
+                "leaving alias={} weid={}",
+                alias_for(&alias_base, count, idx),
+                hex::encode(session.we_epoch_id)
+            );
+            perform_leave(session, verbose).await?;
             println!("leave ok");
         }
+    } else {
+        println!("server={server_url} room={room_id} alias={alias_base}");
+        let session = perform_join(&server_url, &room_id, &alias_base).await?;
+        println!("join ok: weid={}", hex::encode(session.we_epoch_id));
+        log_fingerprints(&session);
+        perform_leave(&session, verbose).await?;
+        println!("leave ok");
     }
 
     Ok(())
@@ -491,6 +782,13 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
     let mut header = BTreeMap::new();
     header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
     header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
+    let (barrier_leaf_ek, barrier_leaf_dk) = kyber768::keypair();
+    header.insert(
+        hdr::HDR_BARRIER_LEAF_PK,
+        Value::Bytes(KemPublicKeyTrait::as_bytes(&barrier_leaf_ek).to_vec()),
+    );
+    // Keep the private leaf key material local (future recover path).
+    let _barrier_leaf_dk = KemSecretKeyTrait::as_bytes(&barrier_leaf_dk).to_vec();
 
     let mut fs_state = ForwardSecrecyState::new({
         let mut seed = [0u8; 32];
@@ -523,6 +821,7 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         vrf_public_key: Some(vrf_public_key.as_slice()),
         fs_policy_version: ticket.fs_policy_version.as_str(),
         fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+        barrier_version: ticket.barrier_version,
         fs_join: FsJoinInputs::default(),
         fs_merge: FsMergeInputs::default(),
     };
@@ -694,6 +993,46 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let revoked_since_root_arr = bytes32("revoked_since_root", &ticket.revoked_since_root)?;
     let revoked_root_arr = bytes32("revoked_root", &ticket.revoked_root)?;
     let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
+    let kem_tree_hash_before = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
+    let next_barrier_version = ticket.barrier_version.saturating_add(1);
+    let revocation_roots_hash =
+        compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
+    let barrier_tree_snapshot = client
+        .barrier_fetch_public_tree(&session.room_id, &kem_tree_hash_before)
+        .await
+        .context("fetch barrier public tree snapshot")?;
+    let barrier_n_max = if ticket.n_max == 0 {
+        DEFAULT_BARRIER_N_MAX
+    } else {
+        ticket.n_max
+    };
+    if ticket.cover_leaf_index >= barrier_n_max {
+        return Err(anyhow!(
+            "cover_leaf_index out of range for barrier tree: {} >= {}",
+            ticket.cover_leaf_index,
+            barrier_n_max
+        ));
+    }
+    if barrier_tree_snapshot.n_max != barrier_n_max {
+        return Err(anyhow!(
+            "barrier tree snapshot n_max mismatch: expected {barrier_n_max}, got {}",
+            barrier_tree_snapshot.n_max
+        ));
+    }
+    let barrier_update = build_barrier_update_bytes(
+        barrier_n_max,
+        ticket.cover_leaf_index,
+        next_barrier_version,
+        ticket.barrier_version,
+        revocation_roots_hash,
+        kem_tree_hash_before,
+        barrier_tree_snapshot.pk_entries.as_slice(),
+    )?;
+    header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(barrier_update));
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE_REASON,
+        Value::Integer(Integer::from(0u64)),
+    );
 
     let parts = AnchorInstanceParts {
         gid: &session.gid,
@@ -726,6 +1065,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         vrf_public_key: Some(&session.vrf_public_key[..]),
         fs_policy_version: ticket.fs_policy_version.as_str(),
         fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+        barrier_version: next_barrier_version,
         fs_join: FsJoinInputs {
             fs_ec: session.fs_ec,
             fs_epoch_commit: session.fs_epoch_commit,
@@ -1614,6 +1954,144 @@ mod tests {
         let err = bytes32("room", &[0xAB; 31]).expect_err("must reject non-32-byte input");
         assert!(err.to_string().contains("room must be 32 bytes"));
         Ok(())
+    }
+
+    #[test]
+    fn revocation_roots_hash_helper_is_deterministic() -> Result<()> {
+        let since = [0x11; 32];
+        let revoked = [0x22; 32];
+        let first = compute_revocation_roots_hash(&since, &revoked)?;
+        let second = compute_revocation_roots_hash(&since, &revoked)?;
+        assert_eq!(first, second, "hash must be deterministic");
+        let changed = compute_revocation_roots_hash(&since, &[0x23; 32])?;
+        assert_ne!(first, changed, "hash must bind revocation roots");
+        Ok(())
+    }
+
+    #[test]
+    fn build_barrier_update_bytes_encodes_expected_shape() -> Result<()> {
+        let snapshot_pre = vec![Vec::new(); 2 * 1_024 - 1];
+        let bytes = build_barrier_update_bytes(
+            1_024,
+            0,
+            9,
+            8,
+            [0x33; 32],
+            [0x22; 32],
+            snapshot_pre.as_slice(),
+        )?;
+        let value: Value = ciborium::de::from_reader(bytes.as_slice())?;
+        let Value::Array(update) = value else {
+            return Err(anyhow!("barrier update must decode as array"));
+        };
+        assert_eq!(update.len(), 8);
+        assert!(matches!(update.first(), Some(Value::Text(mode)) if mode == "barrier-v1"));
+        assert!(
+            matches!(update.get(1), Some(Value::Integer(version)) if u64::try_from(*version).ok() == Some(9))
+        );
+        assert!(
+            matches!(update.get(2), Some(Value::Integer(version)) if u64::try_from(*version).ok() == Some(8))
+        );
+        assert!(
+            matches!(update.get(3), Some(Value::Integer(tree_size)) if u64::try_from(*tree_size).ok() == Some(1_024))
+        );
+
+        let cover_bytes = match update.get(7) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => return Err(anyhow!("cover payload must be encoded as bytes")),
+        };
+        let cover_value: Value = ciborium::de::from_reader(cover_bytes.as_slice())?;
+        assert!(matches!(cover_value, Value::Array(fields) if fields.len() == 5));
+        Ok(())
+    }
+
+    #[test]
+    fn build_barrier_update_bytes_sets_hash_after_from_snapshot_and_new_public_keys() -> Result<()>
+    {
+        let n_max = 8u64;
+        let snapshot_pre = vec![Vec::new(); (n_max as usize) * 2 - 1];
+        let bytes = build_barrier_update_bytes(
+            n_max,
+            0,
+            2,
+            1,
+            [0x11; 32],
+            [0x22; 32],
+            snapshot_pre.as_slice(),
+        )?;
+        let update_value: Value = ciborium::de::from_reader(bytes.as_slice())?;
+        let Value::Array(update_fields) = update_value else {
+            return Err(anyhow!("barrier update must decode as array"));
+        };
+        let kem_tree_hash_after = match update_fields.get(6) {
+            Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(bytes.as_slice());
+                out
+            }
+            _ => return Err(anyhow!("barrier update missing kem_tree_hash_after")),
+        };
+        let cover_bytes = match update_fields.get(7) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => return Err(anyhow!("cover payload must be bytes")),
+        };
+        let cover_value: Value = ciborium::de::from_reader(cover_bytes.as_slice())?;
+        let Value::Array(cover_fields) = cover_value else {
+            return Err(anyhow!("cover payload must decode as array"));
+        };
+        let Some(Value::Array(new_public_keys_values)) = cover_fields.get(4) else {
+            return Err(anyhow!("cover payload missing new_public_keys"));
+        };
+
+        let mut snapshot_post = snapshot_pre.clone();
+        for entry in new_public_keys_values {
+            let Value::Array(pair) = entry else {
+                return Err(anyhow!("new_public_keys entry must be [node, ek]"));
+            };
+            if pair.len() != 2 {
+                return Err(anyhow!("new_public_keys entry must have two fields"));
+            }
+            let node = match pair.first() {
+                Some(Value::Integer(value)) => u64::try_from(*value)
+                    .map_err(|_| anyhow!("new_public_keys node index out of range"))?,
+                _ => return Err(anyhow!("new_public_keys node index missing")),
+            };
+            let ek = match pair.get(1) {
+                Some(Value::Bytes(bytes)) => bytes.clone(),
+                _ => return Err(anyhow!("new_public_keys ek missing")),
+            };
+            let idx =
+                usize::try_from(node).map_err(|_| anyhow!("new_public_keys node out of range"))?;
+            let slot = snapshot_post
+                .get_mut(idx)
+                .ok_or_else(|| anyhow!("new_public_keys node out of range"))?;
+            *slot = ek;
+        }
+        let recomputed = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
+        assert_eq!(kem_tree_hash_after, recomputed);
+        Ok(())
+    }
+
+    #[test]
+    fn build_barrier_update_bytes_rejects_invalid_tree_parameters() {
+        let snapshot_pre = vec![Vec::new(); 2 * 8 - 1];
+        assert!(
+            build_barrier_update_bytes(0, 0, 1, 0, [0u8; 32], [0u8; 32], snapshot_pre.as_slice())
+                .is_err()
+        );
+        assert!(
+            build_barrier_update_bytes(3, 0, 1, 0, [0u8; 32], [0u8; 32], snapshot_pre.as_slice())
+                .is_err()
+        );
+        assert!(
+            build_barrier_update_bytes(8, 8, 1, 0, [0u8; 32], [0u8; 32], snapshot_pre.as_slice())
+                .is_err()
+        );
+        let wrong_snapshot = vec![Vec::new(); 3];
+        assert!(
+            build_barrier_update_bytes(8, 0, 1, 0, [0u8; 32], [0u8; 32], wrong_snapshot.as_slice())
+                .is_err()
+        );
     }
 
     #[test]

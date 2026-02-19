@@ -35,11 +35,14 @@ use ciborium::ser::into_writer;
 use futures::{SinkExt, StreamExt};
 use hex::FromHex;
 use pb::{
-    AcceptEpochRequest, AcceptEpochResponse, BootstrapRoomRequest, BootstrapRoomResponse,
-    ChatMessage, ConfigureWindowRequest, ConfigureWindowResponse, FetchMessagesRequest,
-    FetchMessagesResponse, FreezeStat, GetBundleRequest, GetBundleResponse, GetTelemetryRequest,
-    GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse, IdentityBinding,
-    JoinTicketRequest, JoinTicketResponse, Member, MembersRequest, MembersResponse,
+    AcceptEpochRequest, AcceptEpochResponse, BarrierFetchPublicTreeRequest,
+    BarrierFetchPublicTreeResponse, BarrierJoinLeafRecord, BarrierResolveJoinsSinceRequest,
+    BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
+    BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest, BootstrapRoomResponse, ChatMessage,
+    ConfigureWindowRequest, ConfigureWindowResponse, FetchMessagesRequest, FetchMessagesResponse,
+    FreezeStat, GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetTelemetryResponse,
+    GetWindowRequest, GetWindowResponse, HealthResponse, IdentityBinding, JoinTicketRequest,
+    JoinTicketResponse, Member, MembersRequest, MembersResponse, MergeTicketIntent,
     MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
     RotateRoomKbroadRequest, RotateRoomKbroadResponse, SeedHeadRequest, SeedHeadResponse,
     SendMessageRequest, SendMessageResponse, TelemetryEntry, WindowEntry, WindowHead,
@@ -52,7 +55,10 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 use unicode_normalization::UnicodeNormalization;
 
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
-use cityg_server::{CityGServer, MergeTicketBundle, ServerConfig, ServerOutcome};
+use cityg_server::{
+    BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord, CityGServer, MergeTicketBundle,
+    ServerConfig, ServerOutcome,
+};
 use msphf_core::{
     MsphfError,
     params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK},
@@ -165,6 +171,7 @@ const MESSAGE_AUTH_TOKEN_ENV: &str = "CITYG_SERVER_MESSAGE_AUTH_TOKEN";
 const MESSAGE_PRUNE_INTERVAL_MS: u64 = 1_000;
 const WS_MAX_LAG_ENV: &str = "CITYG_SERVER_WS_MAX_LAG";
 const WS_MAX_LAG_DEFAULT: u64 = 256;
+const API_PROFILE_VERSION: &str = "v0.1.2";
 
 #[derive(Clone)]
 struct ApiState {
@@ -1234,6 +1241,13 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         bootstrap_public,
         confirmed_binding: confirmed_binding.clone(),
         kbroad_generation: ticket.kbroad_generation,
+        barrier_version: ticket.barrier_version,
+        profile_version: API_PROFILE_VERSION.to_string(),
+        cover_leaf_index: ticket.cover_leaf_index,
+        k_barrier: ticket.k_barrier.to_vec(),
+        kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
+        n_max: ticket.n_max,
+        max_barrier_update_bytes: ticket.max_barrier_update_bytes,
     };
 
     Ok(protobuf_response(&response))
@@ -1327,12 +1341,19 @@ async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Resp
     let gid = parse_gid(&request.room_id)?;
     let mut leaf_id = [0u8; 32];
     leaf_id.copy_from_slice(&request.leaf_id);
+    let intent = MergeTicketIntent::try_from(request.intent)
+        .map_err(|_| ApiError::InvalidRequest("merge ticket intent is invalid"))?;
 
     let bundle = {
         let mut guard = state.server.write().await;
-        guard
-            .build_merge_ticket(&gid, &leaf_id)
-            .map_err(ApiError::from)?
+        match intent {
+            MergeTicketIntent::Leave => guard
+                .build_merge_ticket(&gid, &leaf_id)
+                .map_err(ApiError::from)?,
+            MergeTicketIntent::Refresh => guard
+                .build_merge_ticket_for_refresh(&gid, &leaf_id)
+                .map_err(ApiError::from)?,
+        }
     };
 
     let MergeTicketBundle {
@@ -1358,6 +1379,12 @@ async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Resp
         fs_epoch_base_ts,
         kbroad_public,
         kbroad_generation,
+        barrier_version,
+        cover_leaf_index,
+        k_barrier,
+        kem_tree_hash_after,
+        n_max,
+        max_barrier_update_bytes,
     } = bundle;
 
     let pivot_parity_cbor = parities
@@ -1386,8 +1413,111 @@ async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Resp
         fs_policy_version,
         fs_epoch_base_ts,
         kbroad_generation,
+        barrier_version,
+        profile_version: API_PROFILE_VERSION.to_string(),
+        cover_leaf_index,
+        k_barrier: k_barrier.to_vec(),
+        kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+        n_max,
+        max_barrier_update_bytes,
     };
 
+    Ok(protobuf_response(&response))
+}
+
+async fn barrier_resolve_revoked_leaves(
+    State(state): State<ApiState>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let request = BarrierResolveRevokedLeavesRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    if request.revocation_roots_hash.len() != 32 {
+        return Err(ApiError::InvalidRequest(
+            "revocation_roots_hash must be 32 bytes",
+        ));
+    }
+    let gid = parse_gid(&request.room_id)?;
+    let mut revocation_roots_hash = [0u8; 32];
+    revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
+
+    let leaf_indices = {
+        let guard = state.server.read().await;
+        guard
+            .resolve_revoked_leaf_indices(&gid, &revocation_roots_hash)
+            .map_err(ApiError::from)?
+    };
+
+    let response = BarrierResolveRevokedLeavesResponse { leaf_indices };
+    Ok(protobuf_response(&response))
+}
+
+async fn barrier_resolve_joins_since(
+    State(state): State<ApiState>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let request = BarrierResolveJoinsSinceRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    let gid = parse_gid(&request.room_id)?;
+
+    let records = {
+        let guard = state.server.read().await;
+        guard
+            .resolve_joins_since(&gid, request.prev_barrier_version)
+            .map_err(ApiError::from)?
+    };
+
+    let response = BarrierResolveJoinsSinceResponse {
+        records: records
+            .into_iter()
+            .map(
+                |ServerBarrierJoinLeafRecord {
+                     device_pk,
+                     leaf_index,
+                     ek_leaf,
+                 }| BarrierJoinLeafRecord {
+                    device_pk,
+                    leaf_index,
+                    ek_leaf,
+                },
+            )
+            .collect(),
+    };
+    Ok(protobuf_response(&response))
+}
+
+async fn barrier_fetch_public_tree(
+    State(state): State<ApiState>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let request = BarrierFetchPublicTreeRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    if request.kem_tree_hash_after.len() != 32 {
+        return Err(ApiError::InvalidRequest(
+            "kem_tree_hash_after must be 32 bytes",
+        ));
+    }
+    let gid = parse_gid(&request.room_id)?;
+    let mut kem_tree_hash_after = [0u8; 32];
+    kem_tree_hash_after.copy_from_slice(&request.kem_tree_hash_after);
+
+    let snapshot = {
+        let guard = state.server.read().await;
+        guard
+            .fetch_barrier_public_tree(&gid, &kem_tree_hash_after)
+            .map_err(ApiError::from)?
+    };
+
+    let response = BarrierFetchPublicTreeResponse {
+        n_max: snapshot.n_max,
+        kem_tree_hash_after: snapshot.kem_tree_hash_after.to_vec(),
+        pk_entries: snapshot.pk_entries,
+    };
     Ok(protobuf_response(&response))
 }
 
@@ -2129,6 +2259,18 @@ pub async fn run_with_config(
         .route("/v1/rooms/rotate_kbroad", post(rotate_room_kbroad))
         .route("/v1/rooms/join_ticket", post(join_ticket))
         .route("/v1/rooms/merge_ticket", post(merge_ticket))
+        .route(
+            "/v1/barrier/resolve_revoked_leaves",
+            post(barrier_resolve_revoked_leaves),
+        )
+        .route(
+            "/v1/barrier/resolve_joins_since",
+            post(barrier_resolve_joins_since),
+        )
+        .route(
+            "/v1/barrier/fetch_public_tree",
+            post(barrier_fetch_public_tree),
+        )
         .route("/v1/pivot/refresh", post(refresh_pivot));
 
     #[cfg(any(debug_assertions, feature = "debug-api"))]
@@ -2424,12 +2566,10 @@ mod tests {
             Err(ApiError::Unauthorized("missing or invalid admin token"))
         ));
 
-        assert!(
-            matches!(
-                enforce_window_config_auth(&empty_headers, None),
-                Err(ApiError::Unauthorized("admin token is not configured"))
-            )
-        );
+        assert!(matches!(
+            enforce_window_config_auth(&empty_headers, None),
+            Err(ApiError::Unauthorized("admin token is not configured"))
+        ));
     }
 
     #[test]
@@ -2472,12 +2612,10 @@ mod tests {
             Err(ApiError::Unauthorized("missing or invalid admin token"))
         ));
 
-        assert!(
-            matches!(
-                enforce_room_admin_auth(&empty_headers, None),
-                Err(ApiError::Unauthorized("admin token is not configured"))
-            )
-        );
+        assert!(matches!(
+            enforce_room_admin_auth(&empty_headers, None),
+            Err(ApiError::Unauthorized("admin token is not configured"))
+        ));
     }
 
     #[test]
@@ -3101,6 +3239,10 @@ mod tests {
         let decoded: JoinTicketResponse = decode_proto_response(response).await;
         assert_eq!(decoded.kbroad_generation, 1);
         assert_eq!(decoded.kbroad_public, rotated);
+        assert_eq!(decoded.k_barrier.len(), 32);
+        assert_eq!(decoded.kem_tree_hash_after.len(), 32);
+        assert!(decoded.n_max.is_power_of_two());
+        assert!(decoded.max_barrier_update_bytes > 0);
     }
 
     #[tokio::test]
@@ -3189,10 +3331,7 @@ mod tests {
         let decoded: pb::SearchMembersResponse = decode_proto_response(response).await;
         assert_eq!(decoded.total_count, 1);
         assert_eq!(decoded.members.len(), 1);
-        assert_eq!(
-            decoded.members[0].alias.as_deref(),
-            Some("special-user")
-        );
+        assert_eq!(decoded.members[0].alias.as_deref(), Some("special-user"));
 
         let leaf_prefix = hex::encode(tagged_leaf);
         let mut body = Vec::new();
@@ -3259,7 +3398,10 @@ mod tests {
         let err = search_members(State(state.clone()), Bytes::from(body))
             .await
             .expect_err("missing gid should fail");
-        assert!(matches!(err, ApiError::InvalidRequest("gid must be provided")));
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("gid must be provided")
+        ));
 
         let mut body = Vec::new();
         pb::SearchMembersRequest {
@@ -3300,6 +3442,7 @@ mod tests {
         MergeTicketRequest {
             room_id: String::new(),
             leaf_id: leaf_id.to_vec(),
+            intent: MergeTicketIntent::Leave as i32,
         }
         .encode(&mut body)
         .expect("encode missing room id request");
@@ -3315,6 +3458,7 @@ mod tests {
         MergeTicketRequest {
             room_id: hex::encode(DEMO_GID),
             leaf_id: vec![0x01; 31],
+            intent: MergeTicketIntent::Leave as i32,
         }
         .encode(&mut body)
         .expect("encode bad leaf request");
@@ -3328,8 +3472,57 @@ mod tests {
 
         let mut body = Vec::new();
         MergeTicketRequest {
+            room_id: "not-hex-room-id".to_string(),
+            leaf_id: leaf_id.to_vec(),
+            intent: MergeTicketIntent::Leave as i32,
+        }
+        .encode(&mut body)
+        .expect("encode invalid room-id merge request");
+        let err = merge_ticket(State(state.clone()), Bytes::from(body))
+            .await
+            .expect_err("invalid room id format should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("room_id must be 64 hex characters")
+        ));
+
+        let mut body = Vec::new();
+        MergeTicketRequest {
+            room_id: hex::encode([0xEE; 32]),
+            leaf_id: leaf_id.to_vec(),
+            intent: MergeTicketIntent::Leave as i32,
+        }
+        .encode(&mut body)
+        .expect("encode unknown room merge request");
+        let err = merge_ticket(State(state.clone()), Bytes::from(body))
+            .await
+            .expect_err("unknown room should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest(_) | ApiError::NotFound | ApiError::Server { .. }
+        ));
+
+        let mut body = Vec::new();
+        MergeTicketRequest {
             room_id: hex::encode(DEMO_GID),
             leaf_id: leaf_id.to_vec(),
+            intent: i32::MAX,
+        }
+        .encode(&mut body)
+        .expect("encode invalid intent request");
+        let err = merge_ticket(State(state.clone()), Bytes::from(body))
+            .await
+            .expect_err("invalid intent should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("merge ticket intent is invalid")
+        ));
+
+        let mut body = Vec::new();
+        MergeTicketRequest {
+            room_id: hex::encode(DEMO_GID),
+            leaf_id: leaf_id.to_vec(),
+            intent: MergeTicketIntent::Leave as i32,
         }
         .encode(&mut body)
         .expect("encode valid merge request");
@@ -3339,18 +3532,248 @@ mod tests {
         let decoded: MergeTicketResponse = decode_proto_response(response).await;
         assert_eq!(decoded.we_epoch_id.len(), 32);
         assert_eq!(decoded.parent_root.len(), 32);
-        assert!(
-            !decoded.pivot_parity_cbor.is_empty(),
-            
-        );
+        assert!(!decoded.pivot_parity_cbor.is_empty(),);
         assert_eq!(decoded.join_delta_root, vec![0u8; 32]);
         let expected_revoked_root = canonical_set_root(&[leaf_id]).expect("canonical revoked root");
         assert_eq!(decoded.revoked_since_root, expected_revoked_root.to_vec());
         assert_eq!(decoded.revoked_root, expected_revoked_root.to_vec());
+        assert_eq!(decoded.k_barrier.len(), 32);
+        assert_eq!(decoded.kem_tree_hash_after.len(), 32);
+        assert!(decoded.n_max.is_power_of_two());
+        assert!(decoded.max_barrier_update_bytes > 0);
+        let expected_cover_leaf_index = u64::from(u32::from_be_bytes(
+            leaf_id[28..32].try_into().expect("leaf suffix"),
+        )) % decoded.n_max.max(1);
+        assert_eq!(decoded.cover_leaf_index, expected_cover_leaf_index);
 
         let srx = SrxInputsOwned::from_cbor(&decoded.srx_cbor).expect("decode merge srx payload");
         assert!(srx.join_leaf_ids.is_empty());
         assert_eq!(srx.since_leaf_ids, vec![leaf_id]);
+
+        let state = test_api_state();
+        {
+            let mut guard = state.server.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+        }
+        let mut refresh_body = Vec::new();
+        MergeTicketRequest {
+            room_id: hex::encode(DEMO_GID),
+            leaf_id: leaf_id.to_vec(),
+            intent: MergeTicketIntent::Refresh as i32,
+        }
+        .encode(&mut refresh_body)
+        .expect("encode refresh merge request");
+        let refresh_response = merge_ticket(State(state), Bytes::from(refresh_body))
+            .await
+            .expect("refresh merge ticket request");
+        let refresh_decoded: MergeTicketResponse = decode_proto_response(refresh_response).await;
+        assert_eq!(refresh_decoded.srx_cbor, Vec::<u8>::new());
+        assert_eq!(refresh_decoded.join_delta_root, vec![0u8; 32]);
+        assert_eq!(
+            refresh_decoded.revoked_since_root,
+            refresh_decoded.revoked_root
+        );
+    }
+
+    #[tokio::test]
+    async fn barrier_resolve_joins_since_returns_join_records() {
+        let state = test_api_state();
+        let alice = demo_bundle("alice").expect("alice demo bundle");
+
+        let mut bad_body = Vec::new();
+        BarrierResolveJoinsSinceRequest {
+            room_id: String::new(),
+            prev_barrier_version: 0,
+        }
+        .encode(&mut bad_body)
+        .expect("encode bad joins-since request");
+        let err = barrier_resolve_joins_since(State(state.clone()), Bytes::from(bad_body))
+            .await
+            .expect_err("joins-since missing room id should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("room_id must be provided")
+        ));
+
+        {
+            let mut guard = state.server.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+        }
+
+        let mut body = Vec::new();
+        BarrierResolveJoinsSinceRequest {
+            room_id: hex::encode(DEMO_GID),
+            prev_barrier_version: 0,
+        }
+        .encode(&mut body)
+        .expect("encode joins-since request");
+        let response = barrier_resolve_joins_since(State(state), Bytes::from(body))
+            .await
+            .expect("joins-since request should succeed");
+        let decoded: BarrierResolveJoinsSinceResponse = decode_proto_response(response).await;
+        assert!(
+            !decoded.records.is_empty(),
+            "joins-since should return records"
+        );
+        let first = &decoded.records[0];
+        assert!(first.leaf_index > 0);
+        assert!(!first.device_pk.is_empty());
+        assert!(
+            first.ek_leaf.is_empty() || first.ek_leaf.len() == ml_kem_public_key_bytes(),
+            "ek_leaf should be absent or ML-KEM-768 size"
+        );
+    }
+
+    #[tokio::test]
+    async fn barrier_tree_and_revoked_leaves_endpoints_validate_inputs() {
+        let state = test_api_state();
+        let alice = demo_bundle("alice").expect("alice demo bundle");
+
+        let (revocation_roots_hash, kem_tree_hash_after, n_max) = {
+            let mut guard = state.server.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+            (
+                guard
+                    .barrier_roots_hash(DEMO_GID.as_ref())
+                    .expect("barrier roots hash"),
+                guard
+                    .barrier_kem_tree_hash_after(DEMO_GID.as_ref())
+                    .expect("barrier tree hash"),
+                guard
+                    .barrier_n_max(DEMO_GID.as_ref())
+                    .expect("barrier n_max"),
+            )
+        };
+
+        let mut bad_revoked_body = Vec::new();
+        BarrierResolveRevokedLeavesRequest {
+            room_id: String::new(),
+            revocation_roots_hash: revocation_roots_hash.to_vec(),
+        }
+        .encode(&mut bad_revoked_body)
+        .expect("encode missing room revoked request");
+        let err =
+            barrier_resolve_revoked_leaves(State(state.clone()), Bytes::from(bad_revoked_body))
+                .await
+                .expect_err("missing room_id should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("room_id must be provided")
+        ));
+
+        let mut bad_revoked_room = Vec::new();
+        BarrierResolveRevokedLeavesRequest {
+            room_id: "bad-room-id".to_string(),
+            revocation_roots_hash: revocation_roots_hash.to_vec(),
+        }
+        .encode(&mut bad_revoked_room)
+        .expect("encode invalid room revoked request");
+        let err =
+            barrier_resolve_revoked_leaves(State(state.clone()), Bytes::from(bad_revoked_room))
+                .await
+                .expect_err("invalid room_id should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("room_id must be 64 hex characters")
+        ));
+
+        let mut bad_revoked_hash = Vec::new();
+        BarrierResolveRevokedLeavesRequest {
+            room_id: hex::encode(DEMO_GID),
+            revocation_roots_hash: vec![0xAB; 31],
+        }
+        .encode(&mut bad_revoked_hash)
+        .expect("encode short hash revoked request");
+        let err =
+            barrier_resolve_revoked_leaves(State(state.clone()), Bytes::from(bad_revoked_hash))
+                .await
+                .expect_err("short revocation_roots_hash should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("revocation_roots_hash must be 32 bytes")
+        ));
+
+        let mut revoked_body = Vec::new();
+        BarrierResolveRevokedLeavesRequest {
+            room_id: hex::encode(DEMO_GID),
+            revocation_roots_hash: revocation_roots_hash.to_vec(),
+        }
+        .encode(&mut revoked_body)
+        .expect("encode revoked leaves request");
+        let revoked_response =
+            barrier_resolve_revoked_leaves(State(state.clone()), Bytes::from(revoked_body))
+                .await
+                .expect("revoked leaves request should succeed");
+        let revoked_decoded: BarrierResolveRevokedLeavesResponse =
+            decode_proto_response(revoked_response).await;
+        assert!(revoked_decoded.leaf_indices.is_empty());
+
+        let mut bad_tree_body = Vec::new();
+        BarrierFetchPublicTreeRequest {
+            room_id: String::new(),
+            kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+        }
+        .encode(&mut bad_tree_body)
+        .expect("encode missing room tree request");
+        let err = barrier_fetch_public_tree(State(state.clone()), Bytes::from(bad_tree_body))
+            .await
+            .expect_err("missing room tree request should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("room_id must be provided")
+        ));
+
+        let mut bad_tree_hash = Vec::new();
+        BarrierFetchPublicTreeRequest {
+            room_id: hex::encode(DEMO_GID),
+            kem_tree_hash_after: vec![0xCD; 31],
+        }
+        .encode(&mut bad_tree_hash)
+        .expect("encode short hash tree request");
+        let err = barrier_fetch_public_tree(State(state.clone()), Bytes::from(bad_tree_hash))
+            .await
+            .expect_err("short tree hash should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("kem_tree_hash_after must be 32 bytes")
+        ));
+
+        let mut tree_body = Vec::new();
+        BarrierFetchPublicTreeRequest {
+            room_id: hex::encode(DEMO_GID),
+            kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+        }
+        .encode(&mut tree_body)
+        .expect("encode barrier tree request");
+        let tree_response = barrier_fetch_public_tree(State(state.clone()), Bytes::from(tree_body))
+            .await
+            .expect("barrier tree request should succeed");
+        let tree_decoded: BarrierFetchPublicTreeResponse =
+            decode_proto_response(tree_response).await;
+        assert_eq!(tree_decoded.n_max, n_max);
+        assert_eq!(
+            tree_decoded.kem_tree_hash_after,
+            kem_tree_hash_after.to_vec()
+        );
+        assert_eq!(
+            tree_decoded.pk_entries.len() as u64,
+            n_max.saturating_mul(2).saturating_sub(1)
+        );
+
+        let mut bad_tree_body = Vec::new();
+        BarrierFetchPublicTreeRequest {
+            room_id: hex::encode(DEMO_GID),
+            kem_tree_hash_after: vec![0xFF; 32],
+        }
+        .encode(&mut bad_tree_body)
+        .expect("encode bad barrier tree request");
+        let err = barrier_fetch_public_tree(State(state), Bytes::from(bad_tree_body))
+            .await
+            .expect_err("mismatched tree hash must fail");
+        assert!(matches!(
+            err,
+            ApiError::Server { message, .. } if message.contains("barrier tree snapshot auth failure")
+        ));
     }
 
     #[test]
@@ -3920,21 +4343,16 @@ mod tests {
         assert_eq!(first_head.seed_commit.len(), 32);
         assert_eq!(first_head.xk_hash.len(), 32);
 
-        let telemetry_response = get_telemetry(
-            State(state),
-            encode_proto_request(&GetTelemetryRequest {}),
-        )
-        .await
-        .expect("telemetry snapshot should succeed");
+        let telemetry_response =
+            get_telemetry(State(state), encode_proto_request(&GetTelemetryRequest {}))
+                .await
+                .expect("telemetry snapshot should succeed");
         let telemetry: GetTelemetryResponse = decode_proto_response(telemetry_response).await;
         assert!(!telemetry.entries.is_empty());
         assert!(
-            telemetry
-                .freeze_stats
-                .iter()
-                .any(|stat| stat.code == 4242
-                    && stat.reason == "unit_test_freeze"
-                    && stat.count == 1)
+            telemetry.freeze_stats.iter().any(|stat| stat.code == 4242
+                && stat.reason == "unit_test_freeze"
+                && stat.count == 1)
         );
     }
 
@@ -4144,10 +4562,7 @@ mod tests {
 
         let retained = store.get(&weid_a).expect("weid_a should exist");
         assert_eq!(retained.len(), 2, "old message should be pruned");
-        assert!(
-            retained.iter().all(|m| m.timestamp_ms >= 9_000),
-            
-        );
+        assert!(retained.iter().all(|m| m.timestamp_ms >= 9_000),);
         assert!(!store.contains_key(&weid_b));
     }
 

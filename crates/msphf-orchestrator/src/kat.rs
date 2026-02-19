@@ -1057,6 +1057,7 @@ fn generate_case(
         },
         fs_policy_version: "7",
         fs_epoch_base_ts: 0,
+        barrier_version: 0,
         fs_join: FsJoinInputs::default(),
         fs_merge: FsMergeInputs::default(),
     };

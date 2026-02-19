@@ -3,7 +3,7 @@
 Welcome to the City-G documentation! This index helps you find the right documentation for your needs.
 
 > [!IMPORTANT]
-> For `tswe/msphf-we/fs-hybrid`, the authoritative normative spec is [`./specs-unified-fs.md`](./specs-unified-fs.md).
+> For `tswe/msphf-we/fs-hybrid + prs-barrier`, the authoritative normative spec is [`./specs.md`](./specs.md).
 > The `docs/protocol/*` chapters are legacy companion material; if there is any conflict, follow the unified spec and implementation behavior/tests.
 
 ## 📚 Documentation by Audience
@@ -25,7 +25,7 @@ Building applications with City-G:
 ### For Protocol Implementers
 Implementing the City-G protocol:
 
-- **[Unified Specification](./specs-unified-fs.md)** - Authoritative normative source
+- **[Unified Specification](./specs.md)** - Authoritative normative source
 - **[Protocol Companion Docs](./protocol/00-README.md)** - Legacy chapterized companion material
   - [01 - Overview](./protocol/01-overview.md) - Protocol architecture and design
   - [02 - Cryptographic Primitives](./protocol/02-cryptographic-primitives.md)
@@ -63,7 +63,7 @@ Deploying and managing City-G in production:
 - [Workflows](./workflows.md) - Common operation flows
 
 ### Core Concepts
-- [Unified Specification](./specs-unified-fs.md) - Normative protocol behavior
+- [Unified Specification](./specs.md) - Normative protocol behavior
 - [Protocol Overview](./protocol/01-overview.md) - High-level architecture (legacy companion)
 - [Security Model](./protocol/10-security-model.md) - Threat model and guarantees (legacy companion)
 - [FAQ](./protocol/17-faq.md) - Frequently asked questions
@@ -77,7 +77,7 @@ Deploying and managing City-G in production:
 - [Observability](./OBSERVABILITY.md) - Monitoring and debugging
 
 ### Protocol Details
-- [Unified Specification](./specs-unified-fs.md) - Full normative protocol definition
+- [Unified Specification](./specs.md) - Full normative protocol definition
 - [Cryptographic Primitives](./protocol/02-cryptographic-primitives.md) - Crypto building blocks (legacy companion)
 - [SPHF & ME-OR](./protocol/05-sphf-meor.md) - Smooth projective hash functions (legacy companion)
 - [Proof Systems](./protocol/06-proof-systems.md) - Zero-knowledge proofs (legacy companion)
@@ -105,7 +105,7 @@ Deploying and managing City-G in production:
 - **Error handling**: [API Reference - Error Handling](./api-reference.md#error-handling)
 
 ### Protocol Understanding
-- **Normative behavior**: [Unified Specification](./specs-unified-fs.md)
+- **Normative behavior**: [Unified Specification](./specs.md)
 - **How server-blindness works**: [Protocol Overview](./protocol/01-overview.md#31-smooth-projective-hash-functions-sphf) (legacy companion)
 - **Join flow details**: [Client Operations](./protocol/08-client-operations.md) (legacy companion)
 - **Proof verification**: [Server Acceptance](./protocol/07-server-acceptance.md) (legacy companion)
@@ -133,17 +133,44 @@ Verification artifacts and benchmarks:
 
 - **[Main README](../README.md)** - Project overview and quick start
 - **[Security Policy](../SECURITY.md)** - Vulnerability reporting
-- **[Specification](./specs-unified-fs.md)** - Formal protocol specification
+- **[Specification](./specs.md)** - Formal protocol specification
 
 ## 🛠️ For Contributors
 
 - See the main [README](../README.md#contributing) for contribution guidelines
-- [Unified Specification](./specs-unified-fs.md) - Normative rules to implement/test against
+- [Unified Specification](./specs.md) - Normative rules to implement/test against
 - [Testing Guide](./protocol/13-testing-guide.md) - How to run and write tests (legacy companion)
 - [Implementation Guide](./protocol/11-implementation-guide.md) - Code walkthrough (legacy companion)
+
+## 🚀 0.1.2 Cutover Order
+
+Direct cutover policy for `v0.1.2` (no legacy interop/A-B path):
+
+1. Update server and clients from the same release set.
+2. Confirm conformance gates on the release candidate:
+   - `cargo test --workspace`
+   - `cargo llvm-cov --workspace --summary-only` (>=95% line coverage)
+3. Roll out server binary and restart all API instances.
+4. Roll out clients (GUI/CLI/integrations) built against the same spec/profile.
+5. Verify runtime health:
+   - API `/health` and telemetry endpoints
+   - barrier endpoints (`resolve_revoked_leaves`, `resolve_joins_since`, `fetch_public_tree`)
+   - acceptance logs for barrier/FS freeze codes
+6. Freeze deployment if acceptance errors regress beyond baseline.
+
+### Rollback Criteria
+
+Rollback to the previous known-good release if any of the following occur:
+
+- sustained acceptance failures tied to migration invariants (`9472`, `96010`, `96011`, `96012`, `96013`);
+- barrier snapshot authentication failures (`960.9`) above baseline;
+- client/server version skew detected in production traffic;
+- message-path regression that prevents normal send/fetch operations after rollout.
+
+Rollback action: revert server + client binaries together as one unit and replay standard validation gates before re-attempting rollout.
 
 ---
 
 **Need help?** Start with the [FAQ](./protocol/17-faq.md), [Glossary](./GLOSSARY.md), or [GUI User Guide](./gui-user-guide.md).
 
-**Last Updated**: 2026-02-08
+**Last Updated**: 2026-02-13

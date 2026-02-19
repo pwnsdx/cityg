@@ -7,7 +7,7 @@ use std::{
 };
 
 use ciborium::ser::into_writer;
-use ciborium::value::Value;
+use ciborium::value::{Integer, Value};
 use dirs::config_dir;
 use msphf_core::{
     merkle::{canonical_set_root, hash_interval_binding, hash_node},
@@ -214,6 +214,7 @@ fn demo_bundle_inner(
         vrf_public_key: Some(vrf_public_key),
         fs_policy_version: "7",
         fs_epoch_base_ts: 0,
+        barrier_version: 0,
         fs_join: FsJoinInputs::default(),
         fs_merge: FsMergeInputs::default(),
     };
@@ -391,6 +392,7 @@ fn base_header() -> BTreeMap<u64, Value> {
     let mut map = BTreeMap::new();
     map.insert(104, Value::Text("ml-kem-768".to_string()));
     map.insert(105, Value::Bytes(kbroad_public().to_vec()));
+    map.insert(176, Value::Integer(Integer::from(0u64)));
     map
 }
 

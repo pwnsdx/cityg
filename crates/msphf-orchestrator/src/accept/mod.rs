@@ -53,6 +53,7 @@ use crate::{
     time::{AcceptClock, AcceptInstant},
 };
 
+mod barrier;
 mod cache;
 mod errors;
 #[cfg(any(test, feature = "bench-fixtures"))]
@@ -65,6 +66,7 @@ mod telemetry;
 #[cfg(feature = "bench-fixtures")]
 pub use bench::SrxBenchHarness;
 
+use barrier::{ParsedBarrierUpdate, parse_barrier_update_from_header};
 use cache::VckCache;
 pub use errors::*;
 use stages::*;
@@ -215,12 +217,41 @@ pub const FREEZE_TSWE_SALT_MISMATCH: FreezeError = FreezeError {
 };
 
 #[derive(Serialize)]
-struct FsDevChainPreimage<'a> {
+struct FsDevChainV2Preimage<'a> {
     #[serde(with = "serde_bytes")]
     device_pk: &'a [u8],
     fs_ec: u64,
     #[serde(with = "serde_bytes")]
     prev_commit: &'a [u8; 32],
+    barrier_version: u64,
+    #[serde(with = "serde_bytes")]
+    barrier_update_digest: &'a [u8; 32],
+}
+
+#[derive(Serialize)]
+struct BarrierUpdateDigestPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+
+#[derive(Serialize)]
+struct BarrierRootsPreimage<'a>(
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnchorType {
+    Join,
+    Merge,
+    Regular,
+}
+
+#[derive(Clone, Debug)]
+struct BarrierGateDecision {
+    barrier_version: u64,
+    fs_ec: u64,
+    revocation_roots_hash: [u8; 32],
+    barrier_update_digest: [u8; 32],
+    barrier_update_reason: Option<u64>,
+    parsed_barrier_update: Option<ParsedBarrierUpdate>,
 }
 
 pub const FREEZE_SRX_REQUIRED: FreezeError = FreezeError {
@@ -483,6 +514,7 @@ pub struct AcceptanceContext {
     policy_version: String,
     policy_timestamp: Option<OffsetDateTime>,
     device_chains: AHashMap<DeviceKey, DeviceChainState>,
+    barrier_groups: AHashMap<Vec<u8>, BarrierGroupState>,
     fs_caps: FsCaps,
     last_checkpoint_ec: u64,
     last_accepted_ec: u64,
@@ -546,6 +578,7 @@ impl AcceptanceContext {
             policy_version: crate::DEFAULT_POLICY_VERSION.to_string(),
             policy_timestamp: None,
             device_chains: AHashMap::new(),
+            barrier_groups: AHashMap::new(),
             fs_caps: FsCaps::default(),
             last_checkpoint_ec: 0,
             last_accepted_ec: 0,
@@ -673,6 +706,8 @@ impl AcceptanceContext {
         fs_dev_prev_commit: &[u8; 32],
         fs_dev_commit: &[u8; 32],
         existing: Option<&DeviceChainState>,
+        barrier_version: u64,
+        barrier_update_digest: &[u8; 32],
     ) -> Result<(), AcceptanceError> {
         let group_cap = self
             .last_accepted_ec()
@@ -708,11 +743,13 @@ impl AcceptanceContext {
         }
 
         let expected_dev_commit = h_l(
-            "fs/dev/chain",
-            &FsDevChainPreimage {
+            "fs/dev/chain/v2",
+            &FsDevChainV2Preimage {
                 device_pk: pop_pk,
                 fs_ec,
                 prev_commit: fs_dev_prev_commit,
+                barrier_version,
+                barrier_update_digest,
             },
         )
         .map_err(AcceptanceError::from)?;
@@ -724,12 +761,214 @@ impl AcceptanceContext {
         Ok(())
     }
 
+    fn enforce_barrier_acceptance_gating(
+        &self,
+        gid: &[u8],
+        header_map: &BTreeMap<u64, Value>,
+        anchor_type: AnchorType,
+    ) -> Result<BarrierGateDecision, AcceptanceError> {
+        let barrier_version = header_u64_or_freeze(
+            header_map,
+            HDR_BARRIER_VERSION,
+            FREEZE_FS_JOIN_MISSING,
+            "barrier_version",
+        )?;
+        let fs_ec = header_u64_or_freeze(header_map, HDR_FS_EC, FREEZE_FS_JOIN_MISSING, "fs_ec")?;
+        let barrier_update_reason = parse_barrier_update_reason(header_map)?;
+        let barrier_update_digest = compute_barrier_update_digest(header_map)?;
+        let revocation_roots_hash = compute_revocation_roots_hash(header_map)?;
+        let has_barrier_update = barrier_update_reason.is_some();
+        let state_snapshot = self.barrier_group_state(gid).cloned().unwrap_or_default();
+        let parsed_barrier_update = if has_barrier_update {
+            Some(parse_barrier_update_from_header(
+                header_map,
+                state_snapshot.n_max,
+                state_snapshot.max_barrier_update_bytes,
+            )?)
+        } else {
+            None
+        };
+
+        let decision = BarrierGateDecision {
+            barrier_version,
+            fs_ec,
+            revocation_roots_hash,
+            barrier_update_digest,
+            barrier_update_reason,
+            parsed_barrier_update,
+        };
+
+        let Some(state) = self.barrier_group_state(gid) else {
+            return Ok(decision);
+        };
+
+        if state.barrier_initialized && has_barrier_update {
+            let Some(parsed_update) = decision.parsed_barrier_update.as_ref() else {
+                return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
+            };
+            if parsed_update.kem_tree_hash_before != state.kem_tree_hash_after {
+                return Err(AcceptanceError::Freeze(
+                    FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
+                ));
+            }
+        }
+
+        if !state.barrier_initialized {
+            if has_barrier_update {
+                let Some(parsed_update) = decision.parsed_barrier_update.as_ref() else {
+                    return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
+                };
+                let is_genesis_merge = matches!(anchor_type, AnchorType::Merge)
+                    && barrier_update_reason == Some(0)
+                    && barrier_version == 0
+                    && parsed_update.barrier_version == 0
+                    && parsed_update.prev_barrier_version == 0
+                    && parsed_update.revocation_roots_hash == revocation_roots_hash;
+                if is_genesis_merge {
+                    return Ok(decision);
+                }
+                return Err(AcceptanceError::Freeze(FREEZE_BARRIER_GENESIS_REQUIRED));
+            }
+            return Err(AcceptanceError::Freeze(FREEZE_BARRIER_GENESIS_REQUIRED));
+        }
+
+        let current_bv = state.barrier_version;
+        let revocation_changed = revocation_roots_hash != state.barrier_roots_hash;
+
+        if revocation_changed {
+            let Some(parsed_update) = decision.parsed_barrier_update.as_ref() else {
+                return Err(AcceptanceError::Freeze(
+                    FREEZE_BARRIER_UPDATE_REQUIRED_ON_REVOCATION_CHANGE,
+                ));
+            };
+            let valid_revocation_merge = matches!(anchor_type, AnchorType::Merge)
+                && has_barrier_update
+                && barrier_update_reason == Some(0)
+                && barrier_version == current_bv.saturating_add(1)
+                && parsed_update.barrier_version == barrier_version
+                && parsed_update.prev_barrier_version == current_bv
+                && parsed_update.revocation_roots_hash == revocation_roots_hash;
+            if !valid_revocation_merge {
+                return Err(AcceptanceError::Freeze(
+                    FREEZE_BARRIER_UPDATE_REQUIRED_ON_REVOCATION_CHANGE,
+                ));
+            }
+            return Ok(decision);
+        }
+
+        if has_barrier_update {
+            let Some(parsed_update) = decision.parsed_barrier_update.as_ref() else {
+                return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
+            };
+            let valid_pcs_refresh = matches!(anchor_type, AnchorType::Merge)
+                && barrier_update_reason == Some(1)
+                && barrier_version == current_bv.saturating_add(1)
+                && parsed_update.barrier_version == barrier_version
+                && parsed_update.prev_barrier_version == current_bv
+                && parsed_update.revocation_roots_hash == revocation_roots_hash;
+            if !valid_pcs_refresh {
+                return Err(AcceptanceError::Freeze(FREEZE_BARRIER_PROACTIVE_FORBIDDEN));
+            }
+
+            if let Some(last_group_refresh) = state.last_pcs_refresh_ec {
+                let min_group_delta = state.pcs_refresh_min_delta_group_ec.max(1);
+                if fs_ec < last_group_refresh.saturating_add(min_group_delta) {
+                    return Err(AcceptanceError::Freeze(
+                        FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED,
+                    ));
+                }
+
+                let slot_width = state.pcs_refresh_slot_width_ec.max(1);
+                if fs_ec / slot_width == last_group_refresh / slot_width {
+                    return Err(AcceptanceError::Freeze(
+                        FREEZE_BARRIER_PCS_REFRESH_SLOT_CONFLICT,
+                    ));
+                }
+            }
+
+            if let Some(device_pk) = header_map.get(&HDR_POP_PK).and_then(Value::as_bytes)
+                && let Some(device_state) = self.device_chain_get(gid, device_pk)
+                && let Some(last_device_refresh) = device_state.last_pcs_refresh_ec
+            {
+                let min_device_delta = state.pcs_refresh_min_delta_device_ec.max(1);
+                if fs_ec < last_device_refresh.saturating_add(min_device_delta) {
+                    return Err(AcceptanceError::Freeze(
+                        FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED,
+                    ));
+                }
+            }
+        } else if barrier_version != current_bv {
+            return Err(AcceptanceError::Freeze(FREEZE_BARRIER_PROACTIVE_FORBIDDEN));
+        }
+
+        Ok(decision)
+    }
+
+    fn apply_barrier_acceptance_commit(
+        &mut self,
+        gid: &[u8],
+        header_map: &BTreeMap<u64, Value>,
+        gate: BarrierGateDecision,
+    ) {
+        if gate.barrier_update_reason.is_none() {
+            if let Some(state) = self.barrier_group_state_mut(gid)
+                && !state.barrier_initialized
+            {
+                state.barrier_initialized = true;
+                state.barrier_version = gate.barrier_version;
+                state.barrier_roots_hash = gate.revocation_roots_hash;
+            }
+            return;
+        }
+
+        {
+            let state = self.barrier_group_state_entry_mut(gid);
+            state.barrier_initialized = true;
+            state.barrier_version = gate.barrier_version;
+            state.barrier_roots_hash = gate.revocation_roots_hash;
+            if let Some(parsed) = gate.parsed_barrier_update.as_ref() {
+                state.kem_tree_hash_after = parsed.kem_tree_hash_after;
+                state.n_max = parsed.tree_size;
+            }
+            if gate.barrier_update_reason == Some(1) {
+                state.last_pcs_refresh_ec = Some(gate.fs_ec);
+            }
+        }
+
+        if gate.barrier_update_reason == Some(1)
+            && let Some(device_pk) = header_map.get(&HDR_POP_PK).and_then(Value::as_bytes)
+        {
+            let device_state = self.device_chain_entry_mut(gid, device_pk);
+            device_state.last_pcs_refresh_ec = Some(gate.fs_ec);
+        }
+    }
+
     pub fn set_last_accepted_ec(&mut self, ec: u64) {
         self.last_accepted_ec = ec;
     }
 
     pub fn clear_device_chains(&mut self) {
         self.device_chains.clear();
+    }
+
+    pub fn barrier_group_state(&self, gid: &[u8]) -> Option<&BarrierGroupState> {
+        self.barrier_groups.get(gid)
+    }
+
+    pub fn barrier_group_state_mut(&mut self, gid: &[u8]) -> Option<&mut BarrierGroupState> {
+        self.barrier_groups.get_mut(gid)
+    }
+
+    pub fn barrier_group_state_entry_mut(&mut self, gid: &[u8]) -> &mut BarrierGroupState {
+        self.barrier_groups.entry(gid.to_vec()).or_default()
+    }
+
+    pub fn insert_barrier_group_state(&mut self, gid: &[u8], state: BarrierGroupState) {
+        self.barrier_groups.insert(gid.to_vec(), state);
+    }
+
+    pub fn barrier_groups_iter(&self) -> impl Iterator<Item = (&Vec<u8>, &BarrierGroupState)> {
+        self.barrier_groups.iter()
     }
 
     pub fn device_chain_entry_mut(
@@ -1205,8 +1444,11 @@ impl AcceptanceContext {
     ) -> Result<AcceptanceOutcome, AcceptanceError> {
         let now = self.next_accept_instant();
         self.mh_window.prune_all(now);
+        let anchor_type = classify_anchor_type(header_map);
         let is_merge = is_merge_anchor(header_map);
         ensure_known_header_keys(header_map, is_merge)?;
+        let barrier_gate =
+            self.enforce_barrier_acceptance_gating(parts.gid, header_map, anchor_type)?;
         debug!(
             "accept_anchor: gid={:?} is_merge={}",
             hex::encode(parts.gid),
@@ -1228,7 +1470,14 @@ impl AcceptanceContext {
             };
             self.accept_anchor_merge(parts, we_epoch_id_claim, header_map, heads, mh_note, now)
         } else {
-            self.accept_anchor_join(parts, we_epoch_id_claim, header_map, mh_note, now)
+            self.accept_anchor_join(
+                parts,
+                we_epoch_id_claim,
+                header_map,
+                mh_note,
+                barrier_gate.barrier_update_digest,
+                now,
+            )
         };
         if let Err(AcceptanceError::Freeze(code)) = &result {
             debug!(
@@ -1237,6 +1486,9 @@ impl AcceptanceContext {
                 code.reason,
                 header_map.keys().collect::<Vec<_>>()
             );
+        }
+        if result.is_ok() {
+            self.apply_barrier_acceptance_commit(parts.gid, header_map, barrier_gate);
         }
         result
     }
@@ -1537,10 +1789,23 @@ pub fn parse_mh_heads(
     Ok(Some(heads))
 }
 
+fn classify_anchor_type(header: &BTreeMap<u64, Value>) -> AnchorType {
+    let has_merge_signal = header.contains_key(&HDR_BARRIER_UPDATE)
+        || header.contains_key(&HDR_BARRIER_UPDATE_REASON)
+        || MERGE_ONLY_KEYS
+            .into_iter()
+            .any(|key| header.contains_key(&key));
+    if has_merge_signal {
+        AnchorType::Merge
+    } else if header.contains_key(&HDR_BARRIER_LEAF_PK) {
+        AnchorType::Join
+    } else {
+        AnchorType::Regular
+    }
+}
+
 pub(crate) fn is_merge_anchor(header: &BTreeMap<u64, Value>) -> bool {
-    MERGE_ONLY_KEYS
-        .into_iter()
-        .any(|key| header.contains_key(&key))
+    matches!(classify_anchor_type(header), AnchorType::Merge)
 }
 
 fn is_known_header_key(key: u64, is_merge: bool) -> bool {
@@ -1585,6 +1850,10 @@ fn is_known_header_key(key: u64, is_merge: bool) -> bool {
             | HDR_FS_CAPSS
             | HDR_FS_DEV_PREV_COMMIT
             | HDR_FS_DEV_COMMIT
+            | HDR_BARRIER_UPDATE
+            | HDR_BARRIER_VERSION
+            | HDR_BARRIER_LEAF_PK
+            | HDR_BARRIER_UPDATE_REASON
             | HDR_VRF_MASK_A
             | HDR_VRF_MASK_B
             | HDR_VRF_PUBLIC_KEY
@@ -1607,6 +1876,53 @@ fn ensure_known_header_keys(
         }
     }
     Ok(())
+}
+
+fn parse_barrier_update_reason(
+    header: &BTreeMap<u64, Value>,
+) -> Result<Option<u64>, AcceptanceError> {
+    let has_update = header.contains_key(&HDR_BARRIER_UPDATE);
+    let reason_value = header.get(&HDR_BARRIER_UPDATE_REASON);
+    if !has_update {
+        if reason_value.is_some() {
+            return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
+        }
+        return Ok(None);
+    }
+
+    let Some(Value::Integer(reason_int)) = reason_value else {
+        return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
+    };
+    let reason = u64::try_from(*reason_int)
+        .map_err(|_| AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED))?;
+    if reason > 1 {
+        return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
+    }
+    Ok(Some(reason))
+}
+
+fn compute_barrier_update_digest(
+    header: &BTreeMap<u64, Value>,
+) -> Result<[u8; 32], AcceptanceError> {
+    match header.get(&HDR_BARRIER_UPDATE) {
+        None => Ok([0u8; 32]),
+        Some(Value::Bytes(raw)) => h_l("barrier/update/digest", &BarrierUpdateDigestPreimage(raw))
+            .map_err(AcceptanceError::from),
+        Some(_) => Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED)),
+    }
+}
+
+fn compute_revocation_roots_hash(
+    header: &BTreeMap<u64, Value>,
+) -> Result<[u8; 32], AcceptanceError> {
+    let revoked_since_root =
+        header_bytes32_or_freeze(header, 112, FREEZE_FIELD_MISSING, "revoked_since_prev_root")?;
+    let revoked_root = header_bytes32_or_freeze(header, 113, FREEZE_FIELD_MISSING, "revoked_root")?;
+    h_l(
+        "barrier/roots",
+        &BarrierRootsPreimage(&revoked_since_root, &revoked_root),
+    )
+    .map_err(AcceptanceError::from)
 }
 
 fn is_sorted_unique(heads: &[[u8; 32]]) -> bool {
@@ -2594,6 +2910,7 @@ mod tests {
     use pqcrypto_dilithium::dilithium5::{detached_sign, keypair};
     use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
     use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+    use serde::Serialize;
     use std::{
         collections::{BTreeMap, BTreeSet},
         time::Duration,
@@ -2633,14 +2950,134 @@ mod tests {
         ])
     }
 
+    fn build_valid_barrier_update_bytes(
+        n_max: u64,
+        updater_leaf: u64,
+        barrier_version: u64,
+        prev_barrier_version: u64,
+        revocation_roots_hash: [u8; 32],
+    ) -> Result<Vec<u8>, AcceptanceError> {
+        #[derive(Serialize)]
+        struct TestNodeCiphertextWire(
+            u64,
+            u64,
+            #[serde(with = "serde_bytes")] Vec<u8>,
+            #[serde(with = "serde_bytes")] Vec<u8>,
+            #[serde(with = "serde_bytes")] Vec<u8>,
+        );
+
+        #[derive(Serialize)]
+        struct TestNewPublicKeyWire(u64, #[serde(with = "serde_bytes")] Vec<u8>);
+
+        #[derive(Serialize)]
+        struct TestKemTreeCoverPayloadWire(
+            u64,
+            Vec<u64>,
+            Option<Vec<u64>>,
+            Vec<TestNodeCiphertextWire>,
+            Vec<TestNewPublicKeyWire>,
+        );
+
+        #[derive(Serialize)]
+        struct TestBarrierUpdateWire(
+            String,
+            u64,
+            u64,
+            u64,
+            #[serde(with = "serde_bytes")] Vec<u8>,
+            #[serde(with = "serde_bytes")] Vec<u8>,
+            #[serde(with = "serde_bytes")] Vec<u8>,
+            #[serde(with = "serde_bytes")] Vec<u8>,
+        );
+
+        let malformed = || AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED);
+        if n_max == 0 || !n_max.is_power_of_two() || updater_leaf >= n_max {
+            return Err(malformed());
+        }
+
+        let leaf_base = n_max.checked_sub(1).ok_or_else(malformed)?;
+        let leaf_node = leaf_base.checked_add(updater_leaf).ok_or_else(malformed)?;
+        let mut path_nodes = vec![leaf_node];
+        while let Some(&node) = path_nodes.last() {
+            if node == 0 {
+                break;
+            }
+            path_nodes.push((node - 1) / 2);
+        }
+
+        let mut expected_nodes: Vec<u64> = path_nodes.iter().copied().skip(1).collect();
+        expected_nodes.sort_unstable();
+
+        let new_public_keys = expected_nodes
+            .into_iter()
+            .map(|node| {
+                let marker = (node as u8).wrapping_add(1);
+                TestNewPublicKeyWire(node, vec![marker; ml_kem_public_key_bytes()])
+            })
+            .collect::<Vec<_>>();
+
+        let cover = TestKemTreeCoverPayloadWire(
+            updater_leaf,
+            path_nodes,
+            None,
+            Vec::<TestNodeCiphertextWire>::new(),
+            new_public_keys,
+        );
+        let cover_bytes = to_cbor_vec(&cover).map_err(|_| malformed())?;
+        let update = TestBarrierUpdateWire(
+            "barrier-v1".to_string(),
+            barrier_version,
+            prev_barrier_version,
+            n_max,
+            revocation_roots_hash.to_vec(),
+            vec![0x00; 32],
+            vec![0x33; 32],
+            cover_bytes,
+        );
+        to_cbor_vec(&update).map_err(|_| malformed())
+    }
+
+    fn insert_valid_barrier_update(
+        header: &mut BTreeMap<u64, Value>,
+        n_max: u64,
+        updater_leaf: u64,
+        barrier_version: u64,
+        prev_barrier_version: u64,
+        revocation_roots_hash: [u8; 32],
+        reason: u64,
+    ) -> Result<(), AcceptanceError> {
+        let barrier_update = build_valid_barrier_update_bytes(
+            n_max,
+            updater_leaf,
+            barrier_version,
+            prev_barrier_version,
+            revocation_roots_hash,
+        )?;
+        header.insert(HDR_BARRIER_UPDATE, Value::Bytes(barrier_update));
+        header.insert(
+            HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(reason)),
+        );
+        Ok(())
+    }
+
     #[test]
     fn acceptance_error_display_and_conversion_paths() {
         let mapping = [
             (WitnessValidationError::CborMalformed, FREEZE_HASH_CBOR),
-            (WitnessValidationError::NonCanonical, FREEZE_HASH_NONCANONICAL),
-            (WitnessValidationError::LeafBindMismatch, FREEZE_HASH_LEAF_BIND),
+            (
+                WitnessValidationError::NonCanonical,
+                FREEZE_HASH_NONCANONICAL,
+            ),
+            (
+                WitnessValidationError::LeafBindMismatch,
+                FREEZE_HASH_LEAF_BIND,
+            ),
             (WitnessValidationError::ProjEvalFail, FREEZE_HASH_PROJ_FAIL),
-            (WitnessValidationError::PathOversize, FREEZE_HASH_PATH_OVERSIZE),
+            (
+                WitnessValidationError::PathOversize,
+                FREEZE_HASH_PATH_OVERSIZE,
+            ),
         ];
         for (witness_err, expected_freeze) in mapping {
             let converted: AcceptanceError = MsphfError::Witness(witness_err).into();
@@ -2717,7 +3154,9 @@ mod tests {
         assert_eq!(ctx.ensure_srx_root_sw()?, [0x44; 32]);
         ctx.set_srx_root_sw(None);
         ctx.set_srx_migration_root_sw(None);
-        let err = ctx.ensure_srx_root_sw().expect_err("missing roots must freeze");
+        let err = ctx
+            .ensure_srx_root_sw()
+            .expect_err("missing roots must freeze");
         assert!(matches!(
             err,
             AcceptanceError::Freeze(code) if code == FREEZE_SUITE_FORBIDDEN
@@ -2726,6 +3165,7 @@ mod tests {
         let state = DeviceChainState {
             last_commit: Some([0x20; 32]),
             last_ec: 12,
+            last_pcs_refresh_ec: None,
         };
         ctx.insert_device_chain_state(b"gid-b", b"device", state.clone());
         assert_eq!(ctx.device_chains_iter().count(), 1);
@@ -2739,6 +3179,21 @@ mod tests {
         );
         ctx.clear_device_chains();
         assert_eq!(ctx.device_chains_iter().count(), 0);
+
+        let mut barrier_state = BarrierGroupState::default();
+        barrier_state.barrier_initialized = true;
+        barrier_state.barrier_version = 4;
+        barrier_state.last_pcs_refresh_ec = Some(44);
+        ctx.insert_barrier_group_state(b"gid-b", barrier_state.clone());
+        assert_eq!(ctx.barrier_groups_iter().count(), 1);
+        assert_eq!(ctx.barrier_group_state(b"gid-b"), Some(&barrier_state));
+        ctx.barrier_group_state_entry_mut(b"gid-b").barrier_version = 5;
+        assert_eq!(
+            ctx.barrier_group_state(b"gid-b")
+                .expect("barrier state should exist")
+                .barrier_version,
+            5
+        );
 
         ctx.set_fs_policy_version(Some("42".to_string()));
         assert_eq!(ctx.fs_policy_version(), Some("42"));
@@ -2758,7 +3213,9 @@ mod tests {
         let mut header = BTreeMap::new();
 
         header.insert(HDR_CRS_ID, Value::Bytes(vec![0xFF]));
-        let err = ctx.ensure_crs_id(&header).expect_err("invalid utf8 CRS should freeze");
+        let err = ctx
+            .ensure_crs_id(&header)
+            .expect_err("invalid utf8 CRS should freeze");
         assert!(matches!(
             err,
             AcceptanceError::Freeze(code) if code == FREEZE_MSPHF_CRS_INVALID
@@ -2940,10 +3397,7 @@ mod tests {
         ));
 
         let bad_cases = vec![
-            (
-                Value::Null,
-                FREEZE_HASH_CBOR,
-            ),
+            (Value::Null, FREEZE_HASH_CBOR),
             (
                 Value::Array(vec![
                     Value::Text("bad-mode".to_string()),
@@ -3013,7 +3467,12 @@ mod tests {
         let nonmem_anchor = valid_nonmem_anchor_value();
         let parsed_anchor = parse_nonmem_anchor(&nonmem_anchor)?;
         assert_eq!(parsed_anchor.witness.query.len(), 32);
-        assert_eq!(parse_nonmem_anchor_list(&Value::Array(vec![nonmem_anchor])).unwrap().len(), 1);
+        assert_eq!(
+            parse_nonmem_anchor_list(&Value::Array(vec![nonmem_anchor]))
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(parse_nonmem_anchor_list(&Value::Null).is_err());
 
         let valid_path = Value::Array(vec![Value::Map(vec![
@@ -3023,31 +3482,41 @@ mod tests {
         assert_eq!(parse_path_entries(&valid_path)?.len(), 1);
         assert!(parse_path_entries(&Value::Null).is_err());
         assert!(parse_path_entries(&Value::Array(vec![Value::Null])).is_err());
-        assert!(parse_path_entries(&Value::Array(vec![Value::Map(vec![(
-            Value::Text("bad-key".to_string()),
-            Value::Bytes(vec![0xAA; 32]),
-        )])]))
-        .is_err());
-        assert!(parse_path_entries(&Value::Array(vec![Value::Map(vec![
-            (value_u64(1), Value::Text("bad".to_string())),
-            (value_u64(2), value_u64(0)),
-        ])]))
-        .is_err());
-        assert!(parse_path_entries(&Value::Array(vec![Value::Map(vec![
-            (value_u64(1), Value::Bytes(vec![0xAA; 31])),
-            (value_u64(2), value_u64(0)),
-        ])]))
-        .is_err());
-        assert!(parse_path_entries(&Value::Array(vec![Value::Map(vec![
-            (value_u64(1), Value::Bytes(vec![0xAA; 32])),
-            (value_u64(2), value_u64(2)),
-        ])]))
-        .is_err());
-        assert!(parse_path_entries(&Value::Array(vec![Value::Map(vec![(
-            value_u64(2),
-            value_u64(0),
-        )])]))
-        .is_err());
+        assert!(
+            parse_path_entries(&Value::Array(vec![Value::Map(vec![(
+                Value::Text("bad-key".to_string()),
+                Value::Bytes(vec![0xAA; 32]),
+            )])]))
+            .is_err()
+        );
+        assert!(
+            parse_path_entries(&Value::Array(vec![Value::Map(vec![
+                (value_u64(1), Value::Text("bad".to_string())),
+                (value_u64(2), value_u64(0)),
+            ])]))
+            .is_err()
+        );
+        assert!(
+            parse_path_entries(&Value::Array(vec![Value::Map(vec![
+                (value_u64(1), Value::Bytes(vec![0xAA; 31])),
+                (value_u64(2), value_u64(0)),
+            ])]))
+            .is_err()
+        );
+        assert!(
+            parse_path_entries(&Value::Array(vec![Value::Map(vec![
+                (value_u64(1), Value::Bytes(vec![0xAA; 32])),
+                (value_u64(2), value_u64(2)),
+            ])]))
+            .is_err()
+        );
+        assert!(
+            parse_path_entries(&Value::Array(vec![Value::Map(vec![(
+                value_u64(2),
+                value_u64(0),
+            )])]))
+            .is_err()
+        );
 
         let leaf_array = Value::Array(vec![Value::Bytes(vec![0x10; 32])]);
         assert_eq!(parse_leaf_array(&leaf_array)?.len(), 1);
@@ -3056,7 +3525,12 @@ mod tests {
         assert!(parse_leaf_array(&Value::Array(vec![Value::Bytes(vec![0x20; 31])])).is_err());
 
         assert_eq!(parse_optional_frontier(&Value::Null)?, None);
-        assert_eq!(parse_optional_frontier(&leaf_array)?.expect("frontier expected").len(), 1);
+        assert_eq!(
+            parse_optional_frontier(&leaf_array)?
+                .expect("frontier expected")
+                .len(),
+            1
+        );
         assert!(parse_optional_frontier(&value_u64(7)).is_err());
         assert!(integer_to_u64(&Integer::from(-1)).is_err());
 
@@ -3374,13 +3848,10 @@ mod tests {
 
         header.insert(HDR_MH_HEADS, Value::Integer(Integer::from(1u64)));
         assert!(parse_mh_heads(&header)?.is_none());
-        header.insert(HDR_MH_HEADS, Value::Array(vec![Value::Integer(Integer::from(1u64))]));
-        assert!(matches!(
-            parse_mh_heads(&header),
-            Err(AcceptanceError::Freeze(code)) if code == FREEZE_MH_HEADS_INVALID
-        ));
-
-        header.insert(HDR_MH_HEADS, Value::Array(vec![Value::Bytes(vec![0x11; 31])]));
+        header.insert(
+            HDR_MH_HEADS,
+            Value::Array(vec![Value::Integer(Integer::from(1u64))]),
+        );
         assert!(matches!(
             parse_mh_heads(&header),
             Err(AcceptanceError::Freeze(code)) if code == FREEZE_MH_HEADS_INVALID
@@ -3388,15 +3859,33 @@ mod tests {
 
         header.insert(
             HDR_MH_HEADS,
-            Value::Array(vec![Value::Bytes(vec![0x22; 32]), Value::Bytes(vec![0x22; 32])]),
+            Value::Array(vec![Value::Bytes(vec![0x11; 31])]),
         );
         assert!(matches!(
             parse_mh_heads(&header),
             Err(AcceptanceError::Freeze(code)) if code == FREEZE_MH_HEADS_INVALID
         ));
 
-        header.insert(HDR_MH_HEADS, Value::Array(vec![Value::Bytes(vec![0x11; 32])]));
-        assert_eq!(parse_mh_heads(&header)?.expect("one head expected").len(), 1);
+        header.insert(
+            HDR_MH_HEADS,
+            Value::Array(vec![
+                Value::Bytes(vec![0x22; 32]),
+                Value::Bytes(vec![0x22; 32]),
+            ]),
+        );
+        assert!(matches!(
+            parse_mh_heads(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_MH_HEADS_INVALID
+        ));
+
+        header.insert(
+            HDR_MH_HEADS,
+            Value::Array(vec![Value::Bytes(vec![0x11; 32])]),
+        );
+        assert_eq!(
+            parse_mh_heads(&header)?.expect("one head expected").len(),
+            1
+        );
 
         header.insert(102, Value::Integer(Integer::from(9u64)));
         assert!(parse_mh_note(&header).is_err());
@@ -3425,17 +3914,35 @@ mod tests {
         let pop_pk = vec![0xAA; 1952];
         let prev_commit = [0u8; 32];
         let dev_commit = h_l(
-            "fs/dev/chain",
-            &FsDevChainPreimage {
+            "fs/dev/chain/v2",
+            &FsDevChainV2Preimage {
                 device_pk: &pop_pk,
                 fs_ec: 104,
                 prev_commit: &prev_commit,
+                barrier_version: 0,
+                barrier_update_digest: &[0u8; 32],
             },
         )?;
 
-        ctx.verify_device_chain_state(&pop_pk, 104, &prev_commit, &dev_commit, None)?;
+        ctx.verify_device_chain_state(
+            &pop_pk,
+            104,
+            &prev_commit,
+            &dev_commit,
+            None,
+            0,
+            &[0u8; 32],
+        )?;
 
-        let result = ctx.verify_device_chain_state(&pop_pk, 107, &prev_commit, &dev_commit, None);
+        let result = ctx.verify_device_chain_state(
+            &pop_pk,
+            107,
+            &prev_commit,
+            &dev_commit,
+            None,
+            0,
+            &[0u8; 32],
+        );
         assert!(result.is_err(), "should freeze");
         let err = result.unwrap_err();
         assert!(matches!(
@@ -3447,14 +3954,17 @@ mod tests {
         let existing = DeviceChainState {
             last_commit: Some(prev_existing),
             last_ec: 110,
+            last_pcs_refresh_ec: None,
         };
         ctx.last_accepted_ec = 110;
         let dev_commit_existing = h_l(
-            "fs/dev/chain",
-            &FsDevChainPreimage {
+            "fs/dev/chain/v2",
+            &FsDevChainV2Preimage {
                 device_pk: &pop_pk,
                 fs_ec: 114,
                 prev_commit: &prev_existing,
+                barrier_version: 0,
+                barrier_update_digest: &[0u8; 32],
             },
         )?;
         let result = ctx.verify_device_chain_state(
@@ -3463,6 +3973,8 @@ mod tests {
             &prev_existing,
             &dev_commit_existing,
             Some(&existing),
+            0,
+            &[0u8; 32],
         );
         assert!(result.is_err(), "device max exceeded");
         let err = result.unwrap_err();
@@ -3471,6 +3983,475 @@ mod tests {
             AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_DEVICE)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn barrier_update_reason_and_digest_helpers_enforce_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut header = BTreeMap::new();
+        assert_eq!(parse_barrier_update_reason(&header)?, None);
+        assert_eq!(compute_barrier_update_digest(&header)?, [0u8; 32]);
+
+        header.insert(
+            HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+        assert!(matches!(
+            parse_barrier_update_reason(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_UPDATE_MALFORMED
+        ));
+        header.clear();
+
+        header.insert(HDR_BARRIER_UPDATE, Value::Bytes(vec![0x01, 0x02]));
+        assert!(matches!(
+            parse_barrier_update_reason(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_UPDATE_MALFORMED
+        ));
+        header.insert(
+            HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(2u64)),
+        );
+        assert!(matches!(
+            parse_barrier_update_reason(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_UPDATE_MALFORMED
+        ));
+        header.insert(
+            HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+        assert_eq!(parse_barrier_update_reason(&header)?, Some(1));
+        assert_ne!(compute_barrier_update_digest(&header)?, [0u8; 32]);
+
+        header.insert(HDR_BARRIER_UPDATE, Value::Integer(Integer::from(7u64)));
+        assert!(matches!(
+            compute_barrier_update_digest(&header),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_UPDATE_MALFORMED
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn classify_anchor_type_detects_barrier_merge_signals() {
+        let mut merge_header = BTreeMap::new();
+        merge_header.insert(
+            HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+        assert!(matches!(
+            classify_anchor_type(&merge_header),
+            AnchorType::Merge
+        ));
+
+        let mut join_header = BTreeMap::new();
+        join_header.insert(HDR_BARRIER_LEAF_PK, Value::Bytes(vec![0u8; 1184]));
+        assert!(matches!(
+            classify_anchor_type(&join_header),
+            AnchorType::Join
+        ));
+
+        let regular_header = BTreeMap::new();
+        assert!(matches!(
+            classify_anchor_type(&regular_header),
+            AnchorType::Regular
+        ));
+    }
+
+    #[test]
+    fn accept_anchor_requires_barrier_update_on_revocation_change()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (header_with_pop, _, fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        let mut barrier_state = BarrierGroupState::default();
+        barrier_state.barrier_initialized = true;
+        barrier_state.barrier_version = 0;
+        barrier_state.barrier_roots_hash = [0xAB; 32];
+        ctx.insert_barrier_group_state(parts.gid, barrier_state);
+
+        seed_capss_with(&mut ctx, &fs_witness);
+        let result = accept_with_header(&mut ctx, &parts, &header_with_pop);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code))
+                if code == FREEZE_BARRIER_UPDATE_REQUIRED_ON_REVOCATION_CHANGE
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn proactive_pcs_refresh_gating_enforces_rate_limits() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let gid = b"gid-rate".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(104u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(6u64)));
+        header.insert(112, Value::Bytes([0x11; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x22; 32].to_vec()));
+        header.insert(
+            HDR_MH_HEADS,
+            Value::Array(vec![Value::Bytes([0x33; 32].to_vec())]),
+        );
+
+        let rrh = compute_revocation_roots_hash(&header)?;
+        insert_valid_barrier_update(&mut header, 1_024, 0, 6, 5, rrh, 1)?;
+        let mut barrier_state = BarrierGroupState::default();
+        barrier_state.barrier_initialized = true;
+        barrier_state.barrier_version = 5;
+        barrier_state.barrier_roots_hash = rrh;
+        barrier_state.last_pcs_refresh_ec = Some(100);
+        barrier_state.pcs_refresh_min_delta_group_ec = 1;
+        barrier_state.pcs_refresh_slot_width_ec = 10;
+        ctx.insert_barrier_group_state(gid, barrier_state);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_PCS_REFRESH_SLOT_CONFLICT
+        ));
+
+        ctx.barrier_group_state_entry_mut(gid)
+            .pcs_refresh_min_delta_group_ec = 20;
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(109u64)));
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_join_path_is_rejected_without_genesis_merge()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-bootstrap".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+        ctx.insert_barrier_group_state(gid, BarrierGroupState::default());
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(0u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(0u64)));
+        header.insert(112, Value::Bytes([0xAA; 32].to_vec()));
+        header.insert(113, Value::Bytes([0xBB; 32].to_vec()));
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Join);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_GENESIS_REQUIRED
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn proactive_refresh_requires_merge_anchor_type() -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-proactive-shape".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(42u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(6u64)));
+        header.insert(112, Value::Bytes([0x21; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x22; 32].to_vec()));
+
+        let rrh = compute_revocation_roots_hash(&header)?;
+        insert_valid_barrier_update(&mut header, 1_024, 0, 6, 5, rrh, 1)?;
+        let mut state = BarrierGroupState::default();
+        state.barrier_initialized = true;
+        state.barrier_version = 5;
+        state.barrier_roots_hash = rrh;
+        ctx.insert_barrier_group_state(gid, state);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Join);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_PROACTIVE_FORBIDDEN
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn proactive_pcs_refresh_gating_enforces_device_rate_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-proactive-device-limit".as_slice();
+        let device_pk = vec![0xA7; 32];
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_POP_PK, Value::Bytes(device_pk.clone()));
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(112u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(10u64)));
+        header.insert(112, Value::Bytes([0x26; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x27; 32].to_vec()));
+
+        let rrh = compute_revocation_roots_hash(&header)?;
+        insert_valid_barrier_update(&mut header, 1_024, 0, 10, 9, rrh, 1)?;
+        let mut state = BarrierGroupState::default();
+        state.barrier_initialized = true;
+        state.barrier_version = 9;
+        state.barrier_roots_hash = rrh;
+        state.last_pcs_refresh_ec = Some(100);
+        state.pcs_refresh_min_delta_group_ec = 1;
+        state.pcs_refresh_slot_width_ec = 10;
+        state.pcs_refresh_min_delta_device_ec = 5;
+        ctx.insert_barrier_group_state(gid, state);
+
+        let device_state = ctx.device_chain_entry_mut(gid, &device_pk);
+        device_state.last_pcs_refresh_ec = Some(110);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn proactive_pcs_refresh_gating_accepts_valid_merge() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let gid = b"gid-proactive-accept".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(120u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(8u64)));
+        header.insert(112, Value::Bytes([0x36; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x37; 32].to_vec()));
+
+        let rrh = compute_revocation_roots_hash(&header)?;
+        insert_valid_barrier_update(&mut header, 1_024, 0, 8, 7, rrh, 1)?;
+        let mut state = BarrierGroupState::default();
+        state.barrier_initialized = true;
+        state.barrier_version = 7;
+        state.barrier_roots_hash = rrh;
+        state.last_pcs_refresh_ec = Some(100);
+        state.pcs_refresh_min_delta_group_ec = 5;
+        state.pcs_refresh_slot_width_ec = 10;
+        state.pcs_refresh_min_delta_device_ec = 5;
+        ctx.insert_barrier_group_state(gid, state);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge)?;
+        assert_eq!(result.barrier_update_reason, Some(1));
+        assert_eq!(result.barrier_version, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn revocation_change_requires_barrier_update_even_for_merge()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-rev-requires-bu".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(9u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(3u64)));
+        header.insert(112, Value::Bytes([0x31; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x32; 32].to_vec()));
+        header.insert(
+            HDR_MH_HEADS,
+            Value::Array(vec![Value::Bytes([0x44; 32].to_vec())]),
+        );
+
+        let mut state = BarrierGroupState::default();
+        state.barrier_initialized = true;
+        state.barrier_version = 3;
+        state.barrier_roots_hash = [0xFF; 32];
+        ctx.insert_barrier_group_state(gid, state);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code))
+                if code == FREEZE_BARRIER_UPDATE_REQUIRED_ON_REVOCATION_CHANGE
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_genesis_merge_reason_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-genesis-reject".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+        ctx.insert_barrier_group_state(gid, BarrierGroupState::default());
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(0u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(0u64)));
+        header.insert(112, Value::Bytes([0x41; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x42; 32].to_vec()));
+        header.insert(
+            HDR_MH_HEADS,
+            Value::Array(vec![Value::Bytes([0x45; 32].to_vec())]),
+        );
+        let rrh = compute_revocation_roots_hash(&header)?;
+        insert_valid_barrier_update(&mut header, 1_024, 0, 0, 0, rrh, 1)?;
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_GENESIS_REQUIRED
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn pcs_commit_updates_group_and_device_refresh_markers() {
+        let gid = b"gid-pcs-commit".as_slice();
+        let device_pk = vec![0xD5; 32];
+        let mut ctx = AcceptanceContext::with_defaults();
+        ctx.insert_barrier_group_state(
+            gid,
+            BarrierGroupState {
+                barrier_initialized: true,
+                barrier_version: 8,
+                barrier_roots_hash: [0x51; 32],
+                kem_tree_hash_after: [0u8; 32],
+                n_max: 1_024,
+                last_pcs_refresh_ec: None,
+                pcs_refresh_min_delta_device_ec: 1,
+                pcs_refresh_min_delta_group_ec: 1,
+                pcs_refresh_slot_width_ec: 1,
+                max_barrier_update_bytes: 1_048_576,
+            },
+        );
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_POP_PK, Value::Bytes(device_pk.clone()));
+
+        let gate = BarrierGateDecision {
+            barrier_version: 9,
+            fs_ec: 77,
+            revocation_roots_hash: [0x61; 32],
+            barrier_update_digest: [0xAB; 32],
+            barrier_update_reason: Some(1),
+            parsed_barrier_update: None,
+        };
+
+        ctx.apply_barrier_acceptance_commit(gid, &header, gate);
+
+        let state = ctx
+            .barrier_group_state(gid)
+            .expect("barrier state should remain present");
+        assert_eq!(state.barrier_version, 9);
+        assert_eq!(state.barrier_roots_hash, [0x61; 32]);
+        assert_eq!(state.last_pcs_refresh_ec, Some(77));
+
+        let device_state = ctx
+            .device_chain_get(gid, &device_pk)
+            .expect("device refresh marker should be persisted");
+        assert_eq!(device_state.last_pcs_refresh_ec, Some(77));
+    }
+
+    #[test]
+    fn valid_revocation_merge_with_barrier_update_is_accepted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-valid-revoke-merge".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(12u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(5u64)));
+        header.insert(112, Value::Bytes([0x71; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x72; 32].to_vec()));
+        header.insert(
+            HDR_MH_HEADS,
+            Value::Array(vec![Value::Bytes([0x73; 32].to_vec())]),
+        );
+        let rrh = compute_revocation_roots_hash(&header)?;
+        insert_valid_barrier_update(&mut header, 1_024, 0, 5, 4, rrh, 0)?;
+
+        let mut state = BarrierGroupState::default();
+        state.barrier_initialized = true;
+        state.barrier_version = 4;
+        state.barrier_roots_hash = [0x00; 32];
+        ctx.insert_barrier_group_state(gid, state);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
+        assert!(result.is_ok(), "valid revocation merge should pass gating");
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_update_hash_chain_mismatch_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-hash-chain-mismatch".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(44u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(8u64)));
+        header.insert(112, Value::Bytes([0x91; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x92; 32].to_vec()));
+        header.insert(
+            HDR_MH_HEADS,
+            Value::Array(vec![Value::Bytes([0x93; 32].to_vec())]),
+        );
+        let rrh = compute_revocation_roots_hash(&header)?;
+        insert_valid_barrier_update(&mut header, 1_024, 0, 8, 7, rrh, 1)?;
+
+        let mut state = BarrierGroupState::default();
+        state.barrier_initialized = true;
+        state.barrier_version = 7;
+        state.barrier_roots_hash = rrh;
+        state.kem_tree_hash_after = [0xAA; 32];
+        ctx.insert_barrier_group_state(gid, state);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code))
+                if code == FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_version_mismatch_without_update_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-version-mismatch".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(18u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(9u64)));
+        header.insert(112, Value::Bytes([0x81; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x82; 32].to_vec()));
+
+        let rrh = compute_revocation_roots_hash(&header)?;
+        let mut state = BarrierGroupState::default();
+        state.barrier_initialized = true;
+        state.barrier_version = 8;
+        state.barrier_roots_hash = rrh;
+        ctx.insert_barrier_group_state(gid, state);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Join);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_PROACTIVE_FORBIDDEN
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_barrier_commit_without_group_state_is_noop() {
+        let gid = b"gid-noop".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+        let header = BTreeMap::new();
+        let gate = BarrierGateDecision {
+            barrier_version: 0,
+            fs_ec: 0,
+            revocation_roots_hash: [0u8; 32],
+            barrier_update_digest: [0u8; 32],
+            barrier_update_reason: None,
+            parsed_barrier_update: None,
+        };
+        ctx.apply_barrier_acceptance_commit(gid, &header, gate);
+        assert!(ctx.barrier_group_state(gid).is_none());
     }
 
     #[test]
@@ -4711,12 +5692,11 @@ mod tests {
         if let Some(value) = joiner_orig.header_map.get(&HDR_PROOF_MODE) {
             tampered.insert(HDR_PROOF_MODE, value.clone());
         }
-        let srx_root_sw =
-            joiner_orig
-                .header_map
-                .get(&HDR_SRX_ROOT_SW)
-                .and_then(|value| value.as_bytes().filter(|bytes| bytes.len() == 32))
-                .map(ToOwned::to_owned);
+        let srx_root_sw = joiner_orig
+            .header_map
+            .get(&HDR_SRX_ROOT_SW)
+            .and_then(|value| value.as_bytes().filter(|bytes| bytes.len() == 32))
+            .map(ToOwned::to_owned);
         let srx_smallwood = joiner_orig
             .header_map
             .get(&HDR_SRX_SMALLWOOD)
@@ -4785,12 +5765,11 @@ mod tests {
         if let Some(value) = joiner_orig.header_map.get(&HDR_PROOF_MODE) {
             tampered.insert(HDR_PROOF_MODE, value.clone());
         }
-        let srx_root_sw =
-            joiner_orig
-                .header_map
-                .get(&HDR_SRX_ROOT_SW)
-                .and_then(|value| value.as_bytes().filter(|bytes| bytes.len() == 32))
-                .map(ToOwned::to_owned);
+        let srx_root_sw = joiner_orig
+            .header_map
+            .get(&HDR_SRX_ROOT_SW)
+            .and_then(|value| value.as_bytes().filter(|bytes| bytes.len() == 32))
+            .map(ToOwned::to_owned);
         let srx_smallwood = joiner_orig
             .header_map
             .get(&HDR_SRX_SMALLWOOD)
@@ -4859,12 +5838,11 @@ mod tests {
         if let Some(value) = joiner_orig.header_map.get(&HDR_PROOF_MODE) {
             tampered.insert(HDR_PROOF_MODE, value.clone());
         }
-        let srx_root_sw =
-            joiner_orig
-                .header_map
-                .get(&HDR_SRX_ROOT_SW)
-                .and_then(|value| value.as_bytes().filter(|bytes| bytes.len() == 32))
-                .map(ToOwned::to_owned);
+        let srx_root_sw = joiner_orig
+            .header_map
+            .get(&HDR_SRX_ROOT_SW)
+            .and_then(|value| value.as_bytes().filter(|bytes| bytes.len() == 32))
+            .map(ToOwned::to_owned);
         let srx_smallwood = joiner_orig
             .header_map
             .get(&HDR_SRX_SMALLWOOD)
@@ -5312,7 +6290,12 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
         if !header.contains_key(&HDR_SRX_PAYLOAD) {
-            ensure_test_srx_payload(&mut header, parts.gid, pop_pk.as_slice(), parts.revoked_since_prev_root);
+            ensure_test_srx_payload(
+                &mut header,
+                parts.gid,
+                pop_pk.as_slice(),
+                parts.revoked_since_prev_root,
+            );
         }
 
         mutate_srx_payload(&mut header, |payload| {
@@ -5346,7 +6329,12 @@ mod tests {
         let (pop_pk, pop_sk) = sample_pop_keys();
         let (mut header, _, _) = header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
         if !header.contains_key(&HDR_SRX_PAYLOAD) {
-            ensure_test_srx_payload(&mut header, parts.gid, pop_pk.as_slice(), parts.revoked_since_prev_root);
+            ensure_test_srx_payload(
+                &mut header,
+                parts.gid,
+                pop_pk.as_slice(),
+                parts.revoked_since_prev_root,
+            );
         }
 
         let leaf_id = crate::compute_leaf_id(
@@ -5866,6 +6854,28 @@ mod tests {
 
         assert!(
             matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_FIELD_MISSING),
+            "unexpected error: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accept_anchor_requires_barrier_version() -> Result<(), Box<dyn std::error::Error>> {
+        let parts = sample_parts();
+        let header = sample_header();
+        let joiner = joiner_kgen_or(header, parts.clone(), params(), None, None)?;
+        let (pop_pk, pop_sk) = sample_pop_keys();
+        let (mut tampered, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
+        tampered.remove(&HDR_BARRIER_VERSION);
+        reseal_header(&mut tampered, &parts, &joiner);
+
+        let mut ctx = AcceptanceContext::with_defaults();
+        configure_bootstrap(&mut ctx);
+        let result = accept_with_header(&mut ctx, &parts, &tampered);
+        assert!(result.is_err(), "missing barrier_version must freeze");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_FS_JOIN_MISSING),
             "unexpected error: {err:?}"
         );
         Ok(())

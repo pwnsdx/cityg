@@ -164,3 +164,38 @@ pub const FREEZE_FS_CHECKPOINT_MONOTONICITY: FreezeError = FreezeError {
     code: 9473,
     reason: "fs_checkpoint_monotonicity",
 };
+
+pub const FREEZE_BARRIER_PROACTIVE_FORBIDDEN: FreezeError = FreezeError {
+    code: 9605,
+    reason: "barrier_proactive_forbidden",
+};
+
+pub const FREEZE_BARRIER_UPDATE_MALFORMED: FreezeError = FreezeError {
+    code: 9607,
+    reason: "barrier_update_malformed",
+};
+
+pub const FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE: FreezeError = FreezeError {
+    code: 9608,
+    reason: "barrier_tree_hash_chain_failure",
+};
+
+pub const FREEZE_BARRIER_GENESIS_REQUIRED: FreezeError = FreezeError {
+    code: 96010,
+    reason: "barrier_genesis_required",
+};
+
+pub const FREEZE_BARRIER_UPDATE_REQUIRED_ON_REVOCATION_CHANGE: FreezeError = FreezeError {
+    code: 96011,
+    reason: "barrier_update_required_on_revocation_change",
+};
+
+pub const FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED: FreezeError = FreezeError {
+    code: 96012,
+    reason: "pcs_refresh_rate_limited",
+};
+
+pub const FREEZE_BARRIER_PCS_REFRESH_SLOT_CONFLICT: FreezeError = FreezeError {
+    code: 96013,
+    reason: "pcs_refresh_slot_conflict",
+};

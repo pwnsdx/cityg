@@ -19,7 +19,7 @@
   linkcolor=blue!55!black,
   citecolor=blue!55!black,
   urlcolor=blue!55!black,
-  pdftitle={City-G Whitepaper v0.1.1},
+  pdftitle={City-G Whitepaper v0.1.2},
   pdfauthor={City-G Working Group}
 }
 
@@ -30,7 +30,7 @@
 \newcommand{\kbarrier}{\texttt{K\_barrier}}
 \newcommand{\tauE}{\texttt{tau\_e}}
 \newcommand{\fsEc}{\texttt{fs\_ec}}
-\newcommand{\wpversion}{0.1.1}
+\newcommand{\wpversion}{0.1.2}
 
 \title{\cityg: Publisher-Blind, Time-Blind End-to-End Encryption\
 for Massive Asynchronous Groups}
@@ -49,7 +49,7 @@ Large-group end-to-end encrypted messaging is difficult to scale without giving 
 \section{Introduction}
 End-to-end encrypted (E2EE) group systems must simultaneously satisfy three pressures: security under active attackers, asynchronous operability for offline devices, and production-grade scalability under bursty concurrency. In large deployments, those pressures collide. Systems that optimize for simplicity often centralize trust in servers for key distribution. Systems that optimize for strict cryptographic structure frequently impose serialization points that become throughput bottlenecks. Systems that optimize for throughput may under-specify edge-case validation, enabling interop drift or latent security regressions.
 
-\cityg targets this gap: robust security semantics without a server-side message secret role, explicit acceptance determinism without wall-clock dependence, and practical behavior for high-concurrency populations. The profile analyzed here is the final unified specification \texttt{v0.1.1} (FS-hybrid + PRS barrier), in which forward secrecy, acceptance rules, and post-revocation secrecy are specified in a single normative document \citep{citygSpec2026}.
+\cityg targets this gap: robust security semantics without a server-side message secret role, explicit acceptance determinism without wall-clock dependence, and practical behavior for high-concurrency populations. The profile analyzed here is the final unified specification \texttt{v0.1.2} (FS-hybrid + PRS barrier), in which forward secrecy, acceptance rules, and post-revocation secrecy are specified in a single normative document \citep{citygSpec2026}.
 
 \paragraph{Core thesis.}
 \cityg is useful because it treats security invariants as state-machine invariants, not just crypto primitive selections. In practice, compromise and drift happen at boundaries: encoding, ordering, replay, and recovery behavior. \cityg codifies those boundaries with explicit MUST-level rules and verifiable transitions.
@@ -322,7 +322,7 @@ For deployments where revocation correctness, server blindness, and high concurr
 \section{Normative Profile Reference}
 This whitepaper describes the final unified profile documented in:
 \begin{quote}
-\texttt{docs/specs.md} (\cityg Unified Spec, v0.1.1 final).
+\texttt{docs/specs.md} (\cityg Unified Spec, v0.1.2 final).
 \end{quote}
 The specification remains normative; this paper is explanatory.
 Normative requirement-language conventions in the specification follow RFC terminology conventions \citep{rfc2119,rfc8174}.
