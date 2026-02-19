@@ -28,11 +28,14 @@ use pqcrypto_traits::kem::{PublicKey as KemPublicKeyTrait, SecretKey as KemSecre
 use pqcrypto_traits::sign::{
     DetachedSignature as DilithiumDetachedSignatureTrait, PublicKey as DilithiumPublicKeyTrait,
 };
-use rand::{RngCore, thread_rng};
+use rand::{Rng, RngCore, thread_rng};
 use serde::Serialize;
 use serde_bytes::ByteBuf;
 use serde_json::Value as JsonValue;
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+    sync::mpsc,
+    time::{sleep, timeout},
+};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tracing::warn;
 
@@ -45,6 +48,36 @@ fn random_room_id() -> String {
 
 const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
 const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
+const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
+const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
+const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
+const TICKET_RETRY_JITTER_MS: u64 = 40;
+
+fn should_retry_ticket_http_error(
+    status_code: u16,
+    message: &str,
+    freeze_code: Option<u32>,
+) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    let looks_like_concurrency_race = lowered.contains("window full")
+        || lowered.contains("mh_heads_invalid")
+        || lowered.contains("barrier_version")
+        || lowered.contains("pivot head missing")
+        || lowered.contains("refresh payload diverges from stored parity")
+        || lowered.contains("barrier_update required on revocation change")
+        || lowered.contains("barrier update required on revocation change");
+    let status_hint = matches!(status_code, 409 | 429 | 500 | 503);
+    let freeze_hint = matches!(freeze_code, Some(925));
+    status_hint && (looks_like_concurrency_race || freeze_hint)
+}
+
+fn ticket_retry_delay(attempt: u32) -> Duration {
+    let exponent = attempt.min(5);
+    let base = TICKET_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << exponent);
+    let capped = base.min(TICKET_RETRY_MAX_DELAY_MS);
+    let jitter = thread_rng().gen_range(0..=TICKET_RETRY_JITTER_MS);
+    Duration::from_millis(capped.saturating_add(jitter))
+}
 
 fn read_nonempty_env(var: &str) -> Option<String> {
     std::env::var(var)
@@ -804,46 +837,63 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         signature: binding_signature.as_bytes().to_vec(),
     };
 
-    let mut join_ticket_result = client
-        .join_ticket(room_id, alias, Some(identity_binding.clone()))
-        .await;
-    if let Err(ApiClientError::HttpStatus {
-        status, message, ..
-    }) = &join_ticket_result
-        && status.is_server_error()
-        && message.contains("kbroad rotation required")
-    {
-        rotate_room_kbroad_with_fresh_key(&client, room_id)
+    let mut kbroad_rotation_attempted = false;
+    let mut retry_attempt = 0u32;
+    let ticket = loop {
+        match client
+            .join_ticket(room_id, alias, Some(identity_binding.clone()))
             .await
-            .context("rotate KBROAD before join")?;
-        join_ticket_result = client
-            .join_ticket(room_id, alias, Some(identity_binding))
-            .await;
-    }
-
-    let ticket = match join_ticket_result {
-        Ok(t) => t,
-        Err(ApiClientError::HttpStatus {
-            status,
-            message,
-            freeze_code,
-            freeze_reason,
-            ..
-        }) => {
-            let mut detail = describe_http_failure(
-                status.as_str(),
-                &message,
+        {
+            Ok(ticket) => break ticket,
+            Err(ApiClientError::HttpStatus {
+                status,
+                message,
                 freeze_code,
-                freeze_reason.as_deref(),
-            );
-            if status.is_server_error() && message.contains("kbroad key missing") {
-                detail.push_str(
-                    " (room is not KBROAD-provisioned; bootstrap it first with a room-specific public key)",
+                freeze_reason,
+                ..
+            }) => {
+                if status.is_server_error()
+                    && message.contains("kbroad rotation required")
+                    && !kbroad_rotation_attempted
+                {
+                    kbroad_rotation_attempted = true;
+                    rotate_room_kbroad_with_fresh_key(&client, room_id)
+                        .await
+                        .context("rotate KBROAD before join")?;
+                    continue;
+                }
+
+                if should_retry_ticket_http_error(status.as_u16(), &message, freeze_code)
+                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
+                {
+                    let delay = ticket_retry_delay(retry_attempt);
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    warn!(
+                        attempt = retry_attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        status = status.as_u16(),
+                        message = %message,
+                        "join_ticket race/concurrency rejection; retrying"
+                    );
+                    sleep(delay).await;
+                    continue;
+                }
+
+                let mut detail = describe_http_failure(
+                    status.as_str(),
+                    &message,
+                    freeze_code,
+                    freeze_reason.as_deref(),
                 );
+                if status.is_server_error() && message.contains("kbroad key missing") {
+                    detail.push_str(
+                        " (room is not KBROAD-provisioned; bootstrap it first with a room-specific public key)",
+                    );
+                }
+                return Err(anyhow!(detail));
             }
-            return Err(anyhow!(detail));
+            Err(err) => return Err(err.into()),
         }
-        Err(err) => return Err(err.into()),
     };
 
     let gid = bytes32("gid", &ticket.gid)?;
@@ -1004,23 +1054,51 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
 
 async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let client = new_api_client(&session.server_url);
-    let mut merge_ticket_result = client
-        .merge_ticket(&session.room_id, &session.leaf_id)
-        .await;
-    if let Err(ApiClientError::HttpStatus {
-        status, message, ..
-    }) = &merge_ticket_result
-        && status.is_server_error()
-        && message.contains("kbroad rotation required")
-    {
-        rotate_room_kbroad_with_fresh_key(&client, &session.room_id)
-            .await
-            .context("rotate KBROAD before merge")?;
-        merge_ticket_result = client
-            .merge_ticket(&session.room_id, &session.leaf_id)
-            .await;
-    }
-    let ticket = merge_ticket_result.context("fetch merge ticket")?;
+    let mut kbroad_rotation_attempted = false;
+    let mut retry_attempt = 0u32;
+    let ticket = loop {
+        match client.merge_ticket(&session.room_id, &session.leaf_id).await {
+            Ok(ticket) => break ticket,
+            Err(err) => {
+                if let ApiClientError::HttpStatus {
+                    status,
+                    message,
+                    freeze_code,
+                    ..
+                } = &err
+                {
+                    if status.is_server_error()
+                        && message.contains("kbroad rotation required")
+                        && !kbroad_rotation_attempted
+                    {
+                        kbroad_rotation_attempted = true;
+                        rotate_room_kbroad_with_fresh_key(&client, &session.room_id)
+                            .await
+                            .context("rotate KBROAD before merge")?;
+                        continue;
+                    }
+
+                    if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                        && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
+                    {
+                        let delay = ticket_retry_delay(retry_attempt);
+                        retry_attempt = retry_attempt.saturating_add(1);
+                        warn!(
+                            attempt = retry_attempt,
+                            delay_ms = delay.as_millis() as u64,
+                            status = status.as_u16(),
+                            message = %message,
+                            "merge_ticket race/concurrency rejection; retrying"
+                        );
+                        sleep(delay).await;
+                        continue;
+                    }
+                }
+
+                return Err(err).context("fetch merge ticket");
+            }
+        }
+    };
 
     let parities = hydrate_parities(
         &ticket.parities,
@@ -2066,6 +2144,42 @@ mod tests {
         let err = bytes32("room", &[0xAB; 31]).expect_err("must reject non-32-byte input");
         assert!(err.to_string().contains("room must be 32 bytes"));
         Ok(())
+    }
+
+    #[test]
+    fn ticket_retry_classifier_detects_concurrency_errors() {
+        assert!(should_retry_ticket_http_error(
+            500,
+            "invalid input: barrier_version mismatch",
+            None
+        ));
+        assert!(should_retry_ticket_http_error(
+            500,
+            "window full",
+            Some(925)
+        ));
+        assert!(should_retry_ticket_http_error(
+            503,
+            "pivot head missing",
+            None
+        ));
+        assert!(!should_retry_ticket_http_error(
+            500,
+            "kbroad key missing",
+            None
+        ));
+    }
+
+    #[test]
+    fn ticket_retry_delay_is_bounded() {
+        for attempt in 0..=10 {
+            let delay = ticket_retry_delay(attempt);
+            assert!(delay >= Duration::from_millis(TICKET_RETRY_BASE_DELAY_MS));
+            assert!(
+                delay
+                    <= Duration::from_millis(TICKET_RETRY_MAX_DELAY_MS + TICKET_RETRY_JITTER_MS)
+            );
+        }
     }
 
     #[test]

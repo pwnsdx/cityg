@@ -10,6 +10,7 @@ mod middleware;
 use std::{
     collections::{BTreeMap, HashSet},
     convert::TryInto,
+    hash::{Hash, Hasher},
     net::SocketAddr,
     sync::{
         Arc,
@@ -18,7 +19,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHasher};
 
 use axum::{
     Router,
@@ -172,10 +173,18 @@ const MESSAGE_PRUNE_INTERVAL_MS: u64 = 1_000;
 const WS_MAX_LAG_ENV: &str = "CITYG_SERVER_WS_MAX_LAG";
 const WS_MAX_LAG_DEFAULT: u64 = 256;
 const API_PROFILE_VERSION: &str = "v0.1.2";
+const GROUP_LANES_ENV: &str = "CITYG_SERVER_GROUP_LANES";
+const DEFAULT_GROUP_LANES: usize = 4;
+const MERGE_COALESCE_TTL_MS: u64 = 2_000;
+const MERGE_COALESCE_MAX_ENTRIES: usize = 8_192;
 
 #[derive(Clone)]
 struct ApiState {
+    // Compatibility handle for tests and single-lane deployments.
     server: Arc<RwLock<CityGServer>>,
+    // Execution lanes keyed by gid hash; write-heavy gid-scoped operations
+    // are routed to one lane to reduce cross-group lock contention.
+    server_lanes: Arc<Vec<Arc<RwLock<CityGServer>>>>,
     messages: Arc<RwLock<AHashMap<[u8; 32], Vec<StoredMessage>>>>,
     bundles: Arc<RwLock<AHashMap<[u8; 32], Vec<u8>>>>,
     message_retention: Duration,
@@ -190,6 +199,7 @@ struct ApiState {
     notification_tx: broadcast::Sender<BroadcastNotification>,
     alias_rate_limiter: AliasRateLimiter,
     message_prune_due_ms: Arc<AtomicU64>,
+    merge_ticket_cache: Arc<RwLock<AHashMap<MergeTicketCacheKey, MergeTicketCacheEntry>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -226,7 +236,92 @@ struct MembershipNotification {
     timestamp_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct MergeTicketCacheKey {
+    gid: [u8; 32],
+    leaf_id: [u8; 32],
+    intent: i32,
+}
+
+#[derive(Clone, Debug)]
+struct MergeTicketCacheEntry {
+    created_at_ms: u64,
+    response_bytes: Vec<u8>,
+}
+
 impl ApiState {
+    fn lane_index_for_gid_bytes(&self, gid: &[u8]) -> usize {
+        if self.server_lanes.is_empty() {
+            return 0;
+        }
+        let mut hasher = AHasher::default();
+        hasher.write(gid);
+        (hasher.finish() as usize) % self.server_lanes.len()
+    }
+
+    fn server_for_gid_bytes(&self, gid: &[u8]) -> Arc<RwLock<CityGServer>> {
+        if self.server_lanes.is_empty() {
+            return self.server.clone();
+        }
+        self.server_lanes[self.lane_index_for_gid_bytes(gid)].clone()
+    }
+
+    fn server_for_gid(&self, gid: &[u8; 32]) -> Arc<RwLock<CityGServer>> {
+        self.server_for_gid_bytes(gid)
+    }
+
+    fn all_server_lanes(&self) -> Vec<Arc<RwLock<CityGServer>>> {
+        if self.server_lanes.is_empty() {
+            return vec![self.server.clone()];
+        }
+        self.server_lanes.iter().cloned().collect()
+    }
+
+    async fn clear_merge_ticket_cache_for_gid(&self, gid: [u8; 32]) {
+        let mut guard = self.merge_ticket_cache.write().await;
+        guard.retain(|key, _| key.gid != gid);
+    }
+
+    async fn coalesced_merge_ticket_lookup(
+        &self,
+        key: MergeTicketCacheKey,
+        now_ms: u64,
+    ) -> Option<Vec<u8>> {
+        let mut guard = self.merge_ticket_cache.write().await;
+        guard.retain(|_, entry| {
+            now_ms.saturating_sub(entry.created_at_ms) <= MERGE_COALESCE_TTL_MS
+        });
+        guard.get(&key).map(|entry| entry.response_bytes.clone())
+    }
+
+    async fn coalesced_merge_ticket_store(
+        &self,
+        key: MergeTicketCacheKey,
+        response_bytes: Vec<u8>,
+        now_ms: u64,
+    ) {
+        let mut guard = self.merge_ticket_cache.write().await;
+        guard.retain(|_, entry| {
+            now_ms.saturating_sub(entry.created_at_ms) <= MERGE_COALESCE_TTL_MS
+        });
+        if !guard.contains_key(&key) && guard.len() >= MERGE_COALESCE_MAX_ENTRIES {
+            let evict = guard
+                .iter()
+                .min_by_key(|(_, entry)| entry.created_at_ms)
+                .map(|(candidate, _)| *candidate);
+            if let Some(evict) = evict {
+                guard.remove(&evict);
+            }
+        }
+        guard.insert(
+            key,
+            MergeTicketCacheEntry {
+                created_at_ms: now_ms,
+                response_bytes,
+            },
+        );
+    }
+
     async fn record_freeze(&self, freeze: FreezeError) {
         let mut guard = self.freeze_counts.write().await;
         let key = (freeze.code, freeze.reason.to_string());
@@ -730,8 +825,83 @@ fn configured_ws_max_lag() -> u64 {
     parse_ws_max_lag(raw.as_deref())
 }
 
+fn configured_group_lane_count() -> usize {
+    std::env::var(GROUP_LANES_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_GROUP_LANES)
+}
+
 fn should_disconnect_for_lag(lagged_messages: u64, max_lag: u64) -> bool {
     lagged_messages > max_lag
+}
+
+fn classify_concurrency_pressure(
+    message: &str,
+    freeze_reason: Option<&'static str>,
+) -> Option<&'static str> {
+    let lowered = message.to_ascii_lowercase();
+    let freeze_lowered = freeze_reason.unwrap_or_default().to_ascii_lowercase();
+    if lowered.contains("window full")
+        || freeze_lowered.contains("window_full")
+        || freeze_lowered.contains("mhw/window")
+    {
+        return Some("window_full");
+    }
+    if lowered.contains("mh_heads_invalid") || freeze_lowered.contains("mh_heads_invalid") {
+        return Some("mh_heads_invalid");
+    }
+    if lowered.contains("barrier_version") || lowered.contains("barrier version") {
+        return Some("barrier_version");
+    }
+    if lowered.contains("barrier update required on revocation change") {
+        return Some("revocation_change");
+    }
+    None
+}
+
+fn record_concurrency_pressure(endpoint: &'static str, reason: &'static str) {
+    metrics::counter!(
+        "cityg_concurrency_pressure_total",
+        "endpoint" => endpoint.to_string(),
+        "reason" => reason.to_string()
+    )
+    .increment(1);
+}
+
+fn maybe_record_api_concurrency_error(endpoint: &'static str, err: &ApiError) {
+    if let ApiError::Server {
+        message, freeze, ..
+    } = err
+    {
+        if let Some(reason) = classify_concurrency_pressure(message, freeze.map(|f| f.reason)) {
+            record_concurrency_pressure(endpoint, reason);
+        }
+    }
+}
+
+fn maybe_record_client_concurrency_error(endpoint: &'static str, err: &ClientError) {
+    match err {
+        ClientError::InvalidInput(message) => {
+            if let Some(reason) = classify_concurrency_pressure(message, None) {
+                record_concurrency_pressure(endpoint, reason);
+            }
+        }
+        ClientError::Acceptance(AcceptanceError::Freeze(freeze)) => {
+            if let Some(reason) = classify_concurrency_pressure(freeze.reason, Some(freeze.reason))
+            {
+                record_concurrency_pressure(endpoint, reason);
+            }
+        }
+        ClientError::Acceptance(inner) => {
+            let message = format!("{inner:?}");
+            if let Some(reason) = classify_concurrency_pressure(&message, None) {
+                record_concurrency_pressure(endpoint, reason);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Verifies an identity binding signature.
@@ -795,16 +965,34 @@ async fn apply_bundle(
     state: &ApiState,
     bundle: &ClientEpochBundle,
 ) -> Result<AcceptEpochResponse, ApiError> {
+    let gid: [u8; 32] = bundle
+        .gid()
+        .try_into()
+        .map_err(|_| ApiError::server_message("invalid gid length in bundle"))?;
     let mut weid = [0u8; 32];
     weid.copy_from_slice(&bundle.we_epoch_id);
+    let started = Instant::now();
 
     let outcome = {
-        let mut guard = state.server.write().await;
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
         match guard.accept_epoch(bundle) {
             Ok(outcome) => outcome,
             Err(err) => {
                 drop(guard);
-                return Err(map_accept_error(state, err, None, None).await);
+                let mapped = map_accept_error(state, err, None, None).await;
+                maybe_record_api_concurrency_error("accept_epoch", &mapped);
+                metrics::counter!(
+                    "cityg_accept_epoch_total",
+                    "result" => "error".to_string()
+                )
+                .increment(1);
+                metrics::histogram!(
+                    "cityg_accept_epoch_duration_seconds",
+                    "result" => "error".to_string()
+                )
+                .record(started.elapsed().as_secs_f64());
+                return Err(mapped);
             }
         }
     };
@@ -813,6 +1001,17 @@ async fn apply_bundle(
         .to_cbor()
         .map_err(|err| ApiError::server_message(format!("failed to sanitize bundle: {err}")))?;
     persist_bundle(state, bundle, weid, sanitized_bundle, outcome.new_root).await?;
+    state.clear_merge_ticket_cache_for_gid(gid).await;
+    metrics::counter!(
+        "cityg_accept_epoch_total",
+        "result" => "ok".to_string()
+    )
+    .increment(1);
+    metrics::histogram!(
+        "cityg_accept_epoch_duration_seconds",
+        "result" => "ok".to_string()
+    )
+    .record(started.elapsed().as_secs_f64());
     Ok(accept_response_from(&outcome))
 }
 
@@ -883,7 +1082,8 @@ async fn ensure_leaf_member_for_epoch(
         .await
         .ok_or(ApiError::NotFound)?;
     let members = {
-        let guard = state.server.read().await;
+        let lane = state.server_for_gid(&scope.gid);
+        let guard = lane.read().await;
         guard
             .members_for_root(&scope.gid, &scope.membership_root)
             .ok_or(ApiError::NotFound)?
@@ -901,7 +1101,8 @@ async fn ensure_leaf_member_for_room(
     leaf_id: [u8; 32],
 ) -> Result<(), ApiError> {
     let members = {
-        let guard = state.server.read().await;
+        let lane = state.server_for_gid(gid);
+        let guard = lane.read().await;
         let latest_root = guard.latest_parent_root(gid).ok_or(ApiError::NotFound)?;
         guard
             .members_for_root(gid, &latest_root)
@@ -968,9 +1169,10 @@ async fn members(State(state): State<ApiState>, body: Bytes) -> Result<Response,
         .limit
         .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
         .clamp(1, MEMBERS_MAX_PAGE_SIZE);
+    let lane = state.server_for_gid_bytes(&gid);
 
     let (members, root) = {
-        let guard = state.server.read().await;
+        let guard = lane.read().await;
         if request.parent_root.is_empty() {
             let latest_root = guard.latest_parent_root(&gid).ok_or(ApiError::NotFound)?;
             let list = guard
@@ -1053,9 +1255,10 @@ async fn search_members(State(state): State<ApiState>, body: Bytes) -> Result<Re
         .limit
         .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
         .clamp(1, MEMBERS_MAX_PAGE_SIZE);
+    let lane = state.server_for_gid_bytes(&gid);
 
     let (members, root) = {
-        let guard = state.server.read().await;
+        let guard = lane.read().await;
         if request.parent_root.is_empty() {
             let latest_root = guard.latest_parent_root(&gid).ok_or(ApiError::NotFound)?;
             let list = guard
@@ -1175,10 +1378,17 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
     };
 
     let (ticket, policy_version, fs_policy_version, fs_epoch_base_ts, bootstrap_public) = {
-        let mut guard = state.server.write().await;
-        let bundle = guard
-            .build_join_ticket_with_leaf(&gid, requested_leaf_id)
-            .map_err(ApiError::from)?;
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
+        let bundle = match guard.build_join_ticket_with_leaf(&gid, requested_leaf_id) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                maybe_record_client_concurrency_error("join_ticket", &err);
+                metrics::counter!("cityg_join_ticket_total", "result" => "error".to_string())
+                    .increment(1);
+                return Err(ApiError::from(err));
+            }
+        };
         let policy_version = guard.context().policy_version().to_string();
         let fs_policy_version = guard
             .context()
@@ -1250,6 +1460,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         max_barrier_update_bytes: ticket.max_barrier_update_bytes,
     };
 
+    metrics::counter!("cityg_join_ticket_total", "result" => "ok".to_string()).increment(1);
     Ok(protobuf_response(&response))
 }
 
@@ -1276,7 +1487,8 @@ async fn bootstrap_room(
     let gid = parse_gid(&request.room_id)?;
 
     {
-        let mut guard = state.server.write().await;
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
         guard
             .register_group(&gid, request.kbroad_public)
             .map_err(|err| match err {
@@ -1313,7 +1525,8 @@ async fn rotate_room_kbroad(
 
     let gid = parse_gid(&request.room_id)?;
     let kbroad_generation = {
-        let mut guard = state.server.write().await;
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
         guard
             .rotate_group_kbroad(&gid, request.kbroad_public)
             .map_err(|err| match err {
@@ -1343,16 +1556,45 @@ async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Resp
     leaf_id.copy_from_slice(&request.leaf_id);
     let intent = MergeTicketIntent::try_from(request.intent)
         .map_err(|_| ApiError::InvalidRequest("merge ticket intent is invalid"))?;
+    let cache_key = MergeTicketCacheKey {
+        gid,
+        leaf_id,
+        intent: request.intent,
+    };
+    let now_ms = current_timestamp_ms();
+    if intent == MergeTicketIntent::Leave {
+        if let Some(cached) = state.coalesced_merge_ticket_lookup(cache_key, now_ms).await {
+            metrics::counter!(
+                "cityg_merge_ticket_coalesced_total",
+                "intent" => "leave".to_string()
+            )
+            .increment(1);
+            metrics::counter!("cityg_merge_ticket_total", "result" => "ok".to_string())
+                .increment(1);
+            return Ok(protobuf_response_bytes(cached));
+        }
+    }
 
     let bundle = {
-        let mut guard = state.server.write().await;
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
         match intent {
             MergeTicketIntent::Leave => guard
                 .build_merge_ticket(&gid, &leaf_id)
-                .map_err(ApiError::from)?,
+                .map_err(|err| {
+                    maybe_record_client_concurrency_error("merge_ticket", &err);
+                    metrics::counter!("cityg_merge_ticket_total", "result" => "error".to_string())
+                        .increment(1);
+                    ApiError::from(err)
+                })?,
             MergeTicketIntent::Refresh => guard
                 .build_merge_ticket_for_refresh(&gid, &leaf_id)
-                .map_err(ApiError::from)?,
+                .map_err(|err| {
+                    maybe_record_client_concurrency_error("merge_ticket_refresh", &err);
+                    metrics::counter!("cityg_merge_ticket_total", "result" => "error".to_string())
+                        .increment(1);
+                    ApiError::from(err)
+                })?,
         }
     };
 
@@ -1422,7 +1664,17 @@ async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Resp
         max_barrier_update_bytes,
     };
 
-    Ok(protobuf_response(&response))
+    let mut response_bytes = Vec::new();
+    response
+        .encode(&mut response_bytes)
+        .map_err(|err| ApiError::server_message(format!("failed to encode merge ticket: {err}")))?;
+    if intent == MergeTicketIntent::Leave {
+        state
+            .coalesced_merge_ticket_store(cache_key, response_bytes.clone(), now_ms)
+            .await;
+    }
+    metrics::counter!("cityg_merge_ticket_total", "result" => "ok".to_string()).increment(1);
+    Ok(protobuf_response_bytes(response_bytes))
 }
 
 async fn barrier_resolve_revoked_leaves(
@@ -1443,7 +1695,8 @@ async fn barrier_resolve_revoked_leaves(
     revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
 
     let leaf_indices = {
-        let guard = state.server.read().await;
+        let lane = state.server_for_gid(&gid);
+        let guard = lane.read().await;
         guard
             .resolve_revoked_leaf_indices(&gid, &revocation_roots_hash)
             .map_err(ApiError::from)?
@@ -1464,7 +1717,8 @@ async fn barrier_resolve_joins_since(
     let gid = parse_gid(&request.room_id)?;
 
     let records = {
-        let guard = state.server.read().await;
+        let lane = state.server_for_gid(&gid);
+        let guard = lane.read().await;
         guard
             .resolve_joins_since(&gid, request.prev_barrier_version)
             .map_err(ApiError::from)?
@@ -1507,7 +1761,8 @@ async fn barrier_fetch_public_tree(
     kem_tree_hash_after.copy_from_slice(&request.kem_tree_hash_after);
 
     let snapshot = {
-        let guard = state.server.read().await;
+        let lane = state.server_for_gid(&gid);
+        let guard = lane.read().await;
         guard
             .fetch_barrier_public_tree(&gid, &kem_tree_hash_after)
             .map_err(ApiError::from)?
@@ -1891,15 +2146,12 @@ async fn health_detailed(State(_state): State<ApiState>) -> Response {
 
 async fn get_window(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
     let _ = GetWindowRequest::decode(body)?;
-    let snapshot = {
-        let guard = state.server.read().await;
+    let mut snapshot: Vec<WindowEntry> = Vec::new();
+    for lane in state.all_server_lanes() {
+        let guard = lane.read().await;
         let now = guard.context().current_time();
-        guard
-            .context()
-            .mh_window
-            .snapshot()
-            .into_iter()
-            .map(|(wid, heads)| WindowEntry {
+        snapshot.extend(guard.context().mh_window.snapshot().into_iter().map(
+            |(wid, heads)| WindowEntry {
                 wid,
                 heads: heads
                     .into_iter()
@@ -1920,9 +2172,9 @@ async fn get_window(State(state): State<ApiState>, body: Bytes) -> Result<Respon
                         }
                     })
                     .collect(),
-            })
-            .collect::<Vec<_>>()
-    };
+            },
+        ));
+    }
 
     let reply = GetWindowResponse { entries: snapshot };
     Ok(protobuf_response(&reply))
@@ -1930,10 +2182,11 @@ async fn get_window(State(state): State<ApiState>, body: Bytes) -> Result<Respon
 
 async fn get_telemetry(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
     let _ = GetTelemetryRequest::decode(body)?;
-    let report = {
-        let guard = state.server.read().await;
-        guard.context().telemetry_report()
-    };
+    let mut report = Vec::new();
+    for lane in state.all_server_lanes() {
+        let guard = lane.read().await;
+        report.extend(guard.context().telemetry_report());
+    }
 
     let entries = report
         .into_iter()
@@ -2079,9 +2332,15 @@ async fn configure_window(
         .transpose()?;
 
     let (effective_h, effective_ttl) = {
-        let mut guard = state.server.write().await;
-        guard.update_window_limits(h_max, ttl);
-        guard.window_limits()
+        let mut effective: Option<(usize, Duration)> = None;
+        for lane in state.all_server_lanes() {
+            let mut guard = lane.write().await;
+            guard.update_window_limits(h_max, ttl);
+            if effective.is_none() {
+                effective = Some(guard.window_limits());
+            }
+        }
+        effective.unwrap_or((0, Duration::from_secs(0)))
     };
 
     let ttl_ms = effective_ttl.as_millis().min(u128::from(u32::MAX)) as u32;
@@ -2104,6 +2363,15 @@ fn protobuf_response<M: Message>(message: &M) -> Response {
     }
 
     let mut response = Response::new(buf.freeze().into());
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/x-protobuf"),
+    );
+    response
+}
+
+fn protobuf_response_bytes(payload: Vec<u8>) -> Response {
+    let mut response = Response::new(payload.into());
     response.headers_mut().insert(
         CONTENT_TYPE,
         HeaderValue::from_static("application/x-protobuf"),
@@ -2211,17 +2479,27 @@ pub async fn run_with_config(
         }
     };
 
-    let server = server_from_config(&config);
+    let lane_count = configured_group_lane_count().max(1);
+    let server_lanes_vec: Vec<Arc<RwLock<CityGServer>>> = (0..lane_count)
+        .map(|_| Arc::new(RwLock::new(server_from_config(&config))))
+        .collect();
+    let server = server_lanes_vec
+        .first()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(RwLock::new(server_from_config(&config))));
+    let server_lanes = Arc::new(server_lanes_vec);
     let message_retention = message_retention_from_config(&config);
     info!(
-        "message retention window set to {}s",
-        message_retention.as_secs()
+        "message retention window set to {}s (group execution lanes: {})",
+        message_retention.as_secs(),
+        lane_count
     );
     // Create broadcast channel for WebSocket notifications (capacity from config)
     let (notification_tx, _) = broadcast::channel(config.server.websocket_capacity);
 
     let state = ApiState {
-        server: Arc::new(RwLock::new(server)),
+        server,
+        server_lanes,
         messages: Arc::new(RwLock::new(AHashMap::new())),
         bundles: Arc::new(RwLock::new(AHashMap::new())),
         message_retention,
@@ -2237,6 +2515,7 @@ pub async fn run_with_config(
             Duration::from_secs(ALIAS_RATE_LIMIT_WINDOW_SECS),
         ),
         message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+        merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
     };
 
     // Build router with all routes
@@ -2385,7 +2664,12 @@ async fn seed_window_head(
     .map_err(|err| ApiError::server_message(err.to_string()))?;
 
     {
-        let mut guard = state.server.write().await;
+        let gid: [u8; 32] = bundle
+            .gid()
+            .try_into()
+            .map_err(|_| ApiError::InvalidRequest("bundle gid must be 32 bytes"))?;
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
         let accept_time = guard.context_mut().next_accept_instant();
         let record = HeadRecord::new(
             bundle.we_epoch_id,
@@ -2426,7 +2710,12 @@ async fn refresh_pivot(State(state): State<ApiState>, body: Bytes) -> Result<Res
     };
 
     {
-        let mut guard = state.server.write().await;
+        let gid: [u8; 32] = bundle
+            .gid()
+            .try_into()
+            .map_err(|_| ApiError::InvalidRequest("bundle gid must be 32 bytes"))?;
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
         guard
             .refresh_pivot(&bundle)
             .map_err(|err| ApiError::server_message(err.to_string()))?;
@@ -2452,13 +2741,21 @@ mod tests {
     use prost::Message;
     use serde_bytes::ByteBuf;
     use serde_json::Value;
-    use std::sync::Once;
+    use std::sync::{Mutex, Once, OnceLock};
 
-    fn test_api_state() -> ApiState {
+    fn test_api_state_with_lanes(lane_count: usize) -> ApiState {
         let mut cfg = CityGConfig::default();
         cfg.server.seed_demo_room = true;
+        let lanes: Vec<Arc<RwLock<CityGServer>>> = (0..lane_count.max(1))
+            .map(|_| Arc::new(RwLock::new(server_from_config(&cfg))))
+            .collect();
+        let server = lanes
+            .first()
+            .cloned()
+            .expect("test lane set must contain at least one lane");
         ApiState {
-            server: Arc::new(RwLock::new(server_from_config(&cfg))),
+            server: server.clone(),
+            server_lanes: Arc::new(lanes),
             messages: Arc::new(RwLock::new(AHashMap::new())),
             bundles: Arc::new(RwLock::new(AHashMap::new())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
@@ -2474,7 +2771,20 @@ mod tests {
                 Duration::from_secs(ALIAS_RATE_LIMIT_WINDOW_SECS),
             ),
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         }
+    }
+
+    fn test_api_state() -> ApiState {
+        test_api_state_with_lanes(1)
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned")
     }
 
     fn ensure_test_admin_tokens() {
@@ -2570,6 +2880,120 @@ mod tests {
             enforce_window_config_auth(&empty_headers, None),
             Err(ApiError::Unauthorized("admin token is not configured"))
         ));
+    }
+
+    #[test]
+    fn classify_concurrency_pressure_maps_expected_signals() {
+        assert_eq!(
+            classify_concurrency_pressure("window full for gid", None),
+            Some("window_full")
+        );
+        assert_eq!(
+            classify_concurrency_pressure("invalid input: barrier_version mismatch", None),
+            Some("barrier_version")
+        );
+        assert_eq!(
+            classify_concurrency_pressure("mh_heads_invalid", Some("mh_heads_invalid")),
+            Some("mh_heads_invalid")
+        );
+        assert_eq!(
+            classify_concurrency_pressure(
+                "barrier update required on revocation change",
+                None
+            ),
+            Some("revocation_change")
+        );
+        assert_eq!(classify_concurrency_pressure("random failure", None), None);
+    }
+
+    #[test]
+    fn configured_group_lane_count_uses_env_or_default() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::remove_var(GROUP_LANES_ENV);
+        }
+        assert_eq!(configured_group_lane_count(), DEFAULT_GROUP_LANES);
+
+        unsafe {
+            std::env::set_var(GROUP_LANES_ENV, "7");
+        }
+        assert_eq!(configured_group_lane_count(), 7);
+
+        unsafe {
+            std::env::set_var(GROUP_LANES_ENV, "0");
+        }
+        assert_eq!(configured_group_lane_count(), DEFAULT_GROUP_LANES);
+
+        unsafe {
+            std::env::set_var(GROUP_LANES_ENV, "not-a-number");
+        }
+        assert_eq!(configured_group_lane_count(), DEFAULT_GROUP_LANES);
+
+        unsafe {
+            std::env::remove_var(GROUP_LANES_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn server_lane_helpers_fallback_when_lane_set_is_empty() {
+        let cfg = CityGConfig::default();
+        let server = Arc::new(RwLock::new(server_from_config(&cfg)));
+        let state = ApiState {
+            server: server.clone(),
+            server_lanes: Arc::new(Vec::new()),
+            messages: Arc::new(RwLock::new(AHashMap::new())),
+            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
+            fs_epoch_period_seconds: cfg.protocol.fs_policy.h_seconds.max(1),
+            freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
+            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
+            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
+            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
+            notification_tx: broadcast::channel(4).0,
+            alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
+            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
+        };
+
+        let gid = [0x44; 32];
+        let routed = state.server_for_gid(&gid);
+        assert!(
+            Arc::ptr_eq(&routed, &server),
+            "empty lane set should fallback to primary server"
+        );
+        let lanes = state.all_server_lanes();
+        assert_eq!(lanes.len(), 1);
+        assert!(Arc::ptr_eq(&lanes[0], &server));
+    }
+
+    #[tokio::test]
+    async fn coalesced_merge_ticket_lookup_prunes_stale_entries() {
+        let state = test_api_state();
+        let key = MergeTicketCacheKey {
+            gid: [0x11; 32],
+            leaf_id: [0x22; 32],
+            intent: MergeTicketIntent::Leave as i32,
+        };
+        let now_ms: u64 = 50_000;
+        {
+            let mut guard = state.merge_ticket_cache.write().await;
+            guard.insert(
+                key,
+                MergeTicketCacheEntry {
+                    created_at_ms: now_ms.saturating_sub(MERGE_COALESCE_TTL_MS + 1),
+                    response_bytes: vec![1, 2, 3],
+                },
+            );
+        }
+        assert!(
+            state
+                .coalesced_merge_ticket_lookup(key, now_ms)
+                .await
+                .is_none(),
+            "stale coalesced merge ticket entry should be pruned on lookup"
+        );
+        assert!(state.merge_ticket_cache.read().await.is_empty());
     }
 
     #[test]
@@ -2880,8 +3304,10 @@ mod tests {
 
     #[tokio::test]
     async fn register_alias_updates_leaf_binding() {
+        let server = Arc::new(RwLock::new(server_from_config(&CityGConfig::default())));
         let state = ApiState {
-            server: Arc::new(RwLock::new(server_from_config(&CityGConfig::default()))),
+            server: server.clone(),
+            server_lanes: Arc::new(vec![server]),
             messages: Arc::new(RwLock::new(AHashMap::new())),
             bundles: Arc::new(RwLock::new(AHashMap::new())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
@@ -2894,6 +3320,7 @@ mod tests {
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         };
 
         let alias = "alice";
@@ -2925,8 +3352,10 @@ mod tests {
     #[tokio::test]
     async fn join_ticket_failure_does_not_persist_alias_binding() {
         let cfg = CityGConfig::default();
+        let server = Arc::new(RwLock::new(server_from_config(&cfg)));
         let state = ApiState {
-            server: Arc::new(RwLock::new(server_from_config(&cfg))),
+            server: server.clone(),
+            server_lanes: Arc::new(vec![server]),
             messages: Arc::new(RwLock::new(AHashMap::new())),
             bundles: Arc::new(RwLock::new(AHashMap::new())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
@@ -2939,6 +3368,7 @@ mod tests {
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         };
 
         let (pop_pk, pop_sk) = dilithium5::keypair();
@@ -3572,6 +4002,175 @@ mod tests {
         assert_eq!(
             refresh_decoded.revoked_since_root,
             refresh_decoded.revoked_root
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_coalesces_duplicate_leave_requests() {
+        let state = test_api_state();
+        let alice = demo_bundle("alice").expect("alice demo bundle");
+        let leaf_id = {
+            let lane = state.server_for_gid(&DEMO_GID);
+            let mut guard = lane.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+            let root = guard
+                .latest_parent_root(DEMO_GID.as_ref())
+                .expect("latest root");
+            guard
+                .members_for_root(DEMO_GID.as_ref(), &root)
+                .expect("members for root")[0]
+        };
+
+        let request = MergeTicketRequest {
+            room_id: hex::encode(DEMO_GID),
+            leaf_id: leaf_id.to_vec(),
+            intent: MergeTicketIntent::Leave as i32,
+        };
+        let response_a = merge_ticket(State(state.clone()), encode_proto_request(&request))
+            .await
+            .expect("first leave merge ticket");
+        let response_b = merge_ticket(State(state.clone()), encode_proto_request(&request))
+            .await
+            .expect("second leave merge ticket should be coalesced");
+        let bytes_a = to_bytes(response_a.into_body(), usize::MAX)
+            .await
+            .expect("first response bytes");
+        let bytes_b = to_bytes(response_b.into_body(), usize::MAX)
+            .await
+            .expect("second response bytes");
+        assert_eq!(
+            bytes_a, bytes_b,
+            "duplicate leave requests should reuse cached merge ticket response"
+        );
+        assert_eq!(state.merge_ticket_cache.read().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn high_contention_join_ticket_requests_across_groups_converge() {
+        ensure_test_admin_tokens();
+        let state = test_api_state_with_lanes(4);
+        let mut room_ids = vec![hex::encode(DEMO_GID)];
+        for seed in [0x11u8, 0x22u8, 0x33u8] {
+            let gid = [seed; 32];
+            let request = BootstrapRoomRequest {
+                room_id: hex::encode(gid),
+                kbroad_public: vec![seed; ml_kem_public_key_bytes()],
+            };
+            bootstrap_room(
+                State(state.clone()),
+                room_admin_headers(),
+                encode_proto_request(&request),
+            )
+            .await
+            .expect("bootstrap extra room for contention test");
+            room_ids.push(hex::encode(gid));
+        }
+
+        let task_count = 48usize;
+        let iterations = 6usize;
+        let mut tasks = Vec::new();
+        for task_idx in 0..task_count {
+            let state = state.clone();
+            let room_id = room_ids[task_idx % room_ids.len()].clone();
+            tasks.push(tokio::spawn(async move {
+                for iter in 0..iterations {
+                    let request = JoinTicketRequest {
+                        room_id: room_id.clone(),
+                        alias: format!("stress-{task_idx}-{iter}"),
+                        identity_binding: None,
+                    };
+                    let response = join_ticket(State(state.clone()), encode_proto_request(&request))
+                        .await
+                        .map_err(|err| format!("join_ticket failed: {err}"))?;
+                    let decoded: JoinTicketResponse = decode_proto_response(response).await;
+                    if decoded.profile_version != API_PROFILE_VERSION {
+                        return Err(format!(
+                            "unexpected profile version: {}",
+                            decoded.profile_version
+                        ));
+                    }
+                }
+                Ok::<(), String>(())
+            }));
+        }
+
+        for task in tasks {
+            let result = task.await.expect("join contention task must complete");
+            assert!(
+                result.is_ok(),
+                "join contention task failed: {}",
+                result.err().unwrap_or_default()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn high_contention_merge_refresh_and_leave_requests_converge() {
+        let state = test_api_state_with_lanes(4);
+        let alice = demo_bundle("alice").expect("alice demo bundle");
+        let leaf_id = {
+            let lane = state.server_for_gid(&DEMO_GID);
+            let mut guard = lane.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+            let root = guard
+                .latest_parent_root(DEMO_GID.as_ref())
+                .expect("latest root");
+            guard
+                .members_for_root(DEMO_GID.as_ref(), &root)
+                .expect("members for root")[0]
+        };
+
+        let task_count = 40usize;
+        let mut tasks = Vec::new();
+        for idx in 0..task_count {
+            let state = state.clone();
+            let room_id = hex::encode(DEMO_GID);
+            let leaf = leaf_id.to_vec();
+            tasks.push(tokio::spawn(async move {
+                let intent = if idx % 2 == 0 {
+                    MergeTicketIntent::Leave as i32
+                } else {
+                    MergeTicketIntent::Refresh as i32
+                };
+                let request = MergeTicketRequest {
+                    room_id,
+                    leaf_id: leaf,
+                    intent,
+                };
+                let response = merge_ticket(State(state), encode_proto_request(&request))
+                    .await
+                    .map_err(|err| format!("merge_ticket failed: {err}"))?;
+                let decoded: MergeTicketResponse = decode_proto_response(response).await;
+                if decoded.profile_version != API_PROFILE_VERSION {
+                    return Err(format!(
+                        "unexpected merge profile version: {}",
+                        decoded.profile_version
+                    ));
+                }
+                Ok::<MergeTicketResponse, String>(decoded)
+            }));
+        }
+
+        let mut leave_barrier_versions = Vec::new();
+        for task in tasks {
+            let result = task.await.expect("merge contention task must complete");
+            let decoded = result.unwrap_or_else(|err| panic!("merge contention task failed: {err}"));
+            if decoded.srx_cbor.is_empty() {
+                // refresh intent
+                continue;
+            }
+            leave_barrier_versions.push(decoded.barrier_version);
+        }
+        assert!(
+            !leave_barrier_versions.is_empty(),
+            "leave intents should be represented in contention run"
+        );
+        let first = leave_barrier_versions[0];
+        assert!(
+            leave_barrier_versions
+                .iter()
+                .all(|version| *version == first),
+            "coalesced leave tickets should converge to one barrier version"
         );
     }
 
@@ -4638,8 +5237,10 @@ mod tests {
 
     #[tokio::test]
     async fn alias_rate_limiter_rejects_produces_429() {
+        let server = Arc::new(RwLock::new(server_from_config(&CityGConfig::default())));
         let state = ApiState {
-            server: Arc::new(RwLock::new(server_from_config(&CityGConfig::default()))),
+            server: server.clone(),
+            server_lanes: Arc::new(vec![server]),
             messages: Arc::new(RwLock::new(AHashMap::new())),
             bundles: Arc::new(RwLock::new(AHashMap::new())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
@@ -4653,6 +5254,7 @@ mod tests {
             // Burst of 1 so the second attempt triggers rate limit
             alias_rate_limiter: AliasRateLimiter::new(1, Duration::from_secs(60)),
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         };
         let leaf = [0x01u8; 32];
         let key = vec![0xAB; 8];

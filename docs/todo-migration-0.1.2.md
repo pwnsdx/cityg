@@ -14,6 +14,7 @@ to the unified FS-hybrid + PRS barrier profile in `/Users/admin/Desktop/Reposito
 - [x] Phase G: PayloadEnvelope v2 + message anti-replay durability
 - [x] Phase H: API/provisioning updates for barrier + PCS policy
 - [x] Phase I: KAT/conformance + enforcement
+- [x] Phase J: Concurrency and traffic hardening
 
 ## Phase A: Profile/version freeze and compatibility gates
 
@@ -113,8 +114,22 @@ to the unified FS-hybrid + PRS barrier profile in `/Users/admin/Desktop/Reposito
 - [x] No shadow/A-B rollout required for this migration track (explicit direct cutover policy).
 - [x] Flip enforcement gates after conformance tests are stable.
 
+## Phase J: Concurrency and traffic hardening
+
+- [x] Add client ticket retry with bounded exponential backoff + jitter for concurrency race errors
+  (`barrier_version`/window-full/head race), while preserving fail-closed behavior.
+  - [x] Implemented on GUI native join/leave/refresh ticket fetch paths.
+  - [x] Implemented on `join_leave` CLI join/leave ticket fetch paths.
+  - [x] Added unit tests for retry classifier and delay bounds.
+- [x] Replace global server lock with per-group execution lanes (actor or keyed lock) to improve
+  throughput under many groups.
+- [x] Add high-contention stress tests with many concurrent join/leave/refresh writers and retry convergence assertions.
+- [x] Add operational metrics/SLOs for concurrency pressure (retry count, WINDOW_FULL rate,
+  barrier version contention, accept latency p95/p99).
+- [x] Add merge/revocation coalescing policy to reduce barrier traffic during bursty churn.
+
 ## Current verification gate
 
 - [x] Workspace tests pass (`cargo test --workspace`).
-- [x] Workspace line coverage >= 95% (`cargo llvm-cov --workspace --summary-only`, current total: 95.02%).
+- [x] Workspace line coverage >= 95% (`cargo llvm-cov --workspace --summary-only`, current total: 95.00%).
 - [x] Native GUI runtime path (`--features native-app`) compiles and targeted barrier recover/persistence tests pass.
