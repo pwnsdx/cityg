@@ -1851,15 +1851,11 @@ mod tests {
     use cityg_config::CityGConfig;
     use futures::SinkExt;
     use std::{
-        sync::{
-            Arc, OnceLock,
-            atomic::{AtomicU16, Ordering},
-        },
+        sync::{Arc, OnceLock},
         time::Duration,
     };
     use tokio::time::sleep;
 
-    static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18600);
     static TEST_AUTH_ENV: OnceLock<()> = OnceLock::new();
 
     fn ensure_test_auth_env() {
@@ -1876,6 +1872,14 @@ mod tests {
                 "join-leave-message-token",
             );
         });
+    }
+
+    fn next_free_local_port() -> u16 {
+        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("bind ephemeral test port")
+            .local_addr()
+            .expect("read ephemeral test port")
+            .port()
     }
 
     async fn spawn_server_on_with_seed_demo(
@@ -2658,7 +2662,7 @@ mod tests {
 
     #[tokio::test]
     async fn join_leave_roundtrip_and_message_send() -> Result<()> {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -2711,7 +2715,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_options_single_roundtrip() -> Result<()> {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -2738,7 +2742,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_options_batch_roundtrip() -> Result<()> {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -2765,7 +2769,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_options_non_batch_multi_roundtrip() -> Result<()> {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -2792,7 +2796,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_options_batch_single_alias_roundtrip() -> Result<()> {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -2819,7 +2823,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_options_watch_mode_roundtrip() -> Result<()> {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -2846,7 +2850,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_options_rejects_runtime_leave_order_index() -> Result<()> {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -2875,7 +2879,7 @@ mod tests {
 
     #[tokio::test]
     async fn watch_mode_roundtrip() -> Result<()> {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -2892,7 +2896,7 @@ mod tests {
 
     #[tokio::test]
     async fn perform_join_reports_kbroad_missing_on_unbootstrapped_room() -> Result<()> {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -2912,7 +2916,7 @@ mod tests {
 
     #[tokio::test]
     async fn perform_join_requires_bootstrap_signer_when_policy_enabled() -> Result<()> {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_free_local_port();
         let handle = spawn_server_on_with_seed_demo(port, true).await;
         sleep(Duration::from_millis(250)).await;
 

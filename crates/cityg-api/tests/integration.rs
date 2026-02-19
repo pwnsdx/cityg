@@ -34,6 +34,14 @@ fn test_client(base_url: impl Into<String>) -> CitygApiClient {
         .with_message_auth_token(TEST_MESSAGE_TOKEN)
 }
 
+fn next_free_local_port() -> u16 {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .expect("bind ephemeral test port")
+        .local_addr()
+        .expect("read ephemeral test port")
+        .port()
+}
+
 async fn spawn_server_on(port: u16) -> JoinHandle<()> {
     ensure_admin_auth_env();
     tokio::spawn(async move {
@@ -80,7 +88,7 @@ fn encode_field1_bytes(payload: &[u8]) -> Vec<u8> {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn accept_epoch_rejects_oversized_body() {
-    let port = 8122;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -103,7 +111,7 @@ async fn end_to_end_demo_flow() {
         .with_env_filter(tracing_subscriber::EnvFilter::new("error"))
         .try_init();
 
-    let port = 8088;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -192,7 +200,7 @@ async fn window_limits_can_be_tuned() {
         .with_env_filter(tracing_subscriber::EnvFilter::new("error"))
         .try_init();
 
-    let port = 8089;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -254,7 +262,7 @@ async fn window_limits_can_be_tuned() {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn configure_window_rejects_invalid() -> Result<()> {
-    let port = 8091;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -271,7 +279,7 @@ async fn configure_window_rejects_invalid() -> Result<()> {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn debug_seed_window_endpoint_handles_validation_paths() {
-    let port = 8110;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -311,7 +319,7 @@ async fn debug_seed_window_endpoint_handles_validation_paths() {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn refresh_pivot_endpoint_rejects_empty_and_invalid_payloads() {
-    let port = 8111;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -340,7 +348,7 @@ async fn refresh_pivot_endpoint_rejects_empty_and_invalid_payloads() {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn window_snapshot_reflects_heads() {
-    let port = 8092;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -375,7 +383,7 @@ async fn window_snapshot_reflects_heads() {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn window_full_rest_api_freeze() -> Result<()> {
-    let port = 8093;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -425,7 +433,7 @@ async fn window_full_rest_api_freeze() -> Result<()> {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn window_full_concurrent_freeze() -> Result<()> {
-    let port = 8094;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -520,7 +528,7 @@ async fn window_full_concurrent_freeze() -> Result<()> {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn members_pagination() -> Result<()> {
-    let port = 8095;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -589,7 +597,7 @@ fn assert_bad_request<T: std::fmt::Debug>(result: Result<T, Error>) -> Result<()
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn error_invalid_room_id_format() -> Result<()> {
-    let port = 8096;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -633,7 +641,7 @@ async fn error_server_unavailable() -> Result<()> {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn error_invalid_bundle_data() -> Result<()> {
-    let port = 8097;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -664,7 +672,7 @@ async fn error_invalid_bundle_data() -> Result<()> {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn join_ticket_omits_bootstrap_key_when_policy_disabled() -> Result<()> {
-    let port = 8101;
+    let port = next_free_local_port();
     let handle = spawn_server_with_seed_demo_room(port, false).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -685,7 +693,7 @@ async fn join_ticket_omits_bootstrap_key_when_policy_disabled() -> Result<()> {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn join_ticket_includes_bootstrap_key_when_policy_enabled() -> Result<()> {
-    let port = 8102;
+    let port = next_free_local_port();
     let handle = spawn_server_with_seed_demo_room(port, true).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -703,7 +711,7 @@ async fn join_ticket_includes_bootstrap_key_when_policy_enabled() -> Result<()> 
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn error_message_with_invalid_epoch() -> Result<()> {
-    let port = 8098;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -746,7 +754,7 @@ async fn error_message_with_invalid_epoch() -> Result<()> {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn error_members_with_invalid_gid() -> Result<()> {
-    let port = 8099;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
@@ -778,7 +786,7 @@ async fn error_members_with_invalid_gid() -> Result<()> {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn error_recovery_graceful_degradation() -> Result<()> {
-    let port = 8100;
+    let port = next_free_local_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(200)).await;
 
