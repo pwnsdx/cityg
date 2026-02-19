@@ -3116,11 +3116,13 @@ pub fn joiner_kgen_merge_or<'a>(
     for key in [HDR_HP_BYTES, HDR_HP_COMMIT, HDR_POP_ALG, HDR_POP_SIG] {
         result.header_map.remove(&key);
     }
-    if let Some(pop_keys) = params.pop_keys.as_ref() {
-        result
-            .header_map
-            .insert(HDR_POP_PK, Value::Bytes(pop_keys.public_key.to_vec()));
-    }
+    let pop_keys = params
+        .pop_keys
+        .as_ref()
+        .ok_or_else(|| MsphfError::invalid_input("merge requires pop_public_key"))?;
+    result
+        .header_map
+        .insert(HDR_POP_PK, Value::Bytes(pop_keys.public_key.to_vec()));
 
     let pivot = select_pivot_parity(retired_parities)?;
     ensure_merge_domain(retired_parities, pivot)?;
