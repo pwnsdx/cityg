@@ -676,6 +676,80 @@ fn parse_barrier_update_for_recover(
     })
 }
 
+async fn full_chain_check_barrier_update(
+    client: &CitygApiClient,
+    room_id: &str,
+    session: &AppSession,
+    header_map: &BTreeMap<u64, Value>,
+    raw_update: &[u8],
+    max_barrier_update_bytes: usize,
+) -> Result<()> {
+    let n_max = session.barrier_state.n_max.max(1);
+    let parsed = parse_barrier_update_for_recover(raw_update, n_max, max_barrier_update_bytes)
+        .map_err(|err| anyhow!("barrier full chain-check prevalidation failed (960.7): {err}"))?;
+
+    let h_prev = session.barrier_state.kem_tree_hash_after;
+    let snapshot_prev = client
+        .barrier_fetch_public_tree(room_id, &h_prev)
+        .await
+        .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
+    if snapshot_prev.n_max != n_max {
+        return Err(anyhow!(
+            "barrier tree snapshot auth failure (960.9): n_max mismatch (expected {n_max}, got {})",
+            snapshot_prev.n_max
+        ));
+    }
+    validate_barrier_tree_snapshot_auth(&h_prev, n_max, &snapshot_prev)?;
+
+    let revoked_since_root = header_bytes32(header_map, hdr::HDR_REVOKED_SINCE_ROOT)
+        .ok_or_else(|| anyhow!("barrier full chain-check prevalidation failed (960.7): missing revoked_since_root"))?;
+    let revoked_root = header_bytes32(header_map, hdr::HDR_REVOKED_ROOT)
+        .ok_or_else(|| anyhow!("barrier full chain-check prevalidation failed (960.7): missing revoked_root"))?;
+    let revocation_roots_hash = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+    if parsed.revocation_roots_hash != revocation_roots_hash {
+        return Err(anyhow!(
+            "barrier full chain-check prevalidation failed (960.7): revocation_roots_hash mismatch"
+        ));
+    }
+
+    let join_records = client
+        .barrier_resolve_joins_since(room_id, parsed.prev_barrier_version)
+        .await
+        .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
+    let revoked_indices = client
+        .barrier_resolve_revoked_leaves(room_id, &revocation_roots_hash)
+        .await
+        .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
+
+    let mut snapshot_pre = snapshot_prev.pk_entries.clone();
+    apply_join_set_to_snapshot(snapshot_pre.as_mut_slice(), n_max, join_records.as_slice())?;
+    apply_revoked_set_to_snapshot(snapshot_pre.as_mut_slice(), n_max, revoked_indices.as_slice())?;
+    let expected_before = compute_barrier_tree_hash(n_max, snapshot_pre.as_slice())?;
+    if expected_before != parsed.kem_tree_hash_before {
+        return Err(anyhow!(
+            "barrier tree hash-chain failure (960.8): kem_tree_hash_before mismatch"
+        ));
+    }
+
+    let mut snapshot_post = snapshot_pre;
+    for (node, ek) in &parsed.new_public_keys {
+        let index =
+            usize::try_from(*node).map_err(|_| anyhow!("barrier node index out of range"))?;
+        let slot = snapshot_post
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+        *slot = ek.clone();
+    }
+    let expected_after = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
+    if expected_after != parsed.kem_tree_hash_after {
+        return Err(anyhow!(
+            "barrier tree hash-chain failure (960.8): kem_tree_hash_after mismatch"
+        ));
+    }
+
+    Ok(())
+}
+
 fn self_path_nodes(n_max: u64, cover_leaf_index: u64) -> Vec<u64> {
     let leaf_base = n_max.saturating_sub(1);
     let mut path = vec![leaf_base.saturating_add(cover_leaf_index)];
@@ -9403,6 +9477,20 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
             Some(Value::Bytes(_))
         );
         if has_barrier_update {
+            let raw_update = match bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE) {
+                Some(Value::Bytes(raw)) => raw.as_slice(),
+                Some(_) => return Err(anyhow!("header barrier_update must be bytes")),
+                None => return Err(anyhow!("missing barrier_update bytes")),
+            };
+            full_chain_check_barrier_update(
+                &client,
+                &session.room_id,
+                &session,
+                &bundle.header_map,
+                raw_update,
+                ticket_max_barrier_update_bytes,
+            )
+            .await?;
             match try_recover_barrier_from_header(
                 &session,
                 &bundle.header_map,
@@ -9430,7 +9518,11 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
                     ));
                 }
                 Err(err) => {
-                    return Err(anyhow!("barrier recover failed (960.7): {err}"));
+                    let detail = err.to_string();
+                    if detail.contains("960.") {
+                        return Err(anyhow!("barrier recover failed: {detail}"));
+                    }
+                    return Err(anyhow!("barrier recover failed (960.7): {detail}"));
                 }
             }
         } else {
