@@ -14297,8 +14297,13 @@ mod tests {
         let _restore = KbroadEnvVarRestore {
             original: std::env::var(KBROAD_SECRET_ENV).ok(),
         };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
@@ -14340,6 +14345,20 @@ mod tests {
 
     #[tokio::test]
     async fn epoch_sync_noop_when_already_current() -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
@@ -14377,6 +14396,20 @@ mod tests {
 
     #[tokio::test]
     async fn sequential_member_leaves_succeed() -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
@@ -14454,8 +14487,13 @@ mod tests {
         let _restore = KbroadEnvVarRestore {
             original: std::env::var(KBROAD_SECRET_ENV).ok(),
         };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
@@ -14578,6 +14616,20 @@ mod tests {
     #[tokio::test]
     async fn members_fetch_recovers_from_stale_parent_root()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
@@ -14636,6 +14688,20 @@ mod tests {
     #[tokio::test]
     async fn members_fetch_recovers_from_stale_parent_root_on_nonzero_offset()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
@@ -14692,6 +14758,20 @@ mod tests {
     #[tokio::test]
     async fn members_fetch_prefers_latest_root_when_old_root_is_still_valid()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
@@ -14749,8 +14829,13 @@ mod tests {
         let _restore = KbroadEnvVarRestore {
             original: std::env::var(KBROAD_SECRET_ENV).ok(),
         };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
@@ -14798,8 +14883,13 @@ mod tests {
         let _restore = KbroadEnvVarRestore {
             original: std::env::var(KBROAD_SECRET_ENV).ok(),
         };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
@@ -14846,6 +14936,20 @@ mod tests {
     #[tokio::test]
     async fn perform_join_succeeds_with_bootstrap_disabled()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_with_seed_demo_room(port, false).await;
         sleep(Duration::from_millis(250)).await;
@@ -14875,6 +14979,20 @@ mod tests {
     #[tokio::test]
     async fn perform_join_populates_barrier_leaf_key_material()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_with_seed_demo_room(port, false).await;
         sleep(Duration::from_millis(250)).await;
@@ -15093,6 +15211,20 @@ mod tests {
     #[tokio::test]
     async fn perform_fetch_skips_malformed_ciphertexts_and_invalid_auth_envelopes()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
         let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
