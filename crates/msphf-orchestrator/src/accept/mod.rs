@@ -85,6 +85,7 @@ pub const RHO_GUARD_CAPACITY: usize = 64;
 const MIN_SRX_MAX_BYTES: usize = 256 * 1024;
 const DEFAULT_SRX_MAX_BYTES: usize = 1024 * 1024;
 const FS_CAPSS_MAX_BYTES: usize = 16_384;
+const BARRIER_LEAF_PUBLIC_KEY_BYTES: usize = 1_184;
 const DEFAULT_SRX_SMALLWOOD_PROFILE: &str = "smallwood-v1/anemoi-jive-a1";
 pub(crate) const MERGE_ONLY_KEYS: [u64; 11] = [
     HDR_MH_HEADS,
@@ -791,6 +792,11 @@ impl AcceptanceContext {
         let barrier_update_digest = compute_barrier_update_digest(header_map)?;
         let revocation_roots_hash = compute_revocation_roots_hash(header_map)?;
         let has_barrier_update = barrier_update_reason.is_some();
+        if has_barrier_update && header_map.contains_key(&HDR_MERGE_DELEGATION_SIG) {
+            return Err(AcceptanceError::Freeze(
+                FREEZE_BARRIER_MERGE_DELEGATION_FORBIDDEN,
+            ));
+        }
         let state_snapshot = self.barrier_group_state(gid).cloned().unwrap_or_default();
         let parsed_barrier_update = if has_barrier_update {
             Some(parse_barrier_update_from_header(
@@ -1461,6 +1467,7 @@ impl AcceptanceContext {
         let anchor_type = classify_anchor_type(header_map);
         let is_merge = is_merge_anchor(header_map);
         ensure_known_header_keys(header_map, is_merge)?;
+        enforce_anchor_presence_rules(header_map, anchor_type)?;
         let barrier_gate =
             self.enforce_barrier_acceptance_gating(parts.gid, header_map, anchor_type)?;
         debug!(
@@ -1887,6 +1894,33 @@ fn ensure_known_header_keys(
         if !is_known_header_key(key, is_merge) {
             debug!("unknown header key {} (is_merge={})", key, is_merge);
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+    }
+    Ok(())
+}
+
+fn enforce_anchor_presence_rules(
+    header: &BTreeMap<u64, Value>,
+    anchor_type: AnchorType,
+) -> Result<(), AcceptanceError> {
+    match anchor_type {
+        AnchorType::Merge => {
+            if header.contains_key(&HDR_BARRIER_LEAF_PK) {
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+            }
+        }
+        AnchorType::Join => {
+            let Some(Value::Bytes(leaf_pk)) = header.get(&HDR_BARRIER_LEAF_PK) else {
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+            };
+            if leaf_pk.len() != BARRIER_LEAF_PUBLIC_KEY_BYTES {
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+            }
+        }
+        AnchorType::Regular => {
+            if header.contains_key(&HDR_BARRIER_LEAF_PK) {
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+            }
         }
     }
     Ok(())
@@ -4076,6 +4110,72 @@ mod tests {
             classify_anchor_type(&regular_header),
             AnchorType::Regular
         ));
+    }
+
+    #[test]
+    fn anchor_presence_rules_enforce_barrier_leaf_pk_shape() {
+        let mut join_header = BTreeMap::new();
+        join_header.insert(
+            HDR_BARRIER_LEAF_PK,
+            Value::Bytes(vec![0x7Au8; BARRIER_LEAF_PUBLIC_KEY_BYTES]),
+        );
+        assert!(
+            enforce_anchor_presence_rules(&join_header, AnchorType::Join).is_ok(),
+            "join anchors with well-formed barrier leaf key must pass"
+        );
+
+        join_header.insert(HDR_BARRIER_LEAF_PK, Value::Bytes(vec![0x7Au8; 64]));
+        assert!(
+            matches!(
+                enforce_anchor_presence_rules(&join_header, AnchorType::Join),
+                Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_CBOR
+            ),
+            "join anchors must reject malformed barrier leaf key bytes"
+        );
+
+        let mut merge_header = BTreeMap::new();
+        merge_header.insert(
+            HDR_BARRIER_LEAF_PK,
+            Value::Bytes(vec![0x11u8; BARRIER_LEAF_PUBLIC_KEY_BYTES]),
+        );
+        assert!(
+            matches!(
+                enforce_anchor_presence_rules(&merge_header, AnchorType::Merge),
+                Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_CBOR
+            ),
+            "merge anchors must reject join-only barrier leaf key"
+        );
+    }
+
+    #[test]
+    fn barrier_update_rejects_merge_delegation_key() -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-merge-delegation".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(42u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(6u64)));
+        header.insert(112, Value::Bytes([0x21; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x22; 32].to_vec()));
+
+        let rrh = compute_revocation_roots_hash(&header)?;
+        insert_valid_barrier_update(&mut header, 1_024, 0, 6, 5, rrh, 1)?;
+        header.insert(HDR_MERGE_DELEGATION_SIG, Value::Bytes(vec![0x55; 64]));
+        let state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 5,
+            barrier_roots_hash: rrh,
+            ..BarrierGroupState::default()
+        };
+        ctx.insert_barrier_group_state(gid, state);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code))
+                if code == FREEZE_BARRIER_MERGE_DELEGATION_FORBIDDEN
+        ));
+        Ok(())
     }
 
     #[test]
@@ -7213,7 +7313,7 @@ mod tests {
                 err,
                 AcceptanceError::Freeze(code)
                     if code == FREEZE_SRX_REQUIRED
-                        || code == FREEZE_FS_KBROAD_PRESENT
+                        || code == FREEZE_HASH_CBOR
                         || code == FREEZE_MSPHF_CRS_INVALID
             ),
             "unexpected result: {err:?}"
@@ -7273,7 +7373,7 @@ mod tests {
                 err,
                 AcceptanceError::Freeze(code)
                     if code == FREEZE_MH_HEADS_INVALID
-                        || code == FREEZE_FS_KBROAD_PRESENT
+                        || code == FREEZE_HASH_CBOR
                         || code == FREEZE_MSPHF_CRS_INVALID
             ),
             "unexpected result: {err:?}"
@@ -7365,7 +7465,11 @@ mod tests {
         assert!(result.is_err(), "duplicate heads should freeze");
         let err = result.unwrap_err();
         assert!(
-            matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_MH_HEADS_INVALID),
+            matches!(
+                err,
+                AcceptanceError::Freeze(code)
+                    if code == FREEZE_MH_HEADS_INVALID || code == FREEZE_HASH_CBOR
+            ),
             "unexpected error: {err:?}"
         );
         Ok(())
@@ -7437,7 +7541,7 @@ mod tests {
             matches!(
                 err,
                 AcceptanceError::Freeze(code)
-                    if code == FREEZE_MH_HEADS_INVALID || code == FREEZE_FS_KBROAD_PRESENT
+                    if code == FREEZE_MH_HEADS_INVALID || code == FREEZE_HASH_CBOR
             ),
             "unexpected error: {err:?}"
         );

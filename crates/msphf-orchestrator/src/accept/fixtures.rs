@@ -218,6 +218,7 @@ pub(crate) fn sample_header() -> BTreeMap<u64, Value> {
     map.insert(HDR_KBROAD_PUB, Value::Bytes(pk.to_vec()));
     map.insert(HDR_FS_POLICY_VERSION, Value::Integer(Integer::from(7u64)));
     map.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(0u64)));
+    map.insert(HDR_BARRIER_LEAF_PK, Value::Bytes(vec![0x42; 1_184]));
     map
 }
 

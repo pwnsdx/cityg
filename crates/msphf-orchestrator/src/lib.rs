@@ -3113,7 +3113,13 @@ pub fn joiner_kgen_merge_or<'a>(
         result.header_map.remove(&HDR_FS_PURGE_TIMES);
     }
 
-    for key in [HDR_HP_BYTES, HDR_HP_COMMIT, HDR_POP_ALG, HDR_POP_SIG] {
+    for key in [
+        HDR_HP_BYTES,
+        HDR_HP_COMMIT,
+        HDR_POP_ALG,
+        HDR_POP_SIG,
+        HDR_BARRIER_LEAF_PK,
+    ] {
         result.header_map.remove(&key);
     }
     let pop_keys = params
@@ -4899,6 +4905,7 @@ mod tests {
         map.insert(105, Value::Bytes(pk.to_vec()));
         map.insert(HDR_FS_POLICY_VERSION, Value::Integer(Integer::from(7u64)));
         map.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(0u64)));
+        map.insert(HDR_BARRIER_LEAF_PK, Value::Bytes(vec![0x42; 1_184]));
         map
     }
 

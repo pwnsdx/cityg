@@ -393,6 +393,7 @@ fn base_header() -> BTreeMap<u64, Value> {
     map.insert(104, Value::Text("ml-kem-768".to_string()));
     map.insert(105, Value::Bytes(kbroad_public().to_vec()));
     map.insert(176, Value::Integer(Integer::from(0u64)));
+    map.insert(177, Value::Bytes(vec![0x42; 1_184]));
     map
 }
 

@@ -25,7 +25,7 @@ impl AcceptanceContext {
         debug!("merge: join keys absent");
 
         if header_map.contains_key(&HDR_KBROAD_REPLAY) {
-            return Err(AcceptanceError::Freeze(FREEZE_FS_KBROAD_PRESENT));
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
 
         let fs_policy_version = match header_map.get(&HDR_FS_POLICY_VERSION) {
@@ -901,6 +901,7 @@ mod tests {
             HDR_SRX_HINT_SIZES,
             HDR_SRX_ROOT_SW,
             HDR_SRX_SMALLWOOD,
+            HDR_KBROAD_REPLAY,
             HDR_ROLLUP_PROVENANCE_COMMIT,
             HDR_ROLLUP_EPOCH_REPLAY,
             HDR_ROLLUP_VCK_COMMIT,
@@ -1318,7 +1319,7 @@ mod tests {
             &merge_joiner,
             &header,
             heads,
-            FREEZE_FS_KBROAD_PRESENT,
+            FREEZE_HASH_CBOR,
         )
     }
 

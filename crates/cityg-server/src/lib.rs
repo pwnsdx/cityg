@@ -914,6 +914,23 @@ impl CityGServer {
             .get(&hdr::HDR_BARRIER_LEAF_PK)
             .and_then(Value::as_bytes)
             .map(ToOwned::to_owned);
+        let required_join_barrier_leaf_pk = if delta.joined.is_empty() {
+            None
+        } else {
+            match maybe_barrier_leaf_pk {
+                Some(ref ek) if ek.len() == 1184 => Some(ek.clone()),
+                Some(_) => {
+                    return Err(CityGError::InvalidInput(
+                        "barrier_leaf_pk must be exactly 1184 bytes on join",
+                    ));
+                }
+                None => {
+                    return Err(CityGError::InvalidInput(
+                        "barrier_leaf_pk (header[177]) is required on join",
+                    ));
+                }
+            }
+        };
         let new_root = roster.apply_delta(bundle.gid(), &bundle.anchor.parent_root, &delta)?;
 
         if !delta.joined.is_empty() || !delta.revoked.is_empty() {
@@ -921,7 +938,12 @@ impl CityGServer {
             for leaf in &delta.joined {
                 let leaf_index = cover_leaf_index(leaf, state.n_max.max(1));
                 let device_pk = maybe_device_pk.clone().unwrap_or_else(|| leaf.to_vec());
-                let ek_leaf = maybe_barrier_leaf_pk.clone().unwrap_or_default();
+                let ek_leaf =
+                    required_join_barrier_leaf_pk
+                        .clone()
+                        .ok_or(CityGError::InvalidInput(
+                            "barrier_leaf_pk (header[177]) is required on join",
+                        ))?;
                 state.join_history.push(JoinLeafHistoryRecord {
                     barrier_version,
                     leaf_index,
@@ -3722,8 +3744,35 @@ mod tests {
         assert!(record.leaf_index > 0);
         assert!(!record.device_pk.is_empty());
         assert!(
-            record.ek_leaf.is_empty() || record.ek_leaf.len() == 1184,
-            "ek_leaf should be absent or ML-KEM-768 size"
+            record.ek_leaf.len() == 1184,
+            "ek_leaf must be present and ML-KEM-768 size"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accept_epoch_rejects_join_without_barrier_leaf_pk() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let mut bundle = cityg_client::demo::demo_bundle("alice")?;
+        bundle.header_map.remove(&hdr::HDR_BARRIER_LEAF_PK);
+
+        let err = server
+            .accept_epoch(&bundle)
+            .expect_err("join without barrier leaf key must be rejected");
+        assert!(
+            matches!(err, CityGError::InvalidInput(message) if message.contains("barrier_leaf_pk"))
+                || matches!(
+                    err,
+                    CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Msphf(
+                        msphf_core::MsphfError::InvalidInput(ref message)
+                    )) if message.contains("anchor_hdr_ctx mismatch")
+                )
+                || matches!(
+                    err,
+                    CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(code))
+                        if code.code == 9071
+                ),
+            "unexpected error: {err:?}"
         );
         Ok(())
     }

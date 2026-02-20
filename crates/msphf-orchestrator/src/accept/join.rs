@@ -23,6 +23,12 @@ impl AcceptanceContext {
         self.ensure_kbroad_pub(parts.gid, header_map)?;
         self.ensure_params_id(header_map)?;
         ensure_join_srx_keys_absent(header_map)?;
+        let Some(Value::Bytes(barrier_leaf_pk)) = header_map.get(&HDR_BARRIER_LEAF_PK) else {
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        };
+        if barrier_leaf_pk.len() != BARRIER_LEAF_PUBLIC_KEY_BYTES {
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
 
         let parent_root =
             header_bytes32_or_freeze(header_map, 110, FREEZE_FIELD_MISSING, "parent_root")?;

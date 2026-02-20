@@ -18,7 +18,9 @@ use anchor_seed::{
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use blake3::hash as blake3_hash;
 use ciborium::value::{Integer, Value};
-use cityg_api_client::{BarrierJoinRecord, CitygApiClient, Error as ApiClientError, MergeTicket};
+use cityg_api_client::{
+    BarrierJoinRecord, BarrierPublicTree, CitygApiClient, Error as ApiClientError, MergeTicket,
+};
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
 use cityg_config::CityGConfig;
@@ -343,6 +345,25 @@ fn compute_barrier_tree_hash_recursive(
         },
     )
     .map_err(|err| anyhow!("compute barrier node hash: {err}"))
+}
+
+fn validate_barrier_tree_snapshot_auth(
+    expected_hash: &[u8; 32],
+    expected_n_max: u64,
+    snapshot: &BarrierPublicTree,
+) -> Result<()> {
+    if snapshot.kem_tree_hash_after != *expected_hash {
+        return Err(anyhow!(
+            "barrier tree snapshot auth failure (960.9): hash mismatch"
+        ));
+    }
+    let computed_hash = compute_barrier_tree_hash(expected_n_max, snapshot.pk_entries.as_slice())?;
+    if computed_hash != *expected_hash {
+        return Err(anyhow!(
+            "barrier tree snapshot auth failure (960.9): tree hash mismatch"
+        ));
+    }
+    Ok(())
 }
 
 fn sibling_node(node: u64) -> Option<u64> {
@@ -2011,6 +2032,7 @@ struct BarrierSecretState {
     barrier_version: u64,
     k_barrier: [u8; 32],
     kem_tree_hash_after: [u8; 32],
+    max_barrier_update_bytes: u64,
     n_max: u64,
     cover_leaf_index: u64,
     dk_leaf: Vec<u8>,
@@ -2025,6 +2047,7 @@ impl Default for BarrierSecretState {
             barrier_version: 0,
             k_barrier: [0u8; 32],
             kem_tree_hash_after: [0u8; 32],
+            max_barrier_update_bytes: 0,
             n_max: DEFAULT_BARRIER_N_MAX,
             cover_leaf_index: 0,
             dk_leaf: Vec::new(),
@@ -6006,6 +6029,7 @@ struct LeaveRequest {
     fs_dev_prev_commit: [u8; 32],
     k_fs_current: [u8; 32],
     we_epoch_id: [u8; 32],
+    max_barrier_update_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -6041,6 +6065,7 @@ impl LeaveRequest {
             fs_dev_prev_commit: session.fs_dev_prev_commit,
             k_fs_current: session.forward_state.snapshot().k_fs,
             we_epoch_id: session.we_epoch_id,
+            max_barrier_update_bytes: session.barrier_state.max_barrier_update_bytes,
         }
     }
 }
@@ -6050,14 +6075,14 @@ fn persist_pending_barrier_state_before_publish(
     pending: BarrierPendingState,
 ) -> Result<()> {
     let Some(mut session) = load_session_at(&request.server_url, &request.room_id)? else {
-        warn!("session snapshot missing before barrier publish; skipping pending persist");
-        return Ok(());
+        return Err(anyhow!(
+            "session snapshot missing before barrier publish; refusing to publish barrier update"
+        ));
     };
     if session.gid != request.gid || session.leaf_id != request.leaf_id {
-        warn!(
-            "session snapshot identity mismatch before barrier publish; skipping pending persist"
-        );
-        return Ok(());
+        return Err(anyhow!(
+            "session snapshot identity mismatch before barrier publish; refusing to publish barrier update"
+        ));
     }
     session.barrier_state.pending = Some(pending);
     persist_session(&session).context("persist pending barrier state before publish")?;
@@ -6285,6 +6310,10 @@ fn default_barrier_n_max() -> u64 {
     DEFAULT_BARRIER_N_MAX
 }
 
+fn default_max_barrier_update_bytes() -> u64 {
+    0
+}
+
 fn new_api_client(server_url: &str) -> CitygApiClient {
     let mut client = CitygApiClient::new(server_url);
     if let Some(token) = configured_client_admin_token() {
@@ -6313,6 +6342,8 @@ struct PersistedBarrierState {
     k_barrier_hex: String,
     #[serde(default)]
     kem_tree_hash_after_hex: String,
+    #[serde(default = "default_max_barrier_update_bytes")]
+    max_barrier_update_bytes: u64,
     #[serde(default = "default_barrier_n_max")]
     n_max: u64,
     #[serde(default)]
@@ -6483,6 +6514,7 @@ impl PersistedBarrierState {
             barrier_version: state.barrier_version,
             k_barrier_hex: hex_encode(state.k_barrier),
             kem_tree_hash_after_hex: hex_encode(state.kem_tree_hash_after),
+            max_barrier_update_bytes: state.max_barrier_update_bytes,
             n_max: state.n_max.max(1),
             cover_leaf_index: state.cover_leaf_index,
             dk_leaf_hex: hex_encode(&state.dk_leaf),
@@ -6510,6 +6542,7 @@ impl PersistedBarrierState {
                 "barrier_state.kem_tree_hash_after_hex",
                 &self.kem_tree_hash_after_hex,
             )?,
+            max_barrier_update_bytes: self.max_barrier_update_bytes,
             n_max: self.n_max.max(1),
             cover_leaf_index: self.cover_leaf_index,
             dk_leaf: decode_hex_vec("barrier_state.dk_leaf_hex", &self.dk_leaf_hex)?,
@@ -6755,6 +6788,74 @@ impl PersistedSession {
     }
 }
 
+fn write_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("path has no parent directory: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session");
+
+    for attempt in 0..32u8 {
+        let mut suffix = [0u8; 8];
+        thread_rng().fill_bytes(&mut suffix);
+        let suffix = u64::from_le_bytes(suffix);
+        let temp_path = parent.join(format!(
+            ".{file_name}.tmp-{}-{suffix}-{attempt}",
+            std::process::id()
+        ));
+
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to create {}", temp_path.display()));
+            }
+        };
+
+        if let Err(err) = file
+            .write_all(data)
+            .and_then(|_| file.sync_all())
+            .with_context(|| format!("failed to write {}", temp_path.display()))
+        {
+            let _ = fs::remove_file(&temp_path);
+            return Err(err);
+        }
+        drop(file);
+
+        if let Err(err) = fs::rename(&temp_path, path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to atomically replace {} with {}",
+                    path.display(),
+                    temp_path.display()
+                )
+            });
+        }
+
+        #[cfg(unix)]
+        {
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "failed to allocate unique temporary file for {}",
+        path.display()
+    ))
+}
+
 fn persist_session(session: &AppSession) -> Result<()> {
     let persisted = PersistedSession::from_session(session);
     let path = session_file_path(&session.server_url, &session.room_id)?;
@@ -6763,7 +6864,7 @@ fn persist_session(session: &AppSession) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let data = encrypt_persisted_session(&persisted, &path)?;
-    fs::write(&path, data).with_context(|| format!("failed to write {}", path.display()))?;
+    write_file_atomic(&path, &data)?;
 
     let pointer = LastSessionPointer {
         server_url: session.server_url.clone(),
@@ -6775,8 +6876,7 @@ fn persist_session(session: &AppSession) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let pointer_data = serde_json::to_vec(&pointer).context("failed to encode session pointer")?;
-    fs::write(&pointer_path, pointer_data)
-        .with_context(|| format!("failed to write {}", pointer_path.display()))?;
+    write_file_atomic(&pointer_path, &pointer_data)?;
 
     Ok(())
 }
@@ -7975,6 +8075,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
             barrier_version: ticket.barrier_version,
             k_barrier,
             kem_tree_hash_after,
+            max_barrier_update_bytes: ticket.max_barrier_update_bytes.max(1),
             n_max: barrier_n_max,
             cover_leaf_index: ticket.cover_leaf_index,
             dk_leaf: barrier_leaf_dk_bytes,
@@ -8000,6 +8101,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         fs_ec,
         fs_epoch_commit,
         fs_dev_prev_commit,
+        max_barrier_update_bytes: stored_max_barrier_update_bytes,
         ..
     } = request;
 
@@ -8133,6 +8235,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
             barrier_tree_snapshot.n_max
         ));
     }
+    validate_barrier_tree_snapshot_auth(&snapshot_hash, barrier_n_max, &barrier_tree_snapshot)?;
     let join_records = client
         .barrier_resolve_joins_since(&room_id, barrier_version)
         .await
@@ -8167,7 +8270,18 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         kem_tree_hash_before,
         snapshot_pre.as_slice(),
     )?;
-    let max_barrier_update_bytes = normalize_max_barrier_update_bytes(max_barrier_update_bytes)?;
+    let ticket_max_barrier_update_bytes = max_barrier_update_bytes.max(1);
+    if stored_max_barrier_update_bytes != 0
+        && stored_max_barrier_update_bytes != ticket_max_barrier_update_bytes
+    {
+        return Err(anyhow!(
+            "max_barrier_update_bytes mismatch: local={} server={}",
+            stored_max_barrier_update_bytes,
+            ticket_max_barrier_update_bytes
+        ));
+    }
+    let max_barrier_update_bytes =
+        normalize_max_barrier_update_bytes(ticket_max_barrier_update_bytes)?;
     if barrier_update.raw_update.len() > max_barrier_update_bytes {
         return Err(anyhow!(
             "barrier_update exceeds max_barrier_update_bytes: {} > {}",
@@ -8334,6 +8448,7 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
         fs_dev_prev_commit,
         k_fs_current,
         we_epoch_id,
+        max_barrier_update_bytes: stored_max_barrier_update_bytes,
     } = request;
 
     let client = new_api_client(&server_url);
@@ -8468,6 +8583,7 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
             barrier_tree_snapshot.n_max
         ));
     }
+    validate_barrier_tree_snapshot_auth(&snapshot_hash, barrier_n_max, &barrier_tree_snapshot)?;
     let join_records = client
         .barrier_resolve_joins_since(&room_id, barrier_version)
         .await
@@ -8499,7 +8615,18 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
         kem_tree_hash_before,
         snapshot_pre.as_slice(),
     )?;
-    let max_barrier_update_bytes = normalize_max_barrier_update_bytes(max_barrier_update_bytes)?;
+    let ticket_max_barrier_update_bytes = max_barrier_update_bytes.max(1);
+    if stored_max_barrier_update_bytes != 0
+        && stored_max_barrier_update_bytes != ticket_max_barrier_update_bytes
+    {
+        return Err(anyhow!(
+            "max_barrier_update_bytes mismatch: local={} server={}",
+            stored_max_barrier_update_bytes,
+            ticket_max_barrier_update_bytes
+        ));
+    }
+    let max_barrier_update_bytes =
+        normalize_max_barrier_update_bytes(ticket_max_barrier_update_bytes)?;
     if barrier_update.raw_update.len() > max_barrier_update_bytes {
         return Err(anyhow!(
             "barrier_update exceeds max_barrier_update_bytes: {} > {}",
@@ -9115,8 +9242,18 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     } else {
         ticket.n_max
     };
+    let ticket_max_barrier_update_bytes_u64 = ticket.max_barrier_update_bytes.max(1);
     let ticket_max_barrier_update_bytes =
-        normalize_max_barrier_update_bytes(ticket.max_barrier_update_bytes)?;
+        normalize_max_barrier_update_bytes(ticket_max_barrier_update_bytes_u64)?;
+    if session.barrier_state.max_barrier_update_bytes != 0
+        && session.barrier_state.max_barrier_update_bytes != ticket_max_barrier_update_bytes_u64
+    {
+        return Err(anyhow!(
+            "max_barrier_update_bytes mismatch: local={} server={}",
+            session.barrier_state.max_barrier_update_bytes,
+            ticket_max_barrier_update_bytes_u64
+        ));
+    }
     if ticket.cover_leaf_index >= ticket_n_max {
         return Err(anyhow!(
             "merge ticket cover_leaf_index out of range: {} >= {}",
@@ -9127,9 +9264,11 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     let barrier_changed = session.barrier_state.barrier_version != ticket.barrier_version
         || session.barrier_state.k_barrier != ticket_k_barrier
         || session.barrier_state.kem_tree_hash_after != ticket_kem_tree_hash_after
+        || session.barrier_state.max_barrier_update_bytes != ticket_max_barrier_update_bytes_u64
         || session.barrier_state.n_max != ticket_n_max
         || session.barrier_state.cover_leaf_index != ticket.cover_leaf_index;
     session.barrier_state.barrier_version = ticket.barrier_version;
+    session.barrier_state.max_barrier_update_bytes = ticket_max_barrier_update_bytes_u64;
     session.barrier_state.n_max = ticket_n_max;
     session.barrier_state.cover_leaf_index = ticket.cover_leaf_index;
     let pending_changed_without_bundle =
@@ -10317,6 +10456,43 @@ mod tests {
         );
         header.insert(hdr::HDR_BARRIER_UPDATE, Value::Integer(Integer::from(7u64)));
         assert!(extract_barrier_update_digest(&header).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn validate_barrier_tree_snapshot_auth_checks_hash_and_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let n_max = 4u64;
+        let pk_entries = vec![Vec::new(); 7];
+        let expected_hash = compute_barrier_tree_hash(n_max, pk_entries.as_slice())?;
+        let mut snapshot = BarrierPublicTree {
+            n_max,
+            kem_tree_hash_after: [0xAB; 32],
+            pk_entries: pk_entries.clone(),
+        };
+
+        let err = validate_barrier_tree_snapshot_auth(&expected_hash, n_max, &snapshot)
+            .expect_err("mismatched response hash must fail");
+        assert!(
+            err.to_string().contains("960.9"),
+            "unexpected snapshot-auth error: {err}"
+        );
+
+        snapshot.kem_tree_hash_after = expected_hash;
+        snapshot.pk_entries[3] = vec![0x11; 1184];
+        let err = validate_barrier_tree_snapshot_auth(&expected_hash, n_max, &snapshot)
+            .expect_err("mismatched tree content must fail");
+        assert!(
+            err.to_string().contains("960.9"),
+            "unexpected snapshot-auth error: {err}"
+        );
+
+        let good_snapshot = BarrierPublicTree {
+            n_max,
+            kem_tree_hash_after: expected_hash,
+            pk_entries,
+        };
+        validate_barrier_tree_snapshot_auth(&expected_hash, n_max, &good_snapshot)?;
         Ok(())
     }
 
@@ -14046,6 +14222,7 @@ mod tests {
             barrier_version: 5,
             k_barrier: array(0x21),
             kem_tree_hash_after: array(0x22),
+            max_barrier_update_bytes: DEFAULT_MAX_BARRIER_UPDATE_BYTES,
             n_max: 8,
             cover_leaf_index: 3,
             dk_leaf: random_vec(kyber768::secret_key_bytes()),
@@ -14415,7 +14592,9 @@ mod tests {
         sleep(Duration::from_millis(250)).await;
 
         let server_url = format!("http://127.0.0.1:{port}");
-        let room_id = hex_encode([0x66u8; 32]);
+        let mut room_id_bytes = [0x66u8; 32];
+        room_id_bytes[..2].copy_from_slice(&port.to_le_bytes());
+        let room_id = hex_encode(room_id_bytes);
         bootstrap_test_room(&server_url, &room_id).await?;
 
         let alice = perform_join(JoinParams {
@@ -14447,6 +14626,7 @@ mod tests {
                 .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice())
         );
 
+        persist_session(&alice)?;
         perform_leave(LeaveRequest::from_session(&alice)).await?;
         let after_alice_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_alice_leave.total_count, 1);
@@ -14469,6 +14649,7 @@ mod tests {
             .rotate_room_kbroad(&room_id, &rotated_kbroad_public)
             .await?;
 
+        persist_session(&bob)?;
         perform_leave(LeaveRequest::from_session(&bob)).await?;
         let after_bob_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_bob_leave.total_count, 0);

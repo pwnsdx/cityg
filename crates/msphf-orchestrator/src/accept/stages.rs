@@ -29,6 +29,7 @@ pub(super) fn ensure_merge_join_keys_absent(
 ) -> Result<(), AcceptanceError> {
     for key in [
         super::HDR_HP_BYTES,
+        super::HDR_BARRIER_LEAF_PK,
         super::HDR_POP_ALG,
         super::HDR_POP_SIG,
         super::HDR_BOOTSTRAP_ALG,

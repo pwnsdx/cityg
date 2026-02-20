@@ -150,11 +150,6 @@ pub const FREEZE_FS_FORWARD_JUMP_GROUP: FreezeError = FreezeError {
     reason: "fs_forward_jump_group",
 };
 
-pub const FREEZE_FS_KBROAD_PRESENT: FreezeError = FreezeError {
-    code: 94431,
-    reason: "fs_kbroad_present_in_fspurge",
-};
-
 pub const FREEZE_FS_CHECKPOINT_BACKDATE: FreezeError = FreezeError {
     code: 9471,
     reason: "fs_checkpoint_backdate",
@@ -163,6 +158,11 @@ pub const FREEZE_FS_CHECKPOINT_BACKDATE: FreezeError = FreezeError {
 pub const FREEZE_FS_CHECKPOINT_MONOTONICITY: FreezeError = FreezeError {
     code: 9473,
     reason: "fs_checkpoint_monotonicity",
+};
+
+pub const FREEZE_BARRIER_MERGE_DELEGATION_FORBIDDEN: FreezeError = FreezeError {
+    code: 9604,
+    reason: "barrier_merge_delegation_forbidden",
 };
 
 pub const FREEZE_BARRIER_PROACTIVE_FORBIDDEN: FreezeError = FreezeError {
