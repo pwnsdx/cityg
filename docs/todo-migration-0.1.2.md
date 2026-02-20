@@ -142,6 +142,6 @@ to the unified FS-hybrid + PRS barrier profile in `/Users/admin/Desktop/Reposito
   use `tau_e(t)`-based `K_msg_epoch` input and include full tuple fields (`xk_hash`, `E_k`) in salt/nonce/AAD.
   - [x] Full tuple fields (`xk_hash`, `E_k`) are now bound in message epoch salt, nonce, and AAD on send/receive paths.
   - [ ] `K_msg_epoch` still uses `epoch_key` as IKM; migrate to explicit `tau_e(t)` derivation/source.
-- [ ] (Code) Strengthen deterministic-CBOR verification (`S1.3`) to explicitly reject duplicate keys/floats/indefinite forms at parse time, not only via decode+re-encode.
+- [x] (Code) Strengthen deterministic-CBOR verification (`S1.3`) to explicitly reject duplicate keys/floats/indefinite forms at parse time, not only via decode+re-encode.
 - [ ] (Spec or transport refactor) Clarify/implement byte-level deterministic-CBOR verification for full anchor header maps where only decoded maps are currently exposed to GUI logic.
 - [ ] (Code+API or spec clarification) Reconcile `S12.2` join provisioning requirement for `initial K_fs` with current join flow that locally seeds `ForwardSecrecyState`.
