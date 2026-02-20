@@ -254,6 +254,15 @@ struct BarrierGateDecision {
     parsed_barrier_update: Option<ParsedBarrierUpdate>,
 }
 
+pub(crate) struct DeviceChainVerification<'a> {
+    pub(crate) pop_pk: &'a [u8],
+    pub(crate) fs_ec: u64,
+    pub(crate) fs_dev_prev_commit: &'a [u8; 32],
+    pub(crate) fs_dev_commit: &'a [u8; 32],
+    pub(crate) barrier_version: u64,
+    pub(crate) barrier_update_digest: &'a [u8; 32],
+}
+
 pub const FREEZE_SRX_REQUIRED: FreezeError = FreezeError {
     code: 929,
     reason: "srx_required",
@@ -699,16 +708,20 @@ impl AcceptanceContext {
         }
     }
 
-    pub fn verify_device_chain_state(
+    pub(crate) fn verify_device_chain_state(
         &self,
-        pop_pk: &[u8],
-        fs_ec: u64,
-        fs_dev_prev_commit: &[u8; 32],
-        fs_dev_commit: &[u8; 32],
         existing: Option<&DeviceChainState>,
-        barrier_version: u64,
-        barrier_update_digest: &[u8; 32],
+        verification: DeviceChainVerification<'_>,
     ) -> Result<(), AcceptanceError> {
+        let DeviceChainVerification {
+            pop_pk,
+            fs_ec,
+            fs_dev_prev_commit,
+            fs_dev_commit,
+            barrier_version,
+            barrier_update_digest,
+        } = verification;
+
         let group_cap = self
             .last_accepted_ec()
             .saturating_add(self.fs_caps.anchor_max);
@@ -802,10 +815,11 @@ impl AcceptanceContext {
             return Ok(decision);
         };
 
-        if state.barrier_initialized && has_barrier_update {
-            if decision.parsed_barrier_update.is_none() {
-                return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
-            }
+        if state.barrier_initialized
+            && has_barrier_update
+            && decision.parsed_barrier_update.is_none()
+        {
+            return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
         }
 
         if !state.barrier_initialized {
@@ -3180,10 +3194,12 @@ mod tests {
         ctx.clear_device_chains();
         assert_eq!(ctx.device_chains_iter().count(), 0);
 
-        let mut barrier_state = BarrierGroupState::default();
-        barrier_state.barrier_initialized = true;
-        barrier_state.barrier_version = 4;
-        barrier_state.last_pcs_refresh_ec = Some(44);
+        let barrier_state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 4,
+            last_pcs_refresh_ec: Some(44),
+            ..BarrierGroupState::default()
+        };
         ctx.insert_barrier_group_state(b"gid-b", barrier_state.clone());
         assert_eq!(ctx.barrier_groups_iter().count(), 1);
         assert_eq!(ctx.barrier_group_state(b"gid-b"), Some(&barrier_state));
@@ -3559,7 +3575,7 @@ mod tests {
             right: None,
             path: Vec::new(),
         };
-        ensure_nonmem_coverage(&[], &[coverage_witness.clone()])?;
+        ensure_nonmem_coverage(&[], std::slice::from_ref(&coverage_witness))?;
         ensure_nonmem_coverage(&[[0x42; 32]], &[coverage_witness])?;
         let bounded = ValidatedNonMembership {
             query: [0x50; 32],
@@ -3925,23 +3941,27 @@ mod tests {
         )?;
 
         ctx.verify_device_chain_state(
-            &pop_pk,
-            104,
-            &prev_commit,
-            &dev_commit,
             None,
-            0,
-            &[0u8; 32],
+            DeviceChainVerification {
+                pop_pk: &pop_pk,
+                fs_ec: 104,
+                fs_dev_prev_commit: &prev_commit,
+                fs_dev_commit: &dev_commit,
+                barrier_version: 0,
+                barrier_update_digest: &[0u8; 32],
+            },
         )?;
 
         let result = ctx.verify_device_chain_state(
-            &pop_pk,
-            107,
-            &prev_commit,
-            &dev_commit,
             None,
-            0,
-            &[0u8; 32],
+            DeviceChainVerification {
+                pop_pk: &pop_pk,
+                fs_ec: 107,
+                fs_dev_prev_commit: &prev_commit,
+                fs_dev_commit: &dev_commit,
+                barrier_version: 0,
+                barrier_update_digest: &[0u8; 32],
+            },
         );
         assert!(result.is_err(), "should freeze");
         let err = result.unwrap_err();
@@ -3968,13 +3988,15 @@ mod tests {
             },
         )?;
         let result = ctx.verify_device_chain_state(
-            &pop_pk,
-            114,
-            &prev_existing,
-            &dev_commit_existing,
             Some(&existing),
-            0,
-            &[0u8; 32],
+            DeviceChainVerification {
+                pop_pk: &pop_pk,
+                fs_ec: 114,
+                fs_dev_prev_commit: &prev_existing,
+                fs_dev_commit: &dev_commit_existing,
+                barrier_version: 0,
+                barrier_update_digest: &[0u8; 32],
+            },
         );
         assert!(result.is_err(), "device max exceeded");
         let err = result.unwrap_err();
@@ -4068,10 +4090,12 @@ mod tests {
 
         let mut ctx = AcceptanceContext::with_defaults();
         configure_bootstrap(&mut ctx);
-        let mut barrier_state = BarrierGroupState::default();
-        barrier_state.barrier_initialized = true;
-        barrier_state.barrier_version = 0;
-        barrier_state.barrier_roots_hash = [0xAB; 32];
+        let barrier_state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 0,
+            barrier_roots_hash: [0xAB; 32],
+            ..BarrierGroupState::default()
+        };
         ctx.insert_barrier_group_state(parts.gid, barrier_state);
 
         seed_capss_with(&mut ctx, &fs_witness);
@@ -4102,13 +4126,15 @@ mod tests {
 
         let rrh = compute_revocation_roots_hash(&header)?;
         insert_valid_barrier_update(&mut header, 1_024, 0, 6, 5, rrh, 1)?;
-        let mut barrier_state = BarrierGroupState::default();
-        barrier_state.barrier_initialized = true;
-        barrier_state.barrier_version = 5;
-        barrier_state.barrier_roots_hash = rrh;
-        barrier_state.last_pcs_refresh_ec = Some(100);
-        barrier_state.pcs_refresh_min_delta_group_ec = 1;
-        barrier_state.pcs_refresh_slot_width_ec = 10;
+        let barrier_state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 5,
+            barrier_roots_hash: rrh,
+            last_pcs_refresh_ec: Some(100),
+            pcs_refresh_min_delta_group_ec: 1,
+            pcs_refresh_slot_width_ec: 10,
+            ..BarrierGroupState::default()
+        };
         ctx.insert_barrier_group_state(gid, barrier_state);
 
         let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
@@ -4162,10 +4188,12 @@ mod tests {
 
         let rrh = compute_revocation_roots_hash(&header)?;
         insert_valid_barrier_update(&mut header, 1_024, 0, 6, 5, rrh, 1)?;
-        let mut state = BarrierGroupState::default();
-        state.barrier_initialized = true;
-        state.barrier_version = 5;
-        state.barrier_roots_hash = rrh;
+        let state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 5,
+            barrier_roots_hash: rrh,
+            ..BarrierGroupState::default()
+        };
         ctx.insert_barrier_group_state(gid, state);
 
         let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Join);
@@ -4192,14 +4220,16 @@ mod tests {
 
         let rrh = compute_revocation_roots_hash(&header)?;
         insert_valid_barrier_update(&mut header, 1_024, 0, 10, 9, rrh, 1)?;
-        let mut state = BarrierGroupState::default();
-        state.barrier_initialized = true;
-        state.barrier_version = 9;
-        state.barrier_roots_hash = rrh;
-        state.last_pcs_refresh_ec = Some(100);
-        state.pcs_refresh_min_delta_group_ec = 1;
-        state.pcs_refresh_slot_width_ec = 10;
-        state.pcs_refresh_min_delta_device_ec = 5;
+        let state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 9,
+            barrier_roots_hash: rrh,
+            last_pcs_refresh_ec: Some(100),
+            pcs_refresh_min_delta_group_ec: 1,
+            pcs_refresh_slot_width_ec: 10,
+            pcs_refresh_min_delta_device_ec: 5,
+            ..BarrierGroupState::default()
+        };
         ctx.insert_barrier_group_state(gid, state);
 
         let device_state = ctx.device_chain_entry_mut(gid, &device_pk);
@@ -4227,14 +4257,16 @@ mod tests {
 
         let rrh = compute_revocation_roots_hash(&header)?;
         insert_valid_barrier_update(&mut header, 1_024, 0, 8, 7, rrh, 1)?;
-        let mut state = BarrierGroupState::default();
-        state.barrier_initialized = true;
-        state.barrier_version = 7;
-        state.barrier_roots_hash = rrh;
-        state.last_pcs_refresh_ec = Some(100);
-        state.pcs_refresh_min_delta_group_ec = 5;
-        state.pcs_refresh_slot_width_ec = 10;
-        state.pcs_refresh_min_delta_device_ec = 5;
+        let state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 7,
+            barrier_roots_hash: rrh,
+            last_pcs_refresh_ec: Some(100),
+            pcs_refresh_min_delta_group_ec: 5,
+            pcs_refresh_slot_width_ec: 10,
+            pcs_refresh_min_delta_device_ec: 5,
+            ..BarrierGroupState::default()
+        };
         ctx.insert_barrier_group_state(gid, state);
 
         let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge)?;
@@ -4259,10 +4291,12 @@ mod tests {
             Value::Array(vec![Value::Bytes([0x44; 32].to_vec())]),
         );
 
-        let mut state = BarrierGroupState::default();
-        state.barrier_initialized = true;
-        state.barrier_version = 3;
-        state.barrier_roots_hash = [0xFF; 32];
+        let state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 3,
+            barrier_roots_hash: [0xFF; 32],
+            ..BarrierGroupState::default()
+        };
         ctx.insert_barrier_group_state(gid, state);
 
         let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
@@ -4374,10 +4408,12 @@ mod tests {
         let rrh = compute_revocation_roots_hash(&header)?;
         insert_valid_barrier_update(&mut header, 1_024, 0, 5, 4, rrh, 0)?;
 
-        let mut state = BarrierGroupState::default();
-        state.barrier_initialized = true;
-        state.barrier_version = 4;
-        state.barrier_roots_hash = [0x00; 32];
+        let state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 4,
+            barrier_roots_hash: [0x00; 32],
+            ..BarrierGroupState::default()
+        };
         ctx.insert_barrier_group_state(gid, state);
 
         let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
@@ -4403,11 +4439,13 @@ mod tests {
         let rrh = compute_revocation_roots_hash(&header)?;
         insert_valid_barrier_update(&mut header, 1_024, 0, 8, 7, rrh, 1)?;
 
-        let mut state = BarrierGroupState::default();
-        state.barrier_initialized = true;
-        state.barrier_version = 7;
-        state.barrier_roots_hash = rrh;
-        state.kem_tree_hash_after = [0xAA; 32];
+        let state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 7,
+            barrier_roots_hash: rrh,
+            kem_tree_hash_after: [0xAA; 32],
+            ..BarrierGroupState::default()
+        };
         ctx.insert_barrier_group_state(gid, state);
 
         let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
@@ -4431,10 +4469,12 @@ mod tests {
         header.insert(113, Value::Bytes([0x82; 32].to_vec()));
 
         let rrh = compute_revocation_roots_hash(&header)?;
-        let mut state = BarrierGroupState::default();
-        state.barrier_initialized = true;
-        state.barrier_version = 8;
-        state.barrier_roots_hash = rrh;
+        let state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 8,
+            barrier_roots_hash: rrh,
+            ..BarrierGroupState::default()
+        };
         ctx.insert_barrier_group_state(gid, state);
 
         let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Join);
@@ -5213,10 +5253,8 @@ mod tests {
                 if let Some(entry) = items.get_mut(2) {
                     *entry = Value::Bytes(vec![0xBB; 32]);
                 }
-            } else {
-                if let Some(entry) = items.get_mut(3) {
-                    *entry = Value::Bytes(vec![0xCC; 20_000]);
-                }
+            } else if let Some(entry) = items.get_mut(3) {
+                *entry = Value::Bytes(vec![0xCC; 20_000]);
             }
 
             let fs_witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);

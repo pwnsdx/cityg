@@ -106,13 +106,15 @@ impl AcceptanceContext {
         if let Some(pop_pk_bytes) = pop_pk_bytes.as_deref() {
             let device_state = self.device_chain_get(parts.gid, pop_pk_bytes);
             self.verify_device_chain_state(
-                pop_pk_bytes,
-                fs_ec,
-                &fs_dev_prev_commit,
-                &fs_dev_commit,
                 device_state,
-                barrier_version,
-                &barrier_update_digest,
+                DeviceChainVerification {
+                    pop_pk: pop_pk_bytes,
+                    fs_ec,
+                    fs_dev_prev_commit: &fs_dev_prev_commit,
+                    fs_dev_commit: &fs_dev_commit,
+                    barrier_version,
+                    barrier_update_digest: &barrier_update_digest,
+                },
             )?;
         }
 

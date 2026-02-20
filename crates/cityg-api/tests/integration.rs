@@ -34,6 +34,7 @@ fn test_client(base_url: impl Into<String>) -> CitygApiClient {
         .with_message_auth_token(TEST_MESSAGE_TOKEN)
 }
 
+#[allow(clippy::expect_used)]
 fn next_free_local_port() -> u16 {
     std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .expect("bind ephemeral test port")

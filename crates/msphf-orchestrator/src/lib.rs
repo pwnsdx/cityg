@@ -3718,9 +3718,7 @@ mod tests {
         assert!(
             encrypt_hp_bytes(&vec![0x55; MAX_HP_BYTES + 1], &xk_hash, &hp_commit, &key).is_err()
         );
-        assert!(
-            decrypt_hp_bytes(&vec![0x00; AEAD_TAG_LEN - 1], &xk_hash, &hp_commit, &key).is_err()
-        );
+        assert!(decrypt_hp_bytes(&[0x00; AEAD_TAG_LEN - 1], &xk_hash, &hp_commit, &key).is_err());
         let mut wrong_key = key;
         wrong_key[0] ^= 0x01;
         assert!(decrypt_hp_bytes(&ciphertext, &xk_hash, &hp_commit, &wrong_key).is_err());
@@ -6393,7 +6391,7 @@ mod tests {
             Ok(processed_b) => {
                 assert!(matches!(processed_a.outcome.kind, AcceptanceKind::NonMerge));
                 assert!(matches!(processed_b.outcome.kind, AcceptanceKind::NonMerge));
-                assert!(receiver_cache.len() >= 1);
+                assert!(!receiver_cache.is_empty());
             }
             Err(err) => {
                 let debug = format!("{err:?}");

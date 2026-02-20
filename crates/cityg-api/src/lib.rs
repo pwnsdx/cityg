@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
+#[allow(dead_code)]
 mod pb {
     include!(concat!(env!("OUT_DIR"), "/cityg.api.v1.rs"));
 }
@@ -45,9 +46,11 @@ use pb::{
     GetWindowRequest, GetWindowResponse, HealthResponse, IdentityBinding, JoinTicketRequest,
     JoinTicketResponse, Member, MembersRequest, MembersResponse, MergeTicketIntent,
     MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
-    RotateRoomKbroadRequest, RotateRoomKbroadResponse, SeedHeadRequest, SeedHeadResponse,
-    SendMessageRequest, SendMessageResponse, TelemetryEntry, WindowEntry, WindowHead,
+    RotateRoomKbroadRequest, RotateRoomKbroadResponse, SendMessageRequest, SendMessageResponse,
+    TelemetryEntry, WindowEntry, WindowHead,
 };
+#[cfg(any(debug_assertions, feature = "debug-api"))]
+use pb::{SeedHeadRequest, SeedHeadResponse};
 use prost::Message;
 use thiserror::Error;
 use tokio::sync::{RwLock, broadcast};
@@ -288,9 +291,8 @@ impl ApiState {
         now_ms: u64,
     ) -> Option<Vec<u8>> {
         let mut guard = self.merge_ticket_cache.write().await;
-        guard.retain(|_, entry| {
-            now_ms.saturating_sub(entry.created_at_ms) <= MERGE_COALESCE_TTL_MS
-        });
+        guard
+            .retain(|_, entry| now_ms.saturating_sub(entry.created_at_ms) <= MERGE_COALESCE_TTL_MS);
         guard.get(&key).map(|entry| entry.response_bytes.clone())
     }
 
@@ -301,9 +303,8 @@ impl ApiState {
         now_ms: u64,
     ) {
         let mut guard = self.merge_ticket_cache.write().await;
-        guard.retain(|_, entry| {
-            now_ms.saturating_sub(entry.created_at_ms) <= MERGE_COALESCE_TTL_MS
-        });
+        guard
+            .retain(|_, entry| now_ms.saturating_sub(entry.created_at_ms) <= MERGE_COALESCE_TTL_MS);
         if !guard.contains_key(&key) && guard.len() >= MERGE_COALESCE_MAX_ENTRIES {
             let evict = guard
                 .iter()
@@ -874,10 +875,9 @@ fn maybe_record_api_concurrency_error(endpoint: &'static str, err: &ApiError) {
     if let ApiError::Server {
         message, freeze, ..
     } = err
+        && let Some(reason) = classify_concurrency_pressure(message, freeze.map(|f| f.reason))
     {
-        if let Some(reason) = classify_concurrency_pressure(message, freeze.map(|f| f.reason)) {
-            record_concurrency_pressure(endpoint, reason);
-        }
+        record_concurrency_pressure(endpoint, reason);
     }
 }
 
@@ -1562,31 +1562,30 @@ async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Resp
         intent: request.intent,
     };
     let now_ms = current_timestamp_ms();
-    if intent == MergeTicketIntent::Leave {
-        if let Some(cached) = state.coalesced_merge_ticket_lookup(cache_key, now_ms).await {
-            metrics::counter!(
-                "cityg_merge_ticket_coalesced_total",
-                "intent" => "leave".to_string()
-            )
-            .increment(1);
-            metrics::counter!("cityg_merge_ticket_total", "result" => "ok".to_string())
-                .increment(1);
-            return Ok(protobuf_response_bytes(cached));
-        }
+    if intent == MergeTicketIntent::Leave
+        && let Some(cached) = state.coalesced_merge_ticket_lookup(cache_key, now_ms).await
+    {
+        metrics::counter!(
+            "cityg_merge_ticket_coalesced_total",
+            "intent" => "leave".to_string()
+        )
+        .increment(1);
+        metrics::counter!("cityg_merge_ticket_total", "result" => "ok".to_string()).increment(1);
+        return Ok(protobuf_response_bytes(cached));
     }
 
     let bundle = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         match intent {
-            MergeTicketIntent::Leave => guard
-                .build_merge_ticket(&gid, &leaf_id)
-                .map_err(|err| {
+            MergeTicketIntent::Leave => {
+                guard.build_merge_ticket(&gid, &leaf_id).map_err(|err| {
                     maybe_record_client_concurrency_error("merge_ticket", &err);
                     metrics::counter!("cityg_merge_ticket_total", "result" => "error".to_string())
                         .increment(1);
                     ApiError::from(err)
-                })?,
+                })?
+            }
             MergeTicketIntent::Refresh => guard
                 .build_merge_ticket_for_refresh(&gid, &leaf_id)
                 .map_err(|err| {
@@ -2150,30 +2149,35 @@ async fn get_window(State(state): State<ApiState>, body: Bytes) -> Result<Respon
     for lane in state.all_server_lanes() {
         let guard = lane.read().await;
         let now = guard.context().current_time();
-        snapshot.extend(guard.context().mh_window.snapshot().into_iter().map(
-            |(wid, heads)| WindowEntry {
-                wid,
-                heads: heads
-                    .into_iter()
-                    .map(|record| {
-                        let age_ms = now
-                            .duration_since(record.accept_time())
-                            .as_millis()
-                            .min(u64::MAX as u128) as u64;
-                        WindowHead {
-                            we_epoch_id: record.we_epoch_id.to_vec(),
-                            msphf_hp_commit: record.msphf_hp_commit.to_vec(),
-                            seed_ctx_hash: record.seed_ctx_hash.to_vec(),
-                            rho_commit: record.rho_commit.to_vec(),
-                            seed_commit: record.seed_commit.to_vec(),
-                            xk_hash: record.xk_hash.to_vec(),
-                            accept_seq: record.accept_seq,
-                            age_ms,
-                        }
-                    })
-                    .collect(),
-            },
-        ));
+        snapshot.extend(
+            guard
+                .context()
+                .mh_window
+                .snapshot()
+                .into_iter()
+                .map(|(wid, heads)| WindowEntry {
+                    wid,
+                    heads: heads
+                        .into_iter()
+                        .map(|record| {
+                            let age_ms =
+                                now.duration_since(record.accept_time())
+                                    .as_millis()
+                                    .min(u64::MAX as u128) as u64;
+                            WindowHead {
+                                we_epoch_id: record.we_epoch_id.to_vec(),
+                                msphf_hp_commit: record.msphf_hp_commit.to_vec(),
+                                seed_ctx_hash: record.seed_ctx_hash.to_vec(),
+                                rho_commit: record.rho_commit.to_vec(),
+                                seed_commit: record.seed_commit.to_vec(),
+                                xk_hash: record.xk_hash.to_vec(),
+                                accept_seq: record.accept_seq,
+                                age_ms,
+                            }
+                        })
+                        .collect(),
+                }),
+        );
     }
 
     let reply = GetWindowResponse { entries: snapshot };
@@ -2897,10 +2901,7 @@ mod tests {
             Some("mh_heads_invalid")
         );
         assert_eq!(
-            classify_concurrency_pressure(
-                "barrier update required on revocation change",
-                None
-            ),
+            classify_concurrency_pressure("barrier update required on revocation change", None),
             Some("revocation_change")
         );
         assert_eq!(classify_concurrency_pressure("random failure", None), None);
@@ -4079,9 +4080,10 @@ mod tests {
                         alias: format!("stress-{task_idx}-{iter}"),
                         identity_binding: None,
                     };
-                    let response = join_ticket(State(state.clone()), encode_proto_request(&request))
-                        .await
-                        .map_err(|err| format!("join_ticket failed: {err}"))?;
+                    let response =
+                        join_ticket(State(state.clone()), encode_proto_request(&request))
+                            .await
+                            .map_err(|err| format!("join_ticket failed: {err}"))?;
                     let decoded: JoinTicketResponse = decode_proto_response(response).await;
                     if decoded.profile_version != API_PROFILE_VERSION {
                         return Err(format!(
@@ -4154,7 +4156,8 @@ mod tests {
         let mut leave_barrier_versions = Vec::new();
         for task in tasks {
             let result = task.await.expect("merge contention task must complete");
-            let decoded = result.unwrap_or_else(|err| panic!("merge contention task failed: {err}"));
+            let decoded =
+                result.unwrap_or_else(|err| panic!("merge contention task failed: {err}"));
             if decoded.srx_cbor.is_empty() {
                 // refresh intent
                 continue;

@@ -254,7 +254,7 @@ fn sibling_node(node: u64) -> Option<u64> {
     if node == 0 {
         return None;
     }
-    if node % 2 == 0 {
+    if node.is_multiple_of(2) {
         Some(node - 1)
     } else {
         Some(node + 1)
@@ -1057,7 +1057,10 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
-        match client.merge_ticket(&session.room_id, &session.leaf_id).await {
+        match client
+            .merge_ticket(&session.room_id, &session.leaf_id)
+            .await
+        {
             Ok(ticket) => break ticket,
             Err(err) => {
                 if let ApiClientError::HttpStatus {
@@ -2176,8 +2179,7 @@ mod tests {
             let delay = ticket_retry_delay(attempt);
             assert!(delay >= Duration::from_millis(TICKET_RETRY_BASE_DELAY_MS));
             assert!(
-                delay
-                    <= Duration::from_millis(TICKET_RETRY_MAX_DELAY_MS + TICKET_RETRY_JITTER_MS)
+                delay <= Duration::from_millis(TICKET_RETRY_MAX_DELAY_MS + TICKET_RETRY_JITTER_MS)
             );
         }
     }

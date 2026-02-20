@@ -36,8 +36,7 @@ use gpui::{
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
 use ml_kem::{
-    ExpandedDecapsulationKey as MlKemExpandedDecapsulationKey,
-    ExpandedKeyEncoding as MlKemExpandedKeyEncoding, Seed as MlKemSeed,
+    ExpandedDecapsulationKey as MlKemExpandedDecapsulationKey, Seed as MlKemSeed,
     kem::{Decapsulate as MlKemDecapsulate, KeyExport as MlKemKeyExport},
     ml_kem_768,
     ml_kem_768::DecapsulationKey as MlKem768DecapsulationKey,
@@ -88,6 +87,7 @@ fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
 }
 
 const DEFAULT_BARRIER_N_MAX: u64 = 1_024;
+#[cfg(test)]
 const DEFAULT_MAX_BARRIER_UPDATE_BYTES: u64 = 1_048_576;
 const BARRIER_TREE_INFO: &[u8] = b"city-g|barrier/tree|v1";
 const BARRIER_KEY_INFO: &[u8] = b"city-g|barrier/key|v1";
@@ -349,7 +349,7 @@ fn sibling_node(node: u64) -> Option<u64> {
     if node == 0 {
         return None;
     }
-    if node % 2 == 0 {
+    if node.is_multiple_of(2) {
         Some(node - 1)
     } else {
         Some(node + 1)
@@ -710,7 +710,8 @@ fn derive_internal_node_key_material(
 
     let dk = MlKem768DecapsulationKey::from_seed(MlKemSeed::from(seed_bytes));
     #[allow(deprecated)]
-    let dk_expanded = dk.to_expanded_bytes();
+    let dk_expanded =
+        <MlKem768DecapsulationKey as ml_kem::ExpandedKeyEncoding>::to_expanded_bytes(&dk);
     let ek_bytes = dk.encapsulation_key().to_bytes();
     let pkhash = compute_barrier_pkhash(ek_bytes.as_slice())?;
     Ok((
@@ -728,8 +729,9 @@ fn decapsulate_internal_node_shared_secret(
         .try_into()
         .map_err(|_| anyhow!("internal dk_n must be 2400 bytes"))?;
     #[allow(deprecated)]
-    let dk = MlKem768DecapsulationKey::from_expanded_bytes(&expanded)
-        .map_err(|_| anyhow!("invalid internal dk_n encoding"))?;
+    let dk =
+        <MlKem768DecapsulationKey as ml_kem::ExpandedKeyEncoding>::from_expanded_bytes(&expanded)
+            .map_err(|_| anyhow!("invalid internal dk_n encoding"))?;
     let shared = dk
         .decapsulate_slice(kem_ct)
         .map_err(|_| anyhow!("invalid internal node ciphertext"))?;
@@ -1072,6 +1074,7 @@ fn apply_pending_barrier_activation(
     Ok(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_barrier_update_bytes(
     gid: &[u8; 32],
     n_max: u64,
@@ -9980,6 +9983,7 @@ fn decrypt_message_v2(data: &[u8], context: &MessageCryptoContext<'_>) -> Result
         .map_err(|e| anyhow!("decryption failed: {}", e))
 }
 
+#[cfg(test)]
 fn encrypt_message(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
     use chacha20poly1305::{
         ChaCha20Poly1305,
@@ -10002,6 +10006,7 @@ fn encrypt_message(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
 
 /// Decrypt message using ChaCha20-Poly1305 (post-quantum resistant AEAD)
 /// Expects: nonce (12 bytes) || ciphertext || tag (16 bytes)
+#[cfg(test)]
 fn decrypt_message(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
     use chacha20poly1305::{
         ChaCha20Poly1305,

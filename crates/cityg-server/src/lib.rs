@@ -1763,7 +1763,7 @@ fn sibling_node(node: usize) -> Option<usize> {
     if node == 0 {
         return None;
     }
-    if node % 2 == 0 {
+    if node.is_multiple_of(2) {
         Some(node.saturating_sub(1))
     } else {
         Some(node.saturating_add(1))
@@ -2065,6 +2065,7 @@ pub struct ServerOutcome {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::{CityGError, CityGServer, ServerConfig};
     use ciborium::value::Value;
@@ -2579,8 +2580,10 @@ mod tests {
     #[test]
     fn validate_barrier_update_accepts_expected_pairs_and_pkhash_binding() -> Result<(), CityGError>
     {
-        let mut state = super::GroupState::default();
-        state.n_max = 4;
+        let mut state = super::GroupState {
+            n_max: 4,
+            ..super::GroupState::default()
+        };
         state.barrier_initialized = true;
         state.barrier_version = 1;
         state.barrier_pk_entries = super::build_all_blank_pk_entries(state.n_max)?;
@@ -2763,8 +2766,10 @@ mod tests {
 
     #[test]
     fn barrier_snapshot_helpers_cover_fallback_and_parser_paths() -> Result<(), CityGError> {
-        let mut state = super::GroupState::default();
-        state.n_max = 4;
+        let mut state = super::GroupState {
+            n_max: 4,
+            ..super::GroupState::default()
+        };
         let leaf = cityg_client::demo::demo_member_leaf("barrier-snapshot-fallback");
         let mut membership = cityg_client::GroupMembership::default();
         membership.apply_delta(&cityg_client::MembershipDelta {
@@ -2827,10 +2832,12 @@ mod tests {
 
     #[test]
     fn validate_barrier_update_uses_genesis_snapshot_joinset() -> Result<(), CityGError> {
-        let mut state = super::GroupState::default();
-        state.n_max = 4;
-        state.barrier_initialized = false;
-        state.barrier_version = 0;
+        let mut state = super::GroupState {
+            n_max: 4,
+            barrier_initialized: false,
+            barrier_version: 0,
+            ..super::GroupState::default()
+        };
 
         let leaf = cityg_client::demo::demo_member_leaf("barrier-genesis-joinset");
         let leaf_ek = vec![0x73; 1184];
@@ -3046,10 +3053,12 @@ mod tests {
 
     #[test]
     fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), CityGError> {
-        let mut state = super::GroupState::default();
-        state.n_max = 4;
-        state.barrier_initialized = false;
-        state.barrier_version = 0;
+        let mut state = super::GroupState {
+            n_max: 4,
+            barrier_initialized: false,
+            barrier_version: 0,
+            ..super::GroupState::default()
+        };
 
         let leaf = cityg_client::demo::demo_member_leaf("barrier-mismatch-matrix");
         let leaf_ek = vec![0x33; 1184];
@@ -3890,6 +3899,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod roster_tests {
     use super::*;
     use msphf_core::merkle::canonical_set_root;
