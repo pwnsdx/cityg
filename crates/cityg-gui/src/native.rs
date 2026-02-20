@@ -474,14 +474,49 @@ fn parse_deterministic_cbor<T>(raw: &[u8], label: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned + Serialize,
 {
-    let decoded: T =
+    let value: Value =
         ciborium::de::from_reader(raw).map_err(|err| anyhow!("failed to parse {label}: {err}"))?;
-    let canonical = to_cbor_vec(&decoded)
+    validate_cbor_determinism_invariants(&value, label)?;
+    let canonical = to_cbor_vec(&value)
         .map_err(|err| anyhow!("failed to re-encode canonical {label}: {err}"))?;
     if canonical.as_slice() != raw {
         return Err(anyhow!("non-canonical {label} encoding"));
     }
+    let decoded: T =
+        ciborium::de::from_reader(raw).map_err(|err| anyhow!("failed to parse {label}: {err}"))?;
     Ok(decoded)
+}
+
+fn validate_cbor_determinism_invariants(value: &Value, label: &str) -> Result<()> {
+    fn walk(value: &Value, label: &str, path: &str) -> Result<()> {
+        match value {
+            Value::Float(_) => Err(anyhow!("{label} contains float at {path}")),
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    walk(item, label, format!("{path}[{index}]").as_str())?;
+                }
+                Ok(())
+            }
+            Value::Map(entries) => {
+                let mut seen_keys = HashSet::new();
+                for (index, (key, map_value)) in entries.iter().enumerate() {
+                    let key_bytes = to_cbor_vec(key).map_err(|err| {
+                        anyhow!("{label} failed to encode map key at {path}[{index}]: {err}")
+                    })?;
+                    if !seen_keys.insert(key_bytes) {
+                        return Err(anyhow!("{label} contains duplicate map key at {path}"));
+                    }
+                    walk(key, label, format!("{path}[{index}].key").as_str())?;
+                    walk(map_value, label, format!("{path}[{index}].value").as_str())?;
+                }
+                Ok(())
+            }
+            Value::Tag(_, tagged) => walk(tagged.as_ref(), label, format!("{path}.tag").as_str()),
+            _ => Ok(()),
+        }
+    }
+
+    walk(value, label, "$")
 }
 
 fn to_array32(label: &str, bytes: Vec<u8>) -> Result<[u8; 32]> {
