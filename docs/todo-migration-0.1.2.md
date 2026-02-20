@@ -133,3 +133,13 @@ to the unified FS-hybrid + PRS barrier profile in `/Users/admin/Desktop/Reposito
 - [x] Workspace tests pass (`cargo test --workspace`).
 - [x] Workspace line coverage >= 95% (`cargo llvm-cov --workspace --summary-only`, current total: 95.00%).
 - [x] Native GUI runtime path (`--features native-app`) compiles and targeted barrier recover/persistence tests pass.
+
+## Post-0.1.2 reconciliation backlog (spec vs implementation)
+
+- [x] (Code) Enforce FULL receive-side barrier chain-check (`S11.11.2`) in GUI epoch sync before recover.
+- [x] (Code) Preserve local barrier error-code semantics in receive path (`960.7` prevalidation, `960.9` snapshot auth, `960.8` hash-chain failures).
+- [ ] (Code) Align payload key schedule with `S8.3/S8.4` exactly:
+  use `tau_e(t)`-based `K_msg_epoch` input and include full tuple fields (`xk_hash`, `E_k`) in salt/nonce/AAD.
+- [ ] (Code) Strengthen deterministic-CBOR verification (`S1.3`) to explicitly reject duplicate keys/floats/indefinite forms at parse time, not only via decode+re-encode.
+- [ ] (Spec or transport refactor) Clarify/implement byte-level deterministic-CBOR verification for full anchor header maps where only decoded maps are currently exposed to GUI logic.
+- [ ] (Code+API or spec clarification) Reconcile `S12.2` join provisioning requirement for `initial K_fs` with current join flow that locally seeds `ForwardSecrecyState`.
