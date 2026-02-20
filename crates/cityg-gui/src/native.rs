@@ -736,10 +736,15 @@ async fn full_chain_check_barrier_update(
     }
     validate_barrier_tree_snapshot_auth(&h_prev, n_max, &snapshot_prev)?;
 
-    let revoked_since_root = header_bytes32(header_map, hdr::HDR_REVOKED_SINCE_ROOT)
-        .ok_or_else(|| anyhow!("barrier full chain-check prevalidation failed (960.7): missing revoked_since_root"))?;
-    let revoked_root = header_bytes32(header_map, hdr::HDR_REVOKED_ROOT)
-        .ok_or_else(|| anyhow!("barrier full chain-check prevalidation failed (960.7): missing revoked_root"))?;
+    let revoked_since_root =
+        header_bytes32(header_map, hdr::HDR_REVOKED_SINCE_ROOT).ok_or_else(|| {
+            anyhow!(
+                "barrier full chain-check prevalidation failed (960.7): missing revoked_since_root"
+            )
+        })?;
+    let revoked_root = header_bytes32(header_map, hdr::HDR_REVOKED_ROOT).ok_or_else(|| {
+        anyhow!("barrier full chain-check prevalidation failed (960.7): missing revoked_root")
+    })?;
     let revocation_roots_hash = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
     if parsed.revocation_roots_hash != revocation_roots_hash {
         return Err(anyhow!(
@@ -758,7 +763,11 @@ async fn full_chain_check_barrier_update(
 
     let mut snapshot_pre = snapshot_prev.pk_entries.clone();
     apply_join_set_to_snapshot(snapshot_pre.as_mut_slice(), n_max, join_records.as_slice())?;
-    apply_revoked_set_to_snapshot(snapshot_pre.as_mut_slice(), n_max, revoked_indices.as_slice())?;
+    apply_revoked_set_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        n_max,
+        revoked_indices.as_slice(),
+    )?;
     let expected_before = compute_barrier_tree_hash(n_max, snapshot_pre.as_slice())?;
     if expected_before != parsed.kem_tree_hash_before {
         return Err(anyhow!(
@@ -2107,6 +2116,7 @@ struct AppSession {
     tswe_salt_hash: [u8; 32],
     pox_r_commit: [u8; 32],
     we_epoch_id: [u8; 32],
+    xk_hash: [u8; 32],
     epoch_key: [u8; 32],
     forward_state: ForwardSecrecyState,
     fs_ec: u64,
@@ -6216,6 +6226,7 @@ struct SendParams {
     server_url: String,
     gid: [u8; 32],
     we_epoch_id: [u8; 32],
+    xk_hash: [u8; 32],
     epoch_key: [u8; 32],
     fs_ec: u64,
     barrier_version: u64,
@@ -6234,6 +6245,7 @@ impl SendParams {
             server_url: session.server_url.clone(),
             gid: session.gid,
             we_epoch_id: session.we_epoch_id,
+            xk_hash: session.xk_hash,
             epoch_key: session.epoch_key,
             fs_ec: session.fs_ec,
             barrier_version: session.barrier_state.barrier_version,
@@ -6253,6 +6265,7 @@ struct FetchParams {
     server_url: String,
     gid: [u8; 32],
     we_epoch_id: [u8; 32],
+    xk_hash: [u8; 32],
     epoch_key: [u8; 32],
     fs_ec: u64,
     barrier_version: u64,
@@ -6267,6 +6280,7 @@ impl FetchParams {
             server_url: session.server_url.clone(),
             gid: session.gid,
             we_epoch_id: session.we_epoch_id,
+            xk_hash: session.xk_hash,
             epoch_key: session.epoch_key,
             fs_ec: session.fs_ec,
             barrier_version: session.barrier_state.barrier_version,
@@ -6303,6 +6317,8 @@ struct PersistedSession {
     tswe_salt_hash_hex: String,
     pox_r_commit_hex: String,
     we_epoch_id_hex: String,
+    #[serde(default)]
+    xk_hash_hex: String,
     epoch_key_hex: String,
     proof_mode: String,
     vrf_id: String,
@@ -6678,7 +6694,7 @@ impl PersistedSession {
             .as_millis() as u64;
 
         Self {
-            version: 8, // Version 8: Persist barrier secret/pending client state.
+            version: 9, // Version 9: Persist xk_hash for S8 payload key schedule bindings.
             server_url: session.server_url.clone(),
             room_id: session.room_id.clone(),
             alias: session.alias.clone(),
@@ -6692,6 +6708,7 @@ impl PersistedSession {
             tswe_salt_hash_hex: hex_encode(session.tswe_salt_hash),
             pox_r_commit_hex: hex_encode(session.pox_r_commit),
             we_epoch_id_hex: hex_encode(session.we_epoch_id),
+            xk_hash_hex: hex_encode(session.xk_hash),
             epoch_key_hex: hex_encode(session.epoch_key),
             proof_mode: session.proof_mode.clone(),
             vrf_id: session.vrf_id.clone(),
@@ -6748,6 +6765,7 @@ impl PersistedSession {
             tswe_salt_hash_hex,
             pox_r_commit_hex,
             we_epoch_id_hex,
+            xk_hash_hex,
             epoch_key_hex,
             proof_mode,
             vrf_id,
@@ -6778,9 +6796,15 @@ impl PersistedSession {
             barrier_state,
         } = self;
 
-        if !(version == 4 || version == 5 || version == 6 || version == 7 || version == 8) {
+        if !(version == 4
+            || version == 5
+            || version == 6
+            || version == 7
+            || version == 8
+            || version == 9)
+        {
             return Err(anyhow!(
-                "unsupported session file version {version} (expected 4, 5, 6, 7, or 8 with ML-DSA-65 authentication)"
+                "unsupported session file version {version} (expected 4, 5, 6, 7, 8, or 9 with ML-DSA-65 authentication)"
             ));
         }
 
@@ -6794,6 +6818,7 @@ impl PersistedSession {
         let tswe_salt_hash = decode_hex32("tswe_salt_hash_hex", &tswe_salt_hash_hex)?;
         let pox_r_commit = decode_hex32("pox_r_commit_hex", &pox_r_commit_hex)?;
         let we_epoch_id = decode_hex32("we_epoch_id_hex", &we_epoch_id_hex)?;
+        let xk_hash = decode_hex32_or_zero("xk_hash_hex", &xk_hash_hex)?;
         let epoch_key = decode_hex32("epoch_key_hex", &epoch_key_hex)?;
 
         let kbroad_public = decode_hex_vec("kbroad_public_hex", &kbroad_public_hex)?;
@@ -6857,6 +6882,7 @@ impl PersistedSession {
             tswe_salt_hash,
             pox_r_commit,
             we_epoch_id,
+            xk_hash,
             epoch_key,
             forward_state,
             fs_ec: fs_join_ec,
@@ -8154,6 +8180,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         tswe_salt_hash,
         pox_r_commit,
         we_epoch_id: bundle.we_epoch_id,
+        xk_hash: bundle.hp_binding.xk_hash,
         epoch_key: bundle.epoch_key,
         forward_state,
         fs_ec,
@@ -9119,6 +9146,7 @@ async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
         server_url,
         gid,
         we_epoch_id,
+        xk_hash,
         epoch_key,
         fs_ec,
         barrier_version,
@@ -9158,6 +9186,7 @@ async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
         &MessageCryptoContext {
             gid: &gid,
             we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
             fs_ec,
             barrier_version,
             epoch_key: &epoch_key,
@@ -9190,6 +9219,7 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
         server_url,
         gid,
         we_epoch_id,
+        xk_hash,
         epoch_key,
         fs_ec,
         barrier_version,
@@ -9220,6 +9250,7 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
             &MessageCryptoContext {
                 gid: &gid,
                 we_epoch_id: &we_epoch_id,
+                xk_hash: &xk_hash,
                 fs_ec,
                 barrier_version,
                 epoch_key: &epoch_key,
@@ -9383,6 +9414,10 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     let pending_changed_without_bundle =
         apply_pending_barrier_activation(&mut session, ticket.barrier_version, None)?;
 
+    if let Some(pivot) = select_pivot_parity(&ticket.parities) {
+        session.xk_hash = pivot.xk_hash;
+    }
+
     if ticket.we_epoch_id == session.we_epoch_id {
         if !pending_changed_without_bundle {
             session.barrier_state.k_barrier = ticket_k_barrier;
@@ -9451,6 +9486,7 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     }
 
     session.we_epoch_id = bundle.we_epoch_id;
+    session.xk_hash = bundle.hp_binding.xk_hash;
     session.epoch_key = derived_epoch_key;
     session.parent_root = bundle.anchor.parent_root;
     session.join_delta_root = bundle.anchor.join_delta_root;
@@ -10085,6 +10121,7 @@ const PAYLOAD_MSG_KEY_INFO: &[u8] = b"city-g|fs/msg/key|v2";
 struct MessageCryptoContext<'a> {
     gid: &'a [u8; 32],
     we_epoch_id: &'a [u8; 32],
+    xk_hash: &'a [u8; 32],
     fs_ec: u64,
     barrier_version: u64,
     epoch_key: &'a [u8; 32],
@@ -10096,6 +10133,10 @@ struct MsgEpochSaltArgs<'a> {
     #[serde(with = "serde_bytes")]
     we_epoch_id: &'a [u8; 32],
     fs_ec: u64,
+    #[serde(with = "serde_bytes")]
+    xk_hash: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    e_k: &'a [u8; 32],
     barrier_version: u64,
     #[serde(with = "serde_bytes")]
     k_barrier: &'a [u8; 32],
@@ -10116,6 +10157,10 @@ struct MsgNonceArgs<'a> {
     #[serde(with = "serde_bytes")]
     we_epoch_id: &'a [u8; 32],
     fs_ec: u64,
+    #[serde(with = "serde_bytes")]
+    xk_hash: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    e_k: &'a [u8; 32],
     barrier_version: u64,
     msg_index: u64,
 }
@@ -10125,6 +10170,8 @@ struct MsgAad<'a>(
     #[serde(with = "serde_bytes")] &'a [u8; 32],
     #[serde(with = "serde_bytes")] &'a [u8; 32],
     u64,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
     u64,
     u64,
 );
@@ -10138,6 +10185,8 @@ fn derive_msg_key_material(context: &MessageCryptoContext<'_>, msg_index: u64) -
         &MsgEpochSaltArgs {
             we_epoch_id: context.we_epoch_id,
             fs_ec: context.fs_ec,
+            xk_hash: context.xk_hash,
+            e_k: context.epoch_key,
             barrier_version: context.barrier_version,
             k_barrier: context.k_barrier,
         },
@@ -10164,6 +10213,8 @@ fn derive_msg_nonce(context: &MessageCryptoContext<'_>, msg_index: u64) -> Resul
             gid: context.gid,
             we_epoch_id: context.we_epoch_id,
             fs_ec: context.fs_ec,
+            xk_hash: context.xk_hash,
+            e_k: context.epoch_key,
             barrier_version: context.barrier_version,
             msg_index,
         },
@@ -10179,6 +10230,8 @@ fn message_aad(context: &MessageCryptoContext<'_>, msg_index: u64) -> Result<Vec
         context.gid,
         context.we_epoch_id,
         context.fs_ec,
+        context.xk_hash,
+        context.epoch_key,
         context.barrier_version,
         msg_index,
     ))
@@ -10447,6 +10500,7 @@ mod tests {
             tswe_salt_hash: [0x08u8; 32],
             pox_r_commit: [0x09u8; 32],
             we_epoch_id: [0x10u8; 32],
+            xk_hash: [0x14u8; 32],
             epoch_key: [0x11u8; 32],
             forward_state,
             fs_ec: 17,
@@ -14294,6 +14348,7 @@ mod tests {
             tswe_salt_hash: array(0x08),
             pox_r_commit: array(0x09),
             we_epoch_id: array(0x10),
+            xk_hash: array(0x14),
             epoch_key: array(0x11),
             forward_state,
             fs_ec: 17,
@@ -15691,11 +15746,13 @@ mod tests {
     fn payload_envelope_v2_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let gid = [0x11u8; 32];
         let we_epoch_id = [0x22u8; 32];
+        let xk_hash = [0x23u8; 32];
         let epoch_key = [0x33u8; 32];
         let k_barrier = [0x44u8; 32];
         let context = MessageCryptoContext {
             gid: &gid,
             we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
             fs_ec: 9,
             barrier_version: 5,
             epoch_key: &epoch_key,
@@ -15712,11 +15769,13 @@ mod tests {
     fn payload_envelope_v2_context_mismatch_fails() -> Result<(), Box<dyn std::error::Error>> {
         let gid = [0x51u8; 32];
         let we_epoch_id = [0x52u8; 32];
+        let xk_hash = [0x53u8; 32];
         let epoch_key = [0x53u8; 32];
         let k_barrier = [0x54u8; 32];
         let good_context = MessageCryptoContext {
             gid: &gid,
             we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
             fs_ec: 12,
             barrier_version: 4,
             epoch_key: &epoch_key,
@@ -15739,11 +15798,13 @@ mod tests {
     {
         let gid = [0x61u8; 32];
         let we_epoch_id = [0x62u8; 32];
+        let xk_hash = [0x63u8; 32];
         let epoch_key = [0x63u8; 32];
         let k_barrier = [0x64u8; 32];
         let context = MessageCryptoContext {
             gid: &gid,
             we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
             fs_ec: 3,
             barrier_version: 1,
             epoch_key: &epoch_key,
@@ -16770,6 +16831,7 @@ mod tests {
             tswe_salt_hash: [0x08u8; 32],
             pox_r_commit: [0x09u8; 32],
             we_epoch_id: [0x10u8; 32],
+            xk_hash: [0x14u8; 32],
             epoch_key: [0x11u8; 32],
             forward_state,
             fs_ec: 17,
