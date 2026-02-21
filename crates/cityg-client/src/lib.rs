@@ -119,7 +119,9 @@ fn validate_deterministic_cbor_invariants(value: &Value) -> Result<(), CityGErro
                     let key_bytes = to_cbor_vec(key)
                         .map_err(|_| CityGError::InvalidInput("bundle decode failed"))?;
                     if !seen_keys.insert(key_bytes) {
-                        return Err(CityGError::InvalidInput("bundle contains duplicate map key"));
+                        return Err(CityGError::InvalidInput(
+                            "bundle contains duplicate map key",
+                        ));
                     }
                     walk(key, format!("{path}[{index}].key").as_str())?;
                     walk(map_value, format!("{path}[{index}].value").as_str())?;
@@ -559,9 +561,7 @@ impl ClientEpochBundle {
         let canonical =
             to_cbor_vec(&value).map_err(|_| CityGError::InvalidInput("bundle encode failed"))?;
         if canonical.as_slice() != bytes {
-            return Err(CityGError::InvalidInput(
-                "bundle is not deterministic cbor",
-            ));
+            return Err(CityGError::InvalidInput("bundle is not deterministic cbor"));
         }
         ciborium::de::from_reader(Cursor::new(bytes))
             .map_err(|_| CityGError::InvalidInput("bundle decode failed"))
