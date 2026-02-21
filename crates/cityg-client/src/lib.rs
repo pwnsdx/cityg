@@ -78,14 +78,16 @@ pub mod pivot;
 pub mod witness;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     convert::TryInto,
     fmt,
     io::Cursor,
 };
 
 use ciborium::value::Value;
-use msphf_core::{MsphfError, hash::eid_from_epoch, instance::AnchorInstance};
+use msphf_core::{
+    MsphfError, hash::eid_from_epoch, instance::AnchorInstance, serde_utils::to_cbor_vec,
+};
 use msphf_orchestrator::{
     AnchorInstanceParts, CapssWitnessBundle, ForwardSecrecyState, HpBindingInputs, HpProof,
     JoinerKGenResult, LeafIdMode, OrchestrationParams, PivotParity, extract_epoch_msphf_or,
@@ -100,6 +102,37 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 const MAX_BUNDLE_CBOR_BYTES: usize = 4 * 1024 * 1024;
+
+fn validate_deterministic_cbor_invariants(value: &Value) -> Result<(), CityGError> {
+    fn walk(value: &Value, path: &str) -> Result<(), CityGError> {
+        match value {
+            Value::Float(_) => Err(CityGError::InvalidInput("bundle contains float value")),
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    walk(item, format!("{path}[{index}]").as_str())?;
+                }
+                Ok(())
+            }
+            Value::Map(entries) => {
+                let mut seen_keys = HashSet::new();
+                for (index, (key, map_value)) in entries.iter().enumerate() {
+                    let key_bytes = to_cbor_vec(key)
+                        .map_err(|_| CityGError::InvalidInput("bundle decode failed"))?;
+                    if !seen_keys.insert(key_bytes) {
+                        return Err(CityGError::InvalidInput("bundle contains duplicate map key"));
+                    }
+                    walk(key, format!("{path}[{index}].key").as_str())?;
+                    walk(map_value, format!("{path}[{index}].value").as_str())?;
+                }
+                Ok(())
+            }
+            Value::Tag(_, tagged) => walk(tagged.as_ref(), format!("{path}.tag").as_str()),
+            _ => Ok(()),
+        }
+    }
+
+    walk(value, "$")
+}
 
 /// Unified error type for City-G client operations.
 ///
@@ -520,8 +553,17 @@ impl ClientEpochBundle {
         if bytes.len() > MAX_BUNDLE_CBOR_BYTES {
             return Err(CityGError::InvalidInput("bundle payload too large"));
         }
-        let cursor = Cursor::new(bytes);
-        ciborium::de::from_reader(cursor)
+        let value: Value = ciborium::de::from_reader(Cursor::new(bytes))
+            .map_err(|_| CityGError::InvalidInput("bundle decode failed"))?;
+        validate_deterministic_cbor_invariants(&value)?;
+        let canonical =
+            to_cbor_vec(&value).map_err(|_| CityGError::InvalidInput("bundle encode failed"))?;
+        if canonical.as_slice() != bytes {
+            return Err(CityGError::InvalidInput(
+                "bundle is not deterministic cbor",
+            ));
+        }
+        ciborium::de::from_reader(Cursor::new(bytes))
             .map_err(|_| CityGError::InvalidInput("bundle decode failed"))
     }
 
@@ -975,6 +1017,51 @@ mod tests {
             err,
             CityGError::InvalidInput("bundle payload too large")
         ));
+    }
+
+    #[test]
+    fn from_cbor_rejects_duplicate_map_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = demo_bundle_alice()?;
+        let bytes = bundle.to_cbor()?;
+        let mut value: Value = ciborium::de::from_reader(Cursor::new(bytes))?;
+        let Value::Map(entries) = &mut value else {
+            return Err("bundle cbor must decode to map".into());
+        };
+        let Some((first_key, first_value)) = entries.first().cloned() else {
+            return Err("bundle map must not be empty".into());
+        };
+        entries.push((first_key, first_value));
+
+        let mut non_deterministic = Vec::new();
+        ciborium::ser::into_writer(&value, &mut non_deterministic)?;
+        let err = ClientEpochBundle::from_cbor(&non_deterministic)
+            .expect_err("duplicate map keys must be rejected");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("bundle contains duplicate map key")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn from_cbor_rejects_float_values() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = demo_bundle_alice()?;
+        let bytes = bundle.to_cbor()?;
+        let mut value: Value = ciborium::de::from_reader(Cursor::new(bytes))?;
+        let Value::Map(entries) = &mut value else {
+            return Err("bundle cbor must decode to map".into());
+        };
+        entries.push((Value::Text("float_probe".to_string()), Value::Float(1.5)));
+
+        let mut non_deterministic = Vec::new();
+        ciborium::ser::into_writer(&value, &mut non_deterministic)?;
+        let err = ClientEpochBundle::from_cbor(&non_deterministic)
+            .expect_err("float values must be rejected");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("bundle contains float value")
+        ));
+        Ok(())
     }
 
     #[test]
