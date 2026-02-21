@@ -117,6 +117,7 @@ This construction ties device progression to barrier progression.
 
 \subsection{Payload envelope and nonce safety}
 Payload ciphertexts are carried in a 3-field envelope with explicit \texttt{msg\_index}. Message key and nonce derivation include \texttt{msg\_index}; uniqueness is mandatory for each fixed identifier tuple \{gid, weid, t, xk\_hash, E\_k, barrier\_version\}. State enforcing uniqueness must be crash-safe.
+In the implemented profile, \texttt{K\_msg\_epoch} uses \texttt{E\_k} as its HKDF input and also binds \texttt{xk\_hash} and \texttt{E\_k} in salt/nonce/AAD context, while \tauE remains part of FS-chain/proof context.
 
 \subsection{Time-blind acceptance and FLG}
 Acceptance never uses wall-clock checks. Instead, forward-leap guards (FLG) bound \fsEc jumps against persisted acceptance state and policy-derived windows. This is a key scaling and reliability property: skewed clocks cannot silently widen exposure windows.

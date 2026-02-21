@@ -395,11 +395,13 @@ If uniqueness cannot be enforced, this profile MUST NOT be used.
 
 S8.3 K_msg_epoch
 K_msg_epoch := HKDF-BLAKE3(
-  ikm  = tau_e(t),
+  ikm  = E_k,
   salt = H_L("fs/msg/epoch_salt", [weid, t, xk_hash, E_k, header[176], K_barrier]),
   info = "city-g|fs/msg/epoch|v2",
   L=32
 )
+Where `E_k` is the locally derived epoch key for the active `weid`.
+`tau_e(t)` remains normative for FS chain/proof context per S6, while payload encryption in this profile binds to `E_k` in S8.
 
 S8.4 K_msg, nonce, and AAD
 K_msg := HKDF-BLAKE3(
@@ -1124,6 +1126,7 @@ Barrier required fields:
 * pcs_refresh_slot_width_ec (uint; >=1)
 FS-hybrid required fields:
 * initial K_fs (bstr32) and initial fs_ec (uint) -- or a derivation seed sufficient to compute them
+  - deployment option: if provisioning omits `initial K_fs`, the joiner MAY locally sample fresh `K_fs` (32 bytes, CSPRNG) at join completion and MUST set `fs_ec` from the accepted join anchor (`header[141]`).
 * group fs_epoch_base_ts (T_base; uint64)
 * fs_policy_version (uint)
 * any suite identifiers required to verify proofs (Smallwood/VRF/SRX profiles)
