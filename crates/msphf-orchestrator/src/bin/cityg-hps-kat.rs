@@ -50,7 +50,7 @@ fn write_output(output: &KatOutput, args: &Args) -> Result<(), MsphfError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::{Context, Result, anyhow};
+    use anyhow::{Context, Result};
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -64,9 +64,7 @@ mod tests {
         Ok(path)
     }
 
-    #[test]
-    fn run_writes_output_file() -> Result<()> {
-        let plan_path = temp_path("plan.json")?;
+    fn write_valid_plan(plan_path: &PathBuf) -> Result<()> {
         let plan_json = json!({
             "params": {
                 "msphf_crs_id": msphf_core::params::RLWE_CRS_ID_DEFAULT,
@@ -95,6 +93,13 @@ mod tests {
         });
         let plan_bytes = serde_json::to_vec(&plan_json)?;
         fs::write(&plan_path, plan_bytes)?;
+        Ok(())
+    }
+
+    #[test]
+    fn run_writes_output_file() -> Result<()> {
+        let plan_path = temp_path("plan.json")?;
+        write_valid_plan(&plan_path)?;
 
         let out_path = temp_path("out.json")?;
         let args = Args {
@@ -112,6 +117,22 @@ mod tests {
     }
 
     #[test]
+    fn run_writes_stdout_when_out_missing() -> Result<()> {
+        let plan_path = temp_path("plan-stdout.json")?;
+        write_valid_plan(&plan_path)?;
+
+        let args = Args {
+            plan: plan_path.clone(),
+            out: None,
+            pretty: true,
+        };
+        run(args)?;
+
+        let _ = fs::remove_file(plan_path);
+        Ok(())
+    }
+
+    #[test]
     fn run_reports_invalid_plan() -> Result<()> {
         let plan_path = temp_path("bad.json")?;
         fs::write(&plan_path, b"{")?;
@@ -120,10 +141,7 @@ mod tests {
             out: None,
             pretty: true,
         };
-        let err = match run(args) {
-            Err(e) => e,
-            Ok(_) => return Err(anyhow!("expected run to fail")),
-        };
+        let err = run(args).expect_err("expected run to fail");
         assert!(err.to_string().contains("serialization"));
         let _ = fs::remove_file(plan_path);
         Ok(())

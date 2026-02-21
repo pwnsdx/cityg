@@ -59,6 +59,24 @@ impl Default for HealthState {
     }
 }
 
+fn overall_status(checks: &[HealthCheck]) -> HealthStatus {
+    if checks.iter().any(|c| c.status == HealthStatus::Unhealthy) {
+        HealthStatus::Unhealthy
+    } else if checks.iter().any(|c| c.status == HealthStatus::Degraded) {
+        HealthStatus::Degraded
+    } else {
+        HealthStatus::Healthy
+    }
+}
+
+fn status_code_for(status: HealthStatus) -> StatusCode {
+    match status {
+        HealthStatus::Healthy => StatusCode::OK,
+        HealthStatus::Degraded => StatusCode::OK,
+        HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
 pub async fn health_check_handler(State(health_state): State<HealthState>) -> Response {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -75,13 +93,7 @@ pub async fn health_check_handler(State(health_state): State<HealthState>) -> Re
     }];
 
     // Determine overall status
-    let overall_status = if checks.iter().any(|c| c.status == HealthStatus::Unhealthy) {
-        HealthStatus::Unhealthy
-    } else if checks.iter().any(|c| c.status == HealthStatus::Degraded) {
-        HealthStatus::Degraded
-    } else {
-        HealthStatus::Healthy
-    };
+    let overall_status = overall_status(&checks);
 
     let response = HealthResponse {
         status: overall_status,
@@ -91,11 +103,7 @@ pub async fn health_check_handler(State(health_state): State<HealthState>) -> Re
         checks,
     };
 
-    let status_code = match overall_status {
-        HealthStatus::Healthy => StatusCode::OK,
-        HealthStatus::Degraded => StatusCode::OK,
-        HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
-    };
+    let status_code = status_code_for(overall_status);
 
     (status_code, Json(response)).into_response()
 }
@@ -118,4 +126,54 @@ pub async fn liveness_check_handler() -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overall_status_prioritizes_unhealthy_then_degraded() {
+        let healthy = vec![HealthCheck {
+            name: "healthy".to_string(),
+            status: HealthStatus::Healthy,
+            message: None,
+            latency_ms: None,
+        }];
+        assert_eq!(overall_status(&healthy), HealthStatus::Healthy);
+
+        let degraded = vec![HealthCheck {
+            name: "degraded".to_string(),
+            status: HealthStatus::Degraded,
+            message: None,
+            latency_ms: None,
+        }];
+        assert_eq!(overall_status(&degraded), HealthStatus::Degraded);
+
+        let mixed = vec![
+            HealthCheck {
+                name: "degraded".to_string(),
+                status: HealthStatus::Degraded,
+                message: None,
+                latency_ms: None,
+            },
+            HealthCheck {
+                name: "unhealthy".to_string(),
+                status: HealthStatus::Unhealthy,
+                message: None,
+                latency_ms: None,
+            },
+        ];
+        assert_eq!(overall_status(&mixed), HealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn status_code_mapping_matches_health_status() {
+        assert_eq!(status_code_for(HealthStatus::Healthy), StatusCode::OK);
+        assert_eq!(status_code_for(HealthStatus::Degraded), StatusCode::OK);
+        assert_eq!(
+            status_code_for(HealthStatus::Unhealthy),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 }

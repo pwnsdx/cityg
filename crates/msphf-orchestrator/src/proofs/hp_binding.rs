@@ -126,9 +126,9 @@ mod tests {
             hp_commit: &[0x15; 32],
             ..base
         };
-        match verify_hp_k(&mutated, &proof) {
-            Err(_) => Ok(()),
-            Ok(_) => bail!("verification should fail for mutated commit"),
+        if verify_hp_k(&mutated, &proof).is_ok() {
+            bail!("verification should fail for mutated commit");
         }
+        Ok(())
     }
 }

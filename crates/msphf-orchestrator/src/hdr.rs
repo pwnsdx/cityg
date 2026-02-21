@@ -123,10 +123,6 @@ mod tests {
         ];
 
         let unique: HashSet<u64> = tags.into_iter().collect();
-        assert_eq!(
-            unique.len(),
-            tags.len(),
-            "HDR tags must remain globally unique"
-        );
+        assert_eq!(unique.len(), tags.len());
     }
 }

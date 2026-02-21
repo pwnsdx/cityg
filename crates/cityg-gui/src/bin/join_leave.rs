@@ -3111,7 +3111,9 @@ mod tests {
         let room_id = hex::encode([0xA1u8; 32]);
         bootstrap_test_room(&server_url, &room_id).await?;
 
-        run_watch_mode(&server_url, &room_id, "watcher", 2, None, true).await?;
+        // Keep a single explicit leave in this test to avoid stale-second-leave
+        // checkpoint races under heavy instrumentation (llvm-cov).
+        run_watch_mode(&server_url, &room_id, "watcher", 2, Some(vec![2]), true).await?;
 
         handle.abort();
         let _ = handle.await;

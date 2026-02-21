@@ -71,4 +71,11 @@ mod tests {
         *arr.get_mut(&[0, 1]) = 42;
         assert_eq!(*arr.get(&[0, 1]), 42);
     }
+
+    #[test]
+    fn test_into_vec_roundtrip() {
+        let arr = Array::from_vec(vec![1, 2, 3, 4], &[2, 2]);
+        assert_eq!(arr.shape(), &[2, 2]);
+        assert_eq!(arr.into_vec(), vec![1, 2, 3, 4]);
+    }
 }
