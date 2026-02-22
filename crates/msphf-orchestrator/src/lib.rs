@@ -61,8 +61,8 @@ pub use accept::fixtures;
 pub use accept::{
     AcceptanceContext, AcceptanceError, AcceptanceKind, AcceptanceOptions, AcceptanceOutcome,
     AnnexMTelemetryReport, AnnexMTelemetryRow, BarrierGroupState, BootstrapPolicy,
-    DeviceChainState, FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE, FsPolicyConfig, TelemetryCounters,
-    TelemetryKey, build_bootstrap_digest,
+    DeviceChainState, FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE, FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
+    FsPolicyConfig, TelemetryCounters, TelemetryKey, build_bootstrap_digest,
 };
 pub use hdr::*;
 pub use policy::{
@@ -118,7 +118,8 @@ const KBROAD_MODE: &str = "kbroad-v1";
 const KBROAD_ML_KEM_ALG: &str = "ml-kem-768";
 const KBROAD_AEAD_SUITE: &str = "chacha20-poly1305";
 const KBROAD_INFO_PREFIX: &[u8] = b"city-g|hp/kek/v1";
-const FS_KFS_INFO_PREFIX: &[u8] = b"city-g|fs/kfs/v1";
+const FS_STEP_INFO: &[u8] = b"city-g|fs/step|v1";
+const FS_TAU_INFO: &[u8] = b"city-g|fs/tau|v1";
 pub const DEFAULT_PROOF_MODE: &str = "lin+zkvrf";
 pub const DEFAULT_VRF_ID: &str = "lb-vrf/v1";
 pub const DEFAULT_POLICY_VERSION: &str = "0";
@@ -383,14 +384,14 @@ mod fs_dev_chain_v2_tests {
 }
 
 #[derive(Serialize)]
-struct FsEpochSalt<'a> {
+struct FsTauSalt<'a> {
     #[serde(with = "serde_bytes")]
     weid: &'a [u8; 32],
     fs_ec: u64,
 }
 
-fn fs_epoch_salt(weid: &[u8; 32], fs_ec: u64) -> Result<[u8; 32], MsphfError> {
-    h_l("fs/epoch/salt", &FsEpochSalt { weid, fs_ec })
+fn fs_tau_salt(weid: &[u8; 32], fs_ec: u64) -> Result<[u8; 32], MsphfError> {
+    h_l("fs/tau/salt", &FsTauSalt { weid, fs_ec })
 }
 
 #[derive(Serialize)]
@@ -412,18 +413,19 @@ fn fs_epoch_commit_hash(epoch_sk: &[u8; 32]) -> Result<[u8; 32], MsphfError> {
 }
 
 #[derive(Serialize)]
-struct FsKfsSalt<'a>(#[serde(with = "serde_bytes")] &'a [u8; 32]);
+struct FsStepSalt<'a> {
+    #[serde(with = "serde_bytes")]
+    weid: &'a [u8; 32],
+    next_ec: u64,
+}
 
-fn fs_kfs_salt(weid: &[u8; 32]) -> Result<[u8; 32], MsphfError> {
-    h_l("fs/kfs/salt", &FsKfsSalt(weid))
+fn fs_step_salt(weid: &[u8; 32], next_ec: u64) -> Result<[u8; 32], MsphfError> {
+    h_l("fs/step/salt", &FsStepSalt { weid, next_ec })
 }
 
 fn evolve_k_fs(current: &[u8; 32], weid: &[u8; 32], next_ec: u64) -> Result<[u8; 32], MsphfError> {
-    let salt = fs_kfs_salt(weid)?;
-    let mut info = Vec::with_capacity(FS_KFS_INFO_PREFIX.len() + 8);
-    info.extend_from_slice(FS_KFS_INFO_PREFIX);
-    info.extend_from_slice(&next_ec.to_le_bytes());
-    Ok(hkdf_blake3(&salt, current, &info))
+    let salt = fs_step_salt(weid, next_ec)?;
+    Ok(hkdf_blake3(&salt, current, FS_STEP_INFO))
 }
 
 fn encrypt_chacha20(
@@ -1073,8 +1075,8 @@ impl ForwardSecrecyState {
         let fs_ec = self.fs_ec;
         let fs_dev_prev_commit = self.fs_dev_commit;
 
-        let epoch_salt = fs_epoch_salt(we_epoch_id, fs_ec)?;
-        let tau_e = hkdf_blake3(&epoch_salt, &self.k_fs, b"city-g|fs/epoch/tau|v1");
+        let tau_salt = fs_tau_salt(we_epoch_id, fs_ec)?;
+        let tau_e = hkdf_blake3(&tau_salt, &self.k_fs, FS_TAU_INFO);
         let epoch_sk_salt = fs_epoch_sk_salt(we_epoch_id, fs_ec)?;
         let epoch_sk = hkdf_blake3(&epoch_sk_salt, &self.k_fs, b"city-g|fs/epoch/sk|v1");
 
@@ -4163,8 +4165,8 @@ mod tests {
         let weid = [0x66; 32];
         let base_key = [0x77; 32];
 
-        let salt_a = fs_epoch_salt(&weid, 1)?;
-        let salt_b = fs_epoch_salt(&weid, 2)?;
+        let salt_a = fs_tau_salt(&weid, 1)?;
+        let salt_b = fs_tau_salt(&weid, 2)?;
         assert_ne!(salt_a, salt_b);
 
         let sk_salt = fs_epoch_sk_salt(&weid, 1)?;
@@ -4172,8 +4174,10 @@ mod tests {
         let commit = fs_epoch_commit_hash(&epoch_sk)?;
         assert_ne!(commit, [0u8; 32]);
 
-        let kfs_salt = fs_kfs_salt(&weid)?;
-        assert_ne!(kfs_salt, [0u8; 32]);
+        let step_salt_a = fs_step_salt(&weid, 2)?;
+        let step_salt_b = fs_step_salt(&weid, 3)?;
+        assert_ne!(step_salt_a, [0u8; 32]);
+        assert_ne!(step_salt_a, step_salt_b);
         let evolved_1 = evolve_k_fs(&base_key, &weid, 2)?;
         let evolved_2 = evolve_k_fs(&base_key, &weid, 3)?;
         assert_ne!(evolved_1, evolved_2);

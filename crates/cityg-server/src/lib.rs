@@ -1941,7 +1941,11 @@ fn validate_barrier_update_against_roster(
     let expected_before =
         compute_barrier_tree_hash(state_before.n_max.max(1), snapshot_base.as_slice())?;
     if expected_before != parsed.kem_tree_hash_before {
-        return Err(CityGError::InvalidInput("barrier tree hash chain failure"));
+        return Err(CityGError::Acceptance(
+            msphf_orchestrator::AcceptanceError::Freeze(
+                msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
+            ),
+        ));
     }
 
     let revocation_roots_hash = compute_revocation_roots_hash(
@@ -1964,7 +1968,11 @@ fn validate_barrier_update_against_roster(
     let expected_after =
         compute_barrier_tree_hash(state_before.n_max.max(1), snapshot_post.as_slice())?;
     if expected_after != parsed.kem_tree_hash_after {
-        return Err(CityGError::InvalidInput("barrier tree hash chain failure"));
+        return Err(CityGError::Acceptance(
+            msphf_orchestrator::AcceptanceError::Freeze(
+                msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
+            ),
+        ));
     }
 
     let expected_pairs = collect_expected_pairs(
@@ -3168,7 +3176,10 @@ mod tests {
         ))?;
         assert!(matches!(
             err,
-            CityGError::InvalidInput("barrier tree hash chain failure")
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE.code
+                    && freeze.reason
+                        == msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE.reason
         ));
 
         let roots_bad = super::BarrierUpdateWire(
@@ -3230,7 +3241,10 @@ mod tests {
         ))?;
         assert!(matches!(
             err,
-            CityGError::InvalidInput("barrier tree hash chain failure")
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE.code
+                    && freeze.reason
+                        == msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE.reason
         ));
         Ok(())
     }

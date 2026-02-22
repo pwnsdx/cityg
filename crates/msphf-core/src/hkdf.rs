@@ -61,19 +61,19 @@ mod tests {
         let k_fs = [0x55u8; 32];
 
         #[derive(Serialize)]
-        struct FsEpochSalt<'a> {
+        struct FsTauSalt<'a> {
             #[serde(with = "serde_bytes")]
             weid: &'a [u8; 32],
             fs_ec: u64,
         }
 
-        let epoch_salt = h_l("fs/epoch/salt", &FsEpochSalt { weid: &weid, fs_ec })?;
-        let epoch_sk_salt = h_l("fs/epoch/sk_salt", &FsEpochSalt { weid: &weid, fs_ec })?;
+        let tau_salt = h_l("fs/tau/salt", &FsTauSalt { weid: &weid, fs_ec })?;
+        let epoch_sk_salt = h_l("fs/epoch/sk_salt", &FsTauSalt { weid: &weid, fs_ec })?;
 
-        let tau = hkdf_blake3(&epoch_salt, &k_fs, b"city-g|fs/epoch/tau|v1");
+        let tau = hkdf_blake3(&tau_salt, &k_fs, b"city-g|fs/tau|v1");
         assert_eq!(
             tau,
-            hex_literal::hex!("d2e2abb161e81d485e31d3324f52e7c0424d9d496ea12dae37b704e8d5a964d5")
+            hex_literal::hex!("3a568c08cbb6c9fda1f9fde7180e40c5ae67f466c509ad7f2076c63f987388c6")
         );
 
         let epoch_sk = hkdf_blake3(&epoch_sk_salt, &k_fs, b"city-g|fs/epoch/sk|v1");
