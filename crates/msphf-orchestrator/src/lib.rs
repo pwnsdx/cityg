@@ -42,13 +42,7 @@ use pqcrypto_kyber::kyber768::{
     ciphertext_bytes as ml_kem_ciphertext_bytes, decapsulate as ml_kem_decapsulate,
     encapsulate as ml_kem_encapsulate, public_key_bytes as ml_kem_public_key_bytes,
 };
-use pqcrypto_traits::{
-    kem::{
-        Ciphertext as KemCiphertextTrait, PublicKey as KemPublicKeyTrait,
-        SecretKey as KemSecretKeyTrait, SharedSecret as KemSharedSecretTrait,
-    },
-    sign::DetachedSignature,
-};
+use pqcrypto_traits::sign::DetachedSignature;
 use proofs::{capss, srx_smallwood, zk_vrf};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -67,7 +61,8 @@ pub use accept::fixtures;
 pub use accept::{
     AcceptanceContext, AcceptanceError, AcceptanceKind, AcceptanceOptions, AcceptanceOutcome,
     AnnexMTelemetryReport, AnnexMTelemetryRow, BarrierGroupState, BootstrapPolicy,
-    DeviceChainState, FsPolicyConfig, TelemetryCounters, TelemetryKey, build_bootstrap_digest,
+    DeviceChainState, FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE, FsPolicyConfig, TelemetryCounters,
+    TelemetryKey, build_bootstrap_digest,
 };
 pub use hdr::*;
 pub use policy::{
@@ -252,8 +247,13 @@ pub fn compute_proofs_commit_bytes(
     #[derive(Serialize)]
     struct ProofsArray(Vec<serde_bytes::ByteBuf>);
 
-    let mut components =
-        Vec::with_capacity(2 + srx_root_sw.is_some() as usize + srx_smallwood.is_some() as usize);
+    if srx_root_sw.is_some() != srx_smallwood.is_some() {
+        return Err(MsphfError::invalid_input(
+            "srx_root_sw and srx_smallwood must be both present or both absent",
+        ));
+    }
+
+    let mut components = Vec::with_capacity(if srx_root_sw.is_some() { 4 } else { 2 });
     components.push(serde_bytes::ByteBuf::from(vrf_pi.to_vec()));
     components.push(serde_bytes::ByteBuf::from(fs_capss.to_vec()));
     if let Some(root) = srx_root_sw {
@@ -5191,6 +5191,16 @@ mod tests {
         assert_eq!(outcome.we_epoch_id, result.we_epoch_id);
         assert_eq!(ctx.active_heads(&outcome.wid), 1);
         Ok(())
+    }
+
+    #[test]
+    fn proofs_commit_rejects_partial_srx_inputs() {
+        let err = compute_proofs_commit_bytes(&[0x01], &[0x02], Some(&[0x03; 32]), None)
+            .expect_err("partial SRX tuple must be rejected");
+        assert!(
+            err.to_string()
+                .contains("srx_root_sw and srx_smallwood must be both present or both absent")
+        );
     }
 
     #[test]

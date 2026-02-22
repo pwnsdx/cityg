@@ -931,13 +931,6 @@ impl AcceptanceContext {
         gate: BarrierGateDecision,
     ) {
         if gate.barrier_update_reason.is_none() {
-            if let Some(state) = self.barrier_group_state_mut(gid)
-                && !state.barrier_initialized
-            {
-                state.barrier_initialized = true;
-                state.barrier_version = gate.barrier_version;
-                state.barrier_roots_hash = gate.revocation_roots_hash;
-            }
             return;
         }
 
@@ -4600,6 +4593,35 @@ mod tests {
         };
         ctx.apply_barrier_acceptance_commit(gid, &header, gate);
         assert!(ctx.barrier_group_state(gid).is_none());
+    }
+
+    #[test]
+    fn apply_barrier_commit_without_update_does_not_initialize_group_state() {
+        let gid = b"gid-no-update".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+        let header = BTreeMap::new();
+        ctx.insert_barrier_group_state(
+            gid,
+            BarrierGroupState {
+                barrier_initialized: false,
+                barrier_version: 0,
+                ..BarrierGroupState::default()
+            },
+        );
+        let gate = BarrierGateDecision {
+            barrier_version: 7,
+            fs_ec: 42,
+            revocation_roots_hash: [0x44; 32],
+            barrier_update_digest: [0x55; 32],
+            barrier_update_reason: None,
+            parsed_barrier_update: None,
+        };
+        ctx.apply_barrier_acceptance_commit(gid, &header, gate);
+        let state = ctx
+            .barrier_group_state(gid)
+            .expect("group state should still exist");
+        assert!(!state.barrier_initialized);
+        assert_eq!(state.barrier_version, 0);
     }
 
     #[test]

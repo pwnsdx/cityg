@@ -98,7 +98,7 @@ This separation prevents accidental ``server helpfulness'' from becoming a secre
 
 \section{Cryptographic and Encoding Discipline}
 \subsection{Primitive suite}
-The profile uses BLAKE3-based domain-separated hashing, HKDF-BLAKE3 with fixed output length 32, ChaCha20-Poly1305 AEAD, and ML-KEM-768 for cover operations. Deterministic CBOR (RFC 8949 profile) is mandatory for all critical structures \citep{blake3,rfc8949,rfc8439,fips203}.
+The profile uses BLAKE3-based domain-separated hashing (with \texttt{H\_L} instantiated via BLAKE3 derive-key context \texttt{city-g|h\_l|v1}), HKDF-BLAKE3 with fixed output length 32, ChaCha20-Poly1305 AEAD, and ML-KEM-768 for cover operations. Deterministic CBOR (RFC 8949 profile) is mandatory for all critical structures \citep{blake3,rfc8949,rfc8439,fips203}.
 
 \subsection{Why canonical encoding is first-class}
 In distributed cryptographic systems, parser-level ambiguity is often as dangerous as primitive breakage. \cityg therefore requires deterministic re-encoding checks and maps failures to explicit codes. It also distinguishes semantic objects from their raw transmitted bytes where identity is digest-bound (e.g., barrier update bytes).

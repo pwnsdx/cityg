@@ -1978,7 +1978,11 @@ fn validate_barrier_update_against_roster(
         .map(|node| (node.source_node, node.target_node))
         .collect();
     if actual_pairs != expected_pairs {
-        return Err(CityGError::InvalidInput("barrier expectedpairs failure"));
+        return Err(CityGError::Acceptance(
+            msphf_orchestrator::AcceptanceError::Freeze(
+                msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE,
+            ),
+        ));
     }
     for node in &parsed.node_ciphertexts {
         let target_index = usize::try_from(node.target_node)
@@ -1988,7 +1992,11 @@ fn validate_barrier_update_against_roster(
             .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
         let target_pkhash = compute_barrier_pkhash(target_pk.as_slice())?;
         if node.target_pk_hash.as_slice() != &target_pkhash[..16] {
-            return Err(CityGError::InvalidInput("barrier expectedpairs failure"));
+            return Err(CityGError::Acceptance(
+                msphf_orchestrator::AcceptanceError::Freeze(
+                    msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE,
+                ),
+            ));
         }
     }
 
@@ -2781,7 +2789,10 @@ mod tests {
         };
         assert!(matches!(
             err,
-            CityGError::InvalidInput("barrier expectedpairs failure")
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE.code
+                    && freeze.reason
+                        == msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE.reason
         ));
         Ok(())
     }

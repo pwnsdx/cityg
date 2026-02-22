@@ -43,10 +43,6 @@ use pqcrypto_kyber::kyber768::keypair as kyber_keypair;
 use pqcrypto_kyber::kyber768::{
     Ciphertext as MlKemCiphertext, SecretKey as MlKemSecretKey, decapsulate as ml_kem_decapsulate,
 };
-use pqcrypto_traits::kem::{
-    Ciphertext as KemCiphertextTrait, PublicKey as KemPublicKeyTrait,
-    SecretKey as KemSecretKeyTrait, SharedSecret as KemSharedSecretTrait,
-};
 use pqcrypto_traits::sign::{
     DetachedSignature as SignDetachedSignatureTrait, PublicKey as SignPublicKeyTrait,
 };

@@ -88,7 +88,10 @@ S2.1 BLAKE3
 * BLAKE3_keyed(key32, message) -> 32 bytes
 
 S2.2 H_L: domain-separated hash -> bstr32 (normative)
-H_L(label, args[]) := BLAKE3( "city-g|" || ASCII(label) || 0x00 || CBOR_det(args[]) )
+H_L(label, args[]) := BLAKE3_derive_key(
+  context = "city-g|h_l|v1",
+  message = "city-g|" || ASCII(label) || 0x00 || CBOR_det(args[])
+)
 * ASCII(label) MUST be bytes in 0x20..0x7E, MUST NOT include 0x00.
 * output is exactly 32 bytes.
 
@@ -1132,6 +1135,10 @@ FS-hybrid required fields:
 * any suite identifiers required to verify proofs (Smallwood/VRF/SRX profiles)
 
 S13. ERROR CODES (NORMATIVE)
+
+Encoding note (normative):
+* Dotted forms (e.g., `960.10`) are the canonical documentation form.
+* In machine fields that carry numeric freeze codes, implementations MUST encode the same code as decimal digits without a dot (e.g., `96010`).
 
 Barrier codes
 960.1  barrier_updater_invalid

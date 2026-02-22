@@ -160,6 +160,11 @@ pub const FREEZE_FS_CHECKPOINT_MONOTONICITY: FreezeError = FreezeError {
     reason: "fs_checkpoint_monotonicity",
 };
 
+pub const FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE: FreezeError = FreezeError {
+    code: 9603,
+    reason: "barrier_expectedpairs_failure",
+};
+
 pub const FREEZE_BARRIER_MERGE_DELEGATION_FORBIDDEN: FreezeError = FreezeError {
     code: 9604,
     reason: "barrier_merge_delegation_forbidden",

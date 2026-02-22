@@ -62,7 +62,6 @@ use pqcrypto_dilithium::{
 use pqcrypto_kyber::kyber768;
 use pqcrypto_traits::kem::{
     Ciphertext as KemCiphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey,
-    SharedSecret as KemSharedSecret,
 };
 use pqcrypto_traits::sign::{
     DetachedSignature, PublicKey as DilithiumPublicKey, SecretKey as DilithiumSecretKey,
@@ -98,6 +97,8 @@ const BARRIER_KEYGEN_Z_INFO: &[u8] = b"city-g|barrier/keygen-z|v1";
 const FS_PCS_INFO: &[u8] = b"city-g|fs/pcs|v1";
 const ML_KEM_SEED_BYTES: usize = 64;
 const ML_KEM_EXPANDED_DK_BYTES: usize = 2400;
+const BARRIER_CODE_RECOVER_NO_MATCH: u32 = 9606;
+const BARRIER_CODE_SNAPSHOT_AUTH_FAILURE: u32 = 9609;
 const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
 const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
 const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
@@ -1039,7 +1040,7 @@ fn try_recover_barrier_from_header(
             ));
         }
         warn!(
-            code = 9606,
+            code = BARRIER_CODE_RECOVER_NO_MATCH,
             "barrier recover produced no matching ciphertext"
         );
         return Ok(None);
@@ -1196,7 +1197,7 @@ fn apply_pending_barrier_activation(
         }
 
         warn!(
-            code = 9609,
+            code = BARRIER_CODE_SNAPSHOT_AUTH_FAILURE,
             pending_barrier_version = pending.barrier_version,
             observed_barrier_version,
             "pending barrier activation digest mismatch; dropping pending state"
