@@ -14992,6 +14992,209 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[ignore = "manual benchmark for msg_index persistence cost"]
+    fn benchmark_msg_index_persistence_cost_profile() -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let mut session = build_test_session(0xBEEF, "http://127.0.0.1:9", "bench-room", "bench")?;
+
+        let iterations: u64 = 2_000;
+        let start_counter = std::time::Instant::now();
+        let mut counter: u64 = 0;
+        for _ in 0..iterations {
+            counter = counter.saturating_add(1);
+        }
+        let counter_elapsed = start_counter.elapsed();
+        assert_eq!(counter, iterations);
+
+        let start_persist = std::time::Instant::now();
+        for i in 0..iterations {
+            session.next_msg_index = i;
+            persist_session(&session)?;
+        }
+        let persist_elapsed = start_persist.elapsed();
+
+        let persist_ops = (iterations as f64) / persist_elapsed.as_secs_f64().max(1e-9);
+        let persist_ms = persist_elapsed.as_secs_f64() * 1_000.0 / (iterations as f64);
+        let counter_ops = (iterations as f64) / counter_elapsed.as_secs_f64().max(1e-9);
+        eprintln!(
+            "BENCH[msg_index_persist] iterations={iterations} persist_total_ms={:.2} persist_per_op_ms={persist_ms:.4} persist_ops_per_sec={persist_ops:.1} counter_ops_per_sec={counter_ops:.1}",
+            persist_elapsed.as_secs_f64() * 1_000.0
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "manual benchmark for send throughput with and without msg_index persistence"]
+    async fn benchmark_send_throughput_with_vs_without_msg_index_persist()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0xE1u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+        let session = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id,
+            alias: "bench-sender".to_string(),
+        })
+        .await?;
+
+        let iterations: u64 = 120;
+        let mut msg_index: u64 = 0;
+
+        for i in 0..10u64 {
+            perform_send(SendParams::from_session(
+                &session,
+                format!("warmup-no-persist-{i}"),
+                msg_index,
+            ))
+            .await?;
+            msg_index = msg_index.saturating_add(1);
+        }
+
+        let no_persist_start = std::time::Instant::now();
+        for i in 0..iterations {
+            perform_send(SendParams::from_session(
+                &session,
+                format!("bench-no-persist-{i}"),
+                msg_index,
+            ))
+            .await?;
+            msg_index = msg_index.saturating_add(1);
+        }
+        let no_persist_elapsed = no_persist_start.elapsed();
+
+        let mut strict_session = session.clone();
+        strict_session.next_msg_index = msg_index;
+        let persist_start = std::time::Instant::now();
+        for i in 0..iterations {
+            let current = strict_session.next_msg_index;
+            strict_session.next_msg_index = strict_session.next_msg_index.saturating_add(1);
+            persist_session(&strict_session)?;
+            perform_send(SendParams::from_session(
+                &strict_session,
+                format!("bench-with-persist-{i}"),
+                current,
+            ))
+            .await?;
+        }
+        let persist_elapsed = persist_start.elapsed();
+
+        let no_persist_tps = (iterations as f64) / no_persist_elapsed.as_secs_f64().max(1e-9);
+        let persist_tps = (iterations as f64) / persist_elapsed.as_secs_f64().max(1e-9);
+        eprintln!(
+            "BENCH[send_throughput] iterations={iterations} no_persist_total_ms={:.2} no_persist_msg_per_sec={no_persist_tps:.1} with_persist_total_ms={:.2} with_persist_msg_per_sec={persist_tps:.1}",
+            no_persist_elapsed.as_secs_f64() * 1_000.0,
+            persist_elapsed.as_secs_f64() * 1_000.0
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "manual benchmark for barrier chain-check latency and large-n hashing"]
+    async fn benchmark_barrier_chain_check_latency_profile()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::Arc;
+
+        fn synthetic_entries(n_max: u64) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+            let n_max_usize = usize::try_from(n_max)?;
+            let total = n_max_usize
+                .checked_mul(2)
+                .and_then(|v| v.checked_sub(1))
+                .ok_or_else(|| anyhow!("synthetic entry length overflow"))?;
+            let mut out = Vec::with_capacity(total);
+            for i in 0..total {
+                if i % 7 == 0 {
+                    out.push(vec![0xA5; 1184]);
+                } else {
+                    out.push(Vec::new());
+                }
+            }
+            Ok(out)
+        }
+
+        let mut hash_profiles = Vec::new();
+        for &n_max in &[1024u64, 2048u64] {
+            let mut entries_post = synthetic_entries(n_max)?;
+            let entries_pre = synthetic_entries(n_max)?;
+            // Simulate post-update tree delta on a handful of nodes.
+            for idx in (0..entries_post.len()).step_by(257) {
+                entries_post[idx] = vec![0x5A; 1184];
+            }
+            let pre = Arc::new(entries_pre);
+            let post = Arc::new(entries_post);
+            let rounds = 20u64;
+            let cpu_start = std::time::Instant::now();
+            let mut last = [0u8; 32];
+            for _ in 0..rounds {
+                let before = compute_barrier_tree_hash(n_max, pre.as_slice())?;
+                let after = compute_barrier_tree_hash(n_max, post.as_slice())?;
+                last = before;
+                for i in 0..last.len() {
+                    last[i] ^= after[i];
+                }
+            }
+            let cpu_elapsed = cpu_start.elapsed();
+
+            let blocking_start = std::time::Instant::now();
+            for _ in 0..rounds {
+                let pre = Arc::clone(&pre);
+                let post = Arc::clone(&post);
+                let _: ([u8; 32], [u8; 32]) =
+                    tokio::task::spawn_blocking(move || -> Result<_, anyhow::Error> {
+                        Ok((
+                            compute_barrier_tree_hash(n_max, pre.as_slice())?,
+                            compute_barrier_tree_hash(n_max, post.as_slice())?,
+                        ))
+                    })
+                    .await??;
+            }
+            let blocking_elapsed = blocking_start.elapsed();
+            hash_profiles.push((n_max, cpu_elapsed, blocking_elapsed, rounds, last));
+        }
+
+        for (n_max, cpu_elapsed, blocking_elapsed, rounds, last) in hash_profiles {
+            let cpu_per_round_ms = cpu_elapsed.as_secs_f64() * 1_000.0 / (rounds as f64);
+            let blocking_per_round_ms = blocking_elapsed.as_secs_f64() * 1_000.0 / (rounds as f64);
+            eprintln!(
+                "BENCH[barrier_chain_check] n_max={n_max} rounds={rounds} cpu_total_ms={:.2} cpu_mean_ms={cpu_per_round_ms:.3} spawn_blocking_total_ms={:.2} spawn_blocking_mean_ms={blocking_per_round_ms:.3} hash_prefix={}",
+                cpu_elapsed.as_secs_f64() * 1_000.0,
+                blocking_elapsed.as_secs_f64() * 1_000.0,
+                hex_encode(&last[..4])
+            );
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn members_fetch_recovers_from_stale_parent_root()
     -> Result<(), Box<dyn std::error::Error>> {
