@@ -99,6 +99,7 @@ to the unified FS-hybrid + PRS barrier profile in `/Users/admin/Desktop/Reposito
 ## Phase I: KAT/conformance + enforcement
 
 - [x] Implement mandatory KATs `S14.1`..`S14.6`.
+  - [x] Added `kat/kat-s14-conformance-manifest-v0.1.2.json` to map each S14 requirement to deterministic implementation tests.
   - [x] `S14.1`: explicit `ExpectedNodeSet` conformance/rejection coverage in barrier parser/server validation tests.
   - [x] `S14.2`: FULL-client `ek_n` mismatch fail-closed test coverage.
   - [x] `S14.3`: recover AAD binding to full `pkhash_t` with positive and negative client coverage.

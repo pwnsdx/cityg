@@ -30,6 +30,13 @@ capture the RLWE/HPS scenarios mandated by the Annex K RLWE profile:
 - `scenario-missing-revoked-root`
 - `scenario-merge-join-keys`
 
+# City-G S14 Conformance Manifest
+
+`kat-s14-conformance-manifest-v0.1.2.json` maps each normative S14 requirement to
+deterministic implementation tests covering the same acceptance/rejection behavior.
+This manifest is used as an auditable bridge between spec requirements and the
+current Rust conformance suite.
+
 ## Plan → vectors workflow
 
 1. Edit `plan-rlwe-annex-k.json` if new scenarios are required. The schema matches the

@@ -483,8 +483,9 @@ where
     if canonical.as_slice() != raw {
         return Err(anyhow!("non-canonical {label} encoding"));
     }
-    let decoded: T =
-        ciborium::de::from_reader(raw).map_err(|err| anyhow!("failed to parse {label}: {err}"))?;
+    let decoded: T = value
+        .deserialized()
+        .map_err(|err| anyhow!("failed to decode {label}: {err}"))?;
     Ok(decoded)
 }
 
@@ -762,30 +763,44 @@ async fn full_chain_check_barrier_update(
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
 
-    let mut snapshot_pre = snapshot_prev.pk_entries.clone();
-    apply_join_set_to_snapshot(snapshot_pre.as_mut_slice(), n_max, join_records.as_slice())?;
-    apply_revoked_set_to_snapshot(
-        snapshot_pre.as_mut_slice(),
-        n_max,
-        revoked_indices.as_slice(),
-    )?;
-    let expected_before = compute_barrier_tree_hash(n_max, snapshot_pre.as_slice())?;
+    let parsed_for_hash = parsed.clone();
+    let snapshot_prev_entries = snapshot_prev.pk_entries.clone();
+    let (expected_before, expected_after) =
+        tokio::task::spawn_blocking(move || -> Result<([u8; 32], [u8; 32])> {
+            let mut snapshot_pre = snapshot_prev_entries;
+            apply_join_set_to_snapshot(
+                snapshot_pre.as_mut_slice(),
+                n_max,
+                join_records.as_slice(),
+            )?;
+            apply_revoked_set_to_snapshot(
+                snapshot_pre.as_mut_slice(),
+                n_max,
+                revoked_indices.as_slice(),
+            )?;
+            let expected_before = compute_barrier_tree_hash(n_max, snapshot_pre.as_slice())?;
+
+            let mut snapshot_post = snapshot_pre;
+            for (node, ek) in &parsed_for_hash.new_public_keys {
+                let index = usize::try_from(*node)
+                    .map_err(|_| anyhow!("barrier node index out of range"))?;
+                let slot = snapshot_post
+                    .get_mut(index)
+                    .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+                *slot = ek.clone();
+            }
+            let expected_after = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
+
+            Ok((expected_before, expected_after))
+        })
+        .await
+        .map_err(|err| anyhow!("barrier full chain-check worker join failure (960.8): {err}"))??;
+
     if expected_before != parsed.kem_tree_hash_before {
         return Err(anyhow!(
             "barrier tree hash-chain failure (960.8): kem_tree_hash_before mismatch"
         ));
     }
-
-    let mut snapshot_post = snapshot_pre;
-    for (node, ek) in &parsed.new_public_keys {
-        let index =
-            usize::try_from(*node).map_err(|_| anyhow!("barrier node index out of range"))?;
-        let slot = snapshot_post
-            .get_mut(index)
-            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
-        *slot = ek.clone();
-    }
-    let expected_after = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
     if expected_after != parsed.kem_tree_hash_after {
         return Err(anyhow!(
             "barrier tree hash-chain failure (960.8): kem_tree_hash_after mismatch"
