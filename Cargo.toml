@@ -11,8 +11,12 @@ members = [
     "crates/cityg-api-client",
     "crates/dudect-harness", "crates/capss",
     "crates/cityg-gui", "crates/cityg-config",
+    "crates/pqcrypto-kyber",
 ]
 resolver = "2"
+
+[patch.crates-io]
+pqcrypto-kyber = { path = "crates/pqcrypto-kyber" }
 
 [workspace.package]
 edition = "2024"
