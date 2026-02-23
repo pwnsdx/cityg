@@ -1710,6 +1710,17 @@ fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
 }
 
 fn compute_group_barrier_tree_hash(state: &GroupState) -> Result<[u8; 32], CityGError> {
+    let n_max_usize = usize::try_from(state.n_max)
+        .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
+    let expected_len = n_max_usize
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or(CityGError::InvalidInput("barrier tree size overflow"))?;
+
+    if state.barrier_pk_entries.len() == expected_len {
+        return compute_barrier_tree_hash(state.n_max, state.barrier_pk_entries.as_slice());
+    }
+
     let pk_entries = build_pk_entries(state)?;
     compute_barrier_tree_hash(state.n_max, &pk_entries)
 }
