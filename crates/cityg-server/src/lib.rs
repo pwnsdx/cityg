@@ -1908,7 +1908,12 @@ fn barrier_update_malformed_freeze_error() -> CityGError {
 }
 
 fn is_barrier_update_malformed_error(err: &CityGError) -> bool {
-    matches!(err, CityGError::InvalidInput("barrier_update malformed"))
+    match err {
+        CityGError::InvalidInput(message) => {
+            *message == "barrier_update malformed" || message.starts_with("barrier ")
+        }
+        _ => false,
+    }
 }
 
 fn validate_barrier_update_against_roster(
