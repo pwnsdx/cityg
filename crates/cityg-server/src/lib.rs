@@ -865,10 +865,11 @@ impl CityGServer {
         roster: &mut GroupRoster,
         bundle: &ClientEpochBundle,
     ) -> Result<ServerOutcome, CityGError> {
-        let state_before = roster.groups.get(bundle.gid()).cloned().unwrap_or_default();
+        let default_state = GroupState::default();
+        let state_before = roster.groups.get(bundle.gid()).unwrap_or(&default_state);
         let delta = bundle.membership_delta()?;
         let barrier_validation =
-            validate_barrier_update_against_roster(&state_before, &bundle.header_map, &delta)?;
+            validate_barrier_update_against_roster(state_before, &bundle.header_map, &delta)?;
 
         // Keep barrier acceptance/state logic on a single deterministic path:
         // groups without explicit prior state are treated as default-initialized.
@@ -2033,8 +2034,8 @@ fn validate_barrier_update_against_roster(
         }
 
         let revocation_roots_hash = compute_revocation_roots_hash(
-            &header_bytes32(header, 112, "missing revoked_since_root")?,
-            &header_bytes32(header, hdr::HDR_REVOKED_ROOT, "missing revoked_root")?,
+            &header_bytes32(header, 112, "barrier_update malformed")?,
+            &header_bytes32(header, hdr::HDR_REVOKED_ROOT, "barrier_update malformed")?,
         )?;
         if parsed.revocation_roots_hash != revocation_roots_hash {
             return Err(CityGError::InvalidInput("barrier_update malformed"));
