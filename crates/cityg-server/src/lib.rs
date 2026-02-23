@@ -360,11 +360,13 @@ impl CityGServer {
             pcs_refresh_min_delta_device_ec,
             pcs_refresh_min_delta_group_ec,
             pcs_refresh_slot_width_ec,
+            max_barrier_update_bytes,
         ) = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
             if state.k_barrier == [0u8; 32] {
                 state.k_barrier = random_barrier_key();
             }
+            state.max_barrier_update_bytes = state.max_barrier_update_bytes.max(1);
             if !state.barrier_initialized && !has_history {
                 let zero = [0u8; 32];
                 let revocation_roots_hash = compute_revocation_roots_hash(&zero, &zero)?;
@@ -388,6 +390,7 @@ impl CityGServer {
                 state.pcs_refresh_min_delta_device_ec.max(1),
                 state.pcs_refresh_min_delta_group_ec.max(1),
                 state.pcs_refresh_slot_width_ec.max(1),
+                state.max_barrier_update_bytes.max(1),
             )
         };
 
@@ -405,6 +408,7 @@ impl CityGServer {
         ctx_state.pcs_refresh_min_delta_device_ec = pcs_refresh_min_delta_device_ec;
         ctx_state.pcs_refresh_min_delta_group_ec = pcs_refresh_min_delta_group_ec;
         ctx_state.pcs_refresh_slot_width_ec = pcs_refresh_slot_width_ec;
+        ctx_state.max_barrier_update_bytes = max_barrier_update_bytes.max(1);
         self.ctx
             .insert_barrier_group_state(gid.as_slice(), ctx_state);
         Ok(())
@@ -899,6 +903,7 @@ impl CityGServer {
             barrier_state.pcs_refresh_min_delta_device_ec.max(1);
         group.pcs_refresh_min_delta_group_ec = barrier_state.pcs_refresh_min_delta_group_ec.max(1);
         group.pcs_refresh_slot_width_ec = barrier_state.pcs_refresh_slot_width_ec.max(1);
+        group.max_barrier_update_bytes = barrier_state.max_barrier_update_bytes.max(1);
 
         let barrier_version = ctx
             .barrier_group_state(bundle.gid())
@@ -981,6 +986,7 @@ impl CityGServer {
                 state.pcs_refresh_min_delta_device_ec.max(1);
             ctx_state.pcs_refresh_min_delta_group_ec = state.pcs_refresh_min_delta_group_ec.max(1);
             ctx_state.pcs_refresh_slot_width_ec = state.pcs_refresh_slot_width_ec.max(1);
+            ctx_state.max_barrier_update_bytes = state.max_barrier_update_bytes.max(1);
         }
 
         // Keep at least one pivot parity available on the resulting root so members
@@ -1042,6 +1048,11 @@ impl CityGServer {
                 room_state.pcs_refresh_min_delta_device_ec.max(1);
             group.pcs_refresh_min_delta_group_ec = room_state.pcs_refresh_min_delta_group_ec.max(1);
             group.pcs_refresh_slot_width_ec = room_state.pcs_refresh_slot_width_ec.max(1);
+            group.max_barrier_update_bytes = usize::try_from(room_state.max_barrier_update_bytes)
+                .unwrap_or(
+                    msphf_orchestrator::BarrierGroupState::default().max_barrier_update_bytes,
+                )
+                .max(1);
             self.ctx.insert_barrier_group_state(
                 gid.as_slice(),
                 msphf_orchestrator::BarrierGroupState {
@@ -1050,8 +1061,7 @@ impl CityGServer {
                     barrier_roots_hash: group.barrier_roots_hash,
                     kem_tree_hash_after: group.kem_tree_hash_after,
                     n_max: group.n_max,
-                    max_barrier_update_bytes: msphf_orchestrator::BarrierGroupState::default()
-                        .max_barrier_update_bytes,
+                    max_barrier_update_bytes: group.max_barrier_update_bytes.max(1),
                     last_pcs_refresh_ec: group.last_pcs_refresh_ec,
                     pcs_refresh_min_delta_device_ec: group.pcs_refresh_min_delta_device_ec,
                     pcs_refresh_min_delta_group_ec: group.pcs_refresh_min_delta_group_ec,
@@ -1136,6 +1146,14 @@ impl CityGServer {
                         .get(gid.as_slice())
                         .map(|state| state.pcs_refresh_slot_width_ec.max(1))
                         .unwrap_or_else(default_pcs_refresh_slot_width_ec),
+                    max_barrier_update_bytes: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| {
+                            u64::try_from(state.max_barrier_update_bytes).unwrap_or(u64::MAX)
+                        })
+                        .unwrap_or_else(default_max_barrier_update_bytes),
                 };
                 (gid, room)
             })
@@ -1489,6 +1507,7 @@ struct ParsedNodeCiphertext {
 #[derive(Clone)]
 struct ParsedBarrierUpdate {
     prev_barrier_version: u64,
+    updater_leaf: u64,
     tree_size: u64,
     revocation_roots_hash: [u8; 32],
     kem_tree_hash_before: [u8; 32],
@@ -1652,6 +1671,7 @@ fn parse_barrier_update(
 
     Ok(Some(ParsedBarrierUpdate {
         prev_barrier_version,
+        updater_leaf,
         tree_size,
         revocation_roots_hash: vec_to_32(revocation_roots_hash)?,
         kem_tree_hash_before: vec_to_32(kem_tree_hash_before)?,
@@ -1874,6 +1894,16 @@ fn validate_barrier_update_against_roster(
     header: &BTreeMap<u64, Value>,
     delta: &MembershipDelta,
 ) -> Result<Option<BarrierUpdateValidationOutcome>, CityGError> {
+    if let Some(Value::Bytes(raw_update)) = header.get(&hdr::HDR_BARRIER_UPDATE)
+        && raw_update.len() > state_before.max_barrier_update_bytes
+    {
+        return Err(CityGError::Acceptance(
+            msphf_orchestrator::AcceptanceError::Freeze(
+                msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED,
+            ),
+        ));
+    }
+
     let Some(parsed) = parse_barrier_update(header, state_before.n_max.max(1))? else {
         return Ok(None);
     };
@@ -1933,9 +1963,38 @@ fn validate_barrier_update_against_roster(
     for leaf in revoked_set {
         revoked_indices.insert(cover_leaf_index(&leaf, state_before.n_max.max(1)) as usize);
     }
-    for revoked_index in revoked_indices {
-        let leaf_node = leaf_base.saturating_add(revoked_index);
+    for revoked_index in &revoked_indices {
+        let leaf_node = leaf_base.saturating_add(*revoked_index);
         blank_leaf_and_path(&mut snapshot_base, leaf_node);
+    }
+
+    let author_pop_pk = header
+        .get(&hdr::HDR_POP_PK)
+        .and_then(Value::as_bytes)
+        .ok_or_else(|| {
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(
+                msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+            ))
+        })?;
+    let mut author_cover_indices = BTreeSet::new();
+    for (leaf, device_pk) in &state_before.leaf_device_pk {
+        if device_pk.as_slice() == author_pop_pk {
+            author_cover_indices
+                .insert(u64::from(cover_leaf_index(leaf, state_before.n_max.max(1))));
+        }
+    }
+    if author_cover_indices.len() != 1
+        || !author_cover_indices.contains(&parsed.updater_leaf)
+        || revoked_indices.contains(
+            &usize::try_from(parsed.updater_leaf)
+                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
+        )
+    {
+        return Err(CityGError::Acceptance(
+            msphf_orchestrator::AcceptanceError::Freeze(
+                msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+            ),
+        ));
     }
 
     let expected_before =
@@ -2626,6 +2685,8 @@ mod tests {
         state.barrier_version = 1;
         state.barrier_pk_entries = super::build_all_blank_pk_entries(state.n_max)?;
         let leaf = cityg_client::demo::demo_member_leaf("barrier-expected-pairs");
+        let pop_pk = vec![0xAB; 32];
+        state.leaf_device_pk.insert(leaf, pop_pk.clone());
         let join_ek = vec![0xA5; 1184];
         let delta = cityg_client::MembershipDelta {
             joined: vec![leaf],
@@ -2701,6 +2762,7 @@ mod tests {
         header.insert(112, Value::Bytes(revoked_since.to_vec()));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
         header.insert(hdr::HDR_BARRIER_LEAF_PK, Value::Bytes(join_ek));
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(pop_pk));
 
         let validation = super::validate_barrier_update_against_roster(&state, &header, &delta)?
             .ok_or(CityGError::InvalidInput("missing parsed barrier update"))?;
@@ -2720,6 +2782,8 @@ mod tests {
         state.barrier_pk_entries = super::build_all_blank_pk_entries(state.n_max)?;
 
         let leaf = cityg_client::demo::demo_member_leaf("barrier-pairs-mismatch");
+        let pop_pk = vec![0xBC; 32];
+        state.leaf_device_pk.insert(leaf, pop_pk.clone());
         let join_ek = vec![0xA5; 1184];
         let delta = cityg_client::MembershipDelta {
             joined: vec![leaf],
@@ -2786,6 +2850,7 @@ mod tests {
         header.insert(112, Value::Bytes(revoked_since.to_vec()));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
         header.insert(hdr::HDR_BARRIER_LEAF_PK, Value::Bytes(join_ek));
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(pop_pk));
 
         let err = match super::validate_barrier_update_against_roster(&state, &header, &delta) {
             Ok(_) => {
@@ -2801,6 +2866,137 @@ mod tests {
                 if freeze.code == msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE.code
                     && freeze.reason
                         == msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE.reason
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn validate_barrier_update_rejects_updater_identity_mismatch() -> Result<(), CityGError> {
+        let mut state = super::GroupState {
+            n_max: 4,
+            ..super::GroupState::default()
+        };
+        state.barrier_initialized = true;
+        state.barrier_version = 1;
+        state.barrier_pk_entries = super::build_all_blank_pk_entries(state.n_max)?;
+        let leaf = cityg_client::demo::demo_member_leaf("barrier-updater-mismatch");
+        let mapped_pop_pk = vec![0xA1; 32];
+        let header_pop_pk = vec![0xA2; 32];
+        state.leaf_device_pk.insert(leaf, mapped_pop_pk);
+        let join_ek = vec![0xA5; 1184];
+        let delta = cityg_client::MembershipDelta {
+            joined: vec![leaf],
+            revoked: Vec::new(),
+        };
+        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max.max(1));
+        let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
+            .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
+        let leaf_node = leaf_base
+            + usize::try_from(updater_leaf)
+                .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
+        let sibling_node = super::sibling_node(leaf_node)
+            .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
+        let parent_node = (leaf_node - 1) / 2;
+        let path_nodes = vec![leaf_node as u64, parent_node as u64, 0];
+
+        let target_ek = vec![0x91; 1184];
+        state.barrier_pk_entries[sibling_node] = target_ek.clone();
+        state.kem_tree_hash_after =
+            super::compute_barrier_tree_hash(state.n_max, state.barrier_pk_entries.as_slice())?;
+
+        let mut snapshot_pre = state.barrier_pk_entries.clone();
+        snapshot_pre[leaf_node] = join_ek.clone();
+        super::blank_internal_path_from_leaf(snapshot_pre.as_mut_slice(), leaf_node);
+        let kem_before = super::compute_barrier_tree_hash(state.n_max, snapshot_pre.as_slice())?;
+
+        let mut snapshot_post = snapshot_pre.clone();
+        let ek_root = vec![0x11; 1184];
+        let ek_parent = vec![0x22; 1184];
+        snapshot_post[0] = ek_root.clone();
+        snapshot_post[parent_node] = ek_parent.clone();
+        let kem_after = super::compute_barrier_tree_hash(state.n_max, snapshot_post.as_slice())?;
+
+        let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
+        let cover_payload = super::KemTreeCoverPayloadWire(
+            u64::from(updater_leaf),
+            path_nodes,
+            None,
+            vec![super::NodeCiphertextWire(
+                parent_node as u64,
+                sibling_node as u64,
+                target_pkhash[..16].to_vec(),
+                vec![0x33; 1088],
+                vec![0x44; 48],
+            )],
+            vec![
+                super::NewPublicKeyWire(0, ek_root),
+                super::NewPublicKeyWire(parent_node as u64, ek_parent),
+            ],
+        );
+        let cover_payload_bytes = super::to_cbor_vec(&cover_payload)?;
+
+        let revoked_since = [0u8; 32];
+        let revoked_root = [0u8; 32];
+        let revocation_roots_hash =
+            super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
+        let barrier_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            2,
+            1,
+            state.n_max,
+            revocation_roots_hash.to_vec(),
+            kem_before.to_vec(),
+            kem_after.to_vec(),
+            cover_payload_bytes,
+        );
+
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(112, Value::Bytes(revoked_since.to_vec()));
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(hdr::HDR_BARRIER_LEAF_PK, Value::Bytes(join_ek));
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(header_pop_pk));
+
+        let err = super::validate_barrier_update_against_roster(&state, &header, &delta)
+            .err()
+            .ok_or(CityGError::InvalidInput(
+                "updater identity mismatch must be rejected",
+            ))?;
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                    && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn validate_barrier_update_rejects_oversized_bytes() -> Result<(), CityGError> {
+        let state = super::GroupState {
+            max_barrier_update_bytes: 8,
+            ..super::GroupState::default()
+        };
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(vec![0xAA; 9]));
+        let delta = cityg_client::MembershipDelta {
+            joined: Vec::new(),
+            revoked: Vec::new(),
+        };
+
+        let err = super::validate_barrier_update_against_roster(&state, &header, &delta)
+            .err()
+            .ok_or(CityGError::InvalidInput(
+                "oversized barrier_update must be rejected",
+            ))?;
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED.code
+                    && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED.reason
         ));
         Ok(())
     }
@@ -2881,6 +3077,8 @@ mod tests {
         };
 
         let leaf = cityg_client::demo::demo_member_leaf("barrier-genesis-joinset");
+        let pop_pk = vec![0xCD; 32];
+        state.leaf_device_pk.insert(leaf, pop_pk.clone());
         let leaf_ek = vec![0x73; 1184];
         let mut membership = cityg_client::GroupMembership::default();
         membership.apply_delta(&cityg_client::MembershipDelta {
@@ -2941,6 +3139,7 @@ mod tests {
         );
         header.insert(112, Value::Bytes(revoked_since.to_vec()));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(pop_pk));
 
         let delta = cityg_client::MembershipDelta {
             joined: Vec::new(),
@@ -3102,6 +3301,8 @@ mod tests {
         };
 
         let leaf = cityg_client::demo::demo_member_leaf("barrier-mismatch-matrix");
+        let pop_pk = vec![0xDE; 32];
+        state.leaf_device_pk.insert(leaf, pop_pk.clone());
         let leaf_ek = vec![0x33; 1184];
         let mut membership = cityg_client::GroupMembership::default();
         membership.apply_delta(&cityg_client::MembershipDelta {
@@ -3147,6 +3348,7 @@ mod tests {
         let mut header = BTreeMap::new();
         header.insert(112, Value::Bytes(revoked_since.to_vec()));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(pop_pk));
 
         let before_bad = super::BarrierUpdateWire(
             "barrier-v1".to_string(),
@@ -4265,6 +4467,7 @@ struct GroupState {
     pcs_refresh_min_delta_device_ec: u64,
     pcs_refresh_min_delta_group_ec: u64,
     pcs_refresh_slot_width_ec: u64,
+    max_barrier_update_bytes: usize,
     join_history: Vec<JoinLeafHistoryRecord>,
     leaf_device_pk: BTreeMap<[u8; 32], Vec<u8>>,
     leaf_barrier_public: BTreeMap<[u8; 32], Vec<u8>>,
@@ -4290,6 +4493,8 @@ impl Default for GroupState {
             pcs_refresh_min_delta_device_ec: default_pcs_refresh_min_delta_device_ec(),
             pcs_refresh_min_delta_group_ec: default_pcs_refresh_min_delta_group_ec(),
             pcs_refresh_slot_width_ec: default_pcs_refresh_slot_width_ec(),
+            max_barrier_update_bytes: usize::try_from(default_max_barrier_update_bytes())
+                .unwrap_or(1_048_576),
             join_history: Vec::new(),
             leaf_device_pk: BTreeMap::new(),
             leaf_barrier_public: BTreeMap::new(),
@@ -4354,6 +4559,11 @@ fn default_pcs_refresh_slot_width_ec() -> u64 {
     1
 }
 
+fn default_max_barrier_update_bytes() -> u64 {
+    u64::try_from(msphf_orchestrator::BarrierGroupState::default().max_barrier_update_bytes)
+        .unwrap_or(u64::MAX)
+}
+
 fn random_barrier_key() -> [u8; 32] {
     let mut key = [0u8; 32];
     OsRng.fill_bytes(&mut key);
@@ -4387,6 +4597,8 @@ struct PersistedKbroadRoomState {
     pcs_refresh_min_delta_group_ec: u64,
     #[serde(default = "default_pcs_refresh_slot_width_ec")]
     pcs_refresh_slot_width_ec: u64,
+    #[serde(default = "default_max_barrier_update_bytes")]
+    max_barrier_update_bytes: u64,
 }
 
 fn kbroad_state_path_for_journal(journal_path: &Path) -> PathBuf {

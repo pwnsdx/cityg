@@ -165,6 +165,11 @@ pub const FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE: FreezeError = FreezeError {
     reason: "barrier_expectedpairs_failure",
 };
 
+pub const FREEZE_BARRIER_UPDATER_INVALID: FreezeError = FreezeError {
+    code: 9601,
+    reason: "barrier_updater_invalid",
+};
+
 pub const FREEZE_BARRIER_MERGE_DELEGATION_FORBIDDEN: FreezeError = FreezeError {
     code: 9604,
     reason: "barrier_merge_delegation_forbidden",

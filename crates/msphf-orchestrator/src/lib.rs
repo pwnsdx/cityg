@@ -62,7 +62,8 @@ pub use accept::{
     AcceptanceContext, AcceptanceError, AcceptanceKind, AcceptanceOptions, AcceptanceOutcome,
     AnnexMTelemetryReport, AnnexMTelemetryRow, BarrierGroupState, BootstrapPolicy,
     DeviceChainState, FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE, FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
-    FsPolicyConfig, TelemetryCounters, TelemetryKey, build_bootstrap_digest,
+    FREEZE_BARRIER_UPDATE_MALFORMED, FREEZE_BARRIER_UPDATER_INVALID, FsPolicyConfig,
+    TelemetryCounters, TelemetryKey, build_bootstrap_digest,
 };
 pub use hdr::*;
 pub use policy::{
