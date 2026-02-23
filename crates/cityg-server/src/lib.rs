@@ -1069,6 +1069,17 @@ impl CityGServer {
                     pcs_refresh_slot_width_ec: group.pcs_refresh_slot_width_ec,
                 },
             );
+            for device_state in &room_state.device_chain_states {
+                self.ctx.insert_device_chain_state(
+                    gid.as_slice(),
+                    device_state.device_pk.as_slice(),
+                    msphf_orchestrator::DeviceChainState {
+                        last_commit: device_state.last_commit,
+                        last_ec: device_state.last_ec,
+                        last_pcs_refresh_ec: device_state.last_pcs_refresh_ec,
+                    },
+                );
+            }
         }
         self.ctx.set_kbroad_registry(Some(registry));
     }
@@ -1155,6 +1166,16 @@ impl CityGServer {
                             u64::try_from(state.max_barrier_update_bytes).unwrap_or(u64::MAX)
                         })
                         .unwrap_or_else(default_max_barrier_update_bytes),
+                    device_chain_states: self
+                        .ctx
+                        .device_chain_entries_for_gid(gid.as_slice())
+                        .map(|(device_pk, device_state)| PersistedDeviceChainState {
+                            device_pk: device_pk.clone(),
+                            last_commit: device_state.last_commit,
+                            last_ec: device_state.last_ec,
+                            last_pcs_refresh_ec: device_state.last_pcs_refresh_ec,
+                        })
+                        .collect(),
                 };
                 (gid, room)
             })
@@ -2064,11 +2085,8 @@ fn validate_barrier_update_against_roster(
             return Err(CityGError::InvalidInput("barrier_update malformed"));
         }
 
-        let expected_pairs = collect_expected_pairs(
-            snapshot_base,
-            parsed.path_nodes.as_slice(),
-            tree_n_max,
-        )?;
+        let expected_pairs =
+            collect_expected_pairs(snapshot_base, parsed.path_nodes.as_slice(), tree_n_max)?;
         let actual_pairs: Vec<(u64, u64)> = parsed
             .node_ciphertexts
             .iter()
@@ -2393,6 +2411,12 @@ mod tests {
         let initial_key = vec![0x44; 16];
         let rotated_key = vec![0x66; 16];
         let persisted_k_barrier: [u8; 32];
+        let persisted_device_pk = vec![0x91; 32];
+        let persisted_device_state = msphf_orchestrator::DeviceChainState {
+            last_commit: Some([0xEF; 32]),
+            last_ec: 88,
+            last_pcs_refresh_ec: Some(77),
+        };
 
         {
             let mut cfg = ServerConfig::new();
@@ -2420,6 +2444,11 @@ mod tests {
             state.pcs_refresh_slot_width_ec = 5;
             persisted_k_barrier = state.k_barrier;
             assert_ne!(persisted_k_barrier, [0u8; 32]);
+            server.ctx.insert_device_chain_state(
+                gid.as_slice(),
+                persisted_device_pk.as_slice(),
+                persisted_device_state.clone(),
+            );
             server.persist_kbroad_state()?;
         }
 
@@ -2446,6 +2475,12 @@ mod tests {
         assert_eq!(state.pcs_refresh_min_delta_device_ec, 3);
         assert_eq!(state.pcs_refresh_min_delta_group_ec, 4);
         assert_eq!(state.pcs_refresh_slot_width_ec, 5);
+        assert_eq!(
+            server
+                .ctx
+                .device_chain_get(gid.as_slice(), persisted_device_pk.as_slice()),
+            Some(&persisted_device_state)
+        );
         let duplicate = server
             .register_group(&gid, initial_key)
             .expect_err("restart must preserve registered room kbroad key");
@@ -4736,6 +4771,19 @@ struct PersistedKbroadRoomState {
     pcs_refresh_slot_width_ec: u64,
     #[serde(default = "default_max_barrier_update_bytes")]
     max_barrier_update_bytes: u64,
+    #[serde(default)]
+    device_chain_states: Vec<PersistedDeviceChainState>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PersistedDeviceChainState {
+    device_pk: Vec<u8>,
+    #[serde(default)]
+    last_commit: Option<[u8; 32]>,
+    #[serde(default)]
+    last_ec: u64,
+    #[serde(default)]
+    last_pcs_refresh_ec: Option<u64>,
 }
 
 fn kbroad_state_path_for_journal(journal_path: &Path) -> PathBuf {

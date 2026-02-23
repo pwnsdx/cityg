@@ -1020,6 +1020,16 @@ impl AcceptanceContext {
             .flat_map(|per_gid| per_gid.values())
     }
 
+    pub fn device_chain_entries_for_gid(
+        &self,
+        gid: &[u8],
+    ) -> impl Iterator<Item = (&Vec<u8>, &DeviceChainState)> {
+        self.device_chains
+            .get(gid)
+            .into_iter()
+            .flat_map(|per_gid| per_gid.iter())
+    }
+
     pub fn set_fs_policy_version(&mut self, version: Option<String>) {
         self.fs_policy_version = version;
     }
