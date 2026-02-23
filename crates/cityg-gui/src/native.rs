@@ -103,6 +103,9 @@ const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
 const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
 const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
 const TICKET_RETRY_JITTER_MS: u64 = 40;
+// Receiver-side anti-replay tracks a bounded recent window per tuple tag.
+// S8.2 crash safety is satisfied by persisting this state in the encrypted session file.
+// Replays older than this window can be re-accepted after eviction by design.
 const MSG_INDEX_REPLAY_WINDOW: usize = 4_096;
 
 fn should_retry_ticket_http_error(
@@ -2154,6 +2157,7 @@ impl MsgReplayState {
             return;
         }
         self.seen_msg_indices.push_back(msg_index);
+        // Keep bounded memory/CPU: anti-replay is strongest within this reordering window.
         if self.seen_msg_indices.len() > MSG_INDEX_REPLAY_WINDOW {
             if let Some(oldest) = self.seen_msg_indices.pop_front() {
                 self.seen_msg_index_set.remove(&oldest);
@@ -16191,6 +16195,26 @@ mod tests {
             "duplicate indices must not grow replay state"
         );
         assert!(replay.contains(7));
+        Ok(())
+    }
+
+    #[test]
+    fn msg_replay_state_allows_reuse_after_window_eviction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut replay = MsgReplayState::default();
+        replay.ensure_tuple([0x55; 32]);
+        for msg_index in 0..=(MSG_INDEX_REPLAY_WINDOW as u64) {
+            replay.record(msg_index);
+        }
+        assert!(
+            !replay.contains(0),
+            "oldest index must be evicted once window is exceeded"
+        );
+        replay.record(0);
+        assert!(
+            replay.contains(0),
+            "evicted index can be re-seen by design outside replay window"
+        );
         Ok(())
     }
 
