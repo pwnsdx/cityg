@@ -1927,12 +1927,8 @@ fn validate_barrier_update_against_roster(
             return Ok(None);
         };
 
-        let mut snapshot_base = if state_before.barrier_initialized {
-            build_pk_entries(state_before)?
-        } else {
-            build_all_blank_pk_entries(state_before.n_max.max(1))?
-        };
-        let leaf_base = usize::try_from(state_before.n_max.saturating_sub(1))
+        let tree_n_max = state_before.n_max.max(1);
+        let leaf_base = usize::try_from(tree_n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
 
         // JoinSet: all joins activated after prev_barrier_version plus joins in current delta.
@@ -1940,7 +1936,7 @@ fn validate_barrier_update_against_roster(
         if parsed.prev_barrier_version == 0 && state_before.barrier_version == 0 {
             if let Some(snapshot) = state_before.latest_snapshot() {
                 for leaf in snapshot.members() {
-                    let leaf_index = cover_leaf_index(leaf, state_before.n_max.max(1));
+                    let leaf_index = cover_leaf_index(leaf, tree_n_max);
                     let ek_leaf = state_before
                         .leaf_barrier_public
                         .get(leaf)
@@ -1962,15 +1958,8 @@ fn validate_barrier_update_against_roster(
             .map(ToOwned::to_owned)
             .unwrap_or_default();
         for leaf in &delta.joined {
-            let leaf_index = cover_leaf_index(leaf, state_before.n_max.max(1));
+            let leaf_index = cover_leaf_index(leaf, tree_n_max);
             by_leaf.insert(leaf_index, join_ek.clone());
-        }
-        for (leaf_index, ek_leaf) in by_leaf {
-            let leaf_node = leaf_base.saturating_add(leaf_index as usize);
-            if let Some(slot) = snapshot_base.get_mut(leaf_node) {
-                *slot = ek_leaf;
-            }
-            blank_internal_path_from_leaf(&mut snapshot_base, leaf_node);
         }
 
         // RevokedLeafSet for snapshot construction: committed revoked set plus current delta.
@@ -1980,18 +1969,49 @@ fn validate_barrier_update_against_roster(
         }
         let mut revoked_indices = BTreeSet::new();
         for leaf in revoked_set {
-            revoked_indices.insert(cover_leaf_index(&leaf, state_before.n_max.max(1)) as usize);
+            revoked_indices.insert(cover_leaf_index(&leaf, tree_n_max) as usize);
         }
-        for revoked_index in &revoked_indices {
-            let leaf_node = leaf_base.saturating_add(*revoked_index);
-            blank_leaf_and_path(&mut snapshot_base, leaf_node);
-        }
+
+        let expected_len = usize::try_from(tree_n_max)
+            .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?
+            .checked_mul(2)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+        let can_borrow_snapshot_base = state_before.barrier_initialized
+            && state_before.barrier_pk_entries.len() == expected_len
+            && by_leaf.is_empty()
+            && revoked_indices.is_empty();
+
+        let snapshot_base_owned = if can_borrow_snapshot_base {
+            None
+        } else {
+            let mut snapshot_base = if state_before.barrier_initialized {
+                build_pk_entries(state_before)?
+            } else {
+                build_all_blank_pk_entries(tree_n_max)?
+            };
+            for (leaf_index, ek_leaf) in by_leaf {
+                let leaf_node = leaf_base.saturating_add(leaf_index as usize);
+                if let Some(slot) = snapshot_base.get_mut(leaf_node) {
+                    *slot = ek_leaf;
+                }
+                blank_internal_path_from_leaf(&mut snapshot_base, leaf_node);
+            }
+            for revoked_index in &revoked_indices {
+                let leaf_node = leaf_base.saturating_add(*revoked_index);
+                blank_leaf_and_path(&mut snapshot_base, leaf_node);
+            }
+            Some(snapshot_base)
+        };
+        let snapshot_base = snapshot_base_owned
+            .as_ref()
+            .map(|snapshot| snapshot.as_slice())
+            .unwrap_or_else(|| state_before.barrier_pk_entries.as_slice());
 
         // Updater cannot be a previously revoked member; allow self-revocation merges.
         let mut committed_revoked_indices = BTreeSet::new();
         for leaf in &state_before.revoked {
-            committed_revoked_indices
-                .insert(cover_leaf_index(leaf, state_before.n_max.max(1)) as usize);
+            committed_revoked_indices.insert(cover_leaf_index(leaf, tree_n_max) as usize);
         }
 
         let author_pop_pk = header
@@ -2005,8 +2025,7 @@ fn validate_barrier_update_against_roster(
         let mut author_cover_indices = BTreeSet::new();
         for (leaf, device_pk) in &state_before.leaf_device_pk {
             if device_pk.as_slice() == author_pop_pk {
-                author_cover_indices
-                    .insert(u64::from(cover_leaf_index(leaf, state_before.n_max.max(1))));
+                author_cover_indices.insert(u64::from(cover_leaf_index(leaf, tree_n_max)));
             }
         }
         if author_cover_indices.len() != 1
@@ -2023,8 +2042,7 @@ fn validate_barrier_update_against_roster(
             ));
         }
 
-        let expected_before =
-            compute_barrier_tree_hash(state_before.n_max.max(1), snapshot_base.as_slice())?;
+        let expected_before = compute_barrier_tree_hash(tree_n_max, snapshot_base)?;
         if expected_before != parsed.kem_tree_hash_before {
             return Err(CityGError::Acceptance(
                 msphf_orchestrator::AcceptanceError::Freeze(
@@ -2041,29 +2059,10 @@ fn validate_barrier_update_against_roster(
             return Err(CityGError::InvalidInput("barrier_update malformed"));
         }
 
-        let mut snapshot_post = snapshot_base.clone();
-        for (node, ek) in &parsed.new_public_keys {
-            let index = usize::try_from(*node)
-                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
-            let slot = snapshot_post
-                .get_mut(index)
-                .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
-            *slot = ek.clone();
-        }
-        let expected_after =
-            compute_barrier_tree_hash(state_before.n_max.max(1), snapshot_post.as_slice())?;
-        if expected_after != parsed.kem_tree_hash_after {
-            return Err(CityGError::Acceptance(
-                msphf_orchestrator::AcceptanceError::Freeze(
-                    msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
-                ),
-            ));
-        }
-
         let expected_pairs = collect_expected_pairs(
-            snapshot_base.as_slice(),
+            snapshot_base,
             parsed.path_nodes.as_slice(),
-            state_before.n_max.max(1),
+            tree_n_max,
         )?;
         let actual_pairs: Vec<(u64, u64)> = parsed
             .node_ciphertexts
@@ -2091,6 +2090,27 @@ fn validate_barrier_update_against_roster(
                     ),
                 ));
             }
+        }
+
+        let mut snapshot_post = match snapshot_base_owned {
+            Some(snapshot) => snapshot,
+            None => state_before.barrier_pk_entries.clone(),
+        };
+        for (node, ek) in &parsed.new_public_keys {
+            let index = usize::try_from(*node)
+                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+            let slot = snapshot_post
+                .get_mut(index)
+                .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+            *slot = ek.clone();
+        }
+        let expected_after = compute_barrier_tree_hash(tree_n_max, snapshot_post.as_slice())?;
+        if expected_after != parsed.kem_tree_hash_after {
+            return Err(CityGError::Acceptance(
+                msphf_orchestrator::AcceptanceError::Freeze(
+                    msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
+                ),
+            ));
         }
 
         Ok(Some(BarrierUpdateValidationOutcome {
