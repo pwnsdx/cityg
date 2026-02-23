@@ -1889,188 +1889,210 @@ fn build_all_blank_pk_entries(n_max: u64) -> Result<Vec<Vec<u8>>, CityGError> {
     Ok(vec![Vec::new(); len])
 }
 
+fn barrier_update_malformed_freeze_error() -> CityGError {
+    CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(
+        msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED,
+    ))
+}
+
+fn is_barrier_update_malformed_error(err: &CityGError) -> bool {
+    matches!(err, CityGError::InvalidInput("barrier_update malformed"))
+}
+
 fn validate_barrier_update_against_roster(
     state_before: &GroupState,
     header: &BTreeMap<u64, Value>,
     delta: &MembershipDelta,
 ) -> Result<Option<BarrierUpdateValidationOutcome>, CityGError> {
-    if let Some(Value::Bytes(raw_update)) = header.get(&hdr::HDR_BARRIER_UPDATE)
-        && raw_update.len() > state_before.max_barrier_update_bytes
-    {
-        return Err(CityGError::Acceptance(
-            msphf_orchestrator::AcceptanceError::Freeze(
-                msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED,
-            ),
-        ));
-    }
+    let validation = (|| -> Result<Option<BarrierUpdateValidationOutcome>, CityGError> {
+        if let Some(Value::Bytes(raw_update)) = header.get(&hdr::HDR_BARRIER_UPDATE)
+            && raw_update.len() > state_before.max_barrier_update_bytes
+        {
+            return Err(barrier_update_malformed_freeze_error());
+        }
 
-    let Some(parsed) = parse_barrier_update(header, state_before.n_max.max(1))? else {
-        return Ok(None);
-    };
+        let Some(parsed) = parse_barrier_update(header, state_before.n_max.max(1))? else {
+            return Ok(None);
+        };
 
-    let mut snapshot_base = if state_before.barrier_initialized {
-        build_pk_entries(state_before)?
-    } else {
-        build_all_blank_pk_entries(state_before.n_max.max(1))?
-    };
-    let leaf_base = usize::try_from(state_before.n_max.saturating_sub(1))
-        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+        let mut snapshot_base = if state_before.barrier_initialized {
+            build_pk_entries(state_before)?
+        } else {
+            build_all_blank_pk_entries(state_before.n_max.max(1))?
+        };
+        let leaf_base = usize::try_from(state_before.n_max.saturating_sub(1))
+            .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
 
-    // JoinSet: all joins activated after prev_barrier_version plus joins in current delta.
-    let mut by_leaf: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
-    if parsed.prev_barrier_version == 0 && state_before.barrier_version == 0 {
-        if let Some(snapshot) = state_before.latest_snapshot() {
-            for leaf in snapshot.members() {
-                let leaf_index = cover_leaf_index(leaf, state_before.n_max.max(1));
-                let ek_leaf = state_before
-                    .leaf_barrier_public
-                    .get(leaf)
-                    .cloned()
-                    .unwrap_or_default();
-                by_leaf.insert(leaf_index, ek_leaf);
+        // JoinSet: all joins activated after prev_barrier_version plus joins in current delta.
+        let mut by_leaf: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+        if parsed.prev_barrier_version == 0 && state_before.barrier_version == 0 {
+            if let Some(snapshot) = state_before.latest_snapshot() {
+                for leaf in snapshot.members() {
+                    let leaf_index = cover_leaf_index(leaf, state_before.n_max.max(1));
+                    let ek_leaf = state_before
+                        .leaf_barrier_public
+                        .get(leaf)
+                        .cloned()
+                        .unwrap_or_default();
+                    by_leaf.insert(leaf_index, ek_leaf);
+                }
+            }
+        } else {
+            for record in &state_before.join_history {
+                if record.barrier_version > parsed.prev_barrier_version {
+                    by_leaf.insert(record.leaf_index, record.ek_leaf.clone());
+                }
             }
         }
-    } else {
-        for record in &state_before.join_history {
-            if record.barrier_version > parsed.prev_barrier_version {
-                by_leaf.insert(record.leaf_index, record.ek_leaf.clone());
+        let join_ek = header
+            .get(&hdr::HDR_BARRIER_LEAF_PK)
+            .and_then(Value::as_bytes)
+            .map(ToOwned::to_owned)
+            .unwrap_or_default();
+        for leaf in &delta.joined {
+            let leaf_index = cover_leaf_index(leaf, state_before.n_max.max(1));
+            by_leaf.insert(leaf_index, join_ek.clone());
+        }
+        for (leaf_index, ek_leaf) in by_leaf {
+            let leaf_node = leaf_base.saturating_add(leaf_index as usize);
+            if let Some(slot) = snapshot_base.get_mut(leaf_node) {
+                *slot = ek_leaf;
+            }
+            blank_internal_path_from_leaf(&mut snapshot_base, leaf_node);
+        }
+
+        // RevokedLeafSet for snapshot construction: committed revoked set plus current delta.
+        let mut revoked_set = state_before.revoked.clone();
+        for leaf in &delta.revoked {
+            revoked_set.insert(*leaf);
+        }
+        let mut revoked_indices = BTreeSet::new();
+        for leaf in revoked_set {
+            revoked_indices.insert(cover_leaf_index(&leaf, state_before.n_max.max(1)) as usize);
+        }
+        for revoked_index in &revoked_indices {
+            let leaf_node = leaf_base.saturating_add(*revoked_index);
+            blank_leaf_and_path(&mut snapshot_base, leaf_node);
+        }
+
+        // Updater cannot be a previously revoked member; allow self-revocation merges.
+        let mut committed_revoked_indices = BTreeSet::new();
+        for leaf in &state_before.revoked {
+            committed_revoked_indices
+                .insert(cover_leaf_index(leaf, state_before.n_max.max(1)) as usize);
+        }
+
+        let author_pop_pk = header
+            .get(&hdr::HDR_POP_PK)
+            .and_then(Value::as_bytes)
+            .ok_or_else(|| {
+                CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(
+                    msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+                ))
+            })?;
+        let mut author_cover_indices = BTreeSet::new();
+        for (leaf, device_pk) in &state_before.leaf_device_pk {
+            if device_pk.as_slice() == author_pop_pk {
+                author_cover_indices
+                    .insert(u64::from(cover_leaf_index(leaf, state_before.n_max.max(1))));
             }
         }
-    }
-    let join_ek = header
-        .get(&hdr::HDR_BARRIER_LEAF_PK)
-        .and_then(Value::as_bytes)
-        .map(ToOwned::to_owned)
-        .unwrap_or_default();
-    for leaf in &delta.joined {
-        let leaf_index = cover_leaf_index(leaf, state_before.n_max.max(1));
-        by_leaf.insert(leaf_index, join_ek.clone());
-    }
-    for (leaf_index, ek_leaf) in by_leaf {
-        let leaf_node = leaf_base.saturating_add(leaf_index as usize);
-        if let Some(slot) = snapshot_base.get_mut(leaf_node) {
-            *slot = ek_leaf;
+        if author_cover_indices.len() != 1
+            || !author_cover_indices.contains(&parsed.updater_leaf)
+            || committed_revoked_indices.contains(
+                &usize::try_from(parsed.updater_leaf)
+                    .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
+            )
+        {
+            return Err(CityGError::Acceptance(
+                msphf_orchestrator::AcceptanceError::Freeze(
+                    msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+                ),
+            ));
         }
-        blank_internal_path_from_leaf(&mut snapshot_base, leaf_node);
-    }
 
-    // RevokedLeafSet: committed revoked set plus current delta revocations.
-    let mut revoked_set = state_before.revoked.clone();
-    for leaf in &delta.revoked {
-        revoked_set.insert(*leaf);
-    }
-    let mut revoked_indices = BTreeSet::new();
-    for leaf in revoked_set {
-        revoked_indices.insert(cover_leaf_index(&leaf, state_before.n_max.max(1)) as usize);
-    }
-    for revoked_index in &revoked_indices {
-        let leaf_node = leaf_base.saturating_add(*revoked_index);
-        blank_leaf_and_path(&mut snapshot_base, leaf_node);
-    }
-
-    let author_pop_pk = header
-        .get(&hdr::HDR_POP_PK)
-        .and_then(Value::as_bytes)
-        .ok_or_else(|| {
-            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(
-                msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
-            ))
-        })?;
-    let mut author_cover_indices = BTreeSet::new();
-    for (leaf, device_pk) in &state_before.leaf_device_pk {
-        if device_pk.as_slice() == author_pop_pk {
-            author_cover_indices
-                .insert(u64::from(cover_leaf_index(leaf, state_before.n_max.max(1))));
+        let expected_before =
+            compute_barrier_tree_hash(state_before.n_max.max(1), snapshot_base.as_slice())?;
+        if expected_before != parsed.kem_tree_hash_before {
+            return Err(CityGError::Acceptance(
+                msphf_orchestrator::AcceptanceError::Freeze(
+                    msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
+                ),
+            ));
         }
-    }
-    if author_cover_indices.len() != 1
-        || !author_cover_indices.contains(&parsed.updater_leaf)
-        || revoked_indices.contains(
-            &usize::try_from(parsed.updater_leaf)
-                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
-        )
-    {
-        return Err(CityGError::Acceptance(
-            msphf_orchestrator::AcceptanceError::Freeze(
-                msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
-            ),
-        ));
-    }
 
-    let expected_before =
-        compute_barrier_tree_hash(state_before.n_max.max(1), snapshot_base.as_slice())?;
-    if expected_before != parsed.kem_tree_hash_before {
-        return Err(CityGError::Acceptance(
-            msphf_orchestrator::AcceptanceError::Freeze(
-                msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
-            ),
-        ));
-    }
+        let revocation_roots_hash = compute_revocation_roots_hash(
+            &header_bytes32(header, 112, "missing revoked_since_root")?,
+            &header_bytes32(header, hdr::HDR_REVOKED_ROOT, "missing revoked_root")?,
+        )?;
+        if parsed.revocation_roots_hash != revocation_roots_hash {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
 
-    let revocation_roots_hash = compute_revocation_roots_hash(
-        &header_bytes32(header, 112, "missing revoked_since_root")?,
-        &header_bytes32(header, hdr::HDR_REVOKED_ROOT, "missing revoked_root")?,
-    )?;
-    if parsed.revocation_roots_hash != revocation_roots_hash {
-        return Err(CityGError::InvalidInput("barrier_update malformed"));
-    }
+        let mut snapshot_post = snapshot_base.clone();
+        for (node, ek) in &parsed.new_public_keys {
+            let index = usize::try_from(*node)
+                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+            let slot = snapshot_post
+                .get_mut(index)
+                .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+            *slot = ek.clone();
+        }
+        let expected_after =
+            compute_barrier_tree_hash(state_before.n_max.max(1), snapshot_post.as_slice())?;
+        if expected_after != parsed.kem_tree_hash_after {
+            return Err(CityGError::Acceptance(
+                msphf_orchestrator::AcceptanceError::Freeze(
+                    msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
+                ),
+            ));
+        }
 
-    let mut snapshot_post = snapshot_base.clone();
-    for (node, ek) in &parsed.new_public_keys {
-        let index = usize::try_from(*node)
-            .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
-        let slot = snapshot_post
-            .get_mut(index)
-            .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
-        *slot = ek.clone();
-    }
-    let expected_after =
-        compute_barrier_tree_hash(state_before.n_max.max(1), snapshot_post.as_slice())?;
-    if expected_after != parsed.kem_tree_hash_after {
-        return Err(CityGError::Acceptance(
-            msphf_orchestrator::AcceptanceError::Freeze(
-                msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
-            ),
-        ));
-    }
-
-    let expected_pairs = collect_expected_pairs(
-        snapshot_base.as_slice(),
-        parsed.path_nodes.as_slice(),
-        state_before.n_max.max(1),
-    )?;
-    let actual_pairs: Vec<(u64, u64)> = parsed
-        .node_ciphertexts
-        .iter()
-        .map(|node| (node.source_node, node.target_node))
-        .collect();
-    if actual_pairs != expected_pairs {
-        return Err(CityGError::Acceptance(
-            msphf_orchestrator::AcceptanceError::Freeze(
-                msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE,
-            ),
-        ));
-    }
-    for node in &parsed.node_ciphertexts {
-        let target_index = usize::try_from(node.target_node)
-            .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
-        let target_pk = snapshot_base
-            .get(target_index)
-            .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
-        let target_pkhash = compute_barrier_pkhash(target_pk.as_slice())?;
-        if node.target_pk_hash.as_slice() != &target_pkhash[..16] {
+        let expected_pairs = collect_expected_pairs(
+            snapshot_base.as_slice(),
+            parsed.path_nodes.as_slice(),
+            state_before.n_max.max(1),
+        )?;
+        let actual_pairs: Vec<(u64, u64)> = parsed
+            .node_ciphertexts
+            .iter()
+            .map(|node| (node.source_node, node.target_node))
+            .collect();
+        if actual_pairs != expected_pairs {
             return Err(CityGError::Acceptance(
                 msphf_orchestrator::AcceptanceError::Freeze(
                     msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE,
                 ),
             ));
         }
-    }
+        for node in &parsed.node_ciphertexts {
+            let target_index = usize::try_from(node.target_node)
+                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+            let target_pk = snapshot_base
+                .get(target_index)
+                .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+            let target_pkhash = compute_barrier_pkhash(target_pk.as_slice())?;
+            if node.target_pk_hash.as_slice() != &target_pkhash[..16] {
+                return Err(CityGError::Acceptance(
+                    msphf_orchestrator::AcceptanceError::Freeze(
+                        msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE,
+                    ),
+                ));
+            }
+        }
 
-    Ok(Some(BarrierUpdateValidationOutcome {
-        parsed,
-        snapshot_post,
-    }))
+        Ok(Some(BarrierUpdateValidationOutcome {
+            parsed,
+            snapshot_post,
+        }))
+    })();
+    validation.map_err(|err| {
+        if is_barrier_update_malformed_error(&err) {
+            barrier_update_malformed_freeze_error()
+        } else {
+            err
+        }
+    })
 }
 
 fn header_bytes32(
@@ -3412,7 +3434,9 @@ mod tests {
         ))?;
         assert!(matches!(
             err,
-            CityGError::InvalidInput("barrier_update malformed")
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED.code
+                    && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED.reason
         ));
 
         let after_bad = super::BarrierUpdateWire(
@@ -3707,17 +3731,70 @@ mod tests {
         let _guard = super::journal_serial_guard();
         let dir = tempdir()?;
         let journal_path = dir.path().join("cityg-server.journal");
+        let gid = cityg_client::demo::DEMO_GID.to_vec();
+        let expected_barrier_state: msphf_orchestrator::BarrierGroupState;
+        let expected_alice_device_state: msphf_orchestrator::DeviceChainState;
+        let expected_bob_device_state: msphf_orchestrator::DeviceChainState;
+        let alice_pop_pk: Vec<u8>;
+        let bob_pop_pk: Vec<u8>;
         {
             let mut server = demo_server_with_journal(&journal_path);
             let bundle_alice = cityg_client::demo::demo_bundle("alice")?;
             let bundle_bob = cityg_client::demo::demo_bundle("bob")?;
+            alice_pop_pk = bundle_alice
+                .header_map
+                .get(&hdr::HDR_POP_PK)
+                .and_then(Value::as_bytes)
+                .map(ToOwned::to_owned)
+                .ok_or(CityGError::InvalidInput("alice pop_pk missing"))?;
+            bob_pop_pk = bundle_bob
+                .header_map
+                .get(&hdr::HDR_POP_PK)
+                .and_then(Value::as_bytes)
+                .map(ToOwned::to_owned)
+                .ok_or(CityGError::InvalidInput("bob pop_pk missing"))?;
             server.accept_epoch(&bundle_alice)?;
             server.accept_epoch(&bundle_bob)?;
             assert_eq!(server.members(&cityg_client::demo::DEMO_GID).len(), 2);
+
+            expected_barrier_state = server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .cloned()
+                .ok_or(CityGError::InvalidInput(
+                    "missing barrier state after accepts",
+                ))?;
+            expected_alice_device_state = server
+                .ctx
+                .device_chain_get(gid.as_slice(), &alice_pop_pk)
+                .cloned()
+                .ok_or(CityGError::InvalidInput("missing alice device chain state"))?;
+            expected_bob_device_state = server
+                .ctx
+                .device_chain_get(gid.as_slice(), &bob_pop_pk)
+                .cloned()
+                .ok_or(CityGError::InvalidInput("missing bob device chain state"))?;
         }
 
         let server = demo_server_with_journal(&journal_path);
         assert_eq!(server.members(&cityg_client::demo::DEMO_GID).len(), 2);
+        assert_eq!(
+            server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("missing recovered barrier state"))?,
+            &expected_barrier_state
+        );
+        assert_eq!(
+            server.ctx.device_chain_get(gid.as_slice(), &alice_pop_pk),
+            Some(&expected_alice_device_state)
+        );
+        assert_eq!(
+            server.ctx.device_chain_get(gid.as_slice(), &bob_pop_pk),
+            Some(&expected_bob_device_state)
+        );
+        assert_eq!(expected_alice_device_state.last_pcs_refresh_ec, None);
+        assert_eq!(expected_bob_device_state.last_pcs_refresh_ec, None);
         Ok(())
     }
 
