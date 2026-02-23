@@ -523,7 +523,7 @@ pub struct AcceptanceContext {
     telemetry: BTreeMap<TelemetryKey, TelemetryCounters>,
     policy_version: String,
     policy_timestamp: Option<OffsetDateTime>,
-    device_chains: AHashMap<DeviceKey, DeviceChainState>,
+    device_chains: AHashMap<Vec<u8>, AHashMap<Vec<u8>, DeviceChainState>>,
     barrier_groups: AHashMap<Vec<u8>, BarrierGroupState>,
     fs_caps: FsCaps,
     last_checkpoint_ec: u64,
@@ -989,13 +989,17 @@ impl AcceptanceContext {
         gid: &[u8],
         device_pk: &[u8],
     ) -> &mut DeviceChainState {
-        let key = (gid.to_vec(), device_pk.to_vec());
-        self.device_chains.entry(key).or_default()
+        self.device_chains
+            .entry(gid.to_vec())
+            .or_default()
+            .entry(device_pk.to_vec())
+            .or_default()
     }
 
     pub fn device_chain_get(&self, gid: &[u8], device_pk: &[u8]) -> Option<&DeviceChainState> {
-        let key = (gid.to_vec(), device_pk.to_vec());
-        self.device_chains.get(&key)
+        self.device_chains
+            .get(gid)
+            .and_then(|per_gid| per_gid.get(device_pk))
     }
 
     pub fn insert_device_chain_state(
@@ -1004,12 +1008,16 @@ impl AcceptanceContext {
         device_pk: &[u8],
         state: DeviceChainState,
     ) {
-        let key = (gid.to_vec(), device_pk.to_vec());
-        self.device_chains.insert(key, state);
+        self.device_chains
+            .entry(gid.to_vec())
+            .or_default()
+            .insert(device_pk.to_vec(), state);
     }
 
-    pub fn device_chains_iter(&self) -> impl Iterator<Item = (&DeviceKey, &DeviceChainState)> {
-        self.device_chains.iter()
+    pub fn device_chains_iter(&self) -> impl Iterator<Item = &DeviceChainState> {
+        self.device_chains
+            .values()
+            .flat_map(|per_gid| per_gid.values())
     }
 
     pub fn set_fs_policy_version(&mut self, version: Option<String>) {

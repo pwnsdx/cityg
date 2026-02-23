@@ -4,8 +4,6 @@ use crate::mhw::FreezeError;
 
 use super::FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE;
 
-pub type DeviceKey = (Vec<u8>, Vec<u8>);
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeviceChainState {
     pub last_commit: Option<[u8; 32]>,
