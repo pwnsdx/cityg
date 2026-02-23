@@ -1805,7 +1805,7 @@ fn sibling_node(node: usize) -> Option<usize> {
     if node == 0 {
         return None;
     }
-    if node.is_multiple_of(2) {
+    if node & 1 == 0 {
         Some(node.saturating_sub(1))
     } else {
         Some(node.saturating_add(1))
@@ -4397,6 +4397,29 @@ mod roster_tests {
         assert!(matches!(err, CityGError::InvalidInput(_)));
         Ok(())
     }
+
+    #[test]
+    fn cover_leaf_index_clamps_and_stays_deterministic() {
+        let mut leaf = [0u8; 32];
+        leaf[28..32].copy_from_slice(&0xFFFF_FFFE_u32.to_be_bytes());
+
+        assert_eq!(super::leaf_index(&leaf), 0xFFFF_FFFE);
+        assert_eq!(super::cover_leaf_index(&leaf, 0), 0);
+        assert_eq!(super::cover_leaf_index(&leaf, 1), 0);
+        assert_eq!(super::cover_leaf_index(&leaf, 4), 2);
+        assert_eq!(
+            super::cover_leaf_index(&leaf, u64::from(u32::MAX) + 99),
+            0xFFFF_FFFE
+        );
+
+        for n_max in [2u64, 3, 1024, u64::MAX] {
+            let first = super::cover_leaf_index(&leaf, n_max);
+            let second = super::cover_leaf_index(&leaf, n_max);
+            let clamped = n_max.max(1).min(u32::MAX as u64);
+            assert_eq!(first, second);
+            assert!(u64::from(first) < clamped);
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -4725,6 +4748,11 @@ fn leaf_index(leaf: &[u8; 32]) -> u32 {
     u32::from_be_bytes(bytes)
 }
 
+/// Spec S3.2 cover index mapping.
+///
+/// The mapping is deterministic across components:
+/// `cover_leaf_index(device_pk) = leaf_index(device_pk) mod n_max`.
+/// We clamp `n_max` to `[1, u32::MAX]` before applying modulo.
 fn cover_leaf_index(leaf: &[u8; 32], n_max: u64) -> u32 {
     let n_max = n_max.max(1).min(u32::MAX as u64) as u32;
     leaf_index(leaf) % n_max
