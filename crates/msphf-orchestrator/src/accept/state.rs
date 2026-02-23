@@ -54,8 +54,8 @@ pub struct FsCaps {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FsPolicyConfig {
-    pub h_seconds: u64,
-    pub checkpoint_interval_seconds: u64,
+    pub h: u64,
+    pub checkpoint_interval: u64,
     pub checkpoint_head_threshold: u64,
     pub slack_anchor: u64,
     pub slack_first_device: u64,
@@ -65,8 +65,8 @@ pub struct FsPolicyConfig {
 impl Default for FsPolicyConfig {
     fn default() -> Self {
         Self {
-            h_seconds: 300,
-            checkpoint_interval_seconds: 3600,
+            h: 300,
+            checkpoint_interval: 3600,
             checkpoint_head_threshold: 24,
             slack_anchor: 0,
             slack_first_device: 0,
@@ -77,13 +77,13 @@ impl Default for FsPolicyConfig {
 
 impl FsPolicyConfig {
     pub fn synthesize_caps(&self) -> Result<FsCaps, FreezeError> {
-        if self.h_seconds == 0 || self.checkpoint_interval_seconds == 0 {
+        if self.h == 0 || self.checkpoint_interval == 0 {
             return Err(FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE);
         }
-        if self.checkpoint_interval_seconds < self.h_seconds {
+        if self.checkpoint_interval < self.h {
             return Err(FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE);
         }
-        let window_periods = self.checkpoint_interval_seconds.div_ceil(self.h_seconds);
+        let window_periods = self.checkpoint_interval.div_ceil(self.h);
         if window_periods == 0 {
             return Err(FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE);
         }
@@ -109,27 +109,27 @@ mod tests {
     #[test]
     fn synthesize_caps_rejects_zero_and_inverted_windows() {
         let cfg = FsPolicyConfig {
-            h_seconds: 0,
+            h: 0,
             ..FsPolicyConfig::default()
         };
         assert_eq!(
-            cfg.synthesize_caps().expect_err("h_seconds=0 must freeze"),
+            cfg.synthesize_caps().expect_err("h=0 must freeze"),
             FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE
         );
 
         let cfg = FsPolicyConfig {
-            checkpoint_interval_seconds: 0,
+            checkpoint_interval: 0,
             ..FsPolicyConfig::default()
         };
         assert_eq!(
             cfg.synthesize_caps()
-                .expect_err("checkpoint_interval_seconds=0 must freeze"),
+                .expect_err("checkpoint_interval=0 must freeze"),
             FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE
         );
 
         let cfg = FsPolicyConfig {
-            h_seconds: 600,
-            checkpoint_interval_seconds: 300,
+            h: 600,
+            checkpoint_interval: 300,
             ..FsPolicyConfig::default()
         };
         assert_eq!(
@@ -142,8 +142,8 @@ mod tests {
     #[test]
     fn synthesize_caps_computes_expected_values() {
         let cfg = FsPolicyConfig {
-            h_seconds: 300,
-            checkpoint_interval_seconds: 1000,
+            h: 300,
+            checkpoint_interval: 1000,
             checkpoint_head_threshold: 24,
             slack_anchor: 2,
             slack_first_device: 3,

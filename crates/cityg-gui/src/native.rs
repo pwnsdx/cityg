@@ -3,7 +3,7 @@ use std::cell::RefCell;
 #[cfg(not(test))]
 use std::sync::{LazyLock, Mutex};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, VecDeque},
     fs,
     io::Write,
     path::PathBuf,
@@ -2168,7 +2168,8 @@ struct AppSession {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct MsgReplayState {
     tuple_tag: [u8; 32],
-    seen_msg_indices: Vec<u64>,
+    seen_msg_indices: VecDeque<u64>,
+    seen_msg_index_set: HashSet<u64>,
 }
 
 impl MsgReplayState {
@@ -2176,22 +2177,34 @@ impl MsgReplayState {
         if self.tuple_tag != tuple_tag {
             self.tuple_tag = tuple_tag;
             self.seen_msg_indices.clear();
+            self.seen_msg_index_set.clear();
         }
     }
 
     fn contains(&self, msg_index: u64) -> bool {
-        self.seen_msg_indices.contains(&msg_index)
+        self.seen_msg_index_set.contains(&msg_index)
     }
 
     fn record(&mut self, msg_index: u64) {
-        if self.contains(msg_index) {
+        if !self.seen_msg_index_set.insert(msg_index) {
             return;
         }
-        self.seen_msg_indices.push(msg_index);
+        self.seen_msg_indices.push_back(msg_index);
         if self.seen_msg_indices.len() > MSG_INDEX_REPLAY_WINDOW {
-            let overflow = self.seen_msg_indices.len() - MSG_INDEX_REPLAY_WINDOW;
-            self.seen_msg_indices.drain(0..overflow);
+            if let Some(oldest) = self.seen_msg_indices.pop_front() {
+                self.seen_msg_index_set.remove(&oldest);
+            }
         }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.seen_msg_indices.len()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.seen_msg_indices.is_empty()
     }
 }
 
@@ -6597,17 +6610,15 @@ impl PersistedMsgReplayState {
     fn from_runtime(state: &MsgReplayState) -> Self {
         Self {
             tuple_tag_hex: hex_encode(state.tuple_tag),
-            seen_msg_indices: state.seen_msg_indices.clone(),
+            seen_msg_indices: state.seen_msg_indices.iter().copied().collect(),
         }
     }
 
     fn into_runtime(self) -> Result<MsgReplayState> {
         let tuple_tag =
             decode_hex32_or_zero("msg_replay_state.tuple_tag_hex", &self.tuple_tag_hex)?;
-        let mut runtime = MsgReplayState {
-            tuple_tag,
-            seen_msg_indices: Vec::new(),
-        };
+        let mut runtime = MsgReplayState::default();
+        runtime.tuple_tag = tuple_tag;
         for msg_index in self.seen_msg_indices {
             runtime.record(msg_index);
         }
@@ -14549,10 +14560,13 @@ mod tests {
                 on_path_key_material: pending_on_path,
             }),
         };
-        session.msg_replay_state = MsgReplayState {
-            tuple_tag: array(0x30),
-            seen_msg_indices: vec![11, 22, 33, 44],
-        };
+        let mut replay_state = MsgReplayState::default();
+        replay_state.tuple_tag = array(0x30);
+        replay_state.record(11);
+        replay_state.record(22);
+        replay_state.record(33);
+        replay_state.record(44);
+        session.msg_replay_state = replay_state;
         session.fs_fingerprint = derive_fs_fingerprint_from_fields(
             session.fs_policy_version.as_str(),
             session.fs_ec,
@@ -16184,7 +16198,7 @@ mod tests {
             replay.record(msg_index);
         }
         assert_eq!(replay.tuple_tag, tuple_a);
-        assert_eq!(replay.seen_msg_indices.len(), MSG_INDEX_REPLAY_WINDOW);
+        assert_eq!(replay.len(), MSG_INDEX_REPLAY_WINDOW);
         assert!(!replay.contains(0), "oldest indices should be evicted");
         assert!(replay.contains(MSG_INDEX_REPLAY_WINDOW as u64 + 7));
 
@@ -16192,11 +16206,27 @@ mod tests {
         replay.ensure_tuple(tuple_b);
         assert_eq!(replay.tuple_tag, tuple_b);
         assert!(
-            replay.seen_msg_indices.is_empty(),
+            replay.is_empty(),
             "switching tuple must clear replay window"
         );
         replay.record(99);
         assert!(replay.contains(99));
+        Ok(())
+    }
+
+    #[test]
+    fn msg_replay_state_ignores_duplicate_indices() -> Result<(), Box<dyn std::error::Error>> {
+        let mut replay = MsgReplayState::default();
+        replay.ensure_tuple([0x42; 32]);
+        replay.record(7);
+        replay.record(7);
+        replay.record(7);
+        assert_eq!(
+            replay.len(),
+            1,
+            "duplicate indices must not grow replay state"
+        );
+        assert!(replay.contains(7));
         Ok(())
     }
 

@@ -2458,8 +2458,8 @@ fn aligned_fs_epoch_base_ts(now: SystemTime, period_seconds: u64) -> u64 {
 
 fn fs_policy_from_settings(settings: &cityg_config::FsPolicySettings) -> FsPolicyConfig {
     FsPolicyConfig {
-        h_seconds: settings.h_seconds,
-        checkpoint_interval_seconds: settings.checkpoint_interval_seconds,
+        h: settings.h_seconds,
+        checkpoint_interval: settings.checkpoint_interval_seconds,
         checkpoint_head_threshold: settings.checkpoint_head_threshold,
         slack_anchor: settings.slack_anchor,
         slack_first_device: settings.slack_first_device,

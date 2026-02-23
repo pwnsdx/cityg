@@ -534,8 +534,8 @@ pub struct AcceptanceContext {
     fs_base_ts: Option<u64>,
     fs_policy_version: Option<String>,
     allowed_fs_policy_version: Option<String>,
-    fs_period_seconds: u64,
-    checkpoint_interval_seconds: u64,
+    fs_period: u64,
+    checkpoint_interval: u64,
     checkpoint_head_threshold: u64,
     clock: AcceptClock,
 }
@@ -598,8 +598,8 @@ impl AcceptanceContext {
             fs_base_ts: None,
             fs_policy_version: None,
             allowed_fs_policy_version: None,
-            fs_period_seconds: 0,
-            checkpoint_interval_seconds: 0,
+            fs_period: 0,
+            checkpoint_interval: 0,
             checkpoint_head_threshold: 0,
             clock: AcceptClock::new(),
         };
@@ -613,8 +613,8 @@ impl AcceptanceContext {
                 "fs policy config rejected; using zeroed caps"
             );
             ctx.fs_caps = FsCaps::default();
-            ctx.fs_period_seconds = 0;
-            ctx.checkpoint_interval_seconds = 0;
+            ctx.fs_period = 0;
+            ctx.checkpoint_interval = 0;
             ctx.checkpoint_head_threshold = 0;
         }
 
@@ -1043,8 +1043,8 @@ impl AcceptanceContext {
     pub fn apply_fs_policy_config(&mut self, config: FsPolicyConfig) -> Result<(), FreezeError> {
         let caps = config.synthesize_caps()?;
         self.fs_caps = caps;
-        self.fs_period_seconds = config.h_seconds;
-        self.checkpoint_interval_seconds = config.checkpoint_interval_seconds;
+        self.fs_period = config.h;
+        self.checkpoint_interval = config.checkpoint_interval;
         self.checkpoint_head_threshold = config.checkpoint_head_threshold;
         Ok(())
     }

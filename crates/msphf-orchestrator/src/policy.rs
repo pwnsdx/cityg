@@ -438,10 +438,10 @@ impl PolicyPayloadSer {
 
         let mut fs_policy = FsPolicyConfig::default();
         if let Some(h) = self.fs_h {
-            fs_policy.h_seconds = h;
+            fs_policy.h = h;
         }
         if let Some(interval) = self.fs_checkpoint_interval {
-            fs_policy.checkpoint_interval_seconds = interval;
+            fs_policy.checkpoint_interval = interval;
         }
         if let Some(threshold) = self.fs_checkpoint_head_threshold {
             fs_policy.checkpoint_head_threshold = threshold;
