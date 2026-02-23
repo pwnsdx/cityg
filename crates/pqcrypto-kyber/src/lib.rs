@@ -264,3 +264,75 @@ pub mod kyber768 {
         SharedSecret { raw: ss_raw }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::kyber768;
+    use pqcrypto_traits::Error as PqError;
+
+    #[test]
+    fn keypair_encaps_decaps_roundtrip_and_sizes() {
+        let (pk, sk) = kyber768::keypair();
+        assert_eq!(pk.as_bytes().len(), kyber768::public_key_bytes());
+        assert_eq!(sk.as_bytes().len(), kyber768::secret_key_bytes());
+
+        let pk2 = kyber768::PublicKey::from_bytes(pk.as_bytes()).expect("pk decode");
+        let sk2 = kyber768::SecretKey::from_bytes(sk.as_bytes()).expect("sk decode");
+        let (ss_send, ct) = kyber768::encapsulate(&pk2);
+        assert_eq!(ct.as_bytes().len(), kyber768::ciphertext_bytes());
+        assert_eq!(ss_send.as_bytes().len(), kyber768::shared_secret_bytes());
+
+        let ct2 = kyber768::Ciphertext::from_bytes(ct.as_bytes()).expect("ct decode");
+        let ss_recv = kyber768::decapsulate(&ct2, &sk2);
+        assert_eq!(ss_recv, ss_send);
+        assert_eq!(ss_recv.as_bytes(), ss_send.as_ref());
+        assert_eq!(pk2.as_ref(), pk.as_bytes());
+        assert_eq!(sk2.as_ref(), sk.as_bytes());
+    }
+
+    #[test]
+    fn from_bytes_rejects_wrong_lengths() {
+        let bad_pk = vec![0u8; kyber768::public_key_bytes() - 1];
+        let bad_sk = vec![0u8; kyber768::secret_key_bytes() - 1];
+        let bad_ct = vec![0u8; kyber768::ciphertext_bytes() - 1];
+        let bad_ss = vec![0u8; kyber768::shared_secret_bytes() - 1];
+
+        match kyber768::PublicKey::from_bytes(&bad_pk) {
+            Err(PqError::BadLength { expected, .. }) => {
+                assert_eq!(expected, kyber768::public_key_bytes())
+            }
+            other => panic!("unexpected pk decode result: {other:?}"),
+        }
+        match kyber768::SecretKey::from_bytes(&bad_sk) {
+            Err(PqError::BadLength { expected, .. }) => {
+                assert_eq!(expected, kyber768::secret_key_bytes())
+            }
+            other => panic!("unexpected sk decode result: {other:?}"),
+        }
+        match kyber768::Ciphertext::from_bytes(&bad_ct) {
+            Err(PqError::BadLength { expected, .. }) => {
+                assert_eq!(expected, kyber768::ciphertext_bytes())
+            }
+            other => panic!("unexpected ct decode result: {other:?}"),
+        }
+        match kyber768::SharedSecret::from_bytes(&bad_ss) {
+            Err(PqError::BadLength { expected, .. }) => {
+                assert_eq!(expected, kyber768::shared_secret_bytes())
+            }
+            other => panic!("unexpected ss decode result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_secret_from_bytes_roundtrip() {
+        let (pk, sk) = kyber768::keypair();
+        let (ss_send, ct) = kyber768::encapsulate(&pk);
+        let ss_parsed =
+            kyber768::SharedSecret::from_bytes(ss_send.as_bytes()).expect("shared secret decode");
+        assert_eq!(ss_parsed, ss_send);
+        assert_eq!(ss_parsed.as_ref(), ss_send.as_bytes());
+
+        let ss_recv = kyber768::decapsulate(&ct, &sk);
+        assert_eq!(ss_recv, ss_parsed);
+    }
+}

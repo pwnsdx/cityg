@@ -103,6 +103,7 @@ const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
 const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
 const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
 const TICKET_RETRY_JITTER_MS: u64 = 40;
+const MSG_INDEX_REPLAY_WINDOW: usize = 4_096;
 
 fn should_retry_ticket_http_error(
     status_code: u16,
@@ -2157,9 +2158,41 @@ struct AppSession {
     fs_policy_version: String,
     fs_epoch_base_ts: u64,
     last_fetch_timestamp_ms: Option<u64>,
+    // Legacy monotone sender counter retained for backward-compatible persistence.
     next_msg_index: u64,
+    msg_replay_state: MsgReplayState,
     capss_witness: Vec<u8>,
     barrier_state: BarrierSecretState,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MsgReplayState {
+    tuple_tag: [u8; 32],
+    seen_msg_indices: Vec<u64>,
+}
+
+impl MsgReplayState {
+    fn ensure_tuple(&mut self, tuple_tag: [u8; 32]) {
+        if self.tuple_tag != tuple_tag {
+            self.tuple_tag = tuple_tag;
+            self.seen_msg_indices.clear();
+        }
+    }
+
+    fn contains(&self, msg_index: u64) -> bool {
+        self.seen_msg_indices.contains(&msg_index)
+    }
+
+    fn record(&mut self, msg_index: u64) {
+        if self.contains(msg_index) {
+            return;
+        }
+        self.seen_msg_indices.push(msg_index);
+        if self.seen_msg_indices.len() > MSG_INDEX_REPLAY_WINDOW {
+            let overflow = self.seen_msg_indices.len() - MSG_INDEX_REPLAY_WINDOW;
+            self.seen_msg_indices.drain(0..overflow);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3747,6 +3780,7 @@ impl AppModel {
                 let FetchOutcome {
                     messages,
                     last_timestamp_ms,
+                    msg_replay_state,
                 } = result;
 
                 if !messages.is_empty() {
@@ -3760,18 +3794,24 @@ impl AppModel {
                     }
                 }
 
-                if let Some(ts) = last_timestamp_ms
-                    && let Some(session) = self.session.as_mut()
-                {
-                    let needs_update = session
-                        .last_fetch_timestamp_ms
-                        .map(|prev| ts > prev)
-                        .unwrap_or(true);
-                    if needs_update {
-                        session.last_fetch_timestamp_ms = Some(ts);
-                        if let Err(err) = persist_session(session) {
-                            warn!("failed to persist session after fetch update: {err:?}");
+                if let Some(session) = self.session.as_mut() {
+                    let mut should_persist = false;
+                    if session.msg_replay_state != msg_replay_state {
+                        session.msg_replay_state = msg_replay_state;
+                        should_persist = true;
+                    }
+                    if let Some(ts) = last_timestamp_ms {
+                        let timestamp_changed = session
+                            .last_fetch_timestamp_ms
+                            .map(|prev| ts > prev)
+                            .unwrap_or(true);
+                        if timestamp_changed {
+                            session.last_fetch_timestamp_ms = Some(ts);
+                            should_persist = true;
                         }
+                    }
+                    if should_persist && let Err(err) = persist_session(session) {
+                        warn!("failed to persist session after fetch update: {err:?}");
                     }
                 }
 
@@ -5453,24 +5493,7 @@ impl AppModel {
             return;
         }
         let pending_id = self.queue_pending_message(&session_snapshot, &plaintext);
-        let (msg_index, persist_error) = {
-            let Some(session) = self.session.as_mut() else {
-                return;
-            };
-            let msg_index = session.next_msg_index;
-            session.next_msg_index = session.next_msg_index.saturating_add(1);
-            (msg_index, persist_session(session).err())
-        };
-        if let Some(err) = persist_error {
-            self.set_error(
-                &anyhow!("failed to persist msg_index anti-replay state: {err}"),
-                "send",
-                Some(RetryAction::Send),
-            );
-            self.send_status = SendStatus::Idle;
-            self.mark_pending_message_failed(pending_id);
-            return;
-        }
+        let msg_index = thread_rng().next_u64();
 
         self.composer.clear();
         self.composer.focus();
@@ -6286,6 +6309,7 @@ struct FetchParams {
     fs_ec: u64,
     barrier_version: u64,
     k_barrier: [u8; 32],
+    msg_replay_state: MsgReplayState,
     leaf_id: [u8; 32],
     since: Option<u64>,
 }
@@ -6301,6 +6325,7 @@ impl FetchParams {
             fs_ec: session.fs_ec,
             barrier_version: session.barrier_state.barrier_version,
             k_barrier: session.barrier_state.k_barrier,
+            msg_replay_state: session.msg_replay_state.clone(),
             leaf_id: session.leaf_id,
             since,
         }
@@ -6310,6 +6335,7 @@ impl FetchParams {
 struct FetchOutcome {
     messages: Vec<ChatMessageEntry>,
     last_timestamp_ms: Option<u64>,
+    msg_replay_state: MsgReplayState,
 }
 
 struct EpochSyncOutcome {
@@ -6365,6 +6391,8 @@ struct PersistedSession {
     last_fetch_timestamp_ms: Option<u64>,
     #[serde(default)]
     next_msg_index: u64,
+    #[serde(default)]
+    msg_replay_state: PersistedMsgReplayState,
     #[serde(default)]
     capss_witness_hex: String,
     #[serde(default)]
@@ -6476,6 +6504,14 @@ struct PersistedForwardState {
 }
 
 #[derive(Serialize, Deserialize, Default)]
+struct PersistedMsgReplayState {
+    #[serde(default)]
+    tuple_tag_hex: String,
+    #[serde(default)]
+    seen_msg_indices: Vec<u64>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
 struct PersistedBarrierState {
     #[serde(default)]
     barrier_version: u64,
@@ -6555,6 +6591,28 @@ impl SessionKeySource {
 struct LastSessionPointer {
     server_url: String,
     room_id: String,
+}
+
+impl PersistedMsgReplayState {
+    fn from_runtime(state: &MsgReplayState) -> Self {
+        Self {
+            tuple_tag_hex: hex_encode(state.tuple_tag),
+            seen_msg_indices: state.seen_msg_indices.clone(),
+        }
+    }
+
+    fn into_runtime(self) -> Result<MsgReplayState> {
+        let tuple_tag =
+            decode_hex32_or_zero("msg_replay_state.tuple_tag_hex", &self.tuple_tag_hex)?;
+        let mut runtime = MsgReplayState {
+            tuple_tag,
+            seen_msg_indices: Vec::new(),
+        };
+        for msg_index in self.seen_msg_indices {
+            runtime.record(msg_index);
+        }
+        Ok(runtime)
+    }
 }
 
 impl PersistedBarrierNodeKeyMaterial {
@@ -6710,7 +6768,7 @@ impl PersistedSession {
             .as_millis() as u64;
 
         Self {
-            version: 9, // Version 9: Persist xk_hash for S8 payload key schedule bindings.
+            version: 10, // Version 10: Persist receive-side msg_index anti-replay state.
             server_url: session.server_url.clone(),
             room_id: session.room_id.clone(),
             alias: session.alias.clone(),
@@ -6755,6 +6813,7 @@ impl PersistedSession {
             },
             last_fetch_timestamp_ms: session.last_fetch_timestamp_ms,
             next_msg_index: session.next_msg_index,
+            msg_replay_state: PersistedMsgReplayState::from_runtime(&session.msg_replay_state),
             capss_witness_hex: hex_encode(&session.capss_witness),
             regular_fingerprint_hex: session
                 .regular_fingerprint
@@ -6807,6 +6866,7 @@ impl PersistedSession {
             forward_state,
             last_fetch_timestamp_ms,
             next_msg_index,
+            msg_replay_state,
             capss_witness_hex,
             regular_fingerprint_hex,
             barrier_state,
@@ -6817,10 +6877,11 @@ impl PersistedSession {
             || version == 6
             || version == 7
             || version == 8
-            || version == 9)
+            || version == 9
+            || version == 10)
         {
             return Err(anyhow!(
-                "unsupported session file version {version} (expected 4, 5, 6, 7, 8, or 9 with ML-DSA-65 authentication)"
+                "unsupported session file version {version} (expected 4, 5, 6, 7, 8, 9, or 10 with ML-DSA-65 authentication)"
             ));
         }
 
@@ -6849,6 +6910,7 @@ impl PersistedSession {
         let fs_epoch_commit = decode_hex32("fs_epoch_commit_hex", &fs_epoch_commit_hex)?;
         let fs_dev_prev_commit = decode_hex32("fs_dev_prev_commit_hex", &fs_dev_prev_commit_hex)?;
         let capss_witness = decode_hex_vec("capss_witness_hex", &capss_witness_hex)?;
+        let msg_replay_state = msg_replay_state.into_runtime()?;
         let barrier_state = barrier_state.into_runtime()?;
         let regular_fingerprint = if regular_fingerprint_hex.is_empty() {
             None
@@ -6924,6 +6986,7 @@ impl PersistedSession {
             fs_epoch_base_ts,
             last_fetch_timestamp_ms,
             next_msg_index,
+            msg_replay_state,
             capss_witness,
             barrier_state,
         };
@@ -8222,6 +8285,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         fs_epoch_base_ts,
         last_fetch_timestamp_ms: None,
         next_msg_index: 0,
+        msg_replay_state: MsgReplayState::default(),
         capss_witness: capss_witness_bytes,
         barrier_state: BarrierSecretState {
             barrier_version: ticket.barrier_version,
@@ -9240,6 +9304,7 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
         fs_ec,
         barrier_version,
         k_barrier,
+        mut msg_replay_state,
         leaf_id,
         since,
     } = params;
@@ -9252,6 +9317,18 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
 
     let mut messages = Vec::new();
     let mut max_timestamp = since.unwrap_or(0);
+    let replay_context = MessageCryptoContext {
+        gid: &gid,
+        we_epoch_id: &we_epoch_id,
+        xk_hash: &xk_hash,
+        fs_ec,
+        barrier_version,
+        epoch_key: &epoch_key,
+        k_barrier: &k_barrier,
+    };
+    let replay_tuple_tag =
+        derive_msg_replay_tuple_tag(&replay_context).context("derive fs/msg/replay/tuple")?;
+    msg_replay_state.ensure_tuple(replay_tuple_tag);
 
     for message in response.messages {
         if let Some(threshold) = since
@@ -9261,25 +9338,19 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
         }
 
         // Decrypt using ChaCha20-Poly1305
-        let authenticated_msg = match decrypt_message_v2(
-            &message.ciphertext,
-            &MessageCryptoContext {
-                gid: &gid,
-                we_epoch_id: &we_epoch_id,
-                xk_hash: &xk_hash,
-                fs_ec,
-                barrier_version,
-                epoch_key: &epoch_key,
-                k_barrier: &k_barrier,
-            },
-        ) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                // Skip messages that fail decryption (might be from different epoch or corrupted)
-                tracing::warn!("failed to decrypt message: {}", e);
-                continue;
-            }
-        };
+        let (msg_index, authenticated_msg) =
+            match decrypt_message_v2_with_index(&message.ciphertext, &replay_context) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    // Skip messages that fail decryption (might be from different epoch or corrupted)
+                    tracing::warn!("failed to decrypt message: {}", e);
+                    continue;
+                }
+            };
+        if msg_replay_state.contains(msg_index) {
+            tracing::warn!("dropping replayed msg_index={msg_index}");
+            continue;
+        }
 
         // Parse authenticated message format: plaintext || pub_key_len (4) || pub_key || signature
         // ML-DSA-65: public key is 1952 bytes, signature is 3293 bytes
@@ -9348,6 +9419,7 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
                 if message.timestamp_ms > max_timestamp {
                     max_timestamp = message.timestamp_ms;
                 }
+                msg_replay_state.record(msg_index);
 
                 tracing::info!("message from {}: verification=verified", sender_display);
 
@@ -9382,6 +9454,7 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
     Ok(FetchOutcome {
         messages,
         last_timestamp_ms,
+        msg_replay_state,
     })
 }
 
@@ -10192,6 +10265,18 @@ struct MsgAad<'a>(
     u64,
 );
 
+#[derive(Serialize)]
+struct MsgReplayTupleArgs<'a> {
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    we_epoch_id: &'a [u8; 32],
+    fs_ec: u64,
+    #[serde(with = "serde_bytes")]
+    xk_hash: &'a [u8; 32],
+    barrier_version: u64,
+}
+
 #[derive(Serialize, Deserialize)]
 struct PayloadEnvelopeV2(String, u64, #[serde(with = "serde_bytes")] Vec<u8>);
 
@@ -10254,6 +10339,20 @@ fn message_aad(context: &MessageCryptoContext<'_>, msg_index: u64) -> Result<Vec
     .context("encode message aad")
 }
 
+fn derive_msg_replay_tuple_tag(context: &MessageCryptoContext<'_>) -> Result<[u8; 32]> {
+    h_l(
+        "fs/msg/replay/tuple",
+        &MsgReplayTupleArgs {
+            gid: context.gid,
+            we_epoch_id: context.we_epoch_id,
+            fs_ec: context.fs_ec,
+            xk_hash: context.xk_hash,
+            barrier_version: context.barrier_version,
+        },
+    )
+    .context("derive fs/msg/replay/tuple")
+}
+
 fn encrypt_message_v2(
     plaintext: &[u8],
     context: &MessageCryptoContext<'_>,
@@ -10286,7 +10385,10 @@ fn encrypt_message_v2(
     .context("encode payload envelope v2")
 }
 
-fn decrypt_message_v2(data: &[u8], context: &MessageCryptoContext<'_>) -> Result<Vec<u8>> {
+fn decrypt_message_v2_with_index(
+    data: &[u8],
+    context: &MessageCryptoContext<'_>,
+) -> Result<(u64, Vec<u8>)> {
     use chacha20poly1305::{
         ChaCha20Poly1305,
         aead::{Aead, KeyInit, Payload},
@@ -10307,7 +10409,7 @@ fn decrypt_message_v2(data: &[u8], context: &MessageCryptoContext<'_>) -> Result
     let nonce = derive_msg_nonce(context, msg_index)?;
     let aad = message_aad(context, msg_index)?;
     let cipher = ChaCha20Poly1305::new((&key).into());
-    cipher
+    let plaintext = cipher
         .decrypt(
             (&nonce).into(),
             Payload {
@@ -10315,7 +10417,12 @@ fn decrypt_message_v2(data: &[u8], context: &MessageCryptoContext<'_>) -> Result
                 aad: &aad,
             },
         )
-        .map_err(|e| anyhow!("decryption failed: {}", e))
+        .map_err(|e| anyhow!("decryption failed: {}", e))?;
+    Ok((msg_index, plaintext))
+}
+
+fn decrypt_message_v2(data: &[u8], context: &MessageCryptoContext<'_>) -> Result<Vec<u8>> {
+    decrypt_message_v2_with_index(data, context).map(|(_, plaintext)| plaintext)
 }
 
 #[cfg(test)]
@@ -10542,6 +10649,7 @@ mod tests {
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
             next_msg_index: 0,
+            msg_replay_state: MsgReplayState::default(),
             capss_witness: capss_witness_bytes,
             barrier_state,
         };
@@ -11966,6 +12074,7 @@ mod tests {
                             pending_id: None,
                         }],
                         last_timestamp_ms: Some(99),
+                        msg_replay_state: MsgReplayState::default(),
                     }),
                     session.we_epoch_id,
                     view_cx,
@@ -12209,6 +12318,7 @@ mod tests {
                             pending_id: None,
                         }],
                         last_timestamp_ms: Some(100),
+                        msg_replay_state: MsgReplayState::default(),
                     }),
                     expected_weid,
                     view_cx,
@@ -12222,6 +12332,7 @@ mod tests {
                     Ok(FetchOutcome {
                         messages: vec![],
                         last_timestamp_ms: None,
+                        msg_replay_state: MsgReplayState::default(),
                     }),
                     [0xFF; 32],
                     view_cx,
@@ -14390,6 +14501,7 @@ mod tests {
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
             next_msg_index: 0,
+            msg_replay_state: MsgReplayState::default(),
             capss_witness: capss_witness_bytes.clone(),
             barrier_state: BarrierSecretState::default(),
         };
@@ -14436,6 +14548,10 @@ mod tests {
                 barrier_update_digest: array(0x29),
                 on_path_key_material: pending_on_path,
             }),
+        };
+        session.msg_replay_state = MsgReplayState {
+            tuple_tag: array(0x30),
+            seen_msg_indices: vec![11, 22, 33, 44],
         };
         session.fs_fingerprint = derive_fs_fingerprint_from_fields(
             session.fs_policy_version.as_str(),
@@ -14506,6 +14622,7 @@ mod tests {
             session.last_fetch_timestamp_ms
         );
         assert_eq!(loaded.next_msg_index, session.next_msg_index);
+        assert_eq!(loaded.msg_replay_state, session.msg_replay_state);
 
         assert_eq!(
             loaded.forward_state.snapshot(),
@@ -15985,6 +16102,29 @@ mod tests {
     }
 
     #[test]
+    fn payload_envelope_v2_roundtrip_exposes_msg_index() -> Result<(), Box<dyn std::error::Error>> {
+        let gid = [0x71u8; 32];
+        let we_epoch_id = [0x72u8; 32];
+        let xk_hash = [0x73u8; 32];
+        let epoch_key = [0x74u8; 32];
+        let k_barrier = [0x75u8; 32];
+        let context = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec: 5,
+            barrier_version: 2,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let envelope = encrypt_message_v2(b"payload-v2-index", &context, 42)?;
+        let (msg_index, decrypted) = decrypt_message_v2_with_index(&envelope, &context)?;
+        assert_eq!(msg_index, 42);
+        assert_eq!(decrypted, b"payload-v2-index");
+        Ok(())
+    }
+
+    #[test]
     fn payload_envelope_v2_context_mismatch_fails() -> Result<(), Box<dyn std::error::Error>> {
         let gid = [0x51u8; 32];
         let we_epoch_id = [0x52u8; 32];
@@ -16032,6 +16172,58 @@ mod tests {
         let payload_a = encrypt_message_v2(b"same-plaintext", &context, 1)?;
         let payload_b = encrypt_message_v2(b"same-plaintext", &context, 2)?;
         assert_ne!(payload_a, payload_b, "msg_index must influence ciphertext");
+        Ok(())
+    }
+
+    #[test]
+    fn msg_replay_state_rotates_tuple_and_caps_window() -> Result<(), Box<dyn std::error::Error>> {
+        let mut replay = MsgReplayState::default();
+        let tuple_a = [0xA1; 32];
+        replay.ensure_tuple(tuple_a);
+        for msg_index in 0..(MSG_INDEX_REPLAY_WINDOW as u64 + 8) {
+            replay.record(msg_index);
+        }
+        assert_eq!(replay.tuple_tag, tuple_a);
+        assert_eq!(replay.seen_msg_indices.len(), MSG_INDEX_REPLAY_WINDOW);
+        assert!(!replay.contains(0), "oldest indices should be evicted");
+        assert!(replay.contains(MSG_INDEX_REPLAY_WINDOW as u64 + 7));
+
+        let tuple_b = [0xB2; 32];
+        replay.ensure_tuple(tuple_b);
+        assert_eq!(replay.tuple_tag, tuple_b);
+        assert!(
+            replay.seen_msg_indices.is_empty(),
+            "switching tuple must clear replay window"
+        );
+        replay.record(99);
+        assert!(replay.contains(99));
+        Ok(())
+    }
+
+    #[test]
+    fn derive_msg_replay_tuple_tag_changes_with_tuple_inputs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid = [0x31u8; 32];
+        let we_epoch_id = [0x32u8; 32];
+        let xk_hash = [0x33u8; 32];
+        let epoch_key = [0x34u8; 32];
+        let k_barrier = [0x35u8; 32];
+        let context_a = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec: 8,
+            barrier_version: 1,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let context_b = MessageCryptoContext {
+            barrier_version: 2,
+            ..context_a
+        };
+        let tag_a = derive_msg_replay_tuple_tag(&context_a)?;
+        let tag_b = derive_msg_replay_tuple_tag(&context_b)?;
+        assert_ne!(tag_a, tag_b, "barrier_version must affect replay tuple tag");
         Ok(())
     }
 
@@ -17076,6 +17268,7 @@ mod tests {
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
             next_msg_index: 0,
+            msg_replay_state: MsgReplayState::default(),
             capss_witness: capss_witness_bytes,
             barrier_state: BarrierSecretState::default(),
         };
