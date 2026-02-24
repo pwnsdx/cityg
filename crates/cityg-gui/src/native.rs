@@ -2164,8 +2164,6 @@ struct AppSession {
     fs_policy_version: String,
     fs_epoch_base_ts: u64,
     last_fetch_timestamp_ms: Option<u64>,
-    // Legacy monotone sender counter retained for backward-compatible persistence.
-    next_msg_index: u64,
     msg_replay_state: MsgReplayState,
     capss_witness: Vec<u8>,
     barrier_state: BarrierSecretState,
@@ -6417,9 +6415,10 @@ struct PersistedSession {
     #[serde(default)]
     last_fetch_timestamp_ms: Option<u64>,
     #[serde(default)]
-    // Legacy monotone sender counter retained for backward-compatible session schema.
-    // Active send path uses random msg_index (S8.2 alternative).
-    next_msg_index: u64,
+    #[serde(rename = "next_msg_index")]
+    // Legacy on-disk field kept for backward-compatible session schema parsing.
+    // Runtime send path uses random msg_index (S8.2 alternative).
+    legacy_next_msg_index: u64,
     #[serde(default)]
     msg_replay_state: PersistedMsgReplayState,
     #[serde(default)]
@@ -6853,8 +6852,8 @@ impl PersistedSession {
                 fs_last_weid_hex: hex_encode(snapshot.last_weid),
             },
             last_fetch_timestamp_ms: session.last_fetch_timestamp_ms,
-            // Persist legacy field to keep on-disk compatibility across versions.
-            next_msg_index: session.next_msg_index,
+            // Persist legacy field as zero for cross-version on-disk compatibility.
+            legacy_next_msg_index: 0,
             msg_replay_state: PersistedMsgReplayState::from_runtime(&session.msg_replay_state),
             capss_witness_hex: hex_encode(&session.capss_witness),
             regular_fingerprint_hex: session
@@ -6907,7 +6906,7 @@ impl PersistedSession {
             fs_epoch_rotation_interval_secs,
             forward_state,
             last_fetch_timestamp_ms,
-            next_msg_index,
+            legacy_next_msg_index: _legacy_next_msg_index,
             msg_replay_state,
             capss_witness_hex,
             regular_fingerprint_hex,
@@ -7027,7 +7026,6 @@ impl PersistedSession {
             fs_policy_version,
             fs_epoch_base_ts,
             last_fetch_timestamp_ms,
-            next_msg_index,
             msg_replay_state,
             capss_witness,
             barrier_state,
@@ -8326,7 +8324,6 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         fs_policy_version,
         fs_epoch_base_ts,
         last_fetch_timestamp_ms: None,
-        next_msg_index: 0,
         msg_replay_state: MsgReplayState::default(),
         capss_witness: capss_witness_bytes,
         barrier_state: BarrierSecretState {
@@ -10697,7 +10694,6 @@ mod tests {
             fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
-            next_msg_index: 0,
             msg_replay_state: MsgReplayState::default(),
             capss_witness: capss_witness_bytes,
             barrier_state,
@@ -14552,7 +14548,6 @@ mod tests {
             fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
-            next_msg_index: 0,
             msg_replay_state: MsgReplayState::default(),
             capss_witness: capss_witness_bytes.clone(),
             barrier_state: BarrierSecretState::default(),
@@ -14676,7 +14671,6 @@ mod tests {
             loaded.last_fetch_timestamp_ms,
             session.last_fetch_timestamp_ms
         );
-        assert_eq!(loaded.next_msg_index, session.next_msg_index);
         assert_eq!(loaded.msg_replay_state, session.msg_replay_state);
 
         assert_eq!(
@@ -15186,7 +15180,7 @@ mod tests {
 
         let start_persist = std::time::Instant::now();
         for i in 0..iterations {
-            session.next_msg_index = i;
+            session.last_fetch_timestamp_ms = Some(i);
             persist_session(&session)?;
         }
         let persist_elapsed = start_persist.elapsed();
@@ -15263,11 +15257,12 @@ mod tests {
         let no_persist_elapsed = no_persist_start.elapsed();
 
         let mut strict_session = session.clone();
-        strict_session.next_msg_index = msg_index;
+        let mut strict_msg_index = msg_index;
         let persist_start = std::time::Instant::now();
         for i in 0..iterations {
-            let current = strict_session.next_msg_index;
-            strict_session.next_msg_index = strict_session.next_msg_index.saturating_add(1);
+            let current = strict_msg_index;
+            strict_msg_index = strict_msg_index.saturating_add(1);
+            strict_session.last_fetch_timestamp_ms = Some(current);
             persist_session(&strict_session)?;
             perform_send(SendParams::from_session(
                 &strict_session,
@@ -17358,7 +17353,6 @@ mod tests {
             fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 42,
             last_fetch_timestamp_ms: Some(1_234_567),
-            next_msg_index: 0,
             msg_replay_state: MsgReplayState::default(),
             capss_witness: capss_witness_bytes,
             barrier_state: BarrierSecretState::default(),
