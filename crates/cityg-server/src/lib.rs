@@ -67,6 +67,7 @@ use std::sync::{
     atomic::{AtomicIsize, Ordering},
 };
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
     io::{Read, Write},
@@ -1451,8 +1452,8 @@ impl CityGServer {
             .groups
             .get(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
-        let pk_entries = build_pk_entries(state)?;
-        let computed_hash = compute_barrier_tree_hash(state.n_max, &pk_entries)?;
+        let pk_entries_view = build_pk_entries_view(state)?;
+        let computed_hash = compute_barrier_tree_hash(state.n_max, pk_entries_view.as_ref())?;
         if computed_hash != *kem_tree_hash_after {
             return Err(CityGError::Acceptance(
                 msphf_orchestrator::AcceptanceError::Freeze(
@@ -1460,6 +1461,10 @@ impl CityGServer {
                 ),
             ));
         }
+        let pk_entries = match pk_entries_view {
+            Cow::Borrowed(entries) => entries.to_vec(),
+            Cow::Owned(entries) => entries,
+        };
         Ok(BarrierPublicTreeSnapshot {
             n_max: state.n_max,
             kem_tree_hash_after: computed_hash,
@@ -1706,7 +1711,7 @@ fn parse_barrier_update(
     }))
 }
 
-fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
+fn build_pk_entries_view<'a>(state: &'a GroupState) -> Result<Cow<'a, [Vec<u8>]>, CityGError> {
     let n_max = usize::try_from(state.n_max)
         .map_err(|_| CityGError::InvalidInput("barrier n_max does not fit usize"))?;
     if n_max == 0 {
@@ -1714,7 +1719,7 @@ fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
     }
     let expected_len = n_max.saturating_mul(2).saturating_sub(1);
     if state.barrier_pk_entries.len() == expected_len {
-        return Ok(state.barrier_pk_entries.clone());
+        return Ok(Cow::Borrowed(state.barrier_pk_entries.as_slice()));
     }
 
     let leaf_base = n_max.saturating_sub(1);
@@ -1730,7 +1735,11 @@ fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
             }
         }
     }
-    Ok(pk_entries)
+    Ok(Cow::Owned(pk_entries))
+}
+
+fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
+    Ok(build_pk_entries_view(state)?.into_owned())
 }
 
 fn compute_group_barrier_tree_hash(state: &GroupState) -> Result<[u8; 32], CityGError> {
@@ -1745,8 +1754,8 @@ fn compute_group_barrier_tree_hash(state: &GroupState) -> Result<[u8; 32], CityG
         return compute_barrier_tree_hash(state.n_max, state.barrier_pk_entries.as_slice());
     }
 
-    let pk_entries = build_pk_entries(state)?;
-    compute_barrier_tree_hash(state.n_max, &pk_entries)
+    let pk_entries = build_pk_entries_view(state)?;
+    compute_barrier_tree_hash(state.n_max, pk_entries.as_ref())
 }
 
 fn compute_barrier_tree_hash(n_max: u64, pk_entries: &[Vec<u8>]) -> Result<[u8; 32], CityGError> {
