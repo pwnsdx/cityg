@@ -6414,11 +6414,7 @@ struct PersistedSession {
     forward_state: PersistedForwardState,
     #[serde(default)]
     last_fetch_timestamp_ms: Option<u64>,
-    #[serde(default)]
-    #[serde(rename = "next_msg_index")]
-    // Legacy on-disk field kept for backward-compatible session schema parsing.
-    // Runtime send path uses random msg_index (S8.2 alternative).
-    legacy_next_msg_index: u64,
+
     #[serde(default)]
     msg_replay_state: PersistedMsgReplayState,
     #[serde(default)]
@@ -6852,8 +6848,7 @@ impl PersistedSession {
                 fs_last_weid_hex: hex_encode(snapshot.last_weid),
             },
             last_fetch_timestamp_ms: session.last_fetch_timestamp_ms,
-            // Persist legacy field as zero for cross-version on-disk compatibility.
-            legacy_next_msg_index: 0,
+
             msg_replay_state: PersistedMsgReplayState::from_runtime(&session.msg_replay_state),
             capss_witness_hex: hex_encode(&session.capss_witness),
             regular_fingerprint_hex: session
@@ -6906,7 +6901,6 @@ impl PersistedSession {
             fs_epoch_rotation_interval_secs,
             forward_state,
             last_fetch_timestamp_ms,
-            legacy_next_msg_index: _legacy_next_msg_index,
             msg_replay_state,
             capss_witness_hex,
             regular_fingerprint_hex,

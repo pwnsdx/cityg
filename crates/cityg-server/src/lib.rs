@@ -1743,10 +1743,6 @@ fn build_pk_entries_view<'a>(state: &'a GroupState) -> Result<Cow<'a, [Vec<u8>]>
     Ok(Cow::Owned(pk_entries))
 }
 
-fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
-    Ok(build_pk_entries_view(state)?.into_owned())
-}
-
 fn compute_group_barrier_tree_hash(state: &GroupState) -> Result<[u8; 32], CityGError> {
     let n_max_usize = usize::try_from(state.n_max)
         .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
@@ -1763,7 +1759,7 @@ fn compute_group_barrier_tree_hash(state: &GroupState) -> Result<[u8; 32], CityG
     compute_barrier_tree_hash(state.n_max, pk_entries.as_ref())
 }
 
-fn compute_barrier_tree_hash(n_max: u64, pk_entries: &[Vec<u8>]) -> Result<[u8; 32], CityGError> {
+fn compute_barrier_tree_hash(n_max: u64, pk_entries: &[impl AsRef<[u8]>]) -> Result<[u8; 32], CityGError> {
     let n_max_usize =
         usize::try_from(n_max).map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
     let expected_len = n_max_usize
@@ -1780,11 +1776,12 @@ fn compute_barrier_tree_hash_recursive(
     node_index: usize,
     n_max: u64,
     n_max_usize: usize,
-    pk_entries: &[Vec<u8>],
+    pk_entries: &[impl AsRef<[u8]>],
 ) -> Result<[u8; 32], CityGError> {
     let leaf_base = n_max_usize.saturating_sub(1);
     let pk = pk_entries
         .get(node_index)
+        .map(|v| v.as_ref())
         .ok_or(CityGError::InvalidInput("barrier node index out of range"))?;
     let node_u64 = node_index as u64;
     if node_index >= leaf_base {
@@ -1825,7 +1822,7 @@ fn compute_barrier_subtree_hash_cached(
     node_index: usize,
     n_max: u64,
     n_max_usize: usize,
-    pk_entries: &[Vec<u8>],
+    pk_entries: &[impl AsRef<[u8]>],
     base_cache: Option<&HashMap<usize, [u8; 32]>>,
     cache: &mut HashMap<usize, [u8; 32]>,
 ) -> Result<[u8; 32], CityGError> {
@@ -1838,6 +1835,7 @@ fn compute_barrier_subtree_hash_cached(
     let leaf_base = n_max_usize.saturating_sub(1);
     let pk = pk_entries
         .get(node_index)
+        .map(|v| v.as_ref())
         .ok_or(CityGError::InvalidInput("barrier node index out of range"))?;
     let node_u64 = node_index as u64;
     let hash = if node_index >= leaf_base {
@@ -1895,7 +1893,7 @@ fn compute_barrier_subtree_hash_after_changes(
     node_index: usize,
     n_max: u64,
     n_max_usize: usize,
-    updated_entries: &[Vec<u8>],
+    updated_entries: &[impl AsRef<[u8]>],
     impacted_nodes: &BTreeSet<usize>,
     base_before_cache: Option<&HashMap<usize, [u8; 32]>>,
     before_cache: &mut HashMap<usize, [u8; 32]>,
@@ -1918,6 +1916,7 @@ fn compute_barrier_subtree_hash_after_changes(
     let leaf_base = n_max_usize.saturating_sub(1);
     let pk = updated_entries
         .get(node_index)
+        .map(|v| v.as_ref())
         .ok_or(CityGError::InvalidInput("barrier node index out of range"))?;
     let node_u64 = node_index as u64;
     let hash = if node_index >= leaf_base {
@@ -1977,7 +1976,7 @@ fn compute_barrier_subtree_hash_after_changes(
 
 fn compute_barrier_tree_hash_with_changes(
     n_max: u64,
-    updated_entries: &[Vec<u8>],
+    updated_entries: &[impl AsRef<[u8]>],
     changed_nodes: &BTreeSet<usize>,
     base_before_cache: Option<&HashMap<usize, [u8; 32]>>,
     before_cache: &mut HashMap<usize, [u8; 32]>,
@@ -2040,22 +2039,6 @@ fn direct_path_nodes(mut node: usize) -> Vec<usize> {
     out
 }
 
-fn blank_internal_path_from_leaf(pk_entries: &mut [Vec<u8>], leaf_node: usize) {
-    for node in direct_path_nodes(leaf_node).into_iter().skip(1) {
-        if let Some(slot) = pk_entries.get_mut(node) {
-            slot.clear();
-        }
-    }
-}
-
-fn blank_leaf_and_path(pk_entries: &mut [Vec<u8>], leaf_node: usize) {
-    for node in direct_path_nodes(leaf_node) {
-        if let Some(slot) = pk_entries.get_mut(node) {
-            slot.clear();
-        }
-    }
-}
-
 fn sibling_node(node: usize) -> Option<usize> {
     if node == 0 {
         return None;
@@ -2068,7 +2051,7 @@ fn sibling_node(node: usize) -> Option<usize> {
 }
 
 fn collect_resolution_nodes(
-    pk_entries: &[Vec<u8>],
+    pk_entries: &[impl AsRef<[u8]>],
     node: usize,
     leaf_base: usize,
     out: &mut Vec<usize>,
@@ -2076,7 +2059,7 @@ fn collect_resolution_nodes(
     if node >= pk_entries.len() {
         return;
     }
-    if !pk_entries[node].is_empty() {
+    if !pk_entries[node].as_ref().is_empty() {
         out.push(node);
         return;
     }
@@ -2090,7 +2073,7 @@ fn collect_resolution_nodes(
 }
 
 fn collect_expected_pairs(
-    pk_entries: &[Vec<u8>],
+    pk_entries: &[impl AsRef<[u8]>],
     path_nodes: &[u64],
     n_max: u64,
 ) -> Result<Vec<(u64, u64)>, CityGError> {
@@ -2155,6 +2138,95 @@ fn map_barrier_update_validation_error(err: CityGError) -> CityGError {
         CityGError::InvalidInput(_) => barrier_update_malformed_freeze_error(),
         other => other,
     }
+}
+
+fn blank_internal_path_from_leaf_cow(pk_entries: &mut [Cow<'_, [u8]>], leaf_node: usize) {
+    for node in direct_path_nodes(leaf_node).into_iter().skip(1) {
+        if let Some(slot) = pk_entries.get_mut(node) {
+            *slot = Cow::Borrowed(b"");
+        }
+    }
+}
+
+fn blank_leaf_and_path_cow(pk_entries: &mut [Cow<'_, [u8]>], leaf_node: usize) {
+    for node in direct_path_nodes(leaf_node) {
+        if let Some(slot) = pk_entries.get_mut(node) {
+            *slot = Cow::Borrowed(b"");
+        }
+    }
+}
+
+fn build_all_blank_pk_entries_cow(n_max: u64) -> Result<Vec<Cow<'static, [u8]>>, CityGError> {
+    let n_max_usize =
+        usize::try_from(n_max).map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
+    let len = n_max_usize
+        .checked_mul(2)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or(CityGError::InvalidInput("barrier tree size overflow"))?;
+    Ok(vec![Cow::Borrowed(b""); len])
+}
+
+fn build_pk_entries_cow<'a>(state: &'a GroupState) -> Result<Vec<Cow<'a, [u8]>>, CityGError> {
+    let n_max = usize::try_from(state.n_max)
+        .map_err(|_| CityGError::InvalidInput("barrier n_max does not fit usize"))?;
+    if n_max == 0 {
+        return Err(CityGError::InvalidInput("barrier n_max must be positive"));
+    }
+    let expected_len = n_max.saturating_mul(2).saturating_sub(1);
+    if state.barrier_pk_entries.len() == expected_len {
+        return Ok(state.barrier_pk_entries.iter().map(|v| Cow::Borrowed(v.as_slice())).collect());
+    }
+
+    let leaf_base = n_max.saturating_sub(1);
+    let mut pk_entries = vec![Cow::Borrowed(b"".as_slice()); expected_len];
+    if let Some(snapshot) = state.latest_snapshot() {
+        for leaf in snapshot.members() {
+            let index = cover_leaf_index(leaf, state.n_max.max(1)) as usize;
+            if index >= n_max {
+                continue;
+            }
+            if let Some(ek_leaf) = state.leaf_barrier_public.get(leaf) {
+                pk_entries[leaf_base + index] = Cow::Borrowed(ek_leaf.as_slice());
+            }
+        }
+    }
+    Ok(pk_entries)
+}
+
+fn verify_barrier_update_pairs_and_targets(
+    snapshot_base: &[impl AsRef<[u8]>],
+    parsed: &ParsedBarrierUpdate,
+    tree_n_max: u64,
+) -> Result<(), CityGError> {
+    let expected_pairs = collect_expected_pairs(snapshot_base, parsed.path_nodes.as_slice(), tree_n_max)?;
+    let actual_pairs: Vec<(u64, u64)> = parsed
+        .node_ciphertexts
+        .iter()
+        .map(|node| (node.source_node, node.target_node))
+        .collect();
+    if actual_pairs != expected_pairs {
+        return Err(CityGError::Acceptance(
+            msphf_orchestrator::AcceptanceError::Freeze(
+                msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE,
+            ),
+        ));
+    }
+    for node in &parsed.node_ciphertexts {
+        let target_index = usize::try_from(node.target_node)
+            .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+        let target_pk = snapshot_base
+            .get(target_index)
+            .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+        let target_pkhash = compute_barrier_pkhash(target_pk.as_ref())?;
+        if node.target_pk_hash.as_slice() != &target_pkhash[..16] {
+            return Err(CityGError::Acceptance(
+                msphf_orchestrator::AcceptanceError::Freeze(
+                    msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE,
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_barrier_update_against_roster(
@@ -2232,27 +2304,23 @@ fn validate_barrier_update_against_roster(
             None
         } else {
             let mut snapshot_base = if state_before.barrier_initialized {
-                build_pk_entries(state_before)?
+                build_pk_entries_cow(state_before)?
             } else {
-                build_all_blank_pk_entries(tree_n_max)?
+                build_all_blank_pk_entries_cow(tree_n_max)?
             };
             for (leaf_index, ek_leaf) in by_leaf {
                 let leaf_node = leaf_base.saturating_add(leaf_index as usize);
                 if let Some(slot) = snapshot_base.get_mut(leaf_node) {
-                    *slot = ek_leaf;
+                    *slot = Cow::Owned(ek_leaf);
                 }
-                blank_internal_path_from_leaf(&mut snapshot_base, leaf_node);
+                blank_internal_path_from_leaf_cow(&mut snapshot_base, leaf_node);
             }
             for revoked_index in &revoked_indices {
                 let leaf_node = leaf_base.saturating_add(*revoked_index);
-                blank_leaf_and_path(&mut snapshot_base, leaf_node);
+                blank_leaf_and_path_cow(&mut snapshot_base, leaf_node);
             }
             Some(snapshot_base)
         };
-        let snapshot_base = snapshot_base_owned
-            .as_ref()
-            .map(|snapshot| snapshot.as_slice())
-            .unwrap_or_else(|| state_before.barrier_pk_entries.as_slice());
 
         // Updater cannot be a previously revoked member; allow self-revocation merges.
         let mut committed_revoked_indices = BTreeSet::new();
@@ -2296,7 +2364,7 @@ fn validate_barrier_update_against_roster(
         let expected_before = if can_borrow_snapshot_base {
             #[cfg(debug_assertions)]
             {
-                let recomputed_before = compute_barrier_tree_hash(tree_n_max, snapshot_base)?;
+                let recomputed_before = compute_barrier_tree_hash(tree_n_max, state_before.barrier_pk_entries.as_slice())?;
                 debug_assert_eq!(
                     recomputed_before, state_before.kem_tree_hash_after,
                     "materialized barrier snapshot/hash drifted"
@@ -2308,7 +2376,7 @@ fn validate_barrier_update_against_roster(
                 0,
                 tree_n_max,
                 n_max_usize,
-                snapshot_base,
+                snapshot_base_owned.as_ref().unwrap().as_slice(),
                 None,
                 &mut before_hash_cache,
             )?
@@ -2329,38 +2397,14 @@ fn validate_barrier_update_against_roster(
             return Err(CityGError::InvalidInput("barrier_update malformed"));
         }
 
-        let expected_pairs =
-            collect_expected_pairs(snapshot_base, parsed.path_nodes.as_slice(), tree_n_max)?;
-        let actual_pairs: Vec<(u64, u64)> = parsed
-            .node_ciphertexts
-            .iter()
-            .map(|node| (node.source_node, node.target_node))
-            .collect();
-        if actual_pairs != expected_pairs {
-            return Err(CityGError::Acceptance(
-                msphf_orchestrator::AcceptanceError::Freeze(
-                    msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE,
-                ),
-            ));
-        }
-        for node in &parsed.node_ciphertexts {
-            let target_index = usize::try_from(node.target_node)
-                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
-            let target_pk = snapshot_base
-                .get(target_index)
-                .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
-            let target_pkhash = compute_barrier_pkhash(target_pk.as_slice())?;
-            if node.target_pk_hash.as_slice() != &target_pkhash[..16] {
-                return Err(CityGError::Acceptance(
-                    msphf_orchestrator::AcceptanceError::Freeze(
-                        msphf_orchestrator::FREEZE_BARRIER_EXPECTEDPAIRS_FAILURE,
-                    ),
-                ));
-            }
+        if let Some(ref snapshot_base) = snapshot_base_owned {
+            verify_barrier_update_pairs_and_targets(snapshot_base.as_slice(), &parsed, tree_n_max)?;
+        } else {
+            verify_barrier_update_pairs_and_targets(state_before.barrier_pk_entries.as_slice(), &parsed, tree_n_max)?;
         }
 
         let mut snapshot_post = match snapshot_base_owned {
-            Some(snapshot) => snapshot,
+            Some(snapshot) => snapshot.into_iter().map(|cow| cow.into_owned()).collect(),
             None => state_before.barrier_pk_entries.clone(),
         };
         let mut changed_nodes = BTreeSet::new();
@@ -2507,6 +2551,29 @@ fn header_string(
         None => default
             .map(|s| s.to_string())
             .ok_or(CityGError::InvalidInput("pivot field missing")),
+    }
+}
+
+#[cfg(test)]
+fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
+    Ok(build_pk_entries_cow(state)?.into_iter().map(|cow| cow.into_owned()).collect())
+}
+
+#[cfg(test)]
+fn blank_internal_path_from_leaf(pk_entries: &mut [Vec<u8>], leaf_node: usize) {
+    for node in direct_path_nodes(leaf_node).into_iter().skip(1) {
+        if let Some(slot) = pk_entries.get_mut(node) {
+            slot.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+fn blank_leaf_and_path(pk_entries: &mut [Vec<u8>], leaf_node: usize) {
+    for node in direct_path_nodes(leaf_node) {
+        if let Some(slot) = pk_entries.get_mut(node) {
+            slot.clear();
+        }
     }
 }
 
@@ -3455,7 +3522,7 @@ mod tests {
         assert_eq!(pairs, vec![(1, 4)]);
 
         assert!(matches!(
-            super::compute_barrier_tree_hash(0, &[]),
+            super::compute_barrier_tree_hash(0, &[] as &[&[u8]]),
             Err(CityGError::InvalidInput(_))
         ));
         Ok(())
