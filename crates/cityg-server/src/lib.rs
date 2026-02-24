@@ -3453,6 +3453,106 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual benchmark: compare full rehash vs incremental barrier tree hash"]
+    fn benchmark_barrier_tree_incremental_hash_vs_full_rehash() -> Result<(), CityGError> {
+        fn hex_prefix4(bytes: &[u8; 32]) -> String {
+            format!(
+                "{:02x}{:02x}{:02x}{:02x}",
+                bytes[0], bytes[1], bytes[2], bytes[3]
+            )
+        }
+
+        fn synthetic_entries(n_max: u64) -> Result<Vec<Vec<u8>>, CityGError> {
+            let n_max_usize = usize::try_from(n_max)
+                .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
+            let total = n_max_usize
+                .checked_mul(2)
+                .and_then(|v| v.checked_sub(1))
+                .ok_or(CityGError::InvalidInput("barrier tree size overflow"))?;
+            let mut out = Vec::with_capacity(total);
+            for i in 0..total {
+                if i % 11 == 0 {
+                    out.push(vec![0xA5; 1184]);
+                } else {
+                    out.push(Vec::new());
+                }
+            }
+            Ok(out)
+        }
+
+        for &(n_max, rounds, stride) in &[(1024u64, 200u64, 257usize), (2048u64, 120u64, 389usize)]
+        {
+            let base = synthetic_entries(n_max)?;
+            let mut updated = base.clone();
+            let mut changed_nodes = std::collections::BTreeSet::new();
+            for idx in (0..updated.len()).step_by(stride) {
+                updated[idx] = vec![0x5A; 1184];
+                changed_nodes.insert(idx);
+            }
+
+            let full_start = std::time::Instant::now();
+            let mut full_acc = [0u8; 32];
+            for _ in 0..rounds {
+                let before = super::compute_barrier_tree_hash(n_max, base.as_slice())?;
+                let after = super::compute_barrier_tree_hash(n_max, updated.as_slice())?;
+                for i in 0..full_acc.len() {
+                    full_acc[i] ^= before[i] ^ after[i];
+                }
+            }
+            let full_elapsed = full_start.elapsed();
+
+            let incremental_start = std::time::Instant::now();
+            let mut incr_acc = [0u8; 32];
+            for _ in 0..rounds {
+                let mut before_cache = std::collections::HashMap::new();
+                let before = super::compute_barrier_subtree_hash_cached(
+                    0,
+                    n_max,
+                    usize::try_from(n_max)
+                        .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?,
+                    base.as_slice(),
+                    &mut before_cache,
+                )?;
+                let after = super::compute_barrier_tree_hash_with_changes(
+                    n_max,
+                    updated.as_slice(),
+                    &changed_nodes,
+                    &mut before_cache,
+                )?;
+                for i in 0..incr_acc.len() {
+                    incr_acc[i] ^= before[i] ^ after[i];
+                }
+            }
+            let incremental_elapsed = incremental_start.elapsed();
+
+            assert_eq!(
+                super::compute_barrier_tree_hash(n_max, updated.as_slice())?,
+                super::compute_barrier_tree_hash_with_changes(
+                    n_max,
+                    updated.as_slice(),
+                    &changed_nodes,
+                    &mut std::collections::HashMap::new(),
+                )?,
+                "incremental hash must remain equivalent to full rehash"
+            );
+
+            let full_ms = full_elapsed.as_secs_f64() * 1_000.0;
+            let incremental_ms = incremental_elapsed.as_secs_f64() * 1_000.0;
+            let speedup = full_ms / incremental_ms.max(1e-9);
+            eprintln!(
+                "BENCH[server_barrier_hash] n_max={n_max} rounds={rounds} changed_nodes={} full_total_ms={full_ms:.2} full_per_round_ms={:.3} incremental_total_ms={incremental_ms:.2} incremental_per_round_ms={:.3} speedup_x={speedup:.2} hash_prefix_full={} hash_prefix_incr={}",
+                changed_nodes.len(),
+                full_ms / (rounds as f64),
+                incremental_ms / (rounds as f64),
+                hex_prefix4(&full_acc),
+                hex_prefix4(&incr_acc),
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn validate_barrier_update_accepts_expected_pairs_and_pkhash_binding() -> Result<(), CityGError>
     {
         let mut state = super::GroupState {
