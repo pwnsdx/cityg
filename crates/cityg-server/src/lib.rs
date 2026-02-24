@@ -72,6 +72,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -967,6 +968,7 @@ impl CityGServer {
                 state.leaf_barrier_public.remove(leaf);
             }
             if barrier_validation.is_none() {
+                state.barrier_hash_cache = None;
                 state.kem_tree_hash_after = compute_group_barrier_tree_hash(state)?;
             }
         }
@@ -975,6 +977,7 @@ impl CityGServer {
             state.barrier_pk_entries = validation.snapshot_post.clone();
             state.kem_tree_hash_after = validation.parsed.kem_tree_hash_after;
             state.n_max = validation.parsed.tree_size.max(1);
+            state.barrier_hash_cache = validation.hash_cache_post.clone();
         }
         if let Some(state) = roster.groups.get(bundle.gid()) {
             let ctx_state = ctx.barrier_group_state_entry_mut(bundle.gid());
@@ -1045,6 +1048,7 @@ impl CityGServer {
             group.kem_tree_hash_after = room_state.kem_tree_hash_after;
             group.n_max = room_state.n_max.max(1);
             group.barrier_pk_entries = room_state.barrier_pk_entries.clone();
+            group.barrier_hash_cache = None;
             group.last_pcs_refresh_ec = room_state.last_pcs_refresh_ec;
             group.pcs_refresh_min_delta_device_ec =
                 room_state.pcs_refresh_min_delta_device_ec.max(1);
@@ -1550,6 +1554,7 @@ struct ParsedBarrierUpdate {
 struct BarrierUpdateValidationOutcome {
     parsed: ParsedBarrierUpdate,
     snapshot_post: Vec<Vec<u8>>,
+    hash_cache_post: Option<Arc<HashMap<usize, [u8; 32]>>>,
 }
 
 #[derive(Serialize)]
@@ -1821,9 +1826,13 @@ fn compute_barrier_subtree_hash_cached(
     n_max: u64,
     n_max_usize: usize,
     pk_entries: &[Vec<u8>],
+    base_cache: Option<&HashMap<usize, [u8; 32]>>,
     cache: &mut HashMap<usize, [u8; 32]>,
 ) -> Result<[u8; 32], CityGError> {
     if let Some(existing) = cache.get(&node_index) {
+        return Ok(*existing);
+    }
+    if let Some(existing) = base_cache.and_then(|hashes| hashes.get(&node_index)) {
         return Ok(*existing);
     }
     let leaf_base = n_max_usize.saturating_sub(1);
@@ -1850,10 +1859,22 @@ fn compute_barrier_subtree_hash_cached(
             .checked_mul(2)
             .and_then(|v| v.checked_add(2))
             .ok_or(CityGError::InvalidInput("barrier tree index overflow"))?;
-        let left_hash =
-            compute_barrier_subtree_hash_cached(left, n_max, n_max_usize, pk_entries, cache)?;
-        let right_hash =
-            compute_barrier_subtree_hash_cached(right, n_max, n_max_usize, pk_entries, cache)?;
+        let left_hash = compute_barrier_subtree_hash_cached(
+            left,
+            n_max,
+            n_max_usize,
+            pk_entries,
+            base_cache,
+            cache,
+        )?;
+        let right_hash = compute_barrier_subtree_hash_cached(
+            right,
+            n_max,
+            n_max_usize,
+            pk_entries,
+            base_cache,
+            cache,
+        )?;
         h_l(
             "barrier/tree/node-hash",
             &BarrierTreeNodeHashArgs {
@@ -1876,6 +1897,7 @@ fn compute_barrier_subtree_hash_after_changes(
     n_max_usize: usize,
     updated_entries: &[Vec<u8>],
     impacted_nodes: &BTreeSet<usize>,
+    base_before_cache: Option<&HashMap<usize, [u8; 32]>>,
     before_cache: &mut HashMap<usize, [u8; 32]>,
     after_cache: &mut HashMap<usize, [u8; 32]>,
 ) -> Result<[u8; 32], CityGError> {
@@ -1888,6 +1910,7 @@ fn compute_barrier_subtree_hash_after_changes(
             n_max,
             n_max_usize,
             updated_entries,
+            base_before_cache,
             before_cache,
         );
     }
@@ -1922,6 +1945,7 @@ fn compute_barrier_subtree_hash_after_changes(
             n_max_usize,
             updated_entries,
             impacted_nodes,
+            base_before_cache,
             before_cache,
             after_cache,
         )?;
@@ -1931,6 +1955,7 @@ fn compute_barrier_subtree_hash_after_changes(
             n_max_usize,
             updated_entries,
             impacted_nodes,
+            base_before_cache,
             before_cache,
             after_cache,
         )?;
@@ -1954,8 +1979,9 @@ fn compute_barrier_tree_hash_with_changes(
     n_max: u64,
     updated_entries: &[Vec<u8>],
     changed_nodes: &BTreeSet<usize>,
+    base_before_cache: Option<&HashMap<usize, [u8; 32]>>,
     before_cache: &mut HashMap<usize, [u8; 32]>,
-) -> Result<[u8; 32], CityGError> {
+) -> Result<([u8; 32], HashMap<usize, [u8; 32]>), CityGError> {
     let n_max_usize =
         usize::try_from(n_max).map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
     let expected_len = n_max_usize
@@ -1966,7 +1992,10 @@ fn compute_barrier_tree_hash_with_changes(
         return Err(CityGError::InvalidInput("barrier tree size mismatch"));
     }
     if changed_nodes.is_empty() {
-        return compute_barrier_tree_hash(n_max, updated_entries);
+        return Ok((
+            compute_barrier_tree_hash(n_max, updated_entries)?,
+            HashMap::new(),
+        ));
     }
     if changed_nodes.iter().any(|node| *node >= expected_len) {
         return Err(CityGError::InvalidInput("barrier node index out of range"));
@@ -1985,15 +2014,17 @@ fn compute_barrier_tree_hash_with_changes(
     }
 
     let mut after_cache = HashMap::new();
-    compute_barrier_subtree_hash_after_changes(
+    let root = compute_barrier_subtree_hash_after_changes(
         0,
         n_max,
         n_max_usize,
         updated_entries,
         &impacted_nodes,
+        base_before_cache,
         before_cache,
         &mut after_cache,
-    )
+    )?;
+    Ok((root, after_cache))
 }
 
 fn compute_barrier_pkhash(ek: &[u8]) -> Result<[u8; 32], CityGError> {
@@ -2259,9 +2290,8 @@ fn validate_barrier_update_against_roster(
 
         let n_max_usize = usize::try_from(tree_n_max)
             .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
-        // Cache is fully populated when we materialize/recompute snapshot_base (non-borrow path).
-        // Borrow path starts empty; without a persisted per-node hash cache we still need to
-        // derive unaffected sibling subtrees on demand during after-hash recomputation.
+        let prior_hash_cache = state_before.barrier_hash_cache.clone();
+        let base_before_cache = prior_hash_cache.as_deref();
         let mut before_hash_cache = HashMap::new();
         let expected_before = if can_borrow_snapshot_base {
             #[cfg(debug_assertions)]
@@ -2279,6 +2309,7 @@ fn validate_barrier_update_against_roster(
                 tree_n_max,
                 n_max_usize,
                 snapshot_base,
+                None,
                 &mut before_hash_cache,
             )?
         };
@@ -2342,13 +2373,18 @@ fn validate_barrier_update_against_roster(
             *slot = ek.clone();
             changed_nodes.insert(index);
         }
-        let expected_after = if parsed.new_public_keys.is_empty() {
-            expected_before
+        let (expected_after, after_hash_cache) = if parsed.new_public_keys.is_empty() {
+            (expected_before, HashMap::new())
         } else {
             compute_barrier_tree_hash_with_changes(
                 tree_n_max,
                 snapshot_post.as_slice(),
                 &changed_nodes,
+                if can_borrow_snapshot_base {
+                    base_before_cache
+                } else {
+                    None
+                },
                 &mut before_hash_cache,
             )?
         };
@@ -2369,9 +2405,26 @@ fn validate_barrier_update_against_roster(
             ));
         }
 
+        let hash_cache_post = if parsed.new_public_keys.is_empty() {
+            prior_hash_cache
+        } else {
+            let mut merged_cache = HashMap::new();
+            if let Some(base) = base_before_cache {
+                merged_cache.extend(base.iter().map(|(node, hash)| (*node, *hash)));
+            }
+            merged_cache.extend(before_hash_cache);
+            merged_cache.extend(after_hash_cache);
+            if merged_cache.len() == expected_len {
+                Some(Arc::new(merged_cache))
+            } else {
+                None
+            }
+        };
+
         Ok(Some(BarrierUpdateValidationOutcome {
             parsed,
             snapshot_post,
+            hash_cache_post,
         }))
     })();
     validation.map_err(map_barrier_update_validation_error)
@@ -3432,8 +3485,10 @@ mod tests {
             n_max,
             updated.as_slice(),
             &changed,
+            None,
             &mut before_cache,
-        )?;
+        )?
+        .0;
         let full = super::compute_barrier_tree_hash(n_max, updated.as_slice())?;
         assert_eq!(incremental, full);
 
@@ -3442,8 +3497,10 @@ mod tests {
             n_max,
             base.as_slice(),
             &empty_change,
+            None,
             &mut before_cache,
-        )?;
+        )?
+        .0;
         assert_eq!(
             unchanged,
             super::compute_barrier_tree_hash(n_max, base.as_slice())?
@@ -3456,6 +3513,7 @@ mod tests {
                 n_max,
                 updated.as_slice(),
                 &out_of_range,
+                None,
                 &mut before_cache,
             ),
             Err(CityGError::InvalidInput("barrier node index out of range"))
@@ -3523,14 +3581,17 @@ mod tests {
                     usize::try_from(n_max)
                         .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?,
                     base.as_slice(),
+                    None,
                     &mut before_cache,
                 )?;
                 let after = super::compute_barrier_tree_hash_with_changes(
                     n_max,
                     updated.as_slice(),
                     &changed_nodes,
+                    None,
                     &mut before_cache,
-                )?;
+                )?
+                .0;
                 for i in 0..incr_acc.len() {
                     incr_acc[i] ^= before[i] ^ after[i];
                 }
@@ -3543,8 +3604,10 @@ mod tests {
                     n_max,
                     updated.as_slice(),
                     &changed_nodes,
+                    None,
                     &mut std::collections::HashMap::new(),
-                )?,
+                )?
+                .0,
                 "incremental hash must remain equivalent to full rehash"
             );
 
@@ -5678,6 +5741,7 @@ struct GroupState {
     leaf_device_pk: BTreeMap<[u8; 32], Vec<u8>>,
     leaf_barrier_public: BTreeMap<[u8; 32], Vec<u8>>,
     barrier_pk_entries: Vec<Vec<u8>>,
+    barrier_hash_cache: Option<Arc<HashMap<usize, [u8; 32]>>>,
 }
 
 impl Default for GroupState {
@@ -5705,6 +5769,7 @@ impl Default for GroupState {
             leaf_device_pk: BTreeMap::new(),
             leaf_barrier_public: BTreeMap::new(),
             barrier_pk_entries: Vec::new(),
+            barrier_hash_cache: None,
         }
     }
 }
