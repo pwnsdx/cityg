@@ -71,7 +71,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tracing::{debug, info, warn};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(test)]
 use cityg_client::demo;
@@ -251,9 +251,9 @@ struct ParsedBarrierUpdate {
 
 #[derive(Clone, Debug)]
 struct BarrierRecoverResult {
-    k_barrier_new: [u8; 32],
+    k_barrier_new: Zeroizing<[u8; 32]>,
     kem_tree_hash_after: [u8; 32],
-    k_fs_after_pcs: Option<[u8; 32]>,
+    k_fs_after_pcs: Option<Zeroizing<[u8; 32]>>,
     derived_node_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
 }
 
@@ -262,7 +262,7 @@ struct BarrierUpdateBuildResult {
     raw_update: Vec<u8>,
     barrier_update_digest: [u8; 32],
     kem_tree_hash_after: [u8; 32],
-    k_barrier_new: [u8; 32],
+    k_barrier_new: Zeroizing<[u8; 32]>,
     on_path_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
 }
 
@@ -1123,7 +1123,7 @@ fn try_recover_barrier_from_header(
         derived_node_key_material.insert(
             node_index,
             BarrierNodeKeyMaterial {
-                dk: dk_bytes,
+                dk: Zeroizing::new(dk_bytes),
                 pkhash,
             },
         );
@@ -1146,9 +1146,9 @@ fn try_recover_barrier_from_header(
     zeroize_path_secret_map(&mut path_secrets);
 
     Ok(Some(BarrierRecoverResult {
-        k_barrier_new,
+        k_barrier_new: Zeroizing::new(k_barrier_new),
         kem_tree_hash_after: parsed.kem_tree_hash_after,
-        k_fs_after_pcs,
+        k_fs_after_pcs: k_fs_after_pcs.map(Zeroizing::new),
         derived_node_key_material,
     }))
 }
@@ -1188,14 +1188,22 @@ fn apply_pending_barrier_activation(
 
     if let Some(digest) = accepted_digest {
         if digest == pending.barrier_update_digest {
-            session.barrier_state.barrier_version = pending.barrier_version;
-            session.barrier_state.k_barrier = pending.k_barrier_new;
-            session.barrier_state.kem_tree_hash_after = pending.kem_tree_hash_after;
-            for (node, material) in pending.on_path_key_material {
+            let BarrierPendingState {
+                barrier_version,
+                k_barrier_new,
+                kem_tree_hash_after,
+                k_fs_after_pcs,
+                on_path_key_material,
+                ..
+            } = pending;
+            session.barrier_state.barrier_version = barrier_version;
+            session.barrier_state.k_barrier = k_barrier_new;
+            session.barrier_state.kem_tree_hash_after = kem_tree_hash_after;
+            for (node, material) in on_path_key_material {
                 session.barrier_state.dk_nodes.insert(node, material);
             }
-            if let Some(k_fs_after_pcs) = pending.k_fs_after_pcs {
-                apply_forward_state_k_fs(session, k_fs_after_pcs);
+            if let Some(k_fs_after_pcs) = k_fs_after_pcs {
+                apply_forward_state_k_fs(session, *k_fs_after_pcs);
             }
             session.barrier_state.pending = None;
             return Ok(true);
@@ -1303,7 +1311,7 @@ fn build_barrier_update_bytes(
         on_path_key_material.insert(
             node_index,
             BarrierNodeKeyMaterial {
-                dk: dk_bytes,
+                dk: Zeroizing::new(dk_bytes),
                 pkhash,
             },
         );
@@ -1422,7 +1430,7 @@ fn build_barrier_update_bytes(
         raw_update,
         barrier_update_digest,
         kem_tree_hash_after,
-        k_barrier_new,
+        k_barrier_new: Zeroizing::new(k_barrier_new),
         on_path_key_material,
     })
 }
@@ -2210,12 +2218,12 @@ impl MsgReplayState {
 #[derive(Clone)]
 struct BarrierSecretState {
     barrier_version: u64,
-    k_barrier: [u8; 32],
+    k_barrier: Zeroizing<[u8; 32]>,
     kem_tree_hash_after: [u8; 32],
     max_barrier_update_bytes: u64,
     n_max: u64,
     cover_leaf_index: u64,
-    dk_leaf: Vec<u8>,
+    dk_leaf: Zeroizing<Vec<u8>>,
     pkhash_leaf: [u8; 32],
     dk_nodes: BTreeMap<u32, BarrierNodeKeyMaterial>,
     pending: Option<BarrierPendingState>,
@@ -2225,12 +2233,12 @@ impl Default for BarrierSecretState {
     fn default() -> Self {
         Self {
             barrier_version: 0,
-            k_barrier: [0u8; 32],
+            k_barrier: Zeroizing::new([0u8; 32]),
             kem_tree_hash_after: [0u8; 32],
             max_barrier_update_bytes: 0,
             n_max: DEFAULT_BARRIER_N_MAX,
             cover_leaf_index: 0,
-            dk_leaf: Vec::new(),
+            dk_leaf: Zeroizing::new(Vec::new()),
             pkhash_leaf: [0u8; 32],
             dk_nodes: BTreeMap::new(),
             pending: None,
@@ -2240,7 +2248,7 @@ impl Default for BarrierSecretState {
 
 #[derive(Clone, Default, Debug)]
 struct BarrierNodeKeyMaterial {
-    dk: Vec<u8>,
+    dk: Zeroizing<Vec<u8>>,
     pkhash: [u8; 32],
 }
 
@@ -2256,8 +2264,8 @@ struct BarrierPendingState {
     barrier_version: u64,
     revocation_roots_hash: [u8; 32],
     kem_tree_hash_after: [u8; 32],
-    k_barrier_new: [u8; 32],
-    k_fs_after_pcs: Option<[u8; 32]>,
+    k_barrier_new: Zeroizing<[u8; 32]>,
+    k_fs_after_pcs: Option<Zeroizing<[u8; 32]>>,
     barrier_update_reason: Option<u64>,
     barrier_update_digest: [u8; 32],
     on_path_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
@@ -6307,7 +6315,7 @@ impl SendParams {
             epoch_key: session.epoch_key,
             fs_ec: session.fs_ec,
             barrier_version: session.barrier_state.barrier_version,
-            k_barrier: session.barrier_state.k_barrier,
+            k_barrier: *session.barrier_state.k_barrier,
             msg_index,
             leaf_id: session.leaf_id,
             alias: session.alias.clone(),
@@ -6343,7 +6351,7 @@ impl FetchParams {
             epoch_key: session.epoch_key,
             fs_ec: session.fs_ec,
             barrier_version: session.barrier_state.barrier_version,
-            k_barrier: session.barrier_state.k_barrier,
+            k_barrier: *session.barrier_state.k_barrier,
             msg_replay_state: session.msg_replay_state.clone(),
             leaf_id: session.leaf_id,
             since,
@@ -6637,7 +6645,7 @@ impl PersistedMsgReplayState {
 impl PersistedBarrierNodeKeyMaterial {
     fn from_runtime(material: &BarrierNodeKeyMaterial) -> Self {
         Self {
-            dk_hex: hex_encode(&material.dk),
+            dk_hex: hex_encode(material.dk.as_slice()),
             pkhash_hex: hex_encode(material.pkhash),
         }
     }
@@ -6645,7 +6653,10 @@ impl PersistedBarrierNodeKeyMaterial {
     fn into_runtime(self, field_prefix: &str) -> Result<BarrierNodeKeyMaterial> {
         let dk = decode_hex_vec(&format!("{field_prefix}.dk_hex"), &self.dk_hex)?;
         let pkhash = decode_hex32_or_zero(&format!("{field_prefix}.pkhash_hex"), &self.pkhash_hex)?;
-        Ok(BarrierNodeKeyMaterial { dk, pkhash })
+        Ok(BarrierNodeKeyMaterial {
+            dk: Zeroizing::new(dk),
+            pkhash,
+        })
     }
 }
 
@@ -6665,8 +6676,12 @@ impl PersistedBarrierPendingState {
             barrier_version: pending.barrier_version,
             revocation_roots_hash_hex: hex_encode(pending.revocation_roots_hash),
             kem_tree_hash_after_hex: hex_encode(pending.kem_tree_hash_after),
-            k_barrier_new_hex: hex_encode(pending.k_barrier_new),
-            k_fs_after_pcs_hex: pending.k_fs_after_pcs.map(hex_encode).unwrap_or_default(),
+            k_barrier_new_hex: hex_encode(*pending.k_barrier_new),
+            k_fs_after_pcs_hex: pending
+                .k_fs_after_pcs
+                .as_ref()
+                .map(|value| hex_encode(**value))
+                .unwrap_or_default(),
             barrier_update_reason: pending.barrier_update_reason,
             barrier_update_digest_hex: hex_encode(pending.barrier_update_digest),
             on_path_key_material,
@@ -6704,8 +6719,9 @@ impl PersistedBarrierPendingState {
             k_barrier_new: decode_hex32_or_zero(
                 "barrier_state.pending.k_barrier_new_hex",
                 &self.k_barrier_new_hex,
-            )?,
-            k_fs_after_pcs,
+            )
+            .map(Zeroizing::new)?,
+            k_fs_after_pcs: k_fs_after_pcs.map(Zeroizing::new),
             barrier_update_reason: self.barrier_update_reason,
             barrier_update_digest: decode_hex32_or_zero(
                 "barrier_state.pending.barrier_update_digest_hex",
@@ -6730,12 +6746,12 @@ impl PersistedBarrierState {
             .collect();
         Self {
             barrier_version: state.barrier_version,
-            k_barrier_hex: hex_encode(state.k_barrier),
+            k_barrier_hex: hex_encode(*state.k_barrier),
             kem_tree_hash_after_hex: hex_encode(state.kem_tree_hash_after),
             max_barrier_update_bytes: state.max_barrier_update_bytes,
             n_max: state.n_max.max(1),
             cover_leaf_index: state.cover_leaf_index,
-            dk_leaf_hex: hex_encode(&state.dk_leaf),
+            dk_leaf_hex: hex_encode(state.dk_leaf.as_slice()),
             pkhash_leaf_hex: hex_encode(state.pkhash_leaf),
             dk_nodes,
             pending: state
@@ -6755,7 +6771,10 @@ impl PersistedBarrierState {
         }
         Ok(BarrierSecretState {
             barrier_version: self.barrier_version,
-            k_barrier: decode_hex32_or_zero("barrier_state.k_barrier_hex", &self.k_barrier_hex)?,
+            k_barrier: Zeroizing::new(decode_hex32_or_zero(
+                "barrier_state.k_barrier_hex",
+                &self.k_barrier_hex,
+            )?),
             kem_tree_hash_after: decode_hex32_or_zero(
                 "barrier_state.kem_tree_hash_after_hex",
                 &self.kem_tree_hash_after_hex,
@@ -6763,7 +6782,10 @@ impl PersistedBarrierState {
             max_barrier_update_bytes: self.max_barrier_update_bytes,
             n_max: self.n_max.max(1),
             cover_leaf_index: self.cover_leaf_index,
-            dk_leaf: decode_hex_vec("barrier_state.dk_leaf_hex", &self.dk_leaf_hex)?,
+            dk_leaf: Zeroizing::new(decode_hex_vec(
+                "barrier_state.dk_leaf_hex",
+                &self.dk_leaf_hex,
+            )?),
             pkhash_leaf: decode_hex32_or_zero(
                 "barrier_state.pkhash_leaf_hex",
                 &self.pkhash_leaf_hex,
@@ -8309,12 +8331,12 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         capss_witness: capss_witness_bytes,
         barrier_state: BarrierSecretState {
             barrier_version: ticket.barrier_version,
-            k_barrier,
+            k_barrier: Zeroizing::new(k_barrier),
             kem_tree_hash_after,
             max_barrier_update_bytes: ticket.max_barrier_update_bytes.max(1),
             n_max: barrier_n_max,
             cover_leaf_index: ticket.cover_leaf_index,
-            dk_leaf: barrier_leaf_dk_bytes,
+            dk_leaf: Zeroizing::new(barrier_leaf_dk_bytes),
             pkhash_leaf: barrier_pkhash_leaf,
             ..BarrierSecretState::default()
         },
@@ -8891,8 +8913,8 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
             barrier_version: next_barrier_version,
             revocation_roots_hash,
             kem_tree_hash_after: barrier_update.kem_tree_hash_after,
-            k_barrier_new: barrier_update.k_barrier_new,
-            k_fs_after_pcs: Some(k_fs_after_pcs),
+            k_barrier_new: barrier_update.k_barrier_new.clone(),
+            k_fs_after_pcs: Some(Zeroizing::new(k_fs_after_pcs)),
             barrier_update_reason: Some(1),
             barrier_update_digest: barrier_update.barrier_update_digest,
             on_path_key_material: barrier_update.on_path_key_material.clone(),
@@ -9511,7 +9533,7 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
         ));
     }
     let barrier_changed = session.barrier_state.barrier_version != ticket.barrier_version
-        || session.barrier_state.k_barrier != ticket_k_barrier
+        || *session.barrier_state.k_barrier != ticket_k_barrier
         || session.barrier_state.kem_tree_hash_after != ticket_kem_tree_hash_after
         || session.barrier_state.max_barrier_update_bytes != ticket_max_barrier_update_bytes_u64
         || session.barrier_state.n_max != ticket_n_max
@@ -9529,7 +9551,7 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
 
     if ticket.we_epoch_id == session.we_epoch_id {
         if !pending_changed_without_bundle {
-            session.barrier_state.k_barrier = ticket_k_barrier;
+            session.barrier_state.k_barrier = Zeroizing::new(ticket_k_barrier);
         }
         session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
         return Ok(EpochSyncOutcome {
@@ -9679,17 +9701,24 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
                 ticket_max_barrier_update_bytes,
             ) {
                 Ok(Some(recovered)) => {
-                    if recovered.kem_tree_hash_after != ticket_kem_tree_hash_after {
+                    let BarrierRecoverResult {
+                        k_barrier_new,
+                        kem_tree_hash_after,
+                        k_fs_after_pcs,
+                        derived_node_key_material,
+                        ..
+                    } = recovered;
+                    if kem_tree_hash_after != ticket_kem_tree_hash_after {
                         return Err(anyhow!(
                             "barrier recover hash-chain mismatch: recovered hash does not match merge ticket"
                         ));
                     }
-                    session.barrier_state.k_barrier = recovered.k_barrier_new;
-                    for (node, material) in recovered.derived_node_key_material {
+                    session.barrier_state.k_barrier = k_barrier_new;
+                    for (node, material) in derived_node_key_material {
                         session.barrier_state.dk_nodes.insert(node, material);
                     }
-                    if let Some(k_fs_after_pcs) = recovered.k_fs_after_pcs {
-                        apply_forward_state_k_fs(&mut session, k_fs_after_pcs);
+                    if let Some(k_fs_after_pcs) = k_fs_after_pcs {
+                        apply_forward_state_k_fs(&mut session, *k_fs_after_pcs);
                     }
                 }
                 Ok(None) => {
@@ -9706,7 +9735,7 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
                 }
             }
         } else {
-            session.barrier_state.k_barrier = ticket_k_barrier;
+            session.barrier_state.k_barrier = Zeroizing::new(ticket_k_barrier);
         }
     }
     session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
@@ -10690,7 +10719,7 @@ mod tests {
         on_path.insert(
             7,
             BarrierNodeKeyMaterial {
-                dk: vec![0x11; 32],
+                dk: Zeroizing::new(vec![0x11; 32]),
                 pkhash: [0x22; 32],
             },
         );
@@ -10700,8 +10729,8 @@ mod tests {
             barrier_version: 9,
             revocation_roots_hash: [0x33; 32],
             kem_tree_hash_after: [0x44; 32],
-            k_barrier_new: [0x55; 32],
-            k_fs_after_pcs: Some([0x66; 32]),
+            k_barrier_new: Zeroizing::new([0x55; 32]),
+            k_fs_after_pcs: Some(Zeroizing::new([0x66; 32])),
             barrier_update_reason: Some(1),
             barrier_update_digest: digest,
             on_path_key_material: on_path,
@@ -10711,7 +10740,7 @@ mod tests {
         assert!(changed);
         assert!(session.barrier_state.pending.is_none());
         assert_eq!(session.barrier_state.barrier_version, 9);
-        assert_eq!(session.barrier_state.k_barrier, [0x55; 32]);
+        assert_eq!(*session.barrier_state.k_barrier, [0x55; 32]);
         assert_eq!(session.barrier_state.kem_tree_hash_after, [0x44; 32]);
         assert_eq!(
             session
@@ -10734,7 +10763,7 @@ mod tests {
             barrier_version: 5,
             revocation_roots_hash: [0x11; 32],
             kem_tree_hash_after: [0x22; 32],
-            k_barrier_new: [0x33; 32],
+            k_barrier_new: Zeroizing::new([0x33; 32]),
             k_fs_after_pcs: None,
             barrier_update_reason: Some(1),
             barrier_update_digest: [0x44; 32],
@@ -10755,8 +10784,8 @@ mod tests {
             barrier_version: 7,
             revocation_roots_hash: [0x51; 32],
             kem_tree_hash_after: [0x61; 32],
-            k_barrier_new: [0x71; 32],
-            k_fs_after_pcs: Some([0x81; 32]),
+            k_barrier_new: Zeroizing::new([0x71; 32]),
+            k_fs_after_pcs: Some(Zeroizing::new([0x81; 32])),
             barrier_update_reason: Some(1),
             barrier_update_digest: [0x91; 32],
             on_path_key_material: BTreeMap::new(),
@@ -10831,7 +10860,7 @@ mod tests {
         session.barrier_state.kem_tree_hash_after = [0xAA; 32];
 
         let (leaf_ek, leaf_dk) = kyber768::keypair();
-        session.barrier_state.dk_leaf = KemSecretKey::as_bytes(&leaf_dk).to_vec();
+        session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
         session.barrier_state.pkhash_leaf =
             compute_barrier_pkhash(KemPublicKey::as_bytes(&leaf_ek))?;
 
@@ -10959,7 +10988,7 @@ mod tests {
 
         let (leaf_ek, leaf_dk) = kyber768::keypair();
         let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-        session.barrier_state.dk_leaf = KemSecretKey::as_bytes(&leaf_dk).to_vec();
+        session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
         session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
 
         let revoked_since_root = [0x31; 32];
@@ -11061,7 +11090,7 @@ mod tests {
 
         let barrier_salt = h_l("barrier/derive/salt", &BarrierDeriveSaltPreimage(9, &rrh))?;
         let expected_k_barrier = hkdf_blake3(&barrier_salt, &ps_0, BARRIER_KEY_INFO);
-        assert_eq!(recovered.k_barrier_new, expected_k_barrier);
+        assert_eq!(*recovered.k_barrier_new, expected_k_barrier);
         assert_eq!(recovered.derived_node_key_material.len(), 3);
         assert!(recovered.derived_node_key_material.contains_key(&0));
         assert!(recovered.derived_node_key_material.contains_key(&1));
@@ -11074,7 +11103,10 @@ mod tests {
             9,
             &expected_k_barrier,
         )?;
-        assert_eq!(recovered.k_fs_after_pcs, Some(expected_k_fs_after_pcs));
+        assert_eq!(
+            recovered.k_fs_after_pcs.as_deref().copied(),
+            Some(expected_k_fs_after_pcs)
+        );
         Ok(())
     }
 
@@ -11094,7 +11126,7 @@ mod tests {
 
         let (leaf_ek, leaf_dk) = kyber768::keypair();
         let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-        session.barrier_state.dk_leaf = KemSecretKey::as_bytes(&leaf_dk).to_vec();
+        session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
         session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
 
         let revoked_since_root = [0x31; 32];
@@ -11217,7 +11249,7 @@ mod tests {
 
         let (leaf_ek, leaf_dk) = kyber768::keypair();
         let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-        session.barrier_state.dk_leaf = KemSecretKey::as_bytes(&leaf_dk).to_vec();
+        session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
         let correct_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
         session.barrier_state.pkhash_leaf = correct_pkhash;
 
@@ -11343,7 +11375,7 @@ mod tests {
 
         let (leaf_ek, leaf_dk) = kyber768::keypair();
         let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
-        session.barrier_state.dk_leaf = KemSecretKey::as_bytes(&leaf_dk).to_vec();
+        session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
         let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
         session.barrier_state.pkhash_leaf = target_pkhash;
 
@@ -14529,7 +14561,7 @@ mod tests {
         barrier_dk_nodes.insert(
             1,
             BarrierNodeKeyMaterial {
-                dk: random_vec(kyber768::secret_key_bytes()),
+                dk: Zeroizing::new(random_vec(kyber768::secret_key_bytes())),
                 pkhash: array(0x24),
             },
         );
@@ -14537,33 +14569,33 @@ mod tests {
         pending_on_path.insert(
             0,
             BarrierNodeKeyMaterial {
-                dk: random_vec(kyber768::secret_key_bytes()),
+                dk: Zeroizing::new(random_vec(kyber768::secret_key_bytes())),
                 pkhash: array(0x2A),
             },
         );
         pending_on_path.insert(
             1,
             BarrierNodeKeyMaterial {
-                dk: random_vec(kyber768::secret_key_bytes()),
+                dk: Zeroizing::new(random_vec(kyber768::secret_key_bytes())),
                 pkhash: array(0x2B),
             },
         );
         session.barrier_state = BarrierSecretState {
             barrier_version: 5,
-            k_barrier: array(0x21),
+            k_barrier: Zeroizing::new(array(0x21)),
             kem_tree_hash_after: array(0x22),
             max_barrier_update_bytes: DEFAULT_MAX_BARRIER_UPDATE_BYTES,
             n_max: 8,
             cover_leaf_index: 3,
-            dk_leaf: random_vec(kyber768::secret_key_bytes()),
+            dk_leaf: Zeroizing::new(random_vec(kyber768::secret_key_bytes())),
             pkhash_leaf: array(0x23),
             dk_nodes: barrier_dk_nodes,
             pending: Some(BarrierPendingState {
                 barrier_version: 6,
                 revocation_roots_hash: array(0x25),
                 kem_tree_hash_after: array(0x26),
-                k_barrier_new: array(0x27),
-                k_fs_after_pcs: Some(array(0x28)),
+                k_barrier_new: Zeroizing::new(array(0x27)),
+                k_fs_after_pcs: Some(Zeroizing::new(array(0x28))),
                 barrier_update_reason: Some(1),
                 barrier_update_digest: array(0x29),
                 on_path_key_material: pending_on_path,
