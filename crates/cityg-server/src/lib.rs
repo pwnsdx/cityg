@@ -1930,12 +1930,10 @@ fn barrier_update_malformed_freeze_error() -> CityGError {
     ))
 }
 
-fn is_barrier_update_malformed_error(err: &CityGError) -> bool {
+fn map_barrier_update_validation_error(err: CityGError) -> CityGError {
     match err {
-        CityGError::InvalidInput(message) => {
-            *message == "barrier_update malformed" || message.starts_with("barrier ")
-        }
-        _ => false,
+        CityGError::InvalidInput(_) => barrier_update_malformed_freeze_error(),
+        other => other,
     }
 }
 
@@ -2159,13 +2157,7 @@ fn validate_barrier_update_against_roster(
             snapshot_post,
         }))
     })();
-    validation.map_err(|err| {
-        if is_barrier_update_malformed_error(&err) {
-            barrier_update_malformed_freeze_error()
-        } else {
-            err
-        }
-    })
+    validation.map_err(map_barrier_update_validation_error)
 }
 
 fn header_bytes32(
