@@ -2070,7 +2070,19 @@ fn validate_barrier_update_against_roster(
             ));
         }
 
-        let expected_before = compute_barrier_tree_hash(tree_n_max, snapshot_base)?;
+        let expected_before = if can_borrow_snapshot_base {
+            #[cfg(debug_assertions)]
+            {
+                let recomputed_before = compute_barrier_tree_hash(tree_n_max, snapshot_base)?;
+                debug_assert_eq!(
+                    recomputed_before, state_before.kem_tree_hash_after,
+                    "materialized barrier snapshot/hash drifted"
+                );
+            }
+            state_before.kem_tree_hash_after
+        } else {
+            compute_barrier_tree_hash(tree_n_max, snapshot_base)?
+        };
         if expected_before != parsed.kem_tree_hash_before {
             return Err(CityGError::Acceptance(
                 msphf_orchestrator::AcceptanceError::Freeze(
@@ -2129,7 +2141,11 @@ fn validate_barrier_update_against_roster(
                 .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
             *slot = ek.clone();
         }
-        let expected_after = compute_barrier_tree_hash(tree_n_max, snapshot_post.as_slice())?;
+        let expected_after = if parsed.new_public_keys.is_empty() {
+            expected_before
+        } else {
+            compute_barrier_tree_hash(tree_n_max, snapshot_post.as_slice())?
+        };
         if expected_after != parsed.kem_tree_hash_after {
             return Err(CityGError::Acceptance(
                 msphf_orchestrator::AcceptanceError::Freeze(
