@@ -3933,6 +3933,41 @@ mod tests {
                     && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED.reason
         ));
 
+        let valid_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            0,
+            0,
+            state.n_max,
+            rrh.to_vec(),
+            kem_before.to_vec(),
+            kem_after.to_vec(),
+            cover_payload_bytes.clone(),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&valid_update)?),
+        );
+        header.insert(112, Value::Bytes(vec![0xAA; 31]));
+        let err = super::validate_barrier_update_against_roster(
+            &state,
+            &header,
+            &cityg_client::MembershipDelta {
+                joined: Vec::new(),
+                revoked: Vec::new(),
+            },
+        )
+        .err()
+        .ok_or(CityGError::InvalidInput(
+            "invalid revocation roots header shape must fail",
+        ))?;
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED.code
+                    && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED.reason
+        ));
+        header.insert(112, Value::Bytes(revoked_since.to_vec()));
+
         let after_bad = super::BarrierUpdateWire(
             "barrier-v1".to_string(),
             0,
