@@ -71,6 +71,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tracing::{debug, info, warn};
+use zeroize::Zeroize;
 
 #[cfg(test)]
 use cityg_client::demo;
@@ -475,6 +476,12 @@ fn collect_resolution_targets(
     Ok(())
 }
 
+fn zeroize_path_secret_map(path_secrets: &mut BTreeMap<u64, [u8; 32]>) {
+    for secret in path_secrets.values_mut() {
+        secret.zeroize();
+    }
+}
+
 fn parse_deterministic_cbor<T>(raw: &[u8], label: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned + Serialize,
@@ -870,6 +877,10 @@ fn try_recover_barrier_from_header(
     fs_ec: u64,
     max_barrier_update_bytes: usize,
 ) -> Result<Option<BarrierRecoverResult>> {
+    if max_barrier_update_bytes == 0 {
+        return Err(anyhow!("max_barrier_update_bytes must be positive"));
+    }
+
     let raw_update = match header_map.get(&hdr::HDR_BARRIER_UPDATE) {
         Some(Value::Bytes(bytes)) => bytes.as_slice(),
         Some(_) => return Err(anyhow!("header barrier_update must be bytes")),
@@ -879,7 +890,9 @@ fn try_recover_barrier_from_header(
     let n_max = session.barrier_state.n_max.max(1);
     let parsed = parse_barrier_update_for_recover(raw_update, n_max, max_barrier_update_bytes)?;
 
-    if parsed.prev_barrier_version.saturating_add(1) != parsed.barrier_version {
+    let valid_progression = (parsed.prev_barrier_version == 0 && parsed.barrier_version == 0)
+        || parsed.prev_barrier_version.saturating_add(1) == parsed.barrier_version;
+    if !valid_progression {
         return Err(anyhow!("barrier version progression is invalid"));
     }
     if parsed.tree_size != n_max {
@@ -942,7 +955,7 @@ fn try_recover_barrier_from_header(
             continue;
         }
 
-        let ss = if node.target_node == leaf_node {
+        let mut ss = if node.target_node == leaf_node {
             if dk_bytes.len() != kyber768::secret_key_bytes() {
                 continue;
             }
@@ -994,7 +1007,7 @@ fn try_recover_barrier_from_header(
             aead::{Aead, KeyInit, Payload},
         };
         let cipher = ChaCha20Poly1305::new((&ss).into());
-        let plaintext = match cipher.decrypt(
+        let mut plaintext = match cipher.decrypt(
             (&nonce).into(),
             Payload {
                 msg: node.wrapped_ps.as_slice(),
@@ -1003,16 +1016,20 @@ fn try_recover_barrier_from_header(
         ) {
             Ok(plaintext) => plaintext,
             Err(_) => {
+                ss.zeroize();
                 candidate_decrypt_failure = true;
                 continue;
             }
         };
+        ss.zeroize();
         if plaintext.len() != 32 {
+            plaintext.zeroize();
             candidate_decrypt_failure = true;
             continue;
         }
         let mut path_secret = [0u8; 32];
         path_secret.copy_from_slice(plaintext.as_slice());
+        plaintext.zeroize();
         matches.push((node.source_node, node.target_node, path_secret));
     }
 
@@ -1029,6 +1046,9 @@ fn try_recover_barrier_from_header(
         return Ok(None);
     }
     if matches.len() > 1 {
+        for (_, _, secret) in &mut matches {
+            secret.zeroize();
+        }
         return Err(anyhow!("barrier recover rejected: multi-match (960.2)"));
     }
 
@@ -1122,6 +1142,8 @@ fn try_recover_barrier_from_header(
     } else {
         None
     };
+
+    zeroize_path_secret_map(&mut path_secrets);
 
     Ok(Some(BarrierRecoverResult {
         k_barrier_new,
@@ -1236,6 +1258,7 @@ fn build_barrier_update_bytes(
     let mut ps_leaf = [0u8; 32];
     thread_rng().fill_bytes(&mut ps_leaf);
     path_secrets.insert(path_nodes[0], ps_leaf);
+    ps_leaf.zeroize();
     for k in 1..path_nodes.len() {
         let parent_node = path_nodes[k];
         let child_node = path_nodes[k - 1];
@@ -1319,6 +1342,8 @@ fn build_barrier_update_bytes(
             let target_ek = kyber768::PublicKey::from_bytes(target_pk.as_slice())
                 .map_err(|_| anyhow!("invalid ML-KEM target public key in snapshot_pre"))?;
             let (ss, kem_ct) = kyber768::encapsulate(&target_ek);
+            let mut ss_bytes = [0u8; 32];
+            ss_bytes.copy_from_slice(ss.as_bytes());
 
             let aad = to_cbor_vec(&BarrierWrapAadPreimage(
                 gid,
@@ -1345,16 +1370,21 @@ fn build_barrier_update_bytes(
                 ChaCha20Poly1305,
                 aead::{Aead, KeyInit, Payload},
             };
-            let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
-            let wrapped_ps = cipher
-                .encrypt(
-                    (&nonce).into(),
-                    Payload {
-                        msg: source_secret.as_slice(),
-                        aad: aad.as_slice(),
-                    },
-                )
-                .map_err(|_| anyhow!("barrier wrap encrypt failed"))?;
+            let cipher = ChaCha20Poly1305::new((&ss_bytes).into());
+            let wrapped_ps = match cipher.encrypt(
+                (&nonce).into(),
+                Payload {
+                    msg: source_secret.as_slice(),
+                    aad: aad.as_slice(),
+                },
+            ) {
+                Ok(wrapped_ps) => wrapped_ps,
+                Err(_) => {
+                    ss_bytes.zeroize();
+                    return Err(anyhow!("barrier wrap encrypt failed"));
+                }
+            };
+            ss_bytes.zeroize();
             node_ciphertexts.push(NodeCiphertextWire(
                 source_node,
                 target_node,
@@ -1387,6 +1417,7 @@ fn build_barrier_update_bytes(
     );
     let raw_update = to_cbor_vec(&update).context("encode barrier update")?;
     let barrier_update_digest = compute_barrier_update_digest(raw_update.as_slice())?;
+    zeroize_path_secret_map(&mut path_secrets);
     Ok(BarrierUpdateBuildResult {
         raw_update,
         barrier_update_digest,
@@ -2211,6 +2242,13 @@ impl Default for BarrierSecretState {
 struct BarrierNodeKeyMaterial {
     dk: Vec<u8>,
     pkhash: [u8; 32],
+}
+
+impl Drop for BarrierNodeKeyMaterial {
+    fn drop(&mut self) {
+        self.dk.zeroize();
+        self.pkhash.zeroize();
+    }
 }
 
 #[derive(Clone, Default)]
@@ -6371,6 +6409,8 @@ struct PersistedSession {
     #[serde(default)]
     last_fetch_timestamp_ms: Option<u64>,
     #[serde(default)]
+    // Legacy monotone sender counter retained for backward-compatible session schema.
+    // Active send path uses random msg_index (S8.2 alternative).
     next_msg_index: u64,
     #[serde(default)]
     msg_replay_state: PersistedMsgReplayState,
@@ -6791,6 +6831,7 @@ impl PersistedSession {
                 fs_last_weid_hex: hex_encode(snapshot.last_weid),
             },
             last_fetch_timestamp_ms: session.last_fetch_timestamp_ms,
+            // Persist legacy field to keep on-disk compatibility across versions.
             next_msg_index: session.next_msg_index,
             msg_replay_state: PersistedMsgReplayState::from_runtime(&session.msg_replay_state),
             capss_witness_hex: hex_encode(&session.capss_witness),
