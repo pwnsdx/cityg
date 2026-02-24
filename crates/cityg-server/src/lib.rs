@@ -2376,7 +2376,7 @@ fn validate_barrier_update_against_roster(
         let (expected_after, after_hash_cache) = if parsed.new_public_keys.is_empty() {
             (expected_before, HashMap::new())
         } else {
-            compute_barrier_tree_hash_with_changes(
+            let (expected_after, after_hash_cache) = compute_barrier_tree_hash_with_changes(
                 tree_n_max,
                 snapshot_post.as_slice(),
                 &changed_nodes,
@@ -2386,17 +2386,18 @@ fn validate_barrier_update_against_roster(
                     None
                 },
                 &mut before_hash_cache,
-            )?
+            )?;
+            #[cfg(debug_assertions)]
+            if !changed_nodes.is_empty() {
+                let full_rehash_after =
+                    compute_barrier_tree_hash(tree_n_max, snapshot_post.as_slice())?;
+                debug_assert_eq!(
+                    expected_after, full_rehash_after,
+                    "incremental barrier after-hash diverged from full rehash"
+                );
+            }
+            (expected_after, after_hash_cache)
         };
-        #[cfg(debug_assertions)]
-        if !can_borrow_snapshot_base && !changed_nodes.is_empty() {
-            let full_rehash_after =
-                compute_barrier_tree_hash(tree_n_max, snapshot_post.as_slice())?;
-            debug_assert_eq!(
-                expected_after, full_rehash_after,
-                "incremental barrier after-hash diverged from full rehash"
-            );
-        }
         if expected_after != parsed.kem_tree_hash_after {
             return Err(CityGError::Acceptance(
                 msphf_orchestrator::AcceptanceError::Freeze(
