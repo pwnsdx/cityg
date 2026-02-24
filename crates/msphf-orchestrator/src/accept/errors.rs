@@ -191,6 +191,11 @@ pub const FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE: FreezeError = FreezeError {
     reason: "barrier_tree_hash_chain_failure",
 };
 
+pub const FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE: FreezeError = FreezeError {
+    code: 9609,
+    reason: "barrier_tree_snapshot_auth_failure",
+};
+
 pub const FREEZE_BARRIER_GENESIS_REQUIRED: FreezeError = FreezeError {
     code: 96010,
     reason: "barrier_genesis_required",

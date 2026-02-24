@@ -1454,8 +1454,10 @@ impl CityGServer {
         let pk_entries = build_pk_entries(state)?;
         let computed_hash = compute_barrier_tree_hash(state.n_max, &pk_entries)?;
         if computed_hash != *kem_tree_hash_after {
-            return Err(CityGError::InvalidInput(
-                "barrier tree snapshot auth failure",
+            return Err(CityGError::Acceptance(
+                msphf_orchestrator::AcceptanceError::Freeze(
+                    msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE,
+                ),
             ));
         }
         Ok(BarrierPublicTreeSnapshot {
@@ -4181,7 +4183,10 @@ mod tests {
             .expect_err("mismatched hash must fail");
         assert!(matches!(
             err,
-            CityGError::InvalidInput("barrier tree snapshot auth failure")
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.code
+                    && freeze.reason
+                        == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.reason
         ));
         Ok(())
     }

@@ -4374,7 +4374,12 @@ mod tests {
             .expect_err("mismatched tree hash must fail");
         assert!(matches!(
             err,
-            ApiError::Server { message, .. } if message.contains("barrier tree snapshot auth failure")
+            ApiError::Server {
+                freeze: Some(freeze),
+                ..
+            } if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.code
+                && freeze.reason
+                    == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.reason
         ));
     }
 
