@@ -778,7 +778,6 @@ impl CitygApiClient {
             kbroad_generation: response.kbroad_generation,
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
-            k_barrier: array32(&response.k_barrier)?,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
@@ -1351,7 +1350,6 @@ pub struct MergeTicket {
     pub kbroad_generation: u64,
     pub barrier_version: u64,
     pub cover_leaf_index: u64,
-    pub k_barrier: [u8; 32],
     pub kem_tree_hash_after: [u8; 32],
     pub n_max: u64,
     pub max_barrier_update_bytes: u64,
@@ -1459,7 +1457,6 @@ mod tests {
             barrier_version: 0,
             profile_version: EXPECTED_PROFILE_VERSION.to_string(),
             cover_leaf_index: 0,
-            k_barrier: vec![0x08; 32],
             kem_tree_hash_after: vec![0x09; 32],
             n_max: 1024,
             max_barrier_update_bytes: 1_048_576,
@@ -1799,7 +1796,6 @@ mod tests {
         assert_eq!(merge.parent_root, [0x03; 32]);
         assert_eq!(merge.kbroad_generation, 0);
         assert_eq!(merge.cover_leaf_index, 0);
-        assert_eq!(merge.k_barrier, [0x08; 32]);
         assert_eq!(merge.kem_tree_hash_after, [0x09; 32]);
         assert_eq!(merge.n_max, 1024);
         assert_eq!(merge.max_barrier_update_bytes, 1_048_576);
@@ -1883,24 +1879,6 @@ mod tests {
                 freeze_code: Some(404),
                 ..
             }
-        ));
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn merge_ticket_rejects_invalid_k_barrier_length() -> Result<(), Box<dyn StdError>> {
-        let mut payload = merge_ticket_ok_payload();
-        payload.k_barrier = vec![0x08; 31];
-        let (base_url, handle) = start_merge_ticket_server(payload).await?;
-        let client = CitygApiClient::new(base_url);
-        let err = client
-            .merge_ticket("room-1", &[0x01; 32])
-            .await
-            .expect_err("invalid k_barrier length must fail");
-        assert!(matches!(
-            err,
-            Error::Parse(message) if message.contains("invalid 32-byte field")
         ));
         handle.abort();
         Ok(())

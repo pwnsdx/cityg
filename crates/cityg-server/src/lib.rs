@@ -88,7 +88,6 @@ use msphf_orchestrator::{
     self, AcceptanceContext, AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE,
     DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes, hdr,
 };
-use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 
 /// Re-export commonly used client-side bundle types for convenience.
@@ -258,8 +257,6 @@ pub struct JoinTicketBundle {
     pub barrier_version: u64,
     /// Cover leaf index allocated to the joining device.
     pub cover_leaf_index: u64,
-    /// Provisioned barrier secret for payload key schedule binding.
-    pub k_barrier: [u8; 32],
     /// Current committed barrier tree hash.
     pub kem_tree_hash_after: [u8; 32],
     /// Fixed barrier tree capacity.
@@ -309,7 +306,6 @@ pub struct MergeTicketBundle {
     pub kbroad_generation: u64,
     pub barrier_version: u64,
     pub cover_leaf_index: u64,
-    pub k_barrier: [u8; 32],
     pub kem_tree_hash_after: [u8; 32],
     pub n_max: u64,
     pub max_barrier_update_bytes: u64,
@@ -365,9 +361,6 @@ impl CityGServer {
             max_barrier_update_bytes,
         ) = {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
-            if state.k_barrier == [0u8; 32] {
-                state.k_barrier = random_barrier_key();
-            }
             state.max_barrier_update_bytes = state.max_barrier_update_bytes.max(1);
             if !state.barrier_initialized && !has_history {
                 let zero = [0u8; 32];
@@ -483,22 +476,6 @@ impl CityGServer {
 
     pub fn kbroad_rotation_required(&self, gid: &[u8; 32]) -> bool {
         self.roster.kbroad_rotation_required(gid)
-    }
-
-    fn ensure_group_barrier_secret(&mut self, gid: &[u8; 32]) -> Result<[u8; 32], CityGError> {
-        let mut changed = false;
-        let key = {
-            let state = self.roster.groups.entry(gid.to_vec()).or_default();
-            if state.k_barrier == [0u8; 32] {
-                state.k_barrier = random_barrier_key();
-                changed = true;
-            }
-            state.k_barrier
-        };
-        if changed {
-            self.persist_kbroad_state()?;
-        }
-        Ok(key)
     }
 
     pub fn new(config: ServerConfig) -> Self {
@@ -625,7 +602,6 @@ impl CityGServer {
             .barrier_group_state(gid)
             .cloned()
             .unwrap_or_default();
-        let k_barrier = self.ensure_group_barrier_secret(gid)?;
         let barrier_version = barrier_state.barrier_version;
         let cover_leaf_index = u64::from(cover_leaf_index(&leaf_id, barrier_state.n_max.max(1)));
         let max_barrier_update_bytes =
@@ -647,7 +623,6 @@ impl CityGServer {
             kbroad_generation,
             barrier_version,
             cover_leaf_index,
-            k_barrier,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
             n_max: barrier_state.n_max.max(1),
             max_barrier_update_bytes,
@@ -766,7 +741,6 @@ impl CityGServer {
             .barrier_group_state(gid)
             .cloned()
             .unwrap_or_default();
-        let k_barrier = self.ensure_group_barrier_secret(gid)?;
         let barrier_version = barrier_state.barrier_version;
         let cover_leaf_index = u64::from(cover_leaf_index(leaf_id, barrier_state.n_max.max(1)));
         let max_barrier_update_bytes =
@@ -813,7 +787,6 @@ impl CityGServer {
             kbroad_generation,
             barrier_version,
             cover_leaf_index,
-            k_barrier,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
             n_max: barrier_state.n_max.max(1),
             max_barrier_update_bytes,
@@ -1043,7 +1016,6 @@ impl CityGServer {
             group.rotation_required = room_state.rotation_required;
             group.barrier_initialized = room_state.barrier_initialized;
             group.barrier_version = room_state.barrier_version;
-            group.k_barrier = room_state.k_barrier;
             group.barrier_roots_hash = room_state.barrier_roots_hash;
             group.kem_tree_hash_after = room_state.kem_tree_hash_after;
             group.n_max = room_state.n_max.max(1);
@@ -1110,12 +1082,6 @@ impl CityGServer {
                         .get(gid.as_slice())
                         .map(|state| state.barrier_version)
                         .unwrap_or(0),
-                    k_barrier: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.k_barrier)
-                        .unwrap_or([0u8; 32]),
                     barrier_roots_hash: self
                         .roster
                         .groups
@@ -3183,7 +3149,6 @@ mod tests {
         let gid = [0xC1; 32];
         let initial_key = vec![0x44; 16];
         let rotated_key = vec![0x66; 16];
-        let persisted_k_barrier: [u8; 32];
         let persisted_device_pk = vec![0x91; 32];
         let persisted_device_state = msphf_orchestrator::DeviceChainState {
             last_commit: Some([0xEF; 32]),
@@ -3206,7 +3171,6 @@ mod tests {
                 .groups
                 .get_mut(gid.as_slice())
                 .expect("registered group state must exist");
-            state.barrier_initialized = true;
             state.barrier_version = 9;
             state.barrier_roots_hash = [0xAB; 32];
             state.kem_tree_hash_after = [0xCD; 32];
@@ -3215,8 +3179,6 @@ mod tests {
             state.pcs_refresh_min_delta_device_ec = 3;
             state.pcs_refresh_min_delta_group_ec = 4;
             state.pcs_refresh_slot_width_ec = 5;
-            persisted_k_barrier = state.k_barrier;
-            assert_ne!(persisted_k_barrier, [0u8; 32]);
             server.ctx.insert_device_chain_state(
                 gid.as_slice(),
                 persisted_device_pk.as_slice(),
@@ -3238,11 +3200,7 @@ mod tests {
             .groups
             .get(gid.as_slice())
             .expect("recovered group state must exist");
-        assert!(state.barrier_initialized);
-        assert_eq!(state.barrier_version, 9);
-        assert_eq!(state.barrier_roots_hash, [0xAB; 32]);
         assert_eq!(state.kem_tree_hash_after, [0xCD; 32]);
-        assert_eq!(state.k_barrier, persisted_k_barrier);
         assert_eq!(state.n_max, 2048);
         assert_eq!(state.last_pcs_refresh_ec, Some(77));
         assert_eq!(state.pcs_refresh_min_delta_device_ec, 3);
@@ -3274,7 +3232,6 @@ mod tests {
             .groups
             .get(gid.as_slice())
             .expect("group should exist after registration");
-        assert_ne!(state.k_barrier, [0u8; 32]);
         assert_eq!(state.n_max, super::DEFAULT_BARRIER_N_MAX);
         assert!(state.n_max.is_power_of_two());
         assert!(state.pcs_refresh_min_delta_device_ec >= 1);
@@ -3300,8 +3257,6 @@ mod tests {
         let first = server.build_join_ticket(&gid)?;
         let second = server.build_join_ticket(&gid)?;
         assert!(super::leaf_index(&second.leaf_id) > super::leaf_index(&first.leaf_id));
-        assert_ne!(first.k_barrier, [0u8; 32]);
-        assert_eq!(first.k_barrier, second.k_barrier);
 
         let mut demo_server = super::demo::demo_server();
         let bundle = cityg_client::demo::demo_bundle("alice")?;
@@ -5809,7 +5764,6 @@ struct GroupState {
     rotation_required: bool,
     barrier_initialized: bool,
     barrier_version: u64,
-    k_barrier: [u8; 32],
     barrier_roots_hash: [u8; 32],
     kem_tree_hash_after: [u8; 32],
     n_max: u64,
@@ -5836,7 +5790,6 @@ impl Default for GroupState {
             rotation_required: false,
             barrier_initialized: false,
             barrier_version: 0,
-            k_barrier: [0u8; 32],
             barrier_roots_hash: [0u8; 32],
             kem_tree_hash_after: [0u8; 32],
             n_max: DEFAULT_BARRIER_N_MAX,
@@ -5916,12 +5869,6 @@ fn default_max_barrier_update_bytes() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn random_barrier_key() -> [u8; 32] {
-    let mut key = [0u8; 32];
-    OsRng.fill_bytes(&mut key);
-    key
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct PersistedKbroadRoomState {
     kbroad_public: Vec<u8>,
@@ -5931,8 +5878,6 @@ struct PersistedKbroadRoomState {
     barrier_initialized: bool,
     #[serde(default)]
     barrier_version: u64,
-    #[serde(default)]
-    k_barrier: [u8; 32],
     #[serde(default)]
     barrier_roots_hash: [u8; 32],
     #[serde(default)]

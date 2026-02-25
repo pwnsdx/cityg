@@ -1120,7 +1120,6 @@ Join provisioning MUST deliver to the joiner (authenticated, confidential as per
 Barrier required fields:
 * cover_leaf_index (uint)
 * current barrier_version (uint)
-* current K_barrier (bstr32)
 * current kem_tree_hash_after (bstr32)
 * N_max (uint)
 * max_barrier_update_bytes (uint)
@@ -1133,6 +1132,14 @@ FS-hybrid required fields:
 * group fs_epoch_base_ts (T_base; uint64)
 * fs_policy_version (uint)
 * any suite identifiers required to verify proofs (Smallwood/VRF/SRX profiles)
+
+S12.3 Pending barrier recovery (normative)
+Because the server is untrusted and blind to `K_barrier`, it CANNOT provision `K_barrier` directly to the joiner. Joiners MUST begin in a `pending_barrier_recovery` state.
+While in `pending_barrier_recovery`:
+* The joiner CANNOT encrypt outgoing payload messages (`SendParams` MUST be suspended or buffered).
+* The joiner CANNOT decrypt incoming payload messages encoded with `K_barrier` (or subsequent epochs).
+* The joiner MUST process any observed `barrier_update` messages (S11.13.4).
+When the joiner successfully processes a `barrier_update` whose `ExpectedNodeSet` includes the joiner's `cover_leaf_index`, it derives `K_barrier_new`, clears `pending_barrier_recovery`, and proceeds with normal operation.
 
 S13. ERROR CODES (NORMATIVE)
 

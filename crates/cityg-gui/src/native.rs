@@ -1206,6 +1206,7 @@ fn apply_pending_barrier_activation(
                 apply_forward_state_k_fs(session, *k_fs_after_pcs);
             }
             session.barrier_state.pending = None;
+            session.barrier_state.barrier_recovery_pending = false;
             return Ok(true);
         }
 
@@ -2225,6 +2226,7 @@ struct BarrierSecretState {
     pkhash_leaf: [u8; 32],
     dk_nodes: BTreeMap<u32, BarrierNodeKeyMaterial>,
     pending: Option<BarrierPendingState>,
+    barrier_recovery_pending: bool,
 }
 
 impl Default for BarrierSecretState {
@@ -2240,6 +2242,7 @@ impl Default for BarrierSecretState {
             pkhash_leaf: [0u8; 32],
             dk_nodes: BTreeMap::new(),
             pending: None,
+            barrier_recovery_pending: false,
         }
     }
 }
@@ -3749,7 +3752,20 @@ impl AppModel {
         }
 
         let since = session.last_fetch_timestamp_ms;
-        let params = FetchParams::from_session(&session, since);
+        let params = match FetchParams::from_session(&session, since) {
+            Ok(params) => params,
+            Err(err) => {
+                self.fetch_in_flight = false;
+                self.fetch_status = FetchStatus::Idle;
+                self.last_error = Some(format!("Failed to prepare message fetch: {err}"));
+                self.record_activity_with_detail(
+                    ActivityKind::Message,
+                    "Message fetch skipped",
+                    Some(err.to_string()),
+                );
+                return;
+            }
+        };
         let expected_weid = session.we_epoch_id;
 
         let task = cx.spawn(async move |this, cx| {
@@ -5517,8 +5533,21 @@ impl AppModel {
         if plaintext.is_empty() {
             return;
         }
-        let pending_id = self.queue_pending_message(&session_snapshot, &plaintext);
         let msg_index = thread_rng().next_u64();
+        let params = match SendParams::from_session(&session_snapshot, plaintext.clone(), msg_index)
+        {
+            Ok(params) => params,
+            Err(err) => {
+                self.record_activity_with_detail(
+                    ActivityKind::Message,
+                    "Message send skipped",
+                    Some(err.to_string()),
+                );
+                self.set_error(&err, "send", Some(RetryAction::Send));
+                return;
+            }
+        };
+        let pending_id = self.queue_pending_message(&session_snapshot, &plaintext);
 
         self.composer.clear();
         self.composer.focus();
@@ -5528,7 +5557,6 @@ impl AppModel {
         self.info_message = None;
         cx.notify();
 
-        let params = SendParams::from_session(&session_snapshot, plaintext, msg_index);
         let task = Tokio::spawn_result(cx, async move { perform_send(params).await });
 
         cx.spawn(async move |this, cx| {
@@ -6304,8 +6332,13 @@ struct SendParams {
 }
 
 impl SendParams {
-    fn from_session(session: &AppSession, plaintext: String, msg_index: u64) -> Self {
-        Self {
+    fn from_session(session: &AppSession, plaintext: String, msg_index: u64) -> Result<Self> {
+        if session.barrier_state.barrier_recovery_pending {
+            return Err(anyhow!(
+                "Cannot send messages while barrier recovery is pending. Waiting for next barrier update."
+            ));
+        }
+        Ok(Self {
             server_url: session.server_url.clone(),
             gid: session.gid,
             we_epoch_id: session.we_epoch_id,
@@ -6320,7 +6353,7 @@ impl SendParams {
             plaintext,
             msg_sign_secret_key: session.msg_sign_secret_key.clone(),
             msg_sign_public_key: session.msg_sign_public_key.clone(),
-        }
+        })
     }
 }
 
@@ -6340,8 +6373,13 @@ struct FetchParams {
 }
 
 impl FetchParams {
-    fn from_session(session: &AppSession, since: Option<u64>) -> Self {
-        Self {
+    fn from_session(session: &AppSession, since: Option<u64>) -> Result<Self> {
+        if session.barrier_state.barrier_recovery_pending {
+            return Err(anyhow!(
+                "Cannot fetch/decrypt messages while barrier recovery is pending. Waiting for next barrier update."
+            ));
+        }
+        Ok(Self {
             server_url: session.server_url.clone(),
             gid: session.gid,
             we_epoch_id: session.we_epoch_id,
@@ -6353,7 +6391,7 @@ impl FetchParams {
             msg_replay_state: session.msg_replay_state.clone(),
             leaf_id: session.leaf_id,
             since,
-        }
+        })
     }
 }
 
@@ -6557,6 +6595,12 @@ struct PersistedBarrierState {
     dk_nodes: BTreeMap<u32, PersistedBarrierNodeKeyMaterial>,
     #[serde(default)]
     pending: Option<PersistedBarrierPendingState>,
+    #[serde(default = "default_barrier_recovery_pending")]
+    barrier_recovery_pending: bool,
+}
+
+fn default_barrier_recovery_pending() -> bool {
+    false
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -6755,6 +6799,7 @@ impl PersistedBarrierState {
                 .pending
                 .as_ref()
                 .map(PersistedBarrierPendingState::from_runtime),
+            barrier_recovery_pending: state.barrier_recovery_pending,
         }
     }
 
@@ -6792,6 +6837,7 @@ impl PersistedBarrierState {
                 .pending
                 .map(PersistedBarrierPendingState::into_runtime)
                 .transpose()?,
+            barrier_recovery_pending: self.barrier_recovery_pending,
         })
     }
 }
@@ -8174,7 +8220,6 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         ticket.fs_policy_version
     };
     let fs_epoch_base_ts = ticket.fs_epoch_base_ts;
-    let k_barrier = bytes32("k_barrier", &ticket.k_barrier)?;
     let kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
     let barrier_n_max = if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
@@ -8324,13 +8369,14 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         capss_witness: capss_witness_bytes,
         barrier_state: BarrierSecretState {
             barrier_version: ticket.barrier_version,
-            k_barrier: Zeroizing::new(k_barrier),
+            k_barrier: Zeroizing::new([0u8; 32]),
             kem_tree_hash_after,
             max_barrier_update_bytes: ticket.max_barrier_update_bytes.max(1),
             n_max: barrier_n_max,
             cover_leaf_index: ticket.cover_leaf_index,
             dk_leaf: Zeroizing::new(barrier_leaf_dk_bytes),
             pkhash_leaf: barrier_pkhash_leaf,
+            barrier_recovery_pending: true,
             ..BarrierSecretState::default()
         },
     };
@@ -8426,7 +8472,6 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         kbroad_generation: _,
         barrier_version,
         cover_leaf_index,
-        k_barrier: _,
         kem_tree_hash_after,
         n_max,
         max_barrier_update_bytes,
@@ -8772,7 +8817,6 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
         kbroad_generation: _,
         barrier_version,
         cover_leaf_index,
-        k_barrier: _,
         kem_tree_hash_after,
         n_max,
         max_barrier_update_bytes,
@@ -9499,7 +9543,6 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
         .merge_ticket_refresh(&session.room_id, &session.leaf_id)
         .await
         .context("failed to fetch merge ticket for epoch sync")?;
-    let ticket_k_barrier = bytes32("k_barrier", &ticket.k_barrier)?;
     let ticket_kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
     let ticket_n_max = if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
@@ -9526,7 +9569,6 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
         ));
     }
     let barrier_changed = session.barrier_state.barrier_version != ticket.barrier_version
-        || *session.barrier_state.k_barrier != ticket_k_barrier
         || session.barrier_state.kem_tree_hash_after != ticket_kem_tree_hash_after
         || session.barrier_state.max_barrier_update_bytes != ticket_max_barrier_update_bytes_u64
         || session.barrier_state.n_max != ticket_n_max
@@ -9543,9 +9585,6 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     }
 
     if ticket.we_epoch_id == session.we_epoch_id {
-        if !pending_changed_without_bundle {
-            session.barrier_state.k_barrier = Zeroizing::new(ticket_k_barrier);
-        }
         session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
         return Ok(EpochSyncOutcome {
             session,
@@ -9713,6 +9752,7 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
                     if let Some(k_fs_after_pcs) = k_fs_after_pcs {
                         apply_forward_state_k_fs(&mut session, *k_fs_after_pcs);
                     }
+                    session.barrier_state.barrier_recovery_pending = false;
                 }
                 Ok(None) => {
                     return Err(anyhow!(
@@ -9727,8 +9767,6 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
                     return Err(anyhow!("barrier recover failed (960.7): {detail}"));
                 }
             }
-        } else {
-            session.barrier_state.k_barrier = Zeroizing::new(ticket_k_barrier);
         }
     }
     session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
@@ -14592,6 +14630,7 @@ mod tests {
                 barrier_update_digest: array(0x29),
                 on_path_key_material: pending_on_path,
             }),
+            barrier_recovery_pending: true,
         };
         let mut replay_state = MsgReplayState {
             tuple_tag: array(0x30),
@@ -14710,6 +14749,10 @@ mod tests {
         assert_eq!(
             loaded.barrier_state.cover_leaf_index,
             session.barrier_state.cover_leaf_index
+        );
+        assert_eq!(
+            loaded.barrier_state.barrier_recovery_pending,
+            session.barrier_state.barrier_recovery_pending
         );
         assert_eq!(loaded.barrier_state.dk_leaf, session.barrier_state.dk_leaf);
         assert_eq!(
@@ -14853,18 +14896,20 @@ mod tests {
         let room_id = hex_encode([0x44u8; 32]);
         bootstrap_test_room(&server_url, &room_id).await?;
 
-        let alice = perform_join(JoinParams {
+        let mut alice = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
         })
         .await?;
-        let bob = perform_join(JoinParams {
+        alice.barrier_state.barrier_recovery_pending = false;
+        let mut bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
         })
         .await?;
+        bob.barrier_state.barrier_recovery_pending = false;
         assert_ne!(
             alice.we_epoch_id, bob.we_epoch_id,
             "second join should advance the epoch head"
@@ -14960,18 +15005,20 @@ mod tests {
         let room_id = hex_encode(room_id_bytes);
         bootstrap_test_room(&server_url, &room_id).await?;
 
-        let alice = perform_join(JoinParams {
+        let mut alice = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
         })
         .await?;
-        let bob = perform_join(JoinParams {
+        alice.barrier_state.barrier_recovery_pending = false;
+        let mut bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
         })
         .await?;
+        bob.barrier_state.barrier_recovery_pending = false;
 
         let client = new_api_client(&server_url);
         let before_leave = client.members(&alice.gid, None).await?;
@@ -15047,18 +15094,20 @@ mod tests {
         let room_id = hex_encode([0x77u8; 32]);
         bootstrap_test_room(&server_url, &room_id).await?;
 
-        let alice = perform_join(JoinParams {
+        let mut alice = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
         })
         .await?;
-        let bob = perform_join(JoinParams {
+        alice.barrier_state.barrier_recovery_pending = false;
+        let mut bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
         })
         .await?;
+        bob.barrier_state.barrier_recovery_pending = false;
 
         let members =
             perform_fetch_members(MembersParams::from_session(&bob, 0, 50, MembersMode::Full))
@@ -15087,11 +15136,11 @@ mod tests {
         );
 
         let plaintext = "hello-from-bob".to_string();
-        let sent = perform_send(SendParams::from_session(&bob, plaintext.clone(), 0)).await?;
+        let sent = perform_send(SendParams::from_session(&bob, plaintext.clone(), 0)?).await?;
         assert_eq!(sent.plaintext, plaintext);
         assert_eq!(sent.sender_leaf, Some(bob.leaf_id));
 
-        let stale_fetch = perform_fetch(FetchParams::from_session(&alice, None)).await?;
+        let stale_fetch = perform_fetch(FetchParams::from_session(&alice, None)?).await?;
         assert!(
             stale_fetch
                 .messages
@@ -15115,8 +15164,10 @@ mod tests {
             "epoch sync should adopt latest head after another member joins"
         );
 
+        let mut synced_alice_session = synced_alice.session;
+        synced_alice_session.barrier_state.barrier_recovery_pending = false;
         let synced_fetch =
-            perform_fetch(FetchParams::from_session(&synced_alice.session, None)).await?;
+            perform_fetch(FetchParams::from_session(&synced_alice_session, None)?).await?;
         assert!(
             synced_fetch
                 .messages
@@ -15126,7 +15177,7 @@ mod tests {
             "post-sync fetch should include messages from the latest epoch"
         );
 
-        let fetched = perform_fetch(FetchParams::from_session(&bob, None)).await?;
+        let fetched = perform_fetch(FetchParams::from_session(&bob, None)?).await?;
         assert!(
             !fetched.messages.is_empty(),
             "fetch should return at least one message"
@@ -15141,7 +15192,7 @@ mod tests {
         );
 
         let since = fetched.last_timestamp_ms;
-        let fetched_after = perform_fetch(FetchParams::from_session(&bob, since)).await?;
+        let fetched_after = perform_fetch(FetchParams::from_session(&bob, since)?).await?;
         if let Some(threshold) = since {
             assert!(
                 fetched_after
@@ -15238,7 +15289,7 @@ mod tests {
                 &session,
                 format!("warmup-no-persist-{i}"),
                 msg_index,
-            ))
+            )?)
             .await?;
             msg_index = msg_index.saturating_add(1);
         }
@@ -15249,7 +15300,7 @@ mod tests {
                 &session,
                 format!("bench-no-persist-{i}"),
                 msg_index,
-            ))
+            )?)
             .await?;
             msg_index = msg_index.saturating_add(1);
         }
@@ -15267,7 +15318,7 @@ mod tests {
                 &strict_session,
                 format!("bench-with-persist-{i}"),
                 current,
-            ))
+            )?)
             .await?;
         }
         let persist_elapsed = persist_start.elapsed();
@@ -15528,12 +15579,14 @@ mod tests {
         let room_id = hex_encode([0x7Au8; 32]);
         bootstrap_test_room(&server_url, &room_id).await?;
 
-        let alice = perform_join(JoinParams {
+        let mut alice = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
         })
         .await?;
+        alice.barrier_state.barrier_recovery_pending = false;
+        alice.barrier_state.barrier_recovery_pending = false;
         let bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
@@ -15593,12 +15646,13 @@ mod tests {
         let room_id = hex_encode([0x7Cu8; 32]);
         bootstrap_test_room(&server_url, &room_id).await?;
 
-        let alice = perform_join(JoinParams {
+        let mut alice = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
         })
         .await?;
+        alice.barrier_state.barrier_recovery_pending = false;
         let _bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
@@ -15981,12 +16035,13 @@ mod tests {
         let room_id = hex_encode([0x8Cu8; 32]);
         bootstrap_test_room(&server_url, &room_id).await?;
 
-        let alice = perform_join(JoinParams {
+        let mut alice = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
         })
         .await?;
+        alice.barrier_state.barrier_recovery_pending = false;
 
         let client = new_api_client(&server_url);
         client
@@ -16078,9 +16133,9 @@ mod tests {
         );
 
         let marker = "valid-message-marker".to_string();
-        perform_send(SendParams::from_session(&alice, marker.clone(), 0)).await?;
+        perform_send(SendParams::from_session(&alice, marker.clone(), 0)?).await?;
 
-        let fetched = perform_fetch(FetchParams::from_session(&alice, None)).await?;
+        let fetched = perform_fetch(FetchParams::from_session(&alice, None)?).await?;
         assert!(
             fetched
                 .messages

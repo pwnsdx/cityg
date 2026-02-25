@@ -1454,7 +1454,6 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         barrier_version: ticket.barrier_version,
         profile_version: API_PROFILE_VERSION.to_string(),
         cover_leaf_index: ticket.cover_leaf_index,
-        k_barrier: ticket.k_barrier.to_vec(),
         kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
         n_max: ticket.n_max,
         max_barrier_update_bytes: ticket.max_barrier_update_bytes,
@@ -1622,7 +1621,6 @@ async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Resp
         kbroad_generation,
         barrier_version,
         cover_leaf_index,
-        k_barrier,
         kem_tree_hash_after,
         n_max,
         max_barrier_update_bytes,
@@ -1657,7 +1655,6 @@ async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Resp
         barrier_version,
         profile_version: API_PROFILE_VERSION.to_string(),
         cover_leaf_index,
-        k_barrier: k_barrier.to_vec(),
         kem_tree_hash_after: kem_tree_hash_after.to_vec(),
         n_max,
         max_barrier_update_bytes,
@@ -3670,7 +3667,6 @@ mod tests {
         let decoded: JoinTicketResponse = decode_proto_response(response).await;
         assert_eq!(decoded.kbroad_generation, 1);
         assert_eq!(decoded.kbroad_public, rotated);
-        assert_eq!(decoded.k_barrier.len(), 32);
         assert_eq!(decoded.kem_tree_hash_after.len(), 32);
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);
@@ -3968,7 +3964,6 @@ mod tests {
         let expected_revoked_root = canonical_set_root(&[leaf_id]).expect("canonical revoked root");
         assert_eq!(decoded.revoked_since_root, expected_revoked_root.to_vec());
         assert_eq!(decoded.revoked_root, expected_revoked_root.to_vec());
-        assert_eq!(decoded.k_barrier.len(), 32);
         assert_eq!(decoded.kem_tree_hash_after.len(), 32);
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);

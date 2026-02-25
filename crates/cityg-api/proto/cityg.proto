@@ -235,7 +235,7 @@ message JoinTicketResponse {
   uint64 barrier_version = 23;
   string profile_version = 24;
   uint64 cover_leaf_index = 25;
-  bytes k_barrier = 26;
+  reserved 26;
   bytes kem_tree_hash_after = 27;
   uint64 n_max = 28;
   uint64 max_barrier_update_bytes = 29;
@@ -278,7 +278,7 @@ message MergeTicketResponse {
   uint64 barrier_version = 21;
   string profile_version = 22;
   uint64 cover_leaf_index = 23;
-  bytes k_barrier = 24;
+  reserved 24;
   bytes kem_tree_hash_after = 25;
   uint64 n_max = 26;
   uint64 max_barrier_update_bytes = 27;
