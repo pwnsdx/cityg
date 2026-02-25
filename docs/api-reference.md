@@ -299,8 +299,16 @@ message JoinTicketResponse {
   string fs_policy_version = 17;
   uint64 fs_epoch_base_ts = 18;
   bytes kbroad_public = 19;
-  bytes bootstrap_public = 20;              // Demo bootstrap key for clients
+  bytes bootstrap_public = 20;
   optional IdentityBinding confirmed_binding = 21;
+  uint64 kbroad_generation = 22;
+  uint64 barrier_version = 23;
+  string profile_version = 24;
+  uint64 cover_leaf_index = 25;
+  reserved 26;                               // Legacy k_barrier field id
+  bytes kem_tree_hash_after = 27;
+  uint64 n_max = 28;
+  uint64 max_barrier_update_bytes = 29;
 }
 ```
 
@@ -342,6 +350,12 @@ Current server behavior includes requester self-revocation in the merge SRX delt
 message MergeTicketRequest {
   string room_id = 1;
   bytes leaf_id = 2;  // 32-byte member leaf ID
+  MergeTicketIntent intent = 3;  // leave or refresh
+}
+
+enum MergeTicketIntent {
+  MERGE_TICKET_INTENT_LEAVE = 0;
+  MERGE_TICKET_INTENT_REFRESH = 1;
 }
 ```
 
@@ -367,6 +381,14 @@ message MergeTicketResponse {
   string msphf_params_id = 17;
   string fs_policy_version = 18;
   uint64 fs_epoch_base_ts = 19;
+  uint64 kbroad_generation = 20;
+  uint64 barrier_version = 21;
+  string profile_version = 22;
+  uint64 cover_leaf_index = 23;
+  reserved 24;                               // Legacy k_barrier field id
+  bytes kem_tree_hash_after = 25;
+  uint64 n_max = 26;
+  uint64 max_barrier_update_bytes = 27;
 }
 ```
 

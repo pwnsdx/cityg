@@ -15586,7 +15586,6 @@ mod tests {
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
-        alice.barrier_state.barrier_recovery_pending = false;
         let bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),

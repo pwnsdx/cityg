@@ -80,14 +80,12 @@ to the unified FS-hybrid + PRS barrier profile in `/Users/admin/Desktop/Reposito
 
 ## Phase H: API/provisioning updates
 
-- [x] Extend join/merge provisioning to include barrier-required fields (`cover_leaf_index`, `K_barrier`, `kem_tree_hash_after`, `N_max`, limits/policy).
-  - [x] `JoinTicketResponse` and `MergeTicketResponse` now include `cover_leaf_index`, `k_barrier`, `kem_tree_hash_after`, `n_max`, `max_barrier_update_bytes`.
-  - [x] Server now provisions a persistent per-group `k_barrier` secret (non-`ZERO32`) in join/merge tickets.
-  - [x] GUI epoch sync now reconciles `barrier_version`, `k_barrier`, and `kem_tree_hash_after` from merge tickets even when `we_epoch_id` is unchanged.
-  - [x] Replace server-provisioned fallback with full S11 recover/updater-activation-backed `K_barrier` rotation and client activation semantics.
-    - [x] Client now prefers local recover (`S11.13`) on accepted barrier updates, including deterministic internal-node derivation/verification (`S11.10`/`S11.13.5`/`S11.13.6`).
-    - [x] Ticket `K_barrier` fallback is removed for `barrier_update` processing paths (recover now fail-closed).
-    - [x] End-to-end updater activation coverage (`S11.14.1`) is wired for self-update/non-leaving emitter paths (`perform_pcs_refresh`) and leave-triggered merges.
+- [x] Extend join/merge provisioning to include barrier-required public fields (`cover_leaf_index`, `barrier_version`, `kem_tree_hash_after`, `N_max`, limits/policy).
+  - [x] `JoinTicketResponse` and `MergeTicketResponse` now include `cover_leaf_index`, `barrier_version`, `kem_tree_hash_after`, `n_max`, `max_barrier_update_bytes`, and `profile_version`.
+  - [x] Server-blind migration completed: server no longer provisions `k_barrier` in join/merge tickets.
+  - [x] Legacy wire IDs for removed `k_barrier` fields are reserved in protobuf (`JoinTicketResponse:26`, `MergeTicketResponse:24`) for compatibility safety.
+  - [x] GUI epoch sync reconciles barrier metadata (`barrier_version`, `kem_tree_hash_after`, limits) from merge tickets and performs client-side barrier recover (`S11.13`), fail-closed.
+  - [x] Joiners enter pending barrier recovery and only activate messaging once a valid barrier update is recovered/activated (`S11.13`/`S11.14`).
 - [x] Add server endpoints/contracts for:
   - [x] `ResolveRevokedLeaves`
   - [x] `ResolveJoinsSince`
