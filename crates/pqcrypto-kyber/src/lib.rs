@@ -276,13 +276,28 @@ mod tests {
         assert_eq!(pk.as_bytes().len(), kyber768::public_key_bytes());
         assert_eq!(sk.as_bytes().len(), kyber768::secret_key_bytes());
 
-        let pk2 = kyber768::PublicKey::from_bytes(pk.as_bytes()).expect("pk decode");
-        let sk2 = kyber768::SecretKey::from_bytes(sk.as_bytes()).expect("sk decode");
+        let pk2_res = kyber768::PublicKey::from_bytes(pk.as_bytes());
+        assert!(pk2_res.is_ok(), "pk decode failed: {pk2_res:?}");
+        let pk2 = match pk2_res {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let sk2_res = kyber768::SecretKey::from_bytes(sk.as_bytes());
+        assert!(sk2_res.is_ok(), "sk decode failed: {sk2_res:?}");
+        let sk2 = match sk2_res {
+            Ok(value) => value,
+            Err(_) => return,
+        };
         let (ss_send, ct) = kyber768::encapsulate(&pk2);
         assert_eq!(ct.as_bytes().len(), kyber768::ciphertext_bytes());
         assert_eq!(ss_send.as_bytes().len(), kyber768::shared_secret_bytes());
 
-        let ct2 = kyber768::Ciphertext::from_bytes(ct.as_bytes()).expect("ct decode");
+        let ct2_res = kyber768::Ciphertext::from_bytes(ct.as_bytes());
+        assert!(ct2_res.is_ok(), "ct decode failed: {ct2_res:?}");
+        let ct2 = match ct2_res {
+            Ok(value) => value,
+            Err(_) => return,
+        };
         let ss_recv = kyber768::decapsulate(&ct2, &sk2);
         assert_eq!(ss_recv, ss_send);
         assert_eq!(ss_recv.as_bytes(), ss_send.as_ref());
@@ -297,29 +312,25 @@ mod tests {
         let bad_ct = vec![0u8; kyber768::ciphertext_bytes() - 1];
         let bad_ss = vec![0u8; kyber768::shared_secret_bytes() - 1];
 
-        match kyber768::PublicKey::from_bytes(&bad_pk) {
-            Err(PqError::BadLength { expected, .. }) => {
-                assert_eq!(expected, kyber768::public_key_bytes())
-            }
-            other => panic!("unexpected pk decode result: {other:?}"),
+        let pk_res = kyber768::PublicKey::from_bytes(&bad_pk);
+        assert!(matches!(pk_res, Err(PqError::BadLength { .. })));
+        if let Err(PqError::BadLength { expected, .. }) = pk_res {
+            assert_eq!(expected, kyber768::public_key_bytes());
         }
-        match kyber768::SecretKey::from_bytes(&bad_sk) {
-            Err(PqError::BadLength { expected, .. }) => {
-                assert_eq!(expected, kyber768::secret_key_bytes())
-            }
-            other => panic!("unexpected sk decode result: {other:?}"),
+        let sk_res = kyber768::SecretKey::from_bytes(&bad_sk);
+        assert!(matches!(sk_res, Err(PqError::BadLength { .. })));
+        if let Err(PqError::BadLength { expected, .. }) = sk_res {
+            assert_eq!(expected, kyber768::secret_key_bytes());
         }
-        match kyber768::Ciphertext::from_bytes(&bad_ct) {
-            Err(PqError::BadLength { expected, .. }) => {
-                assert_eq!(expected, kyber768::ciphertext_bytes())
-            }
-            other => panic!("unexpected ct decode result: {other:?}"),
+        let ct_res = kyber768::Ciphertext::from_bytes(&bad_ct);
+        assert!(matches!(ct_res, Err(PqError::BadLength { .. })));
+        if let Err(PqError::BadLength { expected, .. }) = ct_res {
+            assert_eq!(expected, kyber768::ciphertext_bytes());
         }
-        match kyber768::SharedSecret::from_bytes(&bad_ss) {
-            Err(PqError::BadLength { expected, .. }) => {
-                assert_eq!(expected, kyber768::shared_secret_bytes())
-            }
-            other => panic!("unexpected ss decode result: {other:?}"),
+        let ss_res = kyber768::SharedSecret::from_bytes(&bad_ss);
+        assert!(matches!(ss_res, Err(PqError::BadLength { .. })));
+        if let Err(PqError::BadLength { expected, .. }) = ss_res {
+            assert_eq!(expected, kyber768::shared_secret_bytes());
         }
     }
 
@@ -327,8 +338,15 @@ mod tests {
     fn shared_secret_from_bytes_roundtrip() {
         let (pk, sk) = kyber768::keypair();
         let (ss_send, ct) = kyber768::encapsulate(&pk);
-        let ss_parsed =
-            kyber768::SharedSecret::from_bytes(ss_send.as_bytes()).expect("shared secret decode");
+        let ss_parsed_res = kyber768::SharedSecret::from_bytes(ss_send.as_bytes());
+        assert!(
+            ss_parsed_res.is_ok(),
+            "shared secret decode failed: {ss_parsed_res:?}"
+        );
+        let ss_parsed = match ss_parsed_res {
+            Ok(value) => value,
+            Err(_) => return,
+        };
         assert_eq!(ss_parsed, ss_send);
         assert_eq!(ss_parsed.as_ref(), ss_send.as_bytes());
 

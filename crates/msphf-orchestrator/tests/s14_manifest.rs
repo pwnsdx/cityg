@@ -28,9 +28,9 @@ fn manifest_path() -> PathBuf {
 }
 
 #[test]
-fn s14_manifest_is_well_formed_and_complete() {
-    let bytes = fs::read(manifest_path()).expect("read S14 manifest");
-    let manifest: S14Manifest = serde_json::from_slice(&bytes).expect("parse S14 manifest");
+fn s14_manifest_is_well_formed_and_complete() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = fs::read(manifest_path())?;
+    let manifest: S14Manifest = serde_json::from_slice(&bytes)?;
 
     assert_eq!(manifest.profile_version, "v0.1.2");
     assert_eq!(manifest.requirements.len(), 6, "expect S14.1..S14.6");
@@ -68,4 +68,5 @@ fn s14_manifest_is_well_formed_and_complete() {
         "S14.6".to_string(),
     ]);
     assert_eq!(ids, expected);
+    Ok(())
 }

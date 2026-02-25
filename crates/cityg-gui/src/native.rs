@@ -2195,10 +2195,10 @@ impl MsgReplayState {
         }
         self.seen_msg_indices.push_back(msg_index);
         // Keep bounded memory/CPU: anti-replay is strongest within this reordering window.
-        if self.seen_msg_indices.len() > MSG_INDEX_REPLAY_WINDOW {
-            if let Some(oldest) = self.seen_msg_indices.pop_front() {
-                self.seen_msg_index_set.remove(&oldest);
-            }
+        if self.seen_msg_indices.len() > MSG_INDEX_REPLAY_WINDOW
+            && let Some(oldest) = self.seen_msg_indices.pop_front()
+        {
+            self.seen_msg_index_set.remove(&oldest);
         }
     }
 
@@ -6628,8 +6628,10 @@ impl PersistedMsgReplayState {
     fn into_runtime(self) -> Result<MsgReplayState> {
         let tuple_tag =
             decode_hex32_or_zero("msg_replay_state.tuple_tag_hex", &self.tuple_tag_hex)?;
-        let mut runtime = MsgReplayState::default();
-        runtime.tuple_tag = tuple_tag;
+        let mut runtime = MsgReplayState {
+            tuple_tag,
+            ..Default::default()
+        };
         for msg_index in self.seen_msg_indices {
             runtime.record(msg_index);
         }
@@ -10461,6 +10463,7 @@ fn decrypt_message_v2_with_index(
     Ok((msg_index, plaintext))
 }
 
+#[cfg(test)]
 fn decrypt_message_v2(data: &[u8], context: &MessageCryptoContext<'_>) -> Result<Vec<u8>> {
     decrypt_message_v2_with_index(data, context).map(|(_, plaintext)| plaintext)
 }
@@ -14590,8 +14593,10 @@ mod tests {
                 on_path_key_material: pending_on_path,
             }),
         };
-        let mut replay_state = MsgReplayState::default();
-        replay_state.tuple_tag = array(0x30);
+        let mut replay_state = MsgReplayState {
+            tuple_tag: array(0x30),
+            ..Default::default()
+        };
         replay_state.record(11);
         replay_state.record(22);
         replay_state.record(33);
