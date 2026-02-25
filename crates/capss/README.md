@@ -252,7 +252,7 @@ The server validates the CAPSS Smallwood transcript at `accept_anchor()` without
 
 ### Related Documentation
 
-- City-G protocol spec: `../../docs/specs-unified-fs.md`
+- City-G protocol spec: `../../docs/specs.md`
 - Forward secrecy and client operations: `../../docs/protocol/08-client-operations.md`
 - Proof systems overview: `../../docs/protocol/06-proof-systems.md`
 

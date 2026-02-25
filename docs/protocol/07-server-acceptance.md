@@ -1,7 +1,7 @@
 # 07 — Server Acceptance Pipeline
 
 **Blueprint:** Alpha (0.1.0) §12.2, §22, §23
-**Normative Source:** [`../specs-unified-fs.md`](../specs-unified-fs.md)
+**Normative Source:** [`../specs.md`](../specs.md)
 **Implementation:** [`../../crates/msphf-orchestrator/src/accept/mod.rs`](../../crates/msphf-orchestrator/src/accept/mod.rs)
 
 ---

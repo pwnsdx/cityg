@@ -173,4 +173,4 @@ Rollback action: revert server + client binaries together as one unit and replay
 
 **Need help?** Start with the [FAQ](./protocol/17-faq.md), [Glossary](./GLOSSARY.md), or [GUI User Guide](./gui-user-guide.md).
 
-**Last Updated**: 2026-02-13
+**Last Updated**: 2026-02-25

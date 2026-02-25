@@ -1,6 +1,6 @@
 # City-G Constraints & Requirements
 
-This note consolidates the core security, functional, and performance requirements that guided the Alpha (0.1.0) design. These checkpoints mirror the original blueprint (§2, §17) and are referenced from the protocol overview.
+Core security, functional, and performance requirements for the City-G protocol. See [`specs.md`](specs.md) for normative definitions.
 
 ---
 
@@ -13,6 +13,7 @@ This note consolidates the core security, functional, and performance requiremen
 5. **Post-Compromise Security** — Fresh epochs are independent of previously compromised material; rejoining re-randomizes contributions.
 6. **Membership Consistency** — Every device derives the same membership root for a given epoch window; no forked rosters.
 7. **Deniability** — AEAD and KBROAD envelopes deliberately avoid non-repudiation; ciphertexts alone are not signatures.
+8. **Post-Revocation Secrecy** — Revoked members lose access to future message keys via PRS barrier (`K_barrier` + KEM-tree cover); key rotation is enforced on revocation-change (spec S11).
 
 ## 2. Functional Requirements
 
@@ -37,4 +38,4 @@ This note consolidates the core security, functional, and performance requiremen
 | Witness size          | O(log N)              | ~2 KB at 1 M |
 | Working set           | ≤ 48 MB               | ✅ Met |
 
-> These figures originate from the `specs-unified-fs` blueprint benchmarks and the reference implementation’s profiling runs. Future releases update this file when targets shift.
+> These figures originate from the `specs` blueprint benchmarks and the reference implementation’s profiling runs. Future releases update this file when targets shift.

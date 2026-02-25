@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**City‑G** is a research‑grade protocol for end‑to‑end encrypted groups designed for very large audiences (millions of members). The server validates activity cryptographically without ever learning message keys. New members can post and send messages even when everyone else is offline. The shipping profile is `tswe/msphf-we/fs-hybrid`, integrating server blindness, multi-head windows, and minutes-grade forward secrecy by default.
+**City‑G** is a research‑grade protocol for end‑to‑end encrypted groups designed for very large audiences (millions of members). The server validates activity cryptographically without ever learning message keys. New members can post and send messages even when everyone else is offline. The shipping profile is `tswe/msphf-we/fs-hybrid + prs-barrier`, integrating server blindness, multi-head windows, minutes-grade forward secrecy, and post-revocation secrecy by default.
 
 ---
 
@@ -27,20 +27,6 @@
 * **Post‑quantum by default.** The spec standardizes ML‑KEM/ML‑DSA with modern hashing and AEAD for simple interoperability.
 
 > **Not a metadata‑hiding system.** The server still sees public structure (that "an update happened") but not your message keys or plaintext.
-
----
-
-## Where City‑G fits (and where it doesn't)
-
-**Great fit**
-
-* Large communities and broadcasts (10k → 100k+): city groups, Discord/Telegram-scale communities, conference coordination, newsletter distribution, large enterprise messaging.
-* High join/leave concurrency with many offline participants.
-* Server environments where cryptographic blindness is required (not just policy-based trust).
-
-**Maybe not**
-
-* If you need **full metadata privacy** today, or **per‑message** forward secrecy (rather than minutes‑grade), look to different trade‑offs. Signal provides Sealed Sender and per-message FS, though Sealed Sender has known scaling challenges in group contexts.
 
 ---
 
@@ -79,7 +65,7 @@ Both verify correctness without revealing secrets. See [workflows.md#two-proof-s
 
 **Server never sees**: hp, Y*, E_k (cryptographically hidden), device secret keys (only public keys), message content
 
-See [workflows.md#what-the-server-sees-and-doesnt](docs/workflows.md#what-the-server-sees-and-doesnt) for detailed diagram, or [protocol/10-security-model.md](docs/protocol/10-security-model.md) for the complete threat model.
+See [workflows.md#what-the-server-sees-and-doesnt](docs/workflows.md#what-the-server-sees-and-doesnt) for a detailed diagram.
 
 ### Architecture: Where Code Runs
 
@@ -129,7 +115,7 @@ City-G separates **cryptographic validation** (protocol-level proofs) from **pol
 - **Open groups**: Bob self-joins → server validates proofs → your app checks rate limits → persist if allowed
 - **Controlled groups**: Admin creates anchor for Bob → server validates proofs → your app checks admin authorization → persist if allowed
 
-See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptography) for detailed diagram, or [protocol/08-client-operations.md](docs/protocol/08-client-operations.md) for client-side implementation.
+See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptography) for a detailed diagram.
 
 ---
 
@@ -140,7 +126,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 | **Confidentiality & server blindness** | Server validates CAPSS Smallwood + ZK-VRF; epoch keys never reach the server. Metadata (who joined/when) remains visible. | Content keys stay client-side, but "server-blind acceptance" is not part of the protocol; operators must ship the audited binaries. | Content keys remain on devices; trust rests on Signal’s infrastructure choices. | Servers store ciphertext; clients share session keys out-of-band. No cryptographic proof that the homeserver stays blind beyond enforcing transport encryption. |
 | **Authentication & membership integrity** | ML-DSA PoP + SRX proofs + CAPSS Smallwood binding freeze anchors if roots or membership drift. | TreeKEM commits authenticate the tree but require an online committer. | Membership is service-controlled; no cryptographic completeness proof. | Membership events are server-signed; authenticity depends on the homeserver you trust. |
 | **Forward secrecy granularity** | Minutes-grade per epoch (`H`, default 5 min) with time-blind enforcement. | Per commit (interactive). | Per message (Double Ratchet + Sender Keys). | Megolm ratchets forward per message, but compromise leaks future traffic until the sender rotates the session. |
-| **Post-compromise recovery** | Publish a new anchor (FS purge) to rotate `K_fs`; compromised device must rejoin. | Honest member must commit an update replacing the compromised leaf. | One new ratchet step (send/receive) restores PCS. | Requires establishing a new Megolm session; existing session remains compromised. |
+| **Post-compromise recovery** | Publish a new anchor (FS purge) to rotate `K_fs` (PCS); K_barrier rotation via KEM-tree cover revokes access for compromised members (PRS). | Honest member must commit an update replacing the compromised leaf. | One new ratchet step (send/receive) restores PCS. | Requires establishing a new Megolm session; existing session remains compromised. |
 | **Asynchronous join?** | ✅ Yes — joiner fetches anchor + witness; server validates alone. | ⚠️ Needs a live committer. Batching is optional but adds latency while the batch finalises. | ❌ Requires admin/service interaction; no offline admission. | ⚠️ Homeserver accepts the join, but a member must be online to share session keys/history. |
 | **Scalability & concurrency** | Multi-Head Windows (default 16 parallel) + deterministic simulations to ~10⁶ members; real deployments >100k are still research pilots. | Sequential commits; batching reduces round-trips but increases wait time. OpenMLS reports strain beyond ≈1–2 k participants.[1] | Service limit 1 000 members per group.[2] | Large rooms are routine, but key-share fan-out grows with membership and stresses clients at very high scale. |
 | **Deniability** | Anchors use ML-DSA (non-deniable); application messages share epoch keys, yielding symmetric-key deniability similar to other shared-key groups. | Commit messages are signed (non-deniable). | Double Ratchet provides strong deniability. | Device identity keys are long-lived; deniability is limited. |
@@ -158,7 +144,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 
 ## What you get in this repository
 
-* **Profile**: `tswe/msphf-we/fs-hybrid` — server-blind admission, merge/rollup, and mandatory minutes-grade forward secrecy.
+* **Profile**: `tswe/msphf-we/fs-hybrid + prs-barrier` — server-blind admission, merge/rollup, mandatory minutes-grade forward secrecy, and post-revocation secrecy via KEM-tree barrier.
 * **Server‑blindness guardrails**: automated checks in this repo fail CI if server code ever attempts to handle epoch secrets. It's evidence you can re‑run.
 * **Docs you can trace**: every public claim here maps to the final specs bundled in the repo.
 
@@ -169,6 +155,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 * **End‑to‑end confidentiality**: only devices hold decryption ability; the server validates proofs but cannot decrypt the protected header.
 * **Consistency**: receivers can verify who was added/removed as they adopt new epochs; **checkpoints/rollups** keep that view compact without granting anyone new decryption rights for the past.
 * **Forward secrecy**: keys evolve on a short schedule your devices enforce locally; the server cannot secretly widen that window because acceptance is **time‑blind**.
+* **Post‑revocation secrecy**: the PRS barrier (`K_barrier` + KEM-tree cover) ensures that revoked members lose access to future message keys, even if they cached prior group state.
 
 ---
 
@@ -193,9 +180,9 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 
 ## Read next
 
-* **Core spec (final):** publisher‑blind acceptance, offline admission, merges/rollups — `specs-unified-fs.md`.
-* **FS spec (final):** minutes‑grade, time‑blind forward secrecy and checkpoints — `specs-unified-fs.md`.
-* **Original README (engineering view):** simulation results, guardrails, and deeper comparisons.
+* **Unified spec (final, v0.1.2):** publisher‑blind acceptance, offline admission, merges/rollups, FS-hybrid, and PRS barrier — [`docs/specs.md`](docs/specs.md).
+* **Protocol companion docs:** chapterized legacy companion material — [`docs/protocol/`](docs/protocol/00-README.md).
+* **Workflows & diagrams:** visual sequence diagrams for common operations — [`docs/workflows.md`](docs/workflows.md).
 
 ---
 
@@ -209,7 +196,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 * **KBROAD** — Group key broadcasting envelope (ML-KEM-768 + ChaCha20-Poly1305) that encrypts hp; server validates structure without decryption.
 * **hp** — Hash projection key (RLWE parameters) used to compute Y* via smooth projective hash functions.
 * **Y\*** — VRF output computed via ME-OR (Masked-Equality OR), used to derive epoch key E_k.
-* **E_k** — Epoch key derived as H_epoch(X_k, Y*), used to encrypt/decrypt messages.
+* **E_k** — Epoch key derived from SPHF output; in v0.1.2, message keys are further bound to `K_barrier` via HKDF-BLAKE3 (spec S8.3).
 
 ---
 
@@ -219,7 +206,7 @@ We welcome contributions from researchers and engineers! Before submitting:
 
 ### **1. Understand the Fundamentals**
 - Read [docs/protocol/01-overview.md](docs/protocol/01-overview.md)
-- Study [docs/specs-unified-fs.md](docs/specs-unified-fs.md) (normative specification)
+- Study [docs/specs.md](docs/specs.md) (normative specification)
 - Review [docs/protocol/10-security-model.md](docs/protocol/10-security-model.md)
 
 ### **2. Development Workflow**
@@ -267,7 +254,7 @@ If you use City-G in academic research, please cite:
   author={Sabri Haddouche},
   year={2025},
   howpublished={\url{https://github.com/pwnsdx/cityg}},
-  note={Protocol Specification: tswe/msphf-we/fs-hybrid}
+  note={Protocol Specification: tswe/msphf-we/fs-hybrid + prs-barrier}
 }
 ```
 

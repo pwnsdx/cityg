@@ -1,7 +1,7 @@
 # Data Structures & Wire Formats
 
 **Specification:** Alpha (0.1.0)
-**Normative Source:** [`../specs-unified-fs.md`](../specs-unified-fs.md)
+**Normative Source:** [`../specs.md`](../specs.md)
 **Implementation:** [`../../crates/msphf-orchestrator/src/hdr.rs`](../../crates/msphf-orchestrator/src/hdr.rs)
 
 ---

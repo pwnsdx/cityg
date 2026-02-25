@@ -23,6 +23,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed broken screenshot reference in GUI user guide
 - Documented the `unsafe-ntt` verification path in `docs/timing-verification.md` and added operational notes about the 120s TTL baseline in the configuration and MHW specs.
 
+## [0.1.2] - 2026-02-11
+
+### Added
+
+#### PRS Barrier (Post-Revocation Secrecy)
+- KEM-tree cover subsystem (`K_barrier` + `barrier_version`) for post-revocation secrecy (spec S11)
+- Barrier error codes: 960.1–960.13, 945.0, 947.0/2/4/5/6, 948.0, 944.6
+- Proactive PCS refresh gating with time-blind rate limiting (spec S10.4B)
+- Updater local state management with crash-safe persist-before-publish (spec S11.14)
+- Client barrier recovery via unique-match and FULL chain-check modes (spec S11.13)
+- Join provisioning extended with barrier-required fields (spec S12.2)
+
+#### Payload Key Schedule
+- `K_msg_epoch` derivation bound to `K_barrier` and `barrier_version` (spec S8.3)
+- PayloadEnvelope wire format `"fs-hybrid-msg-v2"` (spec S8.1)
+- No-fallback rule: receivers MUST NOT try alternate `K_barrier` values (spec S8.5)
+
+#### Device-Chain Binding
+- `fs_dev_commit` v2 binds `barrier_version` and `barrier_update_digest` (spec S7.4)
+- PCS reseed of FS chain on accepted PCS-refresh barrier updates (spec S6.6)
+
+#### Acceptance
+- Barrier version gating, revocation-change gating, PCS refresh gating (spec S10.4–S10.4B)
+- Forward-Leap Guard with configuration invariant check (spec S10.3)
+- Server-side barrier_update validation pipeline (spec S11.12)
+
+### Changed
+- Profile ID updated to `tswe/msphf-we/fs-hybrid + prs-barrier`
+- Unified spec consolidated into `docs/specs.md` (v0.1.2 final)
+
+### Documentation
+- Updated all documentation to reference `docs/specs.md` (removed stale `specs-unified-fs.md` links)
+- Added PRS barrier terms to GLOSSARY (K_barrier, BarrierUpdate, barrier_version, etc.)
+- Updated README security model with post-revocation secrecy
+- Added Post-Revocation Secrecy to constraints
+- Added v0.1.2 error codes reference to error reference doc
+
 ## [0.1.0] - 2025-11-12
 
 Initial alpha release of City-G `tswe/msphf-we/fs-hybrid` protocol.
@@ -110,7 +147,7 @@ Initial alpha release of City-G `tswe/msphf-we/fs-hybrid` protocol.
 - Fixture-based regression testing for CAPSS
 
 #### Documentation
-- Complete protocol specification (`docs/specs-unified-fs.md`)
+- Complete protocol specification (`docs/specs.md`)
 - 18 protocol documentation files in `docs/protocol/`
 - GUI user guide with tutorials and troubleshooting
 - API reference with curl and Rust examples

@@ -1,7 +1,7 @@
 # 08 — Client Operations (Joiner + Merge Builder)
 
 **Blueprint:** Alpha (0.1.0) §10, §12.3, Annex I
-**Normative Source:** [`../specs-unified-fs.md`](../specs-unified-fs.md)
+**Normative Source:** [`../specs.md`](../specs.md)
 **Implementation:** [`../../crates/cityg-client/src/lib.rs`](../../crates/cityg-client/src/lib.rs), [`../../crates/msphf-orchestrator/src/lib.rs`](../../crates/msphf-orchestrator/src/lib.rs)
 
 ---

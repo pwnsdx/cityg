@@ -1,7 +1,7 @@
 # City-G Protocol Documentation
 
 > [!IMPORTANT]
-> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs-unified-fs.md`](../specs-unified-fs.md).
+> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs.md`](../specs.md).
 > If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
 
 
@@ -9,7 +9,7 @@
 
 **Version:** Alpha (0.1.0)
 **Profile:** Post-quantum, anytrust-free, offline-ready epoch-key extraction for extremely large E2EE groups with publisher blindness and integrated merge/rollup support
-**Specification:** [`specs-unified-fs.md`](../specs-unified-fs.md)
+**Specification:** [`specs.md`](../specs.md)
 
 ---
 
@@ -50,7 +50,7 @@ This directory contains legacy, chapterized companion material that complements 
 ### For Cryptographers
 - Start with: [02-cryptographic-primitives.md](02-cryptographic-primitives.md), [05-sphf-meor.md](05-sphf-meor.md), [06-proof-systems.md](06-proof-systems.md)
 - Security proofs: [10-security-model.md](10-security-model.md)
-- Formal specification: [`specs-unified-fs.md`](../specs-unified-fs.md)
+- Formal specification: [`specs.md`](../specs.md)
 
 ### For Protocol Developers
 - Start with: [01-overview.md](01-overview.md), [03-data-structures.md](03-data-structures.md)
@@ -117,7 +117,7 @@ Uses NIST-standardized post-quantum algorithms:
 1. [05-sphf-meor.md](05-sphf-meor.md) - Core SPHF construction
 2. [06-proof-systems.md](06-proof-systems.md) - Zero-knowledge proofs
 3. [10-security-model.md](10-security-model.md) - Security analysis
-4. Specification: [`specs-unified-fs.md`](../specs-unified-fs.md)
+4. Specification: [`specs.md`](../specs.md)
 
 ---
 
@@ -170,7 +170,7 @@ Uses NIST-standardized post-quantum algorithms:
 
 Throughout this documentation:
 
-- **Specification References**: `§12.2` refers to section 12.2 of [`specs-unified-fs.md`](../specs-unified-fs.md)
+- **Specification References**: `§12.2` refers to section 12.2 of [`specs.md`](../specs.md)
 - **Code References**: References to the acceptance pipeline point to `crates/msphf-orchestrator/src/accept/` (module rooted at `mod.rs`); look for the helper or function named in the surrounding text
 - **Header Fields**: `#91` or `HDR_SEED_CTX_HASH` refers to CBOR map key 91
 - **Domain Labels**: `"msphf/hp/commit"` refers to a BLAKE3 domain-separation label

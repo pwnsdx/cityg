@@ -1,7 +1,7 @@
 # 16 — Comparison with MLS
 
 > [!IMPORTANT]
-> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs-unified-fs.md`](../specs-unified-fs.md).
+> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs.md`](../specs.md).
 > If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
 
 

@@ -9,10 +9,8 @@ see the same group state without exposing any plaintext:
 | **Epoch (FS) fingerprint** | `fs_fp := H_L("fs/fingerprint", [fs_policy_version (139), fs_ec (141), fs_epoch_commit (142), fs_epoch_base_ts (143)])` *(computed locally; not a protocol header)* | Every time the FS epoch advances or when the FS policy is re-keyed | Proves epoch/caps equivalence: devices are in lock-step on the current FS epoch. Device-agnostic (excludes 152/153). |
 
 Both digests are 32 bytes. For human comparison, display at least 16 hex
-characters (≈64 bits, e.g. `abcd-1234 ef56-7890 …`) or an equivalent Base32
-string. Comparing 64 bits leaves a ~1 in 2⁶⁴ false-match chance while remaining
-easy to read aloud; provide a “copy full value” affordance for the entire hash,
-and recommend 32 hex characters (~128 bits) for higher-assurance checks.
+characters (≈64 bits); provide a “copy full value” affordance for the entire hash.
+Use 32 hex characters (~128 bits) for higher-assurance checks.
 
 ---
 

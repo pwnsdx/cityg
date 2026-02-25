@@ -65,7 +65,7 @@ cargo test --all
 Before making changes, familiarize yourself with:
 
 1. **[Protocol Overview](docs/protocol/01-overview.md)** - High-level architecture
-2. **[Specification](docs/specs-unified-fs.md)** - Normative protocol specification
+2. **[Specification](docs/specs.md)** - Normative protocol specification
 3. **[Security Model](docs/protocol/10-security-model.md)** - Threat model and guarantees
 4. **[Implementation Guide](docs/protocol/11-implementation-guide.md)** - Code structure walkthrough
 
@@ -220,7 +220,7 @@ If modifying cryptographic code:
 
 If modifying the protocol:
 
-- [ ] Update specification: `docs/specs-unified-fs.md`
+- [ ] Update specification: `docs/specs.md`
 - [ ] Update protocol docs: `docs/protocol/*.md`
 - [ ] Add migration path for breaking changes
 - [ ] Consider backwards compatibility

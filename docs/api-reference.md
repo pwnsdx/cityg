@@ -417,6 +417,7 @@ message MembersResponse {
   uint64 total_count = 3;
   uint64 next_offset = 4;          // Pass as offset for the next page
 }
+```
 
 > **Roster Consistency & TOFU alias bindings**
 > - The server returns the authoritative alias + `pop_public_key` pair for every member. Clients
@@ -426,7 +427,6 @@ message MembersResponse {
 >   and drop any locally-cached members that are not present in the server’s result set.
 > - Large rooms are easier to manage if you maintain an alias-index so message senders can be resolved
 >   even when the roster view is filtered (see `/v1/members/search` below).
-```
 
 **Rust Client Example:**
 ```rust

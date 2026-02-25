@@ -1,7 +1,7 @@
 # 12 — Error Reference
 
 > [!IMPORTANT]
-> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs-unified-fs.md`](../specs-unified-fs.md).
+> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs.md`](../specs.md).
 > If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
 
 
@@ -488,7 +488,48 @@ kbroad_envelope[4] = "aes-gcm"; // Not chacha20-poly1305
 
 ---
 
-### 4.5 Implementation-Specific Errors
+### 4.5 Barrier & FS-Hybrid Error Codes (v0.1.2)
+
+> [!IMPORTANT]
+> The following error codes are defined in specs.md S13 (v0.1.2). For normative definitions, see [`../specs.md`](../specs.md) section S13.
+
+#### Barrier codes (960.x)
+
+| Code | Name | Scope |
+|------|------|-------|
+| 960.1 | barrier_updater_invalid | Server + client |
+| 960.2 | barrier_recover_multi_match | Client |
+| 960.3 | barrier_expectedpairs_failure | Server |
+| 960.4 | barrier_merge_delegation_forbidden | Server |
+| 960.5 | barrier_proactive_forbidden | Server |
+| 960.6 | barrier_recover_no_match | Client-local only |
+| 960.7 | barrier_update_malformed | Server + client |
+| 960.8 | barrier_tree_hash_chain_failure | Server + FULL client |
+| 960.9 | barrier_tree_snapshot_auth_failure | Client-local / updater-local |
+| 960.10 | barrier_genesis_required | Server |
+| 960.11 | barrier_update_required_on_revocation_change | Server |
+| 960.12 | pcs_refresh_rate_limited | Server |
+| 960.13 | pcs_refresh_forbidden_while_pending_revocations | Server |
+
+**Encoding note**: Dotted forms (e.g., `960.10`) are the documentation form. In machine fields, implementations encode as decimal digits without a dot (e.g., `96010`).
+
+#### FS/acceptance codes
+
+| Code | Name |
+|------|------|
+| 907.1 | malformed CBOR / unknown key / duplicate key |
+| 945.0 | fs_base_mismatch |
+| 947.0 | fs_dev_chain_break |
+| 947.2 | fs_dev_chain_bind_mismatch |
+| 947.4 | fs_forward_jump_device |
+| 947.5 | fs_forward_jump_first |
+| 947.6 | fs_forward_jump_group |
+| 948.0 | fs_policy_window_incompatible |
+| 944.6 | fs_policy_version_unsupported |
+
+---
+
+### 4.6 Implementation-Specific Errors (Legacy)
 
 These errors are defined in the implementation but not explicitly listed in Alpha (0.1.0) §15:
 

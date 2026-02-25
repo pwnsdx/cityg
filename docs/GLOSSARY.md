@@ -15,6 +15,11 @@ Configuration parameters that control coarse-grained policy for anchor validatio
 ### Anchor
 A signed, server-blind update representing a state transition (e.g., member join, merge, or revocation). The server can validate it cryptographically but cannot decrypt the protected header containing epoch keys. Devices derive and use those keys privately.
 
+**Anchor types** (v0.1.2, spec S4.1):
+- **JOIN**: introduces a new device leaf; carries `barrier_leaf_pk` (key 177).
+- **MERGE**: carries merge/checkpoint state; may carry `barrier_update` (key 175).
+- **REGULAR**: any anchor that is neither JOIN nor MERGE.
+
 **Also known as**: Epoch bundle, ClientEpochBundle
 
 **See also**: [Protocol Overview](./protocol/01-overview.md)
@@ -23,6 +28,25 @@ A signed, server-blind update representing a state transition (e.g., member join
 Authenticated Encryption with Associated Data. Used in City-G for encrypting the KBROAD envelope (ChaCha20-Poly1305).
 
 **See also**: KBROAD
+
+---
+
+## B
+
+### Barrier (PRS Barrier)
+The post-revocation secrecy subsystem introduced in v0.1.2 (spec S11). Uses a KEM-tree cover to rotate `K_barrier` after revocations, ensuring that revoked members cannot decrypt future messages.
+
+**Components**: `K_barrier`, `barrier_version`, `BarrierUpdate`, `KemTreeCoverPayload`
+
+**See also**: K_barrier, BarrierUpdate
+
+### BarrierUpdate
+A CBOR structure (spec S11.5) carried in anchor header key 175 on MERGE anchors. Contains the KEM-tree cover payload that lets non-revoked members derive the new `K_barrier`.
+
+**Wire tag**: `"barrier-v1"`
+
+### barrier_version
+A monotonically increasing integer tracking the current barrier epoch. Bound into the payload key schedule (S8.3) and device-chain commit (S7.4).
 
 ---
 
@@ -66,7 +90,7 @@ A physical endpoint (phone, laptop, server) with its own cryptographic identity 
 ## E
 
 ### E_k (Epoch Key)
-The symmetric encryption key used to encrypt/decrypt messages within a specific epoch. Derived as `E_k = H_epoch(X_k, Y*)` where Y* is the VRF output.
+The symmetric encryption key used to encrypt/decrypt messages within a specific epoch. In v0.1.2, the payload key schedule binds to `K_barrier` and `barrier_version` (spec S8.3): `K_msg_epoch` is derived via HKDF-BLAKE3 from `E_k` with `K_barrier` in the salt, ensuring revoked members cannot decrypt.
 
 **Security**: Server never learns E_k (cryptographically enforced).
 
@@ -121,6 +145,10 @@ A string identifier for a City-G room (e.g., `"demo-room"`, `"team-alpha"`).
 
 ## H
 
+### H_L (Domain-Separated Hash)
+Domain-separated hash function producing 32 bytes, used throughout City-G for label-separated derivations (spec S2.2):
+`H_L(label, args[]) := BLAKE3_derive_key(context="city-g|h_l|v1", message="city-g|" || ASCII(label) || 0x00 || CBOR_det(args[]))`
+
 ### Hash Projection Key (hp)
 A Ring-LWE parameter set used to compute Y* via smooth projective hash functions. The server never learns hp (encrypted in KBROAD envelope).
 
@@ -131,6 +159,10 @@ A Ring-LWE parameter set used to compute Y* via smooth projective hash functions
 A parallel branch in the Multi-Head Window representing concurrent state evolution. City-G supports up to `h_max` heads (default: 16).
 
 **See also**: MHW
+
+
+### HKDF-BLAKE3
+Key derivation function used throughout City-G (spec S2.3). `HKDF-BLAKE3(ikm, salt32, info_bytes, L=32)` performs Extract then Expand using BLAKE3 keyed hashing. L is always 32 bytes in this profile.
 
 ---
 
@@ -152,6 +184,11 @@ The process where a new member joins a group:
 
 ## K
 
+### K_barrier
+The group-wide barrier secret (32 bytes) used to bind the payload key schedule (spec S8.3, S11). Rotated via `BarrierUpdate` after revocations (post-revocation secrecy) or proactive PCS refresh. Provisioned to joiners during the join flow (spec S12.2).
+
+**See also**: Barrier, BarrierUpdate
+
 ### KBROAD (Key Broadcasting)
 Group key broadcasting envelope that encrypts `hp` using ML-KEM-768 + ChaCha20-Poly1305. Structure:
 ```
@@ -171,7 +208,7 @@ Group key broadcasting envelope that encrypts `hp` using ML-KEM-768 + ChaCha20-P
 Lattice-Based Verifiable Random Function. Provides deterministic, verifiable randomness used in City-G's ME-OR construction for Y* derivation.
 
 **Security**: Post-quantum secure (Module-LWE hardness)
-**Proof Size**: ≤6KB
+**Proof Size**: ≤8KB
 
 **See also**: [LB-VRF README](../crates/msphf-lb-vrf/README.md)
 
@@ -310,13 +347,14 @@ The witness validation system providing Merkle proofs of membership/non-membersh
 ### TOFU (Trust-On-First-Use)
 Security model where the first encountered public key for an identity is trusted, with warnings on subsequent key changes.
 
-**City-G Usage**: Optional identity binding with Ed25519; alias→key mappings stored locally
+**City-G Usage**: Optional identity binding with ML-DSA-65 PoP; alias→key mappings stored locally
 
-### tswe/msphf-we/fs-hybrid
-The City-G protocol profile name:
+### tswe/msphf-we/fs-hybrid + prs-barrier
+The City-G protocol profile name (v0.1.2):
 - **tswe**: Time-Stamped Witness Extraction
 - **msphf-we**: Masked SPHF with Witness Extraction
 - **fs-hybrid**: Forward Secrecy with hybrid pivot rotation
+- **prs-barrier**: Post-Revocation Secrecy via KEM-tree barrier
 
 ---
 
@@ -360,7 +398,7 @@ The unique epoch digest computed via ME-OR from SPHF evaluation. Used to derive 
 - Unique per epoch
 - 32 bytes
 
-**Derivation**: `E_k = H_epoch(X_k, Y*)`
+**Derivation**: In v0.1.2, message keys are bound to `K_barrier` via HKDF-BLAKE3 (spec S8.3).
 
 **See also**: [SPHF & ME-OR](./protocol/05-sphf-meor.md)
 
@@ -371,7 +409,7 @@ The unique epoch digest computed via ME-OR from SPHF evaluation. Used to derive 
 ### ZK-VRF (Zero-Knowledge Verifiable Random Function)
 A proof system demonstrating that Y* was computed correctly without revealing it. Based on LB-VRF with output-hiding property.
 
-**Proof Size**: ≤6KB
+**Proof Size**: ≤8KB
 **Field**: `95: zk_vrf_proof` in anchor headers
 
 **See also**: [Proof Systems](./protocol/06-proof-systems.md)
@@ -383,7 +421,7 @@ A proof system demonstrating that Y* was computed correctly without revealing it
 ### 16 KB
 Maximum size for CAPSS Smallwood proofs (`fs_capss_max_bytes`)
 
-### 6 KB
+### 8 KB
 Maximum size for ZK-VRF proofs (`max_vrf_proof_bytes`)
 
 ### 32 bytes
@@ -436,5 +474,5 @@ Standard size for:
 
 ---
 
-**Last Updated**: 2025-11-12
-**Note**: This glossary consolidates terminology from across City-G documentation. For formal definitions, see the [specification](./specs-unified-fs.md).
+**Last Updated**: 2026-02-25
+**Note**: This glossary consolidates terminology from across City-G documentation. For formal definitions, see the [specification](./specs.md).
