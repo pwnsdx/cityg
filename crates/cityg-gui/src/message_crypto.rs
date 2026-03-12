@@ -433,6 +433,62 @@ mod tests {
     }
 
     #[test]
+    fn same_msg_index_from_different_senders_is_not_replayed() -> Result<()> {
+        let gid = [0x91u8; 32];
+        let we_epoch_id = [0x92u8; 32];
+        let xk_hash = [0x93u8; 32];
+        let epoch_key = [0x94u8; 32];
+        let k_barrier = [0x95u8; 32];
+        let sender_leaf_a = [0x96u8; 32];
+        let sender_leaf_b = [0x97u8; 32];
+        let context_a = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec: 12,
+            barrier_version: 4,
+            sender_leaf: &sender_leaf_a,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let context_b = MessageCryptoContext {
+            sender_leaf: &sender_leaf_b,
+            ..context_a
+        };
+        let shared_msg_index = 41;
+        let payload_a = encrypt_message_v2(b"from-sender-a", &context_a, shared_msg_index)?;
+        let payload_b = encrypt_message_v2(b"from-sender-b", &context_b, shared_msg_index)?;
+
+        let tag_a = derive_msg_replay_tuple_tag(&context_a)?;
+        let tag_b = derive_msg_replay_tuple_tag(&context_b)?;
+        assert_ne!(tag_a, tag_b);
+
+        let mut replay = MsgReplayState::default();
+        replay.ensure_tuple(tag_a);
+        replay.ensure_tuple(tag_b);
+
+        let (msg_index_a, plaintext_a) = decrypt_message_v2_with_index(&payload_a, &context_a)?;
+        assert_eq!(msg_index_a, shared_msg_index);
+        assert_eq!(plaintext_a, b"from-sender-a");
+        assert!(!replay.contains(tag_a, msg_index_a));
+        replay.record(tag_a, msg_index_a);
+        assert!(replay.contains(tag_a, shared_msg_index));
+        assert!(
+            !replay.contains(tag_b, shared_msg_index),
+            "same msg_index from another sender must stay independently admissible"
+        );
+
+        let (msg_index_b, plaintext_b) = decrypt_message_v2_with_index(&payload_b, &context_b)?;
+        assert_eq!(msg_index_b, shared_msg_index);
+        assert_eq!(plaintext_b, b"from-sender-b");
+        assert!(!replay.contains(tag_b, msg_index_b));
+        replay.record(tag_b, msg_index_b);
+        assert!(replay.contains(tag_b, shared_msg_index));
+
+        Ok(())
+    }
+
+    #[test]
     fn msg_replay_state_tracks_multiple_tuples_and_caps_window() {
         let mut replay = MsgReplayState::default();
         let tuple_a = [0xA1; 32];
