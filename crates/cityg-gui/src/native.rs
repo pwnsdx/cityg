@@ -104,7 +104,7 @@ const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
 const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
 const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
 const TICKET_RETRY_JITTER_MS: u64 = 40;
-// Receiver-side anti-replay tracks a bounded recent window per tuple tag.
+// Receiver-side anti-replay tracks a bounded recent window per sender-scoped tuple tag.
 // S8.2 crash safety is satisfied by persisting this state in the encrypted session file.
 // Replays older than this window can be re-accepted after eviction by design.
 const MSG_INDEX_REPLAY_WINDOW: usize = 4_096;
@@ -2171,46 +2171,47 @@ struct AppSession {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct MsgReplayState {
-    tuple_tag: [u8; 32],
+struct MsgReplayTupleState {
     seen_msg_indices: VecDeque<u64>,
     seen_msg_index_set: HashSet<u64>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MsgReplayState {
+    tuples: BTreeMap<[u8; 32], MsgReplayTupleState>,
+}
+
 impl MsgReplayState {
     fn ensure_tuple(&mut self, tuple_tag: [u8; 32]) {
-        if self.tuple_tag != tuple_tag {
-            self.tuple_tag = tuple_tag;
-            self.seen_msg_indices.clear();
-            self.seen_msg_index_set.clear();
-        }
+        self.tuples.entry(tuple_tag).or_default();
     }
 
-    fn contains(&self, msg_index: u64) -> bool {
-        self.seen_msg_index_set.contains(&msg_index)
+    fn contains(&self, tuple_tag: [u8; 32], msg_index: u64) -> bool {
+        self.tuples
+            .get(&tuple_tag)
+            .is_some_and(|state| state.seen_msg_index_set.contains(&msg_index))
     }
 
-    fn record(&mut self, msg_index: u64) {
-        if !self.seen_msg_index_set.insert(msg_index) {
+    fn record(&mut self, tuple_tag: [u8; 32], msg_index: u64) {
+        let state = self.tuples.entry(tuple_tag).or_default();
+        if !state.seen_msg_index_set.insert(msg_index) {
             return;
         }
-        self.seen_msg_indices.push_back(msg_index);
+        state.seen_msg_indices.push_back(msg_index);
         // Keep bounded memory/CPU: anti-replay is strongest within this reordering window.
-        if self.seen_msg_indices.len() > MSG_INDEX_REPLAY_WINDOW
-            && let Some(oldest) = self.seen_msg_indices.pop_front()
+        if state.seen_msg_indices.len() > MSG_INDEX_REPLAY_WINDOW
+            && let Some(oldest) = state.seen_msg_indices.pop_front()
         {
-            self.seen_msg_index_set.remove(&oldest);
+            state.seen_msg_index_set.remove(&oldest);
         }
     }
 
     #[cfg(test)]
-    fn len(&self) -> usize {
-        self.seen_msg_indices.len()
-    }
-
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.seen_msg_indices.is_empty()
+    fn len(&self, tuple_tag: [u8; 32]) -> usize {
+        self.tuples
+            .get(&tuple_tag)
+            .map(|state| state.seen_msg_indices.len())
+            .unwrap_or(0)
     }
 }
 
@@ -6571,6 +6572,16 @@ struct PersistedMsgReplayState {
     tuple_tag_hex: String,
     #[serde(default)]
     seen_msg_indices: Vec<u64>,
+    #[serde(default)]
+    tuples: Vec<PersistedMsgReplayTupleState>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedMsgReplayTupleState {
+    #[serde(default)]
+    tuple_tag_hex: String,
+    #[serde(default)]
+    seen_msg_indices: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -6663,21 +6674,44 @@ struct LastSessionPointer {
 
 impl PersistedMsgReplayState {
     fn from_runtime(state: &MsgReplayState) -> Self {
+        let tuples = state
+            .tuples
+            .iter()
+            .map(|(tuple_tag, tuple_state)| PersistedMsgReplayTupleState {
+                tuple_tag_hex: hex_encode(tuple_tag),
+                seen_msg_indices: tuple_state.seen_msg_indices.iter().copied().collect(),
+            })
+            .collect();
         Self {
-            tuple_tag_hex: hex_encode(state.tuple_tag),
-            seen_msg_indices: state.seen_msg_indices.iter().copied().collect(),
+            tuple_tag_hex: String::new(),
+            seen_msg_indices: Vec::new(),
+            tuples,
         }
     }
 
     fn into_runtime(self) -> Result<MsgReplayState> {
-        let tuple_tag =
-            decode_hex32_or_zero("msg_replay_state.tuple_tag_hex", &self.tuple_tag_hex)?;
-        let mut runtime = MsgReplayState {
-            tuple_tag,
-            ..Default::default()
-        };
-        for msg_index in self.seen_msg_indices {
-            runtime.record(msg_index);
+        let mut runtime = MsgReplayState::default();
+        if self.tuples.is_empty()
+            && (!self.tuple_tag_hex.is_empty() || !self.seen_msg_indices.is_empty())
+        {
+            let tuple_tag =
+                decode_hex32_or_zero("msg_replay_state.tuple_tag_hex", &self.tuple_tag_hex)?;
+            runtime.ensure_tuple(tuple_tag);
+            for msg_index in self.seen_msg_indices {
+                runtime.record(tuple_tag, msg_index);
+            }
+            return Ok(runtime);
+        }
+
+        for (index, tuple) in self.tuples.into_iter().enumerate() {
+            let tuple_tag = decode_hex32_or_zero(
+                &format!("msg_replay_state.tuples[{index}].tuple_tag_hex"),
+                &tuple.tuple_tag_hex,
+            )?;
+            runtime.ensure_tuple(tuple_tag);
+            for msg_index in tuple.seen_msg_indices {
+                runtime.record(tuple_tag, msg_index);
+            }
         }
         Ok(runtime)
     }
@@ -9348,6 +9382,7 @@ async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
             xk_hash: &xk_hash,
             fs_ec,
             barrier_version,
+            sender_leaf: &leaf_id,
             epoch_key: &epoch_key,
             k_barrier: &k_barrier,
         },
@@ -9396,19 +9431,6 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
 
     let mut messages = Vec::new();
     let mut max_timestamp = since.unwrap_or(0);
-    let replay_context = MessageCryptoContext {
-        gid: &gid,
-        we_epoch_id: &we_epoch_id,
-        xk_hash: &xk_hash,
-        fs_ec,
-        barrier_version,
-        epoch_key: &epoch_key,
-        k_barrier: &k_barrier,
-    };
-    let replay_tuple_tag =
-        derive_msg_replay_tuple_tag(&replay_context).context("derive fs/msg/replay/tuple")?;
-    msg_replay_state.ensure_tuple(replay_tuple_tag);
-
     for message in response.messages {
         if let Some(threshold) = since
             && message.timestamp_ms <= threshold
@@ -9416,17 +9438,41 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
             continue;
         }
 
+        // Extract leaf_id from sender field (must be 32 bytes)
+        if message.sender.len() != 32 {
+            tracing::warn!(
+                "sender field is not 32 bytes (got {}), skipping message",
+                message.sender.len()
+            );
+            continue;
+        }
+        // Safe conversion: we verified length == 32 above
+        let leaf_id: [u8; 32] = message.sender[..32].try_into()?;
+        let replay_context = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec,
+            barrier_version,
+            sender_leaf: &leaf_id,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let replay_tuple_tag =
+            derive_msg_replay_tuple_tag(&replay_context).context("derive fs/msg/replay/tuple")?;
+        msg_replay_state.ensure_tuple(replay_tuple_tag);
+
         // Decrypt using ChaCha20-Poly1305
         let (msg_index, authenticated_msg) =
             match decrypt_message_v2_with_index(&message.ciphertext, &replay_context) {
                 Ok(outcome) => outcome,
                 Err(e) => {
-                    // Skip messages that fail decryption (might be from different epoch or corrupted)
+                    // Skip messages that fail decryption (might be from different epoch, sender, or corrupted)
                     tracing::warn!("failed to decrypt message: {}", e);
                     continue;
                 }
             };
-        if msg_replay_state.contains(msg_index) {
+        if msg_replay_state.contains(replay_tuple_tag, msg_index) {
             tracing::warn!("dropping replayed msg_index={msg_index}");
             continue;
         }
@@ -9446,17 +9492,6 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
             );
             continue; // Skip messages that don't meet minimum size
         }
-
-        // Extract leaf_id from sender field (must be 32 bytes)
-        if message.sender.len() != 32 {
-            tracing::warn!(
-                "sender field is not 32 bytes (got {}), skipping message",
-                message.sender.len()
-            );
-            continue;
-        }
-        // Safe conversion: we verified length == 32 above
-        let leaf_id: [u8; 32] = message.sender[..32].try_into()?;
 
         let envelope = match decode_authenticated_message(&authenticated_msg) {
             Ok(env) => env,
@@ -9498,7 +9533,7 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
                 if message.timestamp_ms > max_timestamp {
                     max_timestamp = message.timestamp_ms;
                 }
-                msg_replay_state.record(msg_index);
+                msg_replay_state.record(replay_tuple_tag, msg_index);
 
                 tracing::info!("message from {}: verification=verified", sender_display);
 
@@ -10293,6 +10328,7 @@ struct MessageCryptoContext<'a> {
     xk_hash: &'a [u8; 32],
     fs_ec: u64,
     barrier_version: u64,
+    sender_leaf: &'a [u8; 32],
     epoch_key: &'a [u8; 32],
     k_barrier: &'a [u8; 32],
 }
@@ -10308,6 +10344,8 @@ struct MsgEpochSaltArgs<'a> {
     e_k: &'a [u8; 32],
     barrier_version: u64,
     #[serde(with = "serde_bytes")]
+    sender_leaf: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
     k_barrier: &'a [u8; 32],
 }
 
@@ -10316,6 +10354,8 @@ struct MsgKeySaltArgs<'a> {
     #[serde(with = "serde_bytes")]
     we_epoch_id: &'a [u8; 32],
     fs_ec: u64,
+    #[serde(with = "serde_bytes")]
+    sender_leaf: &'a [u8; 32],
     msg_index: u64,
 }
 
@@ -10331,6 +10371,8 @@ struct MsgNonceArgs<'a> {
     #[serde(with = "serde_bytes")]
     e_k: &'a [u8; 32],
     barrier_version: u64,
+    #[serde(with = "serde_bytes")]
+    sender_leaf: &'a [u8; 32],
     msg_index: u64,
 }
 
@@ -10342,6 +10384,7 @@ struct MsgAad<'a>(
     #[serde(with = "serde_bytes")] &'a [u8; 32],
     #[serde(with = "serde_bytes")] &'a [u8; 32],
     u64,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
     u64,
 );
 
@@ -10355,6 +10398,8 @@ struct MsgReplayTupleArgs<'a> {
     #[serde(with = "serde_bytes")]
     xk_hash: &'a [u8; 32],
     barrier_version: u64,
+    #[serde(with = "serde_bytes")]
+    sender_leaf: &'a [u8; 32],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -10369,6 +10414,7 @@ fn derive_msg_key_material(context: &MessageCryptoContext<'_>, msg_index: u64) -
             xk_hash: context.xk_hash,
             e_k: context.epoch_key,
             barrier_version: context.barrier_version,
+            sender_leaf: context.sender_leaf,
             k_barrier: context.k_barrier,
         },
     )
@@ -10380,6 +10426,7 @@ fn derive_msg_key_material(context: &MessageCryptoContext<'_>, msg_index: u64) -
         &MsgKeySaltArgs {
             we_epoch_id: context.we_epoch_id,
             fs_ec: context.fs_ec,
+            sender_leaf: context.sender_leaf,
             msg_index,
         },
     )
@@ -10397,6 +10444,7 @@ fn derive_msg_nonce(context: &MessageCryptoContext<'_>, msg_index: u64) -> Resul
             xk_hash: context.xk_hash,
             e_k: context.epoch_key,
             barrier_version: context.barrier_version,
+            sender_leaf: context.sender_leaf,
             msg_index,
         },
     )
@@ -10414,6 +10462,7 @@ fn message_aad(context: &MessageCryptoContext<'_>, msg_index: u64) -> Result<Vec
         context.xk_hash,
         context.epoch_key,
         context.barrier_version,
+        context.sender_leaf,
         msg_index,
     ))
     .context("encode message aad")
@@ -10428,6 +10477,7 @@ fn derive_msg_replay_tuple_tag(context: &MessageCryptoContext<'_>) -> Result<[u8
             fs_ec: context.fs_ec,
             xk_hash: context.xk_hash,
             barrier_version: context.barrier_version,
+            sender_leaf: context.sender_leaf,
         },
     )
     .context("derive fs/msg/replay/tuple")
@@ -14632,14 +14682,13 @@ mod tests {
             }),
             barrier_recovery_pending: true,
         };
-        let mut replay_state = MsgReplayState {
-            tuple_tag: array(0x30),
-            ..Default::default()
-        };
-        replay_state.record(11);
-        replay_state.record(22);
-        replay_state.record(33);
-        replay_state.record(44);
+        let tuple_tag = array(0x30);
+        let mut replay_state = MsgReplayState::default();
+        replay_state.ensure_tuple(tuple_tag);
+        replay_state.record(tuple_tag, 11);
+        replay_state.record(tuple_tag, 22);
+        replay_state.record(tuple_tag, 33);
+        replay_state.record(tuple_tag, 44);
         session.msg_replay_state = replay_state;
         session.fs_fingerprint = derive_fs_fingerprint_from_fields(
             session.fs_policy_version.as_str(),
@@ -16188,12 +16237,14 @@ mod tests {
         let xk_hash = [0x23u8; 32];
         let epoch_key = [0x33u8; 32];
         let k_barrier = [0x44u8; 32];
+        let sender_leaf = [0x45u8; 32];
         let context = MessageCryptoContext {
             gid: &gid,
             we_epoch_id: &we_epoch_id,
             xk_hash: &xk_hash,
             fs_ec: 9,
             barrier_version: 5,
+            sender_leaf: &sender_leaf,
             epoch_key: &epoch_key,
             k_barrier: &k_barrier,
         };
@@ -16211,12 +16262,14 @@ mod tests {
         let xk_hash = [0x73u8; 32];
         let epoch_key = [0x74u8; 32];
         let k_barrier = [0x75u8; 32];
+        let sender_leaf = [0x76u8; 32];
         let context = MessageCryptoContext {
             gid: &gid,
             we_epoch_id: &we_epoch_id,
             xk_hash: &xk_hash,
             fs_ec: 5,
             barrier_version: 2,
+            sender_leaf: &sender_leaf,
             epoch_key: &epoch_key,
             k_barrier: &k_barrier,
         };
@@ -16234,12 +16287,14 @@ mod tests {
         let xk_hash = [0x53u8; 32];
         let epoch_key = [0x53u8; 32];
         let k_barrier = [0x54u8; 32];
+        let sender_leaf = [0x55u8; 32];
         let good_context = MessageCryptoContext {
             gid: &gid,
             we_epoch_id: &we_epoch_id,
             xk_hash: &xk_hash,
             fs_ec: 12,
             barrier_version: 4,
+            sender_leaf: &sender_leaf,
             epoch_key: &epoch_key,
             k_barrier: &k_barrier,
         };
@@ -16263,12 +16318,14 @@ mod tests {
         let xk_hash = [0x63u8; 32];
         let epoch_key = [0x63u8; 32];
         let k_barrier = [0x64u8; 32];
+        let sender_leaf = [0x65u8; 32];
         let context = MessageCryptoContext {
             gid: &gid,
             we_epoch_id: &we_epoch_id,
             xk_hash: &xk_hash,
             fs_ec: 3,
             barrier_version: 1,
+            sender_leaf: &sender_leaf,
             epoch_key: &epoch_key,
             k_barrier: &k_barrier,
         };
@@ -16279,43 +16336,81 @@ mod tests {
     }
 
     #[test]
-    fn msg_replay_state_rotates_tuple_and_caps_window() -> Result<(), Box<dyn std::error::Error>> {
+    fn payload_envelope_v2_sender_scope_changes_ciphertext()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid = [0x81u8; 32];
+        let we_epoch_id = [0x82u8; 32];
+        let xk_hash = [0x83u8; 32];
+        let epoch_key = [0x84u8; 32];
+        let k_barrier = [0x85u8; 32];
+        let sender_leaf_a = [0x86u8; 32];
+        let sender_leaf_b = [0x87u8; 32];
+        let context_a = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec: 7,
+            barrier_version: 3,
+            sender_leaf: &sender_leaf_a,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let context_b = MessageCryptoContext {
+            sender_leaf: &sender_leaf_b,
+            ..context_a
+        };
+        let payload_a = encrypt_message_v2(b"same-plaintext", &context_a, 11)?;
+        let payload_b = encrypt_message_v2(b"same-plaintext", &context_b, 11)?;
+        assert_ne!(payload_a, payload_b, "sender scope must affect ciphertext");
+        assert!(
+            decrypt_message_v2(&payload_a, &context_b).is_err(),
+            "wrong sender scope must fail decryption"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn msg_replay_state_tracks_multiple_tuples_and_caps_window()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut replay = MsgReplayState::default();
         let tuple_a = [0xA1; 32];
         replay.ensure_tuple(tuple_a);
         for msg_index in 0..(MSG_INDEX_REPLAY_WINDOW as u64 + 8) {
-            replay.record(msg_index);
+            replay.record(tuple_a, msg_index);
         }
-        assert_eq!(replay.tuple_tag, tuple_a);
-        assert_eq!(replay.len(), MSG_INDEX_REPLAY_WINDOW);
-        assert!(!replay.contains(0), "oldest indices should be evicted");
-        assert!(replay.contains(MSG_INDEX_REPLAY_WINDOW as u64 + 7));
+        assert_eq!(replay.len(tuple_a), MSG_INDEX_REPLAY_WINDOW);
+        assert!(
+            !replay.contains(tuple_a, 0),
+            "oldest indices should be evicted"
+        );
+        assert!(replay.contains(tuple_a, MSG_INDEX_REPLAY_WINDOW as u64 + 7));
 
         let tuple_b = [0xB2; 32];
         replay.ensure_tuple(tuple_b);
-        assert_eq!(replay.tuple_tag, tuple_b);
         assert!(
-            replay.is_empty(),
-            "switching tuple must clear replay window"
+            replay.contains(tuple_a, MSG_INDEX_REPLAY_WINDOW as u64 + 7),
+            "adding a second tuple must preserve the first tuple window"
         );
-        replay.record(99);
-        assert!(replay.contains(99));
+        assert_eq!(replay.len(tuple_b), 0);
+        replay.record(tuple_b, 99);
+        assert!(replay.contains(tuple_b, 99));
         Ok(())
     }
 
     #[test]
     fn msg_replay_state_ignores_duplicate_indices() -> Result<(), Box<dyn std::error::Error>> {
         let mut replay = MsgReplayState::default();
-        replay.ensure_tuple([0x42; 32]);
-        replay.record(7);
-        replay.record(7);
-        replay.record(7);
+        let tuple = [0x42; 32];
+        replay.ensure_tuple(tuple);
+        replay.record(tuple, 7);
+        replay.record(tuple, 7);
+        replay.record(tuple, 7);
         assert_eq!(
-            replay.len(),
+            replay.len(tuple),
             1,
             "duplicate indices must not grow replay state"
         );
-        assert!(replay.contains(7));
+        assert!(replay.contains(tuple, 7));
         Ok(())
     }
 
@@ -16323,17 +16418,18 @@ mod tests {
     fn msg_replay_state_allows_reuse_after_window_eviction()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut replay = MsgReplayState::default();
-        replay.ensure_tuple([0x55; 32]);
+        let tuple = [0x55; 32];
+        replay.ensure_tuple(tuple);
         for msg_index in 0..=(MSG_INDEX_REPLAY_WINDOW as u64) {
-            replay.record(msg_index);
+            replay.record(tuple, msg_index);
         }
         assert!(
-            !replay.contains(0),
+            !replay.contains(tuple, 0),
             "oldest index must be evicted once window is exceeded"
         );
-        replay.record(0);
+        replay.record(tuple, 0);
         assert!(
-            replay.contains(0),
+            replay.contains(tuple, 0),
             "evicted index can be re-seen by design outside replay window"
         );
         Ok(())
@@ -16347,22 +16443,25 @@ mod tests {
         let xk_hash = [0x33u8; 32];
         let epoch_key = [0x34u8; 32];
         let k_barrier = [0x35u8; 32];
+        let sender_leaf_a = [0x36u8; 32];
+        let sender_leaf_b = [0x37u8; 32];
         let context_a = MessageCryptoContext {
             gid: &gid,
             we_epoch_id: &we_epoch_id,
             xk_hash: &xk_hash,
             fs_ec: 8,
             barrier_version: 1,
+            sender_leaf: &sender_leaf_a,
             epoch_key: &epoch_key,
             k_barrier: &k_barrier,
         };
         let context_b = MessageCryptoContext {
-            barrier_version: 2,
+            sender_leaf: &sender_leaf_b,
             ..context_a
         };
         let tag_a = derive_msg_replay_tuple_tag(&context_a)?;
         let tag_b = derive_msg_replay_tuple_tag(&context_b)?;
-        assert_ne!(tag_a, tag_b, "barrier_version must affect replay tuple tag");
+        assert_ne!(tag_a, tag_b, "sender scope must affect replay tuple tag");
         Ok(())
     }
 

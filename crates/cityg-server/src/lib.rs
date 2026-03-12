@@ -374,6 +374,9 @@ impl CityGServer {
                 state.kem_tree_hash_after = kem_tree_hash_after;
                 state.n_max = n_max;
                 state.barrier_pk_entries = blank_entries;
+                state
+                    .barrier_public_tree_history
+                    .insert(kem_tree_hash_after, state.barrier_pk_entries.clone());
             }
             (
                 state.barrier_initialized,
@@ -940,10 +943,6 @@ impl CityGServer {
                 state.leaf_device_pk.remove(leaf);
                 state.leaf_barrier_public.remove(leaf);
             }
-            if barrier_validation.is_none() {
-                state.barrier_hash_cache = None;
-                state.kem_tree_hash_after = compute_group_barrier_tree_hash(state)?;
-            }
         }
         if let Some(validation) = barrier_validation.as_ref() {
             let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
@@ -951,6 +950,7 @@ impl CityGServer {
             state.kem_tree_hash_after = validation.parsed.kem_tree_hash_after;
             state.n_max = validation.parsed.tree_size.max(1);
             state.barrier_hash_cache = validation.hash_cache_post.clone();
+            record_barrier_public_tree_snapshot(state);
         }
         if let Some(state) = roster.groups.get(bundle.gid()) {
             let ctx_state = ctx.barrier_group_state_entry_mut(bundle.gid());
@@ -1020,6 +1020,26 @@ impl CityGServer {
             group.kem_tree_hash_after = room_state.kem_tree_hash_after;
             group.n_max = room_state.n_max.max(1);
             group.barrier_pk_entries = room_state.barrier_pk_entries.clone();
+            group.barrier_public_tree_history = room_state
+                .barrier_public_tree_history
+                .iter()
+                .filter_map(|snapshot| {
+                    let hash = hex::decode(&snapshot.kem_tree_hash_after_hex).ok()?;
+                    let hash: [u8; 32] = hash.try_into().ok()?;
+                    Some((hash, snapshot.pk_entries.clone()))
+                })
+                .collect();
+            if group.barrier_public_tree_history.is_empty() && !group.barrier_pk_entries.is_empty()
+            {
+                group
+                    .barrier_public_tree_history
+                    .insert(group.kem_tree_hash_after, group.barrier_pk_entries.clone());
+            } else if !group.barrier_pk_entries.is_empty() {
+                group
+                    .barrier_public_tree_history
+                    .entry(group.kem_tree_hash_after)
+                    .or_insert_with(|| group.barrier_pk_entries.clone());
+            }
             group.barrier_hash_cache = None;
             group.last_pcs_refresh_ec = room_state.last_pcs_refresh_ec;
             group.pcs_refresh_min_delta_device_ec =
@@ -1099,6 +1119,21 @@ impl CityGServer {
                         .groups
                         .get(gid.as_slice())
                         .map(|state| state.barrier_pk_entries.clone())
+                        .unwrap_or_default(),
+                    barrier_public_tree_history: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| {
+                            state
+                                .barrier_public_tree_history
+                                .iter()
+                                .map(|(hash, pk_entries)| PersistedBarrierPublicTreeSnapshot {
+                                    kem_tree_hash_after_hex: hex::encode(hash),
+                                    pk_entries: pk_entries.clone(),
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default(),
                     n_max: self
                         .roster
@@ -1422,8 +1457,26 @@ impl CityGServer {
             .groups
             .get(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
-        let pk_entries_view = build_pk_entries_view(state)?;
-        let computed_hash = compute_barrier_tree_hash(state.n_max, pk_entries_view.as_ref())?;
+        let pk_entries = if let Some(snapshot) =
+            state.barrier_public_tree_history.get(kem_tree_hash_after)
+        {
+            snapshot.clone()
+        } else {
+            let pk_entries_view = build_pk_entries_view(state)?;
+            let computed_hash = compute_barrier_tree_hash(state.n_max, pk_entries_view.as_ref())?;
+            if computed_hash != *kem_tree_hash_after {
+                return Err(CityGError::Acceptance(
+                    msphf_orchestrator::AcceptanceError::Freeze(
+                        msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE,
+                    ),
+                ));
+            }
+            match pk_entries_view {
+                Cow::Borrowed(entries) => entries.to_vec(),
+                Cow::Owned(entries) => entries,
+            }
+        };
+        let computed_hash = compute_barrier_tree_hash(state.n_max, pk_entries.as_slice())?;
         if computed_hash != *kem_tree_hash_after {
             return Err(CityGError::Acceptance(
                 msphf_orchestrator::AcceptanceError::Freeze(
@@ -1431,10 +1484,6 @@ impl CityGServer {
                 ),
             ));
         }
-        let pk_entries = match pk_entries_view {
-            Cow::Borrowed(entries) => entries.to_vec(),
-            Cow::Owned(entries) => entries,
-        };
         Ok(BarrierPublicTreeSnapshot {
             n_max: state.n_max,
             kem_tree_hash_after: computed_hash,
@@ -1709,6 +1758,24 @@ fn build_pk_entries_view<'a>(state: &'a GroupState) -> Result<Cow<'a, [Vec<u8>]>
     Ok(Cow::Owned(pk_entries))
 }
 
+#[cfg(test)]
+fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
+    Ok(build_pk_entries_cow(state)?
+        .into_iter()
+        .map(|cow| cow.into_owned())
+        .collect())
+}
+
+fn record_barrier_public_tree_snapshot(state: &mut GroupState) {
+    if state.barrier_pk_entries.is_empty() {
+        return;
+    }
+    state
+        .barrier_public_tree_history
+        .insert(state.kem_tree_hash_after, state.barrier_pk_entries.clone());
+}
+
+#[cfg(test)]
 fn compute_group_barrier_tree_hash(state: &GroupState) -> Result<[u8; 32], CityGError> {
     let n_max_usize = usize::try_from(state.n_max)
         .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
@@ -2531,14 +2598,6 @@ fn header_string(
 }
 
 #[cfg(test)]
-fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
-    Ok(build_pk_entries_cow(state)?
-        .into_iter()
-        .map(|cow| cow.into_owned())
-        .collect())
-}
-
-#[cfg(test)]
 fn blank_internal_path_from_leaf(pk_entries: &mut [Vec<u8>], leaf_node: usize) {
     for node in direct_path_nodes(leaf_node).into_iter().skip(1) {
         if let Some(slot) = pk_entries.get_mut(node) {
@@ -3014,6 +3073,139 @@ mod tests {
             cover_bytes,
         );
         Ok(super::to_cbor_vec(&update)?)
+    }
+
+    fn accept_refresh_bundle_for_member(
+        server: &mut CityGServer,
+        generated: &GeneratedMemberBundle,
+    ) -> Result<ClientEpochBundle, CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let fs_ec = u64_from_header(&generated.bundle.header_map, hdr::HDR_FS_EC)?;
+        let fs_epoch_commit =
+            bytes32_from_header(&generated.bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT)?;
+        let fs_dev_prev_commit =
+            bytes32_from_header(&generated.bundle.header_map, hdr::HDR_FS_DEV_COMMIT)?;
+
+        let ticket = server.build_merge_ticket_for_refresh(&gid, &generated.leaf_id)?;
+        let parities = hydrate_parities(
+            ticket.parities.as_slice(),
+            fs_ec,
+            fs_epoch_commit,
+            fs_dev_prev_commit,
+        );
+        let pivot = select_pivot_parity(parities.as_slice())
+            .ok_or(CityGError::InvalidInput("pivot parity missing"))?;
+
+        let committed_roots_hash =
+            super::compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+        let ticket_roots_hash =
+            super::compute_revocation_roots_hash(&ticket.revoked_since_root, &ticket.revoked_root)?;
+        let mut snapshot_pre = server
+            .fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?
+            .pk_entries;
+        let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
+        let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
+        apply_join_records_to_snapshot(
+            snapshot_pre.as_mut_slice(),
+            ticket.n_max,
+            join_records.as_slice(),
+        )?;
+        apply_revoked_indices_to_snapshot(
+            snapshot_pre.as_mut_slice(),
+            ticket.n_max,
+            committed_revoked.as_slice(),
+        )?;
+        let kem_tree_hash_before =
+            super::compute_barrier_tree_hash(ticket.n_max, snapshot_pre.as_slice())?;
+        let next_barrier_version = ticket.barrier_version.saturating_add(1);
+        let barrier_update = build_refresh_barrier_update_bytes(
+            ticket.n_max,
+            ticket.cover_leaf_index,
+            next_barrier_version,
+            ticket.barrier_version,
+            ticket_roots_hash,
+            kem_tree_hash_before,
+            snapshot_pre.as_slice(),
+        )?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+        header.insert(
+            hdr::HDR_KBROAD_PUB,
+            Value::Bytes(ticket.kbroad_public.clone()),
+        );
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(barrier_update));
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+
+        let parts = AnchorInstanceParts {
+            gid: &gid,
+            cat: &ticket.cat,
+            tswe_salt_hash: &ticket.tswe_salt_hash,
+            parent_root: &ticket.parent_root,
+            join_delta_root: &ticket.join_delta_root,
+            revoked_since_prev_root: &ticket.revoked_since_root,
+            revoked_root: &ticket.revoked_root,
+            pox_r_commit: Some(&ticket.pox_r_commit),
+        };
+
+        let params = OrchestrationParams {
+            msphf_crs_id: ticket.msphf_crs_id.as_str(),
+            params_id: ticket.msphf_params_id.as_str(),
+            srx: None,
+            srx_mode: SrxMode::Complete,
+            pop_keys: Some(PopKeypair {
+                algorithm: "ML-DSA-65",
+                public_key: generated.pop_public_key.as_slice(),
+                secret_key: &generated.pop_secret_key,
+            }),
+            leaf_id_mode: LeafIdMode::PerGroup,
+            proof_mode: ticket.proof_mode.as_str(),
+            vrf_id: ticket.vrf_id.as_str(),
+            policy_version: ticket.policy_version.as_str(),
+            vrf_secret_key: Some(generated.vrf_secret_key.as_slice()),
+            vrf_public_key: Some(generated.vrf_public_key.as_slice()),
+            fs_policy_version: ticket.fs_policy_version.as_str(),
+            fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+            barrier_version: next_barrier_version,
+            fs_join: FsJoinInputs {
+                fs_ec,
+                fs_epoch_commit,
+                fs_dev_prev_commit,
+            },
+            fs_merge: FsMergeInputs::default(),
+        };
+
+        let witness_bytes = if ticket.witness_cbor.is_empty() {
+            None
+        } else {
+            Some(ticket.witness_cbor.as_slice())
+        };
+
+        let mut refresh_bundle = CityGClient::generate_merge(
+            header,
+            parts,
+            params,
+            parities.as_slice(),
+            None,
+            witness_bytes,
+        )?;
+        let pristine_bundle = refresh_bundle.clone();
+        strip_rollup_metadata(&mut refresh_bundle.header_map);
+        apply_pivot_alignment(&mut refresh_bundle.header_map, pivot);
+
+        match server.accept_epoch(&refresh_bundle) {
+            Ok(_) => Ok(refresh_bundle),
+            Err(CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze)))
+                if freeze.reason == "mh_heads_invalid" =>
+            {
+                server.accept_epoch(&pristine_bundle)?;
+                Ok(pristine_bundle)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     #[test]
@@ -4813,141 +5005,11 @@ mod tests {
 
         {
             let generated = build_genesis_member_bundle(0x71)?;
-            let fs_ec = u64_from_header(&generated.bundle.header_map, hdr::HDR_FS_EC)?;
-            let fs_epoch_commit =
-                bytes32_from_header(&generated.bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT)?;
-            let fs_dev_prev_commit =
-                bytes32_from_header(&generated.bundle.header_map, hdr::HDR_FS_DEV_COMMIT)?;
             expected_pop_pk = generated.pop_public_key.clone();
 
             let mut server = demo_server_with_journal(&journal_path);
             server.accept_epoch(&generated.bundle)?;
-
-            let ticket = server.build_merge_ticket_for_refresh(&gid, &generated.leaf_id)?;
-            let parities = hydrate_parities(
-                ticket.parities.as_slice(),
-                fs_ec,
-                fs_epoch_commit,
-                fs_dev_prev_commit,
-            );
-            let pivot = select_pivot_parity(parities.as_slice())
-                .ok_or(CityGError::InvalidInput("pivot parity missing"))?;
-
-            let committed_roots_hash = super::compute_revocation_roots_hash(
-                &pivot.revoked_since_root,
-                &pivot.revoked_root,
-            )?;
-            let ticket_roots_hash = super::compute_revocation_roots_hash(
-                &ticket.revoked_since_root,
-                &ticket.revoked_root,
-            )?;
-            let mut snapshot_pre = server
-                .fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?
-                .pk_entries;
-            let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
-            let committed_revoked =
-                server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
-            apply_join_records_to_snapshot(
-                snapshot_pre.as_mut_slice(),
-                ticket.n_max,
-                join_records.as_slice(),
-            )?;
-            apply_revoked_indices_to_snapshot(
-                snapshot_pre.as_mut_slice(),
-                ticket.n_max,
-                committed_revoked.as_slice(),
-            )?;
-            let kem_tree_hash_before =
-                super::compute_barrier_tree_hash(ticket.n_max, snapshot_pre.as_slice())?;
-            let next_barrier_version = ticket.barrier_version.saturating_add(1);
-            let barrier_update = build_refresh_barrier_update_bytes(
-                ticket.n_max,
-                ticket.cover_leaf_index,
-                next_barrier_version,
-                ticket.barrier_version,
-                ticket_roots_hash,
-                kem_tree_hash_before,
-                snapshot_pre.as_slice(),
-            )?;
-
-            let mut header = BTreeMap::new();
-            header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
-            header.insert(
-                hdr::HDR_KBROAD_PUB,
-                Value::Bytes(ticket.kbroad_public.clone()),
-            );
-            header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(barrier_update));
-            header.insert(
-                hdr::HDR_BARRIER_UPDATE_REASON,
-                Value::Integer(Integer::from(1u64)),
-            );
-
-            let parts = AnchorInstanceParts {
-                gid: &gid,
-                cat: &ticket.cat,
-                tswe_salt_hash: &ticket.tswe_salt_hash,
-                parent_root: &ticket.parent_root,
-                join_delta_root: &ticket.join_delta_root,
-                revoked_since_prev_root: &ticket.revoked_since_root,
-                revoked_root: &ticket.revoked_root,
-                pox_r_commit: Some(&ticket.pox_r_commit),
-            };
-
-            let params = OrchestrationParams {
-                msphf_crs_id: ticket.msphf_crs_id.as_str(),
-                params_id: ticket.msphf_params_id.as_str(),
-                srx: None,
-                srx_mode: SrxMode::Complete,
-                pop_keys: Some(PopKeypair {
-                    algorithm: "ML-DSA-65",
-                    public_key: generated.pop_public_key.as_slice(),
-                    secret_key: &generated.pop_secret_key,
-                }),
-                leaf_id_mode: LeafIdMode::PerGroup,
-                proof_mode: ticket.proof_mode.as_str(),
-                vrf_id: ticket.vrf_id.as_str(),
-                policy_version: ticket.policy_version.as_str(),
-                vrf_secret_key: Some(generated.vrf_secret_key.as_slice()),
-                vrf_public_key: Some(generated.vrf_public_key.as_slice()),
-                fs_policy_version: ticket.fs_policy_version.as_str(),
-                fs_epoch_base_ts: ticket.fs_epoch_base_ts,
-                barrier_version: next_barrier_version,
-                fs_join: FsJoinInputs {
-                    fs_ec,
-                    fs_epoch_commit,
-                    fs_dev_prev_commit,
-                },
-                fs_merge: FsMergeInputs::default(),
-            };
-
-            let witness_bytes = if ticket.witness_cbor.is_empty() {
-                None
-            } else {
-                Some(ticket.witness_cbor.as_slice())
-            };
-
-            let mut refresh_bundle = CityGClient::generate_merge(
-                header,
-                parts,
-                params,
-                parities.as_slice(),
-                None,
-                witness_bytes,
-            )?;
-            let pristine_bundle = refresh_bundle.clone();
-            strip_rollup_metadata(&mut refresh_bundle.header_map);
-            apply_pivot_alignment(&mut refresh_bundle.header_map, pivot);
-
-            let accepted_bundle = match server.accept_epoch(&refresh_bundle) {
-                Ok(_) => refresh_bundle,
-                Err(CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(
-                    freeze,
-                ))) if freeze.reason == "mh_heads_invalid" => {
-                    server.accept_epoch(&pristine_bundle)?;
-                    pristine_bundle
-                }
-                Err(err) => return Err(err),
-            };
+            let accepted_bundle = accept_refresh_bundle_for_member(&mut server, &generated)?;
 
             expected_refresh_ec = u64_from_header(&accepted_bundle.header_map, hdr::HDR_FS_EC)?;
             expected_group_state = server
@@ -5316,6 +5378,47 @@ mod tests {
                     && freeze.reason
                         == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.reason
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_barrier_public_tree_serves_historical_committed_snapshots() -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x72)?;
+        let mut server = super::demo::demo_server();
+        server.accept_epoch(&generated.bundle)?;
+        let gid = cityg_client::demo::DEMO_GID;
+        let (historical_hash, historical_entries, n_max) = {
+            let group = server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("group not found"))?;
+            (
+                group.kem_tree_hash_after,
+                group.barrier_pk_entries.clone(),
+                group.n_max,
+            )
+        };
+
+        let _accepted_refresh = accept_refresh_bundle_for_member(&mut server, &generated)?;
+
+        let current_hash = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput(
+                "group not found after second accept",
+            ))?
+            .kem_tree_hash_after;
+        assert_ne!(
+            current_hash, historical_hash,
+            "accepted refresh should advance the committed public tree hash"
+        );
+
+        let snapshot = server.fetch_barrier_public_tree(&gid, &historical_hash)?;
+        assert_eq!(snapshot.n_max, n_max);
+        assert_eq!(snapshot.kem_tree_hash_after, historical_hash);
+        assert_eq!(snapshot.pk_entries, historical_entries);
         Ok(())
     }
 
@@ -5776,6 +5879,7 @@ struct GroupState {
     leaf_device_pk: BTreeMap<[u8; 32], Vec<u8>>,
     leaf_barrier_public: BTreeMap<[u8; 32], Vec<u8>>,
     barrier_pk_entries: Vec<Vec<u8>>,
+    barrier_public_tree_history: BTreeMap<[u8; 32], Vec<Vec<u8>>>,
     barrier_hash_cache: Option<Arc<HashMap<usize, [u8; 32]>>>,
 }
 
@@ -5803,6 +5907,7 @@ impl Default for GroupState {
             leaf_device_pk: BTreeMap::new(),
             leaf_barrier_public: BTreeMap::new(),
             barrier_pk_entries: Vec::new(),
+            barrier_public_tree_history: BTreeMap::new(),
             barrier_hash_cache: None,
         }
     }
@@ -5884,6 +5989,8 @@ struct PersistedKbroadRoomState {
     kem_tree_hash_after: [u8; 32],
     #[serde(default)]
     barrier_pk_entries: Vec<Vec<u8>>,
+    #[serde(default)]
+    barrier_public_tree_history: Vec<PersistedBarrierPublicTreeSnapshot>,
     #[serde(default = "default_barrier_n_max")]
     n_max: u64,
     #[serde(default)]
@@ -5909,6 +6016,14 @@ struct PersistedDeviceChainState {
     last_ec: u64,
     #[serde(default)]
     last_pcs_refresh_ec: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PersistedBarrierPublicTreeSnapshot {
+    #[serde(default)]
+    kem_tree_hash_after_hex: String,
+    #[serde(default)]
+    pk_entries: Vec<Vec<u8>>,
 }
 
 fn kbroad_state_path_for_journal(journal_path: &Path) -> PathBuf {

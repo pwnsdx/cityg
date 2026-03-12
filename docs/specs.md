@@ -154,6 +154,9 @@ This enumeration MUST be integrity-protected by checkpoint history / membership 
 C) FetchBarrierPublicTree(kem_tree_hash_after) -> pk_entries
 pk_entries is an array of length (2*N_max-1) of bstr, where each entry is either empty bstr (BOTTOM) or ML-KEM ek (1184 bytes).
 The returned pk_entries MUST hash (per S11.4) to the requested kem_tree_hash_after.
+Historical retention contract (normative):
+* FetchBarrierPublicTree(kem_tree_hash_after) MUST work for any committed historical barrier public tree snapshot addressed by kem_tree_hash_after, not only the current one.
+* The server MUST retain every committed pk_entries snapshot for as long as the corresponding group history/checkpoint history remains fetchable. Implementations MAY garbage-collect only together with retirement of the associated group history.
 
 Snapshot-auth failure handling (normative; 960.9 wiring):
 If FetchBarrierPublicTree(kem_tree_hash_after) returns pk_entries with TreeHash(root_node) != kem_tree_hash_after, the caller MUST treat the server as faulty/active, MUST NOT proceed with barrier_update creation/activation/verification that depends on that tree, and MUST surface local diagnostic code 960.9 barrier_tree_snapshot_auth_failure.
@@ -272,7 +275,7 @@ Barrier public state:
 * barrier_roots_hash : bstr32
 * kem_tree_hash_after : bstr32
 * N_max : uint (power of two; fixed group lifetime)
-* Server MUST store pk_entries matching kem_tree_hash_after and serve via FetchBarrierPublicTree.
+* Server MUST store pk_entries matching kem_tree_hash_after and a historical map from each committed kem_tree_hash_after to its corresponding pk_entries, and MUST serve both current and historical committed snapshots via FetchBarrierPublicTree.
 
 S5.2 Client persistent secret state
 FS state:
@@ -344,6 +347,7 @@ K_fs := HKDF-BLAKE3(
   L=32
 )
 This reseed MUST be applied atomically with barrier activation state updates (S11.13.7 for non-updater clients; S11.14.2 for updater activation).
+This reseed takes effect immediately at activation time for the accepted pcs_refresh anchor. Therefore, after an accepted pcs_refresh at epoch t, any subsequent anchor in the group MUST use fs_ec > t; same-t anchors are invalid and MUST be rejected per S10.3.
 Servers do not learn K_fs and do not execute this derivation.
 
 S7. DEVICE-CHAIN BINDING + BARRIER DIGEST PATCH (NORMATIVE)
@@ -381,6 +385,10 @@ PayloadEnvelope = [
   msg_index : uint,
   ct_payload : bstr
 ]
+Define sender_leaf_id (normative):
+* sender_leaf_id is the authenticated 32-byte cover leaf identifier supplied by the outer message transport / authenticated sender context for this payload.
+* The same sender_leaf_id MUST be supplied to both the encrypt and decrypt paths for S8.3/S8.4 derivations.
+* If sender_leaf_id is missing, malformed, or not exactly 32 bytes, the implementation MUST fail closed and MUST NOT attempt payload decryption.
 Wire encoding requirement (normative, MUST):
 * PayloadEnvelope MUST be encoded as CBOR_det array of length exactly 3.
 * The first element MUST be the CBOR text string exactly equal to "fs-hybrid-msg-v2".
@@ -388,7 +396,7 @@ Wire encoding requirement (normative, MUST):
 * Receivers MUST verify CBOR_det determinism per S1.3 for PayloadEnvelope bytes; if invalid, receivers MUST discard the message as malformed.
 
 S8.2 msg_index uniqueness rule (CRITICAL)
-For any fixed tuple (gid, weid, t, xk_hash, E_k, barrier_version), msg_index MUST be unique for every payload encrypted under that tuple.
+For any fixed sender-scoped tuple (gid, weid, t, xk_hash, E_k, barrier_version, sender_leaf_id), msg_index MUST be unique for every payload encrypted under that tuple.
 Implementations MUST enforce either:
 * strictly monotone msg_index starting at 0 per tuple, OR
 * globally unique random 64-bit msg_index per tuple with collision resistance, plus anti-replay state.
@@ -399,7 +407,7 @@ If uniqueness cannot be enforced, this profile MUST NOT be used.
 S8.3 K_msg_epoch
 K_msg_epoch := HKDF-BLAKE3(
   ikm  = E_k,
-  salt = H_L("fs/msg/epoch_salt", [weid, t, xk_hash, E_k, header[176], K_barrier]),
+  salt = H_L("fs/msg/epoch_salt", [weid, t, xk_hash, E_k, header[176], K_barrier, sender_leaf_id]),
   info = "city-g|fs/msg/epoch|v2",
   L=32
 )
@@ -409,12 +417,12 @@ Where `E_k` is the locally derived epoch key for the active `weid`.
 S8.4 K_msg, nonce, and AAD
 K_msg := HKDF-BLAKE3(
   ikm  = K_msg_epoch,
-  salt = H_L("fs/msg/key_salt", [weid, t, msg_index]),
+  salt = H_L("fs/msg/key_salt", [weid, t, sender_leaf_id, msg_index]),
   info = "city-g|fs/msg/key|v2",
   L=32
 )
-nonce_msg := H_L("fs/msg/nonce", [gid, weid, t, xk_hash, E_k, header[176], msg_index])[0..11]
-aad_msg := CBOR_det([gid, weid, t, xk_hash, E_k, header[176], msg_index])
+nonce_msg := H_L("fs/msg/nonce", [gid, weid, t, xk_hash, E_k, header[176], sender_leaf_id, msg_index])[0..11]
+aad_msg := CBOR_det([gid, weid, t, xk_hash, E_k, header[176], sender_leaf_id, msg_index])
 ct_payload := AEAD_Seal(key=K_msg, nonce=nonce_msg, aad=aad_msg, pt=payload_plaintext)
 payload_plaintext := AEAD_Open(key=K_msg, nonce=nonce_msg, aad=aad_msg, ct=ct_payload)
 
@@ -484,6 +492,7 @@ S10.1 Pre-filters
 * Reject unknown keys (closed-world registry).
 * Enforce size limits.
 * Determine anchor_type per S4.1 and enforce mutual exclusivity.
+* header[139] fs_policy_version MUST be supported by the deployment/profile. Unsupported values MUST be rejected with 944.6.
 
 S10.2 Presence rules by anchor type
 Presence MUST follow S4.3 exactly.
@@ -497,6 +506,7 @@ Device-chain:
 * New device: header[152] MUST equal ZERO32.
 * Known device: header[152] MUST equal stored_last_commit AND header[141] MUST be >= stored_last_ec else reject 947.0.
 * header[153] MUST equal H_L("fs/dev/chain/v2", [header[108], header[141], header[152], header[176], barrier_update_digest]) else reject 947.2.
+* PCS epoch-boundary rule: if GroupState.last_pcs_refresh_ec is not null and header[141] == GroupState.last_pcs_refresh_ec, the server MUST reject the anchor with 947.0. This prevents the same fs_ec value from spanning both pre-reseed and post-reseed K_fs meanings.
 
 Forward-Leap Guard (time-blind; normative):
 Deployment defines integers: H (>0), checkpoint_interval (>=H), S_anchor, S_first, S_device (>=0).
@@ -859,12 +869,14 @@ Before constructing any barrier_update, the updater MUST:
 * Non-genesis:
   * fetch pk_entries_prev := FetchBarrierPublicTree(H_prev).
   * Compute TreeHash(root_node) over pk_entries_prev per S11.4 and require it equals H_prev.
+  * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
 If this check fails, the updater MUST abort barrier_update creation, MUST NOT sign/emit an anchor containing barrier_update, and MUST surface 960.9.
 
 S11.11.2 FULL clients MUST chain-check (CRITICAL)
 A FULL-verifying client processing a barrier_update MUST:
 * Let H_prev := client's locally stored kem_tree_hash_after.
 * Fetch pk_entries_prev := FetchBarrierPublicTree(H_prev) and verify it hashes to H_prev per S11.4; failure -> 960.9.
+* H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
 * Using pk_entries_prev as snapshot_base, construct snapshot_pre using S11.6 (with verifiable JoinSet and RevokedLeafSet).
 * Verify BU.kem_tree_hash_before equals hash(snapshot_pre).
 * Parse CP := KemTreeCoverPayload from BU.cover_payload bytes and enforce CBOR_det determinism per S1.3; parse or determinism failure -> 960.7.
@@ -1139,7 +1151,7 @@ While in `pending_barrier_recovery`:
 * The joiner CANNOT encrypt outgoing payload messages (`SendParams` MUST be suspended or buffered).
 * The joiner CANNOT decrypt incoming payload messages encoded with `K_barrier` (or subsequent epochs).
 * The joiner MUST process any observed `barrier_update` messages (S11.13.4).
-When the joiner successfully processes a `barrier_update` whose `ExpectedNodeSet` includes the joiner's `cover_leaf_index`, it derives `K_barrier_new`, clears `pending_barrier_recovery`, and proceeds with normal operation.
+When the joiner successfully processes a `barrier_update` via S11.13 and derives `K_barrier_new` from the unique matching NodeCiphertext for its own path, it clears `pending_barrier_recovery` and proceeds with normal operation.
 
 S13. ERROR CODES (NORMATIVE)
 

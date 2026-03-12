@@ -821,6 +821,10 @@ impl AcceptanceContext {
             return Ok(decision);
         };
 
+        if state.last_pcs_refresh_ec == Some(fs_ec) {
+            return Err(AcceptanceError::Freeze(FREEZE_FS_DEV_CHAIN_BREAK));
+        }
+
         if state.barrier_initialized
             && has_barrier_update
             && decision.parsed_barrier_update.is_none()
@@ -4383,6 +4387,35 @@ mod tests {
         let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge)?;
         assert_eq!(result.barrier_update_reason, Some(1));
         assert_eq!(result.barrier_version, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn same_fs_ec_after_pcs_refresh_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-pcs-boundary".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(120u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(8u64)));
+        header.insert(112, Value::Bytes([0x46; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x47; 32].to_vec()));
+
+        let rrh = compute_revocation_roots_hash(&header)?;
+        let state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 8,
+            barrier_roots_hash: rrh,
+            last_pcs_refresh_ec: Some(120),
+            ..BarrierGroupState::default()
+        };
+        ctx.insert_barrier_group_state(gid, state);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Join);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_FS_DEV_CHAIN_BREAK
+        ));
         Ok(())
     }
 
