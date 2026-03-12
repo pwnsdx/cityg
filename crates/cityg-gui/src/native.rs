@@ -3,13 +3,19 @@ use std::cell::RefCell;
 #[cfg(not(test))]
 use std::sync::{LazyLock, Mutex};
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashSet},
     fs,
     io::Write,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use crate::message_crypto::{MSG_INDEX_REPLAY_WINDOW, decrypt_message_v2};
+use crate::message_crypto::{
+    MessageCryptoContext, MsgReplayState, PersistedMsgReplayState, decrypt_message_v2_with_index,
+    derive_msg_replay_tuple_tag, encrypt_message_v2,
+};
 use ahash::AHashMap;
 use anchor_seed::{
     SeedCommitFields, build_anchor_seed_ctx, compute_seed_bundle_commit, compute_seed_commit,
@@ -104,10 +110,6 @@ const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
 const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
 const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
 const TICKET_RETRY_JITTER_MS: u64 = 40;
-// Receiver-side anti-replay tracks a bounded recent window per sender-scoped tuple tag.
-// S8.2 crash safety is satisfied by persisting this state in the encrypted session file.
-// Replays older than this window can be re-accepted after eviction by design.
-const MSG_INDEX_REPLAY_WINDOW: usize = 4_096;
 
 fn should_retry_ticket_http_error(
     status_code: u16,
@@ -2168,51 +2170,6 @@ struct AppSession {
     msg_replay_state: MsgReplayState,
     capss_witness: Vec<u8>,
     barrier_state: BarrierSecretState,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct MsgReplayTupleState {
-    seen_msg_indices: VecDeque<u64>,
-    seen_msg_index_set: HashSet<u64>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct MsgReplayState {
-    tuples: BTreeMap<[u8; 32], MsgReplayTupleState>,
-}
-
-impl MsgReplayState {
-    fn ensure_tuple(&mut self, tuple_tag: [u8; 32]) {
-        self.tuples.entry(tuple_tag).or_default();
-    }
-
-    fn contains(&self, tuple_tag: [u8; 32], msg_index: u64) -> bool {
-        self.tuples
-            .get(&tuple_tag)
-            .is_some_and(|state| state.seen_msg_index_set.contains(&msg_index))
-    }
-
-    fn record(&mut self, tuple_tag: [u8; 32], msg_index: u64) {
-        let state = self.tuples.entry(tuple_tag).or_default();
-        if !state.seen_msg_index_set.insert(msg_index) {
-            return;
-        }
-        state.seen_msg_indices.push_back(msg_index);
-        // Keep bounded memory/CPU: anti-replay is strongest within this reordering window.
-        if state.seen_msg_indices.len() > MSG_INDEX_REPLAY_WINDOW
-            && let Some(oldest) = state.seen_msg_indices.pop_front()
-        {
-            state.seen_msg_index_set.remove(&oldest);
-        }
-    }
-
-    #[cfg(test)]
-    fn len(&self, tuple_tag: [u8; 32]) -> usize {
-        self.tuples
-            .get(&tuple_tag)
-            .map(|state| state.seen_msg_indices.len())
-            .unwrap_or(0)
-    }
 }
 
 #[derive(Clone)]
@@ -6567,24 +6524,6 @@ struct PersistedForwardState {
 }
 
 #[derive(Serialize, Deserialize, Default)]
-struct PersistedMsgReplayState {
-    #[serde(default)]
-    tuple_tag_hex: String,
-    #[serde(default)]
-    seen_msg_indices: Vec<u64>,
-    #[serde(default)]
-    tuples: Vec<PersistedMsgReplayTupleState>,
-}
-
-#[derive(Serialize, Deserialize, Default)]
-struct PersistedMsgReplayTupleState {
-    #[serde(default)]
-    tuple_tag_hex: String,
-    #[serde(default)]
-    seen_msg_indices: Vec<u64>,
-}
-
-#[derive(Serialize, Deserialize, Default)]
 struct PersistedBarrierState {
     #[serde(default)]
     barrier_version: u64,
@@ -6670,51 +6609,6 @@ impl SessionKeySource {
 struct LastSessionPointer {
     server_url: String,
     room_id: String,
-}
-
-impl PersistedMsgReplayState {
-    fn from_runtime(state: &MsgReplayState) -> Self {
-        let tuples = state
-            .tuples
-            .iter()
-            .map(|(tuple_tag, tuple_state)| PersistedMsgReplayTupleState {
-                tuple_tag_hex: hex_encode(tuple_tag),
-                seen_msg_indices: tuple_state.seen_msg_indices.iter().copied().collect(),
-            })
-            .collect();
-        Self {
-            tuple_tag_hex: String::new(),
-            seen_msg_indices: Vec::new(),
-            tuples,
-        }
-    }
-
-    fn into_runtime(self) -> Result<MsgReplayState> {
-        let mut runtime = MsgReplayState::default();
-        if self.tuples.is_empty()
-            && (!self.tuple_tag_hex.is_empty() || !self.seen_msg_indices.is_empty())
-        {
-            let tuple_tag =
-                decode_hex32_or_zero("msg_replay_state.tuple_tag_hex", &self.tuple_tag_hex)?;
-            runtime.ensure_tuple(tuple_tag);
-            for msg_index in self.seen_msg_indices {
-                runtime.record(tuple_tag, msg_index);
-            }
-            return Ok(runtime);
-        }
-
-        for (index, tuple) in self.tuples.into_iter().enumerate() {
-            let tuple_tag = decode_hex32_or_zero(
-                &format!("msg_replay_state.tuples[{index}].tuple_tag_hex"),
-                &tuple.tuple_tag_hex,
-            )?;
-            runtime.ensure_tuple(tuple_tag);
-            for msg_index in tuple.seen_msg_indices {
-                runtime.record(tuple_tag, msg_index);
-            }
-        }
-        Ok(runtime)
-    }
 }
 
 impl PersistedBarrierNodeKeyMaterial {
@@ -10315,245 +10209,6 @@ fn verify_message_signature(
         .map_err(|_| anyhow!("signature verification failed"))?;
 
     Ok(())
-}
-
-const PAYLOAD_ENVELOPE_V2_MODE: &str = "fs-hybrid-msg-v2";
-const PAYLOAD_MSG_EPOCH_INFO: &[u8] = b"city-g|fs/msg/epoch|v2";
-const PAYLOAD_MSG_KEY_INFO: &[u8] = b"city-g|fs/msg/key|v2";
-
-#[derive(Clone, Copy)]
-struct MessageCryptoContext<'a> {
-    gid: &'a [u8; 32],
-    we_epoch_id: &'a [u8; 32],
-    xk_hash: &'a [u8; 32],
-    fs_ec: u64,
-    barrier_version: u64,
-    sender_leaf: &'a [u8; 32],
-    epoch_key: &'a [u8; 32],
-    k_barrier: &'a [u8; 32],
-}
-
-#[derive(Serialize)]
-struct MsgEpochSaltArgs<'a> {
-    #[serde(with = "serde_bytes")]
-    we_epoch_id: &'a [u8; 32],
-    fs_ec: u64,
-    #[serde(with = "serde_bytes")]
-    xk_hash: &'a [u8; 32],
-    #[serde(with = "serde_bytes")]
-    e_k: &'a [u8; 32],
-    barrier_version: u64,
-    #[serde(with = "serde_bytes")]
-    sender_leaf: &'a [u8; 32],
-    #[serde(with = "serde_bytes")]
-    k_barrier: &'a [u8; 32],
-}
-
-#[derive(Serialize)]
-struct MsgKeySaltArgs<'a> {
-    #[serde(with = "serde_bytes")]
-    we_epoch_id: &'a [u8; 32],
-    fs_ec: u64,
-    #[serde(with = "serde_bytes")]
-    sender_leaf: &'a [u8; 32],
-    msg_index: u64,
-}
-
-#[derive(Serialize)]
-struct MsgNonceArgs<'a> {
-    #[serde(with = "serde_bytes")]
-    gid: &'a [u8; 32],
-    #[serde(with = "serde_bytes")]
-    we_epoch_id: &'a [u8; 32],
-    fs_ec: u64,
-    #[serde(with = "serde_bytes")]
-    xk_hash: &'a [u8; 32],
-    #[serde(with = "serde_bytes")]
-    e_k: &'a [u8; 32],
-    barrier_version: u64,
-    #[serde(with = "serde_bytes")]
-    sender_leaf: &'a [u8; 32],
-    msg_index: u64,
-}
-
-#[derive(Serialize)]
-struct MsgAad<'a>(
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    u64,
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    u64,
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    u64,
-);
-
-#[derive(Serialize)]
-struct MsgReplayTupleArgs<'a> {
-    #[serde(with = "serde_bytes")]
-    gid: &'a [u8; 32],
-    #[serde(with = "serde_bytes")]
-    we_epoch_id: &'a [u8; 32],
-    fs_ec: u64,
-    #[serde(with = "serde_bytes")]
-    xk_hash: &'a [u8; 32],
-    barrier_version: u64,
-    #[serde(with = "serde_bytes")]
-    sender_leaf: &'a [u8; 32],
-}
-
-#[derive(Serialize, Deserialize)]
-struct PayloadEnvelopeV2(String, u64, #[serde(with = "serde_bytes")] Vec<u8>);
-
-fn derive_msg_key_material(context: &MessageCryptoContext<'_>, msg_index: u64) -> Result<[u8; 32]> {
-    let epoch_salt = h_l(
-        "fs/msg/epoch_salt",
-        &MsgEpochSaltArgs {
-            we_epoch_id: context.we_epoch_id,
-            fs_ec: context.fs_ec,
-            xk_hash: context.xk_hash,
-            e_k: context.epoch_key,
-            barrier_version: context.barrier_version,
-            sender_leaf: context.sender_leaf,
-            k_barrier: context.k_barrier,
-        },
-    )
-    .context("derive fs/msg/epoch_salt")?;
-    let k_msg_epoch = hkdf_blake3(&epoch_salt, context.epoch_key, PAYLOAD_MSG_EPOCH_INFO);
-
-    let key_salt = h_l(
-        "fs/msg/key_salt",
-        &MsgKeySaltArgs {
-            we_epoch_id: context.we_epoch_id,
-            fs_ec: context.fs_ec,
-            sender_leaf: context.sender_leaf,
-            msg_index,
-        },
-    )
-    .context("derive fs/msg/key_salt")?;
-    Ok(hkdf_blake3(&key_salt, &k_msg_epoch, PAYLOAD_MSG_KEY_INFO))
-}
-
-fn derive_msg_nonce(context: &MessageCryptoContext<'_>, msg_index: u64) -> Result<[u8; 12]> {
-    let nonce_bytes = h_l(
-        "fs/msg/nonce",
-        &MsgNonceArgs {
-            gid: context.gid,
-            we_epoch_id: context.we_epoch_id,
-            fs_ec: context.fs_ec,
-            xk_hash: context.xk_hash,
-            e_k: context.epoch_key,
-            barrier_version: context.barrier_version,
-            sender_leaf: context.sender_leaf,
-            msg_index,
-        },
-    )
-    .context("derive fs/msg/nonce")?;
-    let mut nonce = [0u8; 12];
-    nonce.copy_from_slice(&nonce_bytes[..12]);
-    Ok(nonce)
-}
-
-fn message_aad(context: &MessageCryptoContext<'_>, msg_index: u64) -> Result<Vec<u8>> {
-    to_cbor_vec(&MsgAad(
-        context.gid,
-        context.we_epoch_id,
-        context.fs_ec,
-        context.xk_hash,
-        context.epoch_key,
-        context.barrier_version,
-        context.sender_leaf,
-        msg_index,
-    ))
-    .context("encode message aad")
-}
-
-fn derive_msg_replay_tuple_tag(context: &MessageCryptoContext<'_>) -> Result<[u8; 32]> {
-    h_l(
-        "fs/msg/replay/tuple",
-        &MsgReplayTupleArgs {
-            gid: context.gid,
-            we_epoch_id: context.we_epoch_id,
-            fs_ec: context.fs_ec,
-            xk_hash: context.xk_hash,
-            barrier_version: context.barrier_version,
-            sender_leaf: context.sender_leaf,
-        },
-    )
-    .context("derive fs/msg/replay/tuple")
-}
-
-fn encrypt_message_v2(
-    plaintext: &[u8],
-    context: &MessageCryptoContext<'_>,
-    msg_index: u64,
-) -> Result<Vec<u8>> {
-    use chacha20poly1305::{
-        ChaCha20Poly1305,
-        aead::{Aead, KeyInit, Payload},
-    };
-
-    let key = derive_msg_key_material(context, msg_index)?;
-    let nonce = derive_msg_nonce(context, msg_index)?;
-    let aad = message_aad(context, msg_index)?;
-    let cipher = ChaCha20Poly1305::new((&key).into());
-    let ct_payload = cipher
-        .encrypt(
-            (&nonce).into(),
-            Payload {
-                msg: plaintext,
-                aad: &aad,
-            },
-        )
-        .map_err(|e| anyhow!("encryption failed: {}", e))?;
-
-    to_cbor_vec(&PayloadEnvelopeV2(
-        PAYLOAD_ENVELOPE_V2_MODE.to_string(),
-        msg_index,
-        ct_payload,
-    ))
-    .context("encode payload envelope v2")
-}
-
-fn decrypt_message_v2_with_index(
-    data: &[u8],
-    context: &MessageCryptoContext<'_>,
-) -> Result<(u64, Vec<u8>)> {
-    use chacha20poly1305::{
-        ChaCha20Poly1305,
-        aead::{Aead, KeyInit, Payload},
-    };
-
-    let envelope: PayloadEnvelopeV2 =
-        ciborium::de::from_reader(data).context("decode payload envelope v2")?;
-    let canonical_bytes = to_cbor_vec(&envelope).context("re-encode payload envelope v2")?;
-    if canonical_bytes.as_slice() != data {
-        return Err(anyhow!("payload envelope v2 is not deterministic CBOR"));
-    }
-    if envelope.0 != PAYLOAD_ENVELOPE_V2_MODE {
-        return Err(anyhow!("unexpected payload envelope mode"));
-    }
-    let msg_index = envelope.1;
-    let ct_payload = envelope.2;
-    let key = derive_msg_key_material(context, msg_index)?;
-    let nonce = derive_msg_nonce(context, msg_index)?;
-    let aad = message_aad(context, msg_index)?;
-    let cipher = ChaCha20Poly1305::new((&key).into());
-    let plaintext = cipher
-        .decrypt(
-            (&nonce).into(),
-            Payload {
-                msg: &ct_payload,
-                aad: &aad,
-            },
-        )
-        .map_err(|e| anyhow!("decryption failed: {}", e))?;
-    Ok((msg_index, plaintext))
-}
-
-#[cfg(test)]
-fn decrypt_message_v2(data: &[u8], context: &MessageCryptoContext<'_>) -> Result<Vec<u8>> {
-    decrypt_message_v2_with_index(data, context).map(|(_, plaintext)| plaintext)
 }
 
 #[cfg(test)]

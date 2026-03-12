@@ -1,3 +1,5 @@
+mod message_crypto;
+
 #[cfg(not(feature = "native-app"))]
 fn main() {
     eprintln!("cityg-gui native binary is disabled in this build.");

@@ -10,7 +10,7 @@ native-app = ["dep:gpui", "dep:gpui-macros"]
 debug-api = ["cityg-api-client/debug-api"]
 
 [dependencies]
-gpui = { version = "0.2.2", optional = true }
+gpui = { version = "0.2.2", optional = true, features = ["test-support"] }
 gpui-macros = { version = "0.2.2", optional = true }
 cityg-api-client = { path = "../cityg-api-client" }
 cityg-client = { path = "../cityg-client" }
@@ -47,7 +47,6 @@ zeroize = "1"
 core-text = "=21.0.0"
 
 [dev-dependencies]
-gpui = { version = "0.2.2", features = ["test-support"] }
 tempfile = "3"
 cityg-api = { path = "../cityg-api" }
 
