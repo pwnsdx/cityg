@@ -3415,6 +3415,70 @@ mod tests {
     }
 
     #[test]
+    fn kbroad_state_persists_historical_barrier_tree_snapshots() -> Result<(), CityGError> {
+        let _serial = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("kbroad-history.journal");
+        let gid = cityg_client::demo::DEMO_GID;
+        let generated = build_genesis_member_bundle(0x73)?;
+        let historical_hash: [u8; 32];
+        let historical_entries: Vec<Vec<u8>>;
+        let current_hash: [u8; 32];
+        let current_entries: Vec<Vec<u8>>;
+
+        {
+            let mut server = demo_server_with_journal(&journal_path);
+            server.accept_epoch(&generated.bundle)?;
+            {
+                let group = server
+                    .roster
+                    .groups
+                    .get(gid.as_slice())
+                    .ok_or(CityGError::InvalidInput("group not found"))?;
+                historical_hash = group.kem_tree_hash_after;
+                historical_entries = group.barrier_pk_entries.clone();
+            }
+
+            let _accepted_refresh = accept_refresh_bundle_for_member(&mut server, &generated)?;
+            {
+                let group = server
+                    .roster
+                    .groups
+                    .get(gid.as_slice())
+                    .ok_or(CityGError::InvalidInput("group not found after refresh"))?;
+                current_hash = group.kem_tree_hash_after;
+                current_entries = group.barrier_pk_entries.clone();
+                assert_ne!(current_hash, historical_hash);
+            }
+
+            server.persist_kbroad_state()?;
+        }
+
+        std::fs::remove_file(&journal_path).ok();
+
+        let reloaded = demo_server_with_journal(&journal_path);
+        let historical_snapshot = reloaded.fetch_barrier_public_tree(&gid, &historical_hash)?;
+        let current_snapshot = reloaded.fetch_barrier_public_tree(&gid, &current_hash)?;
+        assert_eq!(historical_snapshot.kem_tree_hash_after, historical_hash);
+        assert_eq!(historical_snapshot.pk_entries, historical_entries);
+        assert_eq!(current_snapshot.kem_tree_hash_after, current_hash);
+        assert_eq!(current_snapshot.pk_entries, current_entries);
+
+        let history_len = reloaded
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("reloaded group missing"))?
+            .barrier_public_tree_history
+            .len();
+        assert!(
+            history_len >= 2,
+            "reloaded persisted state should retain historical committed snapshots"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn group_state_defaults_include_barrier_policy_bounds() -> Result<(), CityGError> {
         let mut server = CityGServer::new(ServerConfig::new());
         let gid = [0xD1; 32];
