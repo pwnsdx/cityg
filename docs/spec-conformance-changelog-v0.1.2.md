@@ -4,11 +4,12 @@ Last updated: 2026-03-13
 Scope: protocol/spec conformance and related hardening/performance work.
 
 ## Purpose
-This changelog provides PR-ready traceability from shipped commits to the normative sections in `/Users/admin/Desktop/Repositories/cityg/docs/specs.md`.
+This changelog provides PR-ready traceability from shipped commits to the normative sections in `docs/specs.md`.
 
 Note on versioning:
 - The implementation still advertises wire/API `profile_version = v0.1.2`.
 - Repository documentation after 2026-03-13 should be read as `v0.1.2` plus in-repo errata, not as a silent wire-format bump.
+- The canonical repository references for that errata set are `docs/specs.md` and this changelog, as of the repository revision being audited or released.
 
 ## Conformance and Security Milestones
 
@@ -46,9 +47,9 @@ Note on versioning:
 ## Benchmarks and Evidence
 
 - Benchmark note commit: `33f5cb8`  
-  Evidence path: `/Users/admin/Desktop/Repositories/cityg/docs/evidence/benchmarks/gui-msg-index-and-barrier-2026-02-22.md`
-- S14 manifest path: `/Users/admin/Desktop/Repositories/cityg/kat/kat-s14-conformance-manifest-v0.1.2.json`
-- Freeze-blockers errata manifest path: `/Users/admin/Desktop/Repositories/cityg/kat/kat-freeze-blockers-manifest-v0.1.2-errata.json`
+  Evidence path: `docs/evidence/benchmarks/gui-msg-index-and-barrier-2026-02-22.md`
+- S14 manifest path: `kat/kat-s14-conformance-manifest-v0.1.2.json`
+- Freeze-blockers errata manifest path: `kat/kat-freeze-blockers-manifest-v0.1.2-errata.json`
 
 ## Remaining Non-Blocking Item
 

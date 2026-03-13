@@ -8,7 +8,7 @@ Profile ID: tswe/msphf-we/fs-hybrid + prs-barrier (native; no legacy interop)
 ERRATA STATUS
 * The wire/API `profile_version` exposed by the current implementation remains `v0.1.2`.
 * This repository copy of the specification includes post-freeze normative errata adopted after the original `v0.1.2 -- final` text.
-* For commit-level traceability, see `/Users/admin/Desktop/Repositories/cityg/docs/spec-conformance-changelog-v0.1.2.md`.
+* For commit-level traceability, see `docs/spec-conformance-changelog-v0.1.2.md`.
 
 IMPORTANT (label supersession / no mixing)
 * All H_L label strings and HKDF info strings in THIS document are NORMATIVE for this profile version.
@@ -424,7 +424,7 @@ Any state used to enforce uniqueness or anti-replay for msg_index MUST be persis
 If uniqueness cannot be enforced, this profile MUST NOT be used.
 Receiver duplicate-rejection rule (normative, MUST):
 Define `tuple_tag` (normative):
-* `tuple_tag := H_L("fs/msg/replay/tuple", [gid, weid, t, xk_hash, header[176], sender_leaf_id])`
+* `tuple_tag := H_L("fs/msg/replay/tuple", [gid, weid, t, xk_hash, E_k, header[176], sender_leaf_id])`
 Receivers MUST derive this exact `tuple_tag` and MUST reject a payload if the pair `(tuple_tag, msg_index)` has already been accepted locally. Duplicate detection MUST occur before the payload is released to the application.
 
 S8.3 K_msg_epoch
@@ -1107,6 +1107,9 @@ On successful processing:
 * kem_tree_hash_after := BU.kem_tree_hash_after
 * pending_barrier_recovery := false
 * If header[178] == 1 (pcs_refresh), apply FS reseed per S6.6 using K_barrier_new at the same atomic activation point.
+Atomicity requirement (normative, MUST):
+* The entire successful activation above, together with all `dk_n/pkhash_n` updates from S11.13.5 and any PCS reseed of `K_fs`, MUST commit crash-safely as one logical transaction.
+* After restart, the client MUST observe either the complete pre-activation state or the complete post-activation state, never a mixture.
 
 S11.14 Updater local state management (normative; crash-safe; REQUIRED)
 This section specifies how the updater activates its own barrier_update locally. The updater MUST NOT use the Recover path (S11.13) for its own updates.

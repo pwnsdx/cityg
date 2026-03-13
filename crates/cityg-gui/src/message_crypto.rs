@@ -196,6 +196,8 @@ struct MsgReplayTupleArgs<'a> {
     fs_ec: u64,
     #[serde(with = "serde_bytes")]
     xk_hash: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    e_k: &'a [u8; 32],
     barrier_version: u64,
     #[serde(with = "serde_bytes")]
     sender_leaf: &'a [u8; 32],
@@ -275,6 +277,7 @@ pub(crate) fn derive_msg_replay_tuple_tag(context: &MessageCryptoContext<'_>) ->
             we_epoch_id: context.we_epoch_id,
             fs_ec: context.fs_ec,
             xk_hash: context.xk_hash,
+            e_k: context.epoch_key,
             barrier_version: context.barrier_version,
             sender_leaf: context.sender_leaf,
         },
@@ -529,6 +532,35 @@ mod tests {
         };
         let context_b = MessageCryptoContext {
             sender_leaf: &sender_leaf_b,
+            ..context_a
+        };
+        let tag_a = derive_msg_replay_tuple_tag(&context_a)?;
+        let tag_b = derive_msg_replay_tuple_tag(&context_b)?;
+        assert_ne!(tag_a, tag_b);
+        Ok(())
+    }
+
+    #[test]
+    fn derive_msg_replay_tuple_tag_changes_with_epoch_key() -> Result<()> {
+        let gid = [0x41u8; 32];
+        let we_epoch_id = [0x42u8; 32];
+        let xk_hash = [0x43u8; 32];
+        let epoch_key_a = [0x44u8; 32];
+        let epoch_key_b = [0x45u8; 32];
+        let k_barrier = [0x46u8; 32];
+        let sender_leaf = [0x47u8; 32];
+        let context_a = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec: 9,
+            barrier_version: 2,
+            sender_leaf: &sender_leaf,
+            epoch_key: &epoch_key_a,
+            k_barrier: &k_barrier,
+        };
+        let context_b = MessageCryptoContext {
+            epoch_key: &epoch_key_b,
             ..context_a
         };
         let tag_a = derive_msg_replay_tuple_tag(&context_a)?;
