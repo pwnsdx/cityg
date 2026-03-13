@@ -138,6 +138,7 @@ S3.1 Core identifiers (inputs)
 S3.2 Membership/SRX anchor roots (inputs)
 * header[110], header[111], header[112], header[113] : bstr32 roots (membership and revocation)
 * membership mapping: cover_leaf_index(device_pk) -> uint, committed by membership state
+* membership state also defines the current per-group membership leaf identifier `leaf_id(device_pk) -> bstr32` for each active device. This 32-byte `leaf_id` is distinct from `cover_leaf_index(device_pk)` and is the canonical `sender_leaf_id` used in S8.
 
 S3.3 Interfaces REQUIRED by this profile (implementability requirement)
 The membership/SRX/barrier subsystems MUST provide to any authenticated group member:
@@ -150,6 +151,12 @@ B) ResolveJoinsSince(prev_barrier_version) -> list of JoinLeafRecord
 JoinLeafRecord = [device_pk:bstr, leaf_index:uint, ek_leaf:bstr]
 Returns join leaf allocations and leaf public keys that became active since prev_barrier_version.
 This enumeration MUST be integrity-protected by checkpoint history / membership state.
+Output constraints (normative):
+* entries MUST be strictly sorted by increasing `leaf_index`,
+* `leaf_index` values MUST be unique,
+* `leaf_index` MUST be `< N_max`,
+* `ek_leaf` MUST be exactly 1184 bytes,
+* if membership history is inconsistent (duplicate active allocation, out-of-range index, conflicting `ek_leaf` for the same activation), the implementation MUST fail closed and MUST NOT construct or accept a dependent `barrier_update`.
 
 C) FetchBarrierPublicTree(kem_tree_hash_after) -> pk_entries
 pk_entries is an array of length (2*N_max-1) of bstr, where each entry is either empty bstr (BOTTOM) or ML-KEM ek (1184 bytes).
@@ -386,9 +393,10 @@ PayloadEnvelope = [
   ct_payload : bstr
 ]
 Define sender_leaf_id (normative):
-* sender_leaf_id is the authenticated 32-byte cover leaf identifier supplied by the outer message transport / authenticated sender context for this payload.
+* sender_leaf_id is the authenticated 32-byte current membership `leaf_id` of the sending device for this group, supplied by the outer message transport / authenticated sender context for this payload. It is NOT `cover_leaf_index(device_pk)`.
 * The same sender_leaf_id MUST be supplied to both the encrypt and decrypt paths for S8.3/S8.4 derivations.
 * If sender_leaf_id is missing, malformed, or not exactly 32 bytes, the implementation MUST fail closed and MUST NOT attempt payload decryption.
+* If the surrounding transport/authenticated context also identifies the sender device (for example via `author_device_pk` or an equivalent membership record), implementations MUST verify that `sender_leaf_id` corresponds to that device's current membership `leaf_id`; mismatch -> drop payload.
 Wire encoding requirement (normative, MUST):
 * PayloadEnvelope MUST be encoded as CBOR_det array of length exactly 3.
 * The first element MUST be the CBOR text string exactly equal to "fs-hybrid-msg-v2".
@@ -403,6 +411,8 @@ Implementations MUST enforce either:
 Crash-safety requirement (normative, MUST):
 Any state used to enforce uniqueness or anti-replay for msg_index MUST be persisted durably (crash-safe) before allowing encryption under the tuple to proceed. If crash-safe persistence is not available, this profile MUST NOT be used.
 If uniqueness cannot be enforced, this profile MUST NOT be used.
+Receiver duplicate-rejection rule (normative, MUST):
+Receivers MUST derive the same sender-scoped tuple tag used for payload decryption context and MUST reject a payload if the pair `(tuple_tag, msg_index)` has already been accepted locally. Duplicate detection MUST occur before the payload is released to the application.
 
 S8.3 K_msg_epoch
 K_msg_epoch := HKDF-BLAKE3(
@@ -428,6 +438,9 @@ payload_plaintext := AEAD_Open(key=K_msg, nonce=nonce_msg, aad=aad_msg, ct=ct_pa
 
 S8.5 No-fallback rule (CRITICAL)
 Receivers MUST derive K_msg_epoch only with the barrier_version authenticated in the anchor (header[176]) and MUST NOT try alternate cached K_barrier values to "make decryption succeed".
+
+Delayed-delivery rule (normative)
+This profile defines payload decryption only for the receiver's current authenticated `(barrier_version, K_barrier)` state. Payloads bound to an older barrier_version are stale and MUST be discarded. Implementations MUST NOT retain or probe cached old `K_barrier` values unless a future profile explicitly standardizes old-version payload support.
 
 S9. PROOFS, BIND TUPLES, AND SRX (NORMATIVE INTERFACE)
 
@@ -737,6 +750,8 @@ RevokedLeafSet := ResolveRevokedLeaves(revocation_roots_hash)
 JoinSet        := ResolveJoinsSince(prev_barrier_version)
 Genesis convention:
 When barrier_initialized == false, prev_barrier_version MUST be treated as 0 for JoinSet enumeration, and ResolveJoinsSince(0) MUST return the complete active leaf set for genesis.
+Leaf-allocation invariant (normative):
+* cover leaf indices are single-assignment for the lifetime of `gid` and MUST NOT be reused after revocation.
 snapshot_base:
 * genesis: all-blank tree (every pk_i := empty bstr for all 2*N_max-1 nodes)
 * non-genesis: current committed pk_entries
@@ -862,6 +877,8 @@ S11.11 Active-server resistance (normative; 960.9 wired)
 
 S11.11.1 Updater MUST authenticate snapshot_base (CRITICAL)
 Before constructing any barrier_update, the updater MUST:
+* already hold FULL-verified current barrier state at its locally stored current `barrier_version`.
+* A client whose current `kem_tree_hash_after` was learned only via recover-only processing MUST first re-establish FULL verification at the current version before originating any barrier_update or pcs_refresh merge.
 * Let H_prev := updater's locally stored kem_tree_hash_after for current barrier_version.
 * Genesis special case:
   * if barrier_initialized == false (genesis updater), H_prev is the TreeHash(root_node) of the all-blank tree of size N_max.
@@ -893,6 +910,8 @@ A client that cannot fetch/verify snapshot_base MAY still attempt recovery (uniq
 * enforce unique-match fail-closed semantics (S11.13.1),
 * enforce deterministic storage rule (S11.13.5),
 * treat barrier_update as untrusted for public-tree correctness beyond its local recovery.
+Additional restriction (normative):
+* A recover-only client MUST NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges until it has obtained FULL verification of the current public tree at the current `barrier_version`.
 
 S11.12 Server-side validation of barrier_update (normative; MUST)
 
@@ -1006,6 +1025,14 @@ Clients MUST enforce:
 * Require BU.tree_size == N_max.
 * Require BU.barrier_version == header[176].
 * Require BU.revocation_roots_hash == revocation_roots_hash (computed per S11.1).
+* Local version adjacency:
+  * allow genesis-local case only if `(local barrier_version == 0 AND BU.prev_barrier_version == 0 AND BU.barrier_version == 0)`,
+  * otherwise require `BU.prev_barrier_version == local barrier_version` AND `BU.barrier_version == local barrier_version + 1`.
+* Local barrier_update_reason mirror:
+  * if local `revocation_roots_hash == BU.revocation_roots_hash`, then `header[178] MUST equal 1`,
+  * if local `revocation_roots_hash != BU.revocation_roots_hash`, then `header[178] MUST equal 0`,
+  * except for the genesis-local case above, where `header[178] MUST equal 0`.
+* Clients MUST reject stale, duplicate, or gap barrier updates that do not satisfy the local version-adjacency rules above.
 Failure -> reject barrier_update locally with 960.7.
 
 S11.13.4 Recover derivation (normative)
@@ -1099,6 +1126,7 @@ S11.14.2 Acceptance correlation + activation (MUST)
 Upon observing acceptance of the merge carrying this barrier_update:
 * Compute accepted_digest := H_L("barrier/update/digest", [accepted raw header[175] bytes]).
 * Require accepted_digest == pending_barrier_update_digest.
+* Require the observed accepted `barrier_version` to equal `pending_barrier_version`.
 * If match: activate -- update local state:
   * barrier_version := pending_barrier_version
   * K_barrier := pending_K_barrier_new
@@ -1123,6 +1151,17 @@ On restart, the updater MUST check for pending_* state:
 
 S12. JOIN PROVISIONING REQUIREMENTS (NORMATIVE)
 
+S12.0 Genesis provisioning artifact (normative)
+Before the first accepted MERGE when `barrier_initialized == false`, the deployment MUST establish the initial active leaf set as a genesis provisioning artifact. This artifact is the source consumed by `ResolveJoinsSince(0)` in S11.6.
+Requirements:
+* it MUST contain the complete initial active set,
+* each entry MUST bind exactly one active device to exactly one `leaf_index` and one `ek_leaf`,
+* entries MUST be strictly sorted by increasing `leaf_index`,
+* `leaf_index` values MUST be unique and `< N_max`,
+* `ek_leaf` MUST be exactly 1184 bytes for every entry,
+* the artifact MUST be authenticated and persisted before genesis MERGE acceptance.
+If the genesis provisioning artifact is absent, incomplete, or inconsistent, the server MUST reject genesis MERGE processing and MUST NOT claim this profile is fully implemented.
+
 S12.1 Join anchor requirement
 Joiner generates (ek_leaf, dk_leaf) := ML-KEM-768.KeyGen() and publishes ek_leaf in header[177].
 Joiner MUST store dk_leaf locally and MUST also store pkhash_leaf := H_pk(ek_leaf) locally.
@@ -1139,8 +1178,8 @@ Barrier required fields:
 * pcs_refresh_min_delta_group_ec (uint; >=1)
 * pcs_refresh_slot_width_ec (uint; >=1)
 FS-hybrid required fields:
-* initial K_fs (bstr32) and initial fs_ec (uint) -- or a derivation seed sufficient to compute them
-  - deployment option: if provisioning omits `initial K_fs`, the joiner MAY locally sample fresh `K_fs` (32 bytes, CSPRNG) at join completion and MUST set `fs_ec` from the accepted join anchor (`header[141]`).
+* initial K_fs (bstr32) and initial fs_ec (uint) -- or a derivation seed sufficient to deterministically compute the same initial `K_fs` and `fs_ec`
+* Joiners MUST NOT locally sample an unrelated fresh `K_fs` for an already-existing group, because PCS reseed in S6.6 requires all honest clients to evolve from the same pre-refresh `K_fs`.
 * group fs_epoch_base_ts (T_base; uint64)
 * fs_policy_version (uint)
 * any suite identifiers required to verify proofs (Smallwood/VRF/SRX profiles)
@@ -1151,6 +1190,7 @@ While in `pending_barrier_recovery`:
 * The joiner CANNOT encrypt outgoing payload messages (`SendParams` MUST be suspended or buffered).
 * The joiner CANNOT decrypt incoming payload messages encoded with `K_barrier` (or subsequent epochs).
 * The joiner MUST process any observed `barrier_update` messages (S11.13.4).
+* The joiner MUST NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges until `pending_barrier_recovery` has been cleared by successful FULL-checked recovery.
 When the joiner successfully processes a `barrier_update` via S11.13 and derives `K_barrier_new` from the unique matching NodeCiphertext for its own path, it clears `pending_barrier_recovery` and proceeds with normal operation.
 
 S13. ERROR CODES (NORMATIVE)

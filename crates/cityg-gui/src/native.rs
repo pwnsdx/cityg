@@ -701,6 +701,20 @@ async fn full_chain_check_barrier_update(
     let n_max = session.barrier_state.n_max.max(1);
     let parsed = parse_barrier_update_for_recover(raw_update, n_max, max_barrier_update_bytes)
         .map_err(|err| anyhow!("barrier full chain-check prevalidation failed (960.7): {err}"))?;
+    let local_barrier_version = session.barrier_state.barrier_version;
+    let barrier_reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON).ok_or_else(|| {
+        anyhow!("barrier full chain-check prevalidation failed (960.7): missing barrier_update_reason")
+    })?;
+    let valid_local_progression = (parsed.prev_barrier_version == 0
+        && parsed.barrier_version == 0
+        && local_barrier_version == 0)
+        || (parsed.prev_barrier_version == local_barrier_version
+            && parsed.barrier_version == local_barrier_version.saturating_add(1));
+    if !valid_local_progression {
+        return Err(anyhow!(
+            "barrier full chain-check prevalidation failed (960.7): local barrier version progression mismatch"
+        ));
+    }
 
     let h_prev = session.barrier_state.kem_tree_hash_after;
     let snapshot_prev = client
@@ -729,6 +743,24 @@ async fn full_chain_check_barrier_update(
         return Err(anyhow!(
             "barrier full chain-check prevalidation failed (960.7): revocation_roots_hash mismatch"
         ));
+    }
+    let local_revocation_roots_hash =
+        compute_revocation_roots_hash(&session.revoked_since_root, &session.revoked_root)?;
+    let genesis_local_case = parsed.prev_barrier_version == 0
+        && parsed.barrier_version == 0
+        && local_barrier_version == 0;
+    if !genesis_local_case {
+        if local_revocation_roots_hash == parsed.revocation_roots_hash {
+            if barrier_reason != 1 {
+                return Err(anyhow!(
+                    "barrier full chain-check prevalidation failed (960.7): local roots unchanged but barrier_update_reason != 1"
+                ));
+            }
+        } else if barrier_reason != 0 {
+            return Err(anyhow!(
+                "barrier full chain-check prevalidation failed (960.7): local roots changed but barrier_update_reason != 0"
+            ));
+        }
     }
 
     let join_records = client
@@ -897,6 +929,17 @@ fn try_recover_barrier_from_header(
     if !valid_progression {
         return Err(anyhow!("barrier version progression is invalid"));
     }
+    let local_barrier_version = session.barrier_state.barrier_version;
+    let valid_local_progression = (parsed.prev_barrier_version == 0
+        && parsed.barrier_version == 0
+        && local_barrier_version == 0)
+        || (parsed.prev_barrier_version == local_barrier_version
+            && parsed.barrier_version == local_barrier_version.saturating_add(1));
+    if !valid_local_progression {
+        return Err(anyhow!(
+            "barrier version progression does not match local barrier state"
+        ));
+    }
     if parsed.tree_size != n_max {
         return Err(anyhow!("barrier tree_size mismatch for local state"));
     }
@@ -911,6 +954,26 @@ fn try_recover_barrier_from_header(
     let expected_rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
     if parsed.revocation_roots_hash != expected_rrh {
         return Err(anyhow!("barrier revocation_roots_hash mismatch"));
+    }
+    let local_rrh =
+        compute_revocation_roots_hash(&session.revoked_since_root, &session.revoked_root)?;
+    let reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON)
+        .ok_or_else(|| anyhow!("barrier_update_reason is missing or malformed"))?;
+    let genesis_local_case = parsed.prev_barrier_version == 0
+        && parsed.barrier_version == 0
+        && local_barrier_version == 0;
+    if !genesis_local_case {
+        if local_rrh == parsed.revocation_roots_hash {
+            if reason != 1 {
+                return Err(anyhow!(
+                    "barrier_update_reason must be pcs_refresh (1) when local roots are unchanged"
+                ));
+            }
+        } else if reason != 0 {
+            return Err(anyhow!(
+                "barrier_update_reason must be revocation_or_bootstrap (0) when local roots changed"
+            ));
+        }
     }
 
     let author_matches = header_map
@@ -1189,7 +1252,9 @@ fn apply_pending_barrier_activation(
     }
 
     if let Some(digest) = accepted_digest {
-        if digest == pending.barrier_update_digest {
+        if digest == pending.barrier_update_digest
+            && observed_barrier_version == pending.barrier_version
+        {
             let BarrierPendingState {
                 barrier_version,
                 k_barrier_new,
@@ -6199,6 +6264,7 @@ struct LeaveRequest {
     k_fs_current: [u8; 32],
     we_epoch_id: [u8; 32],
     max_barrier_update_bytes: u64,
+    barrier_recovery_pending: bool,
 }
 
 #[derive(Clone)]
@@ -6235,6 +6301,7 @@ impl LeaveRequest {
             k_fs_current: session.forward_state.snapshot().k_fs,
             we_epoch_id: session.we_epoch_id,
             max_barrier_update_bytes: session.barrier_state.max_barrier_update_bytes,
+            barrier_recovery_pending: session.barrier_state.barrier_recovery_pending,
         }
     }
 }
@@ -8327,8 +8394,15 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         fs_epoch_commit,
         fs_dev_prev_commit,
         max_barrier_update_bytes: stored_max_barrier_update_bytes,
+        barrier_recovery_pending,
         ..
     } = request;
+
+    if barrier_recovery_pending {
+        return Err(anyhow!(
+            "cannot originate barrier updates while barrier recovery is pending; complete FULL barrier recovery first"
+        ));
+    }
 
     let client = new_api_client(&server_url);
     let mut kbroad_rotation_attempted = false;
@@ -8673,7 +8747,14 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
         k_fs_current,
         we_epoch_id,
         max_barrier_update_bytes: stored_max_barrier_update_bytes,
+        barrier_recovery_pending,
     } = request;
+
+    if barrier_recovery_pending {
+        return Err(anyhow!(
+            "cannot originate PCS refresh while barrier recovery is pending; complete FULL barrier recovery first"
+        ));
+    }
 
     let client = new_api_client(&server_url);
     let mut kbroad_rotation_attempted = false;
@@ -10536,6 +10617,37 @@ mod tests {
     }
 
     #[test]
+    fn pending_barrier_activation_does_not_activate_on_digest_match_with_newer_observed_version()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = build_test_session(0xB4, "http://127.0.0.1:9", "room-b3", "bob")?;
+        let digest = [0x31; 32];
+        session.barrier_state.pending = Some(BarrierPendingState {
+            barrier_version: 7,
+            revocation_roots_hash: [0x41; 32],
+            kem_tree_hash_after: [0x51; 32],
+            k_barrier_new: Zeroizing::new([0x61; 32]),
+            k_fs_after_pcs: Some(Zeroizing::new([0x71; 32])),
+            barrier_update_reason: Some(1),
+            barrier_update_digest: digest,
+            on_path_key_material: BTreeMap::new(),
+        });
+
+        let changed = apply_pending_barrier_activation(&mut session, 8, Some(digest))?;
+        assert!(changed);
+        assert!(session.barrier_state.pending.is_none());
+        assert_eq!(
+            session.barrier_state.barrier_version, 0,
+            "newer observed version must not activate older pending state"
+        );
+        assert_eq!(
+            session.forward_state.snapshot().k_fs,
+            [0xAAu8; 32],
+            "PCS reseed must not activate when observed version overtook pending state"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn extract_barrier_update_digest_uses_raw_bytes() -> Result<(), Box<dyn std::error::Error>> {
         let mut header = BTreeMap::new();
         let raw = vec![0x01, 0x02, 0x03, 0x04];
@@ -10730,6 +10842,8 @@ mod tests {
         let revoked_since_root = [0x31; 32];
         let revoked_root = [0x32; 32];
         let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+        session.revoked_since_root = revoked_since_root;
+        session.revoked_root = revoked_root;
 
         let source_node = 4u64;
         let target_node = 10u64;
@@ -10868,6 +10982,8 @@ mod tests {
         let revoked_since_root = [0x31; 32];
         let revoked_root = [0x32; 32];
         let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+        session.revoked_since_root = revoked_since_root;
+        session.revoked_root = revoked_root;
 
         let source_node = 4u64;
         let target_node = 10u64;
@@ -10992,6 +11108,8 @@ mod tests {
         let revoked_since_root = [0x31; 32];
         let revoked_root = [0x32; 32];
         let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+        session.revoked_since_root = revoked_since_root;
+        session.revoked_root = revoked_root;
 
         let source_node = 4u64;
         let target_node = 10u64;
@@ -11118,6 +11236,8 @@ mod tests {
         let revoked_since_root = [0x31; 32];
         let revoked_root = [0x32; 32];
         let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+        session.revoked_since_root = revoked_since_root;
+        session.revoked_root = revoked_root;
 
         let source_node = 4u64;
         let target_node = 10u64;
@@ -11206,6 +11326,68 @@ mod tests {
         assert!(
             recovered.is_none(),
             "pkhash mismatch must prevent barrier recovery"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn try_recover_barrier_from_header_rejects_reason_mismatch_for_local_roots()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = build_test_session(0xD50, "http://127.0.0.1:9", "room-h", "helen")?;
+        session.barrier_state.n_max = 8;
+        session.barrier_state.cover_leaf_index = 3;
+        session.barrier_state.barrier_version = 4;
+        session.barrier_state.kem_tree_hash_after = [0xAA; 32];
+
+        let revoked_since_root = [0x41; 32];
+        let revoked_root = [0x42; 32];
+        let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+        let new_public_keys = vec![
+            NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+            NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+            NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        ];
+        let update_bytes = to_cbor_vec(&BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            5,
+            4,
+            8,
+            rrh.to_vec(),
+            session.barrier_state.kem_tree_hash_after.to_vec(),
+            [0xBB; 32].to_vec(),
+            to_cbor_vec(&KemTreeCoverPayloadWire(
+                3,
+                vec![10, 4, 1, 0],
+                None,
+                Vec::new(),
+                new_public_keys,
+            ))?,
+        ))?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(update_bytes));
+        header.insert(
+            hdr::HDR_REVOKED_SINCE_ROOT,
+            Value::Bytes(revoked_since_root.to_vec()),
+        );
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+
+        let err = try_recover_barrier_from_header(
+            &session,
+            &header,
+            &session.we_epoch_id,
+            session.fs_ec,
+            DEFAULT_MAX_BARRIER_UPDATE_BYTES as usize,
+        )
+        .expect_err("local revocation roots mismatch must reject pcs_refresh reason");
+        assert!(
+            err.to_string()
+                .contains("barrier_update_reason must be revocation_or_bootstrap (0)"),
+            "unexpected error for reason mismatch: {err}"
         );
         Ok(())
     }
@@ -15527,6 +15709,42 @@ mod tests {
 
         handle.abort();
         let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_leave_rejects_while_barrier_recovery_is_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session =
+            build_test_session(0xC31, "http://127.0.0.1:9", "room-leave-guard", "alice")?;
+        session.barrier_state.barrier_recovery_pending = true;
+
+        let err = perform_leave(LeaveRequest::from_session(&session))
+            .await
+            .expect_err("leave should be blocked while barrier recovery is pending");
+        assert!(
+            err.to_string()
+                .contains("complete FULL barrier recovery first"),
+            "expected explicit recover-before-update guidance: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_pcs_refresh_rejects_while_barrier_recovery_is_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session =
+            build_test_session(0xC32, "http://127.0.0.1:9", "room-refresh-guard", "alice")?;
+        session.barrier_state.barrier_recovery_pending = true;
+
+        let err = perform_pcs_refresh(LeaveRequest::from_session(&session))
+            .await
+            .expect_err("pcs refresh should be blocked while barrier recovery is pending");
+        assert!(
+            err.to_string()
+                .contains("complete FULL barrier recovery first"),
+            "expected explicit recover-before-update guidance: {err}"
+        );
         Ok(())
     }
 
