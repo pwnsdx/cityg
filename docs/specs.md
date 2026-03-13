@@ -296,13 +296,19 @@ FS state:
 * optional tau_e cache bounded by policy
 
 Barrier secret state:
+* barrier_initialized : bool
 * barrier_version : uint
+* barrier_roots_hash : bstr32 -- covered revocation-roots baseline for the client's current authenticated barrier state
 * K_barrier : bstr32
 * kem_tree_hash_after : bstr32
 * dk_leaf for the client's barrier leaf (join-generated)
 * pkhash_leaf := H_pk(ek_leaf) for the client's barrier leaf (bstr32)
 * dk_n keys for internal nodes on the client's SelfPath (derived per S11.13.5)
 * pkhash_n := H_pk(ek_n) for each stored dk_n (bstr32)
+* pending_barrier_recovery : bool -- true for a newly joined client until it has successfully derived `K_barrier` via S11.13/S12.3
+
+Updater-local pending activation state:
+* If the client has published a local barrier_update that is not yet correlated/activated, it MUST persist the pending_* fields required by S11.14.1, including pending_barrier_version, pending_fs_ec, pending_revocation_roots_hash, pending_kem_tree_hash_after, pending_K_barrier_new, pending_barrier_update_reason, pending_K_fs_after_pcs (if any), pending_barrier_update_digest, and pending_on_path_key_material.
 
 Clients MUST maintain, for each stored dk_t (leaf or internal), a corresponding pkhash_t value such that pkhash_t == H_pk(ek_t), where ek_t is the public key paired with dk_t.
 
@@ -417,7 +423,9 @@ Crash-safety requirement (normative, MUST):
 Any state used to enforce uniqueness or anti-replay for msg_index MUST be persisted durably (crash-safe) before allowing encryption under the tuple to proceed. If crash-safe persistence is not available, this profile MUST NOT be used.
 If uniqueness cannot be enforced, this profile MUST NOT be used.
 Receiver duplicate-rejection rule (normative, MUST):
-Receivers MUST derive the same sender-scoped tuple tag used for payload decryption context and MUST reject a payload if the pair `(tuple_tag, msg_index)` has already been accepted locally. Duplicate detection MUST occur before the payload is released to the application.
+Define `tuple_tag` (normative):
+* `tuple_tag := H_L("fs/msg/replay/tuple", [gid, weid, t, xk_hash, header[176], sender_leaf_id])`
+Receivers MUST derive this exact `tuple_tag` and MUST reject a payload if the pair `(tuple_tag, msg_index)` has already been accepted locally. Duplicate detection MUST occur before the payload is released to the application.
 
 S8.3 K_msg_epoch
 K_msg_epoch := HKDF-BLAKE3(
@@ -1031,11 +1039,11 @@ Clients MUST enforce:
 * Require BU.barrier_version == header[176].
 * Require BU.revocation_roots_hash == revocation_roots_hash (computed per S11.1).
 * Local version adjacency:
-  * allow genesis-local case only if `(local barrier_version == 0 AND BU.prev_barrier_version == 0 AND BU.barrier_version == 0)`,
-  * otherwise require `BU.prev_barrier_version == local barrier_version` AND `BU.barrier_version == local barrier_version + 1`.
+  * allow genesis-local case only if `(local barrier_initialized == false AND BU.prev_barrier_version == 0 AND BU.barrier_version == 0)`,
+  * otherwise require `local barrier_initialized == true`, `BU.prev_barrier_version == local barrier_version`, and `BU.barrier_version == local barrier_version + 1`.
 * Local barrier_update_reason mirror:
-  * if local `revocation_roots_hash == BU.revocation_roots_hash`, then `header[178] MUST equal 1`,
-  * if local `revocation_roots_hash != BU.revocation_roots_hash`, then `header[178] MUST equal 0`,
+  * if local `barrier_roots_hash == BU.revocation_roots_hash`, then `header[178] MUST equal 1`,
+  * if local `barrier_roots_hash != BU.revocation_roots_hash`, then `header[178] MUST equal 0`,
   * except for the genesis-local case above, where `header[178] MUST equal 0`.
 * Clients MUST reject stale, duplicate, or gap barrier updates that do not satisfy the local version-adjacency rules above.
 Failure -> reject barrier_update locally with 960.7.
@@ -1092,9 +1100,12 @@ For each node n in (SuffixNodes INTERSECT ExpectedNodeSet):
 
 S11.13.7 State update (normative)
 On successful processing:
+* barrier_initialized := true
 * barrier_version     := v_new
+* barrier_roots_hash := BU.revocation_roots_hash
 * K_barrier           := K_barrier_new
 * kem_tree_hash_after := BU.kem_tree_hash_after
+* pending_barrier_recovery := false
 * If header[178] == 1 (pcs_refresh), apply FS reseed per S6.6 using K_barrier_new at the same atomic activation point.
 
 S11.14 Updater local state management (normative; crash-safe; REQUIRED)
@@ -1103,6 +1114,7 @@ This section specifies how the updater activates its own barrier_update locally.
 S11.14.1 Persist-before-publish (MUST)
 Before publishing/submitting any merge carrying header[175], the updater MUST persist durably (crash-safe):
 * pending_barrier_version = v_new
+* pending_fs_ec = header[141]
 * pending_revocation_roots_hash = revocation_roots_hash
 * pending_kem_tree_hash_after = kem_tree_hash_after /* BU.kem_tree_hash_after for the to-be-published barrier_update */
 * pending_K_barrier_new = K_barrier_new
@@ -1132,8 +1144,12 @@ Upon observing acceptance of the merge carrying this barrier_update:
 * Compute accepted_digest := H_L("barrier/update/digest", [accepted raw header[175] bytes]).
 * Require accepted_digest == pending_barrier_update_digest.
 * Require the observed accepted `barrier_version` to equal `pending_barrier_version`.
+* Require the observed accepted `header[141]` to equal `pending_fs_ec`.
+* Require the observed accepted `header[178]` to equal `pending_barrier_update_reason`.
 * If match: activate -- update local state:
+  * barrier_initialized := true
   * barrier_version := pending_barrier_version
+  * barrier_roots_hash := pending_revocation_roots_hash
   * K_barrier := pending_K_barrier_new
   * kem_tree_hash_after := pending_kem_tree_hash_after
   * If pending_barrier_update_reason == 1: K_fs := pending_K_fs_after_pcs
@@ -1174,8 +1190,10 @@ Joiner MUST store dk_leaf locally and MUST also store pkhash_leaf := H_pk(ek_lea
 S12.2 Provisioning to joiner
 Join provisioning MUST deliver to the joiner (authenticated, confidential as per base provisioning rules):
 Barrier required fields:
+* current barrier_initialized (bool) -- for joins into an already-existing group under this profile, this MUST be true
 * cover_leaf_index (uint)
 * current barrier_version (uint)
+* current barrier_roots_hash (bstr32), OR authenticated current revocation-root material sufficient to deterministically compute the same barrier_roots_hash before any local S11.13.3 checks are applied
 * current kem_tree_hash_after (bstr32)
 * N_max (uint)
 * max_barrier_update_bytes (uint)
@@ -1195,8 +1213,9 @@ While in `pending_barrier_recovery`:
 * The joiner CANNOT encrypt outgoing payload messages (`SendParams` MUST be suspended or buffered).
 * The joiner CANNOT decrypt incoming payload messages encoded with `K_barrier` (or subsequent epochs).
 * The joiner MUST process any observed `barrier_update` messages (S11.13.4).
-* The joiner MUST NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges until `pending_barrier_recovery` has been cleared by successful FULL-checked recovery.
-When the joiner successfully processes a `barrier_update` via S11.13 and derives `K_barrier_new` from the unique matching NodeCiphertext for its own path, it clears `pending_barrier_recovery` and proceeds with normal operation.
+* The joiner MUST NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges while `pending_barrier_recovery == true`.
+When the joiner successfully processes a `barrier_update` via S11.13 and derives `K_barrier_new` from the unique matching NodeCiphertext for its own path, it clears `pending_barrier_recovery` and may proceed with normal payload send/decrypt operation.
+If that current barrier state was learned only via recover-only processing (S11.11.3), the client MUST still NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges until it has obtained FULL verification of the current public tree at the current `barrier_version`.
 
 S13. ERROR CODES (NORMATIVE)
 
