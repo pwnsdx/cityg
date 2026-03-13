@@ -308,7 +308,7 @@ Barrier secret state:
 * pending_barrier_recovery : bool -- true for a newly joined client until it has successfully derived `K_barrier` via S11.13/S12.3
 
 Updater-local pending activation state:
-* If the client has published a local barrier_update that is not yet correlated/activated, it MUST persist the pending_* fields required by S11.14.1, including pending_barrier_version, pending_fs_ec, pending_revocation_roots_hash, pending_kem_tree_hash_after, pending_K_barrier_new, pending_barrier_update_reason, pending_K_fs_after_pcs (if any), pending_barrier_update_digest, and pending_on_path_key_material.
+* If the client has published a local barrier_update that is not yet correlated/activated, it MUST persist the pending_* fields required by S11.14.1, including pending_barrier_version, pending_we_epoch_id (or equivalent stable merge identifier), pending_fs_ec, pending_revocation_roots_hash, pending_kem_tree_hash_after, pending_K_barrier_new, pending_barrier_update_reason, pending_K_fs_after_pcs (if any), pending_barrier_update_digest, and pending_on_path_key_material.
 
 Clients MUST maintain, for each stored dk_t (leaf or internal), a corresponding pkhash_t value such that pkhash_t == H_pk(ek_t), where ek_t is the public key paired with dk_t.
 
@@ -1117,6 +1117,7 @@ This section specifies how the updater activates its own barrier_update locally.
 S11.14.1 Persist-before-publish (MUST)
 Before publishing/submitting any merge carrying header[175], the updater MUST persist durably (crash-safe):
 * pending_barrier_version = v_new
+* pending_we_epoch_id = the to-be-published `bundle.we_epoch_id`, or an equivalent stable identifier sufficient for authenticated acceptance-history lookup of this specific merge
 * pending_fs_ec = header[141]
 * pending_revocation_roots_hash = revocation_roots_hash
 * pending_kem_tree_hash_after = kem_tree_hash_after /* BU.kem_tree_hash_after for the to-be-published barrier_update */
@@ -1164,13 +1165,15 @@ Upon observing acceptance of the merge carrying this barrier_update:
 
 S11.14.3 Pending state cleanup (MUST)
 * After successful acceptance correlation and activation, updater MUST delete/clear all pending_* state.
-* If the updater observes barrier_version advanced past v_new without acceptance correlation for its pending digest (another barrier_update won), the updater MUST discard pending_* state and MAY retry with fresh Rekey.
+* The updater MUST NOT infer "lost race" solely from `current barrier_version > pending_barrier_version`.
+* The updater MUST discard pending_* state only when authenticated acceptance history is sufficient to determine that the specific pending merge identified by `(pending_barrier_version, pending_barrier_update_digest, pending_we_epoch_id or equivalent stable merge identifier)` was not accepted and a different committed update has superseded it.
 * If the merge carrying this barrier_update is not accepted within a deployment policy timeout, the updater SHOULD discard pending_* state and MAY retry with fresh Rekey (to avoid indefinite stale pending state).
 
 S11.14.4 Crash restart (normative)
 On restart, the updater MUST check for pending_* state:
-* If pending_barrier_update_digest is present and the corresponding merge has been accepted (verify by fetching current GroupState.barrier_version and comparing), apply acceptance correlation per S11.14.2.
-* If pending_barrier_update_digest is present but the merge has NOT been accepted and GroupState.barrier_version >= pending_barrier_version, another update won; discard pending_* state.
+* The updater MUST determine acceptance status by consulting authenticated anchor/checkpoint history sufficient to identify the specific pending merge, not merely by comparing against the current `GroupState.barrier_version`.
+* If pending_barrier_update_digest is present and authenticated history shows that the corresponding merge has been accepted, the updater MUST obtain the accepted fields required by S11.14.2 and apply acceptance correlation, even if the current group `barrier_version` is already greater than `pending_barrier_version`.
+* If pending_barrier_update_digest is present and authenticated history shows that the specific pending merge was not accepted and has been superseded by another committed update, the updater MUST discard pending_* state.
 * If pending_barrier_update_digest is present but the merge status is unknown, the updater MAY wait for resolution up to deployment policy timeout, then discard.
 
 S12. JOIN PROVISIONING REQUIREMENTS (NORMATIVE)

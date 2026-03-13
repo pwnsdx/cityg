@@ -1233,6 +1233,13 @@ fn apply_forward_state_k_fs(session: &mut AppSession, k_fs: [u8; 32]) {
     session.forward_state = updated_state;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingBarrierHistoryOutcome {
+    Unchanged,
+    Activated([u8; 32]),
+    Discarded,
+}
+
 fn apply_pending_barrier_activation(
     session: &mut AppSession,
     observed_barrier_version: u64,
@@ -1278,23 +1285,75 @@ fn apply_pending_barrier_activation(
             session.barrier_state.barrier_recovery_pending = false;
             return Ok(true);
         }
-
-        warn!(
-            code = BARRIER_CODE_SNAPSHOT_AUTH_FAILURE,
-            pending_barrier_version = pending.barrier_version,
-            observed_barrier_version,
-            "pending barrier activation digest mismatch; dropping pending state"
-        );
-        session.barrier_state.pending = None;
-        return Ok(true);
-    }
-
-    if observed_barrier_version > pending.barrier_version {
-        session.barrier_state.pending = None;
-        return Ok(true);
     }
 
     Ok(false)
+}
+
+async fn apply_pending_barrier_activation_from_history(
+    client: &CitygApiClient,
+    session: &mut AppSession,
+    current_barrier_version: u64,
+) -> Result<PendingBarrierHistoryOutcome> {
+    let Some(pending) = session.barrier_state.pending.clone() else {
+        return Ok(PendingBarrierHistoryOutcome::Unchanged);
+    };
+
+    if pending.we_epoch_id == [0u8; 32] {
+        if current_barrier_version > pending.barrier_version {
+            warn!(
+                code = BARRIER_CODE_SNAPSHOT_AUTH_FAILURE,
+                pending_barrier_version = pending.barrier_version,
+                current_barrier_version,
+                "pending barrier state predates pending we_epoch_id persistence; discarding after newer barrier version observed"
+            );
+            session.barrier_state.pending = None;
+            return Ok(PendingBarrierHistoryOutcome::Discarded);
+        }
+        return Ok(PendingBarrierHistoryOutcome::Unchanged);
+    }
+
+    match client.get_bundle(&pending.we_epoch_id).await {
+        Ok(bundle_response) => {
+            let bundle = ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor).context(
+                "decode accepted pending bundle for barrier activation correlation (960.9)",
+            )?;
+            let accepted_digest = extract_barrier_update_digest(&bundle.header_map)?.ok_or_else(|| {
+                anyhow!(
+                    "pending barrier activation history returned bundle without barrier_update (960.9)"
+                )
+            })?;
+            let observed_barrier_version = header_u64(&bundle.header_map, hdr::HDR_BARRIER_VERSION)
+                .ok_or_else(|| {
+                    anyhow!("pending barrier activation history missing barrier_version (960.9)")
+                })?;
+            let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC);
+            let observed_barrier_update_reason =
+                header_u64(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON);
+            if apply_pending_barrier_activation(
+                session,
+                observed_barrier_version,
+                observed_fs_ec,
+                observed_barrier_update_reason,
+                Some(accepted_digest),
+            )? {
+                return Ok(PendingBarrierHistoryOutcome::Activated(bundle.we_epoch_id));
+            }
+            Err(anyhow!(
+                "pending barrier activation history mismatch (960.9): accepted bundle did not match persisted pending state"
+            ))
+        }
+        Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
+            if current_barrier_version > pending.barrier_version {
+                session.barrier_state.pending = None;
+                return Ok(PendingBarrierHistoryOutcome::Discarded);
+            }
+            Ok(PendingBarrierHistoryOutcome::Unchanged)
+        }
+        Err(err) => Err(anyhow!(
+            "pending barrier activation history lookup failed (960.9): {err}"
+        )),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2292,6 +2351,7 @@ impl Drop for BarrierNodeKeyMaterial {
 #[derive(Clone, Default)]
 struct BarrierPendingState {
     barrier_version: u64,
+    we_epoch_id: [u8; 32],
     fs_ec: u64,
     revocation_roots_hash: [u8; 32],
     kem_tree_hash_after: [u8; 32],
@@ -6644,6 +6704,8 @@ struct PersistedBarrierPendingState {
     #[serde(default)]
     barrier_version: u64,
     #[serde(default)]
+    we_epoch_id_hex: String,
+    #[serde(default)]
     fs_ec: u64,
     #[serde(default)]
     revocation_roots_hash_hex: String,
@@ -6723,6 +6785,7 @@ impl PersistedBarrierPendingState {
             .collect();
         Self {
             barrier_version: pending.barrier_version,
+            we_epoch_id_hex: hex_encode(pending.we_epoch_id),
             fs_ec: pending.fs_ec,
             revocation_roots_hash_hex: hex_encode(pending.revocation_roots_hash),
             kem_tree_hash_after_hex: hex_encode(pending.kem_tree_hash_after),
@@ -6758,6 +6821,10 @@ impl PersistedBarrierPendingState {
         };
         Ok(BarrierPendingState {
             barrier_version: self.barrier_version,
+            we_epoch_id: decode_hex32_or_zero(
+                "barrier_state.pending.we_epoch_id_hex",
+                &self.we_epoch_id_hex,
+            )?,
             fs_ec: self.fs_ec,
             revocation_roots_hash: decode_hex32_or_zero(
                 "barrier_state.pending.revocation_roots_hash_hex",
@@ -6869,7 +6936,7 @@ impl PersistedSession {
             .as_millis() as u64;
 
         Self {
-            version: 11, // Version 11: Persist client barrier initialization/roots state.
+            version: 12, // Version 12: Persist pending updater we_epoch_id for restart correlation.
             server_url: session.server_url.clone(),
             room_id: session.room_id.clone(),
             alias: session.alias.clone(),
@@ -6979,10 +7046,11 @@ impl PersistedSession {
             || version == 8
             || version == 9
             || version == 10
-            || version == 11)
+            || version == 11
+            || version == 12)
         {
             return Err(anyhow!(
-                "unsupported session file version {version} (expected 4, 5, 6, 7, 8, 9, 10, or 11 with ML-DSA-65 authentication)"
+                "unsupported session file version {version} (expected 4, 5, 6, 7, 8, 9, 10, 11, or 12 with ML-DSA-65 authentication)"
             ));
         }
 
@@ -8635,20 +8703,18 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         hdr::HDR_BARRIER_UPDATE_REASON,
         Value::Integer(Integer::from(0u64)),
     );
-    persist_pending_barrier_state_before_publish(
-        &persist_request,
-        BarrierPendingState {
-            barrier_version: next_barrier_version,
-            fs_ec,
-            revocation_roots_hash,
-            kem_tree_hash_after: barrier_update.kem_tree_hash_after,
-            k_barrier_new: barrier_update.k_barrier_new,
-            k_fs_after_pcs: None,
-            barrier_update_reason: Some(0),
-            barrier_update_digest: barrier_update.barrier_update_digest,
-            on_path_key_material: barrier_update.on_path_key_material.clone(),
-        },
-    )?;
+    let mut pending_barrier_state = BarrierPendingState {
+        barrier_version: next_barrier_version,
+        we_epoch_id: [0u8; 32],
+        fs_ec,
+        revocation_roots_hash,
+        kem_tree_hash_after: barrier_update.kem_tree_hash_after,
+        k_barrier_new: barrier_update.k_barrier_new,
+        k_fs_after_pcs: None,
+        barrier_update_reason: Some(0),
+        barrier_update_digest: barrier_update.barrier_update_digest,
+        on_path_key_material: barrier_update.on_path_key_material.clone(),
+    };
 
     let params = OrchestrationParams {
         msphf_crs_id: msphf_crs_id.as_str(),
@@ -8723,6 +8789,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
     bundle.hp_binding.seed_commit = seed_commit;
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
     bundle.we_epoch_id = derived_we_epoch_id;
+    pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
     bundle
         .header_map
         .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
@@ -8749,6 +8816,8 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
             .header_map
             .insert(hdr::HDR_PROOFS_COMMIT, Value::Bytes(recomputed));
     }
+
+    persist_pending_barrier_state_before_publish(&persist_request, pending_barrier_state)?;
 
     match client.refresh_pivot(&bundle).await {
         Ok(_) => {}
@@ -8994,20 +9063,18 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
         hdr::HDR_BARRIER_UPDATE_REASON,
         Value::Integer(Integer::from(1u64)),
     );
-    persist_pending_barrier_state_before_publish(
-        &persist_request,
-        BarrierPendingState {
-            barrier_version: next_barrier_version,
-            fs_ec,
-            revocation_roots_hash,
-            kem_tree_hash_after: barrier_update.kem_tree_hash_after,
-            k_barrier_new: barrier_update.k_barrier_new.clone(),
-            k_fs_after_pcs: Some(Zeroizing::new(k_fs_after_pcs)),
-            barrier_update_reason: Some(1),
-            barrier_update_digest: barrier_update.barrier_update_digest,
-            on_path_key_material: barrier_update.on_path_key_material.clone(),
-        },
-    )?;
+    let mut pending_barrier_state = BarrierPendingState {
+        barrier_version: next_barrier_version,
+        we_epoch_id: [0u8; 32],
+        fs_ec,
+        revocation_roots_hash,
+        kem_tree_hash_after: barrier_update.kem_tree_hash_after,
+        k_barrier_new: barrier_update.k_barrier_new.clone(),
+        k_fs_after_pcs: Some(Zeroizing::new(k_fs_after_pcs)),
+        barrier_update_reason: Some(1),
+        barrier_update_digest: barrier_update.barrier_update_digest,
+        on_path_key_material: barrier_update.on_path_key_material.clone(),
+    };
 
     let params = OrchestrationParams {
         msphf_crs_id: msphf_crs_id.as_str(),
@@ -9082,6 +9149,7 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
     bundle.hp_binding.seed_commit = seed_commit;
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
     bundle.we_epoch_id = derived_we_epoch_id;
+    pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
     bundle
         .header_map
         .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
@@ -9108,6 +9176,8 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
             .header_map
             .insert(hdr::HDR_PROOFS_COMMIT, Value::Bytes(recomputed));
     }
+
+    persist_pending_barrier_state_before_publish(&persist_request, pending_barrier_state)?;
 
     match client.refresh_pivot(&bundle).await {
         Ok(_) => {}
@@ -9620,27 +9690,36 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
             ticket_n_max
         ));
     }
+    let previous_we_epoch_id = session.we_epoch_id;
+    session.barrier_state.max_barrier_update_bytes = ticket_max_barrier_update_bytes_u64;
+    session.barrier_state.n_max = ticket_n_max;
+    session.barrier_state.cover_leaf_index = ticket.cover_leaf_index;
+    let pending_history_outcome = apply_pending_barrier_activation_from_history(
+        &client,
+        &mut session,
+        ticket.barrier_version,
+    )
+    .await?;
     let barrier_changed = session.barrier_state.barrier_version != ticket.barrier_version
         || session.barrier_state.kem_tree_hash_after != ticket_kem_tree_hash_after
         || session.barrier_state.max_barrier_update_bytes != ticket_max_barrier_update_bytes_u64
         || session.barrier_state.n_max != ticket_n_max
         || session.barrier_state.cover_leaf_index != ticket.cover_leaf_index;
-    session.barrier_state.barrier_version = ticket.barrier_version;
-    session.barrier_state.max_barrier_update_bytes = ticket_max_barrier_update_bytes_u64;
-    session.barrier_state.n_max = ticket_n_max;
-    session.barrier_state.cover_leaf_index = ticket.cover_leaf_index;
-    let pending_changed_without_bundle =
-        apply_pending_barrier_activation(&mut session, ticket.barrier_version, None, None, None)?;
 
     if let Some(pivot) = select_pivot_parity(&ticket.parities) {
         session.xk_hash = pivot.xk_hash;
     }
 
     if ticket.we_epoch_id == session.we_epoch_id {
+        session.barrier_state.barrier_version = ticket.barrier_version;
         session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
         return Ok(EpochSyncOutcome {
             session,
-            changed: barrier_changed || pending_changed_without_bundle,
+            changed: barrier_changed
+                || !matches!(
+                    pending_history_outcome,
+                    PendingBarrierHistoryOutcome::Unchanged
+                ),
         });
     }
 
@@ -9724,9 +9803,6 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     {
         session.fs_dev_prev_commit = commit;
     }
-    if let Some(barrier_version) = header_u64(&bundle.header_map, hdr::HDR_BARRIER_VERSION) {
-        session.barrier_state.barrier_version = barrier_version;
-    }
     if let Some(base_ts) = header_u64(&bundle.header_map, hdr::HDR_FS_EPOCH_BASE_TS) {
         session.fs_epoch_base_ts = base_ts;
     }
@@ -9748,22 +9824,21 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     }
 
     let accepted_digest = extract_barrier_update_digest(&bundle.header_map)?;
-    let pending_before = session.barrier_state.pending.clone();
     let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC);
     let observed_barrier_update_reason =
         header_u64(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON);
-    let _pending_changed_with_bundle = apply_pending_barrier_activation(
+    let pending_changed_with_bundle = apply_pending_barrier_activation(
         &mut session,
         ticket.barrier_version,
         observed_fs_ec,
         observed_barrier_update_reason,
         accepted_digest,
     )?;
-    let pending_applied = matches!(
-        (pending_before.as_ref(), accepted_digest),
-        (Some(pending), Some(digest))
-            if digest == pending.barrier_update_digest && ticket.barrier_version >= pending.barrier_version
-    );
+    let pending_applied = pending_changed_with_bundle
+        || matches!(
+            pending_history_outcome,
+            PendingBarrierHistoryOutcome::Activated(we_epoch_id) if we_epoch_id == bundle.we_epoch_id
+        );
 
     if !pending_applied {
         let has_barrier_update = matches!(
@@ -9834,6 +9909,7 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
             }
         }
     }
+    session.barrier_state.barrier_version = ticket.barrier_version;
     session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
 
     session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
@@ -9856,7 +9932,12 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
 
     Ok(EpochSyncOutcome {
         session,
-        changed: true,
+        changed: previous_we_epoch_id != ticket.we_epoch_id
+            || barrier_changed
+            || !matches!(
+                pending_history_outcome,
+                PendingBarrierHistoryOutcome::Unchanged
+            ),
     })
 }
 
@@ -10602,6 +10683,7 @@ mod tests {
         let digest = compute_barrier_update_digest(raw_update.as_slice())?;
         session.barrier_state.pending = Some(BarrierPendingState {
             barrier_version: 9,
+            we_epoch_id: [0x21; 32],
             fs_ec: 31,
             revocation_roots_hash: [0x33; 32],
             kem_tree_hash_after: [0x44; 32],
@@ -10635,11 +10717,12 @@ mod tests {
     }
 
     #[test]
-    fn pending_barrier_activation_drops_state_when_overtaken()
+    fn pending_barrier_activation_keeps_state_when_overtaken_without_exact_match()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut session = build_test_session(0xB22, "http://127.0.0.1:9", "room-b", "bob")?;
         session.barrier_state.pending = Some(BarrierPendingState {
             barrier_version: 5,
+            we_epoch_id: [0x41; 32],
             fs_ec: 31,
             revocation_roots_hash: [0x11; 32],
             kem_tree_hash_after: [0x22; 32],
@@ -10651,17 +10734,19 @@ mod tests {
         });
 
         let changed = apply_pending_barrier_activation(&mut session, 6, None, None, None)?;
-        assert!(changed);
-        assert!(session.barrier_state.pending.is_none());
+        assert!(!changed);
+        assert!(session.barrier_state.pending.is_some());
+        assert_eq!(session.barrier_state.barrier_version, 0);
         Ok(())
     }
 
     #[test]
-    fn pending_barrier_activation_drops_state_on_digest_mismatch()
+    fn pending_barrier_activation_keeps_state_on_digest_mismatch()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut session = build_test_session(0xB3, "http://127.0.0.1:9", "room-b2", "bob")?;
         session.barrier_state.pending = Some(BarrierPendingState {
             barrier_version: 7,
+            we_epoch_id: [0x42; 32],
             fs_ec: 31,
             revocation_roots_hash: [0x51; 32],
             kem_tree_hash_after: [0x61; 32],
@@ -10674,8 +10759,8 @@ mod tests {
 
         let changed =
             apply_pending_barrier_activation(&mut session, 7, Some(31), Some(1), Some([0x92; 32]))?;
-        assert!(changed);
-        assert!(session.barrier_state.pending.is_none());
+        assert!(!changed);
+        assert!(session.barrier_state.pending.is_some());
         assert_eq!(session.barrier_state.barrier_version, 0);
         assert_eq!(session.forward_state.snapshot().k_fs, [0xAAu8; 32]);
         Ok(())
@@ -10688,6 +10773,7 @@ mod tests {
         let digest = [0x31; 32];
         session.barrier_state.pending = Some(BarrierPendingState {
             barrier_version: 7,
+            we_epoch_id: [0x43; 32],
             fs_ec: 31,
             revocation_roots_hash: [0x41; 32],
             kem_tree_hash_after: [0x51; 32],
@@ -10700,8 +10786,8 @@ mod tests {
 
         let changed =
             apply_pending_barrier_activation(&mut session, 8, Some(31), Some(1), Some(digest))?;
-        assert!(changed);
-        assert!(session.barrier_state.pending.is_none());
+        assert!(!changed);
+        assert!(session.barrier_state.pending.is_some());
         assert_eq!(
             session.barrier_state.barrier_version, 0,
             "newer observed version must not activate older pending state"
@@ -10715,12 +10801,13 @@ mod tests {
     }
 
     #[test]
-    fn pending_barrier_activation_drops_state_on_fs_ec_mismatch()
+    fn pending_barrier_activation_keeps_state_on_fs_ec_mismatch()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut session = build_test_session(0xB5, "http://127.0.0.1:9", "room-b4", "bob")?;
         let digest = [0x41; 32];
         session.barrier_state.pending = Some(BarrierPendingState {
             barrier_version: 7,
+            we_epoch_id: [0x44; 32],
             fs_ec: 31,
             revocation_roots_hash: [0x51; 32],
             kem_tree_hash_after: [0x61; 32],
@@ -10733,8 +10820,8 @@ mod tests {
 
         let changed =
             apply_pending_barrier_activation(&mut session, 7, Some(32), Some(1), Some(digest))?;
-        assert!(changed);
-        assert!(session.barrier_state.pending.is_none());
+        assert!(!changed);
+        assert!(session.barrier_state.pending.is_some());
         assert_eq!(session.barrier_state.barrier_version, 0);
         assert_eq!(session.forward_state.snapshot().k_fs, [0xAAu8; 32]);
         Ok(())
@@ -14734,6 +14821,7 @@ mod tests {
             dk_nodes: barrier_dk_nodes,
             pending: Some(BarrierPendingState {
                 barrier_version: 6,
+                we_epoch_id: array(0x2A),
                 fs_ec: 18,
                 revocation_roots_hash: array(0x25),
                 kem_tree_hash_after: array(0x26),
@@ -14906,6 +14994,7 @@ mod tests {
             loaded_pending.barrier_version,
             expected_pending.barrier_version
         );
+        assert_eq!(loaded_pending.we_epoch_id, expected_pending.we_epoch_id);
         assert_eq!(loaded_pending.fs_ec, expected_pending.fs_ec);
         assert_eq!(
             loaded_pending.revocation_roots_hash,
@@ -15094,6 +15183,105 @@ mod tests {
         );
         assert_eq!(sync.session.we_epoch_id, alice.we_epoch_id);
         assert_eq!(sync.session.epoch_key, alice.epoch_key);
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_barrier_history_activation_succeeds_even_when_current_version_is_newer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x56u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        let mut alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        alice.barrier_state.barrier_recovery_pending = false;
+
+        persist_session(&alice)?;
+        perform_pcs_refresh(LeaveRequest::from_session(&alice)).await?;
+
+        let mut pending_alice = load_session_at(&alice.server_url, &alice.room_id)?
+            .ok_or_else(|| anyhow!("expected persisted alice session after pcs refresh"))?;
+        pending_alice.kbroad_secret = demo::kbroad_secret().to_vec();
+        let pending_state = pending_alice
+            .barrier_state
+            .pending
+            .as_ref()
+            .ok_or_else(|| anyhow!("expected pending barrier state after pcs refresh"))?;
+        let pending_snapshot = pending_state.clone();
+        let pending_we_epoch_id = pending_state.we_epoch_id;
+
+        let client = new_api_client(&server_url);
+        let outcome = apply_pending_barrier_activation_from_history(
+            &client,
+            &mut pending_alice,
+            pending_snapshot.barrier_version.saturating_add(1),
+        )
+        .await?;
+        assert_eq!(
+            outcome,
+            PendingBarrierHistoryOutcome::Activated(pending_we_epoch_id)
+        );
+        assert!(
+            pending_alice.barrier_state.pending.is_none(),
+            "pending updater state must clear after historical activation"
+        );
+        assert!(pending_alice.barrier_state.barrier_initialized);
+        assert_eq!(
+            pending_alice.barrier_state.barrier_version,
+            pending_snapshot.barrier_version
+        );
+        assert_eq!(
+            pending_alice.barrier_state.barrier_roots_hash,
+            pending_snapshot.revocation_roots_hash
+        );
+        assert_eq!(
+            pending_alice.barrier_state.kem_tree_hash_after,
+            pending_snapshot.kem_tree_hash_after
+        );
+        assert_eq!(
+            *pending_alice.barrier_state.k_barrier,
+            *pending_snapshot.k_barrier_new
+        );
+        if let Some(k_fs_after_pcs) = pending_snapshot.k_fs_after_pcs.as_ref() {
+            assert_eq!(
+                pending_alice.forward_state.snapshot().k_fs,
+                **k_fs_after_pcs
+            );
+        }
+        assert_eq!(
+            pending_alice.we_epoch_id, alice.we_epoch_id,
+            "historical activation should not itself rewrite the session head"
+        );
 
         handle.abort();
         let _ = handle.await;
