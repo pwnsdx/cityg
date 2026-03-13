@@ -11392,6 +11392,68 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn try_recover_barrier_from_header_rejects_local_barrier_version_mismatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = build_test_session(0xD51, "http://127.0.0.1:9", "room-i", "irene")?;
+        session.barrier_state.n_max = 8;
+        session.barrier_state.cover_leaf_index = 3;
+        session.barrier_state.barrier_version = 4;
+        session.barrier_state.kem_tree_hash_after = [0xAA; 32];
+
+        let revoked_since_root = [0x51; 32];
+        let revoked_root = [0x52; 32];
+        let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+        let new_public_keys = vec![
+            NewPublicKeyWire(0, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+            NewPublicKeyWire(1, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+            NewPublicKeyWire(4, KemPublicKey::as_bytes(&kyber768::keypair().0).to_vec()),
+        ];
+        let update_bytes = to_cbor_vec(&BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            6,
+            5,
+            8,
+            rrh.to_vec(),
+            session.barrier_state.kem_tree_hash_after.to_vec(),
+            [0xBB; 32].to_vec(),
+            to_cbor_vec(&KemTreeCoverPayloadWire(
+                3,
+                vec![10, 4, 1, 0],
+                None,
+                Vec::new(),
+                new_public_keys,
+            ))?,
+        ))?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(update_bytes));
+        header.insert(
+            hdr::HDR_REVOKED_SINCE_ROOT,
+            Value::Bytes(revoked_since_root.to_vec()),
+        );
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
+        );
+
+        let err = try_recover_barrier_from_header(
+            &session,
+            &header,
+            &session.we_epoch_id,
+            session.fs_ec,
+            DEFAULT_MAX_BARRIER_UPDATE_BYTES as usize,
+        )
+        .expect_err("local barrier version gaps must reject recover");
+        assert!(
+            err.to_string()
+                .contains("barrier version progression does not match local barrier state"),
+            "unexpected error for local barrier progression mismatch: {err}"
+        );
+        Ok(())
+    }
+
     struct EnvVarRestore {
         original: Option<String>,
     }

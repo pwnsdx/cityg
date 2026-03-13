@@ -37,6 +37,13 @@ deterministic implementation tests covering the same acceptance/rejection behavi
 This manifest is used as an auditable bridge between spec requirements and the
 current Rust conformance suite.
 
+# City-G Freeze-Blockers Errata Manifest
+
+`kat-freeze-blockers-manifest-v0.1.2-errata.json` tracks post-freeze `v0.1.2`
+errata that closed spec blockers without changing the advertised wire/API profile
+version. It maps each errata item to deterministic implementation tests so the
+repository can audit those fixes independently of the original S14 set.
+
 ## Plan → vectors workflow
 
 1. Edit `plan-rlwe-annex-k.json` if new scenarios are required. The schema matches the

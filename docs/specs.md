@@ -1,9 +1,14 @@
 CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER)
 
-Version: v0.1.2 -- final
+Version: v0.1.2 (repository errata through 2026-03-13)
 Date: 2026-02-11
-Status: Final (self-contained; freeze-ready)
+Status: Frozen wire/API profile with repository-tracked normative errata
 Profile ID: tswe/msphf-we/fs-hybrid + prs-barrier (native; no legacy interop)
+
+ERRATA STATUS
+* The wire/API `profile_version` exposed by the current implementation remains `v0.1.2`.
+* This repository copy of the specification includes post-freeze normative errata adopted after the original `v0.1.2 -- final` text.
+* For commit-level traceability, see `/Users/admin/Desktop/Repositories/cityg/docs/spec-conformance-changelog-v0.1.2.md`.
 
 IMPORTANT (label supersession / no mixing)
 * All H_L label strings and HKDF info strings in THIS document are NORMATIVE for this profile version.
@@ -1294,4 +1299,4 @@ The test suite MUST include a case where:
 * updater and non-updater client derive identical K_fs after applying S6.6 at activation,
 * after simulated crash/restart before activation completion, the implementation applies reseed at most once and converges to the same final K_fs.
 
-END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.2 -- final
+END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.2 (repository errata through 2026-03-13)

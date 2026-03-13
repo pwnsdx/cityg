@@ -1,10 +1,14 @@
 # CityG Spec Conformance Changelog (v0.1.2)
 
-Last updated: 2026-02-24  
+Last updated: 2026-03-13
 Scope: protocol/spec conformance and related hardening/performance work.
 
 ## Purpose
 This changelog provides PR-ready traceability from shipped commits to the normative sections in `/Users/admin/Desktop/Repositories/cityg/docs/specs.md`.
+
+Note on versioning:
+- The implementation still advertises wire/API `profile_version = v0.1.2`.
+- Repository documentation after 2026-03-13 should be read as `v0.1.2` plus in-repo errata, not as a silent wire-format bump.
 
 ## Conformance and Security Milestones
 
@@ -17,6 +21,11 @@ This changelog provides PR-ready traceability from shipped commits to the normat
 | 2026-02-23 | `e21bc67` | Switched GUI to randomized `msg_index` + replay-state persistence | S8.2 | Removes per-message durability bottleneck while keeping anti-replay semantics allowed by spec. |
 | 2026-02-23 | `c04bbfd` | Enforced barrier updater identity binding and update-size checks in server validation | S4.4, S11.12.1(F) | Closes acceptance gap for updater mismatch and oversized barrier updates. |
 | 2026-02-24 | `de7c0c1` | Surfaced freeze `9609` for barrier snapshot auth failures | S11.12.1(G/H), S13 | Distinguishes snapshot-auth failures from generic malformed cases in diagnostics. |
+| 2026-02-24 | `5474dec` | Migrated to server-blind `K_barrier` provisioning | S11.13, S11.14, S12.2, S12.3 | Removes server-side barrier secret role and makes joiners wait for Kem-Tree recovery instead of server provisioning. |
+| 2026-02-24 | `2faa66b` | Sender-scoped payload tuple and committed historical barrier tree fetch | S3.3(C), S8.2-S8.5, S10.3, S11.11.1-S11.11.2 | Eliminates cross-sender `msg_index` ambiguity and lets FULL clients fetch historical committed trees by hash. |
+| 2026-02-24 | `fedce86` | Added restart-persistence test for historical barrier tree snapshots | S3.3(C), S11.11.1, S11.11.2 | Verifies historical committed tree fetch survives persisted-state reloads. |
+| 2026-02-24 | `495eca8` | Added sender-scoped replay regression coverage | S8.2-S8.4 | Proves same `msg_index` from different senders does not collide in replay tracking or payload derivation. |
+| 2026-03-13 | `2f475a3` | Tightened barrier recovery sequencing and patched remaining freeze blockers in spec text | S3.2, S3.3(B), S8.1-S8.5, S11.6, S11.11.1, S11.11.3, S11.13.3, S11.14.2, S12.0, S12.2, S12.3 | Adds explicit genesis provisioning artifact, removes invalid joiner-local `K_fs` option, blocks recover-only clients from originating updates before FULL verification, and hardens local recovery sequencing/reason checks. |
 
 ## Hardening and Performance Follow-through
 
@@ -39,6 +48,7 @@ This changelog provides PR-ready traceability from shipped commits to the normat
 - Benchmark note commit: `33f5cb8`  
   Evidence path: `/Users/admin/Desktop/Repositories/cityg/docs/evidence/benchmarks/gui-msg-index-and-barrier-2026-02-22.md`
 - S14 manifest path: `/Users/admin/Desktop/Repositories/cityg/kat/kat-s14-conformance-manifest-v0.1.2.json`
+- Freeze-blockers errata manifest path: `/Users/admin/Desktop/Repositories/cityg/kat/kat-freeze-blockers-manifest-v0.1.2-errata.json`
 
 ## Remaining Non-Blocking Item
 
@@ -46,4 +56,3 @@ This changelog provides PR-ready traceability from shipped commits to the normat
    - Current behavior is already optimized versus earlier baselines.
    - A full incremental hash update algorithm (delta-apply over `new_public_keys`) is a broader refactor with performance upside at large scales.
    - No current spec conformance impact.
-
