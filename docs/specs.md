@@ -1166,17 +1166,17 @@ Upon observing acceptance of the merge carrying this barrier_update:
 S11.14.3 Pending state cleanup (MUST)
 * After successful acceptance correlation and activation, updater MUST delete/clear all pending_* state.
 * The updater MUST NOT infer "lost race" solely from `current barrier_version > pending_barrier_version`.
-* The updater MUST discard pending_* state only when authenticated acceptance history is sufficient to determine that the specific pending merge identified by `(pending_barrier_version, pending_barrier_update_digest, pending_we_epoch_id or equivalent stable merge identifier)` was not accepted and a different committed update has superseded it.
-* The updater MUST NOT discard pending_* state solely due to elapsed time unless the deployment provides an authenticated finality bound under which the specific pending merge can no longer become accepted after that bound.
-* If acceptance status remains unknown and such authenticated finality is unavailable, the updater MUST retain pending_* state or enter an explicit recovery-required state; it MUST NOT silently discard pending_* state and continue as though the pending merge had lost.
+* The updater MUST discard pending_* state only when authenticated evidence is sufficient to determine either:
+  * (a) that the specific pending merge identified by `(pending_barrier_version, pending_barrier_update_digest, pending_we_epoch_id or equivalent stable merge identifier)` was not accepted and has been superseded by a different committed update, or
+  * (b) that authenticated finality guarantees the specific pending merge can no longer become accepted.
+* If acceptance status remains unknown and authenticated evidence is insufficient to establish either (a) or (b), the updater MUST retain pending_* state or enter an explicit recovery-required state; it MUST NOT silently discard pending_* state and continue as though the pending merge had lost.
 
 S11.14.4 Crash restart (normative)
 On restart, the updater MUST check for pending_* state:
 * The updater MUST determine acceptance status by consulting authenticated anchor/checkpoint history sufficient to identify the specific pending merge, not merely by comparing against the current `GroupState.barrier_version`.
 * If pending_barrier_update_digest is present and authenticated history shows that the corresponding merge has been accepted, the updater MUST obtain the accepted fields required by S11.14.2 and apply acceptance correlation, even if the current group `barrier_version` is already greater than `pending_barrier_version`.
-* If pending_barrier_update_digest is present and authenticated history shows that the specific pending merge was not accepted and has been superseded by another committed update, the updater MUST discard pending_* state.
-* If pending_barrier_update_digest is present but the merge status remains unknown, the updater MUST NOT discard pending_* state solely because a timeout elapsed, unless authenticated finality semantics guarantee that the merge can no longer be accepted.
-* Otherwise, the updater MUST retain pending_* state or transition to an explicit recovery-required state until authenticated history resolves acceptance or non-acceptance.
+* If pending_barrier_update_digest is present and authenticated history shows either that the specific pending merge was not accepted and has been superseded by another committed update, or that authenticated finality guarantees it can no longer become accepted, the updater MUST discard pending_* state.
+* If pending_barrier_update_digest is present but authenticated history is still insufficient to establish acceptance or non-acceptance under the rule above, the updater MUST retain pending_* state or transition to an explicit recovery-required state until authenticated history resolves acceptance or non-acceptance.
 
 S12. JOIN PROVISIONING REQUIREMENTS (NORMATIVE)
 
