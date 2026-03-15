@@ -1,6 +1,6 @@
 # CityG Spec Conformance Changelog (v0.1.2)
 
-Last updated: 2026-03-13
+Last updated: 2026-03-15
 Scope: protocol/spec conformance and related hardening/performance work.
 
 ## Purpose
@@ -8,7 +8,7 @@ This changelog provides PR-ready traceability from shipped commits to the normat
 
 Note on versioning:
 - The implementation still advertises wire/API `profile_version = v0.1.2`.
-- Repository documentation after 2026-03-13 should be read as `v0.1.2` plus in-repo errata, not as a silent wire-format bump.
+- Repository documentation after 2026-03-15 should be read as `v0.1.2` plus in-repo errata, not as a silent wire-format bump.
 - The canonical repository references for that errata set are `docs/specs.md` and this changelog, as of the repository revision being audited or released.
 
 ## Conformance and Security Milestones
@@ -27,6 +27,9 @@ Note on versioning:
 | 2026-02-24 | `fedce86` | Added restart-persistence test for historical barrier tree snapshots | S3.3(C), S11.11.1, S11.11.2 | Verifies historical committed tree fetch survives persisted-state reloads. |
 | 2026-02-24 | `495eca8` | Added sender-scoped replay regression coverage | S8.2-S8.4 | Proves same `msg_index` from different senders does not collide in replay tracking or payload derivation. |
 | 2026-03-13 | `2f475a3` | Tightened barrier recovery sequencing and patched remaining freeze blockers in spec text | S3.2, S3.3(B), S8.1-S8.5, S11.6, S11.11.1, S11.11.3, S11.13.3, S11.14.2, S12.0, S12.2, S12.3 | Adds explicit genesis provisioning artifact, removes invalid joiner-local `K_fs` option, blocks recover-only clients from originating updates before FULL verification, and hardens local recovery sequencing/reason checks. |
+| 2026-03-14 | `00eb972` | Switched updater restart correlation from current-version heuristics to specific merge-history correlation | S11.14.1-S11.14.4 | Uses persisted pending merge identity and authenticated history instead of treating `current barrier_version > pending_barrier_version` as a loss signal. |
+| 2026-03-15 | `2f36dee` | Forbade timeout-only pending-state discard without authenticated finality | S11.14.3, S11.14.4 | Prevents updater self-stranding when acceptance history is delayed or temporarily unavailable. |
+| 2026-03-15 | `896c44c` | Clarified finality-vs-supersession discard rule for pending updater state | S11.14.3, S11.14.4 | Makes discard semantics explicitly disjunctive: either superseded by a committed update or dead by authenticated finality. |
 
 ## Hardening and Performance Follow-through
 
