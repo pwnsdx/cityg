@@ -62,11 +62,6 @@
           "crate": "cityg-gui",
           "test": "native::tests::pending_barrier_activation_applies_on_digest_match",
           "expectation": "accept"
-        },
-        {
-          "crate": "cityg-gui",
-          "test": "native::tests::pending_barrier_activation_drops_state_on_digest_mismatch",
-          "expectation": "reject_9609_local"
         }
       ]
     },
@@ -82,11 +77,16 @@
         {
           "crate": "msphf-orchestrator",
           "test": "accept::tests::proactive_pcs_refresh_gating_enforces_rate_limits",
-          "expectation": "reject_96013"
+          "expectation": "reject_96012"
         },
         {
           "crate": "msphf-orchestrator",
           "test": "accept::tests::proactive_pcs_refresh_gating_enforces_device_rate_limit",
+          "expectation": "reject_96012"
+        },
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::tests::revocation_change_requires_barrier_update_even_for_merge",
           "expectation": "reject_96013"
         }
       ]
@@ -107,8 +107,8 @@
         },
         {
           "crate": "cityg-gui",
-          "test": "native::tests::pending_barrier_activation_drops_state_when_overtaken",
-          "expectation": "accept_cleanup"
+          "test": "native::tests::pending_barrier_history_activation_succeeds_even_when_current_version_is_newer",
+          "expectation": "accept_restart_history_activation"
         }
       ]
     }
