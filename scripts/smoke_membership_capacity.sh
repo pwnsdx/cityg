@@ -9,6 +9,7 @@ set -euo pipefail
 # - CITYG_SMOKE_WATCH_COUNT (default: 2, must be >= 2)
 # - CITYG_SMOKE_MAX_CONCURRENT_HEADS (default: 2; used for watch-flow server config)
 # - CITYG_SMOKE_WINDOW_TTL_SECS (default: 120)
+# - CITYG_SMOKE_USE_BUILT_BINARIES (default: 1; if set to 0, forces cargo run)
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -18,6 +19,9 @@ SERVER_URL="http://${SERVER_BIND}"
 WATCH_COUNT="${CITYG_SMOKE_WATCH_COUNT:-2}"
 MAX_HEADS="${CITYG_SMOKE_MAX_CONCURRENT_HEADS:-2}"
 WINDOW_TTL_SECS="${CITYG_SMOKE_WINDOW_TTL_SECS:-120}"
+USE_BUILT_BINARIES="${CITYG_SMOKE_USE_BUILT_BINARIES:-1}"
+ADMIN_TOKEN="${CITYG_CLIENT_ADMIN_TOKEN:-join-leave-admin-token}"
+MESSAGE_TOKEN="${CITYG_CLIENT_MESSAGE_AUTH_TOKEN:-join-leave-message-token}"
 
 if ! [[ "$WATCH_COUNT" =~ ^[0-9]+$ ]] || [ "$WATCH_COUNT" -lt 2 ]; then
     echo "error: CITYG_SMOKE_WATCH_COUNT must be an integer >= 2 (got '$WATCH_COUNT')" >&2
@@ -46,6 +50,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
+make_room_id() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+        return
+    fi
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+run_api() {
+    if [ "$USE_BUILT_BINARIES" = "1" ] && [ -x "$REPO_ROOT/target/debug/cityg-api" ]; then
+        "$REPO_ROOT/target/debug/cityg-api"
+    else
+        cargo run -p cityg-api
+    fi
+}
+
+run_join_leave() {
+    if [ "$USE_BUILT_BINARIES" = "1" ] && [ -x "$REPO_ROOT/target/debug/join_leave" ]; then
+        "$REPO_ROOT/target/debug/join_leave" "$@"
+    else
+        cargo run -p cityg-gui --features native-app --bin join_leave -- "$@"
+    fi
+}
+
 fail() {
     echo "error: $1" >&2
     if [ -f "$SERVER_LOG" ]; then
@@ -56,21 +84,18 @@ fail() {
     exit 1
 }
 
-make_room_id() {
-    if command -v openssl >/dev/null 2>&1; then
-        openssl rand -hex 32
-        return
-    fi
-    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
-}
-
 echo "starting cityg-api on ${SERVER_URL}"
+export CITYG_SERVER_ROOMS_ADMIN_TOKEN="$ADMIN_TOKEN"
+export CITYG_SERVER_WINDOW_ADMIN_TOKEN="$ADMIN_TOKEN"
+export CITYG_SERVER_MESSAGE_AUTH_TOKEN="$MESSAGE_TOKEN"
+export CITYG_CLIENT_ADMIN_TOKEN="$ADMIN_TOKEN"
+export CITYG_CLIENT_MESSAGE_AUTH_TOKEN="$MESSAGE_TOKEN"
 CITYG_SERVER_ADDRESS="$SERVER_BIND" \
 CITYG_SERVER_WINDOW_TTL_SECS="$WINDOW_TTL_SECS" \
 CITYG_PROTOCOL_WINDOW_DURATION_SECS="$WINDOW_TTL_SECS" \
 CITYG_PROTOCOL_MAX_CONCURRENT_HEADS="$MAX_HEADS" \
 RUST_LOG=warn \
-cargo run -p cityg-api >"$SERVER_LOG" 2>&1 &
+run_api >"$SERVER_LOG" 2>&1 &
 SERVER_PID="$!"
 
 ./scripts/healthcheck_api.sh "${SERVER_URL}/health/ready" 45 1 >/dev/null \
@@ -78,9 +103,10 @@ SERVER_PID="$!"
 
 echo "join/leave watch smoke (count=${WATCH_COUNT})"
 ROOM_WATCH="$(make_room_id)"
-cargo run -p cityg-gui --features native-app --bin join_leave -- \
-    "$SERVER_URL" "$ROOM_WATCH" "smoke-w" --watch --count="$WATCH_COUNT" \
-    || fail "watch-mode join/leave smoke failed"
+./scripts/bootstrap_room.sh "$SERVER_URL" "$ROOM_WATCH" \
+    || fail "room bootstrap failed"
+run_join_leave "$SERVER_URL" "$ROOM_WATCH" "smoke-w" --watch --count="$WATCH_COUNT" \
+    --verbose || fail "watch-mode join/leave smoke failed"
 
 echo "capacity smoke (window_full_rest_api_freeze)"
 cargo test -p cityg-api window_full_rest_api_freeze -- --exact \

@@ -2,6 +2,8 @@
 
 Use this checklist to verify server + GUI readiness before a release.
 
+For longer-running staging validation, see `/Users/admin/Desktop/Repositories/cityg/docs/preproduction-validation.md`.
+
 ## 1. Build and Unit/Integration Tests
 
 - [ ] `cargo test -p cityg-server`
