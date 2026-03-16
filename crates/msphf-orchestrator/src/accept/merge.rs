@@ -409,7 +409,7 @@ impl AcceptanceContext {
         let srx_required_for_merge = revoked_since_root_arr != pivot_record.revoked_since_root
             || revoked_root_arr != pivot_record.revoked_root;
         ensure_merge_srx_keys(header_map, srx_required_for_merge)?;
-        let srx_root_sw_before = self.ensure_srx_root_sw()?;
+        let srx_root_sw_before = self.ensure_group_srx_root_sw(parts.gid)?;
         if srx_required_for_merge {
             ensure_srx_relations(
                 header_map,
@@ -611,7 +611,7 @@ impl AcceptanceContext {
             )?;
             Some(bytes)
         } else {
-            self.srx_root_sw()
+            self.group_srx_root_sw(parts.gid)
         };
 
         let parity = PivotParity {
@@ -648,10 +648,10 @@ impl AcceptanceContext {
             fs_dev_commit: Some(fs_dev_commit),
         };
         if srx_required_for_merge {
-            if self.srx_root_sw() != Some(srx_root_sw_before) {
+            if self.group_srx_root_sw(parts.gid) != Some(srx_root_sw_before) {
                 return Err(AcceptanceError::Freeze(FREEZE_SRX_INVALID));
             }
-            self.set_srx_root_sw(srx_root_sw);
+            self.set_group_srx_root_sw(parts.gid, srx_root_sw);
         }
         self.pivot_store.insert(parity, now);
 

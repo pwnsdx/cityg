@@ -187,6 +187,7 @@ CITYG_CHAOS_WORKERS=8 \
 CITYG_CHAOS_ROUNDS_PER_WORKER=10 \
 CITYG_CHAOS_MIN_COUNT=2 \
 CITYG_CHAOS_MAX_COUNT=5 \
+CITYG_CHAOS_LEAVES_PER_ROOM=1 \
 CITYG_CHAOS_RESTART_EVERY_SECS=20 \
 ./scripts/chaos_membership_campaign.sh
 ```
@@ -194,10 +195,12 @@ CITYG_CHAOS_RESTART_EVERY_SECS=20 \
 Notes:
 
 - each worker uses a fresh room per round to avoid cross-round contamination
-- the runner mixes `watch` and `batch` membership flows, with randomized member counts and batch leave order
+- the runner mixes `watch` and `batch` membership flows, with randomized member counts and explicit randomized leave order
+- `CITYG_CHAOS_LEAVES_PER_ROOM=1` is the safest default because it avoids stale multi-revoke artifacts dominating the signal; raise it only when you intentionally want to probe repeated local leave sequencing
 - set `CITYG_CHAOS_MANAGE_SERVER=0` to run against an existing staging server
 - set `CITYG_CHAOS_RESTART_EVERY_SECS` only when you want deliberate restart turbulence during live traffic
 - if another local campaign is already using `127.0.0.1:18080`, set `CITYG_CHAOS_SERVER_BIND` to a different port before starting a managed chaos run
+- `CITYG_CHAOS_API_BIN` and `CITYG_CHAOS_JOIN_LEAVE_BIN` can point at explicitly-built binaries when you want to isolate a candidate patch from the repository's default `target/debug`
 
 Success criteria:
 

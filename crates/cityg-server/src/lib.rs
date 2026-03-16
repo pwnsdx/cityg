@@ -401,6 +401,11 @@ impl CityGServer {
         ctx_state.barrier_version = barrier_version;
         ctx_state.barrier_roots_hash = barrier_roots_hash;
         ctx_state.kem_tree_hash_after = kem_tree_hash_after;
+        ctx_state.srx_root_sw = self
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .and_then(|state| state.srx_root_sw);
         ctx_state.n_max = n_max;
         ctx_state.last_pcs_refresh_ec = last_pcs_refresh_ec;
         ctx_state.pcs_refresh_min_delta_device_ec = pcs_refresh_min_delta_device_ec;
@@ -876,6 +881,7 @@ impl CityGServer {
         group.barrier_version = barrier_state.barrier_version;
         group.barrier_roots_hash = barrier_state.barrier_roots_hash;
         group.kem_tree_hash_after = barrier_state.kem_tree_hash_after;
+        group.srx_root_sw = barrier_state.srx_root_sw;
         group.n_max = barrier_state.n_max.max(1);
         group.last_pcs_refresh_ec = barrier_state.last_pcs_refresh_ec;
         group.pcs_refresh_min_delta_device_ec =
@@ -958,6 +964,7 @@ impl CityGServer {
             ctx_state.barrier_version = state.barrier_version;
             ctx_state.barrier_roots_hash = state.barrier_roots_hash;
             ctx_state.kem_tree_hash_after = state.kem_tree_hash_after;
+            ctx_state.srx_root_sw = state.srx_root_sw;
             ctx_state.n_max = state.n_max.max(1);
             ctx_state.last_pcs_refresh_ec = state.last_pcs_refresh_ec;
             ctx_state.pcs_refresh_min_delta_device_ec =
@@ -1018,6 +1025,7 @@ impl CityGServer {
             group.barrier_version = room_state.barrier_version;
             group.barrier_roots_hash = room_state.barrier_roots_hash;
             group.kem_tree_hash_after = room_state.kem_tree_hash_after;
+            group.srx_root_sw = room_state.srx_root_sw;
             group.n_max = room_state.n_max.max(1);
             group.barrier_pk_entries = room_state.barrier_pk_entries.clone();
             group.barrier_public_tree_history = room_state
@@ -1058,6 +1066,7 @@ impl CityGServer {
                     barrier_version: group.barrier_version,
                     barrier_roots_hash: group.barrier_roots_hash,
                     kem_tree_hash_after: group.kem_tree_hash_after,
+                    srx_root_sw: group.srx_root_sw,
                     n_max: group.n_max,
                     max_barrier_update_bytes: group.max_barrier_update_bytes.max(1),
                     last_pcs_refresh_ec: group.last_pcs_refresh_ec,
@@ -1114,6 +1123,11 @@ impl CityGServer {
                         .get(gid.as_slice())
                         .map(|state| state.kem_tree_hash_after)
                         .unwrap_or([0u8; 32]),
+                    srx_root_sw: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .and_then(|state| state.srx_root_sw),
                     barrier_pk_entries: self
                         .roster
                         .groups
@@ -3366,6 +3380,7 @@ mod tests {
             state.barrier_version = 9;
             state.barrier_roots_hash = [0xAB; 32];
             state.kem_tree_hash_after = [0xCD; 32];
+            state.srx_root_sw = Some([0xD7; 32]);
             state.n_max = 2048;
             state.last_pcs_refresh_ec = Some(77);
             state.pcs_refresh_min_delta_device_ec = 3;
@@ -3393,11 +3408,20 @@ mod tests {
             .get(gid.as_slice())
             .expect("recovered group state must exist");
         assert_eq!(state.kem_tree_hash_after, [0xCD; 32]);
+        assert_eq!(state.srx_root_sw, Some([0xD7; 32]));
         assert_eq!(state.n_max, 2048);
         assert_eq!(state.last_pcs_refresh_ec, Some(77));
         assert_eq!(state.pcs_refresh_min_delta_device_ec, 3);
         assert_eq!(state.pcs_refresh_min_delta_group_ec, 4);
         assert_eq!(state.pcs_refresh_slot_width_ec, 5);
+        assert_eq!(
+            server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .expect("recovered barrier group state must exist")
+                .srx_root_sw,
+            Some([0xD7; 32])
+        );
         assert_eq!(
             server
                 .ctx
@@ -5933,6 +5957,7 @@ struct GroupState {
     barrier_version: u64,
     barrier_roots_hash: [u8; 32],
     kem_tree_hash_after: [u8; 32],
+    srx_root_sw: Option<[u8; 32]>,
     n_max: u64,
     last_pcs_refresh_ec: Option<u64>,
     pcs_refresh_min_delta_device_ec: u64,
@@ -5960,6 +5985,7 @@ impl Default for GroupState {
             barrier_version: 0,
             barrier_roots_hash: [0u8; 32],
             kem_tree_hash_after: [0u8; 32],
+            srx_root_sw: None,
             n_max: DEFAULT_BARRIER_N_MAX,
             last_pcs_refresh_ec: None,
             pcs_refresh_min_delta_device_ec: default_pcs_refresh_min_delta_device_ec(),
@@ -6051,6 +6077,8 @@ struct PersistedKbroadRoomState {
     barrier_roots_hash: [u8; 32],
     #[serde(default)]
     kem_tree_hash_after: [u8; 32],
+    #[serde(default)]
+    srx_root_sw: Option<[u8; 32]>,
     #[serde(default)]
     barrier_pk_entries: Vec<Vec<u8>>,
     #[serde(default)]

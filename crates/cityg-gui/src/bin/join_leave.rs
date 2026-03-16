@@ -635,7 +635,7 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
     let room_id = room_id.unwrap_or_else(random_room_id);
     let alias_base = alias.unwrap_or_else(|| "cli-joiner".to_string());
 
-    if !batch_mode && leave_order_raw.is_some() {
+    if !batch_mode && !watch_mode && leave_order_raw.is_some() {
         return Err(anyhow!("--leave-order requires --batch"));
     }
 
@@ -671,10 +671,6 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
     } else {
         None
     };
-
-    if watch_mode && leave_order.is_some() {
-        return Err(anyhow!("--leave-order is not supported with --watch"));
-    }
 
     Ok(CliOptions {
         server_url,
@@ -2514,16 +2510,14 @@ mod tests {
         .expect_err("out-of-range leave order should fail");
         assert!(err.to_string().contains("out of range"));
 
-        let err = parse_cli_args(vec![
+        let opts = parse_cli_args(vec![
             "--watch".to_string(),
             "--count=2".to_string(),
-            "--leave-order=2,1".to_string(),
+            "--leave-order=2".to_string(),
         ])
-        .expect_err("watch mode should reject explicit leave-order");
-        assert!(
-            err.to_string()
-                .contains("--leave-order is not supported with --watch")
-        );
+        .expect("watch mode should accept sparse explicit leave-order");
+        assert!(opts.watch_mode);
+        assert_eq!(opts.leave_order, Some(vec![2]));
 
         let err = parse_cli_args(vec![
             "http://127.0.0.1:18080".to_string(),

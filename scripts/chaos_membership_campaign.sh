@@ -15,11 +15,14 @@ set -euo pipefail
 # - CITYG_CHAOS_ROUNDS_PER_WORKER (default: 5)
 # - CITYG_CHAOS_MIN_COUNT (default: 2)
 # - CITYG_CHAOS_MAX_COUNT (default: 4)
+# - CITYG_CHAOS_LEAVES_PER_ROOM (default: 1)
 # - CITYG_CHAOS_WATCH_PERCENT (default: 60; 0..100)
 # - CITYG_CHAOS_JITTER_MAX_SECS (default: 3)
 # - CITYG_CHAOS_WINDOW_TTL_SECS (default: 120)
 # - CITYG_CHAOS_MAX_CONCURRENT_HEADS (default: 4)
 # - CITYG_CHAOS_USE_BUILT_BINARIES (default: 1)
+# - CITYG_CHAOS_API_BIN (optional absolute path to a prebuilt cityg-api binary)
+# - CITYG_CHAOS_JOIN_LEAVE_BIN (optional absolute path to a prebuilt join_leave binary)
 # - CITYG_CHAOS_RESTART_EVERY_SECS (default: 0; if > 0 and managing server, restarts API periodically)
 # - CITYG_CHAOS_REQUIRE_METRICS (default: 1)
 # - CITYG_CHAOS_ARTIFACT_DIR (default: /tmp/cityg-chaos-<timestamp>)
@@ -34,11 +37,14 @@ WORKERS="${CITYG_CHAOS_WORKERS:-4}"
 ROUNDS_PER_WORKER="${CITYG_CHAOS_ROUNDS_PER_WORKER:-5}"
 MIN_COUNT="${CITYG_CHAOS_MIN_COUNT:-2}"
 MAX_COUNT="${CITYG_CHAOS_MAX_COUNT:-4}"
+LEAVES_PER_ROOM="${CITYG_CHAOS_LEAVES_PER_ROOM:-1}"
 WATCH_PERCENT="${CITYG_CHAOS_WATCH_PERCENT:-60}"
 JITTER_MAX_SECS="${CITYG_CHAOS_JITTER_MAX_SECS:-3}"
 WINDOW_TTL_SECS="${CITYG_CHAOS_WINDOW_TTL_SECS:-120}"
 MAX_HEADS="${CITYG_CHAOS_MAX_CONCURRENT_HEADS:-4}"
 USE_BUILT_BINARIES="${CITYG_CHAOS_USE_BUILT_BINARIES:-1}"
+API_BIN="${CITYG_CHAOS_API_BIN:-}"
+JOIN_LEAVE_BIN="${CITYG_CHAOS_JOIN_LEAVE_BIN:-}"
 RESTART_EVERY_SECS="${CITYG_CHAOS_RESTART_EVERY_SECS:-0}"
 REQUIRE_METRICS="${CITYG_CHAOS_REQUIRE_METRICS:-1}"
 ARTIFACT_DIR="${CITYG_CHAOS_ARTIFACT_DIR:-${TMPDIR:-/tmp}/cityg-chaos-$(date +%Y%m%d-%H%M%S)}"
@@ -51,6 +57,7 @@ for pair in \
     "CITYG_CHAOS_ROUNDS_PER_WORKER:$ROUNDS_PER_WORKER:^[0-9]+$" \
     "CITYG_CHAOS_MIN_COUNT:$MIN_COUNT:^[0-9]+$" \
     "CITYG_CHAOS_MAX_COUNT:$MAX_COUNT:^[0-9]+$" \
+    "CITYG_CHAOS_LEAVES_PER_ROOM:$LEAVES_PER_ROOM:^[0-9]+$" \
     "CITYG_CHAOS_WATCH_PERCENT:$WATCH_PERCENT:^[0-9]+$" \
     "CITYG_CHAOS_JITTER_MAX_SECS:$JITTER_MAX_SECS:^[0-9]+$" \
     "CITYG_CHAOS_WINDOW_TTL_SECS:$WINDOW_TTL_SECS:^[0-9]+$" \
@@ -70,6 +77,10 @@ if [ "$WORKERS" -lt 1 ] || [ "$ROUNDS_PER_WORKER" -lt 1 ]; then
 fi
 if [ "$MIN_COUNT" -lt 1 ] || [ "$MAX_COUNT" -lt "$MIN_COUNT" ]; then
     echo "error: CITYG_CHAOS_MIN_COUNT/MAX_COUNT are inconsistent" >&2
+    exit 2
+fi
+if [ "$LEAVES_PER_ROOM" -lt 1 ]; then
+    echo "error: CITYG_CHAOS_LEAVES_PER_ROOM must be >= 1" >&2
     exit 2
 fi
 if [ "$WATCH_PERCENT" -gt 100 ]; then
@@ -111,6 +122,7 @@ random_percent_hit() {
 
 random_leave_order() {
     local count="$1"
+    local limit="$2"
     local values=()
     local i j tmp
     for ((i = 1; i <= count; i++)); do
@@ -122,8 +134,12 @@ random_leave_order() {
         values[i]="${values[j]}"
         values[j]="$tmp"
     done
+    if [ "$limit" -gt "$count" ]; then
+        limit="$count"
+    fi
     local joined=""
-    for value in "${values[@]}"; do
+    for ((i = 0; i < limit; i++)); do
+        value="${values[i]}"
         if [ -n "$joined" ]; then
             joined+=","
         fi
@@ -133,7 +149,9 @@ random_leave_order() {
 }
 
 run_api() {
-    if [ "$USE_BUILT_BINARIES" = "1" ] && [ -x "$REPO_ROOT/target/debug/cityg-api" ]; then
+    if [ -n "$API_BIN" ]; then
+        "$API_BIN"
+    elif [ "$USE_BUILT_BINARIES" = "1" ] && [ -x "$REPO_ROOT/target/debug/cityg-api" ]; then
         "$REPO_ROOT/target/debug/cityg-api"
     else
         cargo run -p cityg-api
@@ -141,7 +159,9 @@ run_api() {
 }
 
 run_join_leave() {
-    if [ "$USE_BUILT_BINARIES" = "1" ] && [ -x "$REPO_ROOT/target/debug/join_leave" ]; then
+    if [ -n "$JOIN_LEAVE_BIN" ]; then
+        "$JOIN_LEAVE_BIN" "$@"
+    elif [ "$USE_BUILT_BINARIES" = "1" ] && [ -x "$REPO_ROOT/target/debug/join_leave" ]; then
         "$REPO_ROOT/target/debug/join_leave" "$@"
     else
         cargo run -p cityg-gui --features native-app --bin join_leave -- "$@"
@@ -259,9 +279,10 @@ run_worker() {
                 if [ "$count" -lt 2 ]; then
                     count=2
                 fi
-                run_join_leave "$SERVER_URL" "$room_id" "$alias_base" --watch --count="$count" --verbose
+                leave_order="$(random_leave_order "$count" "$LEAVES_PER_ROOM")"
+                run_join_leave "$SERVER_URL" "$room_id" "$alias_base" --watch --count="$count" --leave-order="$leave_order" --verbose
             else
-                leave_order="$(random_leave_order "$count")"
+                leave_order="$(random_leave_order "$count" "$LEAVES_PER_ROOM")"
                 run_join_leave "$SERVER_URL" "$room_id" "$alias_base" --batch --count="$count" --leave-order="$leave_order" --verbose
             fi
         } >>"$log_file" 2>&1 || {

@@ -703,6 +703,30 @@ impl AcceptanceContext {
         Err(AcceptanceError::Freeze(FREEZE_SUITE_FORBIDDEN))
     }
 
+    pub fn group_srx_root_sw(&self, gid: &[u8]) -> Option<[u8; 32]> {
+        self.barrier_group_state(gid)
+            .and_then(|state| state.srx_root_sw)
+            .or(Some(self.srx_empty_root_sw))
+    }
+
+    pub fn ensure_group_srx_root_sw(&mut self, gid: &[u8]) -> Result<[u8; 32], AcceptanceError> {
+        let fallback = if let Some(migration_root) = self.srx_migration_root_sw {
+            migration_root
+        } else {
+            self.srx_empty_root_sw
+        };
+        let state = self.barrier_group_state_entry_mut(gid);
+        if let Some(root) = state.srx_root_sw {
+            return Ok(root);
+        }
+        state.srx_root_sw = Some(fallback);
+        Ok(fallback)
+    }
+
+    pub fn set_group_srx_root_sw(&mut self, gid: &[u8], root: Option<[u8; 32]>) {
+        self.barrier_group_state_entry_mut(gid).srx_root_sw = root;
+    }
+
     pub fn record_accepted_ec(&mut self, ec: u64) {
         if ec > self.last_accepted_ec {
             self.last_accepted_ec = ec;
@@ -3259,6 +3283,16 @@ mod tests {
                 .barrier_version,
             5
         );
+        assert_eq!(ctx.group_srx_root_sw(b"gid-b"), Some([0x56; 32]));
+        assert_eq!(ctx.group_srx_root_sw(b"gid-c"), Some([0x56; 32]));
+        ctx.set_group_srx_root_sw(b"gid-b", Some([0x71; 32]));
+        ctx.set_group_srx_root_sw(b"gid-c", Some([0x82; 32]));
+        assert_eq!(ctx.group_srx_root_sw(b"gid-b"), Some([0x71; 32]));
+        assert_eq!(ctx.group_srx_root_sw(b"gid-c"), Some([0x82; 32]));
+        ctx.set_srx_migration_root_sw(Some([0x93; 32]));
+        assert_eq!(ctx.ensure_group_srx_root_sw(b"gid-d")?, [0x93; 32]);
+        assert_eq!(ctx.group_srx_root_sw(b"gid-b"), Some([0x71; 32]));
+        assert_eq!(ctx.group_srx_root_sw(b"gid-c"), Some([0x82; 32]));
 
         ctx.set_fs_policy_version(Some("42".to_string()));
         assert_eq!(ctx.fs_policy_version(), Some("42"));
@@ -4498,6 +4532,7 @@ mod tests {
                 barrier_version: 8,
                 barrier_roots_hash: [0x51; 32],
                 kem_tree_hash_after: [0u8; 32],
+                srx_root_sw: None,
                 n_max: 1_024,
                 last_pcs_refresh_ec: None,
                 pcs_refresh_min_delta_device_ec: 1,
