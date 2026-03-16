@@ -76,6 +76,27 @@ done
 
 Run this against a dedicated staging server with journaling enabled.
 
+Recommended runner:
+
+```bash
+./scripts/soak_membership_campaign.sh
+```
+
+Useful overrides:
+
+```bash
+CITYG_SOAK_ITERATIONS=50 \
+CITYG_SOAK_SLEEP_SECS=5 \
+CITYG_SOAK_FINAL_CAPACITY=1 \
+./scripts/soak_membership_campaign.sh
+```
+
+Notes:
+
+- the soak runner keeps one API process alive by default and exercises fresh room IDs on each iteration
+- artifacts are written under `/tmp/cityg-soak-<timestamp>` unless `CITYG_SOAK_ARTIFACT_DIR` is set
+- set `CITYG_SOAK_MANAGE_SERVER=0` to point at an already-running staging server via `CITYG_SOAK_SERVER_URL`
+
 Success criteria:
 
 - no server crash

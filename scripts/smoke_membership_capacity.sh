@@ -10,6 +10,7 @@ set -euo pipefail
 # - CITYG_SMOKE_MAX_CONCURRENT_HEADS (default: 2; used for watch-flow server config)
 # - CITYG_SMOKE_WINDOW_TTL_SECS (default: 120)
 # - CITYG_SMOKE_USE_BUILT_BINARIES (default: 1; if set to 0, forces cargo run)
+# - CITYG_SMOKE_SKIP_CAPACITY (default: 0; if set to 1, skips the final capacity freeze test)
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -20,6 +21,7 @@ WATCH_COUNT="${CITYG_SMOKE_WATCH_COUNT:-2}"
 MAX_HEADS="${CITYG_SMOKE_MAX_CONCURRENT_HEADS:-2}"
 WINDOW_TTL_SECS="${CITYG_SMOKE_WINDOW_TTL_SECS:-120}"
 USE_BUILT_BINARIES="${CITYG_SMOKE_USE_BUILT_BINARIES:-1}"
+SKIP_CAPACITY="${CITYG_SMOKE_SKIP_CAPACITY:-0}"
 ADMIN_TOKEN="${CITYG_CLIENT_ADMIN_TOKEN:-join-leave-admin-token}"
 MESSAGE_TOKEN="${CITYG_CLIENT_MESSAGE_AUTH_TOKEN:-join-leave-message-token}"
 
@@ -35,6 +37,11 @@ fi
 
 if ! [[ "$WINDOW_TTL_SECS" =~ ^[0-9]+$ ]] || [ "$WINDOW_TTL_SECS" -lt 1 ]; then
     echo "error: CITYG_SMOKE_WINDOW_TTL_SECS must be an integer >= 1 (got '$WINDOW_TTL_SECS')" >&2
+    exit 2
+fi
+
+if ! [[ "$SKIP_CAPACITY" =~ ^[01]$ ]]; then
+    echo "error: CITYG_SMOKE_SKIP_CAPACITY must be 0 or 1 (got '$SKIP_CAPACITY')" >&2
     exit 2
 fi
 
@@ -108,8 +115,12 @@ ROOM_WATCH="$(make_room_id)"
 run_join_leave "$SERVER_URL" "$ROOM_WATCH" "smoke-w" --watch --count="$WATCH_COUNT" \
     --verbose || fail "watch-mode join/leave smoke failed"
 
-echo "capacity smoke (window_full_rest_api_freeze)"
-cargo test -p cityg-api window_full_rest_api_freeze -- --exact \
-    || fail "capacity freeze integration test failed"
+if [ "$SKIP_CAPACITY" = "0" ]; then
+    echo "capacity smoke (window_full_rest_api_freeze)"
+    cargo test -p cityg-api window_full_rest_api_freeze -- --exact \
+        || fail "capacity freeze integration test failed"
+else
+    echo "capacity smoke skipped (CITYG_SMOKE_SKIP_CAPACITY=1)"
+fi
 
 echo "smoke passed: membership flow works and capacity freeze path is enforced"

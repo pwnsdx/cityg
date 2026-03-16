@@ -48,6 +48,12 @@ Expected result:
 - Join + leave watch flow succeeds.
 - Capacity run fails with `freeze 925`/`mh_window_full` signal.
 
+For longer churn validation, run:
+
+```bash
+CITYG_SOAK_ITERATIONS=10 ./scripts/soak_membership_campaign.sh
+```
+
 ## 4. GUI Smoke
 
 - [ ] Launch GUI binary:
