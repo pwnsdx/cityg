@@ -174,6 +174,31 @@ pkill -f cityg-api
 cargo run -p cityg-api
 ```
 
+Recommended runner:
+
+```bash
+./scripts/chaos_membership_campaign.sh
+```
+
+Useful overrides:
+
+```bash
+CITYG_CHAOS_WORKERS=8 \
+CITYG_CHAOS_ROUNDS_PER_WORKER=10 \
+CITYG_CHAOS_MIN_COUNT=2 \
+CITYG_CHAOS_MAX_COUNT=5 \
+CITYG_CHAOS_RESTART_EVERY_SECS=20 \
+./scripts/chaos_membership_campaign.sh
+```
+
+Notes:
+
+- each worker uses a fresh room per round to avoid cross-round contamination
+- the runner mixes `watch` and `batch` membership flows, with randomized member counts and batch leave order
+- set `CITYG_CHAOS_MANAGE_SERVER=0` to run against an existing staging server
+- set `CITYG_CHAOS_RESTART_EVERY_SECS` only when you want deliberate restart turbulence during live traffic
+- if another local campaign is already using `127.0.0.1:18080`, set `CITYG_CHAOS_SERVER_BIND` to a different port before starting a managed chaos run
+
 Success criteria:
 
 - server restarts and becomes healthy
