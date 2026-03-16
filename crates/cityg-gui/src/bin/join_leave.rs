@@ -1480,12 +1480,14 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         Ok(_) => {}
         Err(ApiClientError::HttpStatus {
             status, message, ..
-        }) if status.is_server_error()
-            && (message.contains("pivot head missing")
-                || message.contains("refresh payload diverges from stored parity")) =>
+        }) if message.contains("pivot head missing")
+            || message.contains("refresh payload diverges from stored parity") =>
         {
             if verbose {
-                println!("refresh pivot skipped: {message}");
+                println!(
+                    "refresh pivot skipped (status={}): {message}",
+                    status.as_u16()
+                );
             }
         }
         Err(err) => return Err(err).context("refresh pivot parity"),

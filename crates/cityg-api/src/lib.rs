@@ -541,6 +541,8 @@ enum ApiError {
     Decode(#[from] prost::DecodeError),
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("server error: {message}")]
     Server {
         message: String,
@@ -559,6 +561,10 @@ enum ApiError {
 impl ApiError {
     fn server_message(message: impl Into<String>) -> Self {
         Self::server_with_context(message.into(), None, None, None)
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        ApiError::Conflict(message.into())
     }
 
     fn server_with_freeze(message: impl Into<String>, freeze: FreezeError) -> Self {
@@ -630,6 +636,7 @@ impl IntoResponse for ApiError {
             ApiError::InvalidRequest(msg) => {
                 (StatusCode::BAD_REQUEST, msg.to_string(), None, None, None)
             }
+            ApiError::Conflict(message) => (StatusCode::CONFLICT, message, None, None, None),
             ApiError::NotFound => (
                 StatusCode::NOT_FOUND,
                 "resource not found".to_string(),
@@ -662,7 +669,11 @@ impl IntoResponse for ApiError {
         };
         let freeze_code = freeze.map(|f| f.code);
         let freeze_reason = freeze.map(|f| f.reason);
-        error!(status = %status, message = %message, freeze_code = ?freeze_code, freeze_reason = ?freeze_reason, "request failed");
+        if status.is_server_error() {
+            error!(status = %status, message = %message, freeze_code = ?freeze_code, freeze_reason = ?freeze_reason, "request failed");
+        } else {
+            warn!(status = %status, message = %message, freeze_code = ?freeze_code, freeze_reason = ?freeze_reason, "request failed");
+        }
         let body = ErrorResponse {
             message: &message,
             freeze_code,
@@ -2717,9 +2728,14 @@ async fn refresh_pivot(State(state): State<ApiState>, body: Bytes) -> Result<Res
             .map_err(|_| ApiError::InvalidRequest("bundle gid must be 32 bytes"))?;
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        guard
-            .refresh_pivot(&bundle)
-            .map_err(|err| ApiError::server_message(err.to_string()))?;
+        guard.refresh_pivot(&bundle).map_err(|err| match err {
+            ClientError::InvalidInput(
+                "pivot parity missing for refresh"
+                | "pivot head missing"
+                | "refresh payload diverges from stored parity",
+            ) => ApiError::conflict(err.to_string()),
+            other => ApiError::server_message(other.to_string()),
+        })?;
     }
 
     let reply = RefreshPivotResponse {};
@@ -2737,6 +2753,7 @@ mod tests {
     use futures::{SinkExt, StreamExt};
     use msphf_core::MsphfError;
     use msphf_core::merkle::canonical_set_root;
+    use msphf_orchestrator::hdr;
     use pqcrypto_dilithium::dilithium5;
     use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
     use prost::Message;
@@ -4819,6 +4836,23 @@ mod tests {
             err,
             ApiError::InvalidRequest("invalid bundle encoding")
         ));
+
+        let mut demo_bundle = demo_bundle("pivot-missing").expect("demo bundle");
+        demo_bundle.header_map.insert(
+            hdr::HDR_ROLLUP_PIVOT_WEID,
+            ciborium::value::Value::Bytes([0xAB; 32].to_vec()),
+        );
+        let err = refresh_pivot(
+            State(state.clone()),
+            encode_proto_request(&RefreshPivotRequest {
+                bundle_cbor: demo_bundle.to_cbor().expect("bundle cbor"),
+            }),
+        )
+        .await
+        .expect_err("stale refresh should report conflict");
+        assert!(
+            matches!(err, ApiError::Conflict(message) if message == "invalid input: pivot parity missing for refresh")
+        );
 
         let live_body = to_bytes(
             health_liveness(State(state.clone())).await.into_body(),
