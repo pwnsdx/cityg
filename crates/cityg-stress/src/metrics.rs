@@ -17,7 +17,10 @@ fn parse_metric_value(text: &str, name: &str, label_fragments: &[&str]) -> Optio
         if !line.starts_with(name) || line.starts_with('#') {
             continue;
         }
-        if !label_fragments.iter().all(|fragment| line.contains(fragment)) {
+        if !label_fragments
+            .iter()
+            .all(|fragment| line.contains(fragment))
+        {
             continue;
         }
         let value = line.split_whitespace().last()?;

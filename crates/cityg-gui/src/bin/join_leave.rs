@@ -584,6 +584,12 @@ struct CliOptions {
     message_burst_interval_ms: u64,
 }
 
+#[derive(Clone, Copy)]
+struct MessageBurstOptions {
+    count: usize,
+    interval: Duration,
+}
+
 fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> {
     let mut server_url = None;
     let mut room_id = None;
@@ -724,6 +730,10 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
     } = options;
 
     if watch_mode {
+        let message_burst = MessageBurstOptions {
+            count: message_burst_count,
+            interval: Duration::from_millis(message_burst_interval_ms),
+        };
         run_watch_mode(
             &server_url,
             &room_id,
@@ -731,8 +741,7 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             count,
             leave_order.clone(),
             verbose,
-            message_burst_count,
-            Duration::from_millis(message_burst_interval_ms),
+            message_burst,
         )
         .await?;
         return Ok(());
@@ -1570,8 +1579,7 @@ async fn run_watch_mode(
     count: usize,
     leave_order: Option<Vec<usize>>,
     verbose: bool,
-    message_burst_count: usize,
-    message_burst_interval: Duration,
+    message_burst: MessageBurstOptions,
 ) -> Result<()> {
     println!(
         "watch mode: server={server_url} room={room_id} alias_base={alias_base} count={count}"
@@ -1611,11 +1619,11 @@ async fn run_watch_mode(
         sessions.push(session);
     }
 
-    let effective_message_burst_count = message_burst_count.max(1);
+    let effective_message_burst_count = message_burst.count.max(1);
     send_message_burst(
         &sessions,
         effective_message_burst_count,
-        message_burst_interval,
+        message_burst.interval,
         Some(&mut event_rx),
     )
     .await?;
@@ -3205,8 +3213,19 @@ mod tests {
 
         // Keep a single explicit leave in this test to avoid stale-second-leave
         // checkpoint races under heavy instrumentation (llvm-cov).
-        run_watch_mode(&server_url, &room_id, "watcher", 2, Some(vec![2]), true, 3, Duration::ZERO)
-            .await?;
+        run_watch_mode(
+            &server_url,
+            &room_id,
+            "watcher",
+            2,
+            Some(vec![2]),
+            true,
+            MessageBurstOptions {
+                count: 3,
+                interval: Duration::ZERO,
+            },
+        )
+        .await?;
 
         handle.abort();
         let _ = handle.await;

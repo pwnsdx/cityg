@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fs, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
 
@@ -38,9 +42,9 @@ fn crate_root(crate_name: &str) -> PathBuf {
         .join(crate_name)
 }
 
-fn rust_source_files(root: &PathBuf) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn rust_source_files(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut files = Vec::new();
-    let mut pending = vec![root.clone()];
+    let mut pending = vec![root.to_path_buf()];
     while let Some(path) = pending.pop() {
         for entry in fs::read_dir(path)? {
             let entry = entry?;

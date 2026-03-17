@@ -137,6 +137,12 @@ fn ticket_retry_delay(attempt: u32) -> Duration {
     Duration::from_millis(capped.saturating_add(jitter))
 }
 
+fn is_refresh_pivot_conflict(status_code: u16, message: &str) -> bool {
+    matches!(status_code, 409 | 500)
+        && (message.contains("pivot head missing")
+            || message.contains("refresh payload diverges from stored parity"))
+}
+
 #[derive(Serialize)]
 struct BarrierRootsPreimage<'a>(
     #[serde(with = "serde_bytes")] &'a [u8; 32],
@@ -1255,36 +1261,35 @@ fn apply_pending_barrier_activation(
         return Ok(false);
     }
 
-    if let Some(digest) = accepted_digest {
-        if digest == pending.barrier_update_digest
-            && observed_barrier_version == pending.barrier_version
-            && observed_fs_ec == Some(pending.fs_ec)
-            && observed_barrier_update_reason == pending.barrier_update_reason
-        {
-            let BarrierPendingState {
-                barrier_version,
-                k_barrier_new,
-                kem_tree_hash_after,
-                k_fs_after_pcs,
-                revocation_roots_hash,
-                on_path_key_material,
-                ..
-            } = pending;
-            session.barrier_state.barrier_initialized = true;
-            session.barrier_state.barrier_version = barrier_version;
-            session.barrier_state.barrier_roots_hash = revocation_roots_hash;
-            session.barrier_state.k_barrier = k_barrier_new;
-            session.barrier_state.kem_tree_hash_after = kem_tree_hash_after;
-            for (node, material) in on_path_key_material {
-                session.barrier_state.dk_nodes.insert(node, material);
-            }
-            if let Some(k_fs_after_pcs) = k_fs_after_pcs {
-                apply_forward_state_k_fs(session, *k_fs_after_pcs);
-            }
-            session.barrier_state.pending = None;
-            session.barrier_state.barrier_recovery_pending = false;
-            return Ok(true);
+    if let Some(digest) = accepted_digest
+        && digest == pending.barrier_update_digest
+        && observed_barrier_version == pending.barrier_version
+        && observed_fs_ec == Some(pending.fs_ec)
+        && observed_barrier_update_reason == pending.barrier_update_reason
+    {
+        let BarrierPendingState {
+            barrier_version,
+            k_barrier_new,
+            kem_tree_hash_after,
+            k_fs_after_pcs,
+            revocation_roots_hash,
+            on_path_key_material,
+            ..
+        } = pending;
+        session.barrier_state.barrier_initialized = true;
+        session.barrier_state.barrier_version = barrier_version;
+        session.barrier_state.barrier_roots_hash = revocation_roots_hash;
+        session.barrier_state.k_barrier = k_barrier_new;
+        session.barrier_state.kem_tree_hash_after = kem_tree_hash_after;
+        for (node, material) in on_path_key_material {
+            session.barrier_state.dk_nodes.insert(node, material);
         }
+        if let Some(k_fs_after_pcs) = k_fs_after_pcs {
+            apply_forward_state_k_fs(session, *k_fs_after_pcs);
+        }
+        session.barrier_state.pending = None;
+        session.barrier_state.barrier_recovery_pending = false;
+        return Ok(true);
     }
 
     Ok(false)
@@ -8823,10 +8828,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         Ok(_) => {}
         Err(ApiClientError::HttpStatus {
             status, message, ..
-        }) if status.is_server_error()
-            && (message.contains("pivot head missing")
-                || message.contains("refresh payload diverges from stored parity")) =>
-        {
+        }) if is_refresh_pivot_conflict(status.as_u16(), &message) => {
             warn!("leave refresh pivot skipped: {message}");
         }
         Err(err) => return Err(err).context("refresh pivot parity"),
@@ -9183,10 +9185,7 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
         Ok(_) => {}
         Err(ApiClientError::HttpStatus {
             status, message, ..
-        }) if status.is_server_error()
-            && (message.contains("pivot head missing")
-                || message.contains("refresh payload diverges from stored parity")) =>
-        {
+        }) if is_refresh_pivot_conflict(status.as_u16(), &message) => {
             warn!("refresh pivot skipped: {message}");
         }
         Err(err) => return Err(err).context("refresh pivot parity"),

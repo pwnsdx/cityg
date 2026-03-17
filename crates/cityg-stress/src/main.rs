@@ -70,7 +70,11 @@ struct Cli {
     round_delay_secs: u64,
     #[arg(long, env = "CITYG_STRESS_MESSAGE_BURST_COUNT", default_value_t = 3)]
     message_burst_count: usize,
-    #[arg(long, env = "CITYG_STRESS_MESSAGE_BURST_INTERVAL_MS", default_value_t = 100)]
+    #[arg(
+        long,
+        env = "CITYG_STRESS_MESSAGE_BURST_INTERVAL_MS",
+        default_value_t = 100
+    )]
     message_burst_interval_ms: u64,
     #[arg(long, env = "CITYG_STRESS_FINAL_CAPACITY_CHECK", action = ArgAction::SetTrue)]
     final_capacity_check: bool,
@@ -221,14 +225,8 @@ impl ManagedServer {
         let mut command = Command::new(&self.config.api_bin);
         command
             .env("CITYG_SERVER_ADDRESS", &self.config.server_bind)
-            .env(
-                "CITYG_SERVER_ROOMS_ADMIN_TOKEN",
-                &self.config.admin_token,
-            )
-            .env(
-                "CITYG_SERVER_WINDOW_ADMIN_TOKEN",
-                &self.config.admin_token,
-            )
+            .env("CITYG_SERVER_ROOMS_ADMIN_TOKEN", &self.config.admin_token)
+            .env("CITYG_SERVER_WINDOW_ADMIN_TOKEN", &self.config.admin_token)
             .env(
                 "CITYG_SERVER_MESSAGE_AUTH_TOKEN",
                 &self.config.message_token,
@@ -325,19 +323,12 @@ async fn main() -> Result<()> {
         config.manage_server,
         config.final_capacity_check,
     );
-    app.push_event(format!(
-        "artifact dir: {}",
-        config.artifact_dir.display()
-    ));
+    app.push_event(format!("artifact dir: {}", config.artifact_dir.display()));
     for line in startup_events {
         app.push_event(line);
     }
-    if let Err(err) = capture_observability_snapshot(
-        &config.server_url,
-        &config.artifact_dir,
-        "initial",
-    )
-    .await
+    if let Err(err) =
+        capture_observability_snapshot(&config.server_url, &config.artifact_dir, "initial").await
     {
         app.push_event(format!("initial observability snapshot failed: {err}"));
         if config.require_metrics {
@@ -362,17 +353,17 @@ async fn main() -> Result<()> {
     ));
 
     let restart_handle = if config.manage_server && config.restart_every_secs > 0 {
-        let server_ref = server
-            .as_ref()
-            .expect("managed server is present")
-            .clone();
-        Some(tokio::spawn(restart_loop(
-            server_ref,
-            Duration::from_secs(config.restart_every_secs),
-            config.artifact_dir.clone(),
-            event_tx.clone(),
-            stop_rx.clone(),
-        )))
+        if let Some(server_ref) = server.as_ref().cloned() {
+            Some(tokio::spawn(restart_loop(
+                server_ref,
+                Duration::from_secs(config.restart_every_secs),
+                config.artifact_dir.clone(),
+                event_tx.clone(),
+                stop_rx.clone(),
+            )))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -395,12 +386,8 @@ async fn main() -> Result<()> {
     if let Some(handle) = restart_handle {
         let _ = handle.await;
     }
-    if let Err(err) = capture_observability_snapshot(
-        &config.server_url,
-        &config.artifact_dir,
-        "final",
-    )
-    .await
+    if let Err(err) =
+        capture_observability_snapshot(&config.server_url, &config.artifact_dir, "final").await
     {
         app.push_event(format!("final observability snapshot failed: {err}"));
         if config.require_metrics {
@@ -460,9 +447,7 @@ impl Config {
             repo_root.join("target/debug/join_leave"),
             "join_leave",
         )?;
-        let artifact_dir = cli
-            .artifact_dir
-            .unwrap_or_else(default_artifact_dir);
+        let artifact_dir = cli.artifact_dir.unwrap_or_else(default_artifact_dir);
 
         Ok(Self {
             server_bind: cli.server_bind,
@@ -503,7 +488,11 @@ fn repo_root() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("failed to resolve workspace root"))
 }
 
-fn resolve_binary(candidate: Option<PathBuf>, default_path: PathBuf, label: &str) -> Result<PathBuf> {
+fn resolve_binary(
+    candidate: Option<PathBuf>,
+    default_path: PathBuf,
+    label: &str,
+) -> Result<PathBuf> {
     let path = candidate.unwrap_or(default_path);
     if path.exists() {
         Ok(path)
@@ -572,7 +561,10 @@ async fn fetch_health(server_url: &str) -> Result<HealthStatus> {
     let url = format!("{}/health/detailed", server_url.trim_end_matches('/'));
     let response = client.get(url).send().await.context("request health")?;
     let response = response.error_for_status().context("health status")?;
-    response.json::<HealthStatus>().await.context("decode health json")
+    response
+        .json::<HealthStatus>()
+        .await
+        .context("decode health json")
 }
 
 async fn fetch_metrics_text(server_url: &str) -> Result<String> {
@@ -738,7 +730,9 @@ async fn run_workers(
                     writeln!(file, "capacity-check-error={err}")?;
                     Ok(file)
                 });
-                let _ = event_tx.send(AppEvent::Info(format!("final capacity check failed: {err}")));
+                let _ = event_tx.send(AppEvent::Info(format!(
+                    "final capacity check failed: {err}"
+                )));
                 let _ = event_tx.send(AppEvent::CapacityCheckFinished {
                     ok: false,
                     log_path,
@@ -788,7 +782,8 @@ async fn run_worker(
     event_tx: mpsc::UnboundedSender<AppEvent>,
     stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut api_client = CitygApiClient::new(&config.server_url).with_admin_token(config.admin_token.clone());
+    let mut api_client =
+        CitygApiClient::new(&config.server_url).with_admin_token(config.admin_token.clone());
     api_client = api_client.with_message_auth_token(config.message_token.clone());
     let worker_log = config
         .artifact_dir
@@ -950,13 +945,12 @@ async fn run_tui(
             break;
         }
 
-        if event::poll(tick_rate).context("poll terminal events")? {
-            if let CEvent::Key(key) = event::read().context("read terminal event")? {
-                if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
-                    let _ = stop_tx.send(true);
-                    app.push_event("graceful stop requested");
-                }
-            }
+        if event::poll(tick_rate).context("poll terminal events")?
+            && let CEvent::Key(key) = event::read().context("read terminal event")?
+            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+        {
+            let _ = stop_tx.send(true);
+            app.push_event("graceful stop requested");
         }
     }
     Ok(app.worker_failures > 0 || app.failed_rounds > 0 || app.capacity_check_failed)
@@ -1129,7 +1123,11 @@ fn write_summary(artifact_dir: &Path, app: &AppState) -> Result<()> {
         "capacity_check_status={}",
         app.capacity_check_status
     );
-    let _ = writeln!(&mut summary, "accept_epoch_ok={}", app.metrics.accept_epoch_ok);
+    let _ = writeln!(
+        &mut summary,
+        "accept_epoch_ok={}",
+        app.metrics.accept_epoch_ok
+    );
     let _ = writeln!(
         &mut summary,
         "refresh_conflicts={}",

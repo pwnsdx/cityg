@@ -2,7 +2,7 @@
 
 This document defines the minimum pre-production validation campaign for CityG before exposing a deployment to non-trivial real traffic.
 
-`cityg-stress` is now the canonical runner for smoke, soak, and chaos validation. The legacy Bash scripts in `/Users/admin/Desktop/Repositories/cityg/scripts` are compatibility wrappers only and forward into this binary.
+`cityg-stress` is the canonical runner for smoke, soak, and chaos validation.
 
 ## Scope
 

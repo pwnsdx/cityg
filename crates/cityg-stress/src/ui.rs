@@ -1,4 +1,8 @@
-use std::{collections::{BTreeMap, VecDeque}, path::PathBuf, time::{Duration, Instant}};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use ratatui::{
     Frame,
@@ -168,7 +172,10 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             Span::raw("  "),
             Span::raw(format!("elapsed={}  ", human_elapsed(app.elapsed()))),
             Span::styled(
-                format!("server={} ", if app.server_ready { "ready" } else { "warming" }),
+                format!(
+                    "server={} ",
+                    if app.server_ready { "ready" } else { "warming" }
+                ),
                 server_style,
             ),
             Span::raw(format!("restarts={}  ", app.restarts)),
@@ -192,8 +199,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             Span::raw(format!("artifacts={}", app.artifact_dir.display())),
         ]),
     ];
-    let block = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Run"));
+    let block = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Run"));
     frame.render_widget(block, area);
 }
 
@@ -286,14 +292,7 @@ fn draw_workers(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     )
     .header(
         Row::new([
-            "Worker",
-            "Round",
-            "Done",
-            "Failed",
-            "Mode",
-            "Count",
-            "Room",
-            "Status",
+            "Worker", "Round", "Done", "Failed", "Mode", "Count", "Room", "Status",
         ])
         .style(Style::default().add_modifier(Modifier::BOLD)),
     )
@@ -311,8 +310,10 @@ fn draw_events(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             .map(|line| Line::from(line.clone()))
             .collect()
     };
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL).title("Recent Events"));
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Recent Events"),
+    );
     frame.render_widget(paragraph, area);
 }
