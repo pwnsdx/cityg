@@ -12,6 +12,7 @@ members = [
     "crates/dudect-harness", "crates/capss",
     "crates/cityg-gui", "crates/cityg-config",
     "crates/pqcrypto-kyber",
+    "crates/cityg-stress",
 ]
 resolver = "2"
 

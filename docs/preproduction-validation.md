@@ -116,6 +116,26 @@ Collect:
 
 Goal: measure behavior under multiple simultaneous rooms and overlapping membership/message activity.
 
+Recommended interactive runner:
+
+```bash
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18090 \
+  --server-url http://127.0.0.1:18090 \
+  --workers 12 \
+  --rounds-per-worker 20 \
+  --min-count 3 \
+  --max-count 6 \
+  --watch-percent 70
+```
+
+Notes:
+
+- `cityg-stress` manages a local `cityg-api` by default and renders live metrics in a `ratatui` dashboard
+- use `--plain` when running in CI or when stdout is not a real terminal
+- pass `--api-bin` and `--join-leave-bin` when you want to pin the run to explicitly-built candidate binaries
+- the artifact directory is printed at the end of the run and contains `server.log`, worker logs, `summary.txt`, and the last `/metrics` snapshot
+
 Suggested method:
 
 - run several independent `join_leave --watch --count=2` sessions in parallel on fresh room IDs
