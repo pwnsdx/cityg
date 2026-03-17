@@ -247,12 +247,23 @@ impl ManagedServer {
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
 
-        let child = command
+        let mut child = command
             .spawn()
             .with_context(|| format!("spawn {}", self.config.api_bin.display()))?;
         let pid = child.id();
+        if let Err(err) = wait_for_ready(
+            &self.config.server_url,
+            Some(&mut child),
+            &self.log_path,
+            Duration::from_secs(45),
+        )
+        .await
+        {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(err);
+        }
         self.child = Some(child);
-        wait_for_ready(&self.config.server_url, Duration::from_secs(45)).await?;
         Ok(pid)
     }
 
@@ -488,18 +499,62 @@ fn repo_root() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("failed to resolve workspace root"))
 }
 
+fn binary_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
 fn resolve_binary(
     candidate: Option<PathBuf>,
     default_path: PathBuf,
     label: &str,
 ) -> Result<PathBuf> {
-    let path = candidate.unwrap_or(default_path);
-    if path.exists() {
-        Ok(path)
+    let cli_flag = match label {
+        "cityg-api" => "--api-bin",
+        "join_leave" => "--join-leave-bin",
+        _ => "--<binary>-bin",
+    };
+    if let Some(path) = candidate {
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(anyhow!(
+            "{label} binary not found at {}; build it first or pass a valid path",
+            path.display()
+        ));
+    }
+
+    let name = binary_name(label);
+    if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
+        let cargo_target_path = PathBuf::from(target_dir).join("debug").join(&name);
+        if cargo_target_path.exists() {
+            return Ok(cargo_target_path);
+        }
+        return Err(anyhow!(
+            "{label} binary not found at {}; build it in the same CARGO_TARGET_DIR or pass {}",
+            cargo_target_path.display(),
+            cli_flag
+        ));
+    }
+
+    if let Ok(current_exe) = env::current_exe()
+        && let Some(runtime_dir) = current_exe.parent()
+    {
+        let sibling = runtime_dir.join(&name);
+        if sibling.exists() {
+            return Ok(sibling);
+        }
+    }
+
+    if default_path.exists() {
+        Ok(default_path)
     } else {
         Err(anyhow!(
             "{label} binary not found at {}; build it first",
-            path.display()
+            default_path.display()
         ))
     }
 }
@@ -541,7 +596,12 @@ fn random_leave_order(count: usize, limit: usize) -> String {
         .join(",")
 }
 
-async fn wait_for_ready(server_url: &str, timeout: Duration) -> Result<()> {
+async fn wait_for_ready(
+    server_url: &str,
+    mut child: Option<&mut Child>,
+    log_path: &Path,
+    timeout: Duration,
+) -> Result<()> {
     let client = reqwest::Client::new();
     let started = Instant::now();
     let url = format!("{}/health/ready", server_url.trim_end_matches('/'));
@@ -549,8 +609,30 @@ async fn wait_for_ready(server_url: &str, timeout: Duration) -> Result<()> {
         if started.elapsed() > timeout {
             return Err(anyhow!("server did not become ready within {:?}", timeout));
         }
+
+        if let Some(child) = child.as_deref_mut()
+            && let Some(status) = child.try_wait().context("poll managed server")?
+        {
+            return Err(anyhow!(
+                "managed server exited before readiness with status {}; check {}",
+                status,
+                log_path.display()
+            ));
+        }
+
         match client.get(&url).send().await {
-            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) if response.status().is_success() => {
+                if let Some(child) = child.as_deref_mut()
+                    && let Some(status) = child.try_wait().context("poll managed server")?
+                {
+                    return Err(anyhow!(
+                        "managed server exited before readiness with status {}; check {}",
+                        status,
+                        log_path.display()
+                    ));
+                }
+                return Ok(());
+            }
             _ => sleep(Duration::from_secs(1)).await,
         }
     }
