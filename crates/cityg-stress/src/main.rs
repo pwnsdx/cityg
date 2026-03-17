@@ -66,6 +66,10 @@ struct Cli {
     watch_percent: u8,
     #[arg(long, env = "CITYG_STRESS_JITTER_MAX_SECS", default_value_t = 3)]
     jitter_max_secs: u64,
+    #[arg(long, env = "CITYG_STRESS_MESSAGE_BURST_COUNT", default_value_t = 3)]
+    message_burst_count: usize,
+    #[arg(long, env = "CITYG_STRESS_MESSAGE_BURST_INTERVAL_MS", default_value_t = 100)]
+    message_burst_interval_ms: u64,
     #[arg(long, env = "CITYG_STRESS_RESTART_EVERY_SECS", default_value_t = 0)]
     restart_every_secs: u64,
     #[arg(long, env = "CITYG_STRESS_WINDOW_TTL_SECS", default_value_t = DEFAULT_WINDOW_TTL_SECS)]
@@ -100,6 +104,8 @@ struct Config {
     leaves_per_room: usize,
     watch_percent: u8,
     jitter_max_secs: u64,
+    message_burst_count: usize,
+    message_burst_interval_ms: u64,
     restart_every_secs: u64,
     window_ttl_secs: u64,
     max_concurrent_heads: u64,
@@ -421,6 +427,8 @@ impl Config {
             leaves_per_room: cli.leaves_per_room.min(cli.max_count),
             watch_percent: cli.watch_percent,
             jitter_max_secs: cli.jitter_max_secs,
+            message_burst_count: cli.message_burst_count,
+            message_burst_interval_ms: cli.message_burst_interval_ms,
             restart_every_secs: cli.restart_every_secs,
             window_ttl_secs: cli.window_ttl_secs,
             max_concurrent_heads: cli.max_concurrent_heads,
@@ -707,6 +715,14 @@ async fn run_worker(
             .arg(&alias_base)
             .arg(format!("--count={count}"))
             .arg(format!("--leave-order={leave_order}"))
+            .arg(format!(
+                "--message-burst-count={}",
+                config.message_burst_count
+            ))
+            .arg(format!(
+                "--message-burst-interval-ms={}",
+                config.message_burst_interval_ms
+            ))
             .arg("--verbose")
             .env("CITYG_CLIENT_ADMIN_TOKEN", &config.admin_token)
             .env("CITYG_CLIENT_MESSAGE_AUTH_TOKEN", &config.message_token)

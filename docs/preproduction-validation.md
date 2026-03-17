@@ -126,15 +126,35 @@ cargo run -p cityg-stress -- \
   --rounds-per-worker 20 \
   --min-count 3 \
   --max-count 6 \
-  --watch-percent 70
+  --watch-percent 70 \
+  --message-burst-count 5 \
+  --message-burst-interval-ms 10
 ```
 
 Notes:
 
 - `cityg-stress` manages a local `cityg-api` by default and renders live metrics in a `ratatui` dashboard
 - use `--plain` when running in CI or when stdout is not a real terminal
+- `--message-burst-count` and `--message-burst-interval-ms` turn each room round into a real message storm instead of a single dummy payload
 - pass `--api-bin` and `--join-leave-bin` when you want to pin the run to explicitly-built candidate binaries
 - the artifact directory is printed at the end of the run and contains `server.log`, worker logs, `summary.txt`, and the last `/metrics` snapshot
+
+High-chatter variant:
+
+```bash
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18095 \
+  --server-url http://127.0.0.1:18095 \
+  --workers 12 \
+  --rounds-per-worker 20 \
+  --min-count 3 \
+  --max-count 6 \
+  --watch-percent 70 \
+  --message-burst-count 6 \
+  --message-burst-interval-ms 25
+```
+
+This variant keeps the same membership churn but adds repeated message sends during each round, which is a better approximation of active rooms than the default single-message path.
 
 Suggested method:
 

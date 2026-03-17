@@ -580,6 +580,8 @@ struct CliOptions {
     watch_mode: bool,
     verbose: bool,
     leave_order: Option<Vec<usize>>,
+    message_burst_count: usize,
+    message_burst_interval_ms: u64,
 }
 
 fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> {
@@ -591,6 +593,8 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
     let mut leave_order_raw: Option<String> = None;
     let mut watch_mode = false;
     let mut verbose = false;
+    let mut message_burst_count = 0usize;
+    let mut message_burst_interval_ms = 0u64;
 
     for arg in args {
         if let Some(rest) = arg.strip_prefix("--count=") {
@@ -619,13 +623,25 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
             leave_order_raw = Some(rest.to_string());
             continue;
         }
+        if let Some(rest) = arg.strip_prefix("--message-burst-count=") {
+            message_burst_count = rest
+                .parse()
+                .map_err(|_| anyhow!("invalid --message-burst-count value: {rest}"))?;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--message-burst-interval-ms=") {
+            message_burst_interval_ms = rest
+                .parse()
+                .map_err(|_| anyhow!("invalid --message-burst-interval-ms value: {rest}"))?;
+            continue;
+        }
         match (&server_url, &room_id, &alias) {
             (None, _, _) => server_url = Some(arg),
             (Some(_), None, _) => room_id = Some(arg),
             (Some(_), Some(_), None) => alias = Some(arg),
             _ => {
                 return Err(anyhow!(
-                    "unexpected extra argument: {arg}. usage: [server] [room] [alias] [--count=N] [--batch|--watch] [--leave-order=...] [--verbose]"
+                    "unexpected extra argument: {arg}. usage: [server] [room] [alias] [--count=N] [--batch|--watch] [--leave-order=...] [--message-burst-count=N] [--message-burst-interval-ms=MS] [--verbose]"
                 ));
             }
         }
@@ -681,6 +697,8 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
         watch_mode,
         verbose,
         leave_order,
+        message_burst_count,
+        message_burst_interval_ms,
     })
 }
 
@@ -701,6 +719,8 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
         watch_mode,
         verbose,
         leave_order,
+        message_burst_count,
+        message_burst_interval_ms,
     } = options;
 
     if watch_mode {
@@ -711,6 +731,8 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             count,
             leave_order.clone(),
             verbose,
+            message_burst_count,
+            Duration::from_millis(message_burst_interval_ms),
         )
         .await?;
         return Ok(());
@@ -729,6 +751,16 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             println!("join ok: weid={}", hex::encode(session.we_epoch_id));
             log_fingerprints(&session);
             sessions.push(session);
+        }
+
+        if message_burst_count > 0 {
+            send_message_burst(
+                &sessions,
+                message_burst_count,
+                Duration::from_millis(message_burst_interval_ms),
+                None,
+            )
+            .await?;
         }
 
         let default_order: Vec<usize> = (1..=count).collect();
@@ -1538,6 +1570,8 @@ async fn run_watch_mode(
     count: usize,
     leave_order: Option<Vec<usize>>,
     verbose: bool,
+    message_burst_count: usize,
+    message_burst_interval: Duration,
 ) -> Result<()> {
     println!(
         "watch mode: server={server_url} room={room_id} alias_base={alias_base} count={count}"
@@ -1577,19 +1611,14 @@ async fn run_watch_mode(
         sessions.push(session);
     }
 
-    if let Some(first) = sessions.first() {
-        println!(
-            "sending dummy message via {}",
-            hex::encode(first.we_epoch_id)
-        );
-        send_dummy_message(first).await?;
-        expect_message_event(
-            &mut event_rx,
-            &first.we_epoch_id,
-            "dummy message delivery".to_string(),
-        )
-        .await?;
-    }
+    let effective_message_burst_count = message_burst_count.max(1);
+    send_message_burst(
+        &sessions,
+        effective_message_burst_count,
+        message_burst_interval,
+        Some(&mut event_rx),
+    )
+    .await?;
 
     let default_order: Vec<usize> = (1..=sessions.len()).collect();
     let order = leave_order.as_ref().unwrap_or(&default_order);
@@ -1630,6 +1659,41 @@ async fn send_dummy_message(session: &Session) -> Result<()> {
     client
         .send_message(&session.we_epoch_id, &ciphertext, Some(&session.leaf_id))
         .await?;
+    Ok(())
+}
+
+async fn send_message_burst(
+    sessions: &[Session],
+    message_burst_count: usize,
+    message_burst_interval: Duration,
+    mut event_rx: Option<&mut mpsc::Receiver<Notification>>,
+) -> Result<()> {
+    if sessions.is_empty() || message_burst_count == 0 {
+        return Ok(());
+    }
+
+    for idx in 0..message_burst_count {
+        let session = &sessions[idx % sessions.len()];
+        println!(
+            "sending dummy message {}/{} via {}",
+            idx + 1,
+            message_burst_count,
+            hex::encode(session.we_epoch_id)
+        );
+        send_dummy_message(session).await?;
+        if let Some(rx) = event_rx.as_deref_mut() {
+            expect_message_event(
+                rx,
+                &session.we_epoch_id,
+                format!("dummy message delivery {}", idx + 1),
+            )
+            .await?;
+        }
+        if message_burst_interval > Duration::ZERO && idx + 1 < message_burst_count {
+            sleep(message_burst_interval).await;
+        }
+    }
+
     Ok(())
 }
 
@@ -2458,6 +2522,8 @@ mod tests {
         assert!(!opts.watch_mode);
         assert!(!opts.verbose);
         assert!(opts.leave_order.is_none());
+        assert_eq!(opts.message_burst_count, 0);
+        assert_eq!(opts.message_burst_interval_ms, 0);
         assert_eq!(opts.alias_base, "cli-joiner");
         assert_eq!(opts.room_id.len(), 64);
 
@@ -2467,6 +2533,8 @@ mod tests {
             "operator".to_string(),
             "--watch".to_string(),
             "--count=2".to_string(),
+            "--message-burst-count=3".to_string(),
+            "--message-burst-interval-ms=25".to_string(),
             "--verbose".to_string(),
         ])?;
         assert_eq!(opts.server_url, "http://127.0.0.1:19090");
@@ -2476,6 +2544,8 @@ mod tests {
         assert!(opts.watch_mode);
         assert!(opts.batch_mode);
         assert!(opts.verbose);
+        assert_eq!(opts.message_burst_count, 3);
+        assert_eq!(opts.message_burst_interval_ms, 25);
         Ok(())
     }
 
@@ -2544,6 +2614,20 @@ mod tests {
         ])
         .expect_err("non-numeric leave order entry should fail");
         assert!(err.to_string().contains("invalid leave order entry: a"));
+
+        let err = parse_cli_args(vec!["--message-burst-count=nope".to_string()])
+            .expect_err("non-numeric message burst count should fail");
+        assert!(
+            err.to_string()
+                .contains("invalid --message-burst-count value: nope")
+        );
+
+        let err = parse_cli_args(vec!["--message-burst-interval-ms=nope".to_string()])
+            .expect_err("non-numeric message burst interval should fail");
+        assert!(
+            err.to_string()
+                .contains("invalid --message-burst-interval-ms value: nope")
+        );
     }
 
     #[test]
@@ -2952,6 +3036,8 @@ mod tests {
             watch_mode: false,
             verbose: true,
             leave_order: None,
+            message_burst_count: 0,
+            message_burst_interval_ms: 0,
         })
         .await?;
 
@@ -2979,6 +3065,8 @@ mod tests {
             watch_mode: false,
             verbose: true,
             leave_order: None,
+            message_burst_count: 2,
+            message_burst_interval_ms: 0,
         })
         .await?;
 
@@ -3006,6 +3094,8 @@ mod tests {
             watch_mode: false,
             verbose: false,
             leave_order: None,
+            message_burst_count: 0,
+            message_burst_interval_ms: 0,
         })
         .await?;
 
@@ -3033,6 +3123,8 @@ mod tests {
             watch_mode: false,
             verbose: false,
             leave_order: None,
+            message_burst_count: 1,
+            message_burst_interval_ms: 0,
         })
         .await?;
 
@@ -3060,6 +3152,8 @@ mod tests {
             watch_mode: true,
             verbose: false,
             leave_order: None,
+            message_burst_count: 3,
+            message_burst_interval_ms: 0,
         })
         .await?;
 
@@ -3087,6 +3181,8 @@ mod tests {
             watch_mode: false,
             verbose: false,
             leave_order: Some(vec![2]),
+            message_burst_count: 0,
+            message_burst_interval_ms: 0,
         })
         .await
         .expect_err("invalid leave order should fail at runtime");
@@ -3109,7 +3205,8 @@ mod tests {
 
         // Keep a single explicit leave in this test to avoid stale-second-leave
         // checkpoint races under heavy instrumentation (llvm-cov).
-        run_watch_mode(&server_url, &room_id, "watcher", 2, Some(vec![2]), true).await?;
+        run_watch_mode(&server_url, &room_id, "watcher", 2, Some(vec![2]), true, 3, Duration::ZERO)
+            .await?;
 
         handle.abort();
         let _ = handle.await;
