@@ -41,7 +41,20 @@ curl -fsS -X POST -H 'content-type: application/x-protobuf' --data-binary '' \
 Run one-command smoke (starts local API, runs watch mode, validates freeze-925 behavior):
 
 ```bash
-./scripts/smoke_membership_capacity.sh
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 1 \
+  --rounds-per-worker 1 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --jitter-max-secs 0 \
+  --round-delay-secs 0 \
+  --message-burst-count 1 \
+  --message-burst-interval-ms 0 \
+  --final-capacity-check
 ```
 
 Expected result:
@@ -51,7 +64,17 @@ Expected result:
 For longer churn validation, run:
 
 ```bash
-CITYG_SOAK_ITERATIONS=10 ./scripts/soak_membership_campaign.sh
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 1 \
+  --rounds-per-worker 10 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --round-delay-secs 2 \
+  --require-metrics
 ```
 
 ## 4. GUI Smoke

@@ -2,6 +2,8 @@
 
 This document defines the minimum pre-production validation campaign for CityG before exposing a deployment to non-trivial real traffic.
 
+`cityg-stress` is now the canonical runner for smoke, soak, and chaos validation. The legacy Bash scripts in `/Users/admin/Desktop/Repositories/cityg/scripts` are compatibility wrappers only and forward into this binary.
+
 ## Scope
 
 These checks are not about wire/spec correctness. They are about runtime stability under:
@@ -26,7 +28,8 @@ A candidate build is considered pre-production ready only if all of the followin
 
 - built binaries:
   - `cargo build -p cityg-api`
-  - `cargo build -p cityg-gui --bin join_leave`
+  - `cargo build -p cityg-gui --features native-app --bin join_leave`
+  - `cargo build -p cityg-stress`
 - local secrets/tokens for smoke:
   - `CITYG_CLIENT_ADMIN_TOKEN`
   - `CITYG_CLIENT_MESSAGE_AUTH_TOKEN`
@@ -42,7 +45,20 @@ A candidate build is considered pre-production ready only if all of the followin
 Run:
 
 ```bash
-./scripts/smoke_membership_capacity.sh
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 1 \
+  --rounds-per-worker 1 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --jitter-max-secs 0 \
+  --round-delay-secs 0 \
+  --message-burst-count 1 \
+  --message-burst-interval-ms 0 \
+  --final-capacity-check
 ```
 
 Success criteria:
@@ -69,9 +85,17 @@ Suggested duration:
 Suggested loop:
 
 ```bash
-for i in $(seq 1 200); do
-  ./scripts/smoke_membership_capacity.sh
-done
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 1 \
+  --rounds-per-worker 200 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --round-delay-secs 0 \
+  --require-metrics
 ```
 
 Run this against a dedicated staging server with journaling enabled.
@@ -79,23 +103,43 @@ Run this against a dedicated staging server with journaling enabled.
 Recommended runner:
 
 ```bash
-./scripts/soak_membership_campaign.sh
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 1 \
+  --rounds-per-worker 50 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --round-delay-secs 5 \
+  --require-metrics \
+  --final-capacity-check
 ```
 
 Useful overrides:
 
 ```bash
 CITYG_SOAK_ITERATIONS=50 \
-CITYG_SOAK_SLEEP_SECS=5 \
-CITYG_SOAK_FINAL_CAPACITY=1 \
-./scripts/soak_membership_campaign.sh
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 1 \
+  --rounds-per-worker 50 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --round-delay-secs 5 \
+  --require-metrics \
+  --final-capacity-check
 ```
 
 Notes:
 
-- the soak runner keeps one API process alive by default and exercises fresh room IDs on each iteration
-- artifacts are written under `/tmp/cityg-soak-<timestamp>` unless `CITYG_SOAK_ARTIFACT_DIR` is set
-- set `CITYG_SOAK_MANAGE_SERVER=0` to point at an already-running staging server via `CITYG_SOAK_SERVER_URL`
+- `cityg-stress` keeps one API process alive by default and exercises fresh room IDs on each iteration
+- artifacts are written under `/tmp/cityg-stress-<timestamp>` unless `--artifact-dir` is set
+- use `--no-manage-server` to point at an already-running staging server
 
 Success criteria:
 
@@ -137,7 +181,7 @@ Notes:
 - use `--plain` when running in CI or when stdout is not a real terminal
 - `--message-burst-count` and `--message-burst-interval-ms` turn each room round into a real message storm instead of a single dummy payload
 - pass `--api-bin` and `--join-leave-bin` when you want to pin the run to explicitly-built candidate binaries
-- the artifact directory is printed at the end of the run and contains `server.log`, worker logs, `summary.txt`, and the last `/metrics` snapshot
+- the artifact directory is printed at the end of the run and contains `server.log`, worker logs, `summary.txt`, initial/final observability snapshots, and per-round observability snapshots
 
 High-chatter variant:
 
@@ -166,7 +210,20 @@ Example:
 
 ```bash
 for n in 1 2 4 8; do
-  CITYG_SERVER_GROUP_LANES=$n ./scripts/smoke_membership_capacity.sh
+  CITYG_SERVER_GROUP_LANES=$n cargo run -p cityg-stress -- \
+    --server-bind 127.0.0.1:18080 \
+    --server-url http://127.0.0.1:18080 \
+    --workers 1 \
+    --rounds-per-worker 1 \
+    --min-count 2 \
+    --max-count 2 \
+    --leaves-per-room 2 \
+    --watch-percent 100 \
+    --jitter-max-secs 0 \
+    --round-delay-secs 0 \
+    --message-burst-count 1 \
+    --message-burst-interval-ms 0 \
+    --final-capacity-check
 done
 ```
 
@@ -174,8 +231,21 @@ Then add parallelism:
 
 ```bash
 for i in $(seq 1 4); do
-  CITYG_SMOKE_SERVER_BIND="127.0.0.1:$((18080 + i))" \
-  ./scripts/smoke_membership_capacity.sh &
+  cargo run -p cityg-stress -- \
+    --plain \
+    --server-bind "127.0.0.1:$((18080 + i))" \
+    --server-url "http://127.0.0.1:$((18080 + i))" \
+    --workers 1 \
+    --rounds-per-worker 1 \
+    --min-count 2 \
+    --max-count 2 \
+    --leaves-per-room 2 \
+    --watch-percent 100 \
+    --jitter-max-secs 0 \
+    --round-delay-secs 0 \
+    --message-burst-count 1 \
+    --message-burst-interval-ms 0 \
+    --final-capacity-check &
 done
 wait
 ```
@@ -207,7 +277,20 @@ Suggested scenarios:
 Minimal manual drill:
 
 ```bash
-./scripts/smoke_membership_capacity.sh
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 1 \
+  --rounds-per-worker 1 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --jitter-max-secs 0 \
+  --round-delay-secs 0 \
+  --message-burst-count 1 \
+  --message-burst-interval-ms 0 \
+  --final-capacity-check
 # while a separate watch run is active:
 pkill -f cityg-api
 # restart server
@@ -217,19 +300,35 @@ cargo run -p cityg-api
 Recommended runner:
 
 ```bash
-./scripts/chaos_membership_campaign.sh
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 8 \
+  --rounds-per-worker 10 \
+  --min-count 2 \
+  --max-count 5 \
+  --leaves-per-room 1 \
+  --watch-percent 60 \
+  --jitter-max-secs 1 \
+  --require-metrics \
+  --restart-every-secs 20
 ```
 
 Useful overrides:
 
 ```bash
-CITYG_CHAOS_WORKERS=8 \
-CITYG_CHAOS_ROUNDS_PER_WORKER=10 \
-CITYG_CHAOS_MIN_COUNT=2 \
-CITYG_CHAOS_MAX_COUNT=5 \
-CITYG_CHAOS_LEAVES_PER_ROOM=1 \
-CITYG_CHAOS_RESTART_EVERY_SECS=20 \
-./scripts/chaos_membership_campaign.sh
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 8 \
+  --rounds-per-worker 10 \
+  --min-count 2 \
+  --max-count 5 \
+  --leaves-per-room 1 \
+  --watch-percent 60 \
+  --jitter-max-secs 1 \
+  --require-metrics \
+  --restart-every-secs 20
 ```
 
 Notes:
@@ -237,10 +336,10 @@ Notes:
 - each worker uses a fresh room per round to avoid cross-round contamination
 - the runner mixes `watch` and `batch` membership flows, with randomized member counts and explicit randomized leave order
 - `CITYG_CHAOS_LEAVES_PER_ROOM=1` is the safest default because it avoids stale multi-revoke artifacts dominating the signal; raise it only when you intentionally want to probe repeated local leave sequencing
-- set `CITYG_CHAOS_MANAGE_SERVER=0` to run against an existing staging server
-- set `CITYG_CHAOS_RESTART_EVERY_SECS` only when you want deliberate restart turbulence during live traffic
-- if another local campaign is already using `127.0.0.1:18080`, set `CITYG_CHAOS_SERVER_BIND` to a different port before starting a managed chaos run
-- `CITYG_CHAOS_API_BIN` and `CITYG_CHAOS_JOIN_LEAVE_BIN` can point at explicitly-built binaries when you want to isolate a candidate patch from the repository's default `target/debug`
+- use `--no-manage-server` to run against an existing staging server
+- set `--restart-every-secs` only when you want deliberate restart turbulence during live traffic
+- if another local campaign is already using `127.0.0.1:18080`, set `--server-bind` to a different port before starting a managed chaos run
+- `--api-bin` and `--join-leave-bin` can point at explicitly-built binaries when you want to isolate a candidate patch from the repository's default `target/debug`
 
 Success criteria:
 

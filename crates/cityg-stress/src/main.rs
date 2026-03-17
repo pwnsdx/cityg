@@ -66,10 +66,16 @@ struct Cli {
     watch_percent: u8,
     #[arg(long, env = "CITYG_STRESS_JITTER_MAX_SECS", default_value_t = 3)]
     jitter_max_secs: u64,
+    #[arg(long, env = "CITYG_STRESS_ROUND_DELAY_SECS", default_value_t = 0)]
+    round_delay_secs: u64,
     #[arg(long, env = "CITYG_STRESS_MESSAGE_BURST_COUNT", default_value_t = 3)]
     message_burst_count: usize,
     #[arg(long, env = "CITYG_STRESS_MESSAGE_BURST_INTERVAL_MS", default_value_t = 100)]
     message_burst_interval_ms: u64,
+    #[arg(long, env = "CITYG_STRESS_FINAL_CAPACITY_CHECK", action = ArgAction::SetTrue)]
+    final_capacity_check: bool,
+    #[arg(long, env = "CITYG_STRESS_REQUIRE_METRICS", action = ArgAction::SetTrue)]
+    require_metrics: bool,
     #[arg(long, env = "CITYG_STRESS_RESTART_EVERY_SECS", default_value_t = 0)]
     restart_every_secs: u64,
     #[arg(long, env = "CITYG_STRESS_WINDOW_TTL_SECS", default_value_t = DEFAULT_WINDOW_TTL_SECS)]
@@ -104,8 +110,11 @@ struct Config {
     leaves_per_room: usize,
     watch_percent: u8,
     jitter_max_secs: u64,
+    round_delay_secs: u64,
     message_burst_count: usize,
     message_burst_interval_ms: u64,
+    final_capacity_check: bool,
+    require_metrics: bool,
     restart_every_secs: u64,
     window_ttl_secs: u64,
     max_concurrent_heads: u64,
@@ -181,6 +190,11 @@ enum AppEvent {
     },
     MetricsUpdated(MetricsSnapshot),
     Info(String),
+    CapacityCheckStarted,
+    CapacityCheckFinished {
+        ok: bool,
+        log_path: PathBuf,
+    },
     RunComplete,
 }
 
@@ -288,21 +302,56 @@ async fn main() -> Result<()> {
     fs::create_dir_all(&config.artifact_dir)
         .with_context(|| format!("create {}", config.artifact_dir.display()))?;
 
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
-    let (stop_tx, stop_rx) = watch::channel(false);
-
+    let mut startup_events = Vec::new();
     let mut server = if config.manage_server {
         let mut managed = ManagedServer::new(config.clone());
         let pid = managed.start().await?;
-        let _ = event_tx.send(AppEvent::Info(format!(
+        startup_events.push(format!(
             "managed server started pid={}",
             pid.map(|id| id.to_string())
                 .unwrap_or_else(|| "-".to_string())
-        )));
+        ));
         Some(Arc::new(Mutex::new(managed)))
     } else {
         None
     };
+
+    let interactive = !config.plain && std::io::stdout().is_terminal();
+    let mut app = AppState::new(
+        config.workers,
+        config.rounds_per_worker,
+        config.artifact_dir.clone(),
+        config.server_url.clone(),
+        config.manage_server,
+        config.final_capacity_check,
+    );
+    app.push_event(format!(
+        "artifact dir: {}",
+        config.artifact_dir.display()
+    ));
+    for line in startup_events {
+        app.push_event(line);
+    }
+    if let Err(err) = capture_observability_snapshot(
+        &config.server_url,
+        &config.artifact_dir,
+        "initial",
+    )
+    .await
+    {
+        app.push_event(format!("initial observability snapshot failed: {err}"));
+        if config.require_metrics {
+            if let Some(server_ref) = server.as_mut() {
+                server_ref.lock().await.stop().await;
+            }
+            write_summary(&config.artifact_dir, &app)?;
+            print_final_summary(&app);
+            return Err(anyhow!("initial observability snapshot failed: {err}"));
+        }
+    }
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
+    let (stop_tx, stop_rx) = watch::channel(false);
 
     let metrics_handle = tokio::spawn(poll_metrics_loop(
         config.server_url.clone(),
@@ -334,20 +383,7 @@ async fn main() -> Result<()> {
         stop_rx.clone(),
     ));
 
-    let interactive = !config.plain && std::io::stdout().is_terminal();
-    let mut app = AppState::new(
-        config.workers,
-        config.rounds_per_worker,
-        config.artifact_dir.clone(),
-        config.server_url.clone(),
-        config.manage_server,
-    );
-    app.push_event(format!(
-        "artifact dir: {}",
-        config.artifact_dir.display()
-    ));
-
-    let failed = if interactive {
+    let mut failed = if interactive {
         run_tui(&mut app, &mut event_rx, stop_tx.clone()).await?
     } else {
         run_plain(&mut app, &mut event_rx, stop_tx.clone()).await?
@@ -358,6 +394,18 @@ async fn main() -> Result<()> {
     let _ = metrics_handle.await;
     if let Some(handle) = restart_handle {
         let _ = handle.await;
+    }
+    if let Err(err) = capture_observability_snapshot(
+        &config.server_url,
+        &config.artifact_dir,
+        "final",
+    )
+    .await
+    {
+        app.push_event(format!("final observability snapshot failed: {err}"));
+        if config.require_metrics {
+            failed = true;
+        }
     }
     if let Some(server_ref) = server.as_mut() {
         server_ref.lock().await.stop().await;
@@ -427,8 +475,11 @@ impl Config {
             leaves_per_room: cli.leaves_per_room.min(cli.max_count),
             watch_percent: cli.watch_percent,
             jitter_max_secs: cli.jitter_max_secs,
+            round_delay_secs: cli.round_delay_secs,
             message_burst_count: cli.message_burst_count,
             message_burst_interval_ms: cli.message_burst_interval_ms,
+            final_capacity_check: cli.final_capacity_check,
+            require_metrics: cli.require_metrics,
             restart_every_secs: cli.restart_every_secs,
             window_ttl_secs: cli.window_ttl_secs,
             max_concurrent_heads: cli.max_concurrent_heads,
@@ -586,6 +637,27 @@ async fn poll_metrics_loop(
     }
 }
 
+async fn capture_observability_snapshot(
+    server_url: &str,
+    artifact_dir: &Path,
+    prefix: &str,
+) -> Result<()> {
+    let health = fetch_health(server_url).await?;
+    fs::write(
+        artifact_dir.join(format!("{prefix}-health.json")),
+        serde_json::to_vec_pretty(&health).unwrap_or_default(),
+    )
+    .with_context(|| format!("write {prefix}-health.json"))?;
+
+    let metrics = fetch_metrics_text(server_url).await?;
+    fs::write(
+        artifact_dir.join(format!("{prefix}-metrics.txt")),
+        metrics.as_bytes(),
+    )
+    .with_context(|| format!("write {prefix}-metrics.txt"))?;
+    Ok(())
+}
+
 async fn restart_loop(
     server: Arc<Mutex<ManagedServer>>,
     interval: Duration,
@@ -653,7 +725,61 @@ async fn run_workers(
             let _ = event_tx.send(AppEvent::Info(format!("worker task join error: {err}")));
         }
     }
+    if config.final_capacity_check && !*stop_rx.borrow() {
+        let _ = event_tx.send(AppEvent::CapacityCheckStarted);
+        let log_path = config.artifact_dir.join("final-capacity.log");
+        let result = run_final_capacity_check(&config, &log_path).await;
+        match result {
+            Ok(()) => {
+                let _ = event_tx.send(AppEvent::CapacityCheckFinished { ok: true, log_path });
+            }
+            Err(err) => {
+                let _ = open_append(&log_path).and_then(|mut file| {
+                    writeln!(file, "capacity-check-error={err}")?;
+                    Ok(file)
+                });
+                let _ = event_tx.send(AppEvent::Info(format!("final capacity check failed: {err}")));
+                let _ = event_tx.send(AppEvent::CapacityCheckFinished {
+                    ok: false,
+                    log_path,
+                });
+            }
+        }
+    }
     let _ = event_tx.send(AppEvent::RunComplete);
+}
+
+async fn run_final_capacity_check(_config: &Config, log_path: &Path) -> Result<()> {
+    let repo_root = repo_root()?;
+    let output = Command::new("cargo")
+        .arg("test")
+        .arg("-p")
+        .arg("cityg-api")
+        .arg("window_full_rest_api_freeze")
+        .arg("--")
+        .arg("--exact")
+        .current_dir(repo_root)
+        .output()
+        .await
+        .context("run final capacity check")?;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&output.stdout);
+    bytes.extend_from_slice(&output.stderr);
+    fs::write(log_path, bytes).with_context(|| format!("write {}", log_path.display()))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "capacity check exited with status {}",
+            output
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string())
+        ))
+    }
 }
 
 async fn run_worker(
@@ -739,6 +865,17 @@ async fn run_worker(
             .with_context(|| format!("run {}", config.join_leave_bin.display()))?;
         if !status.success() {
             fs::write(&worker_status, b"status=failed\n").ok();
+            if let Err(err) = capture_observability_snapshot(
+                &config.server_url,
+                &config.artifact_dir,
+                &format!("worker-{worker_id:02}-round-{round:03}-failure"),
+            )
+            .await
+            {
+                let _ = event_tx.send(AppEvent::Info(format!(
+                    "round {round} failure observability capture failed: {err}"
+                )));
+            }
             let error = format!("round {round} exited with status {status}");
             let _ = event_tx.send(AppEvent::WorkerRoundFailed {
                 worker_id,
@@ -752,11 +889,39 @@ async fn run_worker(
             return Err(anyhow!(error));
         }
 
+        if let Err(err) = capture_observability_snapshot(
+            &config.server_url,
+            &config.artifact_dir,
+            &format!("worker-{worker_id:02}-round-{round:03}"),
+        )
+        .await
+        {
+            if config.require_metrics {
+                fs::write(&worker_status, b"status=failed\n").ok();
+                let error = format!("round {round} observability snapshot failed: {err}");
+                let _ = event_tx.send(AppEvent::WorkerRoundFailed {
+                    worker_id,
+                    round,
+                    error: error.clone(),
+                });
+                let _ = event_tx.send(AppEvent::WorkerFinished {
+                    worker_id,
+                    ok: false,
+                });
+                return Err(anyhow!(error));
+            }
+            let _ = event_tx.send(AppEvent::Info(format!(
+                "round {round} observability capture failed: {err}"
+            )));
+        }
         let _ = event_tx.send(AppEvent::WorkerRoundCompleted {
             worker_id,
             round,
             elapsed: started.elapsed(),
         });
+        if config.round_delay_secs > 0 && round < config.rounds_per_worker && !*stop_rx.borrow() {
+            sleep(Duration::from_secs(config.round_delay_secs)).await;
+        }
     }
 
     fs::write(&worker_status, b"status=ok\n").ok();
@@ -794,7 +959,7 @@ async fn run_tui(
             }
         }
     }
-    Ok(app.worker_failures > 0 || app.failed_rounds > 0)
+    Ok(app.worker_failures > 0 || app.failed_rounds > 0 || app.capacity_check_failed)
 }
 
 async fn run_plain(
@@ -807,12 +972,13 @@ async fn run_plain(
         drain_events(app, event_rx);
         if last_print.elapsed() >= Duration::from_secs(1) {
             println!(
-                "elapsed={} rounds={}/{} failed_rounds={} worker_failures={} accept_ok={} refresh_conflicts={} p95={}",
+                "elapsed={} rounds={}/{} failed_rounds={} worker_failures={} capacity={} accept_ok={} refresh_conflicts={} p95={}",
                 humantime(app.elapsed()),
                 app.completed_rounds,
                 app.total_rounds,
                 app.failed_rounds,
                 app.worker_failures,
+                app.capacity_check_status,
                 app.metrics.accept_epoch_ok,
                 app.metrics.refresh_conflicts,
                 app.metrics
@@ -835,7 +1001,7 @@ async fn run_plain(
             _ = sleep(Duration::from_millis(100)) => {}
         }
     }
-    Ok(app.worker_failures > 0 || app.failed_rounds > 0)
+    Ok(app.worker_failures > 0 || app.failed_rounds > 0 || app.capacity_check_failed)
 }
 
 fn drain_events(app: &mut AppState, event_rx: &mut mpsc::UnboundedReceiver<AppEvent>) {
@@ -917,6 +1083,19 @@ fn drain_events(app: &mut AppState, event_rx: &mut mpsc::UnboundedReceiver<AppEv
                 app.metrics = snapshot;
             }
             AppEvent::Info(line) => app.push_event(line),
+            AppEvent::CapacityCheckStarted => {
+                app.capacity_check_status = "running".to_string();
+                app.push_event("final capacity check running");
+            }
+            AppEvent::CapacityCheckFinished { ok, log_path } => {
+                app.capacity_check_status = if ok { "passed" } else { "failed" }.to_string();
+                app.capacity_check_failed = !ok;
+                app.push_event(format!(
+                    "final capacity check {} ({})",
+                    if ok { "passed" } else { "failed" },
+                    log_path.display()
+                ));
+            }
             AppEvent::RunComplete => {
                 app.finished = true;
                 app.push_event("all workers complete");
@@ -945,6 +1124,11 @@ fn write_summary(artifact_dir: &Path, app: &AppState) -> Result<()> {
     let _ = writeln!(&mut summary, "rounds_completed={}", app.completed_rounds);
     let _ = writeln!(&mut summary, "rounds_failed={}", app.failed_rounds);
     let _ = writeln!(&mut summary, "restarts={}", app.restarts);
+    let _ = writeln!(
+        &mut summary,
+        "capacity_check_status={}",
+        app.capacity_check_status
+    );
     let _ = writeln!(&mut summary, "accept_epoch_ok={}", app.metrics.accept_epoch_ok);
     let _ = writeln!(
         &mut summary,
@@ -959,11 +1143,12 @@ fn write_summary(artifact_dir: &Path, app: &AppState) -> Result<()> {
 
 fn print_final_summary(app: &AppState) {
     println!(
-        "cityg-stress finished: workers_passed={} workers_failed={} rounds={}/{} accept_ok={} refresh_conflicts={} artifacts={}",
+        "cityg-stress finished: workers_passed={} workers_failed={} rounds={}/{} capacity={} accept_ok={} refresh_conflicts={} artifacts={}",
         app.worker_passes,
         app.worker_failures,
         app.completed_rounds,
         app.total_rounds,
+        app.capacity_check_status,
         app.metrics.accept_epoch_ok,
         app.metrics.refresh_conflicts,
         app.artifact_dir.display()

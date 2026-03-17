@@ -49,7 +49,7 @@ This document provides deployment guidance for City-G `tswe/msphf-we/fs-hybrid` 
 - [ ] Verify `cargo test --all --release` passes (capture current count with `cargo test --all -- --list | rg ': test$' | wc -l`)
 - [ ] Run Known-Answer Tests (KATs): `cargo run --bin cityg-hps-kat`
 - [ ] Verify KAT outputs match expected values
-- [ ] Run runtime smoke (`join/leave + capacity`): `./scripts/smoke_membership_capacity.sh`
+- [ ] Run runtime smoke (`join/leave + capacity`): `cargo run -p cityg-stress -- --server-bind 127.0.0.1:18080 --server-url http://127.0.0.1:18080 --workers 1 --rounds-per-worker 1 --min-count 2 --max-count 2 --leaves-per-room 2 --watch-percent 100 --jitter-max-secs 0 --round-delay-secs 0 --message-burst-count 1 --message-burst-interval-ms 0 --final-capacity-check`
 
 **✅ Constant-Time Verification**:
 - [ ] Run DUDECT harness: `cargo run --release --bin dudect-harness`
@@ -668,7 +668,20 @@ cargo test --all --release
 ./scripts/security_review.sh
 
 # Runtime smoke
-./scripts/smoke_membership_capacity.sh
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 1 \
+  --rounds-per-worker 1 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --jitter-max-secs 0 \
+  --round-delay-secs 0 \
+  --message-burst-count 1 \
+  --message-burst-interval-ms 0 \
+  --final-capacity-check
 
 # Verify binary
 sha256sum target/release/cityg-api

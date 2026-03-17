@@ -51,6 +51,8 @@ pub(crate) struct AppState {
     pub(crate) worker_passes: usize,
     pub(crate) worker_failures: usize,
     pub(crate) restarts: usize,
+    pub(crate) capacity_check_status: String,
+    pub(crate) capacity_check_failed: bool,
     pub(crate) server_ready: bool,
     pub(crate) server_alive: bool,
     pub(crate) metrics: MetricsSnapshot,
@@ -66,6 +68,7 @@ impl AppState {
         artifact_dir: PathBuf,
         server_url: String,
         manage_server: bool,
+        final_capacity_check: bool,
     ) -> Self {
         let mut workers = BTreeMap::new();
         for id in 1..=worker_count {
@@ -82,6 +85,12 @@ impl AppState {
             worker_passes: 0,
             worker_failures: 0,
             restarts: 0,
+            capacity_check_status: if final_capacity_check {
+                "pending".to_string()
+            } else {
+                "skipped".to_string()
+            },
+            capacity_check_failed: false,
             server_ready: false,
             server_alive: false,
             metrics: MetricsSnapshot::default(),
@@ -179,6 +188,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                     "external-server"
                 }
             )),
+            Span::raw(format!("capacity={}  ", app.capacity_check_status)),
             Span::raw(format!("artifacts={}", app.artifact_dir.display())),
         ]),
     ];
@@ -208,8 +218,8 @@ fn draw_metrics(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         Row::new(vec![
             Cell::from("Refresh conflicts"),
             Cell::from(app.metrics.refresh_conflicts.to_string()),
-            Cell::from("Pivot 409"),
-            Cell::from(app.metrics.pivot_refresh_409.to_string()),
+            Cell::from("Capacity"),
+            Cell::from(app.capacity_check_status.clone()),
             Cell::from("Metrics age"),
             Cell::from(
                 app.metrics

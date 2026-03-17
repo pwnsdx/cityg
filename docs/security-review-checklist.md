@@ -44,7 +44,20 @@ cargo test -p msphf-orchestrator
 - [ ] Membership join/leave runtime smoke succeeds:
 
 ```bash
-./scripts/smoke_membership_capacity.sh
+cargo run -p cityg-stress -- \
+  --server-bind 127.0.0.1:18080 \
+  --server-url http://127.0.0.1:18080 \
+  --workers 1 \
+  --rounds-per-worker 1 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --jitter-max-secs 0 \
+  --round-delay-secs 0 \
+  --message-burst-count 1 \
+  --message-burst-interval-ms 0 \
+  --final-capacity-check
 ```
 
 - [ ] Capacity guard smoke shows a 925 freeze when `h_max` is intentionally exceeded.
