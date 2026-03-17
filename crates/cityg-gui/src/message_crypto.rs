@@ -1,3 +1,5 @@
+#![cfg_attr(not(any(feature = "native-app", test)), allow(dead_code))]
+
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use hex::{decode as hex_decode, encode as hex_encode};
 use msphf_core::{hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};

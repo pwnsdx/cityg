@@ -39,16 +39,26 @@ struct Args {
     /// RNG seed (for reproducibility)
     #[arg(long, default_value_t = 0xDAD3_C7u64)]
     seed: u64,
+    /// Absolute Welch t-statistic threshold above which the run should fail.
+    #[arg(long, default_value_t = 4.5)]
+    fail_threshold: f64,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Target {
+    #[value(alias = "barrett_reduce")]
     BarrettReduce,
+    #[value(alias = "montgomery_reduce")]
     MontgomeryReduce,
+    #[value(alias = "montgomery_add")]
     MontgomeryAdd,
+    #[value(alias = "montgomery_sub")]
     MontgomerySub,
+    #[value(alias = "expand_a")]
     ExpandA,
+    #[value(alias = "smallwood_prove")]
     SmallwoodProve,
+    #[value(alias = "smallwood_verify")]
     SmallwoodVerify,
 }
 
@@ -118,8 +128,19 @@ fn run(args: Args) {
     println!("Class 0: mean {:.6} ns (n={})", class0.mean(), class0.count);
     println!("Class 1: mean {:.6} ns (n={})", class1.mean(), class1.count);
     let t = welch_t(&class0, &class1);
+    let abs_t = t.abs();
     println!("Welch t-statistic: {:.4}", t);
-    println!("|t| > 4.5 is suspicious. Current |t| = {:.4}", t.abs());
+    println!(
+        "|t| > {:.4} is suspicious. Current |t| = {:.4}",
+        args.fail_threshold, abs_t
+    );
+    if abs_t > args.fail_threshold {
+        eprintln!(
+            "dudect threshold exceeded for target '{}': |t| = {:.4} > {:.4}",
+            args.target, abs_t, args.fail_threshold
+        );
+        std::process::exit(1);
+    }
 }
 
 #[cfg(not(test))]
@@ -295,6 +316,7 @@ mod tests {
             samples: 1,
             inner: 2,
             seed: 7,
+            fail_threshold: 4.5,
         }
     }
 

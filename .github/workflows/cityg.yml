@@ -40,7 +40,7 @@ jobs:
           )
           for target in "${targets[@]}"; do
             echo "Running dudect target: $target"
-            cargo run -p dudect-harness --release -- --target "$target" --samples 20000 --inner 16 --seed 4242
+            cargo run -p dudect-harness --release -- --target "$target" --samples 20000 --inner 16 --seed 4242 --fail-threshold 4.5
           done
 
   release-matrix:
