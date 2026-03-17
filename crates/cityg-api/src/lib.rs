@@ -671,6 +671,19 @@ impl IntoResponse for ApiError {
         let freeze_reason = freeze.map(|f| f.reason);
         if status.is_server_error() {
             error!(status = %status, message = %message, freeze_code = ?freeze_code, freeze_reason = ?freeze_reason, "request failed");
+        } else if status == StatusCode::CONFLICT {
+            if let Some(reason) = classify_refresh_pivot_conflict(&message) {
+                info!(
+                    status = %status,
+                    message = %message,
+                    conflict_reason = reason,
+                    freeze_code = ?freeze_code,
+                    freeze_reason = ?freeze_reason,
+                    "request conflict"
+                );
+            } else {
+                warn!(status = %status, message = %message, freeze_code = ?freeze_code, freeze_reason = ?freeze_reason, "request failed");
+            }
         } else {
             warn!(status = %status, message = %message, freeze_code = ?freeze_code, freeze_reason = ?freeze_reason, "request failed");
         }
@@ -871,6 +884,16 @@ fn classify_concurrency_pressure(
         return Some("revocation_change");
     }
     None
+}
+
+fn classify_refresh_pivot_conflict(message: &str) -> Option<&'static str> {
+    let reason = message.strip_prefix("invalid input: ").unwrap_or(message);
+    match reason {
+        "pivot parity missing for refresh" => Some("pivot_parity_missing"),
+        "pivot head missing" => Some("pivot_head_missing"),
+        "refresh payload diverges from stored parity" => Some("payload_diverges"),
+        _ => None,
+    }
 }
 
 fn record_concurrency_pressure(endpoint: &'static str, reason: &'static str) {
@@ -2733,7 +2756,16 @@ async fn refresh_pivot(State(state): State<ApiState>, body: Bytes) -> Result<Res
                 "pivot parity missing for refresh"
                 | "pivot head missing"
                 | "refresh payload diverges from stored parity",
-            ) => ApiError::conflict(err.to_string()),
+            ) => {
+                if let Some(reason) = classify_refresh_pivot_conflict(&err.to_string()) {
+                    metrics::counter!(
+                        "cityg_refresh_pivot_conflict_total",
+                        "reason" => reason.to_string()
+                    )
+                    .increment(1);
+                }
+                ApiError::conflict(err.to_string())
+            }
             other => ApiError::server_message(other.to_string()),
         })?;
     }
@@ -4852,6 +4884,16 @@ mod tests {
         .expect_err("stale refresh should report conflict");
         assert!(
             matches!(err, ApiError::Conflict(message) if message == "invalid input: pivot parity missing for refresh")
+        );
+        assert_eq!(
+            classify_refresh_pivot_conflict(
+                "invalid input: refresh payload diverges from stored parity"
+            ),
+            Some("payload_diverges")
+        );
+        assert_eq!(
+            classify_refresh_pivot_conflict("invalid input: pivot head missing"),
+            Some("pivot_head_missing")
         );
 
         let live_body = to_bytes(

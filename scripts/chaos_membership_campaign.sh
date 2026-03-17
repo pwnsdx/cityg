@@ -92,10 +92,12 @@ mkdir -p "$ARTIFACT_DIR"
 SERVER_LOG="$ARTIFACT_DIR/server.log"
 RESTART_LOG="$ARTIFACT_DIR/restarts.log"
 SUMMARY_FILE="$ARTIFACT_DIR/summary.txt"
+RESTART_STOP_FILE="$ARTIFACT_DIR/restart.stop"
 SERVER_PID=""
 RESTARTER_PID=""
 START_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SECONDS=0
+rm -f "$RESTART_STOP_FILE"
 
 make_room_id() {
     if command -v openssl >/dev/null 2>&1; then
@@ -183,6 +185,9 @@ start_server() {
     SERVER_PID="$!"
     sleep 1
     if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+        if [ -f "$RESTART_STOP_FILE" ]; then
+            return 0
+        fi
         echo "error: managed cityg-api failed to stay up on ${SERVER_URL}; check ${SERVER_LOG}" >&2
         return 1
     fi
@@ -199,6 +204,23 @@ restart_server() {
     fi
     start_server
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) restart-end pid=${SERVER_PID}" >>"$RESTART_LOG"
+}
+
+restart_loop() {
+    while true; do
+        local remaining="$RESTART_EVERY_SECS"
+        while [ "$remaining" -gt 0 ]; do
+            if [ -f "$RESTART_STOP_FILE" ]; then
+                return 0
+            fi
+            sleep 1
+            remaining=$((remaining - 1))
+        done
+        if [ -f "$RESTART_STOP_FILE" ]; then
+            return 0
+        fi
+        restart_server
+    done
 }
 
 capture_observability() {
@@ -241,8 +263,8 @@ write_summary() {
 }
 
 cleanup() {
+    touch "$RESTART_STOP_FILE"
     if [ -n "$RESTARTER_PID" ] && kill -0 "$RESTARTER_PID" >/dev/null 2>&1; then
-        kill "$RESTARTER_PID" >/dev/null 2>&1 || true
         wait "$RESTARTER_PID" >/dev/null 2>&1 || true
     fi
     write_summary
@@ -303,12 +325,7 @@ fi
 capture_observability "initial"
 
 if [ "$MANAGE_SERVER" = "1" ] && [ "$RESTART_EVERY_SECS" -gt 0 ]; then
-    (
-        while true; do
-            sleep "$RESTART_EVERY_SECS"
-            restart_server
-        done
-    ) &
+    restart_loop >>"$RESTART_LOG" 2>&1 &
     RESTARTER_PID="$!"
 fi
 
@@ -324,6 +341,11 @@ for pid in "${worker_pids[@]}"; do
         failed=1
     fi
 done
+
+touch "$RESTART_STOP_FILE"
+if [ -n "$RESTARTER_PID" ] && kill -0 "$RESTARTER_PID" >/dev/null 2>&1; then
+    wait "$RESTARTER_PID" >/dev/null 2>&1 || true
+fi
 
 capture_observability "final" || true
 
