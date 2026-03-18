@@ -1715,4 +1715,82 @@ mod tests {
             FREEZE_MH_HEADS_INVALID,
         )
     }
+
+    #[test]
+    fn merge_anchor_rejects_rollup_provenance_commit_mismatch() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        inject_valid_rollup_metadata(&mut ctx, &parts, &merge_joiner, &mut header, &heads)?;
+
+        if let Some(Value::Bytes(bytes)) = header.get_mut(&HDR_ROLLUP_PROVENANCE_COMMIT)
+            && let Some(first) = bytes.first_mut()
+        {
+            *first ^= 0x5A;
+        }
+        refresh_seed_bindings(&mut header, &parts, &merge_joiner);
+
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_MH_HEADS_INVALID,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_rollup_replay_xk_hash_mismatch() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        inject_valid_rollup_metadata(&mut ctx, &parts, &merge_joiner, &mut header, &heads)?;
+
+        if let Some(Value::Array(entries)) = header.get_mut(&HDR_ROLLUP_EPOCH_REPLAY)
+            && let Some(Value::Array(fields)) = entries.get_mut(0)
+            && let Some(Value::Bytes(xk_hash)) = fields.get_mut(1)
+            && let Some(first) = xk_hash.first_mut()
+        {
+            *first ^= 0x33;
+        }
+        refresh_seed_bindings(&mut header, &parts, &merge_joiner);
+
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_MH_HEADS_INVALID,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_rollup_replay_join_flag_mismatch() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        inject_valid_rollup_metadata(&mut ctx, &parts, &merge_joiner, &mut header, &heads)?;
+
+        if let Some(Value::Array(entries)) = header.get_mut(&HDR_ROLLUP_EPOCH_REPLAY)
+            && let Some(Value::Array(fields)) = entries.get_mut(0)
+            && let Some(Value::Bool(is_join)) = fields.get_mut(3)
+        {
+            *is_join = !*is_join;
+        }
+        refresh_seed_bindings(&mut header, &parts, &merge_joiner);
+
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_MH_HEADS_INVALID,
+        )
+    }
 }

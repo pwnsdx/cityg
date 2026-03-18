@@ -3367,6 +3367,9 @@ mod tests {
             last_ec: 88,
             last_pcs_refresh_ec: Some(77),
         };
+        let mut persisted_entries = super::build_all_blank_pk_entries(4)?;
+        persisted_entries[0] = vec![0xA5; 1184];
+        let persisted_hash = super::compute_barrier_tree_hash(4, persisted_entries.as_slice())?;
 
         {
             let mut cfg = ServerConfig::new();
@@ -3383,15 +3386,18 @@ mod tests {
                 .groups
                 .get_mut(gid.as_slice())
                 .expect("registered group state must exist");
+            state.barrier_initialized = true;
             state.barrier_version = 9;
             state.barrier_roots_hash = [0xAB; 32];
-            state.kem_tree_hash_after = [0xCD; 32];
+            state.kem_tree_hash_after = persisted_hash;
             state.srx_root_sw = Some([0xD7; 32]);
-            state.n_max = 2048;
+            state.n_max = 4;
+            state.barrier_pk_entries = persisted_entries.clone();
             state.last_pcs_refresh_ec = Some(77);
             state.pcs_refresh_min_delta_device_ec = 3;
             state.pcs_refresh_min_delta_group_ec = 4;
             state.pcs_refresh_slot_width_ec = 5;
+            state.max_barrier_update_bytes = 7777;
             server.ctx.insert_device_chain_state(
                 gid.as_slice(),
                 persisted_device_pk.as_slice(),
@@ -3416,13 +3422,20 @@ mod tests {
         assert!(state.barrier_initialized);
         assert_eq!(state.barrier_version, 9);
         assert_eq!(state.barrier_roots_hash, [0xAB; 32]);
-        assert_eq!(state.kem_tree_hash_after, [0xCD; 32]);
+        assert_eq!(state.kem_tree_hash_after, persisted_hash);
         assert_eq!(state.srx_root_sw, Some([0xD7; 32]));
-        assert_eq!(state.n_max, 2048);
+        assert_eq!(state.n_max, 4);
+        assert_eq!(state.barrier_pk_entries, persisted_entries);
         assert_eq!(state.last_pcs_refresh_ec, Some(77));
         assert_eq!(state.pcs_refresh_min_delta_device_ec, 3);
         assert_eq!(state.pcs_refresh_min_delta_group_ec, 4);
         assert_eq!(state.pcs_refresh_slot_width_ec, 5);
+        assert_eq!(state.max_barrier_update_bytes, 7777);
+        assert_eq!(
+            state.barrier_public_tree_history.get(&persisted_hash),
+            Some(&state.barrier_pk_entries),
+            "persisted live tree should be promoted into history on reload"
+        );
         assert!(
             server
                 .ctx
@@ -3451,8 +3464,16 @@ mod tests {
                 .ctx
                 .barrier_group_state(gid.as_slice())
                 .expect("recovered barrier group state must exist")
+                .max_barrier_update_bytes,
+            7777
+        );
+        assert_eq!(
+            server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .expect("recovered barrier group state must exist")
                 .kem_tree_hash_after,
-            [0xCD; 32]
+            persisted_hash
         );
         assert_eq!(
             server
@@ -3468,6 +3489,9 @@ mod tests {
                 .device_chain_get(gid.as_slice(), persisted_device_pk.as_slice()),
             Some(&persisted_device_state)
         );
+        let snapshot = server.fetch_barrier_public_tree(&gid, &persisted_hash)?;
+        assert_eq!(snapshot.kem_tree_hash_after, persisted_hash);
+        assert_eq!(snapshot.pk_entries, persisted_entries);
         let duplicate = server
             .register_group(&gid, initial_key)
             .expect_err("restart must preserve registered room kbroad key");
@@ -4373,6 +4397,54 @@ mod tests {
             super::parse_barrier_update(&header, 4),
             Err(CityGError::InvalidInput("barrier_update malformed"))
         ));
+
+        let blank_snapshot = super::build_all_blank_pk_entries(4)?;
+        assert!(matches!(
+            build_refresh_barrier_update_bytes(0, 0, 1, 0, [0u8; 32], [0u8; 32], &[],),
+            Err(CityGError::InvalidInput(
+                "invalid barrier update tree parameters"
+            ))
+        ));
+        assert!(matches!(
+            build_refresh_barrier_update_bytes(
+                3,
+                0,
+                1,
+                0,
+                [0u8; 32],
+                [0u8; 32],
+                blank_snapshot.as_slice(),
+            ),
+            Err(CityGError::InvalidInput(
+                "invalid barrier update tree parameters"
+            ))
+        ));
+        assert!(matches!(
+            build_refresh_barrier_update_bytes(
+                4,
+                4,
+                1,
+                0,
+                [0u8; 32],
+                [0u8; 32],
+                blank_snapshot.as_slice(),
+            ),
+            Err(CityGError::InvalidInput(
+                "invalid barrier update tree parameters"
+            ))
+        ));
+        assert!(matches!(
+            build_refresh_barrier_update_bytes(
+                4,
+                0,
+                1,
+                0,
+                [0u8; 32],
+                [0u8; 32],
+                &blank_snapshot[..blank_snapshot.len() - 1],
+            ),
+            Err(CityGError::InvalidInput("barrier snapshot size mismatch"))
+        ));
         Ok(())
     }
 
@@ -4740,6 +4812,22 @@ mod tests {
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&valid_update)?),
         );
+        let validation = super::validate_barrier_update_against_roster(
+            &state,
+            &header,
+            &cityg_client::MembershipDelta {
+                joined: Vec::new(),
+                revoked: Vec::new(),
+            },
+        )?
+        .ok_or(CityGError::InvalidInput(
+            "valid barrier update should be accepted",
+        ))?;
+        assert_eq!(validation.snapshot_post, snapshot_post);
+        assert!(
+            validation.hash_cache_post.is_some(),
+            "non-empty public-key updates should populate a hash cache"
+        );
         header.insert(112, Value::Bytes(vec![0xAA; 31]));
         let err = super::validate_barrier_update_against_roster(
             &state,
@@ -4794,6 +4882,74 @@ mod tests {
                     && freeze.reason
                         == msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE.reason
         ));
+
+        let mut singleton_state = super::GroupState {
+            n_max: 1,
+            barrier_initialized: false,
+            barrier_version: 0,
+            ..super::GroupState::default()
+        };
+        let singleton_leaf = cityg_client::demo::demo_member_leaf("barrier-singleton-empty");
+        let singleton_pop_pk = vec![0xC4; 32];
+        singleton_state
+            .leaf_device_pk
+            .insert(singleton_leaf, singleton_pop_pk.clone());
+        let singleton_leaf_ek = vec![0x55; 1184];
+        let mut singleton_membership = cityg_client::GroupMembership::default();
+        singleton_membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![singleton_leaf],
+            revoked: Vec::new(),
+        });
+        let singleton_root = msphf_core::merkle::canonical_set_root(&[singleton_leaf])?;
+        singleton_state
+            .snapshots
+            .insert(singleton_root, singleton_membership);
+        singleton_state.latest_root = Some(singleton_root);
+        singleton_state
+            .leaf_barrier_public
+            .insert(singleton_leaf, singleton_leaf_ek.clone());
+
+        let singleton_snapshot = vec![singleton_leaf_ek];
+        let singleton_hash =
+            super::compute_barrier_tree_hash(singleton_state.n_max, singleton_snapshot.as_slice())?;
+        let singleton_rrh = super::compute_revocation_roots_hash(&[0u8; 32], &[0u8; 32])?;
+        let singleton_cover =
+            super::KemTreeCoverPayloadWire(0, vec![0], None, Vec::new(), Vec::new());
+        let singleton_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            0,
+            0,
+            singleton_state.n_max,
+            singleton_rrh.to_vec(),
+            singleton_hash.to_vec(),
+            singleton_hash.to_vec(),
+            super::to_cbor_vec(&singleton_cover)?,
+        );
+        let mut singleton_header = BTreeMap::new();
+        singleton_header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&singleton_update)?),
+        );
+        singleton_header.insert(112, Value::Bytes(vec![0u8; 32]));
+        singleton_header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(vec![0u8; 32]));
+        singleton_header.insert(hdr::HDR_POP_PK, Value::Bytes(singleton_pop_pk));
+        let singleton_validation = super::validate_barrier_update_against_roster(
+            &singleton_state,
+            &singleton_header,
+            &cityg_client::MembershipDelta {
+                joined: Vec::new(),
+                revoked: Vec::new(),
+            },
+        )?
+        .ok_or(CityGError::InvalidInput(
+            "singleton barrier update without public-key changes should be accepted",
+        ))?;
+        assert!(singleton_validation.parsed.new_public_keys.is_empty());
+        assert_eq!(singleton_validation.snapshot_post, singleton_snapshot);
+        assert!(
+            singleton_validation.hash_cache_post.is_none(),
+            "empty update should reuse the prior cache instead of building a new one"
+        );
         Ok(())
     }
 
@@ -5548,6 +5704,21 @@ mod tests {
         assert_eq!(snapshot.kem_tree_hash_after, historical_hash);
         assert_eq!(snapshot.pk_entries, historical_entries);
 
+        {
+            let group =
+                server
+                    .roster
+                    .groups
+                    .get_mut(gid.as_slice())
+                    .ok_or(CityGError::InvalidInput(
+                        "group not found before recompute fetch",
+                    ))?;
+            group.barrier_public_tree_history.remove(&current_hash);
+            assert!(
+                !group.barrier_pk_entries.is_empty(),
+                "live tree must remain available for recompute fetch"
+            );
+        }
         let current_snapshot = server.fetch_barrier_public_tree(&gid, &current_hash)?;
         assert_eq!(current_snapshot.kem_tree_hash_after, current_hash);
         assert_ne!(current_snapshot.pk_entries, historical_entries);
