@@ -3413,6 +3413,9 @@ mod tests {
             .groups
             .get(gid.as_slice())
             .expect("recovered group state must exist");
+        assert!(state.barrier_initialized);
+        assert_eq!(state.barrier_version, 9);
+        assert_eq!(state.barrier_roots_hash, [0xAB; 32]);
         assert_eq!(state.kem_tree_hash_after, [0xCD; 32]);
         assert_eq!(state.srx_root_sw, Some([0xD7; 32]));
         assert_eq!(state.n_max, 2048);
@@ -3420,6 +3423,37 @@ mod tests {
         assert_eq!(state.pcs_refresh_min_delta_device_ec, 3);
         assert_eq!(state.pcs_refresh_min_delta_group_ec, 4);
         assert_eq!(state.pcs_refresh_slot_width_ec, 5);
+        assert!(
+            server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .expect("recovered barrier group state must exist")
+                .barrier_initialized
+        );
+        assert_eq!(
+            server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .expect("recovered barrier group state must exist")
+                .barrier_version,
+            9
+        );
+        assert_eq!(
+            server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .expect("recovered barrier group state must exist")
+                .barrier_roots_hash,
+            [0xAB; 32]
+        );
+        assert_eq!(
+            server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .expect("recovered barrier group state must exist")
+                .kem_tree_hash_after,
+            [0xCD; 32]
+        );
         assert_eq!(
             server
                 .ctx
@@ -5513,6 +5547,10 @@ mod tests {
         assert_eq!(snapshot.n_max, n_max);
         assert_eq!(snapshot.kem_tree_hash_after, historical_hash);
         assert_eq!(snapshot.pk_entries, historical_entries);
+
+        let current_snapshot = server.fetch_barrier_public_tree(&gid, &current_hash)?;
+        assert_eq!(current_snapshot.kem_tree_hash_after, current_hash);
+        assert_ne!(current_snapshot.pk_entries, historical_entries);
         Ok(())
     }
 

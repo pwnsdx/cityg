@@ -914,4 +914,133 @@ mod tests {
             MsphfError::Witness(WitnessValidationError::PathOversize)
         ));
     }
+
+    #[test]
+    fn membership_witness_rejects_invalid_dir_or_oversize_path() {
+        let root = hash_leaf(b"path-root");
+
+        let invalid_dir = RawMembershipWitness {
+            leaf_id: root.to_vec(),
+            root: root.to_vec(),
+            path: vec![RawPathEntry {
+                sibling: vec![0x11; 32],
+                dir: 2,
+            }],
+        };
+        let err = match CanonicalWitness::validate_membership_witness(&invalid_dir, &root) {
+            Ok(_) => unreachable!("dir > 1 must fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            MsphfError::Witness(WitnessValidationError::ProjEvalFail)
+        ));
+
+        let oversize = RawMembershipWitness {
+            leaf_id: root.to_vec(),
+            root: root.to_vec(),
+            path: (0..65)
+                .map(|idx| RawPathEntry {
+                    sibling: vec![idx as u8; 32],
+                    dir: (idx & 1) as u8,
+                })
+                .collect(),
+        };
+        let err = match CanonicalWitness::validate_membership_witness(&oversize, &root) {
+            Ok(_) => unreachable!("oversize membership path must fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            MsphfError::Witness(WitnessValidationError::PathOversize)
+        ));
+    }
+
+    #[test]
+    fn empty_tree_nonmembership_witness_accepts_zero_root() {
+        let witness = RawNonMembershipWitness {
+            query: vec![0x44; 32],
+            root: vec![0x00; 32],
+            left: None,
+            right: None,
+            path: Vec::new(),
+            left_below: Vec::new(),
+            right_below: Vec::new(),
+            above: Vec::new(),
+            nmint: None,
+            lca_left_height: None,
+            lca_right_height: None,
+        };
+
+        let validated = match CanonicalWitness::validate_nonmembership_witness(&witness, &[0u8; 32])
+        {
+            Ok(validated) => validated,
+            Err(err) => unreachable!("empty-tree sentinel should validate: {err}"),
+        };
+        assert_eq!(validated.query, [0x44; 32]);
+        assert_eq!(validated.root, [0u8; 32]);
+        assert!(validated.left.is_none());
+        assert!(validated.right.is_none());
+        assert!(validated.path.is_empty());
+    }
+
+    #[test]
+    fn nonmembership_extended_interval_witness_validates() {
+        let left_bound = [0x10u8; 32];
+        let right_bound = [0xF0u8; 32];
+        let query = [0x80u8; 32];
+
+        let left_sibling = [0x21u8; 32];
+        let right_sibling = [0x22u8; 32];
+        let above_sibling = [0x23u8; 32];
+
+        let left_anchor = hash_node(&left_bound, &left_sibling);
+        let right_anchor = hash_node(&right_sibling, &right_bound);
+        let lca = hash_node(&left_anchor, &right_anchor);
+        let expected_root = hash_node(&lca, &above_sibling);
+
+        let witness = RawNonMembershipWitness {
+            query: query.to_vec(),
+            root: expected_root.to_vec(),
+            left: Some(left_bound.to_vec()),
+            right: Some(right_bound.to_vec()),
+            path: Vec::new(),
+            left_below: vec![RawPathEntry {
+                sibling: left_sibling.to_vec(),
+                dir: 0,
+            }],
+            right_below: vec![RawPathEntry {
+                sibling: right_sibling.to_vec(),
+                dir: 1,
+            }],
+            above: vec![RawPathEntry {
+                sibling: above_sibling.to_vec(),
+                dir: 0,
+            }],
+            nmint: Some(
+                merkle::hash_interval_binding(
+                    &left_bound,
+                    &left_bound,
+                    &right_bound,
+                    &right_bound,
+                    2,
+                    2,
+                )
+                .to_vec(),
+            ),
+            lca_left_height: Some(2),
+            lca_right_height: Some(2),
+        };
+
+        let validated =
+            match CanonicalWitness::validate_nonmembership_witness(&witness, &expected_root) {
+                Ok(validated) => validated,
+                Err(err) => unreachable!("extended interval witness should validate: {err}"),
+            };
+        assert_eq!(validated.query, query);
+        assert_eq!(validated.root, expected_root);
+        assert_eq!(validated.left, Some(left_bound));
+        assert_eq!(validated.right, Some(right_bound));
+        assert!(validated.path.is_empty());
+    }
 }

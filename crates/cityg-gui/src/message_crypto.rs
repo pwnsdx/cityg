@@ -589,4 +589,162 @@ mod tests {
         assert_eq!(restored.len(tuple_b), 1);
         Ok(())
     }
+
+    #[test]
+    fn msg_replay_state_ignores_duplicate_recordings() {
+        let tuple = [0x51; 32];
+        let mut state = MsgReplayState::default();
+        state.record(tuple, 7);
+        state.record(tuple, 7);
+        assert_eq!(state.len(tuple), 1);
+        assert!(state.contains(tuple, 7));
+    }
+
+    #[test]
+    fn persisted_msg_replay_state_supports_legacy_single_tuple_format() -> Result<()> {
+        let tuple_tag = [0x61; 32];
+        let persisted = PersistedMsgReplayState {
+            tuple_tag_hex: hex_encode(tuple_tag),
+            seen_msg_indices: vec![3, 5, 8],
+            tuples: Vec::new(),
+        };
+        let restored = persisted.into_runtime()?;
+        assert!(restored.contains(tuple_tag, 3));
+        assert!(restored.contains(tuple_tag, 5));
+        assert!(restored.contains(tuple_tag, 8));
+        assert_eq!(restored.len(tuple_tag), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_msg_replay_state_allows_empty_tuple_tag_as_zero_in_legacy_formats() -> Result<()> {
+        let persisted = PersistedMsgReplayState {
+            tuple_tag_hex: String::new(),
+            seen_msg_indices: vec![13],
+            tuples: Vec::new(),
+        };
+        let restored = persisted.into_runtime()?;
+        assert!(restored.contains([0u8; 32], 13));
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_msg_replay_state_rejects_invalid_hex_tuple_tag() {
+        let persisted = PersistedMsgReplayState {
+            tuple_tag_hex: "zz".to_string(),
+            seen_msg_indices: vec![1],
+            tuples: Vec::new(),
+        };
+        let err = match persisted.into_runtime() {
+            Ok(_) => unreachable!("invalid legacy tuple tag hex must fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("msg_replay_state.tuple_tag_hex"));
+    }
+
+    #[test]
+    fn persisted_msg_replay_state_rejects_wrong_tuple_tag_length() {
+        let persisted = PersistedMsgReplayState {
+            tuple_tag_hex: "aa".repeat(31),
+            seen_msg_indices: Vec::new(),
+            tuples: vec![PersistedMsgReplayTupleState {
+                tuple_tag_hex: "aa".repeat(31),
+                seen_msg_indices: vec![9],
+            }],
+        };
+        let err = match persisted.into_runtime() {
+            Ok(_) => unreachable!("wrong tuple tag length must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("msg_replay_state.tuples[0].tuple_tag_hex")
+        );
+    }
+
+    #[test]
+    fn decrypt_message_v2_rejects_noncanonical_cbor() -> Result<()> {
+        fn encode_definite_bytes(bytes: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            match bytes.len() {
+                len @ 0..=23 => out.push(0x40 | (len as u8)),
+                len @ 24..=0xFF => {
+                    out.push(0x58);
+                    out.push(len as u8);
+                }
+                len => {
+                    out.push(0x59);
+                    out.extend_from_slice(&(len as u16).to_be_bytes());
+                }
+            }
+            out.extend_from_slice(bytes);
+            out
+        }
+
+        let gid = [0x71u8; 32];
+        let we_epoch_id = [0x72u8; 32];
+        let xk_hash = [0x73u8; 32];
+        let epoch_key = [0x74u8; 32];
+        let k_barrier = [0x75u8; 32];
+        let sender_leaf = [0x76u8; 32];
+        let context = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec: 17,
+            barrier_version: 6,
+            sender_leaf: &sender_leaf,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let canonical = encrypt_message_v2(b"noncanonical", &context, 19)?;
+        let envelope: PayloadEnvelopeV2 = ciborium::de::from_reader(canonical.as_slice())?;
+        let mut noncanonical = Vec::new();
+        noncanonical.push(0x83);
+        noncanonical.push(0x70);
+        noncanonical.extend_from_slice(PAYLOAD_ENVELOPE_V2_MODE.as_bytes());
+        noncanonical.extend_from_slice(&[0x18, envelope.1 as u8]);
+        noncanonical.extend_from_slice(&encode_definite_bytes(&envelope.2));
+        assert_ne!(noncanonical, canonical);
+        let err = match decrypt_message_v2(&noncanonical, &context) {
+            Ok(_) => unreachable!("non-canonical CBOR must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("payload envelope v2 is not deterministic CBOR")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn decrypt_message_v2_rejects_wrong_mode() -> Result<()> {
+        let gid = [0x81u8; 32];
+        let we_epoch_id = [0x82u8; 32];
+        let xk_hash = [0x83u8; 32];
+        let epoch_key = [0x84u8; 32];
+        let k_barrier = [0x85u8; 32];
+        let sender_leaf = [0x86u8; 32];
+        let context = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec: 18,
+            barrier_version: 7,
+            sender_leaf: &sender_leaf,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let bad_mode = to_cbor_vec(&PayloadEnvelopeV2(
+            "wrong-mode".to_string(),
+            23,
+            vec![0xAA; 16],
+        ))?;
+        let err = match decrypt_message_v2(&bad_mode, &context) {
+            Ok(_) => unreachable!("wrong mode must be rejected before decryption"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("unexpected payload envelope mode"));
+        Ok(())
+    }
 }

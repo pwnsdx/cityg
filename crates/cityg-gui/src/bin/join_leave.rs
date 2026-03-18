@@ -2522,6 +2522,18 @@ mod tests {
     }
 
     #[test]
+    fn barrier_tree_helpers_cover_size_mismatch_and_siblings() {
+        let wrong_entries = (0..6).map(|_| vec![0x11; 1184]).collect::<Vec<_>>();
+        let err =
+            compute_barrier_tree_hash(4, &wrong_entries).expect_err("wrong tree size must fail");
+        assert!(err.to_string().contains("barrier tree size mismatch"));
+
+        assert_eq!(sibling_node(0), None);
+        assert_eq!(sibling_node(1), Some(2));
+        assert_eq!(sibling_node(2), Some(1));
+    }
+
+    #[test]
     fn parse_cli_args_defaults_and_flags() -> Result<()> {
         let opts = parse_cli_args(vec!["--batch".to_string(), "--count=2".to_string()])?;
         assert_eq!(opts.server_url, "http://127.0.0.1:8080");
@@ -3171,6 +3183,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_watch_mode_accepts_zero_burst_count_and_interval() -> Result<()> {
+        let port = next_free_local_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex::encode([0x7Au8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        run_watch_mode(
+            &server_url,
+            &room_id,
+            "watch-zero-burst",
+            2,
+            Some(vec![2]),
+            false,
+            MessageBurstOptions {
+                count: 0,
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await?;
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn run_with_options_rejects_runtime_leave_order_index() -> Result<()> {
         let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
@@ -3195,6 +3236,37 @@ mod tests {
         .await
         .expect_err("invalid leave order should fail at runtime");
         assert!(err.to_string().contains("leave order index 2 invalid"));
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_watch_mode_rejects_invalid_leave_order_index() -> Result<()> {
+        let port = next_free_local_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex::encode([0x7Bu8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        let err = run_watch_mode(
+            &server_url,
+            &room_id,
+            "watch-invalid-order",
+            2,
+            Some(vec![3]),
+            false,
+            MessageBurstOptions {
+                count: 1,
+                interval: Duration::ZERO,
+            },
+        )
+        .await
+        .expect_err("invalid watch leave order should fail");
+        assert!(err.to_string().contains("leave order index 3 invalid"));
 
         handle.abort();
         let _ = handle.await;
@@ -3347,6 +3419,13 @@ mod tests {
             .await
             .expect_err("closed channel should produce an error");
         assert!(err.to_string().contains("websocket channel closed"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_message_burst_is_noop_for_empty_sessions() -> Result<()> {
+        send_message_burst(&[], 3, Duration::ZERO, None).await?;
+        send_message_burst(&[], 0, Duration::from_millis(1), None).await?;
         Ok(())
     }
 
