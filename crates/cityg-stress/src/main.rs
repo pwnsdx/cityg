@@ -455,11 +455,11 @@ async fn main() -> Result<()> {
         }
     }
     drain_events(&mut app, &mut event_rx);
-    if let Some(server_ref) = server.as_mut() {
-        if let Err(err) = server_ref.lock().await.stop().await {
-            app.push_event(format!("managed server stop failed: {err}"));
-            failed = true;
-        }
+    if let Some(server_ref) = server.as_mut()
+        && let Err(err) = server_ref.lock().await.stop().await
+    {
+        app.push_event(format!("managed server stop failed: {err}"));
+        failed = true;
     }
 
     write_summary(&config.artifact_dir, &app)?;
@@ -1012,13 +1012,15 @@ async fn run_worker(
             let result = run_worker_round_attempt(
                 &api_client,
                 &config,
-                &worker_log,
-                worker_id,
-                round,
-                &room_id,
-                count,
-                watch_mode,
-                &leave_order,
+                WorkerRoundAttempt {
+                    worker_log: &worker_log,
+                    worker_id,
+                    round,
+                    room_id: &room_id,
+                    count,
+                    watch_mode,
+                    leave_order: &leave_order,
+                },
             )
             .await;
             active_rounds.fetch_sub(1, Ordering::SeqCst);
@@ -1201,21 +1203,25 @@ async fn wait_for_restart_quiescence(
     }
 }
 
+struct WorkerRoundAttempt<'a> {
+    worker_log: &'a Path,
+    worker_id: usize,
+    round: usize,
+    room_id: &'a str,
+    count: usize,
+    watch_mode: bool,
+    leave_order: &'a str,
+}
+
 async fn run_worker_round_attempt(
     api_client: &CitygApiClient,
     config: &Config,
-    worker_log: &Path,
-    worker_id: usize,
-    round: usize,
-    room_id: &str,
-    count: usize,
-    watch_mode: bool,
-    leave_order: &str,
+    attempt: WorkerRoundAttempt<'_>,
 ) -> Result<()> {
     api_client
-        .bootstrap_room(room_id, demo::kbroad_public())
+        .bootstrap_room(attempt.room_id, demo::kbroad_public())
         .await
-        .with_context(|| format!("bootstrap room {room_id}"))?;
+        .with_context(|| format!("bootstrap room {}", attempt.room_id))?;
 
     if config.jitter_max_secs > 0 {
         let jitter = thread_rng().gen_range(0..=config.jitter_max_secs);
@@ -1224,16 +1230,16 @@ async fn run_worker_round_attempt(
         }
     }
 
-    let log_file = open_append(worker_log)?;
+    let log_file = open_append(attempt.worker_log)?;
     let err_file = log_file.try_clone().context("clone worker log file")?;
-    let alias_base = format!("stress-w{worker_id}-r{round}");
+    let alias_base = format!("stress-w{}-r{}", attempt.worker_id, attempt.round);
     let mut command = Command::new(&config.join_leave_bin);
     command
         .arg(&config.server_url)
-        .arg(room_id)
+        .arg(attempt.room_id)
         .arg(&alias_base)
-        .arg(format!("--count={count}"))
-        .arg(format!("--leave-order={leave_order}"))
+        .arg(format!("--count={}", attempt.count))
+        .arg(format!("--leave-order={}", attempt.leave_order))
         .arg(format!(
             "--message-burst-count={}",
             config.message_burst_count
@@ -1247,7 +1253,7 @@ async fn run_worker_round_attempt(
         .env("CITYG_CLIENT_MESSAGE_AUTH_TOKEN", &config.message_token)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(err_file));
-    if watch_mode {
+    if attempt.watch_mode {
         command.arg("--watch");
     } else {
         command.arg("--batch");
