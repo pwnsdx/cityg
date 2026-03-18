@@ -148,7 +148,7 @@ fn chunk_layout(area: Rect) -> [Rect; 4] {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Length(5),
             Constraint::Min(8),
             Constraint::Length(8),
@@ -208,6 +208,14 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             Span::raw(format!("capacity={}  ", app.capacity_check_status)),
             Span::raw(format!("artifacts={}", app.artifact_dir.display())),
         ]),
+        Line::from(if app.finished {
+            vec![Span::styled(
+                "Finished. Press Enter, q, or Esc to exit.",
+                Style::default().fg(Color::Cyan),
+            )]
+        } else {
+            vec![Span::raw("Press q or Esc to request a graceful stop.")]
+        }),
     ];
     let block = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Run"));
     frame.render_widget(block, area);

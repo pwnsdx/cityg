@@ -1272,6 +1272,7 @@ async fn run_tui(
     let mut terminal = TerminalGuard::enter()?;
     let tick_rate = Duration::from_millis(200);
     let mut duration_stop_requested = false;
+    let mut exit_requested_after_finish = false;
     loop {
         drain_events(app, event_rx);
         terminal
@@ -1291,16 +1292,21 @@ async fn run_tui(
             ));
         }
 
-        if app.finished {
-            break;
-        }
-
         if event::poll(tick_rate).context("poll terminal events")?
             && let CEvent::Key(key) = event::read().context("read terminal event")?
-            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
         {
-            let _ = stop_tx.send(true);
-            app.push_event("graceful stop requested");
+            if app.finished {
+                if matches!(key.code, KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc) {
+                    exit_requested_after_finish = true;
+                }
+            } else if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+                let _ = stop_tx.send(true);
+                app.push_event("graceful stop requested");
+            }
+        }
+
+        if app.finished && exit_requested_after_finish {
+            break;
         }
     }
     Ok(app.worker_failures > 0 || app.failed_rounds > 0 || app.capacity_check_failed)
@@ -1456,6 +1462,7 @@ fn drain_events(app: &mut AppState, event_rx: &mut mpsc::UnboundedReceiver<AppEv
             AppEvent::RunComplete => {
                 app.finished = true;
                 app.push_event("all workers complete");
+                app.push_event("finished: press Enter, q, or Esc to exit");
             }
         }
     }
