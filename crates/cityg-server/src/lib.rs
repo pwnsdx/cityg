@@ -495,7 +495,13 @@ impl CityGServer {
             .map(|path| kbroad_state_path_for_journal(path.as_path()));
         let persisted_kbroad_state = kbroad_state_path
             .as_ref()
-            .and_then(|path| load_kbroad_state(path).ok())
+            .and_then(|path| match load_kbroad_state(path) {
+                Ok(state) => Some(state),
+                Err(err) => {
+                    eprintln!("cityg-server: kbroad state recovery failed: {err:?}");
+                    None
+                }
+            })
             .filter(|state| !state.is_empty());
         let mut options = config.acceptance_options.unwrap_or_default();
         if let Some(state) = persisted_kbroad_state.as_ref() {

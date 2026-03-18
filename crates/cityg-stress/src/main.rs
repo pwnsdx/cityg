@@ -7,7 +7,10 @@ use std::{
     io::{IsTerminal, Stdout, Write},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -30,7 +33,7 @@ use tokio::{
     process::{Child, Command},
     sync::{Mutex, mpsc, watch},
     task::JoinSet,
-    time::sleep,
+    time::{sleep, timeout},
 };
 use tracing_subscriber::EnvFilter;
 use ui::{AppState, draw};
@@ -41,6 +44,9 @@ const DEFAULT_MESSAGE_TOKEN: &str = "join-leave-message-token";
 const DEFAULT_WINDOW_TTL_SECS: u64 = 120;
 const DEFAULT_MAX_CONCURRENT_HEADS: u64 = 4;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
+const DEFAULT_SERVER_READY_TIMEOUT_SECS: u64 = 120;
+const RESTART_RETRY_ATTEMPTS: usize = 3;
+const RESTART_SETTLE_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Parser)]
 #[command(name = "cityg-stress")]
@@ -68,6 +74,8 @@ struct Cli {
     jitter_max_secs: u64,
     #[arg(long, env = "CITYG_STRESS_ROUND_DELAY_SECS", default_value_t = 0)]
     round_delay_secs: u64,
+    #[arg(long, env = "CITYG_STRESS_DURATION_SECS")]
+    duration_secs: Option<u64>,
     #[arg(long, env = "CITYG_STRESS_MESSAGE_BURST_COUNT", default_value_t = 3)]
     message_burst_count: usize,
     #[arg(
@@ -88,10 +96,18 @@ struct Cli {
     max_concurrent_heads: u64,
     #[arg(long, env = "CITYG_STRESS_POLL_INTERVAL_MS", default_value_t = DEFAULT_POLL_INTERVAL_MS)]
     poll_interval_ms: u64,
+    #[arg(
+        long,
+        env = "CITYG_STRESS_SERVER_READY_TIMEOUT_SECS",
+        default_value_t = DEFAULT_SERVER_READY_TIMEOUT_SECS
+    )]
+    server_ready_timeout_secs: u64,
     #[arg(long, env = "CITYG_STRESS_ADMIN_TOKEN")]
     admin_token: Option<String>,
     #[arg(long, env = "CITYG_STRESS_MESSAGE_TOKEN")]
     message_token: Option<String>,
+    #[arg(long, env = "CITYG_STRESS_SERVER_STATE_PATH")]
+    server_state_path: Option<PathBuf>,
     #[arg(long, env = "CITYG_STRESS_API_BIN")]
     api_bin: Option<PathBuf>,
     #[arg(long, env = "CITYG_STRESS_JOIN_LEAVE_BIN")]
@@ -115,6 +131,7 @@ struct Config {
     watch_percent: u8,
     jitter_max_secs: u64,
     round_delay_secs: u64,
+    duration: Option<Duration>,
     message_burst_count: usize,
     message_burst_interval_ms: u64,
     final_capacity_check: bool,
@@ -123,8 +140,10 @@ struct Config {
     window_ttl_secs: u64,
     max_concurrent_heads: u64,
     poll_interval: Duration,
+    server_ready_timeout: Duration,
     admin_token: String,
     message_token: String,
+    server_state_path: Option<PathBuf>,
     api_bin: PathBuf,
     join_leave_bin: PathBuf,
     artifact_dir: PathBuf,
@@ -202,6 +221,23 @@ enum AppEvent {
     RunComplete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RestartState {
+    generation: u64,
+    restarting: bool,
+    changed_at: Instant,
+}
+
+impl Default for RestartState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            restarting: false,
+            changed_at: Instant::now(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ManagedServer {
     config: Config,
@@ -246,6 +282,9 @@ impl ManagedServer {
             .env("RUST_LOG", "warn")
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
+        if let Some(state_path) = self.config.server_state_path.as_ref() {
+            command.env("CITYG_SERVER_STATE_PATH", state_path);
+        }
 
         let mut child = command
             .spawn()
@@ -255,7 +294,7 @@ impl ManagedServer {
             &self.config.server_url,
             Some(&mut child),
             &self.log_path,
-            Duration::from_secs(45),
+            self.config.server_ready_timeout,
         )
         .await
         {
@@ -267,15 +306,18 @@ impl ManagedServer {
         Ok(pid)
     }
 
-    async fn stop(&mut self) {
+    async fn stop(&mut self) -> Result<()> {
         if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            timeout(Duration::from_secs(15), child.kill())
+                .await
+                .context("timed out stopping managed server")?
+                .context("kill managed server")?;
         }
+        Ok(())
     }
 
     async fn restart(&mut self) -> Result<Option<u32>> {
-        self.stop().await;
+        self.stop().await?;
         self.start().await
     }
 }
@@ -344,7 +386,7 @@ async fn main() -> Result<()> {
         app.push_event(format!("initial observability snapshot failed: {err}"));
         if config.require_metrics {
             if let Some(server_ref) = server.as_mut() {
-                server_ref.lock().await.stop().await;
+                let _ = server_ref.lock().await.stop().await;
             }
             write_summary(&config.artifact_dir, &app)?;
             print_final_summary(&app);
@@ -354,6 +396,8 @@ async fn main() -> Result<()> {
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
     let (stop_tx, stop_rx) = watch::channel(false);
+    let (restart_state_tx, restart_state_rx) = watch::channel(RestartState::default());
+    let active_rounds = Arc::new(AtomicUsize::new(0));
 
     let metrics_handle = tokio::spawn(poll_metrics_loop(
         config.server_url.clone(),
@@ -370,6 +414,8 @@ async fn main() -> Result<()> {
                 Duration::from_secs(config.restart_every_secs),
                 config.artifact_dir.clone(),
                 event_tx.clone(),
+                restart_state_tx,
+                active_rounds.clone(),
                 stop_rx.clone(),
             )))
         } else {
@@ -382,13 +428,15 @@ async fn main() -> Result<()> {
     let supervisor_handle = tokio::spawn(run_workers(
         config.clone(),
         event_tx.clone(),
+        restart_state_rx.clone(),
+        active_rounds.clone(),
         stop_rx.clone(),
     ));
 
     let mut failed = if interactive {
-        run_tui(&mut app, &mut event_rx, stop_tx.clone()).await?
+        run_tui(&mut app, &mut event_rx, stop_tx.clone(), config.duration).await?
     } else {
-        run_plain(&mut app, &mut event_rx, stop_tx.clone()).await?
+        run_plain(&mut app, &mut event_rx, stop_tx.clone(), config.duration).await?
     };
 
     let _ = stop_tx.send(true);
@@ -397,6 +445,7 @@ async fn main() -> Result<()> {
     if let Some(handle) = restart_handle {
         let _ = handle.await;
     }
+    drain_events(&mut app, &mut event_rx);
     if let Err(err) =
         capture_observability_snapshot(&config.server_url, &config.artifact_dir, "final").await
     {
@@ -405,8 +454,12 @@ async fn main() -> Result<()> {
             failed = true;
         }
     }
+    drain_events(&mut app, &mut event_rx);
     if let Some(server_ref) = server.as_mut() {
-        server_ref.lock().await.stop().await;
+        if let Err(err) = server_ref.lock().await.stop().await {
+            app.push_event(format!("managed server stop failed: {err}"));
+            failed = true;
+        }
     }
 
     write_summary(&config.artifact_dir, &app)?;
@@ -459,6 +512,9 @@ impl Config {
             "join_leave",
         )?;
         let artifact_dir = cli.artifact_dir.unwrap_or_else(default_artifact_dir);
+        let server_state_path = cli
+            .server_state_path
+            .or_else(|| (!cli.no_manage_server).then(|| artifact_dir.join("server.journal")));
 
         Ok(Self {
             server_bind: cli.server_bind,
@@ -472,6 +528,7 @@ impl Config {
             watch_percent: cli.watch_percent,
             jitter_max_secs: cli.jitter_max_secs,
             round_delay_secs: cli.round_delay_secs,
+            duration: cli.duration_secs.map(Duration::from_secs),
             message_burst_count: cli.message_burst_count,
             message_burst_interval_ms: cli.message_burst_interval_ms,
             final_capacity_check: cli.final_capacity_check,
@@ -480,8 +537,10 @@ impl Config {
             window_ttl_secs: cli.window_ttl_secs,
             max_concurrent_heads: cli.max_concurrent_heads,
             poll_interval: Duration::from_millis(cli.poll_interval_ms),
+            server_ready_timeout: Duration::from_secs(cli.server_ready_timeout_secs),
             admin_token,
             message_token,
+            server_state_path,
             api_bin,
             join_leave_bin,
             artifact_dir,
@@ -737,6 +796,8 @@ async fn restart_loop(
     interval: Duration,
     artifact_dir: PathBuf,
     event_tx: mpsc::UnboundedSender<AppEvent>,
+    restart_state_tx: watch::Sender<RestartState>,
+    active_rounds: Arc<AtomicUsize>,
     mut stop_rx: watch::Receiver<bool>,
 ) {
     let restart_log_path = artifact_dir.join("restarts.log");
@@ -763,16 +824,42 @@ async fn restart_loop(
                     .as_secs()
             );
         }
+        let next_generation = restart_state_tx.borrow().generation.saturating_add(1);
+        let _ = restart_state_tx.send(RestartState {
+            generation: next_generation,
+            restarting: true,
+            changed_at: Instant::now(),
+        });
         let _ = event_tx.send(AppEvent::ServerRestarting);
+        while active_rounds.load(Ordering::SeqCst) > 0 {
+            tokio::select! {
+                _ = sleep(Duration::from_millis(100)) => {}
+                _ = stop_rx.changed() => {
+                    if *stop_rx.borrow() {
+                        return;
+                    }
+                }
+            }
+        }
         let restart_result = {
             let mut guard = server.lock().await;
             guard.restart().await
         };
         match restart_result {
             Ok(pid) => {
+                let _ = restart_state_tx.send(RestartState {
+                    generation: next_generation,
+                    restarting: false,
+                    changed_at: Instant::now(),
+                });
                 let _ = event_tx.send(AppEvent::ServerRestarted { pid });
             }
             Err(err) => {
+                let _ = restart_state_tx.send(RestartState {
+                    generation: next_generation,
+                    restarting: false,
+                    changed_at: Instant::now(),
+                });
                 let _ = event_tx.send(AppEvent::Info(format!("restart failed: {err}")));
                 break;
             }
@@ -783,6 +870,8 @@ async fn restart_loop(
 async fn run_workers(
     config: Config,
     event_tx: mpsc::UnboundedSender<AppEvent>,
+    restart_rx: watch::Receiver<RestartState>,
+    active_rounds: Arc<AtomicUsize>,
     stop_rx: watch::Receiver<bool>,
 ) {
     let mut set = JoinSet::new();
@@ -791,12 +880,20 @@ async fn run_workers(
             worker_id,
             config.clone(),
             event_tx.clone(),
+            restart_rx.clone(),
+            active_rounds.clone(),
             stop_rx.clone(),
         ));
     }
     while let Some(result) = set.join_next().await {
-        if let Err(err) = result {
-            let _ = event_tx.send(AppEvent::Info(format!("worker task join error: {err}")));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                let _ = event_tx.send(AppEvent::Info(format!("worker task error: {err:#}")));
+            }
+            Err(err) => {
+                let _ = event_tx.send(AppEvent::Info(format!("worker task join error: {err}")));
+            }
         }
     }
     if config.final_capacity_check && !*stop_rx.borrow() {
@@ -862,6 +959,8 @@ async fn run_worker(
     worker_id: usize,
     config: Config,
     event_tx: mpsc::UnboundedSender<AppEvent>,
+    mut restart_rx: watch::Receiver<RestartState>,
+    active_rounds: Arc<AtomicUsize>,
     stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut api_client =
@@ -874,12 +973,11 @@ async fn run_worker(
         .artifact_dir
         .join(format!("worker-{worker_id:02}.status"));
 
-    for round in 1..=config.rounds_per_worker {
+    'rounds: for round in 1..=config.rounds_per_worker {
         if *stop_rx.borrow() {
             break;
         }
         let started = Instant::now();
-        let room_id = random_room_id();
         let mut count = thread_rng().gen_range(config.min_count..=config.max_count);
         let watch_mode = thread_rng().gen_range(0..100) < config.watch_percent;
         if watch_mode && count < 2 {
@@ -888,84 +986,156 @@ async fn run_worker(
         let mode = if watch_mode { "watch" } else { "batch" };
         let leave_order = random_leave_order(count, config.leaves_per_room);
 
-        let _ = event_tx.send(AppEvent::WorkerRoundStarted {
-            worker_id,
-            round,
-            room_id: room_id.clone(),
-            mode,
-            count,
-        });
-
-        api_client
-            .bootstrap_room(&room_id, demo::kbroad_public())
-            .await
-            .with_context(|| format!("bootstrap room {room_id}"))?;
-
-        if config.jitter_max_secs > 0 {
-            let jitter = thread_rng().gen_range(0..=config.jitter_max_secs);
-            if jitter > 0 {
-                sleep(Duration::from_secs(jitter)).await;
-            }
-        }
-
-        let log_file = open_append(&worker_log)?;
-        let err_file = log_file.try_clone().context("clone worker log file")?;
-        let alias_base = format!("stress-w{worker_id}-r{round}");
-        let mut command = Command::new(&config.join_leave_bin);
-        command
-            .arg(&config.server_url)
-            .arg(&room_id)
-            .arg(&alias_base)
-            .arg(format!("--count={count}"))
-            .arg(format!("--leave-order={leave_order}"))
-            .arg(format!(
-                "--message-burst-count={}",
-                config.message_burst_count
-            ))
-            .arg(format!(
-                "--message-burst-interval-ms={}",
-                config.message_burst_interval_ms
-            ))
-            .arg("--verbose")
-            .env("CITYG_CLIENT_ADMIN_TOKEN", &config.admin_token)
-            .env("CITYG_CLIENT_MESSAGE_AUTH_TOKEN", &config.message_token)
-            .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(err_file));
-        if watch_mode {
-            command.arg("--watch");
+        let max_attempts = if config.manage_server && config.restart_every_secs > 0 {
+            RESTART_RETRY_ATTEMPTS
         } else {
-            command.arg("--batch");
-        }
-        let status = command
-            .status()
-            .await
-            .with_context(|| format!("run {}", config.join_leave_bin.display()))?;
-        if !status.success() {
-            fs::write(&worker_status, b"status=failed\n").ok();
-            if let Err(err) = capture_observability_snapshot(
-                &config.server_url,
-                &config.artifact_dir,
-                &format!("worker-{worker_id:02}-round-{round:03}-failure"),
-            )
-            .await
-            {
-                let _ = event_tx.send(AppEvent::Info(format!(
-                    "round {round} failure observability capture failed: {err}"
-                )));
+            1
+        };
+        let mut attempt = 0usize;
+        loop {
+            attempt = attempt.saturating_add(1);
+            let restart_before = wait_for_restart_quiescence(&mut restart_rx).await;
+            if *stop_rx.borrow() {
+                break 'rounds;
             }
-            let error = format!("round {round} exited with status {status}");
-            let _ = event_tx.send(AppEvent::WorkerRoundFailed {
+            let room_id = random_room_id();
+            let round_started_at = Instant::now();
+            let _ = event_tx.send(AppEvent::WorkerRoundStarted {
                 worker_id,
                 round,
-                error: error.clone(),
+                room_id: room_id.clone(),
+                mode,
+                count,
             });
-            let _ = event_tx.send(AppEvent::WorkerFinished {
+            active_rounds.fetch_add(1, Ordering::SeqCst);
+
+            let result = run_worker_round_attempt(
+                &api_client,
+                &config,
+                &worker_log,
                 worker_id,
-                ok: false,
-            });
-            return Err(anyhow!(error));
+                round,
+                &room_id,
+                count,
+                watch_mode,
+                &leave_order,
+            )
+            .await;
+            active_rounds.fetch_sub(1, Ordering::SeqCst);
+            let restart_after = *restart_rx.borrow();
+
+            match result {
+                Ok(()) => break,
+                Err(err) => {
+                    let overlapped_restart = restart_after.restarting
+                        || restart_after.generation != restart_before.generation
+                        || round_started_at.saturating_duration_since(restart_before.changed_at)
+                            <= RESTART_SETTLE_GRACE
+                        || Instant::now().saturating_duration_since(restart_after.changed_at)
+                            <= RESTART_SETTLE_GRACE;
+                    let retryable = attempt < max_attempts
+                        && config.manage_server
+                        && config.restart_every_secs > 0;
+                    if retryable {
+                        let _ = event_tx.send(AppEvent::Info(format!(
+                            "worker {worker_id} round {round} failed{}; retrying on fresh room",
+                            if overlapped_restart {
+                                format!(
+                                    " near managed restart gen={} -> {}",
+                                    restart_before.generation, restart_after.generation
+                                )
+                            } else {
+                                String::new()
+                            }
+                        )));
+                        let _ = event_tx.send(AppEvent::Info(format!(
+                            "worker {worker_id} round {round} waiting for managed server readiness before retry"
+                        )));
+                        if let Err(err) = wait_for_ready(
+                            &config.server_url,
+                            None,
+                            &config.artifact_dir.join("server.log"),
+                            config.server_ready_timeout,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "worker {worker_id} wait for server ready before retrying round {round}"
+                            )
+                        }) {
+                            fs::write(&worker_status, b"status=failed\n").ok();
+                            let error = err.to_string();
+                            let _ = event_tx.send(AppEvent::WorkerRoundFailed {
+                                worker_id,
+                                round,
+                                error: error.clone(),
+                            });
+                            let _ = event_tx.send(AppEvent::WorkerFinished {
+                                worker_id,
+                                ok: false,
+                            });
+                            return Err(err);
+                        }
+                        continue;
+                    }
+
+                    let _ = event_tx.send(AppEvent::Info(format!(
+                        "worker {worker_id} round {round} failed without retry after {} attempts",
+                        attempt
+                    )));
+                    fs::write(&worker_status, b"status=failed\n").ok();
+                    if let Err(snapshot_err) = capture_observability_snapshot(
+                        &config.server_url,
+                        &config.artifact_dir,
+                        &format!("worker-{worker_id:02}-round-{round:03}-failure"),
+                    )
+                    .await
+                    {
+                        let _ = event_tx.send(AppEvent::Info(format!(
+                            "round {round} failure observability capture failed: {snapshot_err}"
+                        )));
+                    }
+                    let error = format!("round {round} failed: {err}");
+                    let _ = event_tx.send(AppEvent::WorkerRoundFailed {
+                        worker_id,
+                        round,
+                        error: error.clone(),
+                    });
+                    let _ = event_tx.send(AppEvent::WorkerFinished {
+                        worker_id,
+                        ok: false,
+                    });
+                    return Err(anyhow!(error));
+                }
+            }
         }
 
+        if config.manage_server && config.restart_every_secs > 0 {
+            let _ = wait_for_restart_quiescence(&mut restart_rx).await;
+            if let Err(err) = wait_for_ready(
+                &config.server_url,
+                None,
+                &config.artifact_dir.join("server.log"),
+                config.server_ready_timeout,
+            )
+            .await
+            .with_context(|| {
+                format!("worker {worker_id} wait for server ready before capturing round {round}")
+            }) {
+                fs::write(&worker_status, b"status=failed\n").ok();
+                let error = err.to_string();
+                let _ = event_tx.send(AppEvent::WorkerRoundFailed {
+                    worker_id,
+                    round,
+                    error: error.clone(),
+                });
+                let _ = event_tx.send(AppEvent::WorkerFinished {
+                    worker_id,
+                    ok: false,
+                });
+                return Err(err);
+            }
+        }
         if let Err(err) = capture_observability_snapshot(
             &config.server_url,
             &config.artifact_dir,
@@ -1009,19 +1179,117 @@ async fn run_worker(
     Ok(())
 }
 
+async fn wait_for_restart_quiescence(
+    restart_rx: &mut watch::Receiver<RestartState>,
+) -> RestartState {
+    loop {
+        let state = *restart_rx.borrow();
+        if !state.restarting && state.changed_at.elapsed() >= RESTART_SETTLE_GRACE {
+            return state;
+        }
+        if state.restarting {
+            if restart_rx.changed().await.is_err() {
+                return state;
+            }
+            continue;
+        }
+        let remaining = RESTART_SETTLE_GRACE.saturating_sub(state.changed_at.elapsed());
+        if remaining.is_zero() {
+            return state;
+        }
+        sleep(remaining).await;
+    }
+}
+
+async fn run_worker_round_attempt(
+    api_client: &CitygApiClient,
+    config: &Config,
+    worker_log: &Path,
+    worker_id: usize,
+    round: usize,
+    room_id: &str,
+    count: usize,
+    watch_mode: bool,
+    leave_order: &str,
+) -> Result<()> {
+    api_client
+        .bootstrap_room(room_id, demo::kbroad_public())
+        .await
+        .with_context(|| format!("bootstrap room {room_id}"))?;
+
+    if config.jitter_max_secs > 0 {
+        let jitter = thread_rng().gen_range(0..=config.jitter_max_secs);
+        if jitter > 0 {
+            sleep(Duration::from_secs(jitter)).await;
+        }
+    }
+
+    let log_file = open_append(worker_log)?;
+    let err_file = log_file.try_clone().context("clone worker log file")?;
+    let alias_base = format!("stress-w{worker_id}-r{round}");
+    let mut command = Command::new(&config.join_leave_bin);
+    command
+        .arg(&config.server_url)
+        .arg(room_id)
+        .arg(&alias_base)
+        .arg(format!("--count={count}"))
+        .arg(format!("--leave-order={leave_order}"))
+        .arg(format!(
+            "--message-burst-count={}",
+            config.message_burst_count
+        ))
+        .arg(format!(
+            "--message-burst-interval-ms={}",
+            config.message_burst_interval_ms
+        ))
+        .arg("--verbose")
+        .env("CITYG_CLIENT_ADMIN_TOKEN", &config.admin_token)
+        .env("CITYG_CLIENT_MESSAGE_AUTH_TOKEN", &config.message_token)
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(err_file));
+    if watch_mode {
+        command.arg("--watch");
+    } else {
+        command.arg("--batch");
+    }
+    let status = command
+        .status()
+        .await
+        .with_context(|| format!("run {}", config.join_leave_bin.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("exited with status {status}"))
+    }
+}
+
 async fn run_tui(
     app: &mut AppState,
     event_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
     stop_tx: watch::Sender<bool>,
+    max_duration: Option<Duration>,
 ) -> Result<bool> {
     let mut terminal = TerminalGuard::enter()?;
     let tick_rate = Duration::from_millis(200);
+    let mut duration_stop_requested = false;
     loop {
         drain_events(app, event_rx);
         terminal
             .terminal
             .draw(|frame| draw(frame, app))
             .context("draw tui")?;
+
+        if !duration_stop_requested
+            && let Some(limit) = max_duration
+            && app.elapsed() >= limit
+        {
+            duration_stop_requested = true;
+            let _ = stop_tx.send(true);
+            app.push_event(format!(
+                "duration limit reached ({}); stopping gracefully",
+                humantime(limit)
+            ));
+        }
 
         if app.finished {
             break;
@@ -1042,10 +1310,23 @@ async fn run_plain(
     app: &mut AppState,
     event_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
     stop_tx: watch::Sender<bool>,
+    max_duration: Option<Duration>,
 ) -> Result<bool> {
     let mut last_print = Instant::now();
+    let mut duration_stop_requested = false;
     loop {
         drain_events(app, event_rx);
+        if !duration_stop_requested
+            && let Some(limit) = max_duration
+            && app.elapsed() >= limit
+        {
+            duration_stop_requested = true;
+            let _ = stop_tx.send(true);
+            app.push_event(format!(
+                "duration limit reached ({}); stopping gracefully",
+                humantime(limit)
+            ));
+        }
         if last_print.elapsed() >= Duration::from_secs(1) {
             println!(
                 "elapsed={} rounds={}/{} failed_rounds={} worker_failures={} capacity={} accept_ok={} refresh_conflicts={} p95={}",

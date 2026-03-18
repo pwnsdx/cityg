@@ -1,5 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
+    fs::OpenOptions,
+    io::Write,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -105,10 +107,18 @@ impl AppState {
     }
 
     pub(crate) fn push_event(&mut self, line: impl Into<String>) {
+        let line = line.into();
         if self.recent_events.len() >= 20 {
             self.recent_events.pop_front();
         }
-        self.recent_events.push_back(line.into());
+        self.recent_events.push_back(line.clone());
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.artifact_dir.join("events.log"))
+        {
+            let _ = writeln!(file, "{line}");
+        }
     }
 
     pub(crate) fn elapsed(&self) -> Duration {

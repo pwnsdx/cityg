@@ -13,6 +13,7 @@ use std::{
     convert::TryInto,
     hash::{Hash, Hasher},
     net::SocketAddr,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -2450,6 +2451,7 @@ fn server_from_config(cfg: &cityg_config::CityGConfig) -> CityGServer {
     let mut server_cfg = ServerConfig::new();
     server_cfg.h_max = Some(cfg.protocol.max_concurrent_heads);
     server_cfg.window_ttl = Some(Duration::from_secs(cfg.server.window_ttl_secs));
+    server_cfg.state_path = cfg.server.state_path.clone();
 
     let mut acceptance = AcceptanceOptions {
         srx_max_bytes: cfg.protocol.default_srx_max_bytes,
@@ -2479,6 +2481,40 @@ fn server_from_config(cfg: &cityg_config::CityGConfig) -> CityGServer {
         ctx.set_fs_policy_version(Some(version));
     }
     server
+}
+
+fn lane_state_path(base: &Path, lane_index: usize, lane_count: usize) -> PathBuf {
+    if lane_count <= 1 {
+        return base.to_path_buf();
+    }
+
+    let stem = base
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("cityg-server");
+    let lane_stem = format!("{stem}.lane-{lane_index:02}");
+    match base.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if !ext.is_empty() => base.with_file_name(format!("{lane_stem}.{ext}")),
+        _ => base.with_file_name(lane_stem),
+    }
+}
+
+fn server_from_config_for_lane(
+    cfg: &cityg_config::CityGConfig,
+    lane_index: usize,
+    lane_count: usize,
+) -> CityGServer {
+    if lane_count <= 1 || cfg.server.state_path.is_none() {
+        return server_from_config(cfg);
+    }
+
+    let mut lane_cfg = cfg.clone();
+    lane_cfg.server.state_path = cfg
+        .server
+        .state_path
+        .as_ref()
+        .map(|path| lane_state_path(path, lane_index, lane_count));
+    server_from_config(&lane_cfg)
 }
 
 fn aligned_fs_epoch_base_ts(now: SystemTime, period_seconds: u64) -> u64 {
@@ -2516,12 +2552,17 @@ pub async fn run_with_config(
 
     let lane_count = configured_group_lane_count().max(1);
     let server_lanes_vec: Vec<Arc<RwLock<CityGServer>>> = (0..lane_count)
-        .map(|_| Arc::new(RwLock::new(server_from_config(&config))))
+        .map(|lane_index| {
+            Arc::new(RwLock::new(server_from_config_for_lane(
+                &config, lane_index, lane_count,
+            )))
+        })
         .collect();
-    let server = server_lanes_vec
-        .first()
-        .cloned()
-        .unwrap_or_else(|| Arc::new(RwLock::new(server_from_config(&config))));
+    let server = server_lanes_vec.first().cloned().unwrap_or_else(|| {
+        Arc::new(RwLock::new(server_from_config_for_lane(
+            &config, 0, lane_count,
+        )))
+    });
     let server_lanes = Arc::new(server_lanes_vec);
     let message_retention = message_retention_from_config(&config);
     info!(

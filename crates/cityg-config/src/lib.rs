@@ -36,7 +36,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use std::{env::VarError, path::Path};
+use std::{
+    env::VarError,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -82,6 +85,9 @@ pub struct CityGConfig {
 pub struct ServerConfig {
     /// Server bind address (e.g., "0.0.0.0:8080")
     pub address: String,
+
+    /// Optional journal path for crash recovery and restart persistence
+    pub state_path: Option<PathBuf>,
 
     /// WebSocket broadcast channel capacity
     pub websocket_capacity: usize,
@@ -210,6 +216,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             address: "0.0.0.0:8080".to_string(),
+            state_path: None,
             websocket_capacity: 1000,
             window_ttl_secs: 120, // 2 minutes default TTL
             seed_demo_room: false,
@@ -383,6 +390,9 @@ impl CityGConfig {
     {
         if let Ok(val) = get_var("CITYG_SERVER_ADDRESS") {
             self.server.address = val;
+        }
+        if let Ok(val) = get_var("CITYG_SERVER_STATE_PATH") {
+            self.server.state_path = Some(PathBuf::from(val));
         }
         if let Ok(val) = get_var("CITYG_SERVER_WEBSOCKET_CAPACITY") {
             self.server.websocket_capacity = val.parse().map_err(|e| {
@@ -844,6 +854,7 @@ default_window_height = 1080.0
             ..Default::default()
         };
         assert_eq!(custom_server.window_ttl(), Duration::from_secs(3600));
+        assert!(custom_server.state_path.is_none());
         Ok(())
     }
 
@@ -1051,6 +1062,10 @@ default_window_height = 1080.0
 
         // Server overrides
         overrides.insert("CITYG_SERVER_ADDRESS", "1.2.3.4:5000".to_string());
+        overrides.insert(
+            "CITYG_SERVER_STATE_PATH",
+            "/tmp/cityg-server.journal".to_string(),
+        );
         overrides.insert("CITYG_SERVER_WEBSOCKET_CAPACITY", "5000".to_string());
         overrides.insert("CITYG_SERVER_WINDOW_TTL_SECS", "7200".to_string());
         overrides.insert("CITYG_SERVER_SEED_DEMO_ROOM", "false".to_string());
@@ -1123,6 +1138,10 @@ default_window_height = 1080.0
 
         // Verify all overrides
         assert_eq!(config.server.address, "1.2.3.4:5000");
+        assert_eq!(
+            config.server.state_path,
+            Some(PathBuf::from("/tmp/cityg-server.journal"))
+        );
         assert_eq!(config.server.websocket_capacity, 5000);
         assert_eq!(config.server.window_ttl_secs, 7200);
         assert!(!config.server.seed_demo_room);
