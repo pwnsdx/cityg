@@ -2260,9 +2260,24 @@ mod tests {
             "pivot head missing",
             None
         ));
+        assert!(should_retry_ticket_http_error(
+            409,
+            "invalid input: refresh payload diverges from stored parity",
+            None
+        ));
+        assert!(should_retry_ticket_http_error(
+            429,
+            "too many requests: unrelated text",
+            Some(925)
+        ));
         assert!(!should_retry_ticket_http_error(
             500,
             "kbroad key missing",
+            None
+        ));
+        assert!(!should_retry_ticket_http_error(
+            429,
+            "too many requests: kbroad key missing",
             None
         ));
     }

@@ -1347,6 +1347,106 @@ mod tests {
             CanonicalWitness::validate_nonmembership_witness(&open_left, &[0xAA; 32]),
             Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
         ));
+
+        let mut both_bounds_with_path = RawNonMembershipWitness {
+            query: vec![0x55; 32],
+            root: vec![0xAA; 32],
+            left: Some(vec![0x10; 32]),
+            right: Some(vec![0xF0; 32]),
+            path: vec![RawPathEntry {
+                sibling: vec![0x11; 32],
+                dir: 0,
+            }],
+            left_below: Vec::new(),
+            right_below: Vec::new(),
+            above: Vec::new(),
+            nmint: Some(vec![0x22; 32]),
+            lca_left_height: Some(1),
+            lca_right_height: Some(1),
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&both_bounds_with_path, &[0xAA; 32]),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+
+        both_bounds_with_path.path.clear();
+        both_bounds_with_path.nmint = None;
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&both_bounds_with_path, &[0xAA; 32]),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+    }
+
+    #[test]
+    fn nonmembership_single_open_bound_witness_validates() {
+        let right_bound = [0x66u8; 32];
+        let sibling = [0x24u8; 32];
+        let expected_root = hash_node(&sibling, &right_bound);
+        let query = [0x55u8; 32];
+
+        let witness = RawNonMembershipWitness {
+            query: query.to_vec(),
+            root: expected_root.to_vec(),
+            left: None,
+            right: Some(right_bound.to_vec()),
+            path: vec![RawPathEntry {
+                sibling: sibling.to_vec(),
+                dir: 1,
+            }],
+            left_below: Vec::new(),
+            right_below: Vec::new(),
+            above: Vec::new(),
+            nmint: None,
+            lca_left_height: None,
+            lca_right_height: None,
+        };
+
+        let validated =
+            match CanonicalWitness::validate_nonmembership_witness(&witness, &expected_root) {
+                Ok(validated) => validated,
+                Err(err) => unreachable!("single-open-bound witness should validate: {err}"),
+            };
+        assert_eq!(validated.query, query);
+        assert_eq!(validated.root, expected_root);
+        assert_eq!(validated.left, None);
+        assert_eq!(validated.right, Some(right_bound));
+        assert_eq!(validated.path, vec![(1, sibling)]);
+    }
+
+    #[test]
+    fn nonmembership_single_left_bound_witness_validates() {
+        let left_bound = [0x33u8; 32];
+        let sibling = [0x81u8; 32];
+        let expected_root = hash_node(&left_bound, &sibling);
+        let query = [0x44u8; 32];
+
+        let witness = RawNonMembershipWitness {
+            query: query.to_vec(),
+            root: expected_root.to_vec(),
+            left: Some(left_bound.to_vec()),
+            right: None,
+            path: vec![RawPathEntry {
+                sibling: sibling.to_vec(),
+                dir: 0,
+            }],
+            left_below: Vec::new(),
+            right_below: Vec::new(),
+            above: Vec::new(),
+            nmint: None,
+            lca_left_height: None,
+            lca_right_height: None,
+        };
+
+        let validated =
+            match CanonicalWitness::validate_nonmembership_witness(&witness, &expected_root) {
+                Ok(validated) => validated,
+                Err(err) => unreachable!("single-left-bound witness should validate: {err}"),
+            };
+        assert_eq!(validated.query, query);
+        assert_eq!(validated.root, expected_root);
+        assert_eq!(validated.left, Some(left_bound));
+        assert_eq!(validated.right, None);
+        assert_eq!(validated.path, vec![(0, sibling)]);
     }
 
     #[test]
