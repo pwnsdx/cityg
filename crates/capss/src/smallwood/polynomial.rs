@@ -109,6 +109,33 @@ mod tests {
     }
 
     #[test]
+    fn eval_empty_polynomial_is_zero() {
+        assert_eq!(eval(&[], bf(7)), BaseField::zero());
+    }
+
+    #[test]
+    fn get_high_coeffs_returns_suffix() {
+        let coeffs = vec![bf(1), bf(2), bf(3), bf(4)];
+        assert_eq!(get_high_coeffs(&coeffs, 3, 2), vec![bf(3), bf(4)]);
+        assert_eq!(get_high_coeffs(&coeffs, 3, 0), Vec::<BaseField>::new());
+        assert_eq!(get_high_coeffs(&coeffs, 3, 4), coeffs);
+    }
+
+    #[test]
+    #[should_panic]
+    fn get_high_coeffs_rejects_degree_mismatch() {
+        let coeffs = vec![bf(1), bf(2)];
+        let _ = get_high_coeffs(&coeffs, 2, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn get_high_coeffs_rejects_too_many_coeffs() {
+        let coeffs = vec![bf(1), bf(2), bf(3)];
+        let _ = get_high_coeffs(&coeffs, 2, 4);
+    }
+
+    #[test]
     fn restore_only_from_single_points() {
         // polynomial P(x) = 2 + 3x + x^2
         let relations = vec![
@@ -121,11 +148,49 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn restore_only_from_relation_rejects_wrong_relation_count() {
+        let relations = vec![(bf(1), vec![bf(0)])];
+        let _ = restore_only_from_relation(&relations, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn restore_only_from_relation_panics_on_singular_system() {
+        let relations = vec![(bf(1), vec![bf(0)]), (bf(1), vec![bf(0)])];
+        let _ = restore_only_from_relation(&relations, 1);
+    }
+
+    #[test]
     fn restore_with_high_coeffs() {
         // polynomial P(x) = 4 + 5x + 7x^2 + 11x^3
         let high_coeffs = vec![bf(7), bf(11)];
         let relations = vec![(bf(4), vec![bf(0)]), (bf(27), vec![bf(1)])];
         let coeffs = restore_from_relations(&relations, &high_coeffs, 3);
         assert_eq!(coeffs, vec![bf(4), bf(5), bf(7), bf(11)]);
+    }
+
+    #[test]
+    fn restore_from_relations_without_high_coeffs_roundtrips() {
+        let relations = vec![(bf(3), vec![bf(0)]), (bf(5), vec![bf(1)])];
+        let coeffs = restore_from_relations(&relations, &[], 1);
+        assert_eq!(coeffs, vec![bf(3), bf(2)]);
+    }
+
+    #[test]
+    fn polynomial_conversions_roundtrip_and_pad() {
+        let coeffs = vec![bf(9), bf(4)];
+        let poly = polynomial_from_coeffs(&coeffs);
+        assert_eq!(poly.coeffs, coeffs);
+        assert_eq!(
+            to_list(&poly, 4),
+            vec![
+                bf(9),
+                bf(4),
+                BaseField::zero(),
+                BaseField::zero(),
+                BaseField::zero()
+            ]
+        );
     }
 }

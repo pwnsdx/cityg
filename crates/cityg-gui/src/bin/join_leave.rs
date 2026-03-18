@@ -2141,6 +2141,30 @@ mod tests {
             .port()
     }
 
+    fn sample_session(server_url: &str) -> Session {
+        let (_pop_pk, pop_sk) = dilithium5::keypair();
+        Session {
+            server_url: server_url.to_string(),
+            room_id: hex::encode([0xAA; 32]),
+            gid: [0x11; 32],
+            leaf_id: [0x22; 32],
+            pop_public_key: vec![0x33; 32],
+            pop_secret: Box::new(pop_sk),
+            vrf_secret_key: vec![0x44; 32],
+            vrf_public_key: vec![0x55; 32],
+            fs_ec: 7,
+            fs_epoch_commit: [0x66; 32],
+            fs_dev_prev_commit: [0x77; 32],
+            we_epoch_id: [0x88; 32],
+            anchor_hdr_ctx: vec![0x99],
+            seed_ctx_hash: [0xAB; 32],
+            seed_commit: [0xBC; 32],
+            seed_bundle_commit: [0xCD; 32],
+            fs_fingerprint: None,
+            stored_header_map: BTreeMap::new(),
+        }
+    }
+
     async fn spawn_server_on_with_seed_demo(
         port: u16,
         seed_demo_room: bool,
@@ -2752,6 +2776,25 @@ mod tests {
     }
 
     #[test]
+    fn notification_from_json_rejects_missing_required_fields() {
+        let missing_type = serde_json::json!({});
+        assert!(Notification::from_json(&missing_type).is_none());
+
+        let missing_message_weid = serde_json::json!({
+            "type": "message",
+            "timestamp_ms": 12u64
+        });
+        assert!(Notification::from_json(&missing_message_weid).is_none());
+
+        let missing_membership_leaf = serde_json::json!({
+            "type": "membership",
+            "gid": hex::encode([0x11u8; 32]),
+            "event": "join"
+        });
+        assert!(Notification::from_json(&missing_membership_leaf).is_none());
+    }
+
+    #[test]
     fn describe_http_failure_includes_freeze_metadata() {
         let detail =
             describe_http_failure("500", "acceptance error", Some(925), Some("mh_window_full"));
@@ -3343,6 +3386,28 @@ mod tests {
 
         handle.abort();
         let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_reports_transport_error() -> Result<()> {
+        let server_url = "http://127.0.0.1:9";
+        let room_id = hex::encode([0xD3u8; 32]);
+        let result = perform_join(server_url, &room_id, "transport-error").await;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_leave_reports_transport_error() -> Result<()> {
+        let session = sample_session("http://127.0.0.1:9");
+        let result = perform_leave(&session, false).await;
+        assert!(result.is_err());
+        let err = match result {
+            Ok(_) => return Err(anyhow!("expected transport failure")),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("fetch merge ticket"));
         Ok(())
     }
 
