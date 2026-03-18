@@ -512,6 +512,26 @@ mod tests {
     use pqcrypto_dilithium::dilithium5::{detached_sign, keypair};
     use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
 
+    fn anchor_for<'a>(
+        parent_root: &'a [u8; 32],
+        join_delta_root: &'a [u8; 32],
+        revoked_root: &'a [u8; 32],
+    ) -> AnchorInstance<'a> {
+        AnchorInstance {
+            gid: b"gid",
+            cat: b"cat",
+            we_epoch_id: [0x42; 32],
+            anchor_hdr_ctx: b"ctx",
+            tswe_salt_hash: b"salt",
+            parent_root: parent_root.as_slice(),
+            join_delta_root: join_delta_root.as_slice(),
+            revoked_since_prev_root: revoked_root.as_slice(),
+            revoked_root: revoked_root.as_slice(),
+            pox_r_commit: None,
+            msphf_hp_commit: None,
+        }
+    }
+
     #[test]
     fn membership_path_matches_root() {
         let leaf = hash_leaf(b"leaf0");
@@ -1042,5 +1062,433 @@ mod tests {
         assert_eq!(validated.left, Some(left_bound));
         assert_eq!(validated.right, Some(right_bound));
         assert!(validated.path.is_empty());
+    }
+
+    #[test]
+    fn validated_witness_digest_and_mode_cover_b_variant() -> Result<(), MsphfError> {
+        let membership = ValidatedMembership {
+            leaf_id: [0x11; 32],
+            root: [0x22; 32],
+            path: vec![(0, [0x33; 32])],
+        };
+        let witness_a = ValidatedWitness {
+            mode: WitnessMode::A,
+            membership: membership.clone(),
+            nonmembership: None,
+            pop: None,
+        };
+        let witness_b = ValidatedWitness {
+            mode: WitnessMode::B,
+            membership,
+            nonmembership: Some(ValidatedNonMembership {
+                query: [0x44; 32],
+                root: [0x55; 32],
+                left: Some([0x10; 32]),
+                right: Some([0xF0; 32]),
+                path: Vec::new(),
+            }),
+            pop: None,
+        };
+
+        assert_ne!(witness_a.digest()?, witness_b.digest()?);
+        assert_eq!(
+            CanonicalWitness {
+                inner: WitnessVariants::B {
+                    witness: RawMembershipWitness {
+                        leaf_id: vec![0x11; 32],
+                        root: vec![0x22; 32],
+                        path: Vec::new(),
+                    },
+                    nonmem: None,
+                    pop: None,
+                },
+            }
+            .mode(),
+            WitnessMode::B
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nonmembership_witness_rejects_malformed_query_root_and_bounds() {
+        let expected_root = [0xAA; 32];
+
+        let bad_query = RawNonMembershipWitness {
+            query: vec![0x44; 31],
+            root: expected_root.to_vec(),
+            left: None,
+            right: None,
+            path: Vec::new(),
+            left_below: Vec::new(),
+            right_below: Vec::new(),
+            above: Vec::new(),
+            nmint: None,
+            lca_left_height: None,
+            lca_right_height: None,
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&bad_query, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::CborMalformed))
+        ));
+
+        let bad_root = RawNonMembershipWitness {
+            query: vec![0x44; 32],
+            root: vec![0xAA; 31],
+            ..bad_query.clone()
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&bad_root, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::CborMalformed))
+        ));
+
+        let root_mismatch = RawNonMembershipWitness {
+            query: vec![0x44; 32],
+            root: vec![0xBB; 32],
+            ..bad_query.clone()
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&root_mismatch, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::ProjEvalFail))
+        ));
+
+        let left_bad_len = RawNonMembershipWitness {
+            query: vec![0x44; 32],
+            root: expected_root.to_vec(),
+            left: Some(vec![0x10; 31]),
+            ..bad_query.clone()
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&left_bad_len, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::CborMalformed))
+        ));
+
+        let left_noncanonical = RawNonMembershipWitness {
+            query: vec![0x44; 32],
+            root: expected_root.to_vec(),
+            left: Some(vec![0x44; 32]),
+            ..bad_query.clone()
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&left_noncanonical, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+
+        let right_bad_len = RawNonMembershipWitness {
+            query: vec![0x44; 32],
+            root: expected_root.to_vec(),
+            right: Some(vec![0x55; 31]),
+            ..bad_query.clone()
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&right_bad_len, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::CborMalformed))
+        ));
+
+        let right_noncanonical = RawNonMembershipWitness {
+            query: vec![0x44; 32],
+            root: expected_root.to_vec(),
+            right: Some(vec![0x44; 32]),
+            ..bad_query.clone()
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&right_noncanonical, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+
+        let crossed_bounds = RawNonMembershipWitness {
+            query: vec![0x44; 32],
+            root: expected_root.to_vec(),
+            left: Some(vec![0x60; 32]),
+            right: Some(vec![0x50; 32]),
+            ..bad_query
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&crossed_bounds, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+    }
+
+    #[test]
+    fn nonmembership_extended_interval_rejects_lca_binding_and_depth_errors() {
+        let left_bound = [0x10u8; 32];
+        let right_bound = [0xF0u8; 32];
+        let left_sibling = [0x21u8; 32];
+        let right_sibling = [0x22u8; 32];
+        let above_sibling = [0x23u8; 32];
+        let left_anchor = hash_node(&left_bound, &left_sibling);
+        let right_anchor = hash_node(&right_sibling, &right_bound);
+        let lca = hash_node(&left_anchor, &right_anchor);
+        let expected_root = hash_node(&lca, &above_sibling);
+
+        let base = RawNonMembershipWitness {
+            query: vec![0x80; 32],
+            root: expected_root.to_vec(),
+            left: Some(left_bound.to_vec()),
+            right: Some(right_bound.to_vec()),
+            path: Vec::new(),
+            left_below: vec![RawPathEntry {
+                sibling: left_sibling.to_vec(),
+                dir: 0,
+            }],
+            right_below: vec![RawPathEntry {
+                sibling: right_sibling.to_vec(),
+                dir: 1,
+            }],
+            above: vec![RawPathEntry {
+                sibling: above_sibling.to_vec(),
+                dir: 0,
+            }],
+            nmint: Some(
+                merkle::hash_interval_binding(
+                    &left_bound,
+                    &left_bound,
+                    &right_bound,
+                    &right_bound,
+                    2,
+                    2,
+                )
+                .to_vec(),
+            ),
+            lca_left_height: Some(2),
+            lca_right_height: Some(2),
+        };
+
+        let mut missing_lca = base.clone();
+        missing_lca.lca_left_height = None;
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&missing_lca, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+
+        let mut wrong_lca = base.clone();
+        wrong_lca.lca_right_height = Some(3);
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&wrong_lca, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+
+        let mut bad_nmint_len = base.clone();
+        bad_nmint_len.nmint = Some(vec![0xAA; 31]);
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&bad_nmint_len, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::CborMalformed))
+        ));
+
+        let mut too_deep = base.clone();
+        too_deep.above = (0..64)
+            .map(|_| RawPathEntry {
+                sibling: vec![0x33; 32],
+                dir: 0,
+            })
+            .collect();
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&too_deep, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::PathOversize))
+        ));
+
+        let mut wrong_root = base.clone();
+        wrong_root.root = vec![0x99; 32];
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&wrong_root, &[0x99; 32]),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+
+        let mut wrong_nmint = base;
+        wrong_nmint.nmint = Some(vec![0xAB; 32]);
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&wrong_nmint, &expected_root),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+    }
+
+    #[test]
+    fn nonmembership_empty_and_open_bound_guards_reject_noncanonical_shapes() {
+        let mut empty_with_path = RawNonMembershipWitness {
+            query: vec![0x44; 32],
+            root: vec![0x00; 32],
+            left: None,
+            right: None,
+            path: vec![RawPathEntry {
+                sibling: vec![0x11; 32],
+                dir: 0,
+            }],
+            left_below: Vec::new(),
+            right_below: Vec::new(),
+            above: Vec::new(),
+            nmint: None,
+            lca_left_height: None,
+            lca_right_height: None,
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&empty_with_path, &[0u8; 32]),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+
+        empty_with_path.path.clear();
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&empty_with_path, &[0x11; 32]),
+            Err(MsphfError::Witness(WitnessValidationError::ProjEvalFail))
+        ));
+
+        let open_left = RawNonMembershipWitness {
+            query: vec![0x44; 32],
+            root: vec![0xAA; 32],
+            left: Some(vec![0x10; 32]),
+            right: None,
+            path: Vec::new(),
+            left_below: Vec::new(),
+            right_below: Vec::new(),
+            above: Vec::new(),
+            nmint: None,
+            lca_left_height: None,
+            lca_right_height: None,
+        };
+        assert!(matches!(
+            CanonicalWitness::validate_nonmembership_witness(&open_left, &[0xAA; 32]),
+            Err(MsphfError::Witness(WitnessValidationError::NonCanonical))
+        ));
+    }
+
+    #[test]
+    fn fold_step_and_pop_validation_cover_error_paths() -> Result<(), MsphfError> {
+        assert!(matches!(
+            CanonicalWitness::fold_step(
+                [0x11; 32],
+                &RawPathEntry {
+                    sibling: vec![0x22; 31],
+                    dir: 0,
+                }
+            ),
+            Err(MsphfError::Witness(WitnessValidationError::CborMalformed))
+        ));
+        assert!(matches!(
+            CanonicalWitness::fold_step(
+                [0x11; 32],
+                &RawPathEntry {
+                    sibling: vec![0x22; 32],
+                    dir: 2,
+                }
+            ),
+            Err(MsphfError::Witness(WitnessValidationError::CborMalformed))
+        ));
+
+        let membership = ValidatedMembership {
+            leaf_id: [0x33; 32],
+            root: [0x44; 32],
+            path: Vec::new(),
+        };
+        let anchor = anchor_for(&membership.root, &membership.root, &[0u8; 32]);
+        assert!(matches!(
+            CanonicalWitness::validate_pop(
+                &anchor,
+                &membership,
+                &RawPopWitness {
+                    public_key: vec![0x11; ML_DSA65_PUBLIC_KEY_LEN - 1],
+                    signature: vec![0x22; ML_DSA65_SIGNATURE_LEN],
+                }
+            ),
+            Err(MsphfError::Witness(WitnessValidationError::CborMalformed))
+        ));
+        assert!(matches!(
+            CanonicalWitness::validate_pop(
+                &anchor,
+                &membership,
+                &RawPopWitness {
+                    public_key: vec![0x11; ML_DSA65_PUBLIC_KEY_LEN],
+                    signature: vec![0x22; ML_DSA65_SIGNATURE_LEN - 1],
+                }
+            ),
+            Err(MsphfError::Witness(WitnessValidationError::CborMalformed))
+        ));
+
+        let (pk, sk) = keypair();
+        let anchor = anchor_for(&membership.root, &membership.root, &[0u8; 32]);
+        let xk_bytes = anchor.to_cbor_bytes()?;
+        #[derive(Serialize)]
+        struct PopMsg<'a> {
+            #[serde(with = "serde_bytes")]
+            xk: &'a [u8],
+            #[serde(with = "serde_bytes")]
+            leaf_id: &'a [u8],
+            #[serde(with = "serde_bytes")]
+            epoch: &'a [u8],
+        }
+        let mut msg = hash::h_l(
+            ds::MSPHF_POP_MSG,
+            &PopMsg {
+                xk: &xk_bytes,
+                leaf_id: &membership.leaf_id,
+                epoch: &anchor.we_epoch_id,
+            },
+        )?;
+        msg[0] ^= 0xFF;
+        let signature = detached_sign(&msg, &sk);
+        assert!(matches!(
+            CanonicalWitness::validate_pop(
+                &anchor,
+                &membership,
+                &RawPopWitness {
+                    public_key: pk.as_bytes().to_vec(),
+                    signature: signature.as_bytes().to_vec(),
+                }
+            ),
+            Err(MsphfError::Witness(WitnessValidationError::ProjEvalFail))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn variant_b_with_pop_without_nonmembership_validates() -> Result<(), MsphfError> {
+        let (pk, sk) = keypair();
+        #[derive(Serialize)]
+        struct LeafBinding<'a> {
+            #[serde(with = "serde_bytes")]
+            public_key: &'a [u8],
+        }
+        let leaf_digest = hash::h_l(
+            ds::MSPHF_LEAF_ID,
+            &LeafBinding {
+                public_key: pk.as_bytes(),
+            },
+        )?;
+        let anchor = anchor_for(&leaf_digest, &leaf_digest, &[0u8; 32]);
+        let xk_bytes = anchor.to_cbor_bytes()?;
+        #[derive(Serialize)]
+        struct PopMsg<'a> {
+            #[serde(with = "serde_bytes")]
+            xk: &'a [u8],
+            #[serde(with = "serde_bytes")]
+            leaf_id: &'a [u8],
+            #[serde(with = "serde_bytes")]
+            epoch: &'a [u8],
+        }
+        let msg = hash::h_l(
+            ds::MSPHF_POP_MSG,
+            &PopMsg {
+                xk: &xk_bytes,
+                leaf_id: &leaf_digest,
+                epoch: &anchor.we_epoch_id,
+            },
+        )?;
+        let signature = detached_sign(&msg, &sk);
+        let witness = CanonicalWitness {
+            inner: WitnessVariants::B {
+                witness: RawMembershipWitness {
+                    leaf_id: leaf_digest.to_vec(),
+                    root: leaf_digest.to_vec(),
+                    path: Vec::new(),
+                },
+                nonmem: None,
+                pop: Some(RawPopWitness {
+                    public_key: pk.as_bytes().to_vec(),
+                    signature: signature.as_bytes().to_vec(),
+                }),
+            },
+        };
+        let validated = witness.validate_against(&anchor)?;
+        assert_eq!(validated.mode, WitnessMode::B);
+        assert!(validated.nonmembership.is_none());
+        assert!(validated.pop.is_some());
+        Ok(())
     }
 }

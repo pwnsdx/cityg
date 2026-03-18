@@ -2663,7 +2663,9 @@ mod tests {
     use pqcrypto_traits::sign::PublicKey;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use serde::Serialize;
-    use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Duration};
+    use std::{
+        borrow::Cow, collections::BTreeMap, fs::File, io::Write, path::Path, time::Duration,
+    };
     use tempfile::tempdir;
 
     fn demo_server_with_journal(path: impl AsRef<Path>) -> CityGServer {
@@ -3567,6 +3569,28 @@ mod tests {
     }
 
     #[test]
+    fn invalid_persisted_kbroad_state_is_ignored_on_boot() -> Result<(), CityGError> {
+        let _serial = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("invalid-kbroad-state.journal");
+        let kbroad_path = super::kbroad_state_path_for_journal(&journal_path);
+        std::fs::write(&kbroad_path, [0xA1, 0x01, 0x02])?;
+
+        let mut cfg = ServerConfig::new();
+        cfg.state_path = Some(journal_path);
+        let mut server = CityGServer::new(cfg);
+        let gid = [0x91; 32];
+
+        assert!(matches!(
+            server.build_join_ticket(&gid),
+            Err(CityGError::InvalidInput("kbroad key missing"))
+        ));
+        server.register_group(&gid, vec![0x11; 16])?;
+        assert_eq!(server.kbroad_generation(&gid), 0);
+        Ok(())
+    }
+
+    #[test]
     fn group_state_defaults_include_barrier_policy_bounds() -> Result<(), CityGError> {
         let mut server = CityGServer::new(ServerConfig::new());
         let gid = [0xD1; 32];
@@ -3899,6 +3923,53 @@ mod tests {
             Err(CityGError::InvalidInput("barrier node index out of range"))
         ));
 
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_tree_fallback_helpers_cover_empty_and_owned_paths() -> Result<(), CityGError> {
+        let zero_state = super::GroupState {
+            n_max: 0,
+            ..super::GroupState::default()
+        };
+        assert!(matches!(
+            super::build_pk_entries_view(&zero_state),
+            Err(CityGError::InvalidInput("barrier n_max must be positive"))
+        ));
+
+        let mut state = super::GroupState {
+            n_max: 4,
+            ..super::GroupState::default()
+        };
+        super::record_barrier_public_tree_snapshot(&mut state);
+        assert!(state.barrier_public_tree_history.is_empty());
+
+        let leaf = cityg_client::demo::demo_member_leaf("fallback-owned");
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![leaf],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[leaf])?;
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        state.leaf_barrier_public.insert(leaf, vec![0x77; 1184]);
+
+        let view = super::build_pk_entries_view(&state)?;
+        let owned = match view {
+            Cow::Borrowed(_) => {
+                return Err(CityGError::InvalidInput(
+                    "expected fallback builder to allocate owned entries",
+                ));
+            }
+            Cow::Owned(entries) => entries,
+        };
+        assert_eq!(owned.len(), 7);
+        let computed = super::compute_group_barrier_tree_hash(&state)?;
+        assert_eq!(
+            computed,
+            super::compute_barrier_tree_hash(state.n_max, owned.as_slice())?
+        );
         Ok(())
     }
 
@@ -5096,6 +5167,27 @@ mod tests {
     }
 
     #[test]
+    fn refresh_pivot_rejects_unknown_pivot_weid() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let mut refresh = bundle.clone();
+        refresh.header_map.insert(
+            hdr::HDR_ROLLUP_PIVOT_WEID,
+            Value::Bytes([0xEE; 32].to_vec()),
+        );
+        let err = server
+            .refresh_pivot(&refresh)
+            .expect_err("unknown pivot parity must fail");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("pivot parity missing for refresh")
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn accept_epoch_reports_window_full() -> Result<(), CityGError> {
         let mut server = super::demo::demo_server();
         server.update_window_limits(Some(1), None);
@@ -5599,6 +5691,19 @@ mod tests {
             record.ek_leaf.len() == 1184,
             "ek_leaf must be present and ML-KEM-768 size"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_joins_since_genesis_without_snapshot_returns_empty() -> Result<(), CityGError> {
+        let gid = [0x81; 32];
+        let mut server = CityGServer::new(ServerConfig::new());
+        server
+            .roster
+            .groups
+            .insert(gid.to_vec(), super::GroupState::default());
+        let joins = server.resolve_joins_since(&gid, 0)?;
+        assert!(joins.is_empty());
         Ok(())
     }
 
