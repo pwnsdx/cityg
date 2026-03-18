@@ -692,8 +692,8 @@ mod tests {
         sample_header, sample_parts_params_joiner, sample_pop_keys, seed_capss_with,
     };
     use crate::{
-        JoinerKGenResult, OrchestrationParams, compute_proofs_commit_bytes, joiner_kgen_merge_or,
-        mhw::HeadRecord,
+        JoinerKGenResult, KBROAD_MODE, OrchestrationParams, compute_proofs_commit_bytes,
+        joiner_kgen_merge_or, mhw::HeadRecord,
     };
     use anyhow::{Result, anyhow};
     use ciborium::value::Integer;
@@ -1393,6 +1393,59 @@ mod tests {
     }
 
     #[test]
+    fn merge_anchor_rejects_missing_core_fs_fields_and_base_mismatch() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+
+        let mut missing_base = header.clone();
+        missing_base.remove(&HDR_FS_EPOCH_BASE_TS);
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &missing_base,
+            heads.clone(),
+            FREEZE_FS_JOIN_MISSING,
+        )?;
+
+        let expected_base_ts = header
+            .get(&HDR_FS_EPOCH_BASE_TS)
+            .and_then(Value::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+            .expect("merge header must carry fs_epoch_base_ts");
+        ctx.set_fs_base_ts(Some(expected_base_ts.saturating_add(1)));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_FS_BASE_MISMATCH,
+        )?;
+        ctx.set_fs_base_ts(Some(expected_base_ts));
+
+        for key in [
+            HDR_BARRIER_VERSION,
+            HDR_FS_EPOCH_COMMIT,
+            HDR_FS_DEV_PREV_COMMIT,
+            HDR_FS_DEV_COMMIT,
+        ] {
+            let mut mutated = header.clone();
+            mutated.remove(&key);
+            expect_merge_freeze(
+                &mut ctx,
+                &parts,
+                &merge_joiner,
+                &mutated,
+                heads.clone(),
+                FREEZE_FS_JOIN_MISSING,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn merge_anchor_initializes_fs_policy_and_base_when_context_empty() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         ctx.set_srx_required(false);
@@ -1424,6 +1477,27 @@ mod tests {
         assert!(matches!(outcome.kind, AcceptanceKind::Merge { .. }));
         assert_eq!(ctx.fs_policy_version(), Some(expected_policy_version.as_str()));
         assert_eq!(ctx.fs_base_ts(), Some(expected_base_ts));
+        Ok(())
+    }
+
+    #[test]
+    fn merge_anchor_accepts_without_pop_key_verification() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.remove(&HDR_POP_PK);
+        seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
+
+        let now = ctx.next_accept_instant();
+        let outcome = ctx.accept_anchor_merge(
+            &parts,
+            merge_joiner.we_epoch_id,
+            &header,
+            heads,
+            merge_joiner.mh_note.clone(),
+            now,
+        )?;
+        assert!(matches!(outcome.kind, AcceptanceKind::Merge { .. }));
         Ok(())
     }
 
@@ -1549,6 +1623,33 @@ mod tests {
     }
 
     #[test]
+    fn merge_anchor_rejects_missing_seed_and_rollup_fields() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+
+        for (key, expected) in [
+            (112, FREEZE_FIELD_MISSING),
+            (HDR_REVOKED_ROOT, FREEZE_FIELD_MISSING),
+            (91, FREEZE_SEEDCTX_MISMATCH),
+            (94, FREEZE_SEEDCTX_MISMATCH),
+            (HDR_ROLLUP_PIVOT_WEID, FREEZE_MH_HEADS_INVALID),
+        ] {
+            let mut mutated = header.clone();
+            mutated.remove(&key);
+            expect_merge_freeze(
+                &mut ctx,
+                &parts,
+                &merge_joiner,
+                &mutated,
+                heads.clone(),
+                expected,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn merge_anchor_rejects_rho_commit_mismatch() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         let (mut header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
@@ -1560,6 +1661,22 @@ mod tests {
             &header,
             heads,
             FREEZE_MSPHF_RHO_PARITY,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_unsorted_retired_heads() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, mut heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        heads.push([0u8; 32]);
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_MH_HEADS_INVALID,
         )
     }
 
@@ -1763,6 +1880,39 @@ mod tests {
     }
 
     #[test]
+    fn merge_anchor_rejects_well_formed_but_invalid_pivot_envelope_shape() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let pivot_weid = header
+            .get(&HDR_ROLLUP_PIVOT_WEID)
+            .and_then(Value::as_bytes)
+            .and_then(|bytes| bytes.as_slice().try_into().ok())
+            .expect("missing pivot weid");
+
+        let mut parity = pivot_parity_from_store(&mut ctx, &parts, pivot_weid)?;
+        let invalid_envelope = Value::Array(vec![
+            Value::Text(KBROAD_MODE.to_string()),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Bytes(vec![0u8; KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Text("chacha20-poly1305".to_string()),
+        ]);
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&invalid_envelope, &mut encoded)?;
+        parity.hp_envelope = Arc::from(encoded.into_boxed_slice());
+        refresh_pivot_parity(&mut ctx, &parts, &parity)?;
+
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_KBROAD_PARENT_MISMATCH,
+        )
+    }
+
+    #[test]
     fn merge_anchor_accepts_with_valid_rollup_metadata() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         ctx.set_srx_required(false);
@@ -1790,6 +1940,50 @@ mod tests {
         };
         assert_eq!(retired_heads, &heads);
         Ok(())
+    }
+
+    #[test]
+    fn merge_anchor_rejects_vrf_and_suite_mismatch_against_pivot_store() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let pivot_weid = header
+            .get(&HDR_ROLLUP_PIVOT_WEID)
+            .and_then(Value::as_bytes)
+            .and_then(|bytes| bytes.as_slice().try_into().ok())
+            .expect("missing pivot weid");
+
+        let mut parity = pivot_parity_from_store(&mut ctx, &parts, pivot_weid)?;
+        parity.vrf_public[0] ^= 0x5A;
+        refresh_pivot_parity(&mut ctx, &parts, &parity)?;
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_VRF_INVALID,
+        )?;
+
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let pivot_weid = header
+            .get(&HDR_ROLLUP_PIVOT_WEID)
+            .and_then(Value::as_bytes)
+            .and_then(|bytes| bytes.as_slice().try_into().ok())
+            .expect("missing pivot weid");
+        let mut parity = pivot_parity_from_store(&mut ctx, &parts, pivot_weid)?;
+        parity.policy_version = "999".to_string();
+        refresh_pivot_parity(&mut ctx, &parts, &parity)?;
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_SUITE_FORBIDDEN,
+        )
     }
 
     #[test]
