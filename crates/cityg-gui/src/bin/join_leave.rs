@@ -2294,6 +2294,22 @@ mod tests {
     }
 
     #[test]
+    fn read_nonempty_env_trims_and_filters_values() {
+        let missing = format!("CITYG_JOIN_LEAVE_TEST_MISSING_{}", std::process::id());
+        assert!(read_nonempty_env(&missing).is_none());
+
+        let blank = format!("CITYG_JOIN_LEAVE_TEST_BLANK_{}", std::process::id());
+        unsafe { std::env::set_var(&blank, "   "); }
+        assert!(read_nonempty_env(&blank).is_none());
+        unsafe { std::env::remove_var(&blank); }
+
+        let value = format!("CITYG_JOIN_LEAVE_TEST_VALUE_{}", std::process::id());
+        unsafe { std::env::set_var(&value, "  token-value  "); }
+        assert_eq!(read_nonempty_env(&value).as_deref(), Some("token-value"));
+        unsafe { std::env::remove_var(&value); }
+    }
+
+    #[test]
     fn revocation_roots_hash_helper_is_deterministic() -> Result<()> {
         let since = [0x11; 32];
         let revoked = [0x22; 32];
