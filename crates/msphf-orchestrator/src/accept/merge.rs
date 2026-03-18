@@ -1393,6 +1393,41 @@ mod tests {
     }
 
     #[test]
+    fn merge_anchor_initializes_fs_policy_and_base_when_context_empty() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let expected_policy_version = header
+            .get(&HDR_FS_POLICY_VERSION)
+            .and_then(Value::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+            .expect("merge header must carry fs_policy_version")
+            .to_string();
+        let expected_base_ts = header
+            .get(&HDR_FS_EPOCH_BASE_TS)
+            .and_then(Value::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+            .expect("merge header must carry fs_epoch_base_ts");
+        ctx.set_fs_policy_version(None);
+        ctx.set_fs_base_ts(None);
+        seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
+
+        let now = ctx.next_accept_instant();
+        let outcome = ctx.accept_anchor_merge(
+            &parts,
+            merge_joiner.we_epoch_id,
+            &header,
+            heads,
+            merge_joiner.mh_note.clone(),
+            now,
+        )?;
+        assert!(matches!(outcome.kind, AcceptanceKind::Merge { .. }));
+        assert_eq!(ctx.fs_policy_version(), Some(expected_policy_version.as_str()));
+        assert_eq!(ctx.fs_base_ts(), Some(expected_base_ts));
+        Ok(())
+    }
+
+    #[test]
     fn merge_anchor_rejects_non_bool_or_missing_fs_boundary_flag() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         let (mut header, heads) =
@@ -1415,6 +1450,21 @@ mod tests {
             &header,
             heads,
             FREEZE_MH_HEADS_INVALID,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_zero_fs_window_capacity() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        ctx.fs_caps.window_periods = 0;
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE,
         )
     }
 
@@ -1499,6 +1549,21 @@ mod tests {
     }
 
     #[test]
+    fn merge_anchor_rejects_rho_commit_mismatch() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (mut header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.insert(93, Value::Bytes([0xAB; 32].to_vec()));
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_MSPHF_RHO_PARITY,
+        )
+    }
+
+    #[test]
     fn merge_anchor_rejects_empty_or_unknown_retired_heads() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
@@ -1522,6 +1587,69 @@ mod tests {
             tampered_heads,
             FREEZE_MH_HEADS_INVALID,
         )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_invalid_tswe_salt_shapes_and_claim_mismatch() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+
+        let short_tswe = [0x11u8; 31];
+        let short_parts = AnchorInstanceParts {
+            gid: parts.gid,
+            cat: parts.cat,
+            tswe_salt_hash: &short_tswe,
+            parent_root: parts.parent_root,
+            join_delta_root: parts.join_delta_root,
+            revoked_since_prev_root: parts.revoked_since_prev_root,
+            revoked_root: parts.revoked_root,
+            pox_r_commit: parts.pox_r_commit,
+        };
+        expect_merge_freeze(
+            &mut ctx,
+            &short_parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_FIELD_MISSING,
+        )?;
+
+        let mut mismatched_tswe = [0u8; 32];
+        mismatched_tswe.copy_from_slice(parts.tswe_salt_hash);
+        mismatched_tswe[0] ^= 0xFF;
+        let mismatched_parts = AnchorInstanceParts {
+            gid: parts.gid,
+            cat: parts.cat,
+            tswe_salt_hash: &mismatched_tswe,
+            parent_root: parts.parent_root,
+            join_delta_root: parts.join_delta_root,
+            revoked_since_prev_root: parts.revoked_since_prev_root,
+            revoked_root: parts.revoked_root,
+            pox_r_commit: parts.pox_r_commit,
+        };
+        expect_merge_freeze(
+            &mut ctx,
+            &mismatched_parts,
+            &merge_joiner,
+            &header,
+            heads.clone(),
+            FREEZE_TSWE_SALT_MISMATCH,
+        )?;
+
+        seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
+        let now = ctx.next_accept_instant();
+        let err = ctx
+            .accept_anchor_merge(
+                &parts,
+                [0xEE; 32],
+                &header,
+                heads,
+                merge_joiner.mh_note.clone(),
+                now,
+            )
+            .expect_err("mismatched we_epoch_id claim must freeze");
+        assert_freeze(err, FREEZE_EPOCHID_MISMATCH);
+        Ok(())
     }
 
     #[test]
