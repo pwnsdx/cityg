@@ -3322,6 +3322,23 @@ mod tests {
     }
 
     #[test]
+    fn rotate_group_kbroad_allows_successive_unflagged_rotations() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0xB2; 32];
+        let key_a = vec![0x41; 16];
+        let key_b = vec![0x42; 16];
+        let key_c = vec![0x43; 16];
+
+        server.register_group(&gid, key_a)?;
+        assert_eq!(server.rotate_group_kbroad(&gid, key_b.clone())?, 1);
+        assert_eq!(server.rotate_group_kbroad(&gid, key_c.clone())?, 2);
+        assert_eq!(server.kbroad_generation(&gid), 2);
+        assert!(!server.kbroad_rotation_required(&gid));
+        assert_eq!(server.build_join_ticket(&gid)?.kbroad_public, key_c);
+        Ok(())
+    }
+
+    #[test]
     fn kbroad_rotation_gate_blocks_until_rotated() -> Result<(), CityGError> {
         let mut server = super::demo::demo_server();
         let gid = cityg_client::demo::DEMO_GID;
@@ -3636,6 +3653,37 @@ mod tests {
     }
 
     #[test]
+    fn initialize_group_barrier_bootstrap_state_skips_history_only_group() -> Result<(), CityGError>
+    {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x93; 32];
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.revoked.insert([0x44; 32]);
+        state.barrier_initialized = false;
+        state.n_max = 8;
+        state.max_barrier_update_bytes = 77;
+
+        server.initialize_group_barrier_bootstrap_state(&gid)?;
+
+        let roster_state = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("missing roster group"))?;
+        assert!(!roster_state.barrier_initialized);
+        assert!(roster_state.barrier_public_tree_history.is_empty());
+
+        let ctx_state = server
+            .ctx
+            .barrier_group_state(&gid)
+            .ok_or(CityGError::InvalidInput("missing ctx barrier state"))?;
+        assert!(!ctx_state.barrier_initialized);
+        assert_eq!(ctx_state.n_max, 8);
+        assert_eq!(ctx_state.max_barrier_update_bytes, 77);
+        Ok(())
+    }
+
+    #[test]
     fn initialize_registered_groups_barrier_state_bootstraps_registry_groups()
     -> Result<(), CityGError> {
         let mut server = CityGServer::new(ServerConfig::new());
@@ -3673,9 +3721,62 @@ mod tests {
             assert!(ctx_state.barrier_initialized);
             assert_eq!(ctx_state.barrier_version, 0);
             assert_eq!(ctx_state.n_max, super::DEFAULT_BARRIER_N_MAX);
-            assert_eq!(ctx_state.kem_tree_hash_after, roster_state.kem_tree_hash_after);
+            assert_eq!(
+                ctx_state.kem_tree_hash_after,
+                roster_state.kem_tree_hash_after
+            );
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn initialize_registered_groups_barrier_state_ignores_non_32_byte_registry_keys()
+    -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x33; 32];
+        let registry = BTreeMap::from([
+            (gid.to_vec(), vec![0x11; 16]),
+            (vec![0x22; 31], vec![0x33; 16]),
+        ]);
+        server.ctx.set_kbroad_registry(Some(registry));
+
+        server.initialize_registered_groups_barrier_state()?;
+
+        assert!(server.roster.groups.contains_key(gid.as_slice()));
+        assert!(
+            !server.roster.groups.contains_key(vec![0x22; 31].as_slice()),
+            "malformed registry gid must be ignored during bootstrap"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn register_group_reuses_existing_historyless_state_and_clears_stale_metadata()
+    -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x34; 32];
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.rotation_required = true;
+        state.kbroad_generation = 9;
+        state.n_max = 8;
+
+        server.register_group(&gid, vec![0x77; 16])?;
+
+        let roster_state = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("missing roster state"))?;
+        assert!(!roster_state.rotation_required);
+        assert_eq!(roster_state.kbroad_generation, 0);
+        assert_eq!(roster_state.n_max, 8);
+        assert!(roster_state.barrier_initialized);
+        assert!(
+            roster_state
+                .barrier_public_tree_history
+                .contains_key(&roster_state.kem_tree_hash_after)
+        );
         Ok(())
     }
 
@@ -3797,7 +3898,8 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_kbroad_state_captures_group_state_and_registry_defaults() -> Result<(), CityGError> {
+    fn snapshot_kbroad_state_captures_group_state_and_registry_defaults() -> Result<(), CityGError>
+    {
         let mut server = CityGServer::new(ServerConfig::new());
         let gid_with_group = [0x95; 32];
         let gid_without_group = [0x96; 32];
@@ -4007,6 +4109,70 @@ mod tests {
     }
 
     #[test]
+    fn build_merge_ticket_rejects_unknown_membership_root() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x25; 32];
+        let leaf = cityg_client::demo::demo_member_leaf("merge-root");
+        let mut state = super::GroupState::default();
+        state.latest_root = Some([0xAB; 32]);
+        server.roster.groups.insert(gid.to_vec(), state);
+
+        let err = match server.build_merge_ticket(&gid, &leaf) {
+            Ok(_) => panic!("missing snapshot for latest root must fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("unknown membership root")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn build_merge_ticket_preserves_existing_revoked_membership() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let leaf_id = cityg_client::demo::demo_member_leaf("alice");
+        let group = server
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("missing group state"))?;
+        group.revoked.insert(leaf_id);
+
+        let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+        let expected_root = msphf_core::merkle::canonical_set_root(&[leaf_id])?;
+        assert_eq!(ticket.revoked_since_root, expected_root);
+        assert_eq!(ticket.revoked_root, expected_root);
+        Ok(())
+    }
+
+    #[test]
+    fn build_merge_ticket_requires_kbroad_even_with_live_roster_and_parity()
+    -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+        server.context_mut().set_kbroad_registry(None);
+
+        let err = match server.build_merge_ticket(
+            &cityg_client::demo::DEMO_GID,
+            &cityg_client::demo::demo_member_leaf("alice"),
+        ) {
+            Ok(_) => panic!("live roster without kbroad registry must fail late"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("kbroad key missing")
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn build_merge_ticket_falls_back_on_invalid_utf8_ids() -> Result<(), CityGError> {
         let mut server = super::demo::demo_server();
         let bundle = cityg_client::demo::demo_bundle("alice")?;
@@ -4035,6 +4201,95 @@ mod tests {
             ticket.msphf_params_id,
             msphf_core::params::RLWE_PARAMS_ID_MOCK
         );
+        Ok(())
+    }
+
+    #[test]
+    fn build_merge_ticket_prefers_highest_accept_seq_and_tie_breaks_on_weid()
+    -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let parent_root = server
+            .latest_parent_root(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("latest root missing"))?;
+        let leaf_id = cityg_client::demo::demo_member_leaf("alice");
+        let base_parity = server
+            .context_mut()
+            .pivot_parities_for(gid.as_slice(), &parent_root)
+            .into_iter()
+            .next()
+            .ok_or(CityGError::InvalidInput("pivot parity missing"))?;
+        let now = server.context().current_time();
+
+        let mut higher_seq = base_parity.clone();
+        higher_seq.accept_seq = base_parity.accept_seq.saturating_add(5);
+        higher_seq.we_epoch_id = [0xEE; 32];
+        higher_seq.proof_mode = "higher-seq".to_string();
+        higher_seq.vrf_id = "higher-seq".to_string();
+        higher_seq.policy_version = "41".to_string();
+        server.context_mut().insert_pivot_parity(higher_seq, now);
+
+        let mut tie_winner = base_parity.clone();
+        tie_winner.accept_seq = base_parity.accept_seq.saturating_add(5);
+        tie_winner.we_epoch_id = [0x11; 32];
+        tie_winner.proof_mode = "tie-winner".to_string();
+        tie_winner.vrf_id = "tie-winner".to_string();
+        tie_winner.policy_version = "42".to_string();
+        server.context_mut().insert_pivot_parity(tie_winner, now);
+
+        let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+        assert_eq!(ticket.pivot_we_epoch_id, [0x11; 32]);
+        assert_eq!(ticket.proof_mode, "tie-winner");
+        assert_eq!(ticket.vrf_id, "tie-winner");
+        assert_eq!(ticket.policy_version, "42");
+        Ok(())
+    }
+
+    #[test]
+    fn build_merge_ticket_defaults_fs_policy_and_base_ts_when_context_unset()
+    -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+        server.context_mut().set_fs_policy_version(None);
+        server.context_mut().set_fs_base_ts(None);
+
+        let ticket = server.build_merge_ticket(
+            &cityg_client::demo::DEMO_GID,
+            &cityg_client::demo::demo_member_leaf("alice"),
+        )?;
+        assert_eq!(ticket.fs_policy_version, "7");
+        assert_eq!(ticket.fs_epoch_base_ts, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn build_merge_ticket_for_refresh_preserves_existing_revoked_roots() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let leaf_id = cityg_client::demo::demo_member_leaf("alice");
+        let extra_revoked = cityg_client::demo::demo_member_leaf("retired-bob");
+        let group = server
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("missing group state"))?;
+        group.revoked.insert(leaf_id);
+        group.revoked.insert(extra_revoked);
+
+        let ticket = server.build_merge_ticket_for_refresh(&gid, &leaf_id)?;
+        let mut expected_revoked = vec![extra_revoked, leaf_id];
+        expected_revoked.sort();
+        let expected_root = msphf_core::merkle::canonical_set_root(&expected_revoked)?;
+        assert_eq!(ticket.revoked_since_root, expected_root);
+        assert_eq!(ticket.revoked_root, expected_root);
+        assert!(ticket.srx_cbor.is_empty());
         Ok(())
     }
 
@@ -4075,6 +4330,7 @@ mod tests {
         map.insert(4, Value::Null);
         map.insert(5, Value::Text("ok".to_string()));
         map.insert(6, Value::Bytes(vec![0x66, 0x67]));
+        map.insert(7, Value::Bool(true));
 
         assert!(super::header_bytes32(&map, 1, "required").is_ok());
         assert!(matches!(
@@ -4096,10 +4352,18 @@ mod tests {
             super::header_bytes32_opt(&map, 2),
             Err(CityGError::InvalidInput("pivot field wrong length"))
         ));
+        assert!(matches!(
+            super::header_bytes32_opt(&map, 7),
+            Err(CityGError::InvalidInput("pivot field wrong type"))
+        ));
 
         assert!(matches!(
             super::header_bytes(&map, 3, "bytes"),
             Err(CityGError::InvalidInput("pivot field wrong type"))
+        ));
+        assert!(matches!(
+            super::header_bytes(&map, 99, "bytes"),
+            Err(CityGError::InvalidInput("bytes"))
         ));
         assert!(matches!(
             super::header_bytes_opt(&map, 3),
@@ -4120,6 +4384,14 @@ mod tests {
         assert!(matches!(
             super::header_string(&map, 4, None),
             Err(CityGError::InvalidInput("pivot field missing"))
+        ));
+        assert!(matches!(
+            super::header_string(&map, 7, None),
+            Err(CityGError::InvalidInput("pivot field wrong type"))
+        ));
+        assert!(matches!(
+            super::header_string(&map, 99, Some("fallback")),
+            Ok(value) if value == "fallback"
         ));
     }
 
@@ -5983,6 +6255,48 @@ mod tests {
     }
 
     #[test]
+    fn resolve_joins_since_filters_post_genesis_join_history() -> Result<(), CityGError> {
+        let gid = [0x82; 32];
+        let mut server = CityGServer::new(ServerConfig::new());
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.barrier_version = 3;
+        state.join_history = vec![
+            super::JoinLeafHistoryRecord {
+                barrier_version: 1,
+                leaf_index: 7,
+                device_pk: vec![0x11; 4],
+                ek_leaf: vec![0x21; 1184],
+            },
+            super::JoinLeafHistoryRecord {
+                barrier_version: 2,
+                leaf_index: 8,
+                device_pk: vec![0x12; 4],
+                ek_leaf: vec![0x22; 1184],
+            },
+            super::JoinLeafHistoryRecord {
+                barrier_version: 3,
+                leaf_index: 8,
+                device_pk: vec![0x13; 4],
+                ek_leaf: vec![0x23; 1184],
+            },
+            super::JoinLeafHistoryRecord {
+                barrier_version: 3,
+                leaf_index: 9,
+                device_pk: vec![0x14; 4],
+                ek_leaf: vec![0x24; 1184],
+            },
+        ];
+
+        let records = server.resolve_joins_since(&gid, 1)?;
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].leaf_index, 8);
+        assert_eq!(records[0].device_pk, vec![0x13; 4]);
+        assert_eq!(records[0].ek_leaf, vec![0x23; 1184]);
+        assert_eq!(records[1].leaf_index, 9);
+        Ok(())
+    }
+
+    #[test]
     fn resolve_joins_since_genesis_without_snapshot_returns_empty() -> Result<(), CityGError> {
         let gid = [0x81; 32];
         let mut server = CityGServer::new(ServerConfig::new());
@@ -6048,6 +6362,41 @@ mod tests {
         let err = server
             .fetch_barrier_public_tree(&cityg_client::demo::DEMO_GID, &[0xFF; 32])
             .expect_err("mismatched hash must fail");
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.code
+                    && freeze.reason
+                        == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.reason
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_barrier_public_tree_rejects_corrupted_history_snapshot() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let expected_hash = {
+            let group = server
+                .roster
+                .groups
+                .get_mut(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("group not found"))?;
+            let mut corrupted = group.barrier_pk_entries.clone();
+            corrupted[0] = vec![0x55; 1184];
+            let expected_hash = group.kem_tree_hash_after;
+            group
+                .barrier_public_tree_history
+                .insert(expected_hash, corrupted);
+            expected_hash
+        };
+
+        let err = server
+            .fetch_barrier_public_tree(&gid, &expected_hash)
+            .expect_err("corrupted historical snapshot must fail auth");
         assert!(matches!(
             err,
             CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))

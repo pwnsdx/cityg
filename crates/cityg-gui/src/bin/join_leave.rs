@@ -2299,14 +2299,22 @@ mod tests {
         assert!(read_nonempty_env(&missing).is_none());
 
         let blank = format!("CITYG_JOIN_LEAVE_TEST_BLANK_{}", std::process::id());
-        unsafe { std::env::set_var(&blank, "   "); }
+        unsafe {
+            std::env::set_var(&blank, "   ");
+        }
         assert!(read_nonempty_env(&blank).is_none());
-        unsafe { std::env::remove_var(&blank); }
+        unsafe {
+            std::env::remove_var(&blank);
+        }
 
         let value = format!("CITYG_JOIN_LEAVE_TEST_VALUE_{}", std::process::id());
-        unsafe { std::env::set_var(&value, "  token-value  "); }
+        unsafe {
+            std::env::set_var(&value, "  token-value  ");
+        }
         assert_eq!(read_nonempty_env(&value).as_deref(), Some("token-value"));
-        unsafe { std::env::remove_var(&value); }
+        unsafe {
+            std::env::remove_var(&value);
+        }
     }
 
     #[test]
@@ -2917,6 +2925,23 @@ mod tests {
     }
 
     #[test]
+    fn collect_resolution_targets_handles_missing_leaf_and_nonempty_branch() -> Result<()> {
+        let mut targets = Vec::new();
+        let snapshot = vec![Vec::new(), vec![0xAA], Vec::new()];
+
+        collect_resolution_targets(snapshot.as_slice(), 99, 2, &mut targets)?;
+        assert!(targets.is_empty());
+
+        collect_resolution_targets(snapshot.as_slice(), 1, 2, &mut targets)?;
+        assert_eq!(targets, vec![1]);
+
+        targets.clear();
+        collect_resolution_targets(snapshot.as_slice(), 2, 2, &mut targets)?;
+        assert!(targets.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn hydrate_parities_and_apply_pivot_alignment_cover_fs_rules() {
         let mut missing = sample_pivot_parity();
         missing.fs_ec = None;
@@ -3026,7 +3051,10 @@ mod tests {
             header.get(&hdr::HDR_VRF_ID),
             Some(&Value::Text("existing-vrf".to_string()))
         );
-        assert_eq!(header.get(&hdr::HDR_VRF_PROOF), Some(&Value::Bytes(vec![0xAA])));
+        assert_eq!(
+            header.get(&hdr::HDR_VRF_PROOF),
+            Some(&Value::Bytes(vec![0xAA]))
+        );
         assert_eq!(
             header.get(&hdr::HDR_VRF_PUBLIC_KEY),
             Some(&Value::Bytes(vec![0xBB]))
@@ -3039,7 +3067,10 @@ mod tests {
             header.get(&hdr::HDR_VRF_MASK_B),
             Some(&Value::Bytes(vec![0xDD]))
         );
-        assert_eq!(header.get(&hdr::HDR_FS_CAPSS), Some(&Value::Bytes(vec![0xEE])));
+        assert_eq!(
+            header.get(&hdr::HDR_FS_CAPSS),
+            Some(&Value::Bytes(vec![0xEE]))
+        );
         assert_eq!(
             header.get(&hdr::HDR_PROOFS_COMMIT),
             Some(&Value::Bytes(vec![0xFF]))
@@ -3618,6 +3649,32 @@ mod tests {
         assert!(seen_message);
 
         drop(rx);
+        handle.abort();
+        let _ = handle.await;
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn spawn_notification_listener_ignores_binary_frames() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            ws.send(WsMessage::Binary(vec![1, 2, 3].into())).await?;
+            ws.close(None).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (mut rx, handle) = spawn_notification_listener(&format!("ws://{addr}/v1/ws")).await?;
+        let event = timeout(Duration::from_secs(2), rx.recv()).await?;
+        assert!(
+            event.is_none(),
+            "binary frames should not emit notifications"
+        );
+
         handle.abort();
         let _ = handle.await;
         tokio::time::timeout(Duration::from_secs(1), server).await???;
