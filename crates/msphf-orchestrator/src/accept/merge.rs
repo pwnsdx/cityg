@@ -1475,7 +1475,10 @@ mod tests {
             now,
         )?;
         assert!(matches!(outcome.kind, AcceptanceKind::Merge { .. }));
-        assert_eq!(ctx.fs_policy_version(), Some(expected_policy_version.as_str()));
+        assert_eq!(
+            ctx.fs_policy_version(),
+            Some(expected_policy_version.as_str())
+        );
         assert_eq!(ctx.fs_base_ts(), Some(expected_base_ts));
         Ok(())
     }
@@ -1484,7 +1487,8 @@ mod tests {
     fn merge_anchor_accepts_without_pop_key_verification() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         ctx.set_srx_required(false);
-        let (mut header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
         header.remove(&HDR_POP_PK);
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
 
@@ -1652,7 +1656,8 @@ mod tests {
     #[test]
     fn merge_anchor_rejects_rho_commit_mismatch() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
-        let (mut header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
         header.insert(93, Value::Bytes([0xAB; 32].to_vec()));
         expect_merge_freeze(
             &mut ctx,
