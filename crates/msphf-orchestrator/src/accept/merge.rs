@@ -1824,6 +1824,40 @@ mod tests {
     }
 
     #[test]
+    fn merge_anchor_rejects_additional_rollup_incompleteness_combinations() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        inject_valid_rollup_metadata(&mut ctx, &parts, &merge_joiner, &mut header, &heads)?;
+
+        let mut missing_replay = header.clone();
+        missing_replay.remove(&HDR_ROLLUP_EPOCH_REPLAY);
+        refresh_seed_bindings(&mut missing_replay, &parts, &merge_joiner);
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &missing_replay,
+            heads.clone(),
+            FREEZE_MH_HEADS_INVALID,
+        )?;
+
+        let mut epoch_only = header.clone();
+        epoch_only.remove(&HDR_ROLLUP_PROVENANCE_COMMIT);
+        epoch_only.remove(&HDR_ROLLUP_VCK_COMMIT);
+        refresh_seed_bindings(&mut epoch_only, &parts, &merge_joiner);
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &epoch_only,
+            heads,
+            FREEZE_MH_HEADS_INVALID,
+        )
+    }
+
+    #[test]
     fn merge_anchor_rejects_checkpoint_monotonicity_violations() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
@@ -2014,6 +2048,39 @@ mod tests {
     }
 
     #[test]
+    fn merge_anchor_rejects_rollup_commit_type_and_length_errors() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        inject_valid_rollup_metadata(&mut ctx, &parts, &merge_joiner, &mut header, &heads)?;
+
+        let mut bad_provenance_type = header.clone();
+        bad_provenance_type.insert(HDR_ROLLUP_PROVENANCE_COMMIT, Value::Text("bad".to_string()));
+        refresh_seed_bindings(&mut bad_provenance_type, &parts, &merge_joiner);
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &bad_provenance_type,
+            heads.clone(),
+            FREEZE_HASH_CBOR,
+        )?;
+
+        let mut bad_vck_length = header.clone();
+        bad_vck_length.insert(HDR_ROLLUP_VCK_COMMIT, Value::Bytes(vec![0xAB; 31]));
+        refresh_seed_bindings(&mut bad_vck_length, &parts, &merge_joiner);
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &bad_vck_length,
+            heads,
+            FREEZE_HASH_CBOR,
+        )
+    }
+
+    #[test]
     fn merge_anchor_rejects_rollup_vck_commit_mismatch() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         ctx.set_srx_required(false);
@@ -2025,6 +2092,29 @@ mod tests {
             && let Some(first) = bytes.first_mut()
         {
             *first ^= 0xFF;
+        }
+        refresh_seed_bindings(&mut header, &parts, &merge_joiner);
+
+        expect_merge_freeze(
+            &mut ctx,
+            &parts,
+            &merge_joiner,
+            &header,
+            heads,
+            FREEZE_MH_HEADS_INVALID,
+        )
+    }
+
+    #[test]
+    fn merge_anchor_rejects_rollup_replay_length_mismatch() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        ctx.set_srx_required(false);
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        inject_valid_rollup_metadata(&mut ctx, &parts, &merge_joiner, &mut header, &heads)?;
+
+        if let Some(Value::Array(entries)) = header.get_mut(&HDR_ROLLUP_EPOCH_REPLAY) {
+            entries.pop();
         }
         refresh_seed_bindings(&mut header, &parts, &merge_joiner);
 
