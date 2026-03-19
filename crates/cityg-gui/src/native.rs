@@ -2368,6 +2368,17 @@ struct BarrierPendingState {
 }
 
 impl AppModel {
+    fn barrier_recovery_pending(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|session| session.barrier_state.barrier_recovery_pending)
+            .unwrap_or(false)
+    }
+
+    fn barrier_recovery_wait_message() -> &'static str {
+        "Joined room. Waiting for barrier recovery before messaging."
+    }
+
     fn new(config: CityGConfig) -> Self {
         let mut model = Self {
             config: config.clone(),
@@ -3793,10 +3804,20 @@ impl AppModel {
 
         match outcome {
             Ok(sync) => {
+                let was_pending = self
+                    .session
+                    .as_ref()
+                    .map(|session| session.barrier_state.barrier_recovery_pending)
+                    .unwrap_or(false);
                 if !sync.changed {
+                    if was_pending {
+                        self.info_message = Some(Self::barrier_recovery_wait_message().to_string());
+                        cx.notify();
+                    }
                     return;
                 }
 
+                let now_pending = sync.session.barrier_state.barrier_recovery_pending;
                 self.session = Some(sync.session);
                 if let Some(session) = self.session.as_mut()
                     && let Err(err) = persist_session(session)
@@ -3804,10 +3825,30 @@ impl AppModel {
                     warn!("failed to persist session after epoch sync: {err:?}");
                 }
 
-                self.info_message = Some("Adopted latest epoch head.".to_string());
-                self.record_activity(ActivityKind::Sync, "Adopted latest epoch head after sync");
+                if was_pending && !now_pending {
+                    self.info_message =
+                        Some("Barrier recovery completed. Messaging is now available.".to_string());
+                    self.record_activity(
+                        ActivityKind::Sync,
+                        "Barrier recovery completed after epoch sync",
+                    );
+                } else if now_pending {
+                    self.info_message = Some(Self::barrier_recovery_wait_message().to_string());
+                    self.record_activity(
+                        ActivityKind::Sync,
+                        "Epoch sync completed; barrier recovery still pending",
+                    );
+                } else {
+                    self.info_message = Some("Adopted latest epoch head.".to_string());
+                    self.record_activity(
+                        ActivityKind::Sync,
+                        "Adopted latest epoch head after sync",
+                    );
+                }
                 self.reset_fetch_state();
-                self.schedule_fetch(cx, Duration::ZERO);
+                if !now_pending {
+                    self.schedule_fetch(cx, Duration::ZERO);
+                }
                 self.refresh_members_soft(cx);
                 cx.notify();
             }
@@ -3852,6 +3893,15 @@ impl AppModel {
             Err(err) => {
                 self.fetch_in_flight = false;
                 self.fetch_status = FetchStatus::Idle;
+                if session.barrier_state.barrier_recovery_pending {
+                    self.info_message = Some(Self::barrier_recovery_wait_message().to_string());
+                    self.record_activity_with_detail(
+                        ActivityKind::Message,
+                        "Message fetch deferred",
+                        Some(err.to_string()),
+                    );
+                    return;
+                }
                 self.last_error = Some(format!("Failed to prepare message fetch: {err}"));
                 self.record_activity_with_detail(
                     ActivityKind::Message,
@@ -4243,11 +4293,16 @@ impl AppModel {
         list = list.overflow_y_scroll().block_mouse_except_scroll();
 
         if self.messages.is_empty() {
+            let empty_text = if self.barrier_recovery_pending() {
+                "Joined room. Waiting for barrier recovery before messages can be sent or decrypted."
+            } else {
+                "No messages yet. Send one to warm up this room."
+            };
             return list.child(
                 div()
                     .text_size(px(13.0))
                     .text_color(rgb(UI_MUTED_TEXT))
-                    .child("No messages yet. Send one to warm up this room."),
+                    .child(empty_text),
             );
         }
 
@@ -4536,6 +4591,7 @@ impl AppModel {
     }
 
     fn render_message_composer(&self, cx: &mut ViewContext<Self>) -> Div {
+        let barrier_pending = self.barrier_recovery_pending();
         let border_color = if self.composer.active {
             rgb(0x72f88e)
         } else {
@@ -4553,7 +4609,9 @@ impl AppModel {
             rgb(0xf5f7ff)
         };
 
-        let placeholder = if self.composer.active {
+        let placeholder = if barrier_pending {
+            "Waiting for barrier recovery…"
+        } else if self.composer.active {
             "Type a message…"
         } else {
             "Click to start typing…"
@@ -4581,12 +4639,14 @@ impl AppModel {
                 )),
         );
 
-        let send_disabled = !self.composer.is_ready()
+        let send_disabled = barrier_pending
+            || !self.composer.is_ready()
             || matches!(self.send_status, SendStatus::Sending)
             || self.session.is_none();
 
         let label = match self.send_status {
             SendStatus::Sending => "Sending…",
+            SendStatus::Idle if barrier_pending => "Awaiting recovery",
             SendStatus::Idle => "Send",
         };
 
@@ -4619,7 +4679,8 @@ impl AppModel {
     fn render_leave_controls(&self, cx: &mut ViewContext<Self>) -> Div {
         let leaving = matches!(self.leave_status, LeaveStatus::Leaving);
         let refreshing = matches!(self.leave_status, LeaveStatus::Refreshing);
-        let membership_op_busy = leaving || refreshing;
+        let barrier_pending = self.barrier_recovery_pending();
+        let membership_op_busy = leaving || refreshing || barrier_pending;
         let mut leave_button = div()
             .px(px(12.0))
             .py(px(8.0))
@@ -4667,6 +4728,8 @@ impl AppModel {
             })
             .child(if refreshing {
                 "Refreshing…"
+            } else if barrier_pending {
+                "Awaiting recovery"
             } else {
                 "PCS refresh"
             });
@@ -5633,6 +5696,16 @@ impl AppModel {
         {
             Ok(params) => params,
             Err(err) => {
+                if session_snapshot.barrier_state.barrier_recovery_pending {
+                    self.info_message = Some(Self::barrier_recovery_wait_message().to_string());
+                    self.record_activity_with_detail(
+                        ActivityKind::Message,
+                        "Message send blocked",
+                        Some(err.to_string()),
+                    );
+                    cx.notify();
+                    return;
+                }
                 self.record_activity_with_detail(
                     ActivityKind::Message,
                     "Message send skipped",
@@ -5669,6 +5742,7 @@ impl AppModel {
         match result {
             Ok(mut session) => {
                 session.last_fetch_timestamp_ms = None;
+                let barrier_pending = session.barrier_state.barrier_recovery_pending;
                 if let Err(err) = persist_session(&session) {
                     warn!("joined room but failed to persist session: {err:?}");
                     self.last_error =
@@ -5678,7 +5752,11 @@ impl AppModel {
                 } else {
                     self.last_error = None;
                     self.categorized_error = None;
-                    self.info_message = Some("Joined room. Session saved locally.".to_string());
+                    self.info_message = Some(if barrier_pending {
+                        Self::barrier_recovery_wait_message().to_string()
+                    } else {
+                        "Joined room. Session saved locally.".to_string()
+                    });
                     self.show_success("Successfully joined room!", cx);
                 }
                 self.session = Some(session);
@@ -5694,7 +5772,9 @@ impl AppModel {
                 self.send_status = SendStatus::Idle;
                 self.join_form.active = None;
                 self.reset_fetch_state();
-                self.schedule_fetch(cx, Duration::from_millis(0));
+                if !barrier_pending {
+                    self.schedule_fetch(cx, Duration::from_millis(0));
+                }
                 self.refresh_members(cx);
 
                 // Start WebSocket connection
@@ -12680,6 +12760,93 @@ mod tests {
 
         cx.refresh().expect("post async state refresh");
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn gpui_pending_barrier_recovery_surfaces_guidance_instead_of_errors(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let mut session = build_test_session(
+            0xBADA55,
+            "http://127.0.0.1:9",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "pending",
+        )
+        .expect("build test session");
+        session.barrier_state.barrier_recovery_pending = true;
+        session.last_fetch_timestamp_ms = None;
+
+        cx.update(|_, app| {
+            view.update(app, |model, view_cx| {
+                model.on_join_finished(Ok(session.clone()), view_cx);
+                assert_eq!(
+                    model.info_message.as_deref(),
+                    Some(AppModel::barrier_recovery_wait_message())
+                );
+                assert!(
+                    !model.fetch_in_flight,
+                    "fetch should stay deferred while pending"
+                );
+                assert!(
+                    model.last_error.is_none(),
+                    "pending recovery is expected state"
+                );
+
+                model.composer.set_text("hello".to_string());
+                model.start_send(view_cx);
+                assert!(matches!(model.send_status, SendStatus::Idle));
+                assert_eq!(
+                    model.info_message.as_deref(),
+                    Some(AppModel::barrier_recovery_wait_message())
+                );
+                assert!(
+                    model.last_error.is_none(),
+                    "blocked send should not become an error"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_pending_barrier_recovery_defers_fetch_without_setting_error(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let mut session = build_test_session(
+            0xBADA56,
+            "http://127.0.0.1:9",
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "pending-fetch",
+        )
+        .expect("build test session");
+        session.barrier_state.barrier_recovery_pending = true;
+
+        cx.update(|_, app| {
+            view.update(app, |model, view_cx| {
+                model.session = Some(session.clone());
+                model.schedule_fetch(view_cx, Duration::ZERO);
+                assert!(matches!(model.fetch_status, FetchStatus::Idle));
+                assert!(
+                    !model.fetch_in_flight,
+                    "fetch should not be scheduled while pending"
+                );
+                assert_eq!(
+                    model.info_message.as_deref(),
+                    Some(AppModel::barrier_recovery_wait_message())
+                );
+                assert!(
+                    model.last_error.is_none(),
+                    "deferred fetch should not set an error"
+                );
+            });
+        });
     }
 
     #[test]
