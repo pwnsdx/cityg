@@ -2647,7 +2647,10 @@ pub struct ServerOutcome {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{CityGError, CityGServer, ServerConfig};
+    use super::{
+        CityGError, CityGServer, PersistedBarrierPublicTreeSnapshot, PersistedKbroadRoomState,
+        ServerConfig, compute_barrier_tree_hash,
+    };
     use ciborium::value::{Integer, Value};
     use cityg_client::{CityGClient, ClientEpochBundle, witness};
     use msphf_core::hash::h_l;
@@ -3673,6 +3676,205 @@ mod tests {
             assert_eq!(ctx_state.kem_tree_hash_after, roster_state.kem_tree_hash_after);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn apply_persisted_kbroad_state_rebuilds_current_snapshot_when_history_is_invalid()
+    -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x93; 32];
+        let pk_entries = vec![vec![0x11; 4], vec![0x22; 4], vec![0x33; 4]];
+        let current_hash = compute_barrier_tree_hash(2, pk_entries.as_slice())?;
+        let state = BTreeMap::from([(
+            gid.to_vec(),
+            PersistedKbroadRoomState {
+                kbroad_public: vec![0x44; 16],
+                kbroad_generation: 7,
+                rotation_required: true,
+                barrier_initialized: true,
+                barrier_version: 5,
+                barrier_roots_hash: [0x55; 32],
+                kem_tree_hash_after: current_hash,
+                srx_root_sw: Some([0x66; 32]),
+                barrier_pk_entries: pk_entries.clone(),
+                barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
+                    kem_tree_hash_after_hex: "not-hex".to_string(),
+                    pk_entries: vec![vec![0x99; 3]],
+                }],
+                n_max: 2,
+                last_pcs_refresh_ec: Some(12),
+                pcs_refresh_min_delta_device_ec: 0,
+                pcs_refresh_min_delta_group_ec: 0,
+                pcs_refresh_slot_width_ec: 0,
+                max_barrier_update_bytes: 0,
+                device_chain_states: Vec::new(),
+            },
+        )]);
+
+        server.apply_persisted_kbroad_state(&state);
+
+        let group = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("missing restored group"))?;
+        assert_eq!(group.kbroad_generation, 7);
+        assert!(group.rotation_required);
+        assert_eq!(group.barrier_public_tree_history.len(), 1);
+        assert_eq!(
+            group.barrier_public_tree_history.get(&current_hash),
+            Some(&pk_entries)
+        );
+        assert_eq!(group.max_barrier_update_bytes, 1);
+
+        let ctx_state = server
+            .ctx
+            .barrier_group_state(&gid)
+            .ok_or(CityGError::InvalidInput("missing restored ctx state"))?;
+        assert_eq!(ctx_state.kem_tree_hash_after, current_hash);
+        assert_eq!(ctx_state.n_max, 2);
+        assert_eq!(ctx_state.max_barrier_update_bytes, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_persisted_kbroad_state_keeps_history_and_adds_missing_current_snapshot()
+    -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x94; 32];
+        let historical_entries = vec![vec![0x01; 4], vec![0x02; 4], vec![0x03; 4]];
+        let current_entries = vec![vec![0x04; 4], vec![0x05; 4], vec![0x06; 4]];
+        let historical_hash = compute_barrier_tree_hash(2, historical_entries.as_slice())?;
+        let current_hash = compute_barrier_tree_hash(2, current_entries.as_slice())?;
+        let state = BTreeMap::from([(
+            gid.to_vec(),
+            PersistedKbroadRoomState {
+                kbroad_public: vec![0x77; 16],
+                kbroad_generation: 2,
+                rotation_required: false,
+                barrier_initialized: true,
+                barrier_version: 8,
+                barrier_roots_hash: [0x88; 32],
+                kem_tree_hash_after: current_hash,
+                srx_root_sw: None,
+                barrier_pk_entries: current_entries.clone(),
+                barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
+                    kem_tree_hash_after_hex: hex::encode(historical_hash),
+                    pk_entries: historical_entries.clone(),
+                }],
+                n_max: 2,
+                last_pcs_refresh_ec: None,
+                pcs_refresh_min_delta_device_ec: 3,
+                pcs_refresh_min_delta_group_ec: 4,
+                pcs_refresh_slot_width_ec: 5,
+                max_barrier_update_bytes: 99,
+                device_chain_states: Vec::new(),
+            },
+        )]);
+
+        server.apply_persisted_kbroad_state(&state);
+
+        let group = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("missing restored group"))?;
+        assert_eq!(group.barrier_public_tree_history.len(), 2);
+        assert_eq!(
+            group.barrier_public_tree_history.get(&historical_hash),
+            Some(&historical_entries)
+        );
+        assert_eq!(
+            group.barrier_public_tree_history.get(&current_hash),
+            Some(&current_entries)
+        );
+        assert_eq!(group.pcs_refresh_min_delta_device_ec, 3);
+        assert_eq!(group.pcs_refresh_min_delta_group_ec, 4);
+        assert_eq!(group.pcs_refresh_slot_width_ec, 5);
+        assert_eq!(group.max_barrier_update_bytes, 99);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_kbroad_state_captures_group_state_and_registry_defaults() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid_with_group = [0x95; 32];
+        let gid_without_group = [0x96; 32];
+        let tree_entries = vec![vec![0x10; 4], vec![0x20; 4], vec![0x30; 4]];
+        let tree_hash = compute_barrier_tree_hash(2, tree_entries.as_slice())?;
+
+        let registry = BTreeMap::from([
+            (gid_with_group.to_vec(), vec![0xAA; 16]),
+            (gid_without_group.to_vec(), vec![0xBB; 16]),
+        ]);
+        server.ctx.set_kbroad_registry(Some(registry));
+        server.ctx.insert_device_chain_state(
+            gid_with_group.as_slice(),
+            &[0xD1; 32],
+            msphf_orchestrator::DeviceChainState {
+                last_commit: Some([0xE2; 32]),
+                last_ec: 17,
+                last_pcs_refresh_ec: Some(9),
+            },
+        );
+
+        let group = server
+            .roster
+            .groups
+            .entry(gid_with_group.to_vec())
+            .or_default();
+        group.kbroad_generation = 4;
+        group.rotation_required = true;
+        group.barrier_initialized = true;
+        group.barrier_version = 6;
+        group.barrier_roots_hash = [0xC3; 32];
+        group.kem_tree_hash_after = tree_hash;
+        group.srx_root_sw = Some([0xF4; 32]);
+        group.barrier_pk_entries = tree_entries.clone();
+        group.barrier_public_tree_history = BTreeMap::from([(tree_hash, tree_entries.clone())]);
+        group.n_max = 0;
+        group.last_pcs_refresh_ec = Some(11);
+        group.pcs_refresh_min_delta_device_ec = 0;
+        group.pcs_refresh_min_delta_group_ec = 0;
+        group.pcs_refresh_slot_width_ec = 0;
+        group.max_barrier_update_bytes = 0;
+
+        let snapshot = server.snapshot_kbroad_state();
+        let with_group = snapshot
+            .get(gid_with_group.as_slice())
+            .ok_or(CityGError::InvalidInput("missing persisted grouped room"))?;
+        assert_eq!(with_group.kbroad_public, vec![0xAA; 16]);
+        assert_eq!(with_group.kbroad_generation, 4);
+        assert!(with_group.rotation_required);
+        assert!(with_group.barrier_initialized);
+        assert_eq!(with_group.barrier_version, 6);
+        assert_eq!(with_group.kem_tree_hash_after, tree_hash);
+        assert_eq!(with_group.srx_root_sw, Some([0xF4; 32]));
+        assert_eq!(with_group.n_max, 1);
+        assert_eq!(with_group.pcs_refresh_min_delta_device_ec, 1);
+        assert_eq!(with_group.pcs_refresh_min_delta_group_ec, 1);
+        assert_eq!(with_group.pcs_refresh_slot_width_ec, 1);
+        assert_eq!(with_group.device_chain_states.len(), 1);
+        assert_eq!(
+            with_group.barrier_public_tree_history[0].kem_tree_hash_after_hex,
+            hex::encode(tree_hash)
+        );
+
+        let without_group = snapshot
+            .get(gid_without_group.as_slice())
+            .ok_or(CityGError::InvalidInput("missing default persisted room"))?;
+        assert_eq!(without_group.kbroad_public, vec![0xBB; 16]);
+        assert_eq!(without_group.kbroad_generation, 0);
+        assert!(!without_group.rotation_required);
+        assert!(!without_group.barrier_initialized);
+        assert_eq!(without_group.n_max, super::DEFAULT_BARRIER_N_MAX);
+        assert_eq!(
+            without_group.max_barrier_update_bytes,
+            super::default_max_barrier_update_bytes()
+        );
+        assert!(without_group.barrier_public_tree_history.is_empty());
+        assert!(without_group.device_chain_states.is_empty());
         Ok(())
     }
 
