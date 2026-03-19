@@ -3591,6 +3591,92 @@ mod tests {
     }
 
     #[test]
+    fn initialize_group_barrier_bootstrap_state_preserves_existing_state() -> Result<(), CityGError>
+    {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x92; 32];
+        let existing_hash = [0xA5; 32];
+        let existing_roots_hash = [0xB6; 32];
+        let existing_srx = [0xC7; 32];
+
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.barrier_initialized = true;
+        state.barrier_version = 9;
+        state.barrier_roots_hash = existing_roots_hash;
+        state.kem_tree_hash_after = existing_hash;
+        state.n_max = 8;
+        state.last_pcs_refresh_ec = Some(44);
+        state.pcs_refresh_min_delta_device_ec = 0;
+        state.pcs_refresh_min_delta_group_ec = 0;
+        state.pcs_refresh_slot_width_ec = 0;
+        state.max_barrier_update_bytes = 0;
+        state.srx_root_sw = Some(existing_srx);
+
+        server.initialize_group_barrier_bootstrap_state(&gid)?;
+
+        let ctx_state = server
+            .ctx
+            .barrier_group_state(&gid)
+            .ok_or(CityGError::InvalidInput("missing ctx barrier state"))?;
+        assert!(ctx_state.barrier_initialized);
+        assert_eq!(ctx_state.barrier_version, 9);
+        assert_eq!(ctx_state.barrier_roots_hash, existing_roots_hash);
+        assert_eq!(ctx_state.kem_tree_hash_after, existing_hash);
+        assert_eq!(ctx_state.n_max, 8);
+        assert_eq!(ctx_state.last_pcs_refresh_ec, Some(44));
+        assert_eq!(ctx_state.pcs_refresh_min_delta_device_ec, 1);
+        assert_eq!(ctx_state.pcs_refresh_min_delta_group_ec, 1);
+        assert_eq!(ctx_state.pcs_refresh_slot_width_ec, 1);
+        assert_eq!(ctx_state.max_barrier_update_bytes, 1);
+        assert_eq!(ctx_state.srx_root_sw, Some(existing_srx));
+        Ok(())
+    }
+
+    #[test]
+    fn initialize_registered_groups_barrier_state_bootstraps_registry_groups()
+    -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid1 = [0x31; 32];
+        let gid2 = [0x32; 32];
+        let registry = BTreeMap::from([
+            (gid1.to_vec(), vec![0x11; 16]),
+            (gid2.to_vec(), vec![0x22; 16]),
+        ]);
+        server.ctx.set_kbroad_registry(Some(registry));
+
+        server.initialize_registered_groups_barrier_state()?;
+
+        for gid in [gid1, gid2] {
+            let roster_state = server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("missing roster group"))?;
+            assert!(roster_state.barrier_initialized);
+            assert_eq!(roster_state.barrier_version, 0);
+            assert_eq!(roster_state.n_max, super::DEFAULT_BARRIER_N_MAX);
+            assert!(roster_state.max_barrier_update_bytes >= 1);
+            assert!(
+                roster_state
+                    .barrier_public_tree_history
+                    .contains_key(&roster_state.kem_tree_hash_after),
+                "bootstrapped registry group should retain its committed tree snapshot"
+            );
+
+            let ctx_state = server
+                .ctx
+                .barrier_group_state(&gid)
+                .ok_or(CityGError::InvalidInput("missing ctx barrier group"))?;
+            assert!(ctx_state.barrier_initialized);
+            assert_eq!(ctx_state.barrier_version, 0);
+            assert_eq!(ctx_state.n_max, super::DEFAULT_BARRIER_N_MAX);
+            assert_eq!(ctx_state.kem_tree_hash_after, roster_state.kem_tree_hash_after);
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn group_state_defaults_include_barrier_policy_bounds() -> Result<(), CityGError> {
         let mut server = CityGServer::new(ServerConfig::new());
         let gid = [0xD1; 32];
