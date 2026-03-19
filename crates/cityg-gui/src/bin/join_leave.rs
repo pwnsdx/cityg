@@ -2107,12 +2107,23 @@ fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use axum::{
+        Router,
+        extract::State,
+        http::{StatusCode as HttpStatusCode, Uri, header},
+        response::{IntoResponse, Response},
+        routing::{get, post},
+    };
     use cityg_config::CityGConfig;
     use futures::SinkExt;
+    use prost::Message;
+    use serde_json::json;
     use std::{
-        sync::{Arc, OnceLock},
+        collections::VecDeque,
+        sync::{Arc, Mutex, OnceLock},
         time::Duration,
     };
+    use tokio::net::TcpListener;
     use tokio::time::sleep;
 
     static TEST_AUTH_ENV: OnceLock<()> = OnceLock::new();
@@ -2226,6 +2237,429 @@ mod tests {
             fs_ec: Some(77),
             fs_dev_commit: Some([0x55; 32]),
         }
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct MergeTicketResponsePb {
+        #[prost(bytes = "vec", tag = "1")]
+        we_epoch_id: Vec<u8>,
+        #[prost(bytes = "vec", repeated, tag = "2")]
+        pivot_parity_cbor: Vec<Vec<u8>>,
+        #[prost(bytes = "vec", tag = "3")]
+        witness_cbor: Vec<u8>,
+        #[prost(string, tag = "4")]
+        proof_mode: String,
+        #[prost(string, tag = "5")]
+        vrf_id: String,
+        #[prost(string, tag = "6")]
+        policy_version: String,
+        #[prost(bytes = "vec", tag = "7")]
+        kbroad_public: Vec<u8>,
+        #[prost(bytes = "vec", tag = "8")]
+        cat: Vec<u8>,
+        #[prost(bytes = "vec", tag = "9")]
+        parent_root: Vec<u8>,
+        #[prost(bytes = "vec", tag = "10")]
+        join_delta_root: Vec<u8>,
+        #[prost(bytes = "vec", tag = "11")]
+        revoked_since_root: Vec<u8>,
+        #[prost(bytes = "vec", tag = "12")]
+        revoked_root: Vec<u8>,
+        #[prost(bytes = "vec", tag = "13")]
+        tswe_salt_hash: Vec<u8>,
+        #[prost(bytes = "vec", tag = "14")]
+        pox_r_commit: Vec<u8>,
+        #[prost(bytes = "vec", tag = "15")]
+        srx_cbor: Vec<u8>,
+        #[prost(string, tag = "16")]
+        msphf_crs_id: String,
+        #[prost(string, tag = "17")]
+        msphf_params_id: String,
+        #[prost(string, tag = "18")]
+        fs_policy_version: String,
+        #[prost(uint64, tag = "19")]
+        fs_epoch_base_ts: u64,
+        #[prost(uint64, tag = "20")]
+        kbroad_generation: u64,
+        #[prost(uint64, tag = "21")]
+        barrier_version: u64,
+        #[prost(string, tag = "22")]
+        profile_version: String,
+        #[prost(uint64, tag = "23")]
+        cover_leaf_index: u64,
+        #[prost(bytes = "vec", tag = "25")]
+        kem_tree_hash_after: Vec<u8>,
+        #[prost(uint64, tag = "26")]
+        n_max: u64,
+        #[prost(uint64, tag = "27")]
+        max_barrier_update_bytes: u64,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct BarrierJoinLeafRecordPb {
+        #[prost(bytes = "vec", tag = "1")]
+        device_pk: Vec<u8>,
+        #[prost(uint32, tag = "2")]
+        leaf_index: u32,
+        #[prost(bytes = "vec", tag = "3")]
+        ek_leaf: Vec<u8>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct BarrierResolveJoinsSinceResponsePb {
+        #[prost(message, repeated, tag = "1")]
+        records: Vec<BarrierJoinLeafRecordPb>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct BarrierResolveRevokedLeavesResponsePb {
+        #[prost(uint32, repeated, tag = "1")]
+        leaf_indices: Vec<u32>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct BarrierFetchPublicTreeResponsePb {
+        #[prost(uint64, tag = "1")]
+        n_max: u64,
+        #[prost(bytes = "vec", tag = "2")]
+        kem_tree_hash_after: Vec<u8>,
+        #[prost(bytes = "vec", repeated, tag = "3")]
+        pk_entries: Vec<Vec<u8>>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct EmptyProto {}
+
+    #[derive(Clone)]
+    struct MockResponse {
+        status: HttpStatusCode,
+        content_type: &'static str,
+        body: Vec<u8>,
+    }
+
+    impl MockResponse {
+        fn proto_bytes(body: Vec<u8>) -> Self {
+            Self {
+                status: HttpStatusCode::OK,
+                content_type: "application/x-protobuf",
+                body,
+            }
+        }
+
+        fn empty_proto() -> Self {
+            Self::proto_bytes(EmptyProto::default().encode_to_vec())
+        }
+
+        fn json(
+            status: HttpStatusCode,
+            message: &str,
+            freeze_code: Option<u32>,
+            freeze_reason: Option<&str>,
+        ) -> Self {
+            Self {
+                status,
+                content_type: "application/json",
+                body: serde_json::to_vec(&json!({
+                    "message": message,
+                    "freeze_code": freeze_code,
+                    "freeze_reason": freeze_reason,
+                }))
+                .expect("encode mock error envelope"),
+            }
+        }
+
+        fn into_response(self) -> Response {
+            (
+                self.status,
+                [(header::CONTENT_TYPE, self.content_type)],
+                self.body,
+            )
+                .into_response()
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct LeaveMockState {
+        responses: Arc<Mutex<BTreeMap<String, VecDeque<MockResponse>>>>,
+        counts: Arc<Mutex<BTreeMap<String, usize>>>,
+    }
+
+    impl LeaveMockState {
+        fn new(routes: impl IntoIterator<Item = (&'static str, Vec<MockResponse>)>) -> Self {
+            let responses = routes
+                .into_iter()
+                .map(|(path, entries)| (path.to_string(), entries.into()))
+                .collect();
+            Self {
+                responses: Arc::new(Mutex::new(responses)),
+                counts: Arc::new(Mutex::new(BTreeMap::new())),
+            }
+        }
+
+        fn response_for(&self, path: &str) -> MockResponse {
+            {
+                let mut counts = self.counts.lock().expect("lock call counts");
+                *counts.entry(path.to_string()).or_insert(0) += 1;
+            }
+            let mut responses = self.responses.lock().expect("lock mock responses");
+            let Some(queue) = responses.get_mut(path) else {
+                return MockResponse::json(
+                    HttpStatusCode::NOT_FOUND,
+                    "resource not found",
+                    Some(404),
+                    None,
+                );
+            };
+            if queue.len() > 1 {
+                queue.pop_front().expect("non-empty response queue")
+            } else {
+                queue
+                    .front()
+                    .cloned()
+                    .expect("response queue must contain at least one response")
+            }
+        }
+
+        fn call_count(&self, path: &str) -> usize {
+            self.counts
+                .lock()
+                .expect("lock call counts")
+                .get(path)
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    async fn mock_leave_health() -> &'static str {
+        "ok"
+    }
+
+    async fn mock_leave_post(State(state): State<LeaveMockState>, uri: Uri) -> Response {
+        state.response_for(uri.path()).into_response()
+    }
+
+    async fn start_leave_mock_server(
+        state: LeaveMockState,
+    ) -> Result<(String, tokio::task::JoinHandle<()>)> {
+        let app = Router::new()
+            .route("/health", get(mock_leave_health))
+            .route("/*path", post(mock_leave_post))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let base = format!("http://{addr}");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((base, handle))
+    }
+
+    struct LeaveFixture {
+        session: Session,
+        ticket: cityg_api_client::MergeTicket,
+        barrier_tree_snapshot: cityg_api_client::BarrierPublicTree,
+        join_records: Vec<BarrierJoinRecord>,
+        revoked_leaf_indices: Vec<u32>,
+    }
+
+    #[derive(Serialize)]
+    struct PivotParitySerializable {
+        gid: ByteBuf,
+        cat: ByteBuf,
+        parent_root: ByteBuf,
+        we_epoch_id: ByteBuf,
+        rho_commit: ByteBuf,
+        seed_ctx_hash: ByteBuf,
+        seed_commit: ByteBuf,
+        hp_commit: ByteBuf,
+        xk_hash: ByteBuf,
+        join_delta_root: ByteBuf,
+        revoked_since_root: ByteBuf,
+        revoked_root: ByteBuf,
+        accept_seq: u64,
+        crs_id: ByteBuf,
+        params_id: ByteBuf,
+        policy_version: String,
+        proof_mode: String,
+        vrf_id: String,
+        vrf_proof: ByteBuf,
+        vrf_public: ByteBuf,
+        mask_a: ByteBuf,
+        mask_b: ByteBuf,
+        fs_capss: ByteBuf,
+        proofs_commit: ByteBuf,
+        srx_commit: Option<ByteBuf>,
+        srx_root_sw: Option<ByteBuf>,
+        is_join: bool,
+        hp_envelope: ByteBuf,
+        fs_epoch_commit: Option<ByteBuf>,
+        fs_ec: Option<u64>,
+        fs_dev_commit: Option<ByteBuf>,
+    }
+
+    fn select_ticket_pivot(parities: &[PivotParity]) -> Option<&PivotParity> {
+        let mut pivot: Option<&PivotParity> = None;
+        for candidate in parities {
+            let better = match pivot {
+                None => true,
+                Some(current) => {
+                    candidate.accept_seq > current.accept_seq
+                        || (candidate.accept_seq == current.accept_seq
+                            && candidate.xk_hash < current.xk_hash)
+                }
+            };
+            if better {
+                pivot = Some(candidate);
+            }
+        }
+        pivot
+    }
+
+    async fn capture_leave_fixture() -> Result<LeaveFixture> {
+        let port = next_free_local_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = random_room_id();
+        bootstrap_test_room(&server_url, &room_id).await?;
+        let session = perform_join(&server_url, &room_id, "leave-mock-alice").await?;
+        let _peer = perform_join(&server_url, &room_id, "leave-mock-bob").await?;
+
+        let client = new_api_client(&server_url);
+        let ticket = client.merge_ticket(&room_id, &session.leaf_id).await?;
+        let pivot = select_ticket_pivot(&ticket.parities)
+            .ok_or_else(|| anyhow!("merge ticket missing pivot parity entries"))?;
+        let committed_revocation_roots_hash =
+            compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+        let barrier_tree_snapshot = client
+            .barrier_fetch_public_tree(&room_id, &ticket.kem_tree_hash_after)
+            .await?;
+        let join_records = client
+            .barrier_resolve_joins_since(&room_id, ticket.barrier_version)
+            .await?;
+        let revoked_leaf_indices = client
+            .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
+            .await?;
+
+        handle.abort();
+        let _ = handle.await;
+
+        Ok(LeaveFixture {
+            session,
+            ticket,
+            barrier_tree_snapshot,
+            join_records,
+            revoked_leaf_indices,
+        })
+    }
+
+    fn encode_merge_ticket(ticket: &cityg_api_client::MergeTicket) -> Result<Vec<u8>> {
+        let pivot_parity_cbor = ticket
+            .parities
+            .iter()
+            .map(|parity| {
+                to_cbor_vec(&PivotParitySerializable {
+                    gid: ByteBuf::from(parity.gid.clone()),
+                    cat: ByteBuf::from(parity.cat.clone()),
+                    parent_root: ByteBuf::from(parity.parent_root.to_vec()),
+                    we_epoch_id: ByteBuf::from(parity.we_epoch_id.to_vec()),
+                    rho_commit: ByteBuf::from(parity.rho_commit.to_vec()),
+                    seed_ctx_hash: ByteBuf::from(parity.seed_ctx_hash.to_vec()),
+                    seed_commit: ByteBuf::from(parity.seed_commit.to_vec()),
+                    hp_commit: ByteBuf::from(parity.hp_commit.to_vec()),
+                    xk_hash: ByteBuf::from(parity.xk_hash.to_vec()),
+                    join_delta_root: ByteBuf::from(parity.join_delta_root.to_vec()),
+                    revoked_since_root: ByteBuf::from(parity.revoked_since_root.to_vec()),
+                    revoked_root: ByteBuf::from(parity.revoked_root.to_vec()),
+                    accept_seq: parity.accept_seq,
+                    crs_id: ByteBuf::from(parity.crs_id.clone()),
+                    params_id: ByteBuf::from(parity.params_id.clone()),
+                    policy_version: parity.policy_version.clone(),
+                    proof_mode: parity.proof_mode.clone(),
+                    vrf_id: parity.vrf_id.clone(),
+                    vrf_proof: ByteBuf::from(parity.vrf_proof.clone()),
+                    vrf_public: ByteBuf::from(parity.vrf_public.clone()),
+                    mask_a: ByteBuf::from(parity.mask_a.to_vec()),
+                    mask_b: ByteBuf::from(parity.mask_b.to_vec()),
+                    fs_capss: ByteBuf::from(parity.fs_capss.clone()),
+                    proofs_commit: ByteBuf::from(parity.proofs_commit.to_vec()),
+                    srx_commit: parity.srx_commit.map(|bytes| ByteBuf::from(bytes.to_vec())),
+                    srx_root_sw: parity
+                        .srx_root_sw
+                        .map(|bytes| ByteBuf::from(bytes.to_vec())),
+                    is_join: parity.is_join,
+                    hp_envelope: ByteBuf::from(parity.hp_envelope.as_ref().to_vec()),
+                    fs_epoch_commit: parity
+                        .fs_epoch_commit
+                        .map(|bytes| ByteBuf::from(bytes.to_vec())),
+                    fs_ec: parity.fs_ec,
+                    fs_dev_commit: parity
+                        .fs_dev_commit
+                        .map(|bytes| ByteBuf::from(bytes.to_vec())),
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|err| anyhow!("encode pivot parity: {err}"))?;
+        Ok(MergeTicketResponsePb {
+            we_epoch_id: ticket.we_epoch_id.to_vec(),
+            pivot_parity_cbor,
+            witness_cbor: ticket.witness_cbor.clone(),
+            proof_mode: ticket.proof_mode.clone(),
+            vrf_id: ticket.vrf_id.clone(),
+            policy_version: ticket.policy_version.clone(),
+            kbroad_public: ticket.kbroad_public.clone(),
+            cat: ticket.cat.to_vec(),
+            parent_root: ticket.parent_root.to_vec(),
+            join_delta_root: ticket.join_delta_root.to_vec(),
+            revoked_since_root: ticket.revoked_since_root.to_vec(),
+            revoked_root: ticket.revoked_root.to_vec(),
+            tswe_salt_hash: ticket.tswe_salt_hash.to_vec(),
+            pox_r_commit: ticket.pox_r_commit.to_vec(),
+            srx_cbor: ticket.srx_cbor.clone(),
+            msphf_crs_id: ticket.msphf_crs_id.clone(),
+            msphf_params_id: ticket.msphf_params_id.clone(),
+            fs_policy_version: ticket.fs_policy_version.clone(),
+            fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+            kbroad_generation: ticket.kbroad_generation,
+            barrier_version: ticket.barrier_version,
+            profile_version: "v0.1.2".to_string(),
+            cover_leaf_index: ticket.cover_leaf_index,
+            kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
+            n_max: ticket.n_max,
+            max_barrier_update_bytes: ticket.max_barrier_update_bytes,
+        }
+        .encode_to_vec())
+    }
+
+    fn encode_barrier_tree_snapshot(tree: &cityg_api_client::BarrierPublicTree) -> Vec<u8> {
+        BarrierFetchPublicTreeResponsePb {
+            n_max: tree.n_max,
+            kem_tree_hash_after: tree.kem_tree_hash_after.to_vec(),
+            pk_entries: tree.pk_entries.clone(),
+        }
+        .encode_to_vec()
+    }
+
+    fn encode_join_records(records: &[BarrierJoinRecord]) -> Vec<u8> {
+        BarrierResolveJoinsSinceResponsePb {
+            records: records
+                .iter()
+                .map(|record| BarrierJoinLeafRecordPb {
+                    device_pk: record.device_pk.clone(),
+                    leaf_index: record.leaf_index,
+                    ek_leaf: record.ek_leaf.clone(),
+                })
+                .collect(),
+        }
+        .encode_to_vec()
+    }
+
+    fn encode_revoked_leaf_indices(indices: &[u32]) -> Vec<u8> {
+        BarrierResolveRevokedLeavesResponsePb {
+            leaf_indices: indices.to_vec(),
+        }
+        .encode_to_vec()
     }
 
     #[test]
@@ -3519,6 +3953,230 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("fetch merge ticket"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_leave_rotates_kbroad_before_cover_leaf_range_rejection() -> Result<()> {
+        let fixture = capture_leave_fixture().await?;
+        let barrier_n_max = if fixture.ticket.n_max == 0 {
+            DEFAULT_BARRIER_N_MAX
+        } else {
+            fixture.ticket.n_max
+        };
+        let mut bad_ticket = fixture.ticket.clone();
+        bad_ticket.cover_leaf_index = barrier_n_max;
+
+        let state = LeaveMockState::new([
+            (
+                "/v1/rooms/merge_ticket",
+                vec![
+                    MockResponse::json(
+                        HttpStatusCode::INTERNAL_SERVER_ERROR,
+                        "kbroad rotation required",
+                        None,
+                        None,
+                    ),
+                    MockResponse::proto_bytes(encode_merge_ticket(&bad_ticket)?),
+                ],
+            ),
+            ("/v1/rooms/rotate_kbroad", vec![MockResponse::empty_proto()]),
+            (
+                "/v1/barrier/fetch_public_tree",
+                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                    &fixture.barrier_tree_snapshot,
+                ))],
+            ),
+        ]);
+        let (server_url, handle) = start_leave_mock_server(state.clone()).await?;
+
+        let mut session = fixture.session;
+        session.server_url = server_url;
+        let err = perform_leave(&session, false)
+            .await
+            .expect_err("out-of-range cover leaf must fail");
+        assert!(
+            err.to_string()
+                .contains("cover_leaf_index out of range for barrier tree"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 2);
+        assert_eq!(state.call_count("/v1/rooms/rotate_kbroad"), 1);
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_leave_rejects_barrier_snapshot_nmax_mismatch() -> Result<()> {
+        let fixture = capture_leave_fixture().await?;
+        let mut bad_ticket = fixture.ticket.clone();
+        bad_ticket.n_max = 0;
+        let mut bad_snapshot = fixture.barrier_tree_snapshot.clone();
+        bad_snapshot.n_max = DEFAULT_BARRIER_N_MAX + 1;
+
+        let state = LeaveMockState::new([
+            (
+                "/v1/rooms/merge_ticket",
+                vec![MockResponse::proto_bytes(encode_merge_ticket(&bad_ticket)?)],
+            ),
+            (
+                "/v1/barrier/fetch_public_tree",
+                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                    &bad_snapshot,
+                ))],
+            ),
+        ]);
+        let (server_url, handle) = start_leave_mock_server(state).await?;
+
+        let mut session = fixture.session;
+        session.server_url = server_url;
+        let err = perform_leave(&session, false)
+            .await
+            .expect_err("n_max mismatch must fail");
+        assert!(
+            err.to_string()
+                .contains("barrier tree snapshot n_max mismatch"),
+            "unexpected error: {err}"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_leave_skips_refresh_conflict_and_retries_pristine_bundle() -> Result<()> {
+        let fixture = capture_leave_fixture().await?;
+        let mut adjusted_ticket = fixture.ticket.clone();
+        if let Some(first_parity) = adjusted_ticket.parities.first_mut() {
+            first_parity.vrf_proof = vec![0xFA, 0xCE, 0x01];
+            first_parity.fs_capss = vec![0xBE, 0xEF, 0x02];
+            first_parity.proofs_commit = [0xAC; 32];
+        }
+
+        let state = LeaveMockState::new([
+            (
+                "/v1/rooms/merge_ticket",
+                vec![MockResponse::proto_bytes(encode_merge_ticket(
+                    &adjusted_ticket,
+                )?)],
+            ),
+            (
+                "/v1/barrier/fetch_public_tree",
+                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                    &fixture.barrier_tree_snapshot,
+                ))],
+            ),
+            (
+                "/v1/barrier/resolve_joins_since",
+                vec![MockResponse::proto_bytes(encode_join_records(
+                    fixture.join_records.as_slice(),
+                ))],
+            ),
+            (
+                "/v1/barrier/resolve_revoked_leaves",
+                vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
+                    fixture.revoked_leaf_indices.as_slice(),
+                ))],
+            ),
+            (
+                "/v1/pivot/refresh",
+                vec![
+                    MockResponse::json(
+                        HttpStatusCode::CONFLICT,
+                        "invalid input: refresh payload diverges from stored parity",
+                        None,
+                        None,
+                    ),
+                    MockResponse::empty_proto(),
+                ],
+            ),
+            (
+                "/v1/accept_epoch",
+                vec![
+                    MockResponse::json(
+                        HttpStatusCode::CONFLICT,
+                        "mh_heads_invalid",
+                        None,
+                        Some("mh_heads_invalid"),
+                    ),
+                    MockResponse::empty_proto(),
+                ],
+            ),
+        ]);
+        let (server_url, handle) = start_leave_mock_server(state.clone()).await?;
+
+        let mut session = fixture.session;
+        session.server_url = server_url;
+        perform_leave(&session, true).await?;
+        assert_eq!(state.call_count("/v1/pivot/refresh"), 2);
+        assert_eq!(state.call_count("/v1/accept_epoch"), 2);
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_leave_surfaces_final_accept_epoch_failure_detail() -> Result<()> {
+        let fixture = capture_leave_fixture().await?;
+        let state = LeaveMockState::new([
+            (
+                "/v1/rooms/merge_ticket",
+                vec![MockResponse::proto_bytes(encode_merge_ticket(
+                    &fixture.ticket,
+                )?)],
+            ),
+            (
+                "/v1/barrier/fetch_public_tree",
+                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                    &fixture.barrier_tree_snapshot,
+                ))],
+            ),
+            (
+                "/v1/barrier/resolve_joins_since",
+                vec![MockResponse::proto_bytes(encode_join_records(
+                    fixture.join_records.as_slice(),
+                ))],
+            ),
+            (
+                "/v1/barrier/resolve_revoked_leaves",
+                vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
+                    fixture.revoked_leaf_indices.as_slice(),
+                ))],
+            ),
+            ("/v1/pivot/refresh", vec![MockResponse::empty_proto()]),
+            (
+                "/v1/accept_epoch",
+                vec![MockResponse::json(
+                    HttpStatusCode::CONFLICT,
+                    "merge rejected",
+                    Some(944),
+                    Some("barrier_version_mismatch"),
+                )],
+            ),
+        ]);
+        let (server_url, handle) = start_leave_mock_server(state).await?;
+
+        let mut session = fixture.session;
+        session.server_url = server_url;
+        let err = perform_leave(&session, true)
+            .await
+            .expect_err("non-retryable accept_epoch failure must surface");
+        let detail = err.to_string();
+        assert!(
+            detail.contains("merge rejected"),
+            "unexpected detail: {detail}"
+        );
+        assert!(
+            detail.contains("[freeze 944 barrier_version_mismatch]"),
+            "unexpected detail: {detail}"
+        );
+
+        handle.abort();
+        let _ = handle.await;
         Ok(())
     }
 

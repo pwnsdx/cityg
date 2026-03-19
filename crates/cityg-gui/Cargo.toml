@@ -50,6 +50,8 @@ core-text = "=21.0.0"
 gpui = { version = "0.2.2", features = ["test-support"] }
 tempfile = "3"
 cityg-api = { path = "../cityg-api" }
+axum = "0.7"
+prost = "0.12"
 
 [[bin]]
 name = "join_leave"
