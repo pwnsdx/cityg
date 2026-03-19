@@ -5304,6 +5304,286 @@ mod tests {
     }
 
     #[test]
+    fn parse_barrier_update_rejects_invalid_mode_and_path_shapes() -> Result<(), CityGError> {
+        let valid_cover = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 1, 0],
+            None,
+            Vec::new(),
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+            ],
+        );
+        let mut header = BTreeMap::new();
+
+        let wrong_mode = super::BarrierUpdateWire(
+            "barrier-v0".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&valid_cover)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&wrong_mode)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let empty_path = super::KemTreeCoverPayloadWire(
+            0,
+            Vec::new(),
+            None,
+            Vec::new(),
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+            ],
+        );
+        let update_empty_path = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&empty_path)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&update_empty_path)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let wrong_leaf = super::KemTreeCoverPayloadWire(
+            0,
+            vec![4, 1, 0],
+            None,
+            Vec::new(),
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+            ],
+        );
+        let update_wrong_leaf = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&wrong_leaf)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&update_wrong_leaf)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let duplicate_path = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 1, 1, 0],
+            None,
+            Vec::new(),
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+                super::NewPublicKeyWire(1, vec![0x33; 1184]),
+            ],
+        );
+        let update_duplicate_path = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&duplicate_path)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&update_duplicate_path)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let non_parent_chain = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 0],
+            None,
+            Vec::new(),
+            vec![super::NewPublicKeyWire(0, vec![0x11; 1184])],
+        );
+        let update_non_parent_chain = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&non_parent_chain)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&update_non_parent_chain)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_barrier_update_rejects_invalid_key_and_ciphertext_shapes() -> Result<(), CityGError> {
+        let mut header = BTreeMap::new();
+
+        let wrong_key_len = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 1, 0],
+            None,
+            Vec::new(),
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 64]),
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+            ],
+        );
+        let update_wrong_key_len = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&wrong_key_len)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&update_wrong_key_len)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let unsorted_keys = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 1, 0],
+            None,
+            Vec::new(),
+            vec![
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+            ],
+        );
+        let update_unsorted_keys = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&unsorted_keys)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&update_unsorted_keys)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let wrong_ciphertext_size = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 1, 0],
+            None,
+            vec![super::NodeCiphertextWire(
+                1,
+                4,
+                vec![0xAA; 16],
+                vec![0xBB; 1088],
+                vec![0xCC; 47],
+            )],
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+            ],
+        );
+        let update_wrong_ciphertext_size = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&wrong_ciphertext_size)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&update_wrong_ciphertext_size)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let unsorted_ciphertexts = super::KemTreeCoverPayloadWire(
+            0,
+            vec![3, 1, 0],
+            None,
+            vec![
+                super::NodeCiphertextWire(1, 4, vec![0xAA; 16], vec![0xBB; 1088], vec![0xCC; 48]),
+                super::NodeCiphertextWire(1, 3, vec![0xAA; 16], vec![0xBB; 1088], vec![0xCC; 48]),
+            ],
+            vec![
+                super::NewPublicKeyWire(0, vec![0x11; 1184]),
+                super::NewPublicKeyWire(1, vec![0x22; 1184]),
+            ],
+        );
+        let update_unsorted_ciphertexts = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            1,
+            0,
+            4,
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            super::to_cbor_vec(&unsorted_ciphertexts)?,
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&update_unsorted_ciphertexts)?),
+        );
+        assert!(matches!(
+            super::parse_barrier_update(&header, 4),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn validate_barrier_update_detects_hash_and_roots_mismatches() -> Result<(), CityGError> {
         let mut state = super::GroupState {
             n_max: 4,
