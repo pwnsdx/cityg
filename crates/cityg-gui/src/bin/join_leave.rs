@@ -3663,7 +3663,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
             let mut ws = tokio_tungstenite::accept_async(stream).await?;
-            ws.send(WsMessage::Binary(vec![1, 2, 3].into())).await?;
+            ws.send(WsMessage::Binary(vec![1, 2, 3])).await?;
             ws.close(None).await?;
             Ok::<(), anyhow::Error>(())
         });

@@ -4113,12 +4113,14 @@ mod tests {
         let mut server = CityGServer::new(ServerConfig::new());
         let gid = [0x25; 32];
         let leaf = cityg_client::demo::demo_member_leaf("merge-root");
-        let mut state = super::GroupState::default();
-        state.latest_root = Some([0xAB; 32]);
+        let state = super::GroupState {
+            latest_root: Some([0xAB; 32]),
+            ..super::GroupState::default()
+        };
         server.roster.groups.insert(gid.to_vec(), state);
 
         let err = match server.build_merge_ticket(&gid, &leaf) {
-            Ok(_) => panic!("missing snapshot for latest root must fail"),
+            Ok(_) => return Err(CityGError::InvalidInput("missing snapshot for latest root")),
             Err(err) => err,
         };
         assert!(matches!(
@@ -4162,7 +4164,7 @@ mod tests {
             &cityg_client::demo::DEMO_GID,
             &cityg_client::demo::demo_member_leaf("alice"),
         ) {
-            Ok(_) => panic!("live roster without kbroad registry must fail late"),
+            Ok(_) => return Err(CityGError::InvalidInput("expected kbroad key miss")),
             Err(err) => err,
         };
         assert!(matches!(
