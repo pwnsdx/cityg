@@ -2998,6 +2998,55 @@ mod tests {
     }
 
     #[test]
+    fn apply_pivot_alignment_preserves_existing_fields_and_skips_invalid_policy_version() {
+        let mut pivot = sample_pivot_parity();
+        pivot.policy_version = "not-a-u64".to_string();
+        let mut header = BTreeMap::from([
+            (
+                hdr::HDR_PROOF_MODE,
+                Value::Text("existing-proof-mode".to_string()),
+            ),
+            (hdr::HDR_VRF_ID, Value::Text("existing-vrf".to_string())),
+            (hdr::HDR_VRF_PROOF, Value::Bytes(vec![0xAA])),
+            (hdr::HDR_VRF_PUBLIC_KEY, Value::Bytes(vec![0xBB])),
+            (hdr::HDR_VRF_MASK_A, Value::Bytes(vec![0xCC])),
+            (hdr::HDR_VRF_MASK_B, Value::Bytes(vec![0xDD])),
+            (hdr::HDR_FS_CAPSS, Value::Bytes(vec![0xEE])),
+            (hdr::HDR_PROOFS_COMMIT, Value::Bytes(vec![0xFF])),
+        ]);
+
+        apply_pivot_alignment(&mut header, &pivot);
+
+        assert!(!header.contains_key(&hdr::HDR_FS_POLICY_VERSION));
+        assert_eq!(
+            header.get(&hdr::HDR_PROOF_MODE),
+            Some(&Value::Text("existing-proof-mode".to_string()))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_VRF_ID),
+            Some(&Value::Text("existing-vrf".to_string()))
+        );
+        assert_eq!(header.get(&hdr::HDR_VRF_PROOF), Some(&Value::Bytes(vec![0xAA])));
+        assert_eq!(
+            header.get(&hdr::HDR_VRF_PUBLIC_KEY),
+            Some(&Value::Bytes(vec![0xBB]))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_VRF_MASK_A),
+            Some(&Value::Bytes(vec![0xCC]))
+        );
+        assert_eq!(
+            header.get(&hdr::HDR_VRF_MASK_B),
+            Some(&Value::Bytes(vec![0xDD]))
+        );
+        assert_eq!(header.get(&hdr::HDR_FS_CAPSS), Some(&Value::Bytes(vec![0xEE])));
+        assert_eq!(
+            header.get(&hdr::HDR_PROOFS_COMMIT),
+            Some(&Value::Bytes(vec![0xFF]))
+        );
+    }
+
+    #[test]
     fn log_helpers_cover_none_fingerprint_and_non_integer_fs_ec() {
         let (_pk, sk) = dilithium5::keypair();
         let session = Session {
