@@ -2367,6 +2367,12 @@ struct BarrierPendingState {
     on_path_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
 }
 
+#[derive(Clone)]
+struct PublishedRefreshMerge {
+    bundle: ClientEpochBundle,
+    pending_barrier_state: BarrierPendingState,
+}
+
 impl AppModel {
     fn barrier_recovery_pending(&self) -> bool {
         self.session
@@ -8510,7 +8516,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
             fs_epoch_base_ts,
         )
     });
-    let session = AppSession {
+    let mut session = AppSession {
         server_url,
         room_id,
         alias,
@@ -8569,7 +8575,146 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         },
     };
 
+    if bootstrap_attempted && ticket.barrier_version == 0 && parent_root == [0u8; 32] {
+        session = match finalize_bootstrapped_room_join(session.clone()).await {
+            Ok(finalized) => finalized,
+            Err(err) => {
+                warn!("initial room setup after bootstrap join failed: {err:#}");
+                match load_session_at(&session.server_url, &session.room_id) {
+                    Ok(Some(reloaded)) => reloaded,
+                    Ok(None) => return Err(err).context("complete initial room setup"),
+                    Err(load_err) => {
+                        return Err(err).context(format!(
+                            "complete initial room setup (and reload persisted session failed: {load_err})"
+                        ))
+                    }
+                }
+            }
+        };
+    }
+
     Ok(session)
+}
+
+async fn finalize_bootstrapped_room_join(session: AppSession) -> Result<AppSession> {
+    persist_session(&session).context("persist joined session before initial room setup")?;
+
+    let published = perform_pcs_refresh_inner(LeaveRequest::from_session(&session), true)
+        .await
+        .context("publish initial barrier setup")?;
+
+    let mut updated = session.clone();
+    match apply_local_published_refresh_merge(&mut updated, published) {
+        Ok(()) => {
+            persist_session(&updated).context("persist initialized room session")?;
+            Ok(updated)
+        }
+        Err(local_err) => {
+            warn!(
+                "local activation of initial barrier setup failed; falling back to epoch sync: {local_err:#}"
+            );
+            let persisted =
+                load_session_at(&session.server_url, &session.room_id)?.ok_or_else(|| {
+                    anyhow!("persisted joined session missing after initial room setup")
+                })?;
+            let sync = perform_epoch_sync(persisted)
+                .await
+                .context("recover initial barrier state after setup merge")?;
+            if sync.session.barrier_state.barrier_recovery_pending {
+                return Err(anyhow!(
+                    "initial room setup completed but barrier recovery is still pending"
+                ));
+            }
+            persist_session(&sync.session).context("persist initialized room session")?;
+            Ok(sync.session)
+        }
+    }
+}
+
+fn apply_local_published_refresh_merge(
+    session: &mut AppSession,
+    published: PublishedRefreshMerge,
+) -> Result<()> {
+    let PublishedRefreshMerge {
+        bundle,
+        pending_barrier_state,
+    } = published;
+    session.barrier_state.pending = Some(pending_barrier_state.clone());
+    let observed_barrier_version = header_u64(&bundle.header_map, hdr::HDR_BARRIER_VERSION)
+        .unwrap_or(pending_barrier_state.barrier_version);
+    let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC);
+    let observed_barrier_update_reason =
+        header_u64(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON);
+    if !apply_pending_barrier_activation(
+        session,
+        observed_barrier_version,
+        observed_fs_ec,
+        observed_barrier_update_reason,
+        Some(pending_barrier_state.barrier_update_digest),
+    )? {
+        return Err(anyhow!(
+            "accepted local refresh bundle did not match persisted pending barrier state"
+        ));
+    }
+
+    session.we_epoch_id = bundle.we_epoch_id;
+    session.xk_hash = bundle.hp_binding.xk_hash;
+    session.epoch_key = bundle.epoch_key;
+    session.parent_root = bundle.anchor.parent_root;
+    session.join_delta_root = bundle.anchor.join_delta_root;
+    session.revoked_since_root = bundle.anchor.revoked_since_prev_root;
+    session.revoked_root = bundle.anchor.revoked_root;
+    session.cat = bytes32("cat", &bundle.anchor.cat)?;
+    session.tswe_salt_hash = bytes32("tswe_salt_hash", &bundle.anchor.tswe_salt_hash)?;
+    if let Some(commit) = bundle.anchor.pox_r_commit {
+        session.pox_r_commit = commit;
+    }
+    if let Some(fs_ec) = header_u64(&bundle.header_map, hdr::HDR_FS_EC) {
+        session.fs_ec = fs_ec;
+    }
+    if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT) {
+        session.fs_epoch_commit = commit;
+    }
+    if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
+        .or_else(|| header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT))
+    {
+        session.fs_dev_prev_commit = commit;
+    }
+    if let Some(base_ts) = header_u64(&bundle.header_map, hdr::HDR_FS_EPOCH_BASE_TS) {
+        session.fs_epoch_base_ts = base_ts;
+    }
+    if let Some(policy) = header_policy_version(&bundle.header_map, hdr::HDR_FS_POLICY_VERSION) {
+        session.fs_policy_version = policy;
+    }
+    session.policy_version = session.fs_policy_version.clone();
+    if let Some(vrf_id) = header_text(&bundle.header_map, hdr::HDR_VRF_ID) {
+        session.vrf_id = vrf_id.to_string();
+    }
+    if let Some(proof_mode) = header_text(&bundle.header_map, hdr::HDR_PROOF_MODE) {
+        session.proof_mode = proof_mode.to_string();
+    }
+    if let Some(Value::Bytes(kbroad_pub)) = bundle.header_map.get(&hdr::HDR_KBROAD_PUB) {
+        session.kbroad_public = kbroad_pub.clone();
+    }
+
+    session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
+    session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
+        derive_fs_fingerprint_from_fields(
+            session.fs_policy_version.as_str(),
+            session.fs_ec,
+            &session.fs_epoch_commit,
+            session.fs_epoch_base_ts,
+        )
+    });
+    session.fs_epoch_created_at = SystemTime::now();
+    session.last_fetch_timestamp_ms = None;
+    session
+        .forward_state
+        .set_last_we_epoch_id(session.we_epoch_id);
+    session
+        .forward_state
+        .set_epoch_base_ts(session.fs_epoch_base_ts);
+    Ok(())
 }
 
 async fn perform_leave(request: LeaveRequest) -> Result<()> {
@@ -8902,14 +9047,14 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
             .insert(hdr::HDR_PROOFS_COMMIT, Value::Bytes(recomputed));
     }
 
-    persist_pending_barrier_state_before_publish(&persist_request, pending_barrier_state)?;
+    persist_pending_barrier_state_before_publish(&persist_request, pending_barrier_state.clone())?;
 
     match client.refresh_pivot(&bundle).await {
         Ok(_) => {}
         Err(ApiClientError::HttpStatus {
             status, message, ..
         }) if is_refresh_pivot_conflict(status.as_u16(), &message) => {
-            warn!("leave refresh pivot skipped: {message}");
+            warn!("refresh pivot skipped: {message}");
         }
         Err(err) => return Err(err).context("refresh pivot parity"),
     }
@@ -8923,6 +9068,13 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
 }
 
 async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
+    perform_pcs_refresh_inner(request, false).await.map(|_| ())
+}
+
+async fn perform_pcs_refresh_inner(
+    request: LeaveRequest,
+    allow_pending_recovery: bool,
+) -> Result<PublishedRefreshMerge> {
     let persist_request = request.clone();
     let LeaveRequest {
         server_url,
@@ -8942,7 +9094,7 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
         barrier_recovery_pending,
     } = request;
 
-    if barrier_recovery_pending {
+    if barrier_recovery_pending && !allow_pending_recovery {
         return Err(anyhow!(
             "cannot originate PCS refresh while barrier recovery is pending; complete FULL barrier recovery first"
         ));
@@ -9259,7 +9411,7 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
             .insert(hdr::HDR_PROOFS_COMMIT, Value::Bytes(recomputed));
     }
 
-    persist_pending_barrier_state_before_publish(&persist_request, pending_barrier_state)?;
+    persist_pending_barrier_state_before_publish(&persist_request, pending_barrier_state.clone())?;
 
     match client.refresh_pivot(&bundle).await {
         Ok(_) => {}
@@ -9276,7 +9428,10 @@ async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
         .await
         .context("server rejected refresh merge bundle")?;
 
-    Ok(())
+    Ok(PublishedRefreshMerge {
+        bundle,
+        pending_barrier_state,
+    })
 }
 
 const MEMBERS_ROOT_VERIFY_PAGE_LIMIT: u32 = 2_000;
@@ -10587,10 +10742,7 @@ mod tests {
     use gpui::{Modifiers, TestAppContext};
     use msphf_rlwe::CapssBranchWitness;
     use rand::{RngCore, SeedableRng, rngs::StdRng};
-    use std::sync::{
-        Arc, Once,
-        atomic::{AtomicU16, Ordering},
-    };
+    use std::sync::{Arc, Once, atomic::AtomicU16};
     use tempfile::TempDir;
     use tokio::{task::JoinHandle, time::sleep};
 
@@ -10612,6 +10764,22 @@ mod tests {
                 std::env::remove_var("CITYG_SERVER_ALLOW_INSECURE_ADMIN");
             }
         });
+    }
+
+    fn next_test_port() -> u16 {
+        for _ in 0..256 {
+            let candidate = NEXT_TEST_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", candidate)) {
+                drop(listener);
+                return candidate;
+            }
+        }
+
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind ephemeral test port")
+            .local_addr()
+            .expect("read ephemeral test port")
+            .port()
     }
 
     fn sample_pivot_parity() -> PivotParity {
@@ -15264,7 +15432,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -15320,7 +15488,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -15376,7 +15544,7 @@ mod tests {
         let base = temp_dir.path().join("cityg").join("gui");
         let _override_guard = set_config_dir_override_for_tests(Some(base));
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -15470,7 +15638,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -15561,7 +15729,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -15742,7 +15910,7 @@ mod tests {
         let base = temp_dir.path().join("cityg").join("gui");
         let _override_guard = set_config_dir_override_for_tests(Some(base));
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -15904,7 +16072,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -15976,7 +16144,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -16046,7 +16214,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -16112,7 +16280,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -16167,7 +16335,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -16226,7 +16394,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -16269,7 +16437,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -16354,7 +16522,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -16375,6 +16543,65 @@ mod tests {
             !session.kbroad_secret.is_empty(),
             "auto-bootstrap join should persist generated KBROAD secret"
         );
+        assert!(
+            !session.barrier_state.barrier_recovery_pending,
+            "auto-bootstrap join should finalize initial barrier setup"
+        );
+        assert_eq!(
+            session.barrier_state.barrier_version, 1,
+            "initial barrier setup should advance barrier version"
+        );
+        assert_ne!(
+            *session.barrier_state.k_barrier, [0u8; 32],
+            "initial barrier setup should derive a non-zero barrier key"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_bootstrapped_room_can_send_immediately()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
+        let port = next_test_port();
+        let handle = spawn_server_with_seed_demo_room(port, false).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x90u8; 32]);
+
+        let session = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id,
+            alias: "alice".to_string(),
+        })
+        .await?;
+        assert!(
+            !session.barrier_state.barrier_recovery_pending,
+            "bootstrapped join should leave the creator message-ready"
+        );
+
+        perform_send(SendParams::from_session(
+            &session,
+            "hello after create".to_string(),
+            1,
+        )?)
+        .await?;
 
         handle.abort();
         let _ = handle.await;
@@ -16398,7 +16625,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, hex_encode(demo::kbroad_public())) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -16443,7 +16670,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -16487,7 +16714,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, hex_encode(vec![0xEE; 1184])) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
         sleep(Duration::from_millis(250)).await;
 
@@ -16537,7 +16764,7 @@ mod tests {
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = next_test_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
 
