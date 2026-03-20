@@ -79,14 +79,37 @@ cargo run -p cityg-stress -- \
 
 ## 4. GUI Smoke
 
-- [ ] Launch GUI binary:
+- [ ] Launch API with explicit local auth:
 
 ```bash
-cargo run -p cityg-gui --features native-app --bin cityg-gui
+export CITYG_SERVER_ADDRESS=127.0.0.1:8080
+export CITYG_SERVER_ROOMS_ADMIN_TOKEN=dev-admin-token
+export CITYG_SERVER_MESSAGE_AUTH_TOKEN=dev-message-token
+cargo run -p cityg-api
 ```
 
-- [ ] Join room from GUI and send/receive at least one message.
+- [ ] Launch first GUI instance:
+
+```bash
+export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
+export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
+export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-1
+cargo run -p cityg-gui --features native-app
+```
+
+- [ ] Launch second GUI instance with an isolated config dir:
+
+```bash
+export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
+export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
+export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-2
+cargo run -p cityg-gui --features native-app
+```
+
+- [ ] Second joiner can send immediately after joining the room.
+- [ ] Send/receive works in both directions.
 - [ ] Members panel reflects join/leave updates.
+- [ ] `PCS Refresh` succeeds without leaving either client stuck in pending barrier recovery.
 
 ## 5. Container/Deployment Smoke
 

@@ -40,6 +40,46 @@ A candidate build is considered pre-production ready only if all of the followin
   - `/health/detailed`
   - `/metrics`
 
+## Local Manual GUI Smoke
+
+Use this when you want to verify the real GUI flow before or after a stress campaign.
+
+Server:
+
+```bash
+cd /Users/admin/Desktop/Repositories/cityg
+export CITYG_SERVER_ADDRESS=127.0.0.1:8080
+export CITYG_SERVER_ROOMS_ADMIN_TOKEN=dev-admin-token
+export CITYG_SERVER_MESSAGE_AUTH_TOKEN=dev-message-token
+cargo run -p cityg-api
+```
+
+GUI instance 1:
+
+```bash
+cd /Users/admin/Desktop/Repositories/cityg
+export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
+export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
+export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-1
+cargo run -p cityg-gui --features native-app
+```
+
+GUI instance 2:
+
+```bash
+cd /Users/admin/Desktop/Repositories/cityg
+export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
+export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
+export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-2
+cargo run -p cityg-gui --features native-app
+```
+
+Success criteria:
+
+- the second joiner can send immediately after joining
+- message send/receive works in both directions
+- `PCS Refresh` succeeds without putting the room back into a stuck pending state
+
 ## Phase 1: Baseline Smoke
 
 Run:

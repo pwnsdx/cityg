@@ -180,7 +180,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 
 ## Read next
 
-* **Unified spec (final, v0.1.2):** publisher‑blind acceptance, offline admission, merges/rollups, FS-hybrid, and PRS barrier — [`docs/specs.md`](docs/specs.md).
+* **Unified spec (final, v0.1.3):** publisher‑blind acceptance, offline admission, joins that self-finalize without another client online, merges/rollups, FS-hybrid, and PRS barrier — [`docs/specs.md`](docs/specs.md).
 * **Protocol companion docs:** chapterized legacy companion material — [`docs/protocol/`](docs/protocol/00-README.md).
 * **Workflows & diagrams:** visual sequence diagrams for common operations — [`docs/workflows.md`](docs/workflows.md).
 
@@ -196,7 +196,46 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 * **KBROAD** — Group key broadcasting envelope (ML-KEM-768 + ChaCha20-Poly1305) that encrypts hp; server validates structure without decryption.
 * **hp** — Hash projection key (RLWE parameters) used to compute Y* via smooth projective hash functions.
 * **Y\*** — VRF output computed via ME-OR (Masked-Equality OR), used to derive epoch key E_k.
-* **E_k** — Epoch key derived from SPHF output; in v0.1.2, message keys are further bound to `K_barrier` via HKDF-BLAKE3 (spec S8.3).
+* **E_k** — Epoch key derived from SPHF output; in v0.1.3, message keys are further bound to `K_barrier` via HKDF-BLAKE3 (spec S8.3).
+
+---
+
+## Local GUI Quick Start
+
+For a clean local manual test with two GUI instances:
+
+**Terminal 1: API**
+```bash
+cd /Users/admin/Desktop/Repositories/cityg
+export CITYG_SERVER_ADDRESS=127.0.0.1:8080
+export CITYG_SERVER_ROOMS_ADMIN_TOKEN=dev-admin-token
+export CITYG_SERVER_MESSAGE_AUTH_TOKEN=dev-message-token
+cargo run -p cityg-api
+```
+
+**Terminal 2: first GUI**
+```bash
+cd /Users/admin/Desktop/Repositories/cityg
+export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
+export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
+export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-1
+cargo run -p cityg-gui --features native-app
+```
+
+**Terminal 3: second GUI**
+```bash
+cd /Users/admin/Desktop/Repositories/cityg
+export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
+export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
+export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-2
+cargo run -p cityg-gui --features native-app
+```
+
+Notes:
+
+* `CITYG_GUI_CONFIG_DIR` keeps the two GUI instances isolated so they do not share session files.
+* The GUI now defaults to the `cityg-gui` binary, so `cargo run -p cityg-gui --features native-app` is sufficient.
+* For local-only testing, you can replace `CITYG_SERVER_ROOMS_ADMIN_TOKEN` with `CITYG_SERVER_ALLOW_INSECURE_ADMIN=1`, but keep `CITYG_SERVER_MESSAGE_AUTH_TOKEN` set if you want to send messages.
 
 ---
 
