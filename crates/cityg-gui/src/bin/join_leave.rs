@@ -840,6 +840,7 @@ struct Session {
     pop_secret: Box<MlDsaSecretKey>,
     vrf_secret_key: Vec<u8>,
     vrf_public_key: Vec<u8>,
+    forward_state: ForwardSecrecyState,
     fs_ec: u64,
     fs_epoch_commit: [u8; 32],
     fs_dev_prev_commit: [u8; 32],
@@ -1076,6 +1077,7 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         pop_secret,
         vrf_secret_key,
         vrf_public_key,
+        forward_state: fs_state,
         fs_ec,
         fs_epoch_commit,
         fs_dev_prev_commit,
@@ -1091,6 +1093,7 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
 
 async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let client = new_api_client(&session.server_url);
+    let mut forward_state = session.forward_state.clone();
     let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
@@ -1140,11 +1143,72 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         }
     };
 
+    let (
+        current_fs_ec,
+        current_fs_epoch_commit,
+        current_fs_dev_prev_commit,
+        current_anchor_hdr_ctx,
+        current_seed_ctx_hash,
+        current_seed_commit,
+        current_seed_bundle_commit,
+        current_stored_header_map,
+    ) = match client.get_bundle(&ticket.we_epoch_id).await {
+        Ok(stored) => {
+            let stored = ClientEpochBundle::from_cbor(&stored.bundle_cbor)
+                .context("decode latest stored bundle for leave")?;
+            let fs_epoch_commit = bytes32(
+                "fs_epoch_commit",
+                stored
+                    .header_map
+                    .get(&hdr::HDR_FS_EPOCH_COMMIT)
+                    .and_then(Value::as_bytes)
+                    .ok_or(anyhow!("stored bundle missing fs_epoch_commit"))?,
+            )?;
+            let fs_dev_prev_commit = bytes32(
+                "fs_dev_prev_commit",
+                stored
+                    .header_map
+                    .get(&hdr::HDR_FS_DEV_COMMIT)
+                    .or_else(|| stored.header_map.get(&hdr::HDR_FS_DEV_PREV_COMMIT))
+                    .and_then(Value::as_bytes)
+                    .ok_or(anyhow!("stored bundle missing fs_dev commit"))?,
+            )?;
+            let fs_ec = stored
+                .header_map
+                .get(&hdr::HDR_FS_EC)
+                .and_then(|value| match value {
+                    Value::Integer(int) => (*int).try_into().ok(),
+                    _ => None,
+                })
+                .unwrap_or(session.fs_ec);
+            (
+                fs_ec,
+                fs_epoch_commit,
+                fs_dev_prev_commit,
+                stored.anchor.anchor_hdr_ctx.clone(),
+                stored.hp_binding.seed_ctx_hash,
+                stored.hp_binding.seed_commit,
+                stored.hp_binding.seed_bundle_commit,
+                stored.header_map.clone(),
+            )
+        }
+        Err(_) => (
+            session.fs_ec,
+            session.fs_epoch_commit,
+            session.fs_dev_prev_commit,
+            session.anchor_hdr_ctx.clone(),
+            session.seed_ctx_hash,
+            session.seed_commit,
+            session.seed_bundle_commit,
+            session.stored_header_map.clone(),
+        ),
+    };
+
     let parities = hydrate_parities(
         &ticket.parities,
-        session.fs_ec,
-        session.fs_epoch_commit,
-        session.fs_dev_prev_commit,
+        current_fs_ec,
+        current_fs_epoch_commit,
+        current_fs_dev_prev_commit,
     );
 
     if verbose {
@@ -1294,9 +1358,9 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         fs_epoch_base_ts: ticket.fs_epoch_base_ts,
         barrier_version: next_barrier_version,
         fs_join: FsJoinInputs {
-            fs_ec: session.fs_ec,
-            fs_epoch_commit: session.fs_epoch_commit,
-            fs_dev_prev_commit: session.fs_dev_prev_commit,
+            fs_ec: current_fs_ec,
+            fs_epoch_commit: current_fs_epoch_commit,
+            fs_dev_prev_commit: current_fs_dev_prev_commit,
         },
         fs_merge: FsMergeInputs::default(),
     };
@@ -1307,9 +1371,16 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         Some(ticket.witness_cbor.as_slice())
     };
 
-    let mut bundle =
-        CityGClient::generate_merge(header, parts, params, &parities, None, witness_bytes)
-            .context("generate merge bundle")?;
+    let mut bundle = CityGClient::generate_merge_with_forward_state(
+        header,
+        parts,
+        params,
+        Some(&mut forward_state),
+        &parities,
+        None,
+        witness_bytes,
+    )
+    .context("generate merge bundle")?;
     let pristine_bundle = bundle.clone();
     strip_srx_and_rollup(&mut bundle.header_map);
     apply_pivot_alignment(&mut bundle.header_map, pivot);
@@ -1346,9 +1417,9 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     if verbose {
         println!(
             "seed_ctx_hash_equal={} seed_commit_equal={} seed_bundle_equal={}",
-            seed_ctx_hash == session.seed_ctx_hash,
-            seed_commit == session.seed_commit,
-            seed_bundle_commit == session.seed_bundle_commit
+            seed_ctx_hash == current_seed_ctx_hash,
+            seed_commit == current_seed_commit,
+            seed_bundle_commit == current_seed_bundle_commit
         );
         println!(
             "binding_match={} seed_commit_match={} seed_bundle_match={}",
@@ -1390,7 +1461,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             println!("pre-submit join root hex={}", hex::encode(bytes));
         }
         let stored_ctx_map: BTreeMap<u64, Value> =
-            ciborium::de::from_reader(session.anchor_hdr_ctx.as_slice())
+            ciborium::de::from_reader(current_anchor_hdr_ctx.as_slice())
                 .context("decode stored anchor ctx")?;
         println!(
             "stored ctx roots: parent={} join_delta={} revoked_since={} revoked={}",
@@ -1405,15 +1476,14 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         let adjusted: Vec<u64> = Vec::new();
 
         use std::collections::BTreeSet;
-        let keys: BTreeSet<u64> = session
-            .stored_header_map
+        let keys: BTreeSet<u64> = current_stored_header_map
             .keys()
             .chain(bundle.header_map.keys())
             .copied()
             .collect();
         let mut diff_report = Vec::new();
         for key in keys {
-            let stored = session.stored_header_map.get(&key);
+            let stored = current_stored_header_map.get(&key);
             let current = bundle.header_map.get(&key);
             if stored != current {
                 diff_report.push((key, describe_value(stored), describe_value(current)));
@@ -1421,7 +1491,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         }
         println!(
             "anchor_ctx_equal={} adjusted_keys={:?} diff_keys={:?}",
-            computed_anchor_ctx == session.anchor_hdr_ctx,
+            computed_anchor_ctx == current_anchor_hdr_ctx,
             adjusted,
             diff_report
                 .iter()
@@ -2163,6 +2233,7 @@ mod tests {
             pop_secret: Box::new(pop_sk),
             vrf_secret_key: vec![0x44; 32],
             vrf_public_key: vec![0x55; 32],
+            forward_state: ForwardSecrecyState::with_state([0x10; 32], 7, [0x77; 32], [0x88; 32]),
             fs_ec: 7,
             fs_epoch_commit: [0x66; 32],
             fs_dev_prev_commit: [0x77; 32],
@@ -3523,6 +3594,7 @@ mod tests {
             pop_secret: Box::new(sk),
             vrf_secret_key: vec![0x22],
             vrf_public_key: vec![0x33],
+            forward_state: ForwardSecrecyState::with_state([0x12; 32], 5, [0x55; 32], [0x66; 32]),
             fs_ec: 5,
             fs_epoch_commit: [0x44; 32],
             fs_dev_prev_commit: [0x55; 32],

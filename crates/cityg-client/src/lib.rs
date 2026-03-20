@@ -96,7 +96,7 @@ use msphf_orchestrator::{
         HDR_ROLLUP_EPOCH_REPLAY, HDR_ROLLUP_FS_MODE, HDR_ROLLUP_PIVOT_WEID,
         HDR_ROLLUP_PROVENANCE_COMMIT, HDR_ROLLUP_VCK_COMMIT,
     },
-    joiner_kgen_merge_or, joiner_kgen_or, recover_hp_material_from_header,
+    joiner_kgen_merge_or_with_state, joiner_kgen_or, recover_hp_material_from_header,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -356,11 +356,32 @@ impl CityGClient {
         note: Option<&'a str>,
         witness: Option<&'a [u8]>,
     ) -> Result<ClientEpochBundle, CityGError> {
+        Self::generate_merge_with_forward_state(
+            header, parts, params, None, parities, note, witness,
+        )
+    }
+
+    pub fn generate_merge_with_forward_state<'a>(
+        header: BTreeMap<u64, Value>,
+        parts: AnchorInstanceParts<'a>,
+        params: OrchestrationParams<'a>,
+        mut fs_state: Option<&mut ForwardSecrecyState>,
+        parities: &[PivotParity],
+        note: Option<&'a str>,
+        witness: Option<&'a [u8]>,
+    ) -> Result<ClientEpochBundle, CityGError> {
         let anchor_bundle = AnchorBundle::try_from_parts(&parts)?;
         let params_snapshot = ParamsSnapshot::from(&params);
         let witness_bytes = witness.map(|bytes| bytes.to_vec());
 
-        let result = joiner_kgen_merge_or(header, parities, note, parts, params, witness)?;
+        if let Some(state) = fs_state.as_deref_mut() {
+            state.set_epoch_base_ts(params.fs_epoch_base_ts);
+            state.autonomic_evolve();
+        }
+
+        let result = joiner_kgen_merge_or_with_state(
+            header, parities, note, parts, params, fs_state, witness,
+        )?;
 
         ClientEpochBundle::from_joiner_result(anchor_bundle, params_snapshot, witness_bytes, result)
     }

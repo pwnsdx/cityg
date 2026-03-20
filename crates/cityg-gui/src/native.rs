@@ -1232,8 +1232,8 @@ fn apply_forward_state_k_fs(session: &mut AppSession, k_fs: [u8; 32]) {
     let mut updated_state = ForwardSecrecyState::with_state(
         k_fs,
         snapshot.fs_ec,
-        snapshot.fs_dev_commit,
-        snapshot.last_weid,
+        session.fs_dev_prev_commit,
+        session.we_epoch_id,
     );
     updated_state.set_epoch_base_ts(session.fs_epoch_base_ts);
     session.forward_state = updated_state;
@@ -1272,6 +1272,9 @@ fn apply_pending_barrier_activation(
             k_barrier_new,
             kem_tree_hash_after,
             k_fs_after_pcs,
+            next_forward_fs_ec,
+            next_forward_fs_dev_commit,
+            next_forward_last_weid,
             revocation_roots_hash,
             on_path_key_material,
             ..
@@ -1285,7 +1288,18 @@ fn apply_pending_barrier_activation(
             session.barrier_state.dk_nodes.insert(node, material);
         }
         if let Some(k_fs_after_pcs) = k_fs_after_pcs {
-            apply_forward_state_k_fs(session, *k_fs_after_pcs);
+            if next_forward_fs_ec != 0 {
+                let mut updated_state = ForwardSecrecyState::with_state(
+                    *k_fs_after_pcs,
+                    next_forward_fs_ec,
+                    next_forward_fs_dev_commit,
+                    next_forward_last_weid,
+                );
+                updated_state.set_epoch_base_ts(session.fs_epoch_base_ts);
+                session.forward_state = updated_state;
+            } else {
+                apply_forward_state_k_fs(session, *k_fs_after_pcs);
+            }
         }
         session.barrier_state.pending = None;
         session.barrier_state.barrier_recovery_pending = false;
@@ -1743,6 +1757,8 @@ struct AppModel {
     epoch_sync_task: Option<Task<()>>, // Background task for membership-driven epoch sync
     ws_task: Option<Task<()>>,         // WebSocket connection task
     ws_connected: bool,                // WebSocket connection status
+    ws_autostart_attempted: bool,
+    restore_epoch_sync_pending: bool,
     last_retry_action: Option<RetryAction>, // Track what action to retry
     security_events: Vec<SecurityEvent>,
     security_unread: u32,
@@ -2358,6 +2374,9 @@ struct BarrierPendingState {
     barrier_version: u64,
     we_epoch_id: [u8; 32],
     fs_ec: u64,
+    next_forward_fs_ec: u64,
+    next_forward_fs_dev_commit: [u8; 32],
+    next_forward_last_weid: [u8; 32],
     revocation_roots_hash: [u8; 32],
     kem_tree_hash_after: [u8; 32],
     k_barrier_new: Zeroizing<[u8; 32]>,
@@ -2371,6 +2390,7 @@ struct BarrierPendingState {
 struct PublishedRefreshMerge {
     bundle: ClientEpochBundle,
     pending_barrier_state: BarrierPendingState,
+    forward_state_after: ForwardSecrecyState,
 }
 
 impl AppModel {
@@ -2425,6 +2445,8 @@ impl AppModel {
             epoch_sync_task: None,
             ws_task: None,
             ws_connected: false,
+            ws_autostart_attempted: false,
+            restore_epoch_sync_pending: false,
             last_retry_action: None,
             security_events: Vec::new(),
             security_unread: 0,
@@ -2453,6 +2475,7 @@ impl AppModel {
                 model.fetch_task = None;
                 model.fetch_in_flight = false;
                 model.show_ciphertext = false;
+                model.restore_epoch_sync_pending = true;
             }
             Ok(None) => {}
             Err(err) => {
@@ -3729,11 +3752,18 @@ impl AppModel {
     fn ensure_websocket_task(&mut self, cx: &mut ViewContext<Self>) {
         if self.session.is_none() {
             self.stop_websocket();
+            self.ws_autostart_attempted = false;
+            self.restore_epoch_sync_pending = false;
             return;
         }
 
-        if self.ws_task.is_none() {
+        if self.ws_task.is_none() && !self.ws_autostart_attempted {
+            self.ws_autostart_attempted = true;
             self.start_websocket(cx);
+        }
+
+        if self.restore_epoch_sync_pending {
+            self.restore_epoch_sync_pending = false;
             self.schedule_epoch_sync(cx, "Syncing latest epoch after session restore…");
         }
     }
@@ -4174,6 +4204,7 @@ impl AppModel {
 
     // Start WebSocket connection
     fn start_websocket(&mut self, cx: &mut ViewContext<Self>) {
+        self.ws_autostart_attempted = true;
         let Some(session) = &self.session else {
             return;
         };
@@ -5777,6 +5808,8 @@ impl AppModel {
                 self.composer.blur();
                 self.send_status = SendStatus::Idle;
                 self.join_form.active = None;
+                self.ws_autostart_attempted = false;
+                self.restore_epoch_sync_pending = false;
                 self.reset_fetch_state();
                 if !barrier_pending {
                     self.schedule_fetch(cx, Duration::from_millis(0));
@@ -6270,8 +6303,11 @@ impl AppModel {
         self.send_status = SendStatus::Idle;
         self.fetch_status = FetchStatus::Idle;
         self.session = None;
+        self.stop_websocket();
         self.stop_epoch_sync_task();
         self.stop_members_refresh_task();
+        self.ws_autostart_attempted = false;
+        self.restore_epoch_sync_pending = false;
         self.alias_bindings.clear();
         self.leaf_alias_index.clear();
         self.members_auto_page = false;
@@ -6412,6 +6448,7 @@ struct LeaveRequest {
     room_id: String,
     gid: [u8; 32],
     leaf_id: [u8; 32],
+    forward_state: ForwardSecrecyState,
     pop_public_key: Vec<u8>,
     pop_secret_key: Vec<u8>,
     vrf_secret_key: Vec<u8>,
@@ -6420,7 +6457,6 @@ struct LeaveRequest {
     fs_epoch_commit: [u8; 32],
     fs_dev_prev_commit: [u8; 32],
     k_fs_current: [u8; 32],
-    we_epoch_id: [u8; 32],
     max_barrier_update_bytes: u64,
     barrier_recovery_pending: bool,
 }
@@ -6449,6 +6485,7 @@ impl LeaveRequest {
             room_id: session.room_id.clone(),
             gid: session.gid,
             leaf_id: session.leaf_id,
+            forward_state: session.forward_state.clone(),
             pop_public_key: session.pop_public_key.clone(),
             pop_secret_key: session.pop_secret_key.clone(),
             vrf_secret_key: session.vrf_secret_key.clone(),
@@ -6457,7 +6494,6 @@ impl LeaveRequest {
             fs_epoch_commit: session.fs_epoch_commit,
             fs_dev_prev_commit: session.fs_dev_prev_commit,
             k_fs_current: session.forward_state.snapshot().k_fs,
-            we_epoch_id: session.we_epoch_id,
             max_barrier_update_bytes: session.barrier_state.max_barrier_update_bytes,
             barrier_recovery_pending: session.barrier_state.barrier_recovery_pending,
         }
@@ -6799,6 +6835,12 @@ struct PersistedBarrierPendingState {
     #[serde(default)]
     fs_ec: u64,
     #[serde(default)]
+    next_forward_fs_ec: u64,
+    #[serde(default)]
+    next_forward_fs_dev_commit_hex: String,
+    #[serde(default)]
+    next_forward_last_weid_hex: String,
+    #[serde(default)]
     revocation_roots_hash_hex: String,
     #[serde(default)]
     kem_tree_hash_after_hex: String,
@@ -6878,6 +6920,9 @@ impl PersistedBarrierPendingState {
             barrier_version: pending.barrier_version,
             we_epoch_id_hex: hex_encode(pending.we_epoch_id),
             fs_ec: pending.fs_ec,
+            next_forward_fs_ec: pending.next_forward_fs_ec,
+            next_forward_fs_dev_commit_hex: hex_encode(pending.next_forward_fs_dev_commit),
+            next_forward_last_weid_hex: hex_encode(pending.next_forward_last_weid),
             revocation_roots_hash_hex: hex_encode(pending.revocation_roots_hash),
             kem_tree_hash_after_hex: hex_encode(pending.kem_tree_hash_after),
             k_barrier_new_hex: hex_encode(*pending.k_barrier_new),
@@ -6917,6 +6962,15 @@ impl PersistedBarrierPendingState {
                 &self.we_epoch_id_hex,
             )?,
             fs_ec: self.fs_ec,
+            next_forward_fs_ec: self.next_forward_fs_ec,
+            next_forward_fs_dev_commit: decode_hex32_or_zero(
+                "barrier_state.pending.next_forward_fs_dev_commit_hex",
+                &self.next_forward_fs_dev_commit_hex,
+            )?,
+            next_forward_last_weid: decode_hex32_or_zero(
+                "barrier_state.pending.next_forward_last_weid_hex",
+                &self.next_forward_last_weid_hex,
+            )?,
             revocation_roots_hash: decode_hex32_or_zero(
                 "barrier_state.pending.revocation_roots_hash_hex",
                 &self.revocation_roots_hash_hex,
@@ -8638,25 +8692,9 @@ fn apply_local_published_refresh_merge(
     let PublishedRefreshMerge {
         bundle,
         pending_barrier_state,
+        mut forward_state_after,
     } = published;
     session.barrier_state.pending = Some(pending_barrier_state.clone());
-    let observed_barrier_version = header_u64(&bundle.header_map, hdr::HDR_BARRIER_VERSION)
-        .unwrap_or(pending_barrier_state.barrier_version);
-    let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC);
-    let observed_barrier_update_reason =
-        header_u64(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON);
-    if !apply_pending_barrier_activation(
-        session,
-        observed_barrier_version,
-        observed_fs_ec,
-        observed_barrier_update_reason,
-        Some(pending_barrier_state.barrier_update_digest),
-    )? {
-        return Err(anyhow!(
-            "accepted local refresh bundle did not match persisted pending barrier state"
-        ));
-    }
-
     session.we_epoch_id = bundle.we_epoch_id;
     session.xk_hash = bundle.hp_binding.xk_hash;
     session.epoch_key = bundle.epoch_key;
@@ -8697,6 +8735,23 @@ fn apply_local_published_refresh_merge(
         session.kbroad_public = kbroad_pub.clone();
     }
 
+    let observed_barrier_version = header_u64(&bundle.header_map, hdr::HDR_BARRIER_VERSION)
+        .unwrap_or(pending_barrier_state.barrier_version);
+    let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC);
+    let observed_barrier_update_reason =
+        header_u64(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON);
+    if !apply_pending_barrier_activation(
+        session,
+        observed_barrier_version,
+        observed_fs_ec,
+        observed_barrier_update_reason,
+        Some(pending_barrier_state.barrier_update_digest),
+    )? {
+        return Err(anyhow!(
+            "accepted local refresh bundle did not match persisted pending barrier state"
+        ));
+    }
+
     session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
         derive_fs_fingerprint_from_fields(
@@ -8708,12 +8763,9 @@ fn apply_local_published_refresh_merge(
     });
     session.fs_epoch_created_at = SystemTime::now();
     session.last_fetch_timestamp_ms = None;
-    session
-        .forward_state
-        .set_last_we_epoch_id(session.we_epoch_id);
-    session
-        .forward_state
-        .set_epoch_base_ts(session.fs_epoch_base_ts);
+    forward_state_after.set_last_we_epoch_id(session.we_epoch_id);
+    forward_state_after.set_epoch_base_ts(session.fs_epoch_base_ts);
+    session.forward_state = forward_state_after;
     Ok(())
 }
 
@@ -8724,6 +8776,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         room_id,
         gid,
         leaf_id,
+        mut forward_state,
         pop_public_key,
         pop_secret_key,
         vrf_secret_key,
@@ -8937,6 +8990,9 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         barrier_version: next_barrier_version,
         we_epoch_id: [0u8; 32],
         fs_ec,
+        next_forward_fs_ec: 0,
+        next_forward_fs_dev_commit: [0u8; 32],
+        next_forward_last_weid: [0u8; 32],
         revocation_roots_hash,
         kem_tree_hash_after: barrier_update.kem_tree_hash_after,
         k_barrier_new: barrier_update.k_barrier_new,
@@ -8984,9 +9040,16 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         pox_r_commit: Some(pox_r_commit_arr.as_slice()),
     };
 
-    let mut bundle =
-        CityGClient::generate_merge(header, parts, params, &parities, None, witness_bytes)
-            .context("failed to build merge bundle")?;
+    let mut bundle = CityGClient::generate_merge_with_forward_state(
+        header,
+        parts,
+        params,
+        Some(&mut forward_state),
+        &parities,
+        None,
+        witness_bytes,
+    )
+    .context("failed to build merge bundle")?;
 
     strip_rollup_metadata(&mut bundle.header_map);
     apply_pivot_alignment(&mut bundle.header_map, pivot);
@@ -9081,6 +9144,7 @@ async fn perform_pcs_refresh_inner(
         room_id,
         gid,
         leaf_id,
+        mut forward_state,
         pop_public_key,
         pop_secret_key,
         vrf_secret_key,
@@ -9089,7 +9153,6 @@ async fn perform_pcs_refresh_inner(
         fs_epoch_commit,
         fs_dev_prev_commit,
         k_fs_current,
-        we_epoch_id,
         max_barrier_update_bytes: stored_max_barrier_update_bytes,
         barrier_recovery_pending,
     } = request;
@@ -9282,13 +9345,6 @@ async fn perform_pcs_refresh_inner(
             max_barrier_update_bytes
         ));
     }
-    let k_fs_after_pcs = derive_k_fs_after_pcs(
-        &k_fs_current,
-        &we_epoch_id,
-        fs_ec,
-        next_barrier_version,
-        &barrier_update.k_barrier_new,
-    )?;
     header.insert(
         hdr::HDR_BARRIER_UPDATE,
         Value::Bytes(barrier_update.raw_update.clone()),
@@ -9301,10 +9357,13 @@ async fn perform_pcs_refresh_inner(
         barrier_version: next_barrier_version,
         we_epoch_id: [0u8; 32],
         fs_ec,
+        next_forward_fs_ec: 0,
+        next_forward_fs_dev_commit: [0u8; 32],
+        next_forward_last_weid: [0u8; 32],
         revocation_roots_hash,
         kem_tree_hash_after: barrier_update.kem_tree_hash_after,
         k_barrier_new: barrier_update.k_barrier_new.clone(),
-        k_fs_after_pcs: Some(Zeroizing::new(k_fs_after_pcs)),
+        k_fs_after_pcs: None,
         barrier_update_reason: Some(1),
         barrier_update_digest: barrier_update.barrier_update_digest,
         on_path_key_material: barrier_update.on_path_key_material.clone(),
@@ -9348,9 +9407,16 @@ async fn perform_pcs_refresh_inner(
         pox_r_commit: Some(pox_r_commit_arr.as_slice()),
     };
 
-    let mut bundle =
-        CityGClient::generate_merge(header, parts, params, &parities, None, witness_bytes)
-            .context("failed to build refresh merge bundle")?;
+    let mut bundle = CityGClient::generate_merge_with_forward_state(
+        header,
+        parts,
+        params,
+        Some(&mut forward_state),
+        &parities,
+        None,
+        witness_bytes,
+    )
+    .context("failed to build refresh merge bundle")?;
 
     strip_rollup_metadata(&mut bundle.header_map);
     apply_pivot_alignment(&mut bundle.header_map, pivot);
@@ -9377,6 +9443,15 @@ async fn perform_pcs_refresh_inner(
     .context("compute seed_bundle_commit")?;
     let derived_we_epoch_id =
         derive_we_epoch_id(&gid, &parent_root_arr, &seed_ctx_hash).context("derive we_epoch_id")?;
+    let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC)
+        .ok_or_else(|| anyhow!("refresh merge bundle missing fs_ec"))?;
+    let k_fs_after_pcs = derive_k_fs_after_pcs(
+        &k_fs_current,
+        &derived_we_epoch_id,
+        observed_fs_ec,
+        next_barrier_version,
+        &barrier_update.k_barrier_new,
+    )?;
 
     bundle.anchor.anchor_hdr_ctx = anchor_ctx.clone();
     bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
@@ -9384,6 +9459,12 @@ async fn perform_pcs_refresh_inner(
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
     bundle.we_epoch_id = derived_we_epoch_id;
     pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
+    pending_barrier_state.fs_ec = observed_fs_ec;
+    pending_barrier_state.k_fs_after_pcs = Some(Zeroizing::new(k_fs_after_pcs));
+    let next_forward = forward_state.snapshot();
+    pending_barrier_state.next_forward_fs_ec = next_forward.fs_ec;
+    pending_barrier_state.next_forward_fs_dev_commit = next_forward.fs_dev_commit;
+    pending_barrier_state.next_forward_last_weid = next_forward.last_weid;
     bundle
         .header_map
         .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
@@ -9431,6 +9512,7 @@ async fn perform_pcs_refresh_inner(
     Ok(PublishedRefreshMerge {
         bundle,
         pending_barrier_state,
+        forward_state_after: forward_state,
     })
 }
 
@@ -10932,6 +11014,9 @@ mod tests {
             barrier_version: 9,
             we_epoch_id: [0x21; 32],
             fs_ec: 31,
+            next_forward_fs_ec: 32,
+            next_forward_fs_dev_commit: [0x77; 32],
+            next_forward_last_weid: [0x21; 32],
             revocation_roots_hash: [0x33; 32],
             kem_tree_hash_after: [0x44; 32],
             k_barrier_new: Zeroizing::new([0x55; 32]),
@@ -10960,6 +11045,9 @@ mod tests {
             [0x22; 32]
         );
         assert_eq!(session.forward_state.snapshot().k_fs, [0x66; 32]);
+        assert_eq!(session.forward_state.snapshot().fs_ec, 32);
+        assert_eq!(session.forward_state.snapshot().fs_dev_commit, [0x77; 32]);
+        assert_eq!(session.forward_state.snapshot().last_weid, [0x21; 32]);
         Ok(())
     }
 
@@ -10971,6 +11059,9 @@ mod tests {
             barrier_version: 5,
             we_epoch_id: [0x41; 32],
             fs_ec: 31,
+            next_forward_fs_ec: 0,
+            next_forward_fs_dev_commit: [0u8; 32],
+            next_forward_last_weid: [0u8; 32],
             revocation_roots_hash: [0x11; 32],
             kem_tree_hash_after: [0x22; 32],
             k_barrier_new: Zeroizing::new([0x33; 32]),
@@ -10995,6 +11086,9 @@ mod tests {
             barrier_version: 7,
             we_epoch_id: [0x42; 32],
             fs_ec: 31,
+            next_forward_fs_ec: 0,
+            next_forward_fs_dev_commit: [0u8; 32],
+            next_forward_last_weid: [0u8; 32],
             revocation_roots_hash: [0x51; 32],
             kem_tree_hash_after: [0x61; 32],
             k_barrier_new: Zeroizing::new([0x71; 32]),
@@ -11022,6 +11116,9 @@ mod tests {
             barrier_version: 7,
             we_epoch_id: [0x43; 32],
             fs_ec: 31,
+            next_forward_fs_ec: 0,
+            next_forward_fs_dev_commit: [0u8; 32],
+            next_forward_last_weid: [0u8; 32],
             revocation_roots_hash: [0x41; 32],
             kem_tree_hash_after: [0x51; 32],
             k_barrier_new: Zeroizing::new([0x61; 32]),
@@ -11056,6 +11153,9 @@ mod tests {
             barrier_version: 7,
             we_epoch_id: [0x44; 32],
             fs_ec: 31,
+            next_forward_fs_ec: 0,
+            next_forward_fs_dev_commit: [0u8; 32],
+            next_forward_last_weid: [0u8; 32],
             revocation_roots_hash: [0x51; 32],
             kem_tree_hash_after: [0x61; 32],
             k_barrier_new: Zeroizing::new([0x71; 32]),
@@ -12006,6 +12106,37 @@ mod tests {
         }
     }
 
+    struct MessageTokenEnvVarRestore {
+        client_original: Option<String>,
+        server_original: Option<String>,
+    }
+
+    impl Drop for MessageTokenEnvVarRestore {
+        fn drop(&mut self) {
+            match self.client_original.as_deref() {
+                Some(value) => {
+                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                    unsafe { std::env::set_var(CLIENT_MESSAGE_TOKEN_ENV, value) };
+                }
+                None => {
+                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                    unsafe { std::env::remove_var(CLIENT_MESSAGE_TOKEN_ENV) };
+                }
+            }
+
+            match self.server_original.as_deref() {
+                Some(value) => {
+                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                    unsafe { std::env::set_var("CITYG_SERVER_MESSAGE_AUTH_TOKEN", value) };
+                }
+                None => {
+                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+                    unsafe { std::env::remove_var("CITYG_SERVER_MESSAGE_AUTH_TOKEN") };
+                }
+            }
+        }
+    }
+
     async fn spawn_server_on(port: u16) -> JoinHandle<()> {
         init_test_auth_env();
         tokio::spawn(async move {
@@ -12210,6 +12341,63 @@ mod tests {
             );
             assert!(model.fetch_in_flight, "fetch should be marked in-flight");
             assert!(matches!(model.fetch_status, FetchStatus::Refreshing));
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_missing_message_token_only_schedules_restore_sync_once(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let _env_lock = ENV_VAR_LOCK.lock().expect("env var lock");
+        let _restore = MessageTokenEnvVarRestore {
+            client_original: std::env::var(CLIENT_MESSAGE_TOKEN_ENV).ok(),
+            server_original: std::env::var("CITYG_SERVER_MESSAGE_AUTH_TOKEN").ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(CLIENT_MESSAGE_TOKEN_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var("CITYG_SERVER_MESSAGE_AUTH_TOKEN") };
+
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xBEEF,
+            "http://127.0.0.1:9",
+            "77aa55bb66cc11dd22ee33ff44aa55bb66cc77dd88ee99ff00aa11bb22cc33dd",
+            "missing-token",
+        )
+        .expect("build session");
+
+        view.update(cx, |model, view_cx| {
+            model.session = Some(session.clone());
+            model.restore_epoch_sync_pending = true;
+
+            model.ensure_websocket_task(view_cx);
+            assert!(
+                model.ws_task.is_none(),
+                "ws task must stay absent without token"
+            );
+            assert!(
+                model.ws_autostart_attempted,
+                "autostart should be marked attempted"
+            );
+            assert!(
+                model.epoch_sync_task.is_some(),
+                "restore sync should still be scheduled once"
+            );
+            assert!(
+                !model.restore_epoch_sync_pending,
+                "restore sync marker must clear after scheduling"
+            );
+
+            model.stop_epoch_sync_task();
+            model.ensure_websocket_task(view_cx);
+            assert!(
+                model.epoch_sync_task.is_none(),
+                "missing token should not reschedule restore sync on later renders"
+            );
         });
     }
 
@@ -15157,6 +15345,9 @@ mod tests {
                 barrier_version: 6,
                 we_epoch_id: array(0x2A),
                 fs_ec: 18,
+                next_forward_fs_ec: 19,
+                next_forward_fs_dev_commit: array(0x24),
+                next_forward_last_weid: array(0x2A),
                 revocation_roots_hash: array(0x25),
                 kem_tree_hash_after: array(0x26),
                 k_barrier_new: Zeroizing::new(array(0x27)),
@@ -16602,6 +16793,86 @@ mod tests {
             1,
         )?)
         .await?;
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_bootstrapped_room_can_refresh_immediately()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
+        let port = next_test_port();
+        let handle = spawn_server_with_seed_demo_room(port, false).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x91u8; 32]);
+
+        let session = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        assert!(
+            !session.barrier_state.barrier_recovery_pending,
+            "bootstrapped join should leave the creator message-ready"
+        );
+
+        let client = new_api_client(&server_url);
+        let ticket = client
+            .merge_ticket_refresh(&room_id, &session.leaf_id)
+            .await
+            .context("fetch merge ticket after bootstrapped join")?;
+        assert_eq!(
+            ticket.we_epoch_id, session.we_epoch_id,
+            "bootstrapped join must already track the latest accepted epoch"
+        );
+        let bundle_response = client
+            .get_bundle(&ticket.we_epoch_id)
+            .await
+            .context("fetch latest bundle after bootstrapped join")?;
+        let bundle = ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor)
+            .context("decode latest bundle after bootstrapped join")?;
+        let server_dev_commit = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
+            .ok_or_else(|| anyhow!("latest bundle missing fs_dev_commit"))?;
+        assert_eq!(
+            session.fs_dev_prev_commit, server_dev_commit,
+            "bootstrapped join must persist the latest accepted fs_dev_commit"
+        );
+        assert_eq!(
+            session.forward_state.snapshot().fs_dev_commit,
+            server_dev_commit,
+            "bootstrapped join must also advance local FS state to the latest accepted dev commit"
+        );
+        assert!(
+            session.forward_state.snapshot().fs_ec > session.fs_ec,
+            "local FS state should advance beyond the visible anchor fs_ec after a refresh"
+        );
+
+        perform_pcs_refresh(LeaveRequest::from_session(&session)).await?;
+
+        let persisted = load_session_at(&server_url, &room_id)?
+            .ok_or_else(|| anyhow!("expected persisted session after pcs refresh"))?;
+        assert!(
+            persisted.barrier_state.pending.is_some(),
+            "pcs refresh should persist pending barrier state for later activation"
+        );
 
         handle.abort();
         let _ = handle.await;

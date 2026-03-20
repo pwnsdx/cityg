@@ -2666,11 +2666,12 @@ pub fn joiner_kgen_or<'a>(
             let new_we_epoch_id =
                 derive_we_epoch_id(parts.gid, parts.parent_root, &new_seed_ctx_hash)?;
 
+            final_state = work_state.clone();
+
             if new_we_epoch_id == we_epoch_id {
                 anchor_seed_ctx = new_anchor_seed_ctx;
                 seed_ctx_hash = new_seed_ctx_hash;
                 we_epoch_id = new_we_epoch_id;
-                final_state = work_state;
                 break;
             }
 
@@ -3047,12 +3048,13 @@ pub fn joiner_kgen_or<'a>(
     })
 }
 
-pub fn joiner_kgen_merge_or<'a>(
+pub fn joiner_kgen_merge_or_with_state<'a>(
     mut header_map: BTreeMap<u64, Value>,
     retired_parities: &[PivotParity],
     note: Option<&str>,
     parts: AnchorInstanceParts<'a>,
     params: OrchestrationParams<'a>,
+    forward_state: Option<&mut ForwardSecrecyState>,
     witness_bytes: Option<&[u8]>,
 ) -> Result<JoinerKGenResult, MsphfError> {
     if retired_parities.is_empty() {
@@ -3070,7 +3072,7 @@ pub fn joiner_kgen_merge_or<'a>(
         header_map,
         parts.clone(),
         params.clone(),
-        None,
+        forward_state,
         witness_bytes,
     )?;
 
@@ -3368,6 +3370,25 @@ pub fn joiner_kgen_merge_or<'a>(
     result.capss_witness = CapssWitnessBundle::default();
 
     Ok(result)
+}
+
+pub fn joiner_kgen_merge_or<'a>(
+    header_map: BTreeMap<u64, Value>,
+    retired_parities: &[PivotParity],
+    note: Option<&str>,
+    parts: AnchorInstanceParts<'a>,
+    params: OrchestrationParams<'a>,
+    witness_bytes: Option<&[u8]>,
+) -> Result<JoinerKGenResult, MsphfError> {
+    joiner_kgen_merge_or_with_state(
+        header_map,
+        retired_parities,
+        note,
+        parts,
+        params,
+        None,
+        witness_bytes,
+    )
 }
 
 pub fn joiner_kgen_merge_from_acceptances<'a>(
