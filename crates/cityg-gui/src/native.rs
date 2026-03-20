@@ -8750,15 +8750,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
             Ok(finalized) => finalized,
             Err(err) => {
                 warn!("initial room setup after bootstrap join failed: {err:#}");
-                match load_session_at(&session.server_url, &session.room_id) {
-                    Ok(Some(reloaded)) => reloaded,
-                    Ok(None) => return Err(err).context("complete initial room setup"),
-                    Err(load_err) => {
-                        return Err(err).context(format!(
-                            "complete initial room setup (and reload persisted session failed: {load_err})"
-                        ))
-                    }
-                }
+                reload_join_finalization_session(&session, err, "complete initial room setup")?
             }
         };
     } else if session.barrier_state.barrier_recovery_pending {
@@ -8766,20 +8758,37 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
             Ok(finalized) => finalized,
             Err(err) => {
                 warn!("post-join barrier finalization failed: {err:#}");
-                match load_session_at(&session.server_url, &session.room_id) {
-                    Ok(Some(reloaded)) => reloaded,
-                    Ok(None) => return Err(err).context("complete join barrier finalization"),
-                    Err(load_err) => {
-                        return Err(err).context(format!(
-                            "complete join barrier finalization (and reload persisted session failed: {load_err})"
-                        ))
-                    }
-                }
+                reload_join_finalization_session(
+                    &session,
+                    err,
+                    "complete join barrier finalization",
+                )?
             }
         };
     }
 
     Ok(session)
+}
+
+fn reload_join_finalization_session(
+    session: &AppSession,
+    err: anyhow::Error,
+    context: &'static str,
+) -> Result<AppSession> {
+    match load_session_at(&session.server_url, &session.room_id) {
+        Ok(Some(reloaded))
+            if reloaded.gid == session.gid
+                && reloaded.leaf_id == session.leaf_id
+                && !reloaded.barrier_state.barrier_recovery_pending =>
+        {
+            Ok(reloaded)
+        }
+        Ok(Some(_)) => Err(err).context(context),
+        Ok(None) => Err(err).context(context),
+        Err(load_err) => Err(err).context(format!(
+            "{context} (and reload persisted session failed: {load_err})"
+        )),
+    }
 }
 
 async fn finalize_bootstrapped_room_join(session: AppSession) -> Result<AppSession> {
@@ -13774,6 +13783,49 @@ mod tests {
             .ok_or_else(|| anyhow!("expected pointer to remain present"))?;
         assert_eq!(loaded.server_url, pointer.server_url);
         assert_eq!(loaded.room_id, pointer.room_id);
+        Ok(())
+    }
+
+    #[test]
+    fn reload_join_finalization_session_rejects_other_identity_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let alice = build_test_session(
+            0xA11C,
+            "http://127.0.0.1:18080",
+            "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface",
+            "alice",
+        )?;
+        let mut bob = build_test_session(
+            0xB0B0,
+            "http://127.0.0.1:18080",
+            "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface",
+            "bob",
+        )?;
+        bob.gid = [0xB0; 32];
+        bob.leaf_id = [0x0B; 32];
+
+        persist_session(&alice)?;
+
+        let err = match reload_join_finalization_session(
+            &bob,
+            anyhow!("join finalization failed"),
+            "complete join barrier finalization",
+        ) {
+            Ok(_) => {
+                return Err(anyhow!(
+                    "mismatched persisted identity must not be treated as a finalized session"
+                )
+                .into())
+            }
+            Err(err) => err,
+        };
+        let text = format!("{err:#}");
+        assert!(text.contains("complete join barrier finalization"));
+        assert!(text.contains("join finalization failed"));
         Ok(())
     }
 
