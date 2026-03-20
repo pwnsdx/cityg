@@ -211,8 +211,12 @@ pub const FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED: FreezeError = FreezeError {
     reason: "pcs_refresh_rate_limited",
 };
 
-pub const FREEZE_BARRIER_PCS_REFRESH_FORBIDDEN_WHILE_PENDING_REVOCATIONS: FreezeError =
+pub const FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIONS: FreezeError =
     FreezeError {
         code: 96013,
-        reason: "pcs_refresh_forbidden_while_pending_revocations",
+        reason: "barrier_non_revocation_reason_forbidden_while_pending_revocations",
     };
+
+#[allow(dead_code)]
+pub const FREEZE_BARRIER_PCS_REFRESH_FORBIDDEN_WHILE_PENDING_REVOCATIONS: FreezeError =
+    FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIONS;

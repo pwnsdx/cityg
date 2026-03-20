@@ -941,7 +941,7 @@ impl CityGServer {
                             "barrier_leaf_pk (header[177]) is required on join",
                         ))?;
                 state.join_history.push(JoinLeafHistoryRecord {
-                    barrier_version,
+                    barrier_version: barrier_version.saturating_add(1),
                     leaf_index,
                     device_pk: device_pk.clone(),
                     ek_leaf: ek_leaf.clone(),
@@ -1621,6 +1621,27 @@ fn vec_to_16(bytes: Vec<u8>) -> Result<[u8; 16], CityGError> {
         .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))
 }
 
+fn parse_barrier_update_reason(header: &BTreeMap<u64, Value>) -> Result<Option<u64>, CityGError> {
+    let has_update = header.contains_key(&hdr::HDR_BARRIER_UPDATE);
+    let reason_value = header.get(&hdr::HDR_BARRIER_UPDATE_REASON);
+    if !has_update {
+        if reason_value.is_some() {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
+        return Ok(None);
+    }
+
+    let Some(Value::Integer(reason_int)) = reason_value else {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    };
+    let reason = u64::try_from(*reason_int)
+        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+    if reason > 2 {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+    Ok(Some(reason))
+}
+
 fn parse_barrier_update(
     header: &BTreeMap<u64, Value>,
     expected_n_max: u64,
@@ -2293,6 +2314,7 @@ fn validate_barrier_update_against_roster(
             return Err(barrier_update_malformed_freeze_error());
         }
 
+        let barrier_update_reason = parse_barrier_update_reason(header)?;
         let Some(parsed) = parse_barrier_update(header, state_before.n_max.max(1))? else {
             return Ok(None);
         };
@@ -2352,6 +2374,7 @@ fn validate_barrier_update_against_roster(
             && by_leaf.is_empty()
             && revoked_indices.is_empty();
 
+        let unresolved_join_leaf_set: BTreeSet<u32> = by_leaf.keys().copied().collect();
         let snapshot_base_owned = if can_borrow_snapshot_base {
             None
         } else {
@@ -2406,6 +2429,40 @@ fn validate_barrier_update_against_roster(
                     msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
                 ),
             ));
+        }
+
+        let author_is_unresolved_joiner = unresolved_join_leaf_set.contains(
+            &u32::try_from(parsed.updater_leaf)
+                .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
+        );
+        let revocation_changed = state_before.barrier_initialized
+            && parsed.revocation_roots_hash != state_before.barrier_roots_hash;
+        if revocation_changed {
+            if matches!(barrier_update_reason, Some(1 | 2)) {
+                return Err(CityGError::Acceptance(
+                    msphf_orchestrator::AcceptanceError::Freeze(
+                        msphf_orchestrator::FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIONS,
+                    ),
+                ));
+            }
+        } else if state_before.barrier_initialized {
+            match barrier_update_reason {
+                Some(2) if !author_is_unresolved_joiner => {
+                    return Err(CityGError::Acceptance(
+                        msphf_orchestrator::AcceptanceError::Freeze(
+                            msphf_orchestrator::FREEZE_BARRIER_PROACTIVE_FORBIDDEN,
+                        ),
+                    ));
+                }
+                Some(1) if author_is_unresolved_joiner => {
+                    return Err(CityGError::Acceptance(
+                        msphf_orchestrator::AcceptanceError::Freeze(
+                            msphf_orchestrator::FREEZE_BARRIER_PROACTIVE_FORBIDDEN,
+                        ),
+                    ));
+                }
+                _ => {}
+            }
         }
 
         let n_max_usize = usize::try_from(tree_n_max)

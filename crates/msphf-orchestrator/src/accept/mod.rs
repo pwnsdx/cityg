@@ -879,9 +879,9 @@ impl AcceptanceContext {
         let revocation_changed = revocation_roots_hash != state.barrier_roots_hash;
 
         if revocation_changed {
-            if barrier_update_reason == Some(1) {
+            if matches!(barrier_update_reason, Some(1 | 2)) {
                 return Err(AcceptanceError::Freeze(
-                    FREEZE_BARRIER_PCS_REFRESH_FORBIDDEN_WHILE_PENDING_REVOCATIONS,
+                    FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIONS,
                 ));
             }
             let Some(parsed_update) = decision.parsed_barrier_update.as_ref() else {
@@ -908,41 +908,43 @@ impl AcceptanceContext {
             let Some(parsed_update) = decision.parsed_barrier_update.as_ref() else {
                 return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
             };
-            let valid_pcs_refresh = matches!(anchor_type, AnchorType::Merge)
-                && barrier_update_reason == Some(1)
+            let valid_proactive_merge = matches!(anchor_type, AnchorType::Merge)
+                && matches!(barrier_update_reason, Some(1 | 2))
                 && barrier_version == current_bv.saturating_add(1)
                 && parsed_update.barrier_version == barrier_version
                 && parsed_update.prev_barrier_version == current_bv
                 && parsed_update.revocation_roots_hash == revocation_roots_hash;
-            if !valid_pcs_refresh {
+            if !valid_proactive_merge {
                 return Err(AcceptanceError::Freeze(FREEZE_BARRIER_PROACTIVE_FORBIDDEN));
             }
 
-            if let Some(last_group_refresh) = state.last_pcs_refresh_ec {
-                let min_group_delta = state.pcs_refresh_min_delta_group_ec.max(1);
-                if fs_ec < last_group_refresh.saturating_add(min_group_delta) {
-                    return Err(AcceptanceError::Freeze(
-                        FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED,
-                    ));
+            if barrier_update_reason == Some(1) {
+                if let Some(last_group_refresh) = state.last_pcs_refresh_ec {
+                    let min_group_delta = state.pcs_refresh_min_delta_group_ec.max(1);
+                    if fs_ec < last_group_refresh.saturating_add(min_group_delta) {
+                        return Err(AcceptanceError::Freeze(
+                            FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED,
+                        ));
+                    }
+
+                    let slot_width = state.pcs_refresh_slot_width_ec.max(1);
+                    if fs_ec / slot_width == last_group_refresh / slot_width {
+                        return Err(AcceptanceError::Freeze(
+                            FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED,
+                        ));
+                    }
                 }
 
-                let slot_width = state.pcs_refresh_slot_width_ec.max(1);
-                if fs_ec / slot_width == last_group_refresh / slot_width {
-                    return Err(AcceptanceError::Freeze(
-                        FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED,
-                    ));
-                }
-            }
-
-            if let Some(device_pk) = header_map.get(&HDR_POP_PK).and_then(Value::as_bytes)
-                && let Some(device_state) = self.device_chain_get(gid, device_pk)
-                && let Some(last_device_refresh) = device_state.last_pcs_refresh_ec
-            {
-                let min_device_delta = state.pcs_refresh_min_delta_device_ec.max(1);
-                if fs_ec < last_device_refresh.saturating_add(min_device_delta) {
-                    return Err(AcceptanceError::Freeze(
-                        FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED,
-                    ));
+                if let Some(device_pk) = header_map.get(&HDR_POP_PK).and_then(Value::as_bytes)
+                    && let Some(device_state) = self.device_chain_get(gid, device_pk)
+                    && let Some(last_device_refresh) = device_state.last_pcs_refresh_ec
+                {
+                    let min_device_delta = state.pcs_refresh_min_delta_device_ec.max(1);
+                    if fs_ec < last_device_refresh.saturating_add(min_device_delta) {
+                        return Err(AcceptanceError::Freeze(
+                            FREEZE_BARRIER_PCS_REFRESH_RATE_LIMITED,
+                        ));
+                    }
                 }
             }
         } else if barrier_version != current_bv {
@@ -1982,7 +1984,7 @@ fn parse_barrier_update_reason(
     };
     let reason = u64::try_from(*reason_int)
         .map_err(|_| AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED))?;
-    if reason > 1 {
+    if reason > 2 {
         return Err(AcceptanceError::Freeze(FREEZE_BARRIER_UPDATE_MALFORMED));
     }
     Ok(Some(reason))
@@ -4114,17 +4116,22 @@ mod tests {
         ));
         header.insert(
             HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+        assert_eq!(parse_barrier_update_reason(&header)?, Some(1));
+        header.insert(
+            HDR_BARRIER_UPDATE_REASON,
             Value::Integer(Integer::from(2u64)),
+        );
+        assert_eq!(parse_barrier_update_reason(&header)?, Some(2));
+        header.insert(
+            HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(3u64)),
         );
         assert!(matches!(
             parse_barrier_update_reason(&header),
             Err(AcceptanceError::Freeze(code)) if code == FREEZE_BARRIER_UPDATE_MALFORMED
         ));
-        header.insert(
-            HDR_BARRIER_UPDATE_REASON,
-            Value::Integer(Integer::from(1u64)),
-        );
-        assert_eq!(parse_barrier_update_reason(&header)?, Some(1));
         assert_ne!(compute_barrier_update_digest(&header)?, [0u8; 32]);
 
         header.insert(HDR_BARRIER_UPDATE, Value::Integer(Integer::from(7u64)));
@@ -4425,6 +4432,38 @@ mod tests {
     }
 
     #[test]
+    fn join_finalize_gating_accepts_valid_merge_without_rate_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid = b"gid-join-finalize-accept".as_slice();
+        let mut ctx = AcceptanceContext::with_defaults();
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_FS_EC, Value::Integer(Integer::from(105u64)));
+        header.insert(HDR_BARRIER_VERSION, Value::Integer(Integer::from(6u64)));
+        header.insert(112, Value::Bytes([0x51; 32].to_vec()));
+        header.insert(113, Value::Bytes([0x52; 32].to_vec()));
+
+        let rrh = compute_revocation_roots_hash(&header)?;
+        insert_valid_barrier_update(&mut header, 1_024, 0, 6, 5, rrh, 2)?;
+        let state = BarrierGroupState {
+            barrier_initialized: true,
+            barrier_version: 5,
+            barrier_roots_hash: rrh,
+            last_pcs_refresh_ec: Some(104),
+            pcs_refresh_min_delta_group_ec: 99,
+            pcs_refresh_slot_width_ec: 100,
+            pcs_refresh_min_delta_device_ec: 99,
+            ..BarrierGroupState::default()
+        };
+        ctx.insert_barrier_group_state(gid, state);
+
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge)?;
+        assert_eq!(result.barrier_update_reason, Some(2));
+        assert_eq!(result.barrier_version, 6);
+        Ok(())
+    }
+
+    #[test]
     fn same_fs_ec_after_pcs_refresh_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let gid = b"gid-pcs-boundary".as_slice();
         let mut ctx = AcceptanceContext::with_defaults();
@@ -4489,7 +4528,15 @@ mod tests {
         assert!(matches!(
             result,
             Err(AcceptanceError::Freeze(code))
-                if code == FREEZE_BARRIER_PCS_REFRESH_FORBIDDEN_WHILE_PENDING_REVOCATIONS
+                if code == FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIONS
+        ));
+
+        insert_valid_barrier_update(&mut header, 1_024, 0, 3, 3, [0xAA; 32], 2)?;
+        let result = ctx.enforce_barrier_acceptance_gating(gid, &header, AnchorType::Merge);
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(code))
+                if code == FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIONS
         ));
         Ok(())
     }
@@ -4567,6 +4614,56 @@ mod tests {
             .device_chain_get(gid, &device_pk)
             .expect("device refresh marker should be persisted");
         assert_eq!(device_state.last_pcs_refresh_ec, Some(77));
+    }
+
+    #[test]
+    fn join_finalize_commit_does_not_touch_refresh_markers() {
+        let gid = b"gid-join-finalize-commit".as_slice();
+        let device_pk = vec![0xD6; 32];
+        let mut ctx = AcceptanceContext::with_defaults();
+        ctx.insert_barrier_group_state(
+            gid,
+            BarrierGroupState {
+                barrier_initialized: true,
+                barrier_version: 8,
+                barrier_roots_hash: [0x71; 32],
+                kem_tree_hash_after: [0x10; 32],
+                srx_root_sw: None,
+                n_max: 1_024,
+                last_pcs_refresh_ec: Some(55),
+                pcs_refresh_min_delta_device_ec: 1,
+                pcs_refresh_min_delta_group_ec: 1,
+                pcs_refresh_slot_width_ec: 1,
+                max_barrier_update_bytes: 1_048_576,
+            },
+        );
+        ctx.device_chain_entry_mut(gid, &device_pk).last_pcs_refresh_ec = Some(44);
+
+        let mut header = BTreeMap::new();
+        header.insert(HDR_POP_PK, Value::Bytes(device_pk.clone()));
+
+        let gate = BarrierGateDecision {
+            barrier_version: 9,
+            fs_ec: 77,
+            revocation_roots_hash: [0x72; 32],
+            barrier_update_digest: [0xBC; 32],
+            barrier_update_reason: Some(2),
+            parsed_barrier_update: None,
+        };
+
+        ctx.apply_barrier_acceptance_commit(gid, &header, gate);
+
+        let state = ctx
+            .barrier_group_state(gid)
+            .expect("barrier state should remain present");
+        assert_eq!(state.barrier_version, 9);
+        assert_eq!(state.barrier_roots_hash, [0x72; 32]);
+        assert_eq!(state.last_pcs_refresh_ec, Some(55));
+
+        let device_state = ctx
+            .device_chain_get(gid, &device_pk)
+            .expect("device state should remain present");
+        assert_eq!(device_state.last_pcs_refresh_ec, Some(44));
     }
 
     #[test]

@@ -1,14 +1,14 @@
 CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER)
 
-Version: v0.1.2 (repository errata through 2026-03-15)
-Date: 2026-02-11
-Status: Frozen wire/API profile with repository-tracked normative errata
+Version: v0.1.3
+Date: 2026-03-20
+Status: Active wire/API profile revision
 Profile ID: tswe/msphf-we/fs-hybrid + prs-barrier (native; no legacy interop)
 
-ERRATA STATUS
-* The wire/API `profile_version` exposed by the current implementation remains `v0.1.2`.
-* This repository copy of the specification includes post-freeze normative errata adopted after the original `v0.1.2 -- final` text.
-* For commit-level traceability, see `docs/spec-conformance-changelog-v0.1.2.md`.
+PROFILE STATUS
+* The wire/API `profile_version` exposed by the current implementation is `v0.1.3`.
+* `v0.1.3` is a wire-profile revision from `v0.1.2`, not a repository-only errata layer, because it adds `barrier_update_reason = 2 (join_finalize)` and changes acceptance / client validation behavior.
+* For commit-level traceability of this profile revision, see `docs/spec-conformance-changelog-v0.1.3.md`.
 
 IMPORTANT (label supersession / no mixing)
 * All H_L label strings and HKDF info strings in THIS document are NORMATIVE for this profile version.
@@ -623,7 +623,6 @@ This section applies only when:
 * GroupState.barrier_initialized == true
 * RRH == GroupState.barrier_roots_hash
 * header[175] is present
-* the client-side eligibility preconditions of S11.11.1 / S12.3 hold
 * the server-observable JoinSet predicate below holds for the author
 
 Then:
@@ -920,9 +919,10 @@ Before constructing any barrier_update, the updater MUST:
   * Compute TreeHash(root_node) over pk_entries_prev per S11.4 and require it equals H_prev.
   * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
 Join-finalize bootstrap exception (normative):
-* A newly joined client with `pending_barrier_recovery == true` MAY originate exactly reason 2 (`join_finalize`) while pending if, and only if, it has:
+* A newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if, it has:
   * the S12.2 provisioned current barrier metadata for the current committed state,
   * authenticated access to S3.3.A/B/C at that same current `barrier_version`,
+  * the authenticated accepted current `barrier_update` bytes and authenticated prior-committed history handle(s) for that same current committed state, sufficient to execute the S11.11.2 chain-checks literally against the provisioned `H_prev`,
   * successfully performed the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 for that current committed state.
 * Satisfying the bullets above establishes FULL public-state verification sufficient for join_finalize eligibility even though the client has not yet derived the current `K_barrier`.
 * A pending joiner admitted under this exception MUST still NOT originate reason 0 or reason 1 while `pending_barrier_recovery == true`.
@@ -951,7 +951,7 @@ A client that cannot fetch/verify snapshot_base MAY still attempt recovery (uniq
 * treat barrier_update as untrusted for public-tree correctness beyond its local recovery.
 Additional restriction (normative):
 * A recover-only client MUST NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges until it has obtained FULL verification of the current public tree at the current `barrier_version`.
-* Exception: a newly joined client with `pending_barrier_recovery == true` MAY originate exactly reason 2 (`join_finalize`) after satisfying the S11.11.1 join_finalize bootstrap exception. Until then, and for all other reasons, the restriction above remains absolute.
+* Exception: a newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, after satisfying the S11.11.1 join_finalize bootstrap exception. Until then, and for all other reasons, the restriction above remains absolute.
 
 S11.12 Server-side validation of barrier_update (normative; MUST)
 
@@ -1249,6 +1249,7 @@ Barrier required fields:
 * pcs_refresh_min_delta_device_ec (uint; >=1)
 * pcs_refresh_min_delta_group_ec (uint; >=1)
 * pcs_refresh_slot_width_ec (uint; >=1)
+* authenticated accepted current `barrier_update` bytes for the current committed state, together with authenticated prior-committed history handle(s) sufficient to execute the S11.11.2 chain-checks for `join_finalize` bootstrap eligibility against that current state
 FS-hybrid required fields:
 * initial K_fs (bstr32) and initial fs_ec (uint) -- or a derivation seed sufficient to deterministically compute the same initial `K_fs` and `fs_ec`
 * Joiners MUST NOT locally sample an unrelated fresh `K_fs` for an already-existing group, because PCS reseed in S6.6 requires all honest clients to evolve from the same pre-refresh `K_fs`.
@@ -1266,7 +1267,7 @@ While in `pending_barrier_recovery`:
 * The joiner CANNOT decrypt incoming payload messages encoded with `K_barrier` (or subsequent epochs).
 * The joiner MUST process any observed `barrier_update` messages (S11.13.4).
 * The joiner MUST NOT originate reason 0 (`revocation_or_bootstrap`) or reason 1 (`pcs_refresh`) while `pending_barrier_recovery == true`.
-* Exception: the joiner MAY originate exactly reason 2 (`join_finalize`) while pending if, and only if:
+* Exception: the joiner MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if:
   * it satisfies the S11.11.1 join_finalize bootstrap exception,
   * its own leaf is still present in the unresolved JoinSet for the current `barrier_version`,
   * and revocations are not pending for the update.
@@ -1404,4 +1405,4 @@ The test suite MUST include a scenario where:
   * retries reason 2 after authenticated history establishes non-acceptance and the join_finalize eligibility predicate still holds,
 * the implementation MUST NOT clear `pending_barrier_recovery` solely because a timer elapsed or because the current barrier version advanced.
 
-END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.2 (repository errata through 2026-03-15)
+END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.3

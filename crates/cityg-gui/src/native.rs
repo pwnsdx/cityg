@@ -454,6 +454,20 @@ fn apply_revoked_set_to_snapshot(
     Ok(())
 }
 
+fn expected_same_rrh_barrier_reason(
+    join_records: &[BarrierJoinRecord],
+    updater_leaf: u64,
+) -> u64 {
+    if join_records
+        .iter()
+        .any(|record| u64::from(record.leaf_index) == updater_leaf)
+    {
+        2
+    } else {
+        1
+    }
+}
+
 fn collect_resolution_targets(
     snapshot: &[Vec<u8>],
     node: u64,
@@ -753,20 +767,6 @@ async fn full_chain_check_barrier_update(
             "barrier full chain-check prevalidation failed (960.7): revocation_roots_hash mismatch"
         ));
     }
-    if !genesis_local_case {
-        if session.barrier_state.barrier_roots_hash == parsed.revocation_roots_hash {
-            if barrier_reason != 1 {
-                return Err(anyhow!(
-                    "barrier full chain-check prevalidation failed (960.7): local barrier_roots_hash unchanged but barrier_update_reason != 1"
-                ));
-            }
-        } else if barrier_reason != 0 {
-            return Err(anyhow!(
-                "barrier full chain-check prevalidation failed (960.7): local barrier_roots_hash changed but barrier_update_reason != 0"
-            ));
-        }
-    }
-
     let join_records = client
         .barrier_resolve_joins_since(room_id, parsed.prev_barrier_version)
         .await
@@ -775,6 +775,22 @@ async fn full_chain_check_barrier_update(
         .barrier_resolve_revoked_leaves(room_id, &revocation_roots_hash)
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
+
+    if !genesis_local_case {
+        if session.barrier_state.barrier_roots_hash == parsed.revocation_roots_hash {
+            let expected_reason =
+                expected_same_rrh_barrier_reason(join_records.as_slice(), parsed.updater_leaf);
+            if barrier_reason != expected_reason {
+                return Err(anyhow!(
+                    "barrier full chain-check prevalidation failed (960.7): local barrier_roots_hash unchanged but barrier_update_reason != {expected_reason}"
+                ));
+            }
+        } else if barrier_reason != 0 {
+            return Err(anyhow!(
+                "barrier full chain-check prevalidation failed (960.7): local barrier_roots_hash changed but barrier_update_reason != 0"
+            ));
+        }
+    }
 
     let parsed_for_hash = parsed.clone();
     let snapshot_prev_entries = snapshot_prev.pk_entries.clone();
@@ -965,9 +981,9 @@ fn try_recover_barrier_from_header(
         .ok_or_else(|| anyhow!("barrier_update_reason is missing or malformed"))?;
     if !genesis_local_case {
         if session.barrier_state.barrier_roots_hash == parsed.revocation_roots_hash {
-            if reason != 1 {
+            if !matches!(reason, 1 | 2) {
                 return Err(anyhow!(
-                    "barrier_update_reason must be pcs_refresh (1) when local barrier_roots_hash is unchanged"
+                    "barrier_update_reason must be pcs_refresh (1) or join_finalize (2) when local barrier_roots_hash is unchanged"
                 ));
             }
         } else if reason != 0 {
@@ -2387,10 +2403,93 @@ struct BarrierPendingState {
 }
 
 #[derive(Clone)]
-struct PublishedRefreshMerge {
+struct PublishedBarrierMerge {
     bundle: ClientEpochBundle,
     pending_barrier_state: BarrierPendingState,
     forward_state_after: ForwardSecrecyState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BarrierMergeMode {
+    PcsRefresh,
+    JoinFinalize,
+}
+
+impl BarrierMergeMode {
+    fn reason(self) -> u64 {
+        match self {
+            Self::PcsRefresh => 1,
+            Self::JoinFinalize => 2,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::PcsRefresh => "refresh",
+            Self::JoinFinalize => "join_finalize",
+        }
+    }
+
+    fn publish_context(self) -> &'static str {
+        match self {
+            Self::PcsRefresh => "publish PCS refresh",
+            Self::JoinFinalize => "publish join finalization barrier update",
+        }
+    }
+
+    fn persist_context(self) -> &'static str {
+        match self {
+            Self::PcsRefresh => "persist refreshed room session",
+            Self::JoinFinalize => "persist join-finalized room session",
+        }
+    }
+
+    fn fallback_sync_context(self) -> &'static str {
+        match self {
+            Self::PcsRefresh => "recover initial barrier state after setup merge",
+            Self::JoinFinalize => "recover barrier state after join finalization merge",
+        }
+    }
+
+    fn still_pending_message(self) -> &'static str {
+        match self {
+            Self::PcsRefresh => {
+                "initial room setup completed but barrier recovery is still pending"
+            }
+            Self::JoinFinalize => {
+                "join finalization completed but barrier recovery is still pending"
+            }
+        }
+    }
+
+    fn build_bundle_context(self) -> &'static str {
+        match self {
+            Self::PcsRefresh => "failed to build refresh merge bundle",
+            Self::JoinFinalize => "failed to build join finalize merge bundle",
+        }
+    }
+
+    fn accept_bundle_context(self) -> &'static str {
+        match self {
+            Self::PcsRefresh => "server rejected refresh merge bundle",
+            Self::JoinFinalize => "server rejected join finalize merge bundle",
+        }
+    }
+
+    fn pending_guard_message(self) -> &'static str {
+        match self {
+            Self::PcsRefresh => {
+                "cannot originate PCS refresh while barrier recovery is pending; complete FULL barrier recovery first"
+            }
+            Self::JoinFinalize => {
+                "cannot originate join finalization while barrier recovery is pending without join-finalize eligibility"
+            }
+        }
+    }
+
+    fn reseeds_k_fs(self) -> bool {
+        matches!(self, Self::PcsRefresh)
+    }
 }
 
 impl AppModel {
@@ -8629,7 +8728,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         },
     };
 
-    if bootstrap_attempted && ticket.barrier_version == 0 && parent_root == [0u8; 32] {
+    if ticket.barrier_version == 0 && parent_root == [0u8; 32] {
         session = match finalize_bootstrapped_room_join(session.clone()).await {
             Ok(finalized) => finalized,
             Err(err) => {
@@ -8645,51 +8744,82 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 }
             }
         };
+    } else if session.barrier_state.barrier_recovery_pending {
+        session = match finalize_pending_join(session.clone()).await {
+            Ok(finalized) => finalized,
+            Err(err) => {
+                warn!("post-join barrier finalization failed: {err:#}");
+                match load_session_at(&session.server_url, &session.room_id) {
+                    Ok(Some(reloaded)) => reloaded,
+                    Ok(None) => return Err(err).context("complete join barrier finalization"),
+                    Err(load_err) => {
+                        return Err(err).context(format!(
+                            "complete join barrier finalization (and reload persisted session failed: {load_err})"
+                        ))
+                    }
+                }
+            }
+        };
     }
 
     Ok(session)
 }
 
 async fn finalize_bootstrapped_room_join(session: AppSession) -> Result<AppSession> {
+    finalize_joined_room(session, BarrierMergeMode::JoinFinalize).await
+}
+
+async fn finalize_pending_join(session: AppSession) -> Result<AppSession> {
+    finalize_joined_room(session, BarrierMergeMode::JoinFinalize).await
+}
+
+async fn finalize_joined_room(
+    session: AppSession,
+    mode: BarrierMergeMode,
+) -> Result<AppSession> {
     persist_session(&session).context("persist joined session before initial room setup")?;
 
-    let published = perform_pcs_refresh_inner(LeaveRequest::from_session(&session), true)
-        .await
-        .context("publish initial barrier setup")?;
+    let published = match mode {
+        BarrierMergeMode::PcsRefresh => {
+            perform_pcs_refresh_inner(LeaveRequest::from_session(&session), true).await
+        }
+        BarrierMergeMode::JoinFinalize => {
+            perform_join_finalize_inner(LeaveRequest::from_session(&session)).await
+        }
+    }
+    .context(mode.publish_context())?;
 
     let mut updated = session.clone();
-    match apply_local_published_refresh_merge(&mut updated, published) {
+    match apply_local_published_barrier_merge(&mut updated, published) {
         Ok(()) => {
-            persist_session(&updated).context("persist initialized room session")?;
+            persist_session(&updated).context(mode.persist_context())?;
             Ok(updated)
         }
         Err(local_err) => {
             warn!(
-                "local activation of initial barrier setup failed; falling back to epoch sync: {local_err:#}"
+                "local activation of barrier merge failed; falling back to epoch sync: {local_err:#}"
             );
             let persisted =
                 load_session_at(&session.server_url, &session.room_id)?.ok_or_else(|| {
-                    anyhow!("persisted joined session missing after initial room setup")
+                    anyhow!("persisted joined session missing after barrier merge publish")
                 })?;
             let sync = perform_epoch_sync(persisted)
                 .await
-                .context("recover initial barrier state after setup merge")?;
+                .context(mode.fallback_sync_context())?;
             if sync.session.barrier_state.barrier_recovery_pending {
-                return Err(anyhow!(
-                    "initial room setup completed but barrier recovery is still pending"
-                ));
+                return Err(anyhow!(mode.still_pending_message()));
             }
-            persist_session(&sync.session).context("persist initialized room session")?;
+            persist_session(&sync.session).context(mode.persist_context())?;
             Ok(sync.session)
         }
     }
 }
 
-fn apply_local_published_refresh_merge(
+fn apply_local_published_barrier_merge(
     session: &mut AppSession,
-    published: PublishedRefreshMerge,
+    published: PublishedBarrierMerge,
 ) -> Result<()> {
-    let PublishedRefreshMerge {
+    let PublishedBarrierMerge {
         bundle,
         pending_barrier_state,
         mut forward_state_after,
@@ -9131,13 +9261,32 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
 }
 
 async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {
-    perform_pcs_refresh_inner(request, false).await.map(|_| ())
+    perform_barrier_merge_inner(request, BarrierMergeMode::PcsRefresh, false)
+        .await
+        .map(|_| ())
 }
 
 async fn perform_pcs_refresh_inner(
     request: LeaveRequest,
     allow_pending_recovery: bool,
-) -> Result<PublishedRefreshMerge> {
+) -> Result<PublishedBarrierMerge> {
+    perform_barrier_merge_inner(
+        request,
+        BarrierMergeMode::PcsRefresh,
+        allow_pending_recovery,
+    )
+    .await
+}
+
+async fn perform_join_finalize_inner(request: LeaveRequest) -> Result<PublishedBarrierMerge> {
+    perform_barrier_merge_inner(request, BarrierMergeMode::JoinFinalize, true).await
+}
+
+async fn perform_barrier_merge_inner(
+    request: LeaveRequest,
+    mode: BarrierMergeMode,
+    allow_pending_recovery: bool,
+) -> Result<PublishedBarrierMerge> {
     let persist_request = request.clone();
     let LeaveRequest {
         server_url,
@@ -9158,9 +9307,7 @@ async fn perform_pcs_refresh_inner(
     } = request;
 
     if barrier_recovery_pending && !allow_pending_recovery {
-        return Err(anyhow!(
-            "cannot originate PCS refresh while barrier recovery is pending; complete FULL barrier recovery first"
-        ));
+        return Err(anyhow!(mode.pending_guard_message()));
     }
 
     let client = new_api_client(&server_url);
@@ -9205,7 +9352,10 @@ async fn perform_pcs_refresh_inner(
                     }
                 }
 
-                return Err(err).context("failed to obtain refresh merge ticket");
+                return Err(err).context(format!(
+                    "failed to obtain {} merge ticket",
+                    mode.label()
+                ));
             }
         }
     };
@@ -9240,7 +9390,8 @@ async fn perform_pcs_refresh_inner(
 
     if !srx_cbor.is_empty() {
         return Err(anyhow!(
-            "refresh merge ticket unexpectedly contained SRX payload"
+            "{} merge ticket unexpectedly contained SRX payload",
+            mode.label()
         ));
     }
 
@@ -9351,7 +9502,7 @@ async fn perform_pcs_refresh_inner(
     );
     header.insert(
         hdr::HDR_BARRIER_UPDATE_REASON,
-        Value::Integer(Integer::from(1u64)),
+        Value::Integer(Integer::from(mode.reason())),
     );
     let mut pending_barrier_state = BarrierPendingState {
         barrier_version: next_barrier_version,
@@ -9364,7 +9515,7 @@ async fn perform_pcs_refresh_inner(
         kem_tree_hash_after: barrier_update.kem_tree_hash_after,
         k_barrier_new: barrier_update.k_barrier_new.clone(),
         k_fs_after_pcs: None,
-        barrier_update_reason: Some(1),
+        barrier_update_reason: Some(mode.reason()),
         barrier_update_digest: barrier_update.barrier_update_digest,
         on_path_key_material: barrier_update.on_path_key_material.clone(),
     };
@@ -9416,7 +9567,7 @@ async fn perform_pcs_refresh_inner(
         None,
         witness_bytes,
     )
-    .context("failed to build refresh merge bundle")?;
+    .context(mode.build_bundle_context())?;
 
     strip_rollup_metadata(&mut bundle.header_map);
     apply_pivot_alignment(&mut bundle.header_map, pivot);
@@ -9444,14 +9595,18 @@ async fn perform_pcs_refresh_inner(
     let derived_we_epoch_id =
         derive_we_epoch_id(&gid, &parent_root_arr, &seed_ctx_hash).context("derive we_epoch_id")?;
     let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC)
-        .ok_or_else(|| anyhow!("refresh merge bundle missing fs_ec"))?;
-    let k_fs_after_pcs = derive_k_fs_after_pcs(
-        &k_fs_current,
-        &derived_we_epoch_id,
-        observed_fs_ec,
-        next_barrier_version,
-        &barrier_update.k_barrier_new,
-    )?;
+        .ok_or_else(|| anyhow!("{} merge bundle missing fs_ec", mode.label()))?;
+    let k_fs_after_pcs = if mode.reseeds_k_fs() {
+        Some(derive_k_fs_after_pcs(
+            &k_fs_current,
+            &derived_we_epoch_id,
+            observed_fs_ec,
+            next_barrier_version,
+            &barrier_update.k_barrier_new,
+        )?)
+    } else {
+        None
+    };
 
     bundle.anchor.anchor_hdr_ctx = anchor_ctx.clone();
     bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
@@ -9460,11 +9615,13 @@ async fn perform_pcs_refresh_inner(
     bundle.we_epoch_id = derived_we_epoch_id;
     pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
     pending_barrier_state.fs_ec = observed_fs_ec;
-    pending_barrier_state.k_fs_after_pcs = Some(Zeroizing::new(k_fs_after_pcs));
-    let next_forward = forward_state.snapshot();
-    pending_barrier_state.next_forward_fs_ec = next_forward.fs_ec;
-    pending_barrier_state.next_forward_fs_dev_commit = next_forward.fs_dev_commit;
-    pending_barrier_state.next_forward_last_weid = next_forward.last_weid;
+    if let Some(k_fs_after_pcs) = k_fs_after_pcs {
+        pending_barrier_state.k_fs_after_pcs = Some(Zeroizing::new(k_fs_after_pcs));
+        let next_forward = forward_state.snapshot();
+        pending_barrier_state.next_forward_fs_ec = next_forward.fs_ec;
+        pending_barrier_state.next_forward_fs_dev_commit = next_forward.fs_dev_commit;
+        pending_barrier_state.next_forward_last_weid = next_forward.last_weid;
+    }
     bundle
         .header_map
         .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
@@ -9507,9 +9664,9 @@ async fn perform_pcs_refresh_inner(
     client
         .accept_epoch_bundle(&bundle)
         .await
-        .context("server rejected refresh merge bundle")?;
+        .context(mode.accept_bundle_context())?;
 
-    Ok(PublishedRefreshMerge {
+    Ok(PublishedBarrierMerge {
         bundle,
         pending_barrier_state,
         forward_state_after: forward_state,
@@ -16873,6 +17030,72 @@ mod tests {
             persisted.barrier_state.pending.is_some(),
             "pcs refresh should persist pending barrier state for later activation"
         );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_second_member_can_send_immediately()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
+        let port = next_test_port();
+        let handle = spawn_server_with_seed_demo_room(port, false).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x92u8; 32]);
+        new_api_client(&server_url)
+            .bootstrap_room(&room_id, demo::kbroad_public())
+            .await?;
+
+        let alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        assert!(
+            !alice.barrier_state.barrier_recovery_pending,
+            "first join should leave room creator message-ready"
+        );
+
+        let bob = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+        assert!(
+            !bob.barrier_state.barrier_recovery_pending,
+            "second join should self-finalize without waiting for another client"
+        );
+        assert!(
+            bob.barrier_state.barrier_version >= alice.barrier_state.barrier_version,
+            "second join should not regress barrier version"
+        );
+
+        let sent = perform_send(SendParams::from_session(
+            &bob,
+            "hello from bob immediately".to_string(),
+            0,
+        )?)
+        .await?;
+        assert_eq!(sent.sender_leaf, Some(bob.leaf_id));
 
         handle.abort();
         let _ = handle.await;
