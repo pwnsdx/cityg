@@ -106,6 +106,7 @@ impl AcceptanceContext {
         if let Some(pop_pk_bytes) = pop_pk_bytes.as_deref() {
             let device_state = self.device_chain_get(parts.gid, pop_pk_bytes);
             self.verify_device_chain_state(
+                parts.gid,
                 device_state,
                 DeviceChainVerification {
                     pop_pk: pop_pk_bytes,
@@ -369,14 +370,14 @@ impl AcceptanceContext {
             max_fs_ec = Some(max_fs_ec.map_or(fs_ec, |current| current.max(fs_ec)));
         }
         let max_fs_ec_value = max_fs_ec.ok_or(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID))?;
-        debug_assert!(self.last_checkpoint_ec() <= self.last_accepted_ec());
+        debug_assert!(self.last_checkpoint_ec(parts.gid) <= self.last_accepted_ec(parts.gid));
         if fs_checkpoint_ec != max_fs_ec_value {
             return Err(AcceptanceError::Freeze(FREEZE_FS_CHECKPOINT_BACKDATE));
         }
-        if fs_checkpoint_ec < self.last_checkpoint_ec() {
+        if fs_checkpoint_ec < self.last_checkpoint_ec(parts.gid) {
             return Err(AcceptanceError::Freeze(FREEZE_FS_CHECKPOINT_MONOTONICITY));
         }
-        if fs_checkpoint_ec > self.last_accepted_ec() {
+        if fs_checkpoint_ec > self.last_accepted_ec(parts.gid) {
             return Err(AcceptanceError::Freeze(FREEZE_FS_CHECKPOINT_BACKDATE));
         }
 
@@ -660,8 +661,8 @@ impl AcceptanceContext {
             entry.last_commit = Some(fs_dev_commit);
             entry.last_ec = fs_ec;
         }
-        self.set_last_checkpoint_ec(fs_checkpoint_ec);
-        self.record_accepted_ec(fs_ec);
+        self.set_last_checkpoint_ec(parts.gid, fs_checkpoint_ec);
+        self.record_accepted_ec(parts.gid, fs_ec);
 
         Ok(AcceptanceOutcome {
             kind: AcceptanceKind::Merge {
@@ -1872,7 +1873,7 @@ mod tests {
             .and_then(|int| u64::try_from(int).ok())
             .expect("missing fs checkpoint ec");
 
-        ctx.set_last_checkpoint_ec(checkpoint_ec.saturating_add(1));
+        ctx.set_last_checkpoint_ec(parts.gid, checkpoint_ec.saturating_add(1));
         expect_merge_freeze(
             &mut ctx,
             &parts,
@@ -1881,6 +1882,31 @@ mod tests {
             heads.clone(),
             FREEZE_FS_CHECKPOINT_MONOTONICITY,
         )
+    }
+
+    #[test]
+    fn merge_anchor_ignores_checkpoint_monotonicity_from_other_groups() -> Result<()> {
+        let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
+        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let checkpoint_ec = header
+            .get(&HDR_FS_CHECKPOINT_EC)
+            .and_then(Value::as_integer)
+            .and_then(|int| u64::try_from(int).ok())
+            .expect("missing fs checkpoint ec");
+
+        ctx.set_last_checkpoint_ec(b"other-group", checkpoint_ec.saturating_add(1));
+        seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
+        let now = ctx.next_accept_instant();
+        let outcome = ctx.accept_anchor_merge(
+            &parts,
+            merge_joiner.we_epoch_id,
+            &header,
+            heads,
+            merge_joiner.mh_note.clone(),
+            now,
+        )?;
+        assert!(matches!(outcome.kind, AcceptanceKind::Merge { .. }));
+        Ok(())
     }
 
     #[test]

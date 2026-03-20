@@ -4939,8 +4939,38 @@ mod tests {
     }
 
     fn acceptance_ctx(fixture: &Fixture) -> AcceptanceContext {
+        #[derive(serde::Serialize)]
+        struct BarrierRootsPreimage<'a>(
+            #[serde(with = "serde_bytes")] &'a [u8; 32],
+            #[serde(with = "serde_bytes")] &'a [u8; 32],
+        );
+
         let mut ctx = AcceptanceContext::with_defaults();
         fixture.configure_bootstrap(&mut ctx);
+        let revoked_since_root = {
+            let mut root = [0u8; 32];
+            root.copy_from_slice(fixture.parts.revoked_since_prev_root);
+            root
+        };
+        let revoked_root = {
+            let mut root = [0u8; 32];
+            root.copy_from_slice(fixture.parts.revoked_root);
+            root
+        };
+        let barrier_roots_hash = hash::h_l(
+            "barrier/roots",
+            &BarrierRootsPreimage(&revoked_since_root, &revoked_root),
+        )
+        .expect("fixture barrier roots hash must be derivable");
+        ctx.insert_barrier_group_state(
+            fixture.parts.gid,
+            BarrierGroupState {
+                barrier_initialized: true,
+                barrier_version: 0,
+                barrier_roots_hash,
+                ..BarrierGroupState::default()
+            },
+        );
         ctx
     }
 

@@ -17,6 +17,8 @@ pub struct BarrierGroupState {
     pub barrier_version: u64,
     pub barrier_roots_hash: [u8; 32],
     pub kem_tree_hash_after: [u8; 32],
+    pub last_checkpoint_ec: u64,
+    pub last_accepted_ec: u64,
     pub srx_root_sw: Option<[u8; 32]>,
     pub n_max: u64,
     pub max_barrier_update_bytes: usize,
@@ -33,6 +35,8 @@ impl Default for BarrierGroupState {
             barrier_version: 0,
             barrier_roots_hash: [0u8; 32],
             kem_tree_hash_after: [0u8; 32],
+            last_checkpoint_ec: 0,
+            last_accepted_ec: 0,
             srx_root_sw: None,
             n_max: 1_024,
             max_barrier_update_bytes: 1_048_576,
@@ -166,6 +170,8 @@ mod tests {
         assert_eq!(state.n_max, 1_024);
         assert!(state.n_max.is_power_of_two());
         assert!(state.max_barrier_update_bytes > 0);
+        assert_eq!(state.last_checkpoint_ec, 0);
+        assert_eq!(state.last_accepted_ec, 0);
         assert_eq!(state.pcs_refresh_min_delta_device_ec, 1);
         assert_eq!(state.pcs_refresh_min_delta_group_ec, 1);
         assert_eq!(state.pcs_refresh_slot_width_ec, 1);

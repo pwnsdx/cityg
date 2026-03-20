@@ -8158,6 +8158,26 @@ fn categorize_error(err: &anyhow::Error, context: &str) -> CategorizedError {
         );
     }
 
+    if err_str.contains("admin token is not configured") {
+        return CategorizedError::new(
+            ErrorCategory::Policy,
+            "Admin authentication required",
+            technical_details.clone(),
+            "This action requires a room admin token. Configure CITYG_CLIENT_ADMIN_TOKEN for the client and the matching admin token on the server, or allow insecure admin only for local development.",
+            true,
+        );
+    }
+
+    if err_str.contains("message auth token is not configured") {
+        return CategorizedError::new(
+            ErrorCategory::Policy,
+            "Message authentication required",
+            technical_details.clone(),
+            "Sending messages requires a configured message auth token. Configure CITYG_CLIENT_MESSAGE_AUTH_TOKEN in the client and the matching message token on the server.",
+            true,
+        );
+    }
+
     if err_str.contains("401") || err_str.contains("unauthorized") {
         return CategorizedError::new(
             ErrorCategory::Policy,
@@ -18346,6 +18366,47 @@ mod tests {
         let result = categorize_error(&err, "send");
         assert!(matches!(result.category, ErrorCategory::Policy));
         assert_eq!(result.user_message, "Authentication failed");
+        assert!(result.can_retry);
+        Ok(())
+    }
+
+    #[test]
+    fn categorize_error_admin_token_not_configured() -> Result<(), Box<dyn std::error::Error>> {
+        let err =
+            anyhow!("request failed with status 401 Unauthorized: admin token is not configured");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Policy));
+        assert_eq!(result.user_message, "Admin authentication required");
+        assert!(
+            result
+                .technical_details
+                .contains("admin token is not configured")
+        );
+        assert!(
+            result
+                .recovery_suggestion
+                .contains("CITYG_CLIENT_ADMIN_TOKEN")
+        );
+        assert!(result.can_retry);
+        Ok(())
+    }
+
+    #[test]
+    fn categorize_error_message_token_not_configured() -> Result<(), Box<dyn std::error::Error>> {
+        let err = anyhow!("server error (401): message auth token is not configured");
+        let result = categorize_error(&err, "send");
+        assert!(matches!(result.category, ErrorCategory::Policy));
+        assert_eq!(result.user_message, "Message authentication required");
+        assert!(
+            result
+                .technical_details
+                .contains("message auth token is not configured")
+        );
+        assert!(
+            result
+                .recovery_suggestion
+                .contains("CITYG_CLIENT_MESSAGE_AUTH_TOKEN")
+        );
         assert!(result.can_retry);
         Ok(())
     }

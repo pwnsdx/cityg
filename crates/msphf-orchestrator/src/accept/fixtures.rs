@@ -570,6 +570,25 @@ pub(crate) fn accept_with_header(
     parts: &AnchorInstanceParts<'_>,
     header: &BTreeMap<u64, Value>,
 ) -> Result<AcceptanceOutcome, AcceptanceError> {
+    if ctx.barrier_group_state(parts.gid).is_none() && !header.contains_key(&HDR_BARRIER_UPDATE) {
+        let barrier_version = header
+            .get(&HDR_BARRIER_VERSION)
+            .and_then(|value| match value {
+                Value::Integer(int) => (*int).try_into().ok(),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let barrier_roots_hash = super::compute_revocation_roots_hash(header)?;
+        ctx.insert_barrier_group_state(
+            parts.gid,
+            BarrierGroupState {
+                barrier_initialized: true,
+                barrier_version,
+                barrier_roots_hash,
+                ..BarrierGroupState::default()
+            },
+        );
+    }
     let we_epoch_id = super::compute_we_epoch_id_from_header(parts, header)?;
     ctx.accept_anchor(parts, we_epoch_id, header)
 }

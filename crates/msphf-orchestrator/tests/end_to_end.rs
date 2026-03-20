@@ -31,8 +31,8 @@ use msphf_orchestrator::hdr::{HDR_BOOTSTRAP_ALG, HDR_BOOTSTRAP_PK, HDR_BOOTSTRAP
 use msphf_orchestrator::mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW};
 use msphf_orchestrator::{
     AcceptanceContext, AcceptanceError, AcceptanceKind, AcceptanceOptions, AnchorInstanceParts,
-    BootstrapPolicy, DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, FsJoinInputs,
-    FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair, SrxInputs, SrxMode,
+    BarrierGroupState, BootstrapPolicy, DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
+    FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair, SrxInputs, SrxMode,
     SrxNonMembershipAnchor, build_bootstrap_digest, extract_epoch_msphf_or, joiner_kgen_merge_or,
     joiner_kgen_or,
 };
@@ -172,6 +172,24 @@ fn slice_to_array32(slice: &[u8]) -> [u8; 32] {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(slice);
     arr
+}
+
+fn barrier_roots_hash_from_parts(parts: &AnchorInstanceParts<'_>) -> [u8; 32] {
+    #[derive(Serialize)]
+    struct BarrierRootsPreimage<'a>(
+        #[serde(with = "serde_bytes")] &'a [u8; 32],
+        #[serde(with = "serde_bytes")] &'a [u8; 32],
+    );
+
+    let revoked_since_root = slice_to_array32(parts.revoked_since_prev_root);
+    let revoked_root = slice_to_array32(parts.revoked_root);
+    match h_l(
+        "barrier/roots",
+        &BarrierRootsPreimage(&revoked_since_root, &revoked_root),
+    ) {
+        Ok(hash) => hash,
+        Err(_) => unreachable!("fixture barrier roots hash must be derivable"),
+    }
 }
 
 fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Option<Vec<RawPathEntry>> {
@@ -827,6 +845,15 @@ impl JoinerFixture {
         ctx.set_bootstrap_policy(BootstrapPolicy::CaMlDsa {
             public_key: self.bootstrap_pk.clone(),
         });
+        ctx.insert_barrier_group_state(
+            self.parts.gid,
+            BarrierGroupState {
+                barrier_initialized: true,
+                barrier_version: 0,
+                barrier_roots_hash: barrier_roots_hash_from_parts(&self.parts),
+                ..BarrierGroupState::default()
+            },
+        );
         ctx
     }
 

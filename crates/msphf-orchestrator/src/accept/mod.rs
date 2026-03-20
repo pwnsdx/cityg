@@ -526,8 +526,6 @@ pub struct AcceptanceContext {
     device_chains: AHashMap<Vec<u8>, AHashMap<Vec<u8>, DeviceChainState>>,
     barrier_groups: AHashMap<Vec<u8>, BarrierGroupState>,
     fs_caps: FsCaps,
-    last_checkpoint_ec: u64,
-    last_accepted_ec: u64,
     srx_root_sw: Option<[u8; 32]>,
     srx_empty_root_sw: [u8; 32],
     srx_migration_root_sw: Option<[u8; 32]>,
@@ -590,8 +588,6 @@ impl AcceptanceContext {
             device_chains: AHashMap::new(),
             barrier_groups: AHashMap::new(),
             fs_caps: FsCaps::default(),
-            last_checkpoint_ec: 0,
-            last_accepted_ec: 0,
             srx_root_sw: Some(srx_empty_root_sw),
             srx_empty_root_sw,
             srx_migration_root_sw: None,
@@ -657,19 +653,24 @@ impl AcceptanceContext {
         self.fs_base_ts
     }
 
-    pub fn set_last_checkpoint_ec(&mut self, ec: u64) {
-        self.last_checkpoint_ec = ec;
-        if self.last_accepted_ec < ec {
-            self.last_accepted_ec = ec;
+    pub fn set_last_checkpoint_ec(&mut self, gid: &[u8], ec: u64) {
+        let state = self.barrier_group_state_entry_mut(gid);
+        state.last_checkpoint_ec = ec;
+        if state.last_accepted_ec < ec {
+            state.last_accepted_ec = ec;
         }
     }
 
-    pub fn last_checkpoint_ec(&self) -> u64 {
-        self.last_checkpoint_ec
+    pub fn last_checkpoint_ec(&self, gid: &[u8]) -> u64 {
+        self.barrier_group_state(gid)
+            .map(|state| state.last_checkpoint_ec)
+            .unwrap_or(0)
     }
 
-    pub fn last_accepted_ec(&self) -> u64 {
-        self.last_accepted_ec
+    pub fn last_accepted_ec(&self, gid: &[u8]) -> u64 {
+        self.barrier_group_state(gid)
+            .map(|state| state.last_accepted_ec)
+            .unwrap_or(0)
     }
 
     pub fn srx_root_sw(&self) -> Option<[u8; 32]> {
@@ -727,14 +728,16 @@ impl AcceptanceContext {
         self.barrier_group_state_entry_mut(gid).srx_root_sw = root;
     }
 
-    pub fn record_accepted_ec(&mut self, ec: u64) {
-        if ec > self.last_accepted_ec {
-            self.last_accepted_ec = ec;
+    pub fn record_accepted_ec(&mut self, gid: &[u8], ec: u64) {
+        let state = self.barrier_group_state_entry_mut(gid);
+        if ec > state.last_accepted_ec {
+            state.last_accepted_ec = ec;
         }
     }
 
     pub(crate) fn verify_device_chain_state(
         &self,
+        gid: &[u8],
         existing: Option<&DeviceChainState>,
         verification: DeviceChainVerification<'_>,
     ) -> Result<(), AcceptanceError> {
@@ -748,7 +751,7 @@ impl AcceptanceContext {
         } = verification;
 
         let group_cap = self
-            .last_accepted_ec()
+            .last_accepted_ec(gid)
             .saturating_add(self.fs_caps.anchor_max);
         if fs_ec > group_cap {
             return Err(AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_GROUP));
@@ -768,7 +771,7 @@ impl AcceptanceContext {
                 return Err(AcceptanceError::Freeze(FREEZE_FS_DEV_CHAIN_BREAK));
             }
             let first_cap = self
-                .last_accepted_ec()
+                .last_accepted_ec(gid)
                 .saturating_add(self.fs_caps.first_device);
             if fs_ec > first_cap {
                 return Err(AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_FIRST));
@@ -986,8 +989,8 @@ impl AcceptanceContext {
         }
     }
 
-    pub fn set_last_accepted_ec(&mut self, ec: u64) {
-        self.last_accepted_ec = ec;
+    pub fn set_last_accepted_ec(&mut self, gid: &[u8], ec: u64) {
+        self.barrier_group_state_entry_mut(gid).last_accepted_ec = ec;
     }
 
     pub fn clear_device_chains(&mut self) {
@@ -3220,15 +3223,16 @@ mod tests {
 
         ctx.set_fs_base_ts(Some(123));
         assert_eq!(ctx.fs_base_ts(), Some(123));
-        ctx.set_last_checkpoint_ec(9);
-        assert_eq!(ctx.last_checkpoint_ec(), 9);
-        assert_eq!(ctx.last_accepted_ec(), 9);
-        ctx.record_accepted_ec(8);
-        assert_eq!(ctx.last_accepted_ec(), 9);
-        ctx.record_accepted_ec(11);
-        assert_eq!(ctx.last_accepted_ec(), 11);
-        ctx.set_last_accepted_ec(4);
-        assert_eq!(ctx.last_accepted_ec(), 4);
+        let gid = b"gid-b";
+        ctx.set_last_checkpoint_ec(gid, 9);
+        assert_eq!(ctx.last_checkpoint_ec(gid), 9);
+        assert_eq!(ctx.last_accepted_ec(gid), 9);
+        ctx.record_accepted_ec(gid, 8);
+        assert_eq!(ctx.last_accepted_ec(gid), 9);
+        ctx.record_accepted_ec(gid, 11);
+        assert_eq!(ctx.last_accepted_ec(gid), 11);
+        ctx.set_last_accepted_ec(gid, 4);
+        assert_eq!(ctx.last_accepted_ec(gid), 4);
 
         let previous_empty = ctx.srx_root_sw().unwrap_or([0u8; 32]);
         let new_empty = [0x55; 32];
@@ -4010,7 +4014,8 @@ mod tests {
         ctx.fs_caps.anchor_max = 5;
         ctx.fs_caps.first_device = 5;
         ctx.fs_caps.device_max = 3;
-        ctx.last_accepted_ec = 100;
+        let gid = b"device-chain-caps";
+        ctx.set_last_accepted_ec(gid, 100);
 
         let pop_pk = vec![0xAA; 1952];
         let prev_commit = [0u8; 32];
@@ -4026,6 +4031,7 @@ mod tests {
         )?;
 
         ctx.verify_device_chain_state(
+            gid,
             None,
             DeviceChainVerification {
                 pop_pk: &pop_pk,
@@ -4038,6 +4044,7 @@ mod tests {
         )?;
 
         let result = ctx.verify_device_chain_state(
+            gid,
             None,
             DeviceChainVerification {
                 pop_pk: &pop_pk,
@@ -4061,7 +4068,7 @@ mod tests {
             last_ec: 110,
             last_pcs_refresh_ec: None,
         };
-        ctx.last_accepted_ec = 110;
+        ctx.set_last_accepted_ec(gid, 110);
         let dev_commit_existing = h_l(
             "fs/dev/chain/v2",
             &FsDevChainV2Preimage {
@@ -4073,6 +4080,7 @@ mod tests {
             },
         )?;
         let result = ctx.verify_device_chain_state(
+            gid,
             Some(&existing),
             DeviceChainVerification {
                 pop_pk: &pop_pk,
@@ -4088,6 +4096,48 @@ mod tests {
         assert!(matches!(
             err,
             AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_DEVICE)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_device_chain_state_scopes_first_device_cap_per_group()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut ctx = AcceptanceContext::with_defaults();
+        ctx.fs_caps.anchor_max = 10;
+        ctx.fs_caps.first_device = 5;
+        ctx.fs_caps.device_max = 3;
+        ctx.set_last_accepted_ec(b"other-group", 100);
+
+        let gid = b"fresh-group";
+        let pop_pk = vec![0xAB; 1952];
+        let prev_commit = [0u8; 32];
+        let dev_commit = h_l(
+            "fs/dev/chain/v2",
+            &FsDevChainV2Preimage {
+                device_pk: &pop_pk,
+                fs_ec: 6,
+                prev_commit: &prev_commit,
+                barrier_version: 0,
+                barrier_update_digest: &[0u8; 32],
+            },
+        )?;
+
+        let result = ctx.verify_device_chain_state(
+            gid,
+            None,
+            DeviceChainVerification {
+                pop_pk: &pop_pk,
+                fs_ec: 6,
+                fs_dev_prev_commit: &prev_commit,
+                fs_dev_commit: &dev_commit,
+                barrier_version: 0,
+                barrier_update_digest: &[0u8; 32],
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(AcceptanceError::Freeze(FREEZE_FS_FORWARD_JUMP_FIRST))
         ));
         Ok(())
     }
@@ -4579,6 +4629,8 @@ mod tests {
                 barrier_version: 8,
                 barrier_roots_hash: [0x51; 32],
                 kem_tree_hash_after: [0u8; 32],
+                last_checkpoint_ec: 0,
+                last_accepted_ec: 0,
                 srx_root_sw: None,
                 n_max: 1_024,
                 last_pcs_refresh_ec: None,
@@ -4628,6 +4680,8 @@ mod tests {
                 barrier_version: 8,
                 barrier_roots_hash: [0x71; 32],
                 kem_tree_hash_after: [0x10; 32],
+                last_checkpoint_ec: 0,
+                last_accepted_ec: 0,
                 srx_root_sw: None,
                 n_max: 1_024,
                 last_pcs_refresh_ec: Some(55),
@@ -7518,7 +7572,8 @@ mod tests {
             matches!(
                 err,
                 AcceptanceError::Freeze(code)
-                    if code == FREEZE_SRX_REQUIRED
+                    if code == FREEZE_BARRIER_UPDATE_REQUIRED_ON_REVOCATION_CHANGE
+                        || code == FREEZE_SRX_REQUIRED
                         || code == FREEZE_HASH_CBOR
                         || code == FREEZE_MSPHF_CRS_INVALID
             ),

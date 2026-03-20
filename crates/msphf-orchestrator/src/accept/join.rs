@@ -186,6 +186,7 @@ impl AcceptanceContext {
 
             let device_key_state = self.device_chain_get(parts.gid, &pop_pk_bytes);
             self.verify_device_chain_state(
+                parts.gid,
                 device_key_state,
                 DeviceChainVerification {
                     pop_pk: &pop_pk_bytes,
@@ -411,6 +412,7 @@ impl AcceptanceContext {
 
         let fresh_device_state = self.device_chain_get(parts.gid, &pop_pk_bytes);
         self.verify_device_chain_state(
+            parts.gid,
             fresh_device_state,
             DeviceChainVerification {
                 pop_pk: &pop_pk_bytes,
@@ -426,7 +428,7 @@ impl AcceptanceContext {
             entry.last_commit = Some(fs_dev_commit);
             entry.last_ec = fs_ec;
         }
-        self.record_accepted_ec(fs_ec);
+        self.record_accepted_ec(parts.gid, fs_ec);
 
         let join_delta_root_arr = {
             let mut arr = [0u8; 32];

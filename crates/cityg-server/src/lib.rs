@@ -354,6 +354,8 @@ impl CityGServer {
             barrier_roots_hash,
             kem_tree_hash_after,
             n_max,
+            last_checkpoint_ec,
+            last_accepted_ec,
             last_pcs_refresh_ec,
             pcs_refresh_min_delta_device_ec,
             pcs_refresh_min_delta_group_ec,
@@ -384,6 +386,8 @@ impl CityGServer {
                 state.barrier_roots_hash,
                 state.kem_tree_hash_after,
                 state.n_max.max(1),
+                state.last_checkpoint_ec,
+                state.last_accepted_ec,
                 state.last_pcs_refresh_ec,
                 state.pcs_refresh_min_delta_device_ec.max(1),
                 state.pcs_refresh_min_delta_group_ec.max(1),
@@ -407,6 +411,8 @@ impl CityGServer {
             .get(gid.as_slice())
             .and_then(|state| state.srx_root_sw);
         ctx_state.n_max = n_max;
+        ctx_state.last_checkpoint_ec = last_checkpoint_ec;
+        ctx_state.last_accepted_ec = last_accepted_ec;
         ctx_state.last_pcs_refresh_ec = last_pcs_refresh_ec;
         ctx_state.pcs_refresh_min_delta_device_ec = pcs_refresh_min_delta_device_ec;
         ctx_state.pcs_refresh_min_delta_group_ec = pcs_refresh_min_delta_group_ec;
@@ -889,6 +895,8 @@ impl CityGServer {
         group.kem_tree_hash_after = barrier_state.kem_tree_hash_after;
         group.srx_root_sw = barrier_state.srx_root_sw;
         group.n_max = barrier_state.n_max.max(1);
+        group.last_checkpoint_ec = barrier_state.last_checkpoint_ec;
+        group.last_accepted_ec = barrier_state.last_accepted_ec;
         group.last_pcs_refresh_ec = barrier_state.last_pcs_refresh_ec;
         group.pcs_refresh_min_delta_device_ec =
             barrier_state.pcs_refresh_min_delta_device_ec.max(1);
@@ -972,6 +980,8 @@ impl CityGServer {
             ctx_state.kem_tree_hash_after = state.kem_tree_hash_after;
             ctx_state.srx_root_sw = state.srx_root_sw;
             ctx_state.n_max = state.n_max.max(1);
+            ctx_state.last_checkpoint_ec = state.last_checkpoint_ec;
+            ctx_state.last_accepted_ec = state.last_accepted_ec;
             ctx_state.last_pcs_refresh_ec = state.last_pcs_refresh_ec;
             ctx_state.pcs_refresh_min_delta_device_ec =
                 state.pcs_refresh_min_delta_device_ec.max(1);
@@ -1033,6 +1043,8 @@ impl CityGServer {
             group.kem_tree_hash_after = room_state.kem_tree_hash_after;
             group.srx_root_sw = room_state.srx_root_sw;
             group.n_max = room_state.n_max.max(1);
+            group.last_checkpoint_ec = room_state.last_checkpoint_ec;
+            group.last_accepted_ec = room_state.last_accepted_ec;
             group.barrier_pk_entries = room_state.barrier_pk_entries.clone();
             group.barrier_public_tree_history = room_state
                 .barrier_public_tree_history
@@ -1072,6 +1084,8 @@ impl CityGServer {
                     barrier_version: group.barrier_version,
                     barrier_roots_hash: group.barrier_roots_hash,
                     kem_tree_hash_after: group.kem_tree_hash_after,
+                    last_checkpoint_ec: group.last_checkpoint_ec,
+                    last_accepted_ec: group.last_accepted_ec,
                     srx_root_sw: group.srx_root_sw,
                     n_max: group.n_max,
                     max_barrier_update_bytes: group.max_barrier_update_bytes.max(1),
@@ -1161,6 +1175,18 @@ impl CityGServer {
                         .get(gid.as_slice())
                         .map(|state| state.n_max.max(1))
                         .unwrap_or(DEFAULT_BARRIER_N_MAX),
+                    last_checkpoint_ec: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.last_checkpoint_ec)
+                        .unwrap_or(0),
+                    last_accepted_ec: self
+                        .roster
+                        .groups
+                        .get(gid.as_slice())
+                        .map(|state| state.last_accepted_ec)
+                        .unwrap_or(0),
                     last_pcs_refresh_ec: self
                         .roster
                         .groups
@@ -2724,7 +2750,12 @@ mod tests {
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use serde::Serialize;
     use std::{
-        borrow::Cow, collections::BTreeMap, fs::File, io::Write, path::Path, time::Duration,
+        borrow::Cow,
+        collections::{BTreeMap, BTreeSet},
+        fs::File,
+        io::Write,
+        path::Path,
+        time::Duration,
     };
     use tempfile::tempdir;
 
@@ -3160,13 +3191,14 @@ mod tests {
     fn accept_refresh_bundle_for_member(
         server: &mut CityGServer,
         generated: &GeneratedMemberBundle,
+        source_bundle: &ClientEpochBundle,
     ) -> Result<ClientEpochBundle, CityGError> {
         let gid = cityg_client::demo::DEMO_GID;
-        let fs_ec = u64_from_header(&generated.bundle.header_map, hdr::HDR_FS_EC)?;
+        let fs_ec = u64_from_header(&source_bundle.header_map, hdr::HDR_FS_EC)?;
         let fs_epoch_commit =
-            bytes32_from_header(&generated.bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT)?;
+            bytes32_from_header(&source_bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT)?;
         let fs_dev_prev_commit =
-            bytes32_from_header(&generated.bundle.header_map, hdr::HDR_FS_DEV_COMMIT)?;
+            bytes32_from_header(&source_bundle.header_map, hdr::HDR_FS_DEV_COMMIT)?;
 
         let ticket = server.build_merge_ticket_for_refresh(&gid, &generated.leaf_id)?;
         let parities = hydrate_parities(
@@ -3186,6 +3218,17 @@ mod tests {
             .fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?
             .pk_entries;
         let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
+        let unresolved_join_leaf_indices: BTreeSet<u32> = join_records
+            .iter()
+            .map(|record| record.leaf_index)
+            .collect();
+        let barrier_update_reason = if unresolved_join_leaf_indices.contains(
+            &super::cover_leaf_index(&generated.leaf_id, ticket.n_max.max(1)),
+        ) {
+            2u64
+        } else {
+            1u64
+        };
         let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
         apply_join_records_to_snapshot(
             snapshot_pre.as_mut_slice(),
@@ -3219,7 +3262,7 @@ mod tests {
         header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(barrier_update));
         header.insert(
             hdr::HDR_BARRIER_UPDATE_REASON,
-            Value::Integer(Integer::from(1u64)),
+            Value::Integer(Integer::from(barrier_update_reason)),
         );
 
         let parts = AnchorInstanceParts {
@@ -3471,6 +3514,8 @@ mod tests {
             state.kem_tree_hash_after = persisted_hash;
             state.srx_root_sw = Some([0xD7; 32]);
             state.n_max = 4;
+            state.last_checkpoint_ec = 66;
+            state.last_accepted_ec = 88;
             state.barrier_pk_entries = persisted_entries.clone();
             state.last_pcs_refresh_ec = Some(77);
             state.pcs_refresh_min_delta_device_ec = 3;
@@ -3504,6 +3549,8 @@ mod tests {
         assert_eq!(state.kem_tree_hash_after, persisted_hash);
         assert_eq!(state.srx_root_sw, Some([0xD7; 32]));
         assert_eq!(state.n_max, 4);
+        assert_eq!(state.last_checkpoint_ec, 66);
+        assert_eq!(state.last_accepted_ec, 88);
         assert_eq!(state.barrier_pk_entries, persisted_entries);
         assert_eq!(state.last_pcs_refresh_ec, Some(77));
         assert_eq!(state.pcs_refresh_min_delta_device_ec, 3);
@@ -3545,6 +3592,22 @@ mod tests {
                 .expect("recovered barrier group state must exist")
                 .max_barrier_update_bytes,
             7777
+        );
+        assert_eq!(
+            server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .expect("recovered barrier group state must exist")
+                .last_checkpoint_ec,
+            66
+        );
+        assert_eq!(
+            server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .expect("recovered barrier group state must exist")
+                .last_accepted_ec,
+            88
         );
         assert_eq!(
             server
@@ -3606,7 +3669,8 @@ mod tests {
                 historical_entries = group.barrier_pk_entries.clone();
             }
 
-            let _accepted_refresh = accept_refresh_bundle_for_member(&mut server, &generated)?;
+            let _accepted_refresh =
+                accept_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
             {
                 let group = server
                     .roster
@@ -3854,6 +3918,8 @@ mod tests {
                 barrier_version: 5,
                 barrier_roots_hash: [0x55; 32],
                 kem_tree_hash_after: current_hash,
+                last_checkpoint_ec: 21,
+                last_accepted_ec: 34,
                 srx_root_sw: Some([0x66; 32]),
                 barrier_pk_entries: pk_entries.clone(),
                 barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
@@ -3892,6 +3958,8 @@ mod tests {
             .ok_or(CityGError::InvalidInput("missing restored ctx state"))?;
         assert_eq!(ctx_state.kem_tree_hash_after, current_hash);
         assert_eq!(ctx_state.n_max, 2);
+        assert_eq!(ctx_state.last_checkpoint_ec, 21);
+        assert_eq!(ctx_state.last_accepted_ec, 34);
         assert_eq!(ctx_state.max_barrier_update_bytes, 1);
         Ok(())
     }
@@ -3915,6 +3983,8 @@ mod tests {
                 barrier_version: 8,
                 barrier_roots_hash: [0x88; 32],
                 kem_tree_hash_after: current_hash,
+                last_checkpoint_ec: 55,
+                last_accepted_ec: 89,
                 srx_root_sw: None,
                 barrier_pk_entries: current_entries.clone(),
                 barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
@@ -3951,6 +4021,8 @@ mod tests {
         assert_eq!(group.pcs_refresh_min_delta_group_ec, 4);
         assert_eq!(group.pcs_refresh_slot_width_ec, 5);
         assert_eq!(group.max_barrier_update_bytes, 99);
+        assert_eq!(group.last_checkpoint_ec, 55);
+        assert_eq!(group.last_accepted_ec, 89);
         Ok(())
     }
 
@@ -4766,6 +4838,7 @@ mod tests {
         let revoked_root = [0u8; 32];
         let revocation_roots_hash =
             super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
+        state.barrier_roots_hash = revocation_roots_hash;
         let barrier_update = super::BarrierUpdateWire(
             "barrier-v1".to_string(),
             2,
@@ -4781,6 +4854,10 @@ mod tests {
         header.insert(
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(2u64)),
         );
         header.insert(112, Value::Bytes(revoked_since.to_vec()));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
@@ -5077,11 +5154,16 @@ mod tests {
             kem_after.to_vec(),
             super::to_cbor_vec(&cover_payload)?,
         );
+        state.barrier_roots_hash = super::compute_revocation_roots_hash(&[0u8; 32], &[0u8; 32])?;
 
         let mut header = BTreeMap::new();
         header.insert(
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(2u64)),
         );
         header.insert(112, Value::Bytes(vec![0u8; 32]));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(vec![0u8; 32]));
@@ -5148,6 +5230,7 @@ mod tests {
         let revoked_root = [0u8; 32];
         let revocation_roots_hash =
             super::compute_revocation_roots_hash(&revoked_since, &revoked_root)?;
+        state.barrier_roots_hash = revocation_roots_hash;
         let cover_payload = super::KemTreeCoverPayloadWire(
             u64::from(updater_leaf),
             path_nodes,
@@ -5179,6 +5262,10 @@ mod tests {
         header.insert(
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(2u64)),
         );
         header.insert(112, Value::Bytes(revoked_since.to_vec()));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
@@ -5288,6 +5375,10 @@ mod tests {
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&barrier_update)?),
         );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(2u64)),
+        );
         header.insert(112, Value::Bytes(revoked_since.to_vec()));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
         header.insert(hdr::HDR_BARRIER_LEAF_PK, Value::Bytes(join_ek));
@@ -5384,6 +5475,10 @@ mod tests {
         header.insert(
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(2u64)),
         );
         header.insert(112, Value::Bytes(vec![0u8; 32]));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(vec![0u8; 32]));
@@ -5612,6 +5707,10 @@ mod tests {
         header.insert(
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
         );
         header.insert(112, Value::Bytes(revoked_since.to_vec()));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
@@ -6120,6 +6219,10 @@ mod tests {
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&before_bad)?),
         );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
+        );
         let err = super::validate_barrier_update_against_roster(
             &state,
             &header,
@@ -6154,6 +6257,10 @@ mod tests {
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&roots_bad)?),
         );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
+        );
         let err = super::validate_barrier_update_against_roster(
             &state,
             &header,
@@ -6186,6 +6293,10 @@ mod tests {
         header.insert(
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&valid_update)?),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
         );
         let validation = super::validate_barrier_update_against_roster(
             &state,
@@ -6237,6 +6348,10 @@ mod tests {
         header.insert(
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&after_bad)?),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
         );
         let err = super::validate_barrier_update_against_roster(
             &state,
@@ -6304,6 +6419,10 @@ mod tests {
         singleton_header.insert(
             hdr::HDR_BARRIER_UPDATE,
             Value::Bytes(super::to_cbor_vec(&singleton_update)?),
+        );
+        singleton_header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
         );
         singleton_header.insert(112, Value::Bytes(vec![0u8; 32]));
         singleton_header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(vec![0u8; 32]));
@@ -6689,7 +6808,10 @@ mod tests {
 
             let mut server = demo_server_with_journal(&journal_path);
             server.accept_epoch(&generated.bundle)?;
-            let accepted_bundle = accept_refresh_bundle_for_member(&mut server, &generated)?;
+            let accepted_join_finalize =
+                accept_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+            let accepted_bundle =
+                accept_refresh_bundle_for_member(&mut server, &generated, &accepted_join_finalize)?;
 
             expected_refresh_ec = u64_from_header(&accepted_bundle.header_map, hdr::HDR_FS_EC)?;
             expected_group_state = server
@@ -7170,7 +7292,8 @@ mod tests {
             )
         };
 
-        let _accepted_refresh = accept_refresh_bundle_for_member(&mut server, &generated)?;
+        let _accepted_refresh =
+            accept_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
 
         let current_hash = server
             .roster
@@ -7658,6 +7781,8 @@ struct GroupState {
     barrier_version: u64,
     barrier_roots_hash: [u8; 32],
     kem_tree_hash_after: [u8; 32],
+    last_checkpoint_ec: u64,
+    last_accepted_ec: u64,
     srx_root_sw: Option<[u8; 32]>,
     n_max: u64,
     last_pcs_refresh_ec: Option<u64>,
@@ -7686,6 +7811,8 @@ impl Default for GroupState {
             barrier_version: 0,
             barrier_roots_hash: [0u8; 32],
             kem_tree_hash_after: [0u8; 32],
+            last_checkpoint_ec: 0,
+            last_accepted_ec: 0,
             srx_root_sw: None,
             n_max: DEFAULT_BARRIER_N_MAX,
             last_pcs_refresh_ec: None,
@@ -7778,6 +7905,10 @@ struct PersistedKbroadRoomState {
     barrier_roots_hash: [u8; 32],
     #[serde(default)]
     kem_tree_hash_after: [u8; 32],
+    #[serde(default)]
+    last_checkpoint_ec: u64,
+    #[serde(default)]
+    last_accepted_ec: u64,
     #[serde(default)]
     srx_root_sw: Option<[u8; 32]>,
     #[serde(default)]
