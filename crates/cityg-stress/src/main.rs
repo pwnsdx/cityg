@@ -44,7 +44,7 @@ const DEFAULT_MESSAGE_TOKEN: &str = "join-leave-message-token";
 const DEFAULT_WINDOW_TTL_SECS: u64 = 120;
 const DEFAULT_MAX_CONCURRENT_HEADS: u64 = 4;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
-const DEFAULT_SERVER_READY_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_SERVER_READY_TIMEOUT_SECS: u64 = 180;
 const RESTART_RETRY_ATTEMPTS: usize = 3;
 const RESTART_SETTLE_GRACE: Duration = Duration::from_secs(2);
 

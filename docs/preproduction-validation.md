@@ -221,6 +221,7 @@ Notes:
 - use `--plain` when running in CI or when stdout is not a real terminal
 - `--message-burst-count` and `--message-burst-interval-ms` turn each room round into a real message storm instead of a single dummy payload
 - pass `--api-bin` and `--join-leave-bin` when you want to pin the run to explicitly-built candidate binaries
+- with persisted state and restart-chaos, prefer the default `--server-ready-timeout-secs 180` or a larger override; replay on large journals can exceed `120s`
 - the artifact directory is printed at the end of the run and contains `server.log`, worker logs, `summary.txt`, initial/final observability snapshots, and per-round observability snapshots
 
 High-chatter variant:
