@@ -570,6 +570,14 @@ fn log_fingerprints(session: &Session) {
     );
 }
 
+fn select_pivot_parity(parities: &[PivotParity]) -> Option<&PivotParity> {
+    parities.iter().max_by(|a, b| {
+        a.accept_seq
+            .cmp(&b.accept_seq)
+            .then_with(|| b.xk_hash.cmp(&a.xk_hash))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliOptions {
     server_url: String,
@@ -1068,7 +1076,7 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
             ticket.fs_epoch_base_ts,
         ),
     };
-    Ok(Session {
+    let session = Session {
         server_url: server_url.to_string(),
         room_id: room_id.to_string(),
         gid,
@@ -1088,7 +1096,357 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         seed_bundle_commit,
         fs_fingerprint,
         stored_header_map: stored.header_map.clone(),
-    })
+    };
+    perform_join_finalize(session).await
+}
+
+async fn perform_join_finalize(mut session: Session) -> Result<Session> {
+    let client = new_api_client(&session.server_url);
+    let mut forward_state = session.forward_state.clone();
+    let mut kbroad_rotation_attempted = false;
+    let mut retry_attempt = 0u32;
+    let ticket = loop {
+        match client
+            .merge_ticket_refresh(&session.room_id, &session.leaf_id)
+            .await
+        {
+            Ok(ticket) => break ticket,
+            Err(err) => {
+                if let ApiClientError::HttpStatus {
+                    status,
+                    message,
+                    freeze_code,
+                    ..
+                } = &err
+                {
+                    if status.is_server_error()
+                        && message.contains("kbroad rotation required")
+                        && !kbroad_rotation_attempted
+                    {
+                        kbroad_rotation_attempted = true;
+                        rotate_room_kbroad_with_fresh_key(&client, &session.room_id)
+                            .await
+                            .context("rotate KBROAD before join finalize")?;
+                        continue;
+                    }
+
+                    if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                        && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
+                    {
+                        let delay = ticket_retry_delay(retry_attempt);
+                        retry_attempt = retry_attempt.saturating_add(1);
+                        warn!(
+                            attempt = retry_attempt,
+                            delay_ms = delay.as_millis() as u64,
+                            status = status.as_u16(),
+                            message = %message,
+                            "merge_ticket_refresh race/concurrency rejection during join finalize; retrying"
+                        );
+                        sleep(delay).await;
+                        continue;
+                    }
+                }
+
+                return Err(err).context("fetch merge ticket for join finalize");
+            }
+        }
+    };
+
+    if !ticket.srx_cbor.is_empty() {
+        return Err(anyhow!(
+            "join finalize merge ticket unexpectedly contained SRX payload"
+        ));
+    }
+
+    let parities = hydrate_parities(
+        &ticket.parities,
+        session.fs_ec,
+        session.fs_epoch_commit,
+        session.fs_dev_prev_commit,
+    );
+    let pivot = select_pivot_parity(&parities)
+        .ok_or_else(|| anyhow!("merge ticket missing pivot parity entries for join finalize"))?;
+
+    let mut header = BTreeMap::new();
+    header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+    header.insert(
+        hdr::HDR_KBROAD_PUB,
+        Value::Bytes(ticket.kbroad_public.clone()),
+    );
+
+    let cat = bytes32("cat", &ticket.cat)?;
+    let pox_r_commit = bytes32("pox_r_commit", &ticket.pox_r_commit)?;
+    let parent_root_arr = bytes32("parent_root", &ticket.parent_root)?;
+    let join_delta_root_arr = bytes32("join_delta_root", &ticket.join_delta_root)?;
+    let revoked_since_root_arr = bytes32("revoked_since_root", &ticket.revoked_since_root)?;
+    let revoked_root_arr = bytes32("revoked_root", &ticket.revoked_root)?;
+    let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
+    let snapshot_hash = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
+    let barrier_n_max = if ticket.n_max == 0 {
+        DEFAULT_BARRIER_N_MAX
+    } else {
+        ticket.n_max
+    };
+    if ticket.cover_leaf_index >= barrier_n_max {
+        return Err(anyhow!(
+            "cover_leaf_index out of range for barrier tree: {} >= {}",
+            ticket.cover_leaf_index,
+            barrier_n_max
+        ));
+    }
+    let revocation_roots_hash =
+        compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
+    let committed_revocation_roots_hash =
+        compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+    let barrier_tree_snapshot = client
+        .barrier_fetch_public_tree(&session.room_id, &snapshot_hash)
+        .await
+        .context("fetch barrier public tree snapshot for join finalize")?;
+    if barrier_tree_snapshot.n_max != barrier_n_max {
+        return Err(anyhow!(
+            "barrier tree snapshot n_max mismatch: expected {barrier_n_max}, got {}",
+            barrier_tree_snapshot.n_max
+        ));
+    }
+    let join_records = client
+        .barrier_resolve_joins_since(&session.room_id, ticket.barrier_version)
+        .await
+        .context("resolve barrier joins since previous version for join finalize")?;
+    let committed_revoked_indices = client
+        .barrier_resolve_revoked_leaves(&session.room_id, &committed_revocation_roots_hash)
+        .await
+        .context("resolve committed barrier revoked leaves for join finalize")?;
+    let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
+    apply_join_set_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        barrier_n_max,
+        join_records.as_slice(),
+    )?;
+    apply_revoked_set_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        barrier_n_max,
+        committed_revoked_indices.as_slice(),
+    )?;
+    let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
+    let next_barrier_version = ticket.barrier_version.saturating_add(1);
+    let barrier_update = build_barrier_update_bytes(
+        barrier_n_max,
+        ticket.cover_leaf_index,
+        next_barrier_version,
+        ticket.barrier_version,
+        revocation_roots_hash,
+        kem_tree_hash_before,
+        snapshot_pre.as_slice(),
+    )?;
+    header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(barrier_update));
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE_REASON,
+        Value::Integer(Integer::from(2u64)),
+    );
+
+    let parts = AnchorInstanceParts {
+        gid: &session.gid,
+        cat: cat.as_slice(),
+        tswe_salt_hash: tswe_salt_hash_arr.as_slice(),
+        parent_root: parent_root_arr.as_slice(),
+        join_delta_root: join_delta_root_arr.as_slice(),
+        revoked_since_prev_root: revoked_since_root_arr.as_slice(),
+        revoked_root: revoked_root_arr.as_slice(),
+        pox_r_commit: Some(pox_r_commit.as_slice()),
+    };
+
+    let witness_bytes = if ticket.witness_cbor.is_empty() {
+        None
+    } else {
+        Some(ticket.witness_cbor.as_slice())
+    };
+
+    let params = OrchestrationParams {
+        msphf_crs_id: ticket.msphf_crs_id.as_str(),
+        params_id: ticket.msphf_params_id.as_str(),
+        srx: None,
+        srx_mode: SrxMode::Complete,
+        pop_keys: Some(PopKeypair {
+            algorithm: "ML-DSA-65",
+            public_key: session.pop_public_key.as_slice(),
+            secret_key: session.pop_secret.as_ref(),
+        }),
+        leaf_id_mode: LeafIdMode::PerGroup,
+        proof_mode: ticket.proof_mode.as_str(),
+        vrf_id: ticket.vrf_id.as_str(),
+        policy_version: ticket.policy_version.as_str(),
+        vrf_secret_key: Some(session.vrf_secret_key.as_slice()),
+        vrf_public_key: Some(session.vrf_public_key.as_slice()),
+        fs_policy_version: ticket.fs_policy_version.as_str(),
+        fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+        barrier_version: next_barrier_version,
+        fs_join: FsJoinInputs {
+            fs_ec: session.fs_ec,
+            fs_epoch_commit: session.fs_epoch_commit,
+            fs_dev_prev_commit: session.fs_dev_prev_commit,
+        },
+        fs_merge: FsMergeInputs::default(),
+    };
+
+    let mut bundle = CityGClient::generate_merge_with_forward_state(
+        header,
+        parts,
+        params,
+        Some(&mut forward_state),
+        &parities,
+        None,
+        witness_bytes,
+    )
+    .context("generate join finalize bundle")?;
+    let pristine_bundle = bundle.clone();
+    strip_srx_and_rollup(&mut bundle.header_map);
+    apply_pivot_alignment(&mut bundle.header_map, pivot);
+
+    let computed_anchor_ctx =
+        build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
+    let seed_ctx_hash =
+        compute_seed_ctx_hash(&computed_anchor_ctx).context("compute_seed_ctx_hash")?;
+    let seed_commit = compute_seed_commit(
+        &computed_anchor_ctx,
+        &SeedCommitFields {
+            gid: &session.gid,
+            cat: cat.as_slice(),
+            we_epoch_id: bundle.we_epoch_id,
+        },
+    )
+    .context("compute_seed_commit")?;
+    let seed_bundle_commit = compute_seed_bundle_commit(
+        &computed_anchor_ctx,
+        &bundle.hp_binding.rho_commit,
+        &session.gid,
+        cat.as_slice(),
+        &parent_root_arr,
+    )
+    .context("compute_seed_bundle_commit")?;
+    let derived_we_epoch_id = derive_we_epoch_id(&session.gid, &parent_root_arr, &seed_ctx_hash)
+        .context("derive we_epoch_id")?;
+
+    bundle.anchor.anchor_hdr_ctx = computed_anchor_ctx;
+    bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
+    bundle.hp_binding.seed_commit = seed_commit;
+    bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
+    bundle
+        .header_map
+        .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
+    bundle.header_map.insert(
+        hdr::HDR_RHO_COMMIT,
+        Value::Bytes(bundle.hp_binding.rho_commit.to_vec()),
+    );
+    bundle.header_map.insert(
+        hdr::HDR_SEED_BUNDLE_COMMIT,
+        Value::Bytes(seed_bundle_commit.to_vec()),
+    );
+    bundle.we_epoch_id = derived_we_epoch_id;
+
+    if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
+        bundle
+            .header_map
+            .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
+    }
+    let stored_commit = extract_bytes(&bundle.header_map, hdr::HDR_PROOFS_COMMIT)
+        .context("join finalize bundle missing proofs_commit")?;
+    let recomputed_commit =
+        recompute_proofs_commit(&bundle.header_map).context("recompute proofs commit")?;
+    if stored_commit.as_slice() != recomputed_commit {
+        bundle.header_map.insert(
+            hdr::HDR_PROOFS_COMMIT,
+            Value::Bytes(recomputed_commit.to_vec()),
+        );
+    }
+
+    match client.refresh_pivot(&bundle).await {
+        Ok(_) => {}
+        Err(ApiClientError::HttpStatus { message, .. })
+            if message.contains("pivot head missing")
+                || message.contains("refresh payload diverges from stored parity") => {}
+        Err(err) => return Err(err).context("refresh pivot parity for join finalize"),
+    }
+
+    match client.accept_epoch_bundle(&bundle).await {
+        Ok(_) => {}
+        Err(ApiClientError::HttpStatus {
+            message,
+            freeze_reason,
+            ..
+        }) if message.contains("mh_heads_invalid")
+            || freeze_reason.as_deref() == Some("mh_heads_invalid") =>
+        {
+            let _ = client.refresh_pivot(&pristine_bundle).await;
+            client
+                .accept_epoch_bundle(&pristine_bundle)
+                .await
+                .context("server rejected pristine join finalize bundle")?;
+            bundle = pristine_bundle;
+        }
+        Err(ApiClientError::HttpStatus {
+            status,
+            message,
+            freeze_code,
+            freeze_reason,
+            ..
+        }) => {
+            let detail = describe_http_failure(
+                status.as_str(),
+                &message,
+                freeze_code,
+                freeze_reason.as_deref(),
+            );
+            return Err(anyhow!(detail));
+        }
+        Err(err) => return Err(err.into()),
+    }
+
+    let fs_ec = match bundle.header_map.get(&hdr::HDR_FS_EC) {
+        Some(Value::Integer(int)) => (*int)
+            .try_into()
+            .map_err(|_| anyhow!("join finalize bundle fs_ec out of range"))?,
+        Some(_) => return Err(anyhow!("join finalize bundle fs_ec has invalid type")),
+        None => session.fs_ec,
+    };
+    let fs_epoch_commit = bytes32(
+        "fs_epoch_commit",
+        bundle
+            .header_map
+            .get(&hdr::HDR_FS_EPOCH_COMMIT)
+            .and_then(Value::as_bytes)
+            .ok_or(anyhow!("join finalize bundle missing fs_epoch_commit"))?,
+    )?;
+    let fs_dev_prev_commit = bytes32(
+        "fs_dev_prev_commit",
+        bundle
+            .header_map
+            .get(&hdr::HDR_FS_DEV_COMMIT)
+            .or_else(|| bundle.header_map.get(&hdr::HDR_FS_DEV_PREV_COMMIT))
+            .and_then(Value::as_bytes)
+            .ok_or(anyhow!("join finalize bundle missing fs_dev commit"))?,
+    )?;
+
+    forward_state.set_last_we_epoch_id(bundle.we_epoch_id);
+    forward_state.set_epoch_base_ts(ticket.fs_epoch_base_ts);
+    session.forward_state = forward_state;
+    session.fs_ec = fs_ec;
+    session.fs_epoch_commit = fs_epoch_commit;
+    session.fs_dev_prev_commit = fs_dev_prev_commit;
+    session.we_epoch_id = bundle.we_epoch_id;
+    session.anchor_hdr_ctx = bundle.anchor.anchor_hdr_ctx.clone();
+    session.seed_ctx_hash = bundle.hp_binding.seed_ctx_hash;
+    session.seed_commit = bundle.hp_binding.seed_commit;
+    session.seed_bundle_commit = bundle.hp_binding.seed_bundle_commit;
+    session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
+        derive_fs_fingerprint_from_fields(
+            ticket.fs_policy_version.as_str(),
+            session.fs_ec,
+            &session.fs_epoch_commit,
+            ticket.fs_epoch_base_ts,
+        )
+    });
+    session.stored_header_map = bundle.header_map.clone();
+    Ok(session)
 }
 
 async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
@@ -3691,6 +4049,75 @@ mod tests {
         let after_bob_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_bob_leave.total_count, 0);
         assert!(after_bob_leave.members.is_empty());
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_bootstrapped_room_returns_join_finalize_head() -> Result<()> {
+        let port = next_free_local_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex::encode([0x92u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        let alice = perform_join(&server_url, &room_id, "alice").await?;
+        let stored = new_api_client(&server_url)
+            .get_bundle(&alice.we_epoch_id)
+            .await
+            .context("fetch stored join-finalize bundle")?;
+        let stored =
+            ClientEpochBundle::from_cbor(&stored.bundle_cbor).context("decode stored bundle")?;
+        let reason: u64 = stored
+            .header_map
+            .get(&hdr::HDR_BARRIER_UPDATE_REASON)
+            .and_then(|value| match value {
+                Value::Integer(int) => (*int).try_into().ok(),
+                _ => None,
+            })
+            .ok_or(anyhow!(
+                "stored join-finalize bundle missing barrier_update_reason"
+            ))?;
+        assert_eq!(reason, 2);
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_second_member_returns_join_finalize_head() -> Result<()> {
+        let port = next_free_local_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex::encode([0x93u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        let _alice = perform_join(&server_url, &room_id, "alice").await?;
+        let bob = perform_join(&server_url, &room_id, "bob").await?;
+        let stored = new_api_client(&server_url)
+            .get_bundle(&bob.we_epoch_id)
+            .await
+            .context("fetch stored second join-finalize bundle")?;
+        let stored =
+            ClientEpochBundle::from_cbor(&stored.bundle_cbor).context("decode stored bundle")?;
+        let reason: u64 = stored
+            .header_map
+            .get(&hdr::HDR_BARRIER_UPDATE_REASON)
+            .and_then(|value| match value {
+                Value::Integer(int) => (*int).try_into().ok(),
+                _ => None,
+            })
+            .ok_or(anyhow!(
+                "stored second join-finalize bundle missing barrier_update_reason"
+            ))?;
+        assert_eq!(reason, 2);
 
         handle.abort();
         let _ = handle.await;
