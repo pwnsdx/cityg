@@ -182,7 +182,7 @@ S4. ANCHOR TYPES, HEADER-KEY REGISTRY, AND PRESENCE MATRIX (NORMATIVE)
 S4.1 Anchor types (normative)
 This profile defines three anchor types:
 * JOIN anchor: introduces a new device leaf and MUST carry barrier_leaf_pk (key 177).
-* MERGE anchor: carries merge/checkpoint state and MAY carry barrier_update (key 175) with barrier_update_reason (key 178); see predicates in S10.4, S10.4A, and S10.4B.
+* MERGE anchor: carries merge/checkpoint state and MAY carry barrier_update (key 175) with barrier_update_reason (key 178); see predicates in S10.4, S10.4A, S10.4B, and S10.4C.
 * REGULAR anchor: any anchor that is neither JOIN nor MERGE.
 
 Anchor type determination (normative):
@@ -223,7 +223,7 @@ S4.2.2 Keys REQUIRED on JOIN anchors and FORBIDDEN on REGULAR/MERGE (join-only)
 Key 177: barrier_leaf_pk (bstr; ML-KEM ek; MUST be 1184 bytes)
 
 S4.2.3 Keys PERMITTED only on MERGE anchors and FORBIDDEN on JOIN/REGULAR (merge-only)
-Key 175: barrier_update (bstr; optional; only when permitted by S10.4, S10.4A, and S11)
+Key 175: barrier_update (bstr; optional; only when permitted by S10.4, S10.4A, S10.4B, S10.4C, and S11)
 Key 178: barrier_update_reason (uint; required iff key 175 is present)
 
 S4.2.4 Merge/checkpoint keys (merge-only set)
@@ -242,7 +242,7 @@ S4.3 Presence matrix summary (normative)
 * JOIN: MUST include S4.2.1 + S4.2.2; MUST NOT include any of S4.2.3/S4.2.4/S4.2.5.
 * REGULAR: MUST include S4.2.1; MUST NOT include any of S4.2.2/S4.2.3/S4.2.4/S4.2.5.
 * MERGE: MUST include S4.2.1; MUST include merge/checkpoint keys as required by merge profile;
-  MAY include S4.2.3 (subject to S10.4/S10.4A/S10.4B/S11) and MAY include S4.2.5 (subject to S9.3);
+  MAY include S4.2.3 (subject to S10.4/S10.4A/S10.4B/S10.4C/S11) and MAY include S4.2.5 (subject to S9.3);
   MUST NOT include S4.2.2.
 Additional presence rule (normative):
 * key 178 MUST be present if and only if key 175 is present.
@@ -555,6 +555,7 @@ Define barrier_update_reason:
 * If header[175] is present: header[178] MUST be present and MUST be one of:
   * 0 = revocation_or_bootstrap
   * 1 = pcs_refresh
+  * 2 = join_finalize
 
 Genesis (barrier_initialized == false):
 * Reject JOIN or REGULAR with 960.10.
@@ -586,13 +587,14 @@ Clarification (normative):
 If GroupState.barrier_initialized == true AND RRH == GroupState.barrier_roots_hash, then:
 * JOIN and REGULAR anchors proceed under S10.4.
 * MERGE anchors MAY omit header[175] and proceed under S10.4 and S11.12 gating.
-* If MERGE carries header[175], proactive barrier behavior is controlled by S10.4B.
+* If MERGE carries header[175], same-RRH proactive barrier behavior is controlled by S10.4B and S10.4C.
 
 S10.4B Proactive PCS refresh gating (time-blind; normative)
 This section applies only when:
 * GroupState.barrier_initialized == true
 * RRH == GroupState.barrier_roots_hash
 * header[175] is present
+* the server-observable S10.4C JoinSet predicate does NOT hold for the author
 
 Then:
 * header[178] MUST equal 1 (pcs_refresh), else reject 960.5.
@@ -615,6 +617,23 @@ Rate-limit checks (MUST):
 
 Client behavior note:
 * Clients SHOULD back off and retry with jitter after 960.12 to avoid synchronized refresh storms.
+
+S10.4C Join-finalize gating (normative)
+This section applies only when:
+* GroupState.barrier_initialized == true
+* RRH == GroupState.barrier_roots_hash
+* header[175] is present
+* the client-side eligibility preconditions of S11.11.1 / S12.3 hold
+* the server-observable JoinSet predicate below holds for the author
+
+Then:
+* header[178] MUST equal 2 (join_finalize), else reject 960.5.
+* The anchor MUST be a MERGE anchor.
+* header[176] MUST equal BV + 1.
+* Revocations MUST NOT be pending for this update; if RRH != GroupState.barrier_roots_hash, reject 960.13.
+* Let JoinSet := ResolveJoinsSince(prev_barrier_version), where prev_barrier_version is the value carried in the BarrierUpdate under header[175].
+* The author's updater leaf MUST appear in JoinSet for that prev_barrier_version, else reject 960.5.
+* join_finalize is exempt from S10.4B PCS rate-limit checks and MUST NOT be treated as pcs_refresh for S6.6.
 
 S10.5 Proof verification order (normative)
 * Verify proofs_commit.
@@ -890,8 +909,8 @@ S11.11 Active-server resistance (normative; 960.9 wired)
 
 S11.11.1 Updater MUST authenticate snapshot_base (CRITICAL)
 Before constructing any barrier_update, the updater MUST:
-* already hold FULL-verified current barrier state at its locally stored current `barrier_version`.
-* A client whose current `kem_tree_hash_after` was learned only via recover-only processing MUST first re-establish FULL verification at the current version before originating any barrier_update or pcs_refresh merge.
+* already hold FULL-verified current barrier state at its locally stored current `barrier_version`, OR satisfy the join_finalize bootstrap exception below.
+* A client whose current `kem_tree_hash_after` was learned only via recover-only processing MUST first re-establish FULL verification at the current version before originating any `barrier_update` with reason 0 or 1, acting as updater generally, or originating any pcs_refresh merge. This rule does not by itself forbid a just-joined client from originating reason 2 under the join_finalize bootstrap exception below.
 * Let H_prev := updater's locally stored kem_tree_hash_after for current barrier_version.
 * Genesis special case:
   * if barrier_initialized == false (genesis updater), H_prev is the TreeHash(root_node) of the all-blank tree of size N_max.
@@ -900,6 +919,13 @@ Before constructing any barrier_update, the updater MUST:
   * fetch pk_entries_prev := FetchBarrierPublicTree(H_prev).
   * Compute TreeHash(root_node) over pk_entries_prev per S11.4 and require it equals H_prev.
   * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
+Join-finalize bootstrap exception (normative):
+* A newly joined client with `pending_barrier_recovery == true` MAY originate exactly reason 2 (`join_finalize`) while pending if, and only if, it has:
+  * the S12.2 provisioned current barrier metadata for the current committed state,
+  * authenticated access to S3.3.A/B/C at that same current `barrier_version`,
+  * successfully performed the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 for that current committed state.
+* Satisfying the bullets above establishes FULL public-state verification sufficient for join_finalize eligibility even though the client has not yet derived the current `K_barrier`.
+* A pending joiner admitted under this exception MUST still NOT originate reason 0 or reason 1 while `pending_barrier_recovery == true`.
 If this check fails, the updater MUST abort barrier_update creation, MUST NOT sign/emit an anchor containing barrier_update, and MUST surface 960.9.
 
 S11.11.2 FULL clients MUST chain-check (CRITICAL)
@@ -925,6 +951,7 @@ A client that cannot fetch/verify snapshot_base MAY still attempt recovery (uniq
 * treat barrier_update as untrusted for public-tree correctness beyond its local recovery.
 Additional restriction (normative):
 * A recover-only client MUST NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges until it has obtained FULL verification of the current public tree at the current `barrier_version`.
+* Exception: a newly joined client with `pending_barrier_recovery == true` MAY originate exactly reason 2 (`join_finalize`) after satisfying the S11.11.1 join_finalize bootstrap exception. Until then, and for all other reasons, the restriction above remains absolute.
 
 S11.12 Server-side validation of barrier_update (normative; MUST)
 
@@ -933,10 +960,11 @@ If header[175] present, the server MUST execute steps A through I in order:
 
 A) Gating
 * If header[178] is absent: reject 960.7.
-* If header[178] is present and header[178] is not in {0,1}: reject 960.7.
-* If barrier_initialized == true and pending_revocations == false:
-  * If header[178] != 1: reject 960.5 barrier_proactive_forbidden.
-  * If header[178] == 1, server MUST enforce S10.4B policy checks; on failure reject 960.12.
+* If header[178] is present and header[178] is not in {0,1,2}: reject 960.7.
+* If barrier_initialized == true and pending_revocations == false and header[178] == 0: reject 960.5 barrier_proactive_forbidden.
+* If barrier_initialized == true and pending_revocations == true and header[178] != 0: reject 960.13.
+* If header[178] == 1, later steps MUST enforce S10.4B.
+* If header[178] == 2, later steps MUST enforce S10.4C.
 * If merge_delegation_sig (key 135) is present: reject 960.4 barrier_merge_delegation_forbidden.
 
 B) Parse + structure
@@ -967,6 +995,14 @@ F) Updater identity binding + updater-not-revoked
 * Define updater_leaf := CP.updater_leaf.
 * Require updater_leaf == cover_leaf_index(header[108]); else reject 960.1.
 * Require updater_leaf NOT in RevokedLeafSet for this update; else reject 960.1.
+* Let JoinSet := ResolveJoinsSince(BU.prev_barrier_version).
+* Let JoinLeafSet := the set of `leaf_index` values carried by JoinSet.
+* If header[178] == 1:
+  * Require updater_leaf NOT IN JoinLeafSet, else reject 960.5.
+  * Server MUST enforce S10.4B policy checks; on failure reject 960.12.
+* If header[178] == 2:
+  * Require updater_leaf IN JoinLeafSet, else reject 960.5.
+  * join_finalize MUST NOT execute S10.4B PCS rate-limit checks.
 
 G) Hash-chain checks MUST
 * Construct snapshot_base:
@@ -1042,8 +1078,10 @@ Clients MUST enforce:
   * allow genesis-local case only if `(local barrier_initialized == false AND BU.prev_barrier_version == 0 AND BU.barrier_version == 0)`,
   * otherwise require `local barrier_initialized == true`, `BU.prev_barrier_version == local barrier_version`, and `BU.barrier_version == local barrier_version + 1`.
 * Local barrier_update_reason mirror:
-  * if local `barrier_roots_hash == BU.revocation_roots_hash`, then `header[178] MUST equal 1`,
   * if local `barrier_roots_hash != BU.revocation_roots_hash`, then `header[178] MUST equal 0`,
+  * else let `JoinSet_local := ResolveJoinsSince(BU.prev_barrier_version)` and `JoinLeafSet_local := { leaf_index | record in JoinSet_local }`,
+  * if local `barrier_roots_hash == BU.revocation_roots_hash` AND `CP.updater_leaf IN JoinLeafSet_local`, then `header[178] MUST equal 2`,
+  * if local `barrier_roots_hash == BU.revocation_roots_hash` AND `CP.updater_leaf NOT IN JoinLeafSet_local`, then `header[178] MUST equal 1`,
   * except for the genesis-local case above, where `header[178] MUST equal 0`.
 * Clients MUST reject stale, duplicate, or gap barrier updates that do not satisfy the local version-adjacency rules above.
 Failure -> reject barrier_update locally with 960.7.
@@ -1107,6 +1145,7 @@ On successful processing:
 * kem_tree_hash_after := BU.kem_tree_hash_after
 * pending_barrier_recovery := false
 * If header[178] == 1 (pcs_refresh), apply FS reseed per S6.6 using K_barrier_new at the same atomic activation point.
+* If header[178] == 2 (join_finalize), `K_fs` MUST remain unchanged by this activation.
 Atomicity requirement (normative, MUST):
 * The entire successful activation above, together with all `dk_n/pkhash_n` updates from S11.13.5 and any PCS reseed of `K_fs`, MUST commit crash-safely as one logical transaction.
 * After restart, the client MUST observe either the complete pre-activation state or the complete post-activation state, never a mixture.
@@ -1156,7 +1195,9 @@ Upon observing acceptance of the merge carrying this barrier_update:
   * barrier_roots_hash := pending_revocation_roots_hash
   * K_barrier := pending_K_barrier_new
   * kem_tree_hash_after := pending_kem_tree_hash_after
+  * pending_barrier_recovery := false
   * If pending_barrier_update_reason == 1: K_fs := pending_K_fs_after_pcs
+  * If pending_barrier_update_reason IN {0,2}: `K_fs` MUST remain unchanged by this activation
   * for each entry [n, dk_n, pkhash_n] in pending_on_path_key_material:
     * if n IN SelfPath (updater's SelfPath), store (dk_n, pkhash_n) as the atomic pair for node n
     * if n NOT IN SelfPath, ignore (defense-in-depth)
@@ -1214,6 +1255,9 @@ FS-hybrid required fields:
 * group fs_epoch_base_ts (T_base; uint64)
 * fs_policy_version (uint)
 * any suite identifiers required to verify proofs (Smallwood/VRF/SRX profiles)
+Eligibility note (normative):
+* A just-provisioned joiner into an already-existing group MUST be able to invoke S3.3.A/B/C for the provisioned current committed barrier state immediately after provisioning.
+* For reason 2 (`join_finalize`) eligibility only, a joiner that has the S12.2 current barrier metadata and successfully performs the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 against that provisioned current state is deemed FULL-verifying for current public state, even before it has derived the current `K_barrier`.
 
 S12.3 Pending barrier recovery (normative)
 Because the server is untrusted and blind to `K_barrier`, it CANNOT provision `K_barrier` directly to the joiner. Joiners MUST begin in a `pending_barrier_recovery` state.
@@ -1221,9 +1265,18 @@ While in `pending_barrier_recovery`:
 * The joiner CANNOT encrypt outgoing payload messages (`SendParams` MUST be suspended or buffered).
 * The joiner CANNOT decrypt incoming payload messages encoded with `K_barrier` (or subsequent epochs).
 * The joiner MUST process any observed `barrier_update` messages (S11.13.4).
-* The joiner MUST NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges while `pending_barrier_recovery == true`.
+* The joiner MUST NOT originate reason 0 (`revocation_or_bootstrap`) or reason 1 (`pcs_refresh`) while `pending_barrier_recovery == true`.
+* Exception: the joiner MAY originate exactly reason 2 (`join_finalize`) while pending if, and only if:
+  * it satisfies the S11.11.1 join_finalize bootstrap exception,
+  * its own leaf is still present in the unresolved JoinSet for the current `barrier_version`,
+  * and revocations are not pending for the update.
+* A pending joiner that originates reason 2 MUST activate via S11.14, not via S11.13, for that self-authored update.
 When the joiner successfully processes a `barrier_update` via S11.13 and derives `K_barrier_new` from the unique matching NodeCiphertext for its own path, it clears `pending_barrier_recovery` and may proceed with normal payload send/decrypt operation.
-If that current barrier state was learned only via recover-only processing (S11.11.3), the client MUST still NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges until it has obtained FULL verification of the current public tree at the current `barrier_version`.
+If the joiner successfully activates its own accepted reason 2 update via S11.14, it likewise clears `pending_barrier_recovery` and may proceed with normal payload send/decrypt operation.
+If that current barrier state was learned only via recover-only processing (S11.11.3), the client MUST still NOT originate reason 0 or reason 1, MUST NOT act as updater generally, and MUST NOT originate pcs_refresh merges until it has obtained FULL verification of the current public tree at the current `barrier_version`.
+Race/retry rule (normative):
+* If a pending joiner's reason 2 attempt is not accepted, loses a race, or remains unresolved, the joiner MUST remain in `pending_barrier_recovery` and MUST continue processing observed `barrier_update` messages.
+* Once authenticated history establishes that the specific reason 2 merge was not accepted, the joiner MAY originate a new reason 2 attempt against the then-current committed version only if it still satisfies the join_finalize eligibility predicate above; otherwise it MUST await and process another accepted `barrier_update`.
 
 S13. ERROR CODES (NORMATIVE)
 
@@ -1256,7 +1309,7 @@ Scope: Server
 Scope: Server (acceptance gating)
 960.12 pcs_refresh_rate_limited
 Scope: Server (acceptance gating)
-960.13 pcs_refresh_forbidden_while_pending_revocations
+960.13 barrier_non_revocation_reason_forbidden_while_pending_revocations
 Scope: Server (acceptance gating)
 
 FS/acceptance codes
@@ -1325,5 +1378,30 @@ The test suite MUST include a case where:
 * header[178]=1 and barrier activation succeeds,
 * updater and non-updater client derive identical K_fs after applying S6.6 at activation,
 * after simulated crash/restart before activation completion, the implementation applies reseed at most once and converges to the same final K_fs.
+
+S14.7 KAT: join_finalize gating, activation, and no-K_fs-reseed (MUST)
+The test suite MUST include:
+* Positive case:
+  * RRH == GroupState.barrier_roots_hash,
+  * MERGE with header[175], header[178]=2, header[176]=BV+1,
+  * updater_leaf is in the unresolved JoinSet for BU.prev_barrier_version,
+  * server accepts,
+  * updater activation via S11.14.2 clears `pending_barrier_recovery`,
+  * `K_barrier` advances,
+  * `K_fs` remains unchanged across the activation.
+* Negative cases:
+  * header[175] present with header[178]=2 while updater_leaf is not in the unresolved JoinSet -> reject 960.5,
+  * RRH changed with header[178]=2 -> reject 960.13,
+  * RRH unchanged, updater_leaf in unresolved JoinSet, but header[178]=1 -> reject 960.5.
+
+S14.8 KAT: join_finalize race / loss behavior (MUST)
+The test suite MUST include a scenario where:
+* a pending joiner publishes a reason 2 merge and persists pending_* state,
+* a different accepted barrier_update is committed first at the competing next barrier version,
+* updater acceptance correlation for the pending reason 2 merge does not falsely activate,
+* the joiner remains `pending_barrier_recovery == true` until it either:
+  * recovers from the accepted competing barrier_update, or
+  * retries reason 2 after authenticated history establishes non-acceptance and the join_finalize eligibility predicate still holds,
+* the implementation MUST NOT clear `pending_barrier_recovery` solely because a timer elapsed or because the current barrier version advanced.
 
 END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.2 (repository errata through 2026-03-15)
