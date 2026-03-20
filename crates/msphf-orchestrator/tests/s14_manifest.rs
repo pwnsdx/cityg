@@ -131,6 +131,8 @@ fn s14_manifest_is_well_formed_and_complete() -> Result<(), Box<dyn std::error::
         "S14.4".to_string(),
         "S14.5".to_string(),
         "S14.6".to_string(),
+        "S14.7".to_string(),
+        "S14.8".to_string(),
     ]);
     validate_manifest(manifest, expected)
 }

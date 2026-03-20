@@ -454,10 +454,7 @@ fn apply_revoked_set_to_snapshot(
     Ok(())
 }
 
-fn expected_same_rrh_barrier_reason(
-    join_records: &[BarrierJoinRecord],
-    updater_leaf: u64,
-) -> u64 {
+fn expected_same_rrh_barrier_reason(join_records: &[BarrierJoinRecord], updater_leaf: u64) -> u64 {
     if join_records
         .iter()
         .any(|record| u64::from(record.leaf_index) == updater_leaf)
@@ -8773,10 +8770,7 @@ async fn finalize_pending_join(session: AppSession) -> Result<AppSession> {
     finalize_joined_room(session, BarrierMergeMode::JoinFinalize).await
 }
 
-async fn finalize_joined_room(
-    session: AppSession,
-    mode: BarrierMergeMode,
-) -> Result<AppSession> {
+async fn finalize_joined_room(session: AppSession, mode: BarrierMergeMode) -> Result<AppSession> {
     persist_session(&session).context("persist joined session before initial room setup")?;
 
     let published = match mode {
@@ -9352,10 +9346,7 @@ async fn perform_barrier_merge_inner(
                     }
                 }
 
-                return Err(err).context(format!(
-                    "failed to obtain {} merge ticket",
-                    mode.label()
-                ));
+                return Err(err).context(format!("failed to obtain {} merge ticket", mode.label()));
             }
         }
     };
@@ -11209,6 +11200,56 @@ mod tests {
     }
 
     #[test]
+    fn pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = build_test_session(0xA12, "http://127.0.0.1:9", "room-a2", "alice")?;
+        let original_fs = session.forward_state.snapshot().k_fs;
+        let original_fs_ec = session.forward_state.snapshot().fs_ec;
+        session.barrier_state.barrier_recovery_pending = true;
+        session.barrier_state.pending = Some(BarrierPendingState {
+            barrier_version: 10,
+            we_epoch_id: [0x24; 32],
+            fs_ec: 31,
+            next_forward_fs_ec: 77,
+            next_forward_fs_dev_commit: [0x55; 32],
+            next_forward_last_weid: [0x24; 32],
+            revocation_roots_hash: [0x35; 32],
+            kem_tree_hash_after: [0x45; 32],
+            k_barrier_new: Zeroizing::new([0x56; 32]),
+            k_fs_after_pcs: None,
+            barrier_update_reason: Some(2),
+            barrier_update_digest: [0x67; 32],
+            on_path_key_material: BTreeMap::new(),
+        });
+
+        let changed = apply_pending_barrier_activation(
+            &mut session,
+            10,
+            Some(31),
+            Some(2),
+            Some([0x67; 32]),
+        )?;
+        assert!(changed);
+        assert!(session.barrier_state.pending.is_none());
+        assert!(!session.barrier_state.barrier_recovery_pending);
+        assert_eq!(session.barrier_state.barrier_version, 10);
+        assert_eq!(session.barrier_state.barrier_roots_hash, [0x35; 32]);
+        assert_eq!(session.barrier_state.kem_tree_hash_after, [0x45; 32]);
+        assert_eq!(*session.barrier_state.k_barrier, [0x56; 32]);
+        assert_eq!(
+            session.forward_state.snapshot().k_fs,
+            original_fs,
+            "join_finalize must not reseed K_fs"
+        );
+        assert_eq!(
+            session.forward_state.snapshot().fs_ec,
+            original_fs_ec,
+            "join_finalize must not advance FS state"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn pending_barrier_activation_keeps_state_when_overtaken_without_exact_match()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut session = build_test_session(0xB22, "http://127.0.0.1:9", "room-b", "bob")?;
@@ -11297,6 +11338,45 @@ mod tests {
             session.forward_state.snapshot().k_fs,
             [0xAAu8; 32],
             "PCS reseed must not activate when observed version overtook pending state"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_join_finalize_activation_does_not_activate_on_digest_match_with_newer_observed_version()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = build_test_session(0xB41, "http://127.0.0.1:9", "room-b31", "bob")?;
+        let digest = [0x35; 32];
+        session.barrier_state.barrier_recovery_pending = true;
+        session.barrier_state.pending = Some(BarrierPendingState {
+            barrier_version: 7,
+            we_epoch_id: [0x45; 32],
+            fs_ec: 31,
+            next_forward_fs_ec: 0,
+            next_forward_fs_dev_commit: [0u8; 32],
+            next_forward_last_weid: [0u8; 32],
+            revocation_roots_hash: [0x46; 32],
+            kem_tree_hash_after: [0x56; 32],
+            k_barrier_new: Zeroizing::new([0x66; 32]),
+            k_fs_after_pcs: None,
+            barrier_update_reason: Some(2),
+            barrier_update_digest: digest,
+            on_path_key_material: BTreeMap::new(),
+        });
+
+        let changed =
+            apply_pending_barrier_activation(&mut session, 8, Some(31), Some(2), Some(digest))?;
+        assert!(!changed);
+        assert!(session.barrier_state.pending.is_some());
+        assert!(
+            session.barrier_state.barrier_recovery_pending,
+            "join_finalize race loss must keep pending recovery active"
+        );
+        assert_eq!(session.barrier_state.barrier_version, 0);
+        assert_eq!(
+            session.forward_state.snapshot().k_fs,
+            [0xAAu8; 32],
+            "observing a newer barrier version must not falsely activate join_finalize"
         );
         Ok(())
     }
@@ -15963,6 +16043,54 @@ mod tests {
         assert_eq!(
             pending_alice.we_epoch_id, alice.we_epoch_id,
             "historical activation should not itself rewrite the session head"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_join_finalize_history_lookup_discards_after_newer_version_404()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let port = next_test_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let client = new_api_client(&server_url);
+        let mut session = build_test_session(0xC61, &server_url, "room-history", "carol")?;
+        session.barrier_state.barrier_recovery_pending = true;
+        session.barrier_state.pending = Some(BarrierPendingState {
+            barrier_version: 5,
+            we_epoch_id: [0xD1; 32],
+            fs_ec: 31,
+            next_forward_fs_ec: 0,
+            next_forward_fs_dev_commit: [0u8; 32],
+            next_forward_last_weid: [0u8; 32],
+            revocation_roots_hash: [0xD2; 32],
+            kem_tree_hash_after: [0xD3; 32],
+            k_barrier_new: Zeroizing::new([0xD4; 32]),
+            k_fs_after_pcs: None,
+            barrier_update_reason: Some(2),
+            barrier_update_digest: [0xD5; 32],
+            on_path_key_material: BTreeMap::new(),
+        });
+
+        let outcome =
+            apply_pending_barrier_activation_from_history(&client, &mut session, 6).await?;
+        assert_eq!(outcome, PendingBarrierHistoryOutcome::Discarded);
+        assert!(
+            session.barrier_state.pending.is_none(),
+            "authenticated non-acceptance after a newer barrier version should discard stale join_finalize state"
+        );
+        assert!(
+            session.barrier_state.barrier_recovery_pending,
+            "history discard alone must not falsely mark the session as recovered"
         );
 
         handle.abort();

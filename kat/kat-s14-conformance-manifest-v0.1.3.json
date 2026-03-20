@@ -111,6 +111,58 @@
           "expectation": "accept_restart_history_activation"
         }
       ]
+    },
+    {
+      "id": "S14.7",
+      "title": "join_finalize gating, activation, and no-K_fs-reseed",
+      "coverage": [
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::tests::join_finalize_gating_accepts_valid_merge_without_rate_limit",
+          "expectation": "accept"
+        },
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::tests::join_finalize_commit_does_not_touch_refresh_markers",
+          "expectation": "accept_no_kfs_reseed"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::validate_barrier_update_rejects_join_finalize_reason_for_non_joiner",
+          "expectation": "reject_9605"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::validate_barrier_update_rejects_pcs_refresh_reason_for_unresolved_joiner",
+          "expectation": "reject_9605"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs",
+          "expectation": "accept_no_kfs_reseed"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::perform_join_second_member_can_send_immediately",
+          "expectation": "accept_message_ready"
+        }
+      ]
+    },
+    {
+      "id": "S14.8",
+      "title": "join_finalize race / loss behavior",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_join_finalize_activation_does_not_activate_on_digest_match_with_newer_observed_version",
+          "expectation": "reject_false_activation"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_join_finalize_history_lookup_discards_after_newer_version_404",
+          "expectation": "accept_history_non_acceptance_discard"
+        }
+      ]
     }
   ]
 }

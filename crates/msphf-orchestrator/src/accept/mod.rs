@@ -4637,7 +4637,8 @@ mod tests {
                 max_barrier_update_bytes: 1_048_576,
             },
         );
-        ctx.device_chain_entry_mut(gid, &device_pk).last_pcs_refresh_ec = Some(44);
+        ctx.device_chain_entry_mut(gid, &device_pk)
+            .last_pcs_refresh_ec = Some(44);
 
         let mut header = BTreeMap::new();
         header.insert(HDR_POP_PK, Value::Bytes(device_pk.clone()));
