@@ -48,6 +48,7 @@ fn random_room_id() -> String {
 
 const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
 const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
+const KBROAD_SECRET_ENV: &str = "CITYG_GUI_KBROAD_SECRET_HEX";
 const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
 const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
 const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
@@ -95,6 +96,28 @@ fn configured_client_admin_token() -> Option<String> {
 fn configured_client_message_token() -> Option<String> {
     read_nonempty_env(CLIENT_MESSAGE_TOKEN_ENV)
         .or_else(|| read_nonempty_env("CITYG_SERVER_MESSAGE_AUTH_TOKEN"))
+}
+
+fn configured_kbroad_secret() -> Result<Option<Vec<u8>>> {
+    match read_nonempty_env(KBROAD_SECRET_ENV) {
+        Some(value) => Ok(Some(
+            hex_decode(value.trim_start_matches("0x").trim_start_matches("0X"))
+                .map_err(|err| anyhow!("invalid {}: {err}", KBROAD_SECRET_ENV))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+fn active_kbroad_secret_for_merge(kbroad_secret: &[u8]) -> Result<Vec<u8>> {
+    if !kbroad_secret.is_empty() {
+        return Ok(kbroad_secret.to_vec());
+    }
+    configured_kbroad_secret()?.ok_or_else(|| {
+        anyhow!(
+            "missing room KBROAD secret for merge publication; provide a shared room secret via invite flow or {}",
+            KBROAD_SECRET_ENV
+        )
+    })
 }
 
 fn new_api_client(server_url: &str) -> CitygApiClient {
@@ -844,6 +867,7 @@ struct Session {
     room_id: String,
     gid: [u8; 32],
     leaf_id: [u8; 32],
+    kbroad_secret: Vec<u8>,
     pop_public_key: Vec<u8>,
     pop_secret: Box<MlDsaSecretKey>,
     vrf_secret_key: Vec<u8>,
@@ -865,6 +889,7 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
     let client = new_api_client(server_url);
+    let kbroad_secret = configured_kbroad_secret()?.unwrap_or_default();
     let (pop_pk, pop_sk) = dilithium5::keypair();
     let pop_public_key = DilithiumPublicKeyTrait::as_bytes(&pop_pk).to_vec();
     let pop_secret = Box::new(pop_sk);
@@ -1081,6 +1106,7 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         room_id: room_id.to_string(),
         gid,
         leaf_id,
+        kbroad_secret,
         pop_public_key,
         pop_secret,
         vrf_secret_key,
@@ -1102,6 +1128,7 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
 
 async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     let client = new_api_client(&session.server_url);
+    let active_kbroad_secret = active_kbroad_secret_for_merge(&session.kbroad_secret)?;
     let mut forward_state = session.forward_state.clone();
     let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
@@ -1301,7 +1328,6 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     let pristine_bundle = bundle.clone();
     strip_srx_and_rollup(&mut bundle.header_map);
     apply_pivot_alignment(&mut bundle.header_map, pivot);
-
     let computed_anchor_ctx =
         build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
     let seed_ctx_hash =
@@ -1330,6 +1356,10 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
     bundle.hp_binding.seed_commit = seed_commit;
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
+    bundle.we_epoch_id = derived_we_epoch_id;
+    bundle
+        .rebind_merge_hp_envelope_from_pivot(pivot, active_kbroad_secret.as_slice())
+        .context("rebind merge KBROAD envelope for join finalize")?;
     bundle
         .header_map
         .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
@@ -1341,7 +1371,6 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         hdr::HDR_SEED_BUNDLE_COMMIT,
         Value::Bytes(seed_bundle_commit.to_vec()),
     );
-    bundle.we_epoch_id = derived_we_epoch_id;
 
     if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
         bundle
@@ -1451,6 +1480,7 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
 
 async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let client = new_api_client(&session.server_url);
+    let active_kbroad_secret = active_kbroad_secret_for_merge(&session.kbroad_secret)?;
     let mut forward_state = session.forward_state.clone();
     let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
@@ -1747,7 +1777,6 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             .header_map
             .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
     }
-
     let computed_anchor_ctx =
         build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
     let seed_ctx_hash =
@@ -1791,6 +1820,10 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
     bundle.hp_binding.seed_commit = seed_commit;
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
+    bundle.we_epoch_id = derived_we_epoch_id;
+    bundle
+        .rebind_merge_hp_envelope_from_pivot(pivot, active_kbroad_secret.as_slice())
+        .context("rebind merge KBROAD envelope for leave")?;
     bundle
         .header_map
         .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
@@ -1802,7 +1835,6 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         hdr::HDR_SEED_BUNDLE_COMMIT,
         Value::Bytes(seed_bundle_commit.to_vec()),
     );
-    bundle.we_epoch_id = derived_we_epoch_id;
 
     if verbose {
         println!(
@@ -1879,7 +1911,6 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         }
     }
     for key in [
-        hdr::HDR_HP_BYTES,
         hdr::HDR_POP_ALG,
         hdr::HDR_POP_SIG,
         hdr::HDR_BOOTSTRAP_ALG,
@@ -2569,6 +2600,7 @@ mod tests {
                 "CITYG_CLIENT_MESSAGE_AUTH_TOKEN",
                 "join-leave-message-token",
             );
+            std::env::set_var(KBROAD_SECRET_ENV, hex::encode(demo::kbroad_secret()));
         });
     }
 
@@ -2587,6 +2619,7 @@ mod tests {
             room_id: hex::encode([0xAA; 32]),
             gid: [0x11; 32],
             leaf_id: [0x22; 32],
+            kbroad_secret: demo::kbroad_secret().to_vec(),
             pop_public_key: vec![0x33; 32],
             pop_secret: Box::new(pop_sk),
             vrf_secret_key: vec![0x44; 32],
@@ -3948,6 +3981,7 @@ mod tests {
             room_id: hex::encode([0xAA; 32]),
             gid: [0x01; 32],
             leaf_id: [0x02; 32],
+            kbroad_secret: demo::kbroad_secret().to_vec(),
             pop_public_key: vec![0x11],
             pop_secret: Box::new(sk),
             vrf_secret_key: vec![0x22],

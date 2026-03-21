@@ -110,6 +110,7 @@ const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
 const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
 const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
 const TICKET_RETRY_JITTER_MS: u64 = 40;
+const JOIN_INVITE_PREFIX: &str = "cityg-invite:";
 
 fn should_retry_ticket_http_error(
     status_code: u16,
@@ -962,7 +963,9 @@ fn try_recover_barrier_from_header(
     if parsed.tree_size != n_max {
         return Err(anyhow!("barrier tree_size mismatch for local state"));
     }
-    if parsed.kem_tree_hash_before != session.barrier_state.kem_tree_hash_after {
+    let reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON)
+        .ok_or_else(|| anyhow!("barrier_update_reason is missing or malformed"))?;
+    if reason != 2 && parsed.kem_tree_hash_before != session.barrier_state.kem_tree_hash_after {
         return Err(anyhow!("barrier hash-chain before-hash mismatch"));
     }
 
@@ -974,8 +977,6 @@ fn try_recover_barrier_from_header(
     if parsed.revocation_roots_hash != expected_rrh {
         return Err(anyhow!("barrier revocation_roots_hash mismatch"));
     }
-    let reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON)
-        .ok_or_else(|| anyhow!("barrier_update_reason is missing or malformed"))?;
     if !genesis_local_case {
         if session.barrier_state.barrier_roots_hash == parsed.revocation_roots_hash {
             if !matches!(reason, 1 | 2) {
@@ -1252,6 +1253,25 @@ fn apply_forward_state_k_fs(session: &mut AppSession, k_fs: [u8; 32]) {
     session.forward_state = updated_state;
 }
 
+fn apply_forward_state_snapshot(
+    session: &mut AppSession,
+    k_fs: [u8; 32],
+    fs_ec: u64,
+    fs_dev_commit: [u8; 32],
+    last_weid: [u8; 32],
+) {
+    let mut updated_state = ForwardSecrecyState::with_state(k_fs, fs_ec, fs_dev_commit, last_weid);
+    updated_state.set_epoch_base_ts(session.fs_epoch_base_ts);
+    session.forward_state = updated_state;
+}
+
+fn bundle_authored_by_local_device(session: &AppSession, header: &BTreeMap<u64, Value>) -> bool {
+    matches!(
+        header.get(&hdr::HDR_POP_PK),
+        Some(Value::Bytes(pop_pk)) if pop_pk.as_slice() == session.pop_public_key.as_slice()
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingBarrierHistoryOutcome {
     Unchanged,
@@ -1300,19 +1320,18 @@ fn apply_pending_barrier_activation(
         for (node, material) in on_path_key_material {
             session.barrier_state.dk_nodes.insert(node, material);
         }
-        if let Some(k_fs_after_pcs) = k_fs_after_pcs {
-            if next_forward_fs_ec != 0 {
-                let mut updated_state = ForwardSecrecyState::with_state(
-                    *k_fs_after_pcs,
-                    next_forward_fs_ec,
-                    next_forward_fs_dev_commit,
-                    next_forward_last_weid,
-                );
-                updated_state.set_epoch_base_ts(session.fs_epoch_base_ts);
-                session.forward_state = updated_state;
-            } else {
-                apply_forward_state_k_fs(session, *k_fs_after_pcs);
-            }
+        let reseeded_k_fs = k_fs_after_pcs.as_deref().copied();
+        if next_forward_fs_ec != 0 {
+            let k_fs = reseeded_k_fs.unwrap_or_else(|| session.forward_state.snapshot().k_fs);
+            apply_forward_state_snapshot(
+                session,
+                k_fs,
+                next_forward_fs_ec,
+                next_forward_fs_dev_commit,
+                next_forward_last_weid,
+            );
+        } else if let Some(k_fs_after_pcs) = reseeded_k_fs {
+            apply_forward_state_k_fs(session, k_fs_after_pcs);
         }
         session.barrier_state.pending = None;
         session.barrier_state.barrier_recovery_pending = false;
@@ -1754,6 +1773,7 @@ struct AppModel {
     composer: MessageComposer,
     fetch_task: Option<Task<()>>,
     fetch_in_flight: bool,
+    fetch_after_epoch_sync: bool,
     show_ciphertext: bool,
     members: Vec<MemberEntry>,
     members_status: MembersStatus,
@@ -2508,6 +2528,8 @@ impl AppModel {
                 server: config.client.default_server_url.clone(),
                 room_id: AppModel::random_room_id(),
                 alias: String::new(),
+                invite_kbroad_public: None,
+                invite_kbroad_secret: None,
                 active: Some(ActiveField::Alias),
             },
             join_status: JoinStatus::Idle,
@@ -2525,6 +2547,7 @@ impl AppModel {
             composer: MessageComposer::default(),
             fetch_task: None,
             fetch_in_flight: false,
+            fetch_after_epoch_sync: false,
             show_ciphertext: false,
             members: Vec::new(),
             members_status: MembersStatus::Idle,
@@ -2570,6 +2593,7 @@ impl AppModel {
                 model.composer.blur();
                 model.fetch_task = None;
                 model.fetch_in_flight = false;
+                model.fetch_after_epoch_sync = false;
                 model.show_ciphertext = false;
                 model.restore_epoch_sync_pending = true;
             }
@@ -2588,7 +2612,18 @@ struct JoinFormState {
     server: String,
     room_id: String,
     alias: String,
+    invite_kbroad_public: Option<Vec<u8>>,
+    invite_kbroad_secret: Option<Vec<u8>>,
     active: Option<ActiveField>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct JoinInvitePayload {
+    version: u8,
+    server_url: String,
+    room_id: String,
+    kbroad_public_hex: String,
+    kbroad_secret_hex: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2623,6 +2658,57 @@ fn sanitize_clipboard_text(raw: &str) -> String {
         .collect()
 }
 
+fn build_join_invite(session: &AppSession) -> Result<String> {
+    if session.kbroad_public.is_empty() || session.kbroad_secret.is_empty() {
+        return Err(anyhow!(
+            "room invite unavailable because this session has no KBROAD secret"
+        ));
+    }
+
+    let payload = JoinInvitePayload {
+        version: 1,
+        server_url: session.server_url.clone(),
+        room_id: session.room_id.clone(),
+        kbroad_public_hex: hex_encode(&session.kbroad_public),
+        kbroad_secret_hex: hex_encode(&session.kbroad_secret),
+    };
+    let encoded = serde_json::to_string(&payload).context("failed to encode room invite")?;
+    Ok(format!("{JOIN_INVITE_PREFIX}{encoded}"))
+}
+
+fn parse_join_invite(raw: &str) -> Result<Option<JoinInvitePayload>> {
+    let trimmed = raw.trim();
+    let Some(payload) = trimmed.strip_prefix(JOIN_INVITE_PREFIX) else {
+        return Ok(None);
+    };
+
+    let invite: JoinInvitePayload =
+        serde_json::from_str(payload).context("invalid City-G invite payload")?;
+    if invite.version != 1 {
+        return Err(anyhow!(
+            "unsupported City-G invite version {}",
+            invite.version
+        ));
+    }
+    if invite.server_url.trim().is_empty() {
+        return Err(anyhow!("invite server URL is missing"));
+    }
+    if !JoinFormState::is_valid_room_id(invite.room_id.trim()) {
+        return Err(anyhow!("invite room ID is not valid"));
+    }
+    let kbroad_public = hex_decode(invite.kbroad_public_hex.trim())
+        .context("invite KBROAD public key is not valid hex")?;
+    let kbroad_secret = hex_decode(invite.kbroad_secret_hex.trim())
+        .context("invite KBROAD secret is not valid hex")?;
+    if kbroad_public.is_empty() {
+        return Err(anyhow!("invite KBROAD public key is missing"));
+    }
+    if kbroad_secret.is_empty() {
+        return Err(anyhow!("invite KBROAD secret is missing"));
+    }
+    Ok(Some(invite))
+}
+
 fn apply_join_field_paste(field: ActiveField, existing: &str, pasted: &str) -> String {
     let sanitized = sanitize_clipboard_text(pasted);
     if field == ActiveField::Room {
@@ -2638,6 +2724,25 @@ fn apply_join_field_paste(field: ActiveField, existing: &str, pasted: &str) -> S
 }
 
 impl JoinFormState {
+    fn clear_invite_material(&mut self) {
+        self.invite_kbroad_public = None;
+        self.invite_kbroad_secret = None;
+    }
+
+    fn apply_invite(&mut self, invite: JoinInvitePayload) -> Result<()> {
+        self.server = invite.server_url;
+        self.room_id = invite.room_id;
+        self.invite_kbroad_public = Some(
+            hex_decode(invite.kbroad_public_hex.trim())
+                .context("invite KBROAD public key is not valid hex")?,
+        );
+        self.invite_kbroad_secret = Some(
+            hex_decode(invite.kbroad_secret_hex.trim())
+                .context("invite KBROAD secret is not valid hex")?,
+        );
+        Ok(())
+    }
+
     fn is_ready(&self) -> bool {
         let server = self.server.trim();
         let room = self.room_id.trim();
@@ -2706,6 +2811,9 @@ impl JoinFormState {
         }
 
         if ks.key == "backspace" {
+            if matches!(active, ActiveField::Server | ActiveField::Room) {
+                self.clear_invite_material();
+            }
             let field = self.field_mut(active);
             if !field.is_empty() {
                 field.pop();
@@ -2715,6 +2823,9 @@ impl JoinFormState {
         }
 
         if ks.key == "delete" {
+            if matches!(active, ActiveField::Server | ActiveField::Room) {
+                self.clear_invite_material();
+            }
             let field = self.field_mut(active);
             field.clear();
             return KeyOutcome::Updated;
@@ -2729,6 +2840,9 @@ impl JoinFormState {
 
         if ks.key == "space" {
             // Some layouts report space without key_char.
+            if matches!(active, ActiveField::Server | ActiveField::Room) {
+                self.clear_invite_material();
+            }
             let field = self.field_mut(active);
             field.push(' ');
             return KeyOutcome::Updated;
@@ -2747,6 +2861,9 @@ impl JoinFormState {
                 return KeyOutcome::None;
             }
 
+            if matches!(active, ActiveField::Server | ActiveField::Room) {
+                self.clear_invite_material();
+            }
             let field = self.field_mut(active);
             field.push_str(ch);
             return KeyOutcome::Updated;
@@ -2760,6 +2877,8 @@ impl JoinFormState {
             server_url: self.server.trim().to_string(),
             room_id: self.room_id.trim().to_string(),
             alias: self.alias.trim().to_string(),
+            invite_kbroad_public: self.invite_kbroad_public.clone(),
+            invite_kbroad_secret: self.invite_kbroad_secret.clone(),
         }
     }
 }
@@ -3114,7 +3233,7 @@ impl AppModel {
                     .items_center()
                     .text_size(px(12.0))
                     .text_color(subtext_color)
-                    .child("Room IDs must be 64 hexadecimal characters.")
+                    .child("Paste a City-G invite or enter a 64-character room ID.")
                     .child(
                         div()
                             .px(px(12.0))
@@ -3350,6 +3469,18 @@ impl AppModel {
             .child("Copy room ID");
         copy_room_button =
             copy_room_button.on_mouse_down(MouseButton::Left, cx.listener(Self::on_copy_room_id));
+        let mut copy_invite_button = div()
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(10.0))
+            .bg(rgb(UI_BUTTON_BG))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_PANEL_TEXT))
+            .cursor(CursorStyle::PointingHand)
+            .child("Copy invite");
+        copy_invite_button = copy_invite_button
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_copy_room_invite));
 
         div()
             .flex()
@@ -3400,7 +3531,13 @@ impl AppModel {
                             .child(format!("#{}", room_preview)),
                     ),
             )
-            .child(copy_room_button)
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(copy_room_button)
+                    .child(copy_invite_button),
+            )
             .child(
                 div()
                     .flex()
@@ -3934,6 +4071,8 @@ impl AppModel {
             return;
         }
 
+        let fetch_after_epoch_sync = std::mem::take(&mut self.fetch_after_epoch_sync);
+
         match outcome {
             Ok(sync) => {
                 let was_pending = self
@@ -3945,6 +4084,8 @@ impl AppModel {
                     if was_pending {
                         self.info_message = Some(Self::barrier_recovery_wait_message().to_string());
                         cx.notify();
+                    } else if fetch_after_epoch_sync {
+                        self.schedule_fetch(cx, Duration::ZERO);
                     }
                     return;
                 }
@@ -4374,9 +4515,9 @@ impl AppModel {
             }
             WebSocketEvent::Message => {
                 self.record_activity(ActivityKind::Message, "New message notification");
-                if !self.fetch_in_flight {
-                    self.schedule_fetch(cx, Duration::ZERO);
-                }
+                self.fetch_after_epoch_sync = true;
+                self.schedule_epoch_sync(cx, "Syncing latest epoch after message notification…");
+                cx.notify();
             }
             WebSocketEvent::Membership(signal) => {
                 self.record_membership_activity(&signal);
@@ -5626,6 +5767,25 @@ impl AppModel {
         }
     }
 
+    fn on_copy_room_invite(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        if let Some(session) = &self.session {
+            match build_join_invite(session) {
+                Ok(invite) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(invite));
+                    self.show_success("Room invite copied", cx);
+                }
+                Err(err) => self.show_error_toast(err.to_string(), cx),
+            }
+        } else {
+            self.show_error_toast("No active session", cx);
+        }
+    }
+
     fn handle_join_form_clipboard_shortcuts(
         &mut self,
         keystroke: &Keystroke,
@@ -5650,8 +5810,34 @@ impl AppModel {
 
         if is_primary_shortcut(keystroke, "v") {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                if active == ActiveField::Room {
+                    match parse_join_invite(&text) {
+                        Ok(Some(invite)) => match self.join_form.apply_invite(invite) {
+                            Ok(()) => {
+                                self.clear_error();
+                                self.info_message = Some(
+                                    "Invite imported. Choose your alias and join.".to_string(),
+                                );
+                                return KeyOutcome::Updated;
+                            }
+                            Err(err) => {
+                                self.set_error(&err, "join", Some(RetryAction::Join));
+                                return KeyOutcome::Updated;
+                            }
+                        },
+                        Ok(None) => {}
+                        Err(err) => {
+                            self.set_error(&err, "join", Some(RetryAction::Join));
+                            return KeyOutcome::Updated;
+                        }
+                    }
+                }
+
                 let existing = self.join_form.field(active).to_string();
                 let updated = apply_join_field_paste(active, &existing, &text);
+                if matches!(active, ActiveField::Server | ActiveField::Room) {
+                    self.join_form.clear_invite_material();
+                }
                 *self.join_form.field_mut(active) = updated;
             }
             return KeyOutcome::Updated;
@@ -5772,6 +5958,7 @@ impl AppModel {
         cx: &mut ViewContext<Self>,
     ) {
         self.join_form.room_id = AppModel::random_room_id();
+        self.join_form.clear_invite_material();
         self.join_form.active = Some(ActiveField::Room);
         self.last_error = None;
         self.info_message = Some("Generated a new room identifier.".to_string());
@@ -6536,6 +6723,8 @@ struct JoinParams {
     server_url: String,
     room_id: String,
     alias: String,
+    invite_kbroad_public: Option<Vec<u8>>,
+    invite_kbroad_secret: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -6544,6 +6733,7 @@ struct LeaveRequest {
     room_id: String,
     gid: [u8; 32],
     leaf_id: [u8; 32],
+    kbroad_secret: Vec<u8>,
     forward_state: ForwardSecrecyState,
     pop_public_key: Vec<u8>,
     pop_secret_key: Vec<u8>,
@@ -6581,6 +6771,7 @@ impl LeaveRequest {
             room_id: session.room_id.clone(),
             gid: session.gid,
             leaf_id: session.leaf_id,
+            kbroad_secret: session.kbroad_secret.clone(),
             forward_state: session.forward_state.clone(),
             pop_public_key: session.pop_public_key.clone(),
             pop_secret_key: session.pop_secret_key.clone(),
@@ -8340,6 +8531,8 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         server_url,
         room_id,
         alias,
+        invite_kbroad_public,
+        invite_kbroad_secret,
     } = params;
 
     if server_url.is_empty() {
@@ -8384,8 +8577,14 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         })
     };
 
-    let configured_kbroad_public = configured_kbroad_public_from_env()?;
-    let configured_kbroad_secret = configured_kbroad_secret_from_env()?;
+    let configured_kbroad_public = match invite_kbroad_public {
+        Some(public) => Some(public),
+        None => configured_kbroad_public_from_env()?,
+    };
+    let configured_kbroad_secret = match invite_kbroad_secret {
+        Some(secret) => Some(secret),
+        None => configured_kbroad_secret_from_env()?,
+    };
     let mut generated_kbroad_keypair: Option<(Vec<u8>, Vec<u8>)> = None;
     let mut bootstrap_attempted = false;
     let mut retry_attempt = 0u32;
@@ -8866,10 +9065,12 @@ fn apply_local_published_barrier_merge(
     if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT) {
         session.fs_epoch_commit = commit;
     }
-    if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
-        .or_else(|| header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT))
-    {
-        session.fs_dev_prev_commit = commit;
+    if bundle_authored_by_local_device(session, &bundle.header_map) {
+        if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
+            .or_else(|| header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT))
+        {
+            session.fs_dev_prev_commit = commit;
+        }
     }
     if let Some(base_ts) = header_u64(&bundle.header_map, hdr::HDR_FS_EPOCH_BASE_TS) {
         session.fs_epoch_base_ts = base_ts;
@@ -8929,6 +9130,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         room_id,
         gid,
         leaf_id,
+        kbroad_secret,
         mut forward_state,
         pop_public_key,
         pop_secret_key,
@@ -8949,6 +9151,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
     }
 
     let client = new_api_client(&server_url);
+    let active_kbroad_secret = active_kbroad_secret_for_merge(&kbroad_secret)?;
     let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
@@ -9206,7 +9409,6 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
 
     strip_rollup_metadata(&mut bundle.header_map);
     apply_pivot_alignment(&mut bundle.header_map, pivot);
-
     let anchor_ctx =
         build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
     let seed_ctx_hash = compute_seed_ctx_hash(&anchor_ctx).context("compute seed_ctx_hash")?;
@@ -9235,6 +9437,9 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
     bundle.hp_binding.seed_commit = seed_commit;
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
     bundle.we_epoch_id = derived_we_epoch_id;
+    bundle
+        .rebind_merge_hp_envelope_from_pivot(pivot, active_kbroad_secret.as_slice())
+        .context("rebind merge KBROAD envelope for leave")?;
     pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
     bundle
         .header_map
@@ -9316,6 +9521,7 @@ async fn perform_barrier_merge_inner(
         room_id,
         gid,
         leaf_id,
+        kbroad_secret,
         mut forward_state,
         pop_public_key,
         pop_secret_key,
@@ -9334,6 +9540,7 @@ async fn perform_barrier_merge_inner(
     }
 
     let client = new_api_client(&server_url);
+    let active_kbroad_secret = active_kbroad_secret_for_merge(&kbroad_secret)?;
     let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
@@ -9591,7 +9798,6 @@ async fn perform_barrier_merge_inner(
 
     strip_rollup_metadata(&mut bundle.header_map);
     apply_pivot_alignment(&mut bundle.header_map, pivot);
-
     let anchor_ctx =
         build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
     let seed_ctx_hash = compute_seed_ctx_hash(&anchor_ctx).context("compute seed_ctx_hash")?;
@@ -9633,14 +9839,17 @@ async fn perform_barrier_merge_inner(
     bundle.hp_binding.seed_commit = seed_commit;
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
     bundle.we_epoch_id = derived_we_epoch_id;
+    bundle
+        .rebind_merge_hp_envelope_from_pivot(pivot, active_kbroad_secret.as_slice())
+        .context(format!("rebind merge KBROAD envelope for {}", mode.label()))?;
     pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
     pending_barrier_state.fs_ec = observed_fs_ec;
+    let next_forward = forward_state.snapshot();
+    pending_barrier_state.next_forward_fs_ec = next_forward.fs_ec;
+    pending_barrier_state.next_forward_fs_dev_commit = next_forward.fs_dev_commit;
+    pending_barrier_state.next_forward_last_weid = next_forward.last_weid;
     if let Some(k_fs_after_pcs) = k_fs_after_pcs {
         pending_barrier_state.k_fs_after_pcs = Some(Zeroizing::new(k_fs_after_pcs));
-        let next_forward = forward_state.snapshot();
-        pending_barrier_state.next_forward_fs_ec = next_forward.fs_ec;
-        pending_barrier_state.next_forward_fs_dev_commit = next_forward.fs_dev_commit;
-        pending_barrier_state.next_forward_last_weid = next_forward.last_weid;
     }
     bundle
         .header_map
@@ -10291,10 +10500,12 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT) {
         session.fs_epoch_commit = commit;
     }
-    if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
-        .or_else(|| header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT))
-    {
-        session.fs_dev_prev_commit = commit;
+    if bundle_authored_by_local_device(&session, &bundle.header_map) {
+        if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
+            .or_else(|| header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT))
+        {
+            session.fs_dev_prev_commit = commit;
+        }
     }
     if let Some(base_ts) = header_u64(&bundle.header_map, hdr::HDR_FS_EPOCH_BASE_TS) {
         session.fs_epoch_base_ts = base_ts;
@@ -10672,6 +10883,18 @@ fn configured_hex_from_env(var_name: &str) -> Result<Option<Vec<u8>>> {
 
 fn configured_kbroad_secret_from_env() -> Result<Option<Vec<u8>>> {
     configured_hex_from_env(KBROAD_SECRET_ENV)
+}
+
+fn active_kbroad_secret_for_merge(kbroad_secret: &[u8]) -> Result<Vec<u8>> {
+    if !kbroad_secret.is_empty() {
+        return Ok(kbroad_secret.to_vec());
+    }
+    configured_kbroad_secret_from_env()?.ok_or_else(|| {
+        anyhow!(
+            "missing room KBROAD secret for merge publication; paste a City-G invite from an existing member or provide {}",
+            KBROAD_SECRET_ENV
+        )
+    })
 }
 
 fn configured_kbroad_public_from_env() -> Result<Option<Vec<u8>>> {
@@ -12522,6 +12745,13 @@ mod tests {
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 );
 
+                model.on_copy_room_invite(&event, window, view_cx);
+                let copied_invite = view_cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .expect("clipboard room invite");
+                assert!(copied_invite.starts_with(JOIN_INVITE_PREFIX));
+
                 model.on_copy_regular_fingerprint(&event, window, view_cx);
                 let copied_regular = view_cx
                     .read_from_clipboard()
@@ -12689,7 +12919,9 @@ mod tests {
             assert!(model.ws_connected);
 
             model.handle_websocket_event(WebSocketEvent::Message, view_cx);
-            assert!(matches!(model.fetch_status, FetchStatus::Refreshing));
+            assert!(model.epoch_sync_task.is_some());
+            assert!(!model.fetch_in_flight);
+            assert!(matches!(model.fetch_status, FetchStatus::Idle));
 
             model.handle_websocket_event(
                 WebSocketEvent::Membership(MembershipSignal {
@@ -12709,6 +12941,50 @@ mod tests {
 
             model.handle_websocket_event(WebSocketEvent::Disconnected, view_cx);
             assert!(!model.ws_connected);
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_message_event_fetches_after_epoch_sync_even_when_head_is_unchanged(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xB0B,
+            "http://127.0.0.1:9",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            "ws-sync",
+        )
+        .expect("build session");
+
+        view.update(cx, |model, view_cx| {
+            model.session = Some(session.clone());
+
+            model.handle_websocket_event(WebSocketEvent::Message, view_cx);
+            assert!(model.epoch_sync_task.is_some());
+            assert!(model.fetch_after_epoch_sync);
+
+            model.epoch_sync_task = None;
+            model.handle_epoch_sync_result(
+                Ok(EpochSyncOutcome {
+                    session: session.clone(),
+                    changed: false,
+                }),
+                &session.server_url,
+                &session.room_id,
+                session.leaf_id,
+                "message notification",
+                view_cx,
+            );
+
+            assert!(matches!(model.fetch_status, FetchStatus::Refreshing));
+            assert!(model.fetch_in_flight);
+            assert!(!model.fetch_after_epoch_sync);
         });
     }
 
@@ -13819,7 +14095,7 @@ mod tests {
                 return Err(anyhow!(
                     "mismatched persisted identity must not be treated as a finalized session"
                 )
-                .into())
+                .into());
             }
             Err(err) => err,
         };
@@ -14817,6 +15093,44 @@ mod tests {
     }
 
     #[test]
+    fn join_invite_roundtrip_and_form_import() -> Result<(), Box<dyn std::error::Error>> {
+        let session = build_test_session(
+            31337,
+            "http://127.0.0.1:8080",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "alice",
+        )?;
+        let invite = build_join_invite(&session)?;
+        let parsed =
+            parse_join_invite(&invite)?.ok_or_else(|| anyhow!("expected City-G invite payload"))?;
+
+        let mut form = JoinFormState {
+            server: String::new(),
+            room_id: String::new(),
+            alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
+            active: Some(ActiveField::Room),
+        };
+        form.apply_invite(parsed)?;
+        assert_eq!(form.server, session.server_url);
+        assert_eq!(form.room_id, session.room_id);
+        assert_eq!(
+            form.invite_kbroad_public,
+            Some(session.kbroad_public.clone())
+        );
+        assert_eq!(
+            form.invite_kbroad_secret,
+            Some(session.kbroad_secret.clone())
+        );
+
+        let params = form.join_params();
+        assert_eq!(params.invite_kbroad_public, Some(session.kbroad_public));
+        assert_eq!(params.invite_kbroad_secret, Some(session.kbroad_secret));
+        Ok(())
+    }
+
+    #[test]
     fn message_composer_keystroke_paths() -> Result<(), Box<dyn std::error::Error>> {
         let mut composer = MessageComposer::default();
         let a = Keystroke::parse("a")?;
@@ -14905,6 +15219,8 @@ mod tests {
             server: "http://127.0.0.1:18080".to_string(),
             room_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
             active: Some(ActiveField::Server),
         };
 
@@ -15095,6 +15411,8 @@ mod tests {
             server: " http://127.0.0.1:18080 ".to_string(),
             room_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             alias: " alice ".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
             active: None,
         };
         let tab = Keystroke::parse("tab")?;
@@ -15944,6 +16262,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -15951,6 +16271,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         bob.barrier_state.barrier_recovery_pending = false;
@@ -16000,6 +16322,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         let sync = perform_epoch_sync(alice.clone()).await?;
@@ -16056,6 +16380,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -16200,6 +16526,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -16207,6 +16535,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         bob.barrier_state.barrier_recovery_pending = false;
@@ -16289,6 +16619,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -16296,6 +16628,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         bob.barrier_state.barrier_recovery_pending = false;
@@ -16469,6 +16803,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id,
             alias: "bench-sender".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -16632,12 +16968,16 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         let mut bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -16704,12 +17044,16 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         let mut bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -16774,6 +17118,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -16781,6 +17127,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         assert_ne!(
@@ -16804,6 +17152,75 @@ mod tests {
         assert_ne!(
             page.root, alice.parent_root,
             "page 0 should not remain on stale local root"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn latest_bundle_after_second_join_retains_hp_envelope_for_sync()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let _restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
+        let port = next_test_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x46u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        let alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
+        })
+        .await?;
+        let bob = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
+        })
+        .await?;
+
+        let client = new_api_client(&server_url);
+        let ticket = client
+            .merge_ticket_refresh(&room_id, &alice.leaf_id)
+            .await?;
+        assert_eq!(
+            ticket.we_epoch_id.as_slice(),
+            bob.we_epoch_id.as_slice(),
+            "latest merge ticket should point at bob's accepted head"
+        );
+        let bundle_response = client.get_bundle(&bob.we_epoch_id).await?;
+        let bundle = ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor)?;
+        assert!(
+            bundle.header_map.contains_key(&hdr::HDR_HP_BYTES),
+            "latest accepted bundle must retain HDR_HP_BYTES for KBROAD recovery"
+        );
+        let (epoch_key, _) =
+            bundle.derive_epoch_secrets_with_kbroad_secret(alice.kbroad_secret.as_slice())?;
+        assert_eq!(
+            epoch_key, bob.epoch_key,
+            "peer recovery should derive the accepted latest epoch key"
         );
 
         handle.abort();
@@ -16840,6 +17257,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -16847,6 +17266,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -16895,12 +17316,16 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         let _bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -16956,6 +17381,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -16999,6 +17426,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "barrier-keys".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -17081,6 +17510,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -17137,6 +17568,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id,
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -17184,6 +17617,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -17237,7 +17672,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn perform_join_second_member_can_send_immediately()
+    async fn perform_join_second_member_with_invite_can_send_immediately()
     -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
@@ -17259,14 +17694,13 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x92u8; 32]);
-        new_api_client(&server_url)
-            .bootstrap_room(&room_id, demo::kbroad_public())
-            .await?;
 
         let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -17274,10 +17708,16 @@ mod tests {
             "first join should leave room creator message-ready"
         );
 
+        let invite = build_join_invite(&alice)?;
+        let parsed_invite = parse_join_invite(&invite)?
+            .ok_or_else(|| anyhow!("expected join invite for second member"))?;
+
         let bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
+            invite_kbroad_public: Some(hex_decode(parsed_invite.kbroad_public_hex.as_str())?),
+            invite_kbroad_secret: Some(hex_decode(parsed_invite.kbroad_secret_hex.as_str())?),
         })
         .await?;
         assert!(
@@ -17296,6 +17736,82 @@ mod tests {
         )?)
         .await?;
         assert_eq!(sent.sender_leaf, Some(bob.leaf_id));
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn epoch_sync_after_second_join_keeps_local_pcs_refresh_valid()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+        let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
+        let port = next_test_port();
+        let handle = spawn_server_with_seed_demo_room(port, false).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x93u8; 32]);
+
+        let alice = {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+            perform_join(JoinParams {
+                server_url: server_url.clone(),
+                room_id: room_id.clone(),
+                alias: "alice".to_string(),
+                invite_kbroad_public: None,
+                invite_kbroad_secret: None,
+            })
+            .await?
+        };
+        let alice_prev_commit_before_sync = alice.fs_dev_prev_commit;
+
+        let invite = build_join_invite(&alice)?;
+        let parsed_invite = parse_join_invite(&invite)?
+            .ok_or_else(|| anyhow!("expected join invite for second member"))?;
+        let _bob = {
+            let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+            perform_join(JoinParams {
+                server_url: server_url.clone(),
+                room_id: room_id.clone(),
+                alias: "bob".to_string(),
+                invite_kbroad_public: Some(hex_decode(parsed_invite.kbroad_public_hex.as_str())?),
+                invite_kbroad_secret: Some(hex_decode(parsed_invite.kbroad_secret_hex.as_str())?),
+            })
+            .await?
+        };
+
+        let synced_alice = {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+            let synced = perform_epoch_sync(alice).await?.session;
+            persist_session(&synced)?;
+            synced
+        };
+        assert_eq!(
+            synced_alice.fs_dev_prev_commit, alice_prev_commit_before_sync,
+            "syncing another member's join_finalize must not overwrite local device fs_dev_prev_commit"
+        );
+
+        {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+            perform_pcs_refresh(LeaveRequest::from_session(&synced_alice)).await?;
+        }
 
         handle.abort();
         let _ = handle.await;
@@ -17329,6 +17845,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id,
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         assert_eq!(
@@ -17374,6 +17892,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id,
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await
         {
@@ -17422,6 +17942,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id,
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await
         {
@@ -17470,6 +17992,8 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;

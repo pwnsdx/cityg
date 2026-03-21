@@ -692,9 +692,10 @@ pub(crate) struct KbroadEnvelope {
     k_hp: [u8; 32],
 }
 
-pub(crate) fn build_kbroad_envelope(
+fn wrap_kbroad_envelope_from_material(
     header_map: &BTreeMap<u64, Value>,
-    hp_k: &[u8],
+    hp_ciphertext: Vec<u8>,
+    hp_key: [u8; 32],
     xk_hash: &[u8; 32],
     hp_commit: &[u8; 32],
 ) -> Result<KbroadEnvelope, MsphfError> {
@@ -742,43 +743,55 @@ pub(crate) fn build_kbroad_envelope(
     info.extend_from_slice(hp_commit);
     let kek = Zeroizing::new(hkdf_blake3(&salt, kem_ss_bytes.as_slice(), &info));
 
-    let mut k_hp = Zeroizing::new([0u8; 32]);
-    OsRng.fill_bytes(k_hp.as_mut());
     let wrap_nonce = derive_kek_nonce(xk_hash, hp_commit)?;
     let wrap = encrypt_chacha20(
         &kek,
         &wrap_nonce,
         hp_commit,
-        k_hp.as_slice(),
+        hp_key.as_slice(),
         "msphf_hp_wrap encrypt failure",
     )?;
-    let c_hp = encrypt_hp_bytes(hp_k, xk_hash, hp_commit, &k_hp)?;
-    let k_hp = *k_hp;
 
     let envelope = Value::Array(vec![
         Value::Text(KBROAD_MODE.to_string()),
         Value::Bytes(kem_ct_bytes),
         Value::Bytes(wrap.clone()),
-        Value::Bytes(c_hp.clone()),
+        Value::Bytes(hp_ciphertext.clone()),
         Value::Text(KBROAD_AEAD_SUITE.to_string()),
     ]);
 
     Ok(KbroadEnvelope {
         envelope,
-        c_hp,
-        k_hp,
+        c_hp: hp_ciphertext,
+        k_hp: hp_key,
     })
 }
 
-pub fn recover_hp_material_from_header(
+pub(crate) fn build_kbroad_envelope(
     header_map: &BTreeMap<u64, Value>,
+    hp_k: &[u8],
+    xk_hash: &[u8; 32],
+    hp_commit: &[u8; 32],
+) -> Result<KbroadEnvelope, MsphfError> {
+    let mut k_hp = Zeroizing::new([0u8; 32]);
+    OsRng.fill_bytes(k_hp.as_mut());
+    let c_hp = encrypt_hp_bytes(hp_k, xk_hash, hp_commit, &k_hp)?;
+    wrap_kbroad_envelope_from_material(header_map, c_hp, *k_hp, xk_hash, hp_commit)
+}
+
+#[derive(Debug, Clone)]
+pub struct ReboundHpEnvelope {
+    pub envelope: Value,
+    pub hp_ciphertext: Vec<u8>,
+    pub hp_aead_key: [u8; 32],
+}
+
+fn recover_hp_material_from_value(
+    hp_value: &Value,
     xk_hash: &[u8; 32],
     hp_commit: &[u8; 32],
     kbroad_secret: &[u8],
 ) -> Result<(Vec<u8>, [u8; 32]), MsphfError> {
-    let hp_value = header_map
-        .get(&HDR_HP_BYTES)
-        .ok_or_else(|| MsphfError::invalid_input("missing msphf_hp"))?;
     let items = match hp_value {
         Value::Array(items) => items,
         _ => return Err(MsphfError::invalid_input("msphf_hp must be array")),
@@ -868,6 +881,52 @@ pub fn recover_hp_material_from_header(
         .map_err(|_| MsphfError::invalid_input("kbroad wrap plaintext malformed"))?;
 
     Ok((hp_ciphertext, hp_key))
+}
+
+pub fn recover_hp_material_from_header(
+    header_map: &BTreeMap<u64, Value>,
+    xk_hash: &[u8; 32],
+    hp_commit: &[u8; 32],
+    kbroad_secret: &[u8],
+) -> Result<(Vec<u8>, [u8; 32]), MsphfError> {
+    let hp_value = header_map
+        .get(&HDR_HP_BYTES)
+        .ok_or_else(|| MsphfError::invalid_input("missing msphf_hp"))?;
+    recover_hp_material_from_value(hp_value, xk_hash, hp_commit, kbroad_secret)
+}
+
+pub fn rebind_hp_envelope(
+    target_header_map: &BTreeMap<u64, Value>,
+    source_envelope: &Value,
+    source_xk_hash: &[u8; 32],
+    source_hp_commit: &[u8; 32],
+    kbroad_secret: &[u8],
+    target_xk_hash: &[u8; 32],
+    target_hp_commit: &[u8; 32],
+) -> Result<ReboundHpEnvelope, MsphfError> {
+    let (source_hp_ciphertext, source_hp_key) = recover_hp_material_from_value(
+        source_envelope,
+        source_xk_hash,
+        source_hp_commit,
+        kbroad_secret,
+    )?;
+    let hp_plain = Zeroizing::new(decrypt_hp_bytes(
+        &source_hp_ciphertext,
+        source_xk_hash,
+        source_hp_commit,
+        &source_hp_key,
+    )?);
+    let rebuilt = build_kbroad_envelope(
+        target_header_map,
+        hp_plain.as_slice(),
+        target_xk_hash,
+        target_hp_commit,
+    )?;
+    Ok(ReboundHpEnvelope {
+        envelope: rebuilt.envelope,
+        hp_ciphertext: rebuilt.c_hp,
+        hp_aead_key: rebuilt.k_hp,
+    })
 }
 
 #[derive(Clone)]

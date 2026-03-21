@@ -28,7 +28,6 @@ pub(super) fn ensure_merge_join_keys_absent(
     header: &BTreeMap<u64, Value>,
 ) -> Result<(), AcceptanceError> {
     for key in [
-        super::HDR_HP_BYTES,
         super::HDR_BARRIER_LEAF_PK,
         super::HDR_POP_ALG,
         super::HDR_POP_SIG,
@@ -671,6 +670,7 @@ mod tests {
     use crate::accept::fixtures::{
         anchor_from_result, header_ready_with_pop, sample_parts_params_joiner, sample_pop_keys,
     };
+    use crate::{AEAD_TAG_LEN, KBROAD_AEAD_SUITE};
     use anyhow::Result;
     use pqcrypto_kyber::kyber768::ciphertext_bytes as ml_kem_ciphertext_bytes;
 
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn ensure_merge_join_keys_absent_flags_join_fields() -> Result<()> {
         let mut header = base_header();
-        header.insert(super::HDR_HP_BYTES, Value::Bytes(vec![]));
+        header.insert(super::HDR_POP_SIG, Value::Bytes(vec![]));
 
         let err = ensure_merge_join_keys_absent(&header).expect_err("join keys must be rejected");
         expect_freeze(err, FREEZE_MERGE_JOIN_KEYS);
@@ -735,9 +735,19 @@ mod tests {
     }
 
     #[test]
-    fn ensure_merge_join_keys_absent_allows_author_device_pk() -> Result<()> {
+    fn ensure_merge_join_keys_absent_allows_author_device_pk_and_hp_envelope() -> Result<()> {
         let mut header = base_header();
         header.insert(super::HDR_POP_PK, Value::Bytes(vec![0xA5; 32]));
+        header.insert(
+            super::HDR_HP_BYTES,
+            Value::Array(vec![
+                Value::Text(super::KBROAD_MODE.to_string()),
+                Value::Bytes(vec![0x11; super::ml_kem_ciphertext_bytes()]),
+                Value::Bytes(vec![0x22; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+                Value::Bytes(vec![0x33; AEAD_TAG_LEN]),
+                Value::Text(KBROAD_AEAD_SUITE.to_string()),
+            ]),
+        );
         ensure_merge_join_keys_absent(&header)?;
         Ok(())
     }

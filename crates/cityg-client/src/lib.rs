@@ -92,11 +92,12 @@ use msphf_orchestrator::{
     AnchorInstanceParts, CapssWitnessBundle, ForwardSecrecyState, HpBindingInputs, HpProof,
     JoinerKGenResult, LeafIdMode, OrchestrationParams, PivotParity, extract_epoch_msphf_or,
     hdr::{
-        HDR_FS_EC, HDR_MERGE_DELEGATION_SIG, HDR_MH_HEADS, HDR_POP_ALG, HDR_POP_PK,
+        HDR_FS_EC, HDR_HP_BYTES, HDR_MERGE_DELEGATION_SIG, HDR_MH_HEADS, HDR_POP_ALG, HDR_POP_PK,
         HDR_ROLLUP_EPOCH_REPLAY, HDR_ROLLUP_FS_MODE, HDR_ROLLUP_PIVOT_WEID,
         HDR_ROLLUP_PROVENANCE_COMMIT, HDR_ROLLUP_VCK_COMMIT,
     },
-    joiner_kgen_merge_or_with_state, joiner_kgen_or, recover_hp_material_from_header,
+    joiner_kgen_merge_or_with_state, joiner_kgen_or, prove_hp_k, rebind_hp_envelope,
+    recover_hp_material_from_header,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -644,6 +645,37 @@ impl ClientEpochBundle {
             kbroad_secret,
         )?;
         self.derive_epoch_secrets_with_material(&hp_ciphertext, &hp_key)
+    }
+
+    pub fn rebind_merge_hp_envelope_from_pivot(
+        &mut self,
+        pivot: &PivotParity,
+        kbroad_secret: &[u8],
+    ) -> Result<(), CityGError> {
+        if pivot.hp_envelope.is_empty() {
+            return Err(CityGError::InvalidInput(
+                "pivot parity missing hp envelope for merge rebind",
+            ));
+        }
+        let pivot_envelope: Value = ciborium::de::from_reader(pivot.hp_envelope.as_ref())
+            .map_err(|_| CityGError::InvalidInput("pivot parity hp envelope malformed"))?;
+        let rebound = rebind_hp_envelope(
+            &self.header_map,
+            &pivot_envelope,
+            &pivot.xk_hash,
+            &pivot.hp_commit,
+            kbroad_secret,
+            &self.hp_binding.xk_hash,
+            &self.hp_binding.hp_commit,
+        )?;
+        self.header_map.insert(HDR_HP_BYTES, rebound.envelope);
+        self.hp_ciphertext = rebound.hp_ciphertext;
+        self.hp_aead_key = rebound.hp_aead_key;
+        self.hp_proof = prove_hp_k(&self.hp_binding.as_inputs())?;
+        let (epoch_key, eid) = self.derive_epoch_secrets()?;
+        self.epoch_key = epoch_key;
+        self.eid = eid;
+        Ok(())
     }
 
     fn derive_epoch_secrets_with_material(
@@ -1460,7 +1492,16 @@ mod tests {
             srx_commit: None,
             srx_root_sw: None,
             is_join: false,
-            hp_envelope: std::sync::Arc::from([] as [u8; 0]),
+            hp_envelope: std::sync::Arc::from(
+                to_cbor_vec(
+                    source
+                        .header_map
+                        .get(&HDR_HP_BYTES)
+                        .expect("demo bundle should contain hp envelope"),
+                )
+                .expect("demo envelope must encode")
+                .into_boxed_slice(),
+            ),
             fs_epoch_commit: Some([0x55; 32]),
             fs_ec: Some(0),
             fs_dev_commit: Some([0u8; 32]),
@@ -1530,6 +1571,114 @@ mod tests {
                 .header_map
                 .contains_key(&msphf_orchestrator::hdr::HDR_MH_HEADS)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rebound_merge_hp_envelope_derives_epoch_key() -> Result<(), Box<dyn std::error::Error>> {
+        let source = demo_bundle_bob()?;
+        let parity = PivotParity {
+            gid: source.anchor.gid.clone(),
+            cat: source.anchor.cat.clone(),
+            parent_root: source.anchor.parent_root,
+            we_epoch_id: source.we_epoch_id,
+            rho_commit: source.hp_binding.rho_commit,
+            seed_ctx_hash: source.hp_binding.seed_ctx_hash,
+            seed_commit: source.hp_binding.seed_commit,
+            hp_commit: source.hp_binding.hp_commit,
+            xk_hash: source.hp_binding.xk_hash,
+            join_delta_root: source.anchor.join_delta_root,
+            revoked_since_root: source.anchor.revoked_since_prev_root,
+            revoked_root: source.anchor.revoked_root,
+            accept_seq: 1,
+            crs_id: source.hp_binding.msphf_crs_id.as_bytes().to_vec(),
+            params_id: source.hp_binding.params_id.as_bytes().to_vec(),
+            policy_version: DEFAULT_POLICY_VERSION.to_string(),
+            proof_mode: DEFAULT_PROOF_MODE.to_string(),
+            vrf_id: DEFAULT_VRF_ID.to_string(),
+            vrf_proof: vec![0x01],
+            vrf_public: vec![0x02],
+            mask_a: [0xAA; 32],
+            mask_b: [0xBB; 32],
+            fs_capss: vec![0x03],
+            proofs_commit: [0x44; 32],
+            srx_commit: None,
+            srx_root_sw: None,
+            is_join: false,
+            hp_envelope: std::sync::Arc::from(
+                to_cbor_vec(
+                    source
+                        .header_map
+                        .get(&HDR_HP_BYTES)
+                        .expect("demo bundle should contain hp envelope"),
+                )?
+                .into_boxed_slice(),
+            ),
+            fs_epoch_commit: Some([0x55; 32]),
+            fs_ec: Some(0),
+            fs_dev_commit: Some([0u8; 32]),
+        };
+        let parts = AnchorInstanceParts {
+            gid: source.anchor.gid.as_slice(),
+            cat: source.anchor.cat.as_slice(),
+            tswe_salt_hash: source.anchor.tswe_salt_hash.as_slice(),
+            parent_root: &source.anchor.parent_root,
+            join_delta_root: &source.anchor.join_delta_root,
+            revoked_since_prev_root: &source.anchor.revoked_since_prev_root,
+            revoked_root: &source.anchor.revoked_root,
+            pox_r_commit: source
+                .anchor
+                .pox_r_commit
+                .as_ref()
+                .map(|value| value.as_slice()),
+        };
+        let (pop_pk, pop_sk) = keypair();
+        let (vrf_secret_key, vrf_public_key) = test_vrf_keys();
+        let params = OrchestrationParams {
+            msphf_crs_id: RLWE_CRS_ID_DEFAULT,
+            params_id: RLWE_PARAMS_ID_MOCK,
+            srx: None,
+            srx_mode: SrxMode::Complete,
+            pop_keys: Some(PopKeypair {
+                algorithm: "ML-DSA-65",
+                public_key: pop_pk.as_bytes(),
+                secret_key: &pop_sk,
+            }),
+            leaf_id_mode: LeafIdMode::PerGroup,
+            proof_mode: DEFAULT_PROOF_MODE,
+            vrf_id: DEFAULT_VRF_ID,
+            policy_version: DEFAULT_POLICY_VERSION,
+            vrf_secret_key: Some(vrf_secret_key),
+            vrf_public_key: Some(vrf_public_key),
+            fs_policy_version: "7",
+            fs_epoch_base_ts: 0,
+            barrier_version: 0,
+            fs_join: FsJoinInputs::default(),
+            fs_merge: FsMergeInputs::default(),
+        };
+        let mut header = BTreeMap::new();
+        header.insert(
+            msphf_orchestrator::hdr::HDR_KBROAD_ALG,
+            Value::Text("ml-kem-768".to_string()),
+        );
+        header.insert(
+            msphf_orchestrator::hdr::HDR_KBROAD_PUB,
+            Value::Bytes(kbroad_public().to_vec()),
+        );
+        let mut merged = CityGClient::generate_merge(
+            header,
+            parts,
+            params,
+            &[parity.clone()],
+            Some("merge-note"),
+            source.witness_bytes(),
+        )?;
+        assert!(merged.derive_epoch_secrets().is_err());
+        merged.rebind_merge_hp_envelope_from_pivot(&parity, kbroad_secret())?;
+        let (epoch_key, eid) = merged.derive_epoch_secrets_with_kbroad_secret(kbroad_secret())?;
+        assert_eq!(epoch_key, merged.epoch_key);
+        assert_eq!(eid, merged.eid);
+        assert!(merged.header_map.contains_key(&HDR_HP_BYTES));
         Ok(())
     }
 

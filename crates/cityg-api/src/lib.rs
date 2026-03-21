@@ -71,7 +71,7 @@ use msphf_core::{
 use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
 use msphf_orchestrator::{
     AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, FsPolicyConfig,
-    LeafIdMode, PivotParity, compute_leaf_id,
+    LeafIdMode, PivotParity, compute_leaf_id, hdr,
 };
 use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
 use serde::{Deserialize, Serialize};
@@ -1008,10 +1008,10 @@ async fn apply_bundle(
     weid.copy_from_slice(&bundle.we_epoch_id);
     let started = Instant::now();
 
-    let outcome = {
+    let (outcome, sanitized_bundle) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        match guard.accept_epoch(bundle) {
+        let outcome = match guard.accept_epoch(bundle) {
             Ok(outcome) => outcome,
             Err(err) => {
                 drop(guard);
@@ -1029,12 +1029,11 @@ async fn apply_bundle(
                 .record(started.elapsed().as_secs_f64());
                 return Err(mapped);
             }
-        }
+        };
+        let sanitized_bundle = materialize_stored_bundle(&mut guard, bundle, &outcome)?;
+        (outcome, sanitized_bundle)
     };
 
-    let sanitized_bundle = bundle
-        .to_cbor()
-        .map_err(|err| ApiError::server_message(format!("failed to sanitize bundle: {err}")))?;
     persist_bundle(state, bundle, weid, sanitized_bundle, outcome.new_root).await?;
     state.clear_merge_ticket_cache_for_gid(gid).await;
     metrics::counter!(
@@ -1048,6 +1047,64 @@ async fn apply_bundle(
     )
     .record(started.elapsed().as_secs_f64());
     Ok(accept_response_from(&outcome))
+}
+
+fn materialize_stored_bundle(
+    server: &mut CityGServer,
+    bundle: &ClientEpochBundle,
+    outcome: &ServerOutcome,
+) -> Result<Vec<u8>, ApiError> {
+    let mut stored = bundle.clone();
+    if !stored.header_map.contains_key(&hdr::HDR_HP_BYTES)
+        && is_merge_bundle_header(&stored.header_map)
+    {
+        let parity = [outcome.new_root, outcome.parent_root]
+            .into_iter()
+            .find_map(|root| {
+                server
+                    .context_mut()
+                    .pivot_parities_for(bundle.gid(), &root)
+                    .into_iter()
+                    .find(|parity| {
+                        parity.we_epoch_id == outcome.we_epoch_id && !parity.hp_envelope.is_empty()
+                    })
+            })
+            .ok_or_else(|| {
+                ApiError::server_message(
+                    "accepted merge parity missing hp envelope for stored bundle",
+                )
+            })?;
+        let envelope: ciborium::value::Value =
+            ciborium::de::from_reader(parity.hp_envelope.as_ref()).map_err(|_| {
+                ApiError::server_message(
+                    "accepted merge parity hp envelope malformed for stored bundle",
+                )
+            })?;
+        stored.header_map.insert(hdr::HDR_HP_BYTES, envelope);
+    }
+    stored
+        .to_cbor()
+        .map_err(|err| ApiError::server_message(format!("failed to sanitize bundle: {err}")))
+}
+
+fn is_merge_bundle_header(header: &BTreeMap<u64, ciborium::value::Value>) -> bool {
+    header.contains_key(&hdr::HDR_BARRIER_UPDATE)
+        || header.contains_key(&hdr::HDR_BARRIER_UPDATE_REASON)
+        || [
+            hdr::HDR_MH_HEADS,
+            hdr::HDR_ROLLUP_PIVOT_WEID,
+            hdr::HDR_ROLLUP_PROVENANCE_COMMIT,
+            hdr::HDR_ROLLUP_EPOCH_REPLAY,
+            hdr::HDR_ROLLUP_VCK_COMMIT,
+            hdr::HDR_MERGE_DELEGATION_SIG,
+            hdr::HDR_KBROAD_REPLAY,
+            hdr::HDR_ROLLUP_FS_MODE,
+            hdr::HDR_FS_EVOLUTION_BOUNDARY,
+            hdr::HDR_FS_PURGE_TIMES,
+            hdr::HDR_FS_CHECKPOINT_EC,
+        ]
+        .into_iter()
+        .any(|key| header.contains_key(&key))
 }
 
 async fn store_bundle_bytes(state: &ApiState, weid: [u8; 32], bytes: Vec<u8>) {

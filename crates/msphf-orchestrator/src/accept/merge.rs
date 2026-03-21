@@ -333,11 +333,14 @@ impl AcceptanceContext {
                 AcceptanceError::Freeze(FREEZE_HASH_CBOR)
             })?
         };
+        let envelope_value = header_map
+            .get(&HDR_HP_BYTES)
+            .unwrap_or(&pivot_envelope_value);
 
         verify_join_payload_kbroad(
             self,
             header_map,
-            Some(&pivot_envelope_value),
+            Some(envelope_value),
             &pivot_parity.xk_hash,
             &pivot_parity.hp_commit,
         )?;
