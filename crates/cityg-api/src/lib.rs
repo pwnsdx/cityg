@@ -1223,7 +1223,10 @@ async fn map_accept_error(
     failed_index: Option<u32>,
 ) -> ApiError {
     match err {
-        ClientError::InvalidInput(_) => ApiError::InvalidRequest("invalid bundle components"),
+        ClientError::InvalidInput(message) => {
+            tracing::debug!(%message, "accept_epoch invalid bundle input");
+            ApiError::InvalidRequest("invalid bundle components")
+        }
         ClientError::Acceptance(AcceptanceError::Freeze(freeze)) => {
             state.record_freeze(freeze).await;
             ApiError::server_with_freeze_context(
@@ -1233,7 +1236,8 @@ async fn map_accept_error(
                 failed_index,
             )
         }
-        ClientError::Acceptance(AcceptanceError::Msphf(MsphfError::InvalidInput(_))) => {
+        ClientError::Acceptance(AcceptanceError::Msphf(MsphfError::InvalidInput(message))) => {
+            tracing::debug!(%message, "accept_epoch invalid msphf bundle input");
             ApiError::InvalidRequest("invalid bundle components")
         }
         ClientError::Acceptance(other) => ApiError::server_message_with_context(

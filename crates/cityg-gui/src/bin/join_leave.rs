@@ -17,7 +17,7 @@ use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
 use futures::StreamExt;
 use hex::decode as hex_decode;
-use msphf_core::{ds, hash::h_l, serde_utils::to_cbor_vec};
+use msphf_core::{ds, hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
     OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
@@ -48,11 +48,12 @@ fn random_room_id() -> String {
 
 const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
 const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
-const KBROAD_SECRET_ENV: &str = "CITYG_GUI_KBROAD_SECRET_HEX";
 const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
 const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
 const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
 const TICKET_RETRY_JITTER_MS: u64 = 40;
+const BARRIER_TREE_INFO: &[u8] = b"city-g|barrier/tree|v1";
+const BARRIER_KEY_INFO: &[u8] = b"city-g|barrier/key|v1";
 
 fn should_retry_ticket_http_error(
     status_code: u16,
@@ -96,28 +97,6 @@ fn configured_client_admin_token() -> Option<String> {
 fn configured_client_message_token() -> Option<String> {
     read_nonempty_env(CLIENT_MESSAGE_TOKEN_ENV)
         .or_else(|| read_nonempty_env("CITYG_SERVER_MESSAGE_AUTH_TOKEN"))
-}
-
-fn configured_kbroad_secret() -> Result<Option<Vec<u8>>> {
-    match read_nonempty_env(KBROAD_SECRET_ENV) {
-        Some(value) => Ok(Some(
-            hex_decode(value.trim_start_matches("0x").trim_start_matches("0X"))
-                .map_err(|err| anyhow!("invalid {}: {err}", KBROAD_SECRET_ENV))?,
-        )),
-        None => Ok(None),
-    }
-}
-
-fn active_kbroad_secret_for_merge(kbroad_secret: &[u8]) -> Result<Vec<u8>> {
-    if !kbroad_secret.is_empty() {
-        return Ok(kbroad_secret.to_vec());
-    }
-    configured_kbroad_secret()?.ok_or_else(|| {
-        anyhow!(
-            "missing room KBROAD secret for merge publication; provide a shared room secret via invite flow or {}",
-            KBROAD_SECRET_ENV
-        )
-    })
 }
 
 fn new_api_client(server_url: &str) -> CitygApiClient {
@@ -193,6 +172,17 @@ struct BarrierTreeNodeHashPreimage<'a> {
 
 #[derive(Serialize)]
 struct BarrierPkHashPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+
+#[derive(Serialize)]
+struct BarrierTreePathSaltPreimage(u64);
+
+#[derive(Serialize)]
+struct BarrierDeriveSaltPreimage<'a>(u64, #[serde(with = "serde_bytes")] &'a [u8; 32]);
+
+struct BarrierUpdateBuildResult {
+    raw_update: Vec<u8>,
+    k_barrier_new: [u8; 32],
+}
 
 fn compute_revocation_roots_hash(
     revoked_since_root: &[u8; 32],
@@ -385,7 +375,7 @@ fn build_barrier_update_bytes(
     revocation_roots_hash: [u8; 32],
     kem_tree_hash_before: [u8; 32],
     snapshot_pre: &[Vec<u8>],
-) -> Result<Vec<u8>> {
+) -> Result<BarrierUpdateBuildResult> {
     if n_max == 0 || !n_max.is_power_of_two() || updater_leaf >= n_max {
         return Err(anyhow!("invalid barrier update tree parameters"));
     }
@@ -442,6 +432,34 @@ fn build_barrier_update_bytes(
         }
         path_nodes.push((node - 1) / 2);
     }
+
+    let mut path_secrets = BTreeMap::new();
+    let mut path_secret_leaf = [0u8; 32];
+    thread_rng().fill_bytes(&mut path_secret_leaf);
+    path_secrets.insert(path_nodes[0], path_secret_leaf);
+    for idx in 1..path_nodes.len() {
+        let parent_node = path_nodes[idx];
+        let child_node = path_nodes[idx - 1];
+        let child_secret = path_secrets
+            .get(&child_node)
+            .ok_or_else(|| anyhow!("missing path secret for node {child_node}"))?;
+        let salt = h_l(
+            "barrier/tree/path",
+            &BarrierTreePathSaltPreimage(parent_node),
+        )
+        .map_err(|err| anyhow!("derive barrier tree/path salt: {err}"))?;
+        let parent_secret = hkdf_blake3(&salt, child_secret, BARRIER_TREE_INFO);
+        path_secrets.insert(parent_node, parent_secret);
+    }
+    let root_secret = path_secrets
+        .get(&0)
+        .ok_or_else(|| anyhow!("missing barrier root path secret"))?;
+    let barrier_salt = h_l(
+        "barrier/derive/salt",
+        &BarrierDeriveSaltPreimage(barrier_version, &revocation_roots_hash),
+    )
+    .map_err(|err| anyhow!("derive barrier/derive/salt: {err}"))?;
+    let k_barrier_new = hkdf_blake3(&barrier_salt, root_secret, BARRIER_KEY_INFO);
 
     let mut expected_nodes: Vec<u64> = path_nodes.iter().copied().skip(1).collect();
     expected_nodes.sort_unstable();
@@ -515,7 +533,10 @@ fn build_barrier_update_bytes(
         kem_tree_hash_after.to_vec(),
         cover_bytes,
     );
-    to_cbor_vec(&update).context("encode barrier update")
+    Ok(BarrierUpdateBuildResult {
+        raw_update: to_cbor_vec(&update).context("encode barrier update")?,
+        k_barrier_new,
+    })
 }
 
 #[derive(Serialize)]
@@ -867,7 +888,6 @@ struct Session {
     room_id: String,
     gid: [u8; 32],
     leaf_id: [u8; 32],
-    kbroad_secret: Vec<u8>,
     pop_public_key: Vec<u8>,
     pop_secret: Box<MlDsaSecretKey>,
     vrf_secret_key: Vec<u8>,
@@ -889,7 +909,6 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
     let client = new_api_client(server_url);
-    let kbroad_secret = configured_kbroad_secret()?.unwrap_or_default();
     let (pop_pk, pop_sk) = dilithium5::keypair();
     let pop_public_key = DilithiumPublicKeyTrait::as_bytes(&pop_pk).to_vec();
     let pop_secret = Box::new(pop_sk);
@@ -1106,7 +1125,6 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         room_id: room_id.to_string(),
         gid,
         leaf_id,
-        kbroad_secret,
         pop_public_key,
         pop_secret,
         vrf_secret_key,
@@ -1128,7 +1146,6 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
 
 async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     let client = new_api_client(&session.server_url);
-    let active_kbroad_secret = active_kbroad_secret_for_merge(&session.kbroad_secret)?;
     let mut forward_state = session.forward_state.clone();
     let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
@@ -1265,7 +1282,10 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         kem_tree_hash_before,
         snapshot_pre.as_slice(),
     )?;
-    header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(barrier_update));
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE,
+        Value::Bytes(barrier_update.raw_update.clone()),
+    );
     header.insert(
         hdr::HDR_BARRIER_UPDATE_REASON,
         Value::Integer(Integer::from(2u64)),
@@ -1358,8 +1378,8 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
     bundle.we_epoch_id = derived_we_epoch_id;
     bundle
-        .rebind_merge_hp_envelope_from_pivot(pivot, active_kbroad_secret.as_slice())
-        .context("rebind merge KBROAD envelope for join finalize")?;
+        .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
+        .context("rebind merge HP envelope for join finalize")?;
     bundle
         .header_map
         .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
@@ -1480,7 +1500,6 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
 
 async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let client = new_api_client(&session.server_url);
-    let active_kbroad_secret = active_kbroad_secret_for_merge(&session.kbroad_secret)?;
     let mut forward_state = session.forward_state.clone();
     let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
@@ -1530,67 +1549,14 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             }
         }
     };
-
-    let (
-        current_fs_ec,
-        current_fs_epoch_commit,
-        current_fs_dev_prev_commit,
-        current_anchor_hdr_ctx,
-        current_seed_ctx_hash,
-        current_seed_commit,
-        current_seed_bundle_commit,
-        current_stored_header_map,
-    ) = match client.get_bundle(&ticket.we_epoch_id).await {
-        Ok(stored) => {
-            let stored = ClientEpochBundle::from_cbor(&stored.bundle_cbor)
-                .context("decode latest stored bundle for leave")?;
-            let fs_epoch_commit = bytes32(
-                "fs_epoch_commit",
-                stored
-                    .header_map
-                    .get(&hdr::HDR_FS_EPOCH_COMMIT)
-                    .and_then(Value::as_bytes)
-                    .ok_or(anyhow!("stored bundle missing fs_epoch_commit"))?,
-            )?;
-            let fs_dev_prev_commit = bytes32(
-                "fs_dev_prev_commit",
-                stored
-                    .header_map
-                    .get(&hdr::HDR_FS_DEV_COMMIT)
-                    .or_else(|| stored.header_map.get(&hdr::HDR_FS_DEV_PREV_COMMIT))
-                    .and_then(Value::as_bytes)
-                    .ok_or(anyhow!("stored bundle missing fs_dev commit"))?,
-            )?;
-            let fs_ec = stored
-                .header_map
-                .get(&hdr::HDR_FS_EC)
-                .and_then(|value| match value {
-                    Value::Integer(int) => (*int).try_into().ok(),
-                    _ => None,
-                })
-                .unwrap_or(session.fs_ec);
-            (
-                fs_ec,
-                fs_epoch_commit,
-                fs_dev_prev_commit,
-                stored.anchor.anchor_hdr_ctx.clone(),
-                stored.hp_binding.seed_ctx_hash,
-                stored.hp_binding.seed_commit,
-                stored.hp_binding.seed_bundle_commit,
-                stored.header_map.clone(),
-            )
-        }
-        Err(_) => (
-            session.fs_ec,
-            session.fs_epoch_commit,
-            session.fs_dev_prev_commit,
-            session.anchor_hdr_ctx.clone(),
-            session.seed_ctx_hash,
-            session.seed_commit,
-            session.seed_bundle_commit,
-            session.stored_header_map.clone(),
-        ),
-    };
+    let current_fs_ec = session.fs_ec;
+    let current_fs_epoch_commit = session.fs_epoch_commit;
+    let current_fs_dev_prev_commit = session.fs_dev_prev_commit;
+    let current_anchor_hdr_ctx = session.anchor_hdr_ctx.clone();
+    let current_seed_ctx_hash = session.seed_ctx_hash;
+    let current_seed_commit = session.seed_commit;
+    let current_seed_bundle_commit = session.seed_bundle_commit;
+    let current_stored_header_map = session.stored_header_map.clone();
 
     let parities = hydrate_parities(
         &ticket.parities,
@@ -1707,7 +1673,10 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         kem_tree_hash_before,
         snapshot_pre.as_slice(),
     )?;
-    header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(barrier_update));
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE,
+        Value::Bytes(barrier_update.raw_update.clone()),
+    );
     header.insert(
         hdr::HDR_BARRIER_UPDATE_REASON,
         Value::Integer(Integer::from(0u64)),
@@ -1822,8 +1791,8 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
     bundle.we_epoch_id = derived_we_epoch_id;
     bundle
-        .rebind_merge_hp_envelope_from_pivot(pivot, active_kbroad_secret.as_slice())
-        .context("rebind merge KBROAD envelope for leave")?;
+        .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
+        .context("rebind merge HP envelope for leave")?;
     bundle
         .header_map
         .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
@@ -2600,7 +2569,6 @@ mod tests {
                 "CITYG_CLIENT_MESSAGE_AUTH_TOKEN",
                 "join-leave-message-token",
             );
-            std::env::set_var(KBROAD_SECRET_ENV, hex::encode(demo::kbroad_secret()));
         });
     }
 
@@ -2619,7 +2587,6 @@ mod tests {
             room_id: hex::encode([0xAA; 32]),
             gid: [0x11; 32],
             leaf_id: [0x22; 32],
-            kbroad_secret: demo::kbroad_secret().to_vec(),
             pop_public_key: vec![0x33; 32],
             pop_secret: Box::new(pop_sk),
             vrf_secret_key: vec![0x44; 32],
@@ -3228,7 +3195,7 @@ mod tests {
     #[test]
     fn build_barrier_update_bytes_encodes_expected_shape() -> Result<()> {
         let snapshot_pre = vec![Vec::new(); 2 * 1_024 - 1];
-        let bytes = build_barrier_update_bytes(
+        let update = build_barrier_update_bytes(
             1_024,
             0,
             9,
@@ -3237,7 +3204,7 @@ mod tests {
             [0x22; 32],
             snapshot_pre.as_slice(),
         )?;
-        let value: Value = ciborium::de::from_reader(bytes.as_slice())?;
+        let value: Value = ciborium::de::from_reader(update.raw_update.as_slice())?;
         let Value::Array(update) = value else {
             return Err(anyhow!("barrier update must decode as array"));
         };
@@ -3267,7 +3234,7 @@ mod tests {
     {
         let n_max = 8u64;
         let snapshot_pre = vec![Vec::new(); (n_max as usize) * 2 - 1];
-        let bytes = build_barrier_update_bytes(
+        let update = build_barrier_update_bytes(
             n_max,
             0,
             2,
@@ -3276,7 +3243,7 @@ mod tests {
             [0x22; 32],
             snapshot_pre.as_slice(),
         )?;
-        let update_value: Value = ciborium::de::from_reader(bytes.as_slice())?;
+        let update_value: Value = ciborium::de::from_reader(update.raw_update.as_slice())?;
         let Value::Array(update_fields) = update_value else {
             return Err(anyhow!("barrier update must decode as array"));
         };
@@ -3981,7 +3948,6 @@ mod tests {
             room_id: hex::encode([0xAA; 32]),
             gid: [0x01; 32],
             leaf_id: [0x02; 32],
-            kbroad_secret: demo::kbroad_secret().to_vec(),
             pop_public_key: vec![0x11],
             pop_secret: Box::new(sk),
             vrf_secret_key: vec![0x22],

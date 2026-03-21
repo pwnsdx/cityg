@@ -606,6 +606,13 @@ fn resolve_binary(
         if sibling.exists() {
             return Ok(sibling);
         }
+        if runtime_dir != default_path.parent().unwrap_or_else(|| Path::new("")) {
+            return Err(anyhow!(
+                "{label} binary not found next to {}; build it in the same target dir or pass {}",
+                current_exe.display(),
+                cli_flag
+            ));
+        }
     }
 
     if default_path.exists() {

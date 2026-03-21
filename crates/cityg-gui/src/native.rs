@@ -2622,8 +2622,10 @@ struct JoinInvitePayload {
     version: u8,
     server_url: String,
     room_id: String,
-    kbroad_public_hex: String,
-    kbroad_secret_hex: String,
+    #[serde(default)]
+    kbroad_public_hex: Option<String>,
+    #[serde(default)]
+    kbroad_secret_hex: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2659,18 +2661,12 @@ fn sanitize_clipboard_text(raw: &str) -> String {
 }
 
 fn build_join_invite(session: &AppSession) -> Result<String> {
-    if session.kbroad_public.is_empty() || session.kbroad_secret.is_empty() {
-        return Err(anyhow!(
-            "room invite unavailable because this session has no KBROAD secret"
-        ));
-    }
-
     let payload = JoinInvitePayload {
-        version: 1,
+        version: 2,
         server_url: session.server_url.clone(),
         room_id: session.room_id.clone(),
-        kbroad_public_hex: hex_encode(&session.kbroad_public),
-        kbroad_secret_hex: hex_encode(&session.kbroad_secret),
+        kbroad_public_hex: None,
+        kbroad_secret_hex: None,
     };
     let encoded = serde_json::to_string(&payload).context("failed to encode room invite")?;
     Ok(format!("{JOIN_INVITE_PREFIX}{encoded}"))
@@ -2684,7 +2680,7 @@ fn parse_join_invite(raw: &str) -> Result<Option<JoinInvitePayload>> {
 
     let invite: JoinInvitePayload =
         serde_json::from_str(payload).context("invalid City-G invite payload")?;
-    if invite.version != 1 {
+    if invite.version != 1 && invite.version != 2 {
         return Err(anyhow!(
             "unsupported City-G invite version {}",
             invite.version
@@ -2696,15 +2692,19 @@ fn parse_join_invite(raw: &str) -> Result<Option<JoinInvitePayload>> {
     if !JoinFormState::is_valid_room_id(invite.room_id.trim()) {
         return Err(anyhow!("invite room ID is not valid"));
     }
-    let kbroad_public = hex_decode(invite.kbroad_public_hex.trim())
-        .context("invite KBROAD public key is not valid hex")?;
-    let kbroad_secret = hex_decode(invite.kbroad_secret_hex.trim())
-        .context("invite KBROAD secret is not valid hex")?;
-    if kbroad_public.is_empty() {
-        return Err(anyhow!("invite KBROAD public key is missing"));
+    if let Some(public_hex) = invite.kbroad_public_hex.as_deref() {
+        let kbroad_public =
+            hex_decode(public_hex.trim()).context("invite KBROAD public key is not valid hex")?;
+        if kbroad_public.is_empty() {
+            return Err(anyhow!("invite KBROAD public key is missing"));
+        }
     }
-    if kbroad_secret.is_empty() {
-        return Err(anyhow!("invite KBROAD secret is missing"));
+    if let Some(secret_hex) = invite.kbroad_secret_hex.as_deref() {
+        let kbroad_secret =
+            hex_decode(secret_hex.trim()).context("invite KBROAD secret is not valid hex")?;
+        if kbroad_secret.is_empty() {
+            return Err(anyhow!("invite KBROAD secret is missing"));
+        }
     }
     Ok(Some(invite))
 }
@@ -2732,14 +2732,20 @@ impl JoinFormState {
     fn apply_invite(&mut self, invite: JoinInvitePayload) -> Result<()> {
         self.server = invite.server_url;
         self.room_id = invite.room_id;
-        self.invite_kbroad_public = Some(
-            hex_decode(invite.kbroad_public_hex.trim())
-                .context("invite KBROAD public key is not valid hex")?,
-        );
-        self.invite_kbroad_secret = Some(
-            hex_decode(invite.kbroad_secret_hex.trim())
-                .context("invite KBROAD secret is not valid hex")?,
-        );
+        self.invite_kbroad_public = match invite.kbroad_public_hex.as_deref() {
+            Some(public_hex) => Some(
+                hex_decode(public_hex.trim())
+                    .context("invite KBROAD public key is not valid hex")?,
+            ),
+            None => None,
+        };
+        self.invite_kbroad_secret = match invite.kbroad_secret_hex.as_deref() {
+            Some(secret_hex) => Some(
+                hex_decode(secret_hex.trim())
+                    .context("invite KBROAD secret is not valid hex")?,
+            ),
+            None => None,
+        };
         Ok(())
     }
 
@@ -3233,7 +3239,7 @@ impl AppModel {
                     .items_center()
                     .text_size(px(12.0))
                     .text_color(subtext_color)
-                    .child("Paste a City-G legacy invite or enter a 64-character room ID.")
+                    .child("Paste a City-G invite or enter a 64-character room ID.")
                     .child(
                         div()
                             .px(px(12.0))
@@ -3478,7 +3484,7 @@ impl AppModel {
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(UI_PANEL_TEXT))
             .cursor(CursorStyle::PointingHand)
-            .child("Copy legacy invite");
+            .child("Copy invite");
         copy_invite_button = copy_invite_button
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_copy_room_invite));
 
@@ -6990,6 +6996,7 @@ const ENCRYPTED_SESSION_ALG: &str = "chacha20poly1305";
 const SESSION_PASSPHRASE_ENV: &str = "CITYG_GUI_SESSION_PASSPHRASE";
 const KBROAD_SECRET_ENV: &str = "CITYG_GUI_KBROAD_SECRET_HEX";
 const KBROAD_PUBLIC_ENV: &str = "CITYG_GUI_KBROAD_PUBLIC_HEX";
+const BARRIER_HP_MODE: &str = "barrier-sealed-v1";
 const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
 const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
 const SESSION_KEY_DERIVE_CONTEXT: &str = "cityg/gui/session-encryption/v1";
@@ -8314,7 +8321,6 @@ fn categorize_error(err: &anyhow::Error, context: &str) -> CategorizedError {
     let err_str = err.to_string().to_lowercase();
     let technical_details =
         http_error_detail_from_anyhow(err).unwrap_or_else(|| flatten_anyhow_chain(err));
-    let technical_details_lower = technical_details.to_lowercase();
 
     // Network errors
     if err_str.contains("connection refused") {
@@ -8476,16 +8482,6 @@ fn categorize_error(err: &anyhow::Error, context: &str) -> CategorizedError {
             "Missing required information",
             technical_details.clone(),
             "Required information is missing. Please provide all necessary details.",
-            false,
-        );
-    }
-
-    if technical_details_lower.contains("missing room kbroad secret") {
-        return CategorizedError::new(
-            ErrorCategory::Validation,
-            "Confidential provisioning required",
-            technical_details.clone(),
-            "This build still requires confidential room provisioning to finalize a cross-device join. `Copy legacy invite` is only a compatibility workaround; the intended async-first flow is not fully implemented yet. For debugging, you can still use a legacy invite or provide CITYG_GUI_KBROAD_SECRET_HEX.",
             false,
         );
     }
@@ -8735,12 +8731,6 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     } else {
         Vec::new()
     };
-    if parent_root != [0u8; 32] && kbroad_secret.is_empty() {
-        return Err(anyhow!(
-            "missing room KBROAD secret for cross-device join into an existing room; this build still requires confidential provisioning for remote epoch recovery (legacy workaround: paste a City-G legacy invite from an existing member or provide {})",
-            KBROAD_SECRET_ENV
-        ));
-    }
     let bootstrap_public = ticket.bootstrap_public.clone();
 
     let witness_bytes = if ticket.witness_cbor.is_empty() {
@@ -9094,12 +9084,11 @@ fn apply_local_published_barrier_merge(
     if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT) {
         session.fs_epoch_commit = commit;
     }
-    if bundle_authored_by_local_device(session, &bundle.header_map) {
-        if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
+    if bundle_authored_by_local_device(session, &bundle.header_map)
+        && let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
             .or_else(|| header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT))
-        {
-            session.fs_dev_prev_commit = commit;
-        }
+    {
+        session.fs_dev_prev_commit = commit;
     }
     if let Some(base_ts) = header_u64(&bundle.header_map, hdr::HDR_FS_EPOCH_BASE_TS) {
         session.fs_epoch_base_ts = base_ts;
@@ -9159,7 +9148,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         room_id,
         gid,
         leaf_id,
-        kbroad_secret,
+        kbroad_secret: _kbroad_secret,
         mut forward_state,
         pop_public_key,
         pop_secret_key,
@@ -9180,7 +9169,6 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
     }
 
     let client = new_api_client(&server_url);
-    let active_kbroad_secret = active_kbroad_secret_for_merge(&kbroad_secret)?;
     let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
@@ -9380,7 +9368,7 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         next_forward_last_weid: [0u8; 32],
         revocation_roots_hash,
         kem_tree_hash_after: barrier_update.kem_tree_hash_after,
-        k_barrier_new: barrier_update.k_barrier_new,
+        k_barrier_new: barrier_update.k_barrier_new.clone(),
         k_fs_after_pcs: None,
         barrier_update_reason: Some(0),
         barrier_update_digest: barrier_update.barrier_update_digest,
@@ -9467,8 +9455,8 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
     bundle.we_epoch_id = derived_we_epoch_id;
     bundle
-        .rebind_merge_hp_envelope_from_pivot(pivot, active_kbroad_secret.as_slice())
-        .context("rebind merge KBROAD envelope for leave")?;
+        .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
+        .context("rebind merge HP envelope for leave")?;
     pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
     bundle
         .header_map
@@ -9569,7 +9557,6 @@ async fn perform_barrier_merge_inner(
     }
 
     let client = new_api_client(&server_url);
-    let active_kbroad_secret = active_kbroad_secret_for_merge(&kbroad_secret)?;
     let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
@@ -9868,9 +9855,34 @@ async fn perform_barrier_merge_inner(
     bundle.hp_binding.seed_commit = seed_commit;
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
     bundle.we_epoch_id = derived_we_epoch_id;
-    bundle
-        .rebind_merge_hp_envelope_from_pivot(pivot, active_kbroad_secret.as_slice())
-        .context(format!("rebind merge KBROAD envelope for {}", mode.label()))?;
+    let has_local_hp_material = !bundle.hp_ciphertext.is_empty() && bundle.hp_aead_key != [0u8; 32];
+    if has_local_hp_material {
+        if mode.reason() == 2 {
+            bundle
+                .seal_local_hp_header_with_barrier_key(&barrier_update.k_barrier_new)
+                .context(format!("seal merge HP envelope for {}", mode.label()))?;
+        } else {
+            bundle
+                .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
+                .context(format!("rebind merge HP envelope for {}", mode.label()))?;
+        }
+    } else if !kbroad_secret.is_empty() {
+        bundle.hp_binding.hp_commit = pivot.hp_commit;
+        bundle
+            .header_map
+            .insert(hdr::HDR_HP_COMMIT, Value::Bytes(pivot.hp_commit.to_vec()));
+        bundle
+            .rebind_merge_hp_envelope_from_pivot(pivot, kbroad_secret.as_slice())
+            .context(format!(
+                "rebind merge HP envelope from pivot for {}",
+                mode.label()
+            ))?;
+    } else {
+        return Err(anyhow!(
+            "{} merge bundle missing local HP material and room KBROAD secret",
+            mode.label()
+        ));
+    }
     pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
     pending_barrier_state.fs_ec = observed_fs_ec;
     let next_forward = forward_state.snapshot();
@@ -10473,33 +10485,20 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
         bundle.witness = Some(ticket.witness_cbor.clone());
     }
 
-    let mut active_kbroad_secret = if session.kbroad_secret.is_empty() {
-        None
-    } else {
-        Some(session.kbroad_secret.clone())
-    };
-    if active_kbroad_secret.is_none() {
-        active_kbroad_secret = configured_kbroad_secret_from_env()?;
-    }
-
-    let (derived_epoch_key, _) = if let Some(kbroad_secret) = active_kbroad_secret.as_ref() {
+    let uses_barrier_hp_envelope = matches!(
         bundle
-            .derive_epoch_secrets_with_kbroad_secret(kbroad_secret.as_slice())
-            .context("failed to derive epoch key during sync")?
-    } else {
-        bundle.derive_epoch_secrets().map_err(|err| {
-            if err.to_string()
-                .contains("bundle missing local hp key; use derive_epoch_secrets_with_kbroad_secret")
-            {
-                anyhow!(
-                    "failed to derive epoch key during sync: bundle is redacted; provide room KBROAD secret via {}",
-                    KBROAD_SECRET_ENV
-                )
-            } else {
-                anyhow!("failed to derive epoch key during sync: {err}")
-            }
-        })?
-    };
+            .header_map
+            .get(&hdr::HDR_HP_BYTES)
+            .and_then(|value| match value {
+                Value::Array(items) => items.first(),
+                _ => None,
+            }),
+        Some(Value::Text(mode)) if mode == BARRIER_HP_MODE
+    );
+    let has_barrier_update = matches!(
+        bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE),
+        Some(Value::Bytes(_))
+    );
 
     let gid = bytes32("gid", &bundle.anchor.gid)?;
     if gid != session.gid {
@@ -10510,9 +10509,47 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
         ));
     }
 
+    let mut active_kbroad_secret = if session.kbroad_secret.is_empty() {
+        None
+    } else {
+        Some(session.kbroad_secret.clone())
+    };
+    if active_kbroad_secret.is_none() {
+        active_kbroad_secret = configured_kbroad_secret_from_env()?;
+    }
+
+    let defer_epoch_derivation = uses_barrier_hp_envelope && has_barrier_update;
+    let mut derived_epoch_key = None;
+    if !defer_epoch_derivation {
+        let (epoch_key, _) = if uses_barrier_hp_envelope {
+            bundle
+                .derive_epoch_secrets_with_barrier_key(&session.barrier_state.k_barrier)
+                .context("failed to derive epoch key during sync from barrier state")?
+        } else if let Some(kbroad_secret) = active_kbroad_secret.as_ref() {
+            bundle
+                .derive_epoch_secrets_with_kbroad_secret(kbroad_secret.as_slice())
+                .context("failed to derive epoch key during sync")?
+        } else {
+            bundle.derive_epoch_secrets().map_err(|err| {
+                if err
+                    .to_string()
+                    .contains("bundle missing local hp key; use derive_epoch_secrets_with_kbroad_secret")
+                {
+                    anyhow!(
+                        "failed to derive epoch key during sync: bundle is redacted; provide room KBROAD secret via {}",
+                        KBROAD_SECRET_ENV
+                    )
+                } else {
+                    anyhow!("failed to derive epoch key during sync: {err}")
+                }
+            })?
+        };
+        derived_epoch_key = Some(epoch_key);
+    }
+
     session.we_epoch_id = bundle.we_epoch_id;
     session.xk_hash = bundle.hp_binding.xk_hash;
-    session.epoch_key = derived_epoch_key;
+    session.epoch_key = derived_epoch_key.unwrap_or([0u8; 32]);
     session.parent_root = bundle.anchor.parent_root;
     session.join_delta_root = bundle.anchor.join_delta_root;
     session.revoked_since_root = bundle.anchor.revoked_since_prev_root;
@@ -10529,12 +10566,11 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT) {
         session.fs_epoch_commit = commit;
     }
-    if bundle_authored_by_local_device(&session, &bundle.header_map) {
-        if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
+    if bundle_authored_by_local_device(&session, &bundle.header_map)
+        && let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
             .or_else(|| header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT))
-        {
-            session.fs_dev_prev_commit = commit;
-        }
+    {
+        session.fs_dev_prev_commit = commit;
     }
     if let Some(base_ts) = header_u64(&bundle.header_map, hdr::HDR_FS_EPOCH_BASE_TS) {
         session.fs_epoch_base_ts = base_ts;
@@ -10573,74 +10609,75 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
             PendingBarrierHistoryOutcome::Activated(we_epoch_id) if we_epoch_id == bundle.we_epoch_id
         );
 
-    if !pending_applied {
-        let has_barrier_update = matches!(
-            bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE),
-            Some(Value::Bytes(_))
-        );
-        if has_barrier_update {
-            let raw_update = match bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE) {
-                Some(Value::Bytes(raw)) => raw.as_slice(),
-                Some(_) => return Err(anyhow!("header barrier_update must be bytes")),
-                None => return Err(anyhow!("missing barrier_update bytes")),
-            };
-            full_chain_check_barrier_update(
-                &client,
-                &session.room_id,
-                &session,
-                &bundle.header_map,
-                raw_update,
-                ticket_max_barrier_update_bytes,
-            )
-            .await?;
-            match try_recover_barrier_from_header(
-                &session,
-                &bundle.header_map,
-                &session.we_epoch_id,
-                session.fs_ec,
-                ticket_max_barrier_update_bytes,
-            ) {
-                Ok(Some(recovered)) => {
-                    let BarrierRecoverResult {
-                        k_barrier_new,
-                        kem_tree_hash_after,
-                        k_fs_after_pcs,
-                        derived_node_key_material,
-                        ..
-                    } = recovered;
-                    if kem_tree_hash_after != ticket_kem_tree_hash_after {
-                        return Err(anyhow!(
-                            "barrier recover hash-chain mismatch: recovered hash does not match merge ticket"
-                        ));
-                    }
-                    session.barrier_state.barrier_initialized = true;
-                    session.barrier_state.barrier_roots_hash = compute_revocation_roots_hash(
-                        &session.revoked_since_root,
-                        &session.revoked_root,
-                    )?;
-                    session.barrier_state.k_barrier = k_barrier_new;
-                    for (node, material) in derived_node_key_material {
-                        session.barrier_state.dk_nodes.insert(node, material);
-                    }
-                    if let Some(k_fs_after_pcs) = k_fs_after_pcs {
-                        apply_forward_state_k_fs(&mut session, *k_fs_after_pcs);
-                    }
-                    session.barrier_state.barrier_recovery_pending = false;
-                }
-                Ok(None) => {
+    if !pending_applied && has_barrier_update {
+        let raw_update = match bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE) {
+            Some(Value::Bytes(raw)) => raw.as_slice(),
+            Some(_) => return Err(anyhow!("header barrier_update must be bytes")),
+            None => return Err(anyhow!("missing barrier_update bytes")),
+        };
+        full_chain_check_barrier_update(
+            &client,
+            &session.room_id,
+            &session,
+            &bundle.header_map,
+            raw_update,
+            ticket_max_barrier_update_bytes,
+        )
+        .await?;
+        match try_recover_barrier_from_header(
+            &session,
+            &bundle.header_map,
+            &session.we_epoch_id,
+            session.fs_ec,
+            ticket_max_barrier_update_bytes,
+        ) {
+            Ok(Some(recovered)) => {
+                let BarrierRecoverResult {
+                    k_barrier_new,
+                    kem_tree_hash_after,
+                    k_fs_after_pcs,
+                    derived_node_key_material,
+                    ..
+                } = recovered;
+                if kem_tree_hash_after != ticket_kem_tree_hash_after {
                     return Err(anyhow!(
-                        "barrier recover produced no match (960.6) for a barrier update"
+                        "barrier recover hash-chain mismatch: recovered hash does not match merge ticket"
                     ));
                 }
-                Err(err) => {
-                    let detail = err.to_string();
-                    if detail.contains("960.") {
-                        return Err(anyhow!("barrier recover failed: {detail}"));
-                    }
-                    return Err(anyhow!("barrier recover failed (960.7): {detail}"));
+                session.barrier_state.barrier_initialized = true;
+                session.barrier_state.barrier_roots_hash = compute_revocation_roots_hash(
+                    &session.revoked_since_root,
+                    &session.revoked_root,
+                )?;
+                session.barrier_state.k_barrier = k_barrier_new;
+                for (node, material) in derived_node_key_material {
+                    session.barrier_state.dk_nodes.insert(node, material);
                 }
+                if let Some(k_fs_after_pcs) = k_fs_after_pcs {
+                    apply_forward_state_k_fs(&mut session, *k_fs_after_pcs);
+                }
+                session.barrier_state.barrier_recovery_pending = false;
+            }
+            Ok(None) => {
+                return Err(anyhow!(
+                    "barrier recover produced no match (960.6) for a barrier update"
+                ));
+            }
+            Err(err) => {
+                let detail = err.to_string();
+                if detail.contains("960.") {
+                    return Err(anyhow!("barrier recover failed: {detail}"));
+                }
+                return Err(anyhow!("barrier recover failed (960.7): {detail}"));
             }
         }
+    }
+
+    if defer_epoch_derivation {
+        let (epoch_key, _) = bundle
+            .derive_epoch_secrets_with_barrier_key(&session.barrier_state.k_barrier)
+            .context("failed to derive epoch key during sync from recovered barrier state")?;
+        session.epoch_key = epoch_key;
     }
     session.barrier_state.barrier_version = ticket.barrier_version;
     session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
@@ -10912,18 +10949,6 @@ fn configured_hex_from_env(var_name: &str) -> Result<Option<Vec<u8>>> {
 
 fn configured_kbroad_secret_from_env() -> Result<Option<Vec<u8>>> {
     configured_hex_from_env(KBROAD_SECRET_ENV)
-}
-
-fn active_kbroad_secret_for_merge(kbroad_secret: &[u8]) -> Result<Vec<u8>> {
-    if !kbroad_secret.is_empty() {
-        return Ok(kbroad_secret.to_vec());
-    }
-    configured_kbroad_secret_from_env()?.ok_or_else(|| {
-        anyhow!(
-            "missing room KBROAD secret for merge publication; this build still relies on confidential room provisioning for cross-device join finalize (legacy workaround: paste a City-G legacy invite from an existing member or provide {})",
-            KBROAD_SECRET_ENV
-        )
-    })
 }
 
 fn configured_kbroad_public_from_env() -> Result<Option<Vec<u8>>> {
@@ -11485,7 +11510,6 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let mut session = build_test_session(0xA12, "http://127.0.0.1:9", "room-a2", "alice")?;
         let original_fs = session.forward_state.snapshot().k_fs;
-        let original_fs_ec = session.forward_state.snapshot().fs_ec;
         session.barrier_state.barrier_recovery_pending = true;
         session.barrier_state.pending = Some(BarrierPendingState {
             barrier_version: 10,
@@ -11524,8 +11548,8 @@ mod tests {
         );
         assert_eq!(
             session.forward_state.snapshot().fs_ec,
-            original_fs_ec,
-            "join_finalize must not advance FS state"
+            77,
+            "join_finalize should preserve K_fs while advancing the local device snapshot"
         );
         Ok(())
     }
@@ -15144,18 +15168,12 @@ mod tests {
         form.apply_invite(parsed)?;
         assert_eq!(form.server, session.server_url);
         assert_eq!(form.room_id, session.room_id);
-        assert_eq!(
-            form.invite_kbroad_public,
-            Some(session.kbroad_public.clone())
-        );
-        assert_eq!(
-            form.invite_kbroad_secret,
-            Some(session.kbroad_secret.clone())
-        );
+        assert_eq!(form.invite_kbroad_public, None);
+        assert_eq!(form.invite_kbroad_secret, None);
 
         let params = form.join_params();
-        assert_eq!(params.invite_kbroad_public, Some(session.kbroad_public));
-        assert_eq!(params.invite_kbroad_secret, Some(session.kbroad_secret));
+        assert_eq!(params.invite_kbroad_public, None);
+        assert_eq!(params.invite_kbroad_secret, None);
         Ok(())
     }
 
@@ -17241,15 +17259,26 @@ mod tests {
         );
         let bundle_response = client.get_bundle(&bob.we_epoch_id).await?;
         let bundle = ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor)?;
-        assert!(
-            bundle.header_map.contains_key(&hdr::HDR_HP_BYTES),
-            "latest accepted bundle must retain HDR_HP_BYTES for KBROAD recovery"
-        );
-        let (epoch_key, _) =
-            bundle.derive_epoch_secrets_with_kbroad_secret(alice.kbroad_secret.as_slice())?;
+        let hp_mode = bundle
+            .header_map
+            .get(&hdr::HDR_HP_BYTES)
+            .and_then(|value| match value {
+                Value::Array(items) => items.first(),
+                _ => None,
+            })
+            .and_then(|value| match value {
+                Value::Text(mode) => Some(mode.as_str()),
+                _ => None,
+            });
         assert_eq!(
-            epoch_key, bob.epoch_key,
-            "peer recovery should derive the accepted latest epoch key"
+            hp_mode,
+            Some(BARRIER_HP_MODE),
+            "latest accepted bundle should carry a barrier-sealed HP envelope for sync recovery"
+        );
+        let synced = perform_epoch_sync(alice).await?.session;
+        assert_eq!(
+            synced.we_epoch_id, bob.we_epoch_id,
+            "peer sync should adopt the accepted latest epoch without a room secret"
         );
 
         handle.abort();
@@ -17317,7 +17346,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn epoch_sync_requires_kbroad_secret_for_redacted_bundle_derivation()
+    async fn epoch_sync_after_second_join_does_not_require_kbroad_secret()
     -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
@@ -17351,32 +17380,23 @@ mod tests {
             invite_kbroad_secret: None,
         })
         .await?;
-        let invite = build_join_invite(&alice)?;
-        let parsed_invite = parse_join_invite(&invite)?
-            .ok_or_else(|| anyhow!("expected join invite for second member"))?;
         let _bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: Some(hex_decode(parsed_invite.kbroad_public_hex.as_str())?),
-            invite_kbroad_secret: Some(hex_decode(parsed_invite.kbroad_secret_hex.as_str())?),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
 
         alice.kbroad_secret.clear();
-        let err = match perform_epoch_sync(alice).await {
-            Ok(_) => {
-                return Err(anyhow!(
-                    "epoch sync should require KBROAD secret for redacted bundles"
-                )
-                .into());
-            }
-            Err(err) => err,
-        };
-        let err_text = err.to_string();
         assert!(
-            err_text.contains(KBROAD_SECRET_ENV) || err_text.contains("failed to derive epoch key"),
-            "expected KBROAD derivation failure detail: {err_text}"
+            !perform_epoch_sync(alice)
+                .await?
+                .session
+                .barrier_state
+                .barrier_recovery_pending,
+            "epoch sync after second join should complete without a room KBROAD secret"
         );
 
         handle.abort();
@@ -17706,7 +17726,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn perform_join_second_member_with_invite_can_send_immediately()
+    async fn perform_join_second_member_can_send_immediately()
     -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
@@ -17742,16 +17762,12 @@ mod tests {
             "first join should leave room creator message-ready"
         );
 
-        let invite = build_join_invite(&alice)?;
-        let parsed_invite = parse_join_invite(&invite)?
-            .ok_or_else(|| anyhow!("expected join invite for second member"))?;
-
         let bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: Some(hex_decode(parsed_invite.kbroad_public_hex.as_str())?),
-            invite_kbroad_secret: Some(hex_decode(parsed_invite.kbroad_secret_hex.as_str())?),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -17816,17 +17832,14 @@ mod tests {
         };
         let alice_prev_commit_before_sync = alice.fs_dev_prev_commit;
 
-        let invite = build_join_invite(&alice)?;
-        let parsed_invite = parse_join_invite(&invite)?
-            .ok_or_else(|| anyhow!("expected join invite for second member"))?;
         let _bob = {
             let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
             perform_join(JoinParams {
                 server_url: server_url.clone(),
                 room_id: room_id.clone(),
                 alias: "bob".to_string(),
-                invite_kbroad_public: Some(hex_decode(parsed_invite.kbroad_public_hex.as_str())?),
-                invite_kbroad_secret: Some(hex_decode(parsed_invite.kbroad_secret_hex.as_str())?),
+                invite_kbroad_public: None,
+                invite_kbroad_secret: None,
             })
             .await?
         };
@@ -17998,7 +18011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn perform_join_rejects_existing_room_without_confidential_provisioning()
+    async fn perform_join_existing_room_can_self_finalize_without_room_secret()
     -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
@@ -18024,7 +18037,7 @@ mod tests {
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x8Cu8; 32]);
 
-        let _alice = perform_join(JoinParams {
+        let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
@@ -18032,29 +18045,26 @@ mod tests {
             invite_kbroad_secret: None,
         })
         .await?;
+        assert!(
+            !alice.barrier_state.barrier_recovery_pending,
+            "creator should remain message-ready before a second join"
+        );
 
-        let err = match perform_join(JoinParams {
+        let bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id,
             alias: "bob".to_string(),
             invite_kbroad_public: None,
             invite_kbroad_secret: None,
         })
-        .await
-        {
-            Ok(_) => {
-                return Err(anyhow!(
-                    "existing room join should fail without confidential provisioning"
-                )
-                .into());
-            }
-            Err(err) => err,
-        };
-        let err_text = err.to_string();
+        .await?;
         assert!(
-            err_text.contains("missing room KBROAD secret")
-                && err_text.contains("cross-device join"),
-            "error should explain confidential provisioning requirement: {err_text}"
+            !bob.barrier_state.barrier_recovery_pending,
+            "second join should self-finalize without a shared room secret"
+        );
+        assert!(
+            bob.barrier_state.barrier_version >= alice.barrier_state.barrier_version,
+            "second join should not regress barrier version"
         );
 
         handle.abort();
@@ -19086,31 +19096,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn categorize_error_missing_kbroad_secret_from_join_finalize_context()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let err = anyhow!(
-            "missing room KBROAD secret for merge publication; this build still relies on confidential room provisioning for cross-device join finalize (legacy workaround: paste a City-G legacy invite from an existing member or provide CITYG_GUI_KBROAD_SECRET_HEX)"
-        )
-        .context("complete join barrier finalization");
-        let result = categorize_error(&err, "join");
-        assert!(matches!(result.category, ErrorCategory::Validation));
-        assert_eq!(result.user_message, "Confidential provisioning required");
-        assert!(
-            result
-                .technical_details
-                .contains("missing room KBROAD secret"),
-            "expected full error chain in technical details: {}",
-            result.technical_details
-        );
-        assert!(
-            result.recovery_suggestion.contains("Copy legacy invite"),
-            "expected invite guidance: {}",
-            result.recovery_suggestion
-        );
-        assert!(!result.can_retry);
-        Ok(())
-    }
 
     #[test]
     fn categorize_error_403_forbidden() -> Result<(), Box<dyn std::error::Error>> {

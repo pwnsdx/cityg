@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use crate::BARRIER_HP_MODE;
+
 use super::*;
 use tracing::debug;
 
@@ -74,6 +76,12 @@ impl AcceptanceContext {
             "fs_checkpoint_ec",
         )?;
         let fs_ec = header_u64_or_freeze(header_map, HDR_FS_EC, FREEZE_FS_JOIN_MISSING, "fs_ec")?;
+        let _barrier_update_reason = header_u64_or_freeze(
+            header_map,
+            HDR_BARRIER_UPDATE_REASON,
+            FREEZE_FS_JOIN_MISSING,
+            "barrier_update_reason",
+        )?;
         let barrier_version = header_u64_or_freeze(
             header_map,
             HDR_BARRIER_VERSION,
@@ -97,6 +105,12 @@ impl AcceptanceContext {
             HDR_FS_DEV_COMMIT,
             FREEZE_FS_JOIN_MISSING,
             "fs_dev_commit",
+        )?;
+        let local_hp_commit = header_bytes32_or_freeze(
+            header_map,
+            HDR_HP_COMMIT,
+            FREEZE_FIELD_MISSING,
+            "msphf_hp_commit",
         )?;
         let pop_pk_bytes = header_map
             .get(&HDR_POP_PK)
@@ -333,16 +347,33 @@ impl AcceptanceContext {
                 AcceptanceError::Freeze(FREEZE_HASH_CBOR)
             })?
         };
-        let envelope_value = header_map
-            .get(&HDR_HP_BYTES)
-            .unwrap_or(&pivot_envelope_value);
+        let use_local_hp_transport = matches!(
+            header_map.get(&HDR_HP_BYTES),
+            Some(Value::Array(items))
+                if matches!(items.first(), Some(Value::Text(mode)) if mode == BARRIER_HP_MODE)
+        );
+        let envelope_value = if use_local_hp_transport {
+            header_map
+                .get(&HDR_HP_BYTES)
+                .ok_or(AcceptanceError::Freeze(FREEZE_FIELD_MISSING))?
+        } else {
+            header_map.get(&HDR_HP_BYTES).unwrap_or(&pivot_envelope_value)
+        };
 
         verify_join_payload_kbroad(
             self,
             header_map,
             Some(envelope_value),
-            &pivot_parity.xk_hash,
-            &pivot_parity.hp_commit,
+            if use_local_hp_transport {
+                &xk_hash
+            } else {
+                &pivot_parity.xk_hash
+            },
+            if use_local_hp_transport {
+                &local_hp_commit
+            } else {
+                &pivot_parity.hp_commit
+            },
         )?;
 
         if proofs.fs_capss != pivot_parity.fs_capss {
@@ -558,7 +589,11 @@ impl AcceptanceContext {
 
         let record = HeadRecord::new(
             derived_we_epoch_id,
-            pivot_record.msphf_hp_commit,
+            if use_local_hp_transport {
+                local_hp_commit
+            } else {
+                pivot_record.msphf_hp_commit
+            },
             seed_ctx_hash,
             rho_commit,
             seed_commit,
@@ -626,7 +661,11 @@ impl AcceptanceContext {
             rho_commit,
             seed_ctx_hash,
             seed_commit,
-            hp_commit: pivot_record.msphf_hp_commit,
+            hp_commit: if use_local_hp_transport {
+                local_hp_commit
+            } else {
+                pivot_record.msphf_hp_commit
+            },
             xk_hash,
             join_delta_root: join_delta_root_arr,
             revoked_since_root: revoked_since_root_arr,
@@ -676,7 +715,11 @@ impl AcceptanceContext {
             seed_ctx_hash,
             seed_commit,
             rho_commit,
-            hp_commit: pivot_record.msphf_hp_commit,
+            hp_commit: if use_local_hp_transport {
+                local_hp_commit
+            } else {
+                pivot_record.msphf_hp_commit
+            },
             xk_hash,
             accept_seq,
             accept_time: now,
@@ -738,8 +781,10 @@ mod tests {
             "merge fixture requires at least one retired parity"
         );
 
+        let mut header_map = sample_header();
+        header_map.insert(HDR_BARRIER_UPDATE_REASON, Value::Integer(Integer::from(2u64)));
         let merge_joiner = joiner_kgen_merge_or(
-            sample_header(),
+            header_map,
             &parities,
             Some("test-merge"),
             parts.clone(),
@@ -887,6 +932,7 @@ mod tests {
         retired_heads: &[[u8; 32]],
     ) -> Result<PreparedMergeHeader> {
         let mut header = merge_joiner.header_map.clone();
+        header.insert(HDR_BARRIER_UPDATE_REASON, Value::Integer(Integer::from(2u64)));
         recompute_proofs_commit(&mut header)?;
 
         let pivot_weid = header
@@ -914,6 +960,7 @@ mod tests {
         }
         pivot_parity.srx_commit = None;
         recompute_proofs_commit(&mut header)?;
+        refresh_seed_bindings(&mut header, parts, merge_joiner);
 
         let proofs_commit = header
             .get(&HDR_PROOFS_COMMIT)

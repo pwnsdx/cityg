@@ -119,9 +119,11 @@ const MERKLE_DS_ID: &str = "rpo-256/v2";
 const TSWE_ALG_CODE: u8 = 31;
 const TSWE_ALG_LABEL: &str = "tswe/msphf-we/fs-hybrid";
 const KBROAD_MODE: &str = "kbroad-v1";
+const BARRIER_HP_MODE: &str = "barrier-sealed-v1";
 const KBROAD_ML_KEM_ALG: &str = "ml-kem-768";
 const KBROAD_AEAD_SUITE: &str = "chacha20-poly1305";
 const KBROAD_INFO_PREFIX: &[u8] = b"city-g|hp/kek/v1";
+const BARRIER_HP_INFO_PREFIX: &[u8] = b"city-g|hp/barrier/v1";
 const FS_STEP_INFO: &[u8] = b"city-g|fs/step|v1";
 const FS_TAU_INFO: &[u8] = b"city-g|fs/tau|v1";
 pub const DEFAULT_PROOF_MODE: &str = "lin+zkvrf";
@@ -692,6 +694,32 @@ pub(crate) struct KbroadEnvelope {
     k_hp: [u8; 32],
 }
 
+fn derive_barrier_hp_key(
+    barrier_key: &[u8; 32],
+    barrier_version: u64,
+    xk_hash: &[u8; 32],
+    hp_commit: &[u8; 32],
+) -> Result<[u8; 32], MsphfError> {
+    #[derive(Serialize)]
+    struct BarrierSalt<'a> {
+        barrier_version: u64,
+        #[serde(with = "serde_bytes")]
+        xk_hash: &'a [u8; 32],
+    }
+
+    let salt = h_l(
+        "hp/barrier/salt",
+        &BarrierSalt {
+            barrier_version,
+            xk_hash,
+        },
+    )?;
+    let mut info = Vec::with_capacity(BARRIER_HP_INFO_PREFIX.len() + hp_commit.len());
+    info.extend_from_slice(BARRIER_HP_INFO_PREFIX);
+    info.extend_from_slice(hp_commit);
+    Ok(hkdf_blake3(&salt, barrier_key, &info))
+}
+
 fn wrap_kbroad_envelope_from_material(
     header_map: &BTreeMap<u64, Value>,
     hp_ciphertext: Vec<u8>,
@@ -779,6 +807,34 @@ pub(crate) fn build_kbroad_envelope(
     wrap_kbroad_envelope_from_material(header_map, c_hp, *k_hp, xk_hash, hp_commit)
 }
 
+pub(crate) fn build_barrier_hp_envelope(
+    header_map: &BTreeMap<u64, Value>,
+    hp_k: &[u8],
+    xk_hash: &[u8; 32],
+    hp_commit: &[u8; 32],
+    barrier_key: &[u8; 32],
+) -> Result<KbroadEnvelope, MsphfError> {
+    let barrier_version = header_map
+        .get(&HDR_BARRIER_VERSION)
+        .and_then(Value::as_integer)
+        .ok_or_else(|| MsphfError::invalid_input("missing barrier_version"))?
+        .try_into()
+        .map_err(|_| MsphfError::invalid_input("barrier_version malformed"))?;
+    let hp_key = derive_barrier_hp_key(barrier_key, barrier_version, xk_hash, hp_commit)?;
+    let hp_ciphertext = encrypt_hp_bytes(hp_k, xk_hash, hp_commit, &hp_key)?;
+    let envelope = Value::Array(vec![
+        Value::Text(BARRIER_HP_MODE.to_string()),
+        Value::Bytes(hp_ciphertext.clone()),
+        Value::Text(KBROAD_AEAD_SUITE.to_string()),
+    ]);
+
+    Ok(KbroadEnvelope {
+        envelope,
+        c_hp: hp_ciphertext,
+        k_hp: hp_key,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct ReboundHpEnvelope {
     pub envelope: Value,
@@ -792,11 +848,29 @@ fn recover_hp_material_from_value(
     hp_commit: &[u8; 32],
     kbroad_secret: &[u8],
 ) -> Result<(Vec<u8>, [u8; 32]), MsphfError> {
+    recover_hp_material_from_value_with_secrets(
+        hp_value,
+        xk_hash,
+        hp_commit,
+        Some(kbroad_secret),
+        None,
+        None,
+    )
+}
+
+fn recover_hp_material_from_value_with_secrets(
+    hp_value: &Value,
+    xk_hash: &[u8; 32],
+    hp_commit: &[u8; 32],
+    kbroad_secret: Option<&[u8]>,
+    barrier_key: Option<&[u8; 32]>,
+    barrier_version: Option<u64>,
+) -> Result<(Vec<u8>, [u8; 32]), MsphfError> {
     let items = match hp_value {
         Value::Array(items) => items,
         _ => return Err(MsphfError::invalid_input("msphf_hp must be array")),
     };
-    if items.len() != 5 {
+    if items.is_empty() {
         return Err(MsphfError::invalid_input("msphf_hp shape mismatch"));
     }
 
@@ -806,81 +880,117 @@ fn recover_hp_material_from_value(
             .map_err(|_| MsphfError::invalid_input("kbroad mode invalid utf8"))?,
         _ => return Err(MsphfError::invalid_input("kbroad mode malformed")),
     };
-    if mode != KBROAD_MODE {
-        return Err(MsphfError::invalid_input("unsupported kbroad mode"));
+    match mode {
+        KBROAD_MODE => {
+            if items.len() != 5 {
+                return Err(MsphfError::invalid_input("msphf_hp shape mismatch"));
+            }
+            let ct_bytes = match &items[1] {
+                Value::Bytes(bytes) => bytes.as_slice(),
+                _ => return Err(MsphfError::invalid_input("kbroad ciphertext malformed")),
+            };
+            if ct_bytes.len() != ml_kem_ciphertext_bytes() {
+                return Err(MsphfError::invalid_input(
+                    "kbroad ciphertext length mismatch",
+                ));
+            }
+
+            let wrap_bytes = match &items[2] {
+                Value::Bytes(bytes) => bytes.as_slice(),
+                _ => return Err(MsphfError::invalid_input("kbroad wrap malformed")),
+            };
+            if wrap_bytes.len() != (32 + AEAD_TAG_LEN) {
+                return Err(MsphfError::invalid_input("kbroad wrap length mismatch"));
+            }
+
+            let hp_ciphertext = match &items[3] {
+                Value::Bytes(bytes) => bytes.clone(),
+                _ => return Err(MsphfError::invalid_input("msphf_hp ciphertext malformed")),
+            };
+            if hp_ciphertext.is_empty() || hp_ciphertext.len() > (MAX_HP_BYTES + AEAD_TAG_LEN) {
+                return Err(MsphfError::invalid_input(
+                    "msphf_hp ciphertext length mismatch",
+                ));
+            }
+
+            let aead = match &items[4] {
+                Value::Text(text) => text.as_str(),
+                Value::Bytes(bytes) => std::str::from_utf8(bytes)
+                    .map_err(|_| MsphfError::invalid_input("kbroad aead invalid utf8"))?,
+                _ => return Err(MsphfError::invalid_input("kbroad aead malformed")),
+            };
+            if aead != KBROAD_AEAD_SUITE {
+                return Err(MsphfError::invalid_input("unsupported kbroad aead"));
+            }
+            let kbroad_secret =
+                kbroad_secret.ok_or_else(|| MsphfError::invalid_input("kbroad secret missing"))?;
+
+            let kem_ct = MlKemCiphertext::from_bytes(ct_bytes)
+                .map_err(|_| MsphfError::invalid_input("kbroad ciphertext malformed"))?;
+            let kem_sk = MlKemSecretKey::from_bytes(kbroad_secret)
+                .map_err(|_| MsphfError::invalid_input("kbroad secret malformed"))?;
+            let kem_ss = ml_kem_decapsulate(&kem_ct, &kem_sk);
+            let kem_ss_bytes = Zeroizing::new(kem_ss.as_bytes().to_vec());
+
+            #[derive(Serialize)]
+            struct KekSalt<'a> {
+                #[serde(with = "serde_bytes")]
+                xk_hash: &'a [u8; 32],
+            }
+
+            let salt = h_l("hp/kek/salt", &KekSalt { xk_hash })?;
+            let mut info = Vec::with_capacity(KBROAD_INFO_PREFIX.len() + hp_commit.len());
+            info.extend_from_slice(KBROAD_INFO_PREFIX);
+            info.extend_from_slice(hp_commit);
+            let kek = Zeroizing::new(hkdf_blake3(&salt, kem_ss_bytes.as_slice(), &info));
+
+            let wrap_nonce = derive_kek_nonce(xk_hash, hp_commit)?;
+            let hp_key_bytes = Zeroizing::new(decrypt_chacha20(
+                &kek,
+                &wrap_nonce,
+                hp_commit,
+                wrap_bytes,
+                "msphf_hp_wrap tag mismatch",
+            )?);
+            let hp_key: [u8; 32] = hp_key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| MsphfError::invalid_input("kbroad wrap plaintext malformed"))?;
+
+            Ok((hp_ciphertext, hp_key))
+        }
+        BARRIER_HP_MODE => {
+            if items.len() != 3 {
+                return Err(MsphfError::invalid_input("barrier hp shape mismatch"));
+            }
+            let hp_ciphertext = match &items[1] {
+                Value::Bytes(bytes) => bytes.clone(),
+                _ => return Err(MsphfError::invalid_input("barrier hp ciphertext malformed")),
+            };
+            if hp_ciphertext.is_empty() || hp_ciphertext.len() > (MAX_HP_BYTES + AEAD_TAG_LEN) {
+                return Err(MsphfError::invalid_input(
+                    "barrier hp ciphertext length mismatch",
+                ));
+            }
+            let aead = match &items[2] {
+                Value::Text(text) => text.as_str(),
+                Value::Bytes(bytes) => std::str::from_utf8(bytes)
+                    .map_err(|_| MsphfError::invalid_input("barrier hp aead invalid utf8"))?,
+                _ => return Err(MsphfError::invalid_input("barrier hp aead malformed")),
+            };
+            if aead != KBROAD_AEAD_SUITE {
+                return Err(MsphfError::invalid_input("unsupported barrier hp aead"));
+            }
+            let barrier_key =
+                barrier_key.ok_or_else(|| MsphfError::invalid_input("barrier key missing"))?;
+            let barrier_version = barrier_version
+                .ok_or_else(|| MsphfError::invalid_input("barrier_version missing"))?;
+            let hp_key =
+                derive_barrier_hp_key(barrier_key, barrier_version, xk_hash, hp_commit)?;
+            Ok((hp_ciphertext, hp_key))
+        }
+        _ => Err(MsphfError::invalid_input("unsupported kbroad mode")),
     }
-
-    let ct_bytes = match &items[1] {
-        Value::Bytes(bytes) => bytes.as_slice(),
-        _ => return Err(MsphfError::invalid_input("kbroad ciphertext malformed")),
-    };
-    if ct_bytes.len() != ml_kem_ciphertext_bytes() {
-        return Err(MsphfError::invalid_input(
-            "kbroad ciphertext length mismatch",
-        ));
-    }
-
-    let wrap_bytes = match &items[2] {
-        Value::Bytes(bytes) => bytes.as_slice(),
-        _ => return Err(MsphfError::invalid_input("kbroad wrap malformed")),
-    };
-    if wrap_bytes.len() != (32 + AEAD_TAG_LEN) {
-        return Err(MsphfError::invalid_input("kbroad wrap length mismatch"));
-    }
-
-    let hp_ciphertext = match &items[3] {
-        Value::Bytes(bytes) => bytes.clone(),
-        _ => return Err(MsphfError::invalid_input("msphf_hp ciphertext malformed")),
-    };
-    if hp_ciphertext.is_empty() || hp_ciphertext.len() > (MAX_HP_BYTES + AEAD_TAG_LEN) {
-        return Err(MsphfError::invalid_input(
-            "msphf_hp ciphertext length mismatch",
-        ));
-    }
-
-    let aead = match &items[4] {
-        Value::Text(text) => text.as_str(),
-        Value::Bytes(bytes) => std::str::from_utf8(bytes)
-            .map_err(|_| MsphfError::invalid_input("kbroad aead invalid utf8"))?,
-        _ => return Err(MsphfError::invalid_input("kbroad aead malformed")),
-    };
-    if aead != KBROAD_AEAD_SUITE {
-        return Err(MsphfError::invalid_input("unsupported kbroad aead"));
-    }
-
-    let kem_ct = MlKemCiphertext::from_bytes(ct_bytes)
-        .map_err(|_| MsphfError::invalid_input("kbroad ciphertext malformed"))?;
-    let kem_sk = MlKemSecretKey::from_bytes(kbroad_secret)
-        .map_err(|_| MsphfError::invalid_input("kbroad secret malformed"))?;
-    let kem_ss = ml_kem_decapsulate(&kem_ct, &kem_sk);
-    let kem_ss_bytes = Zeroizing::new(kem_ss.as_bytes().to_vec());
-
-    #[derive(Serialize)]
-    struct KekSalt<'a> {
-        #[serde(with = "serde_bytes")]
-        xk_hash: &'a [u8; 32],
-    }
-
-    let salt = h_l("hp/kek/salt", &KekSalt { xk_hash })?;
-    let mut info = Vec::with_capacity(KBROAD_INFO_PREFIX.len() + hp_commit.len());
-    info.extend_from_slice(KBROAD_INFO_PREFIX);
-    info.extend_from_slice(hp_commit);
-    let kek = Zeroizing::new(hkdf_blake3(&salt, kem_ss_bytes.as_slice(), &info));
-
-    let wrap_nonce = derive_kek_nonce(xk_hash, hp_commit)?;
-    let hp_key_bytes = Zeroizing::new(decrypt_chacha20(
-        &kek,
-        &wrap_nonce,
-        hp_commit,
-        wrap_bytes,
-        "msphf_hp_wrap tag mismatch",
-    )?);
-    let hp_key: [u8; 32] = hp_key_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| MsphfError::invalid_input("kbroad wrap plaintext malformed"))?;
-
-    Ok((hp_ciphertext, hp_key))
 }
 
 pub fn recover_hp_material_from_header(
@@ -893,6 +1003,35 @@ pub fn recover_hp_material_from_header(
         .get(&HDR_HP_BYTES)
         .ok_or_else(|| MsphfError::invalid_input("missing msphf_hp"))?;
     recover_hp_material_from_value(hp_value, xk_hash, hp_commit, kbroad_secret)
+}
+
+pub fn recover_hp_material_from_header_with_secrets(
+    header_map: &BTreeMap<u64, Value>,
+    xk_hash: &[u8; 32],
+    hp_commit: &[u8; 32],
+    kbroad_secret: Option<&[u8]>,
+    barrier_key: Option<&[u8; 32]>,
+) -> Result<(Vec<u8>, [u8; 32]), MsphfError> {
+    let hp_value = header_map
+        .get(&HDR_HP_BYTES)
+        .ok_or_else(|| MsphfError::invalid_input("missing msphf_hp"))?;
+    let barrier_version = header_map
+        .get(&HDR_BARRIER_VERSION)
+        .and_then(Value::as_integer)
+        .map(|value| {
+            value
+                .try_into()
+                .map_err(|_| MsphfError::invalid_input("barrier_version malformed"))
+        })
+        .transpose()?;
+    recover_hp_material_from_value_with_secrets(
+        hp_value,
+        xk_hash,
+        hp_commit,
+        kbroad_secret,
+        barrier_key,
+        barrier_version,
+    )
 }
 
 pub fn rebind_hp_envelope(
@@ -921,6 +1060,109 @@ pub fn rebind_hp_envelope(
         hp_plain.as_slice(),
         target_xk_hash,
         target_hp_commit,
+    )?;
+    Ok(ReboundHpEnvelope {
+        envelope: rebuilt.envelope,
+        hp_ciphertext: rebuilt.c_hp,
+        hp_aead_key: rebuilt.k_hp,
+    })
+}
+
+#[derive(Clone, Copy)]
+pub struct HpEnvelopeBinding<'a> {
+    pub xk_hash: &'a [u8; 32],
+    pub hp_commit: &'a [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+pub struct HpEnvelopeSecrets<'a> {
+    pub kbroad_secret: Option<&'a [u8]>,
+    pub barrier_key: Option<&'a [u8; 32]>,
+}
+
+pub fn rebind_hp_envelope_with_secrets(
+    target_header_map: &BTreeMap<u64, Value>,
+    source_envelope: &Value,
+    source_binding: HpEnvelopeBinding<'_>,
+    secrets: HpEnvelopeSecrets<'_>,
+    target_binding: HpEnvelopeBinding<'_>,
+) -> Result<ReboundHpEnvelope, MsphfError> {
+    let barrier_version = match source_envelope {
+        Value::Array(items) if matches!(items.first(), Some(Value::Text(mode)) if mode == BARRIER_HP_MODE) => {
+            target_header_map
+                .get(&HDR_BARRIER_VERSION)
+                .and_then(Value::as_integer)
+                .map(|value| {
+                    value
+                        .try_into()
+                        .map_err(|_| MsphfError::invalid_input("barrier_version malformed"))
+                })
+                .transpose()?
+        }
+        _ => None,
+    };
+    let (source_hp_ciphertext, source_hp_key) = recover_hp_material_from_value_with_secrets(
+        source_envelope,
+        source_binding.xk_hash,
+        source_binding.hp_commit,
+        secrets.kbroad_secret,
+        secrets.barrier_key,
+        barrier_version,
+    )?;
+    let hp_plain = Zeroizing::new(decrypt_hp_bytes(
+        &source_hp_ciphertext,
+        source_binding.xk_hash,
+        source_binding.hp_commit,
+        &source_hp_key,
+    )?);
+    let rebuilt = if let Some(barrier_key) = secrets.barrier_key {
+        build_barrier_hp_envelope(
+            target_header_map,
+            hp_plain.as_slice(),
+            target_binding.xk_hash,
+            target_binding.hp_commit,
+            barrier_key,
+        )?
+    } else {
+        build_kbroad_envelope(
+            target_header_map,
+            hp_plain.as_slice(),
+            target_binding.xk_hash,
+            target_binding.hp_commit,
+        )?
+    };
+    Ok(ReboundHpEnvelope {
+        envelope: rebuilt.envelope,
+        hp_ciphertext: rebuilt.c_hp,
+        hp_aead_key: rebuilt.k_hp,
+    })
+}
+
+#[derive(Clone, Copy)]
+pub struct LocalHpEnvelopeMaterial<'a> {
+    pub hp_ciphertext: &'a [u8],
+    pub hp_aead_key: &'a [u8; 32],
+}
+
+pub fn rebind_local_hp_envelope_with_barrier_key(
+    target_header_map: &BTreeMap<u64, Value>,
+    source_binding: HpEnvelopeBinding<'_>,
+    source_material: LocalHpEnvelopeMaterial<'_>,
+    barrier_key: &[u8; 32],
+    target_binding: HpEnvelopeBinding<'_>,
+) -> Result<ReboundHpEnvelope, MsphfError> {
+    let hp_plain = Zeroizing::new(decrypt_hp_bytes(
+        source_material.hp_ciphertext,
+        source_binding.xk_hash,
+        source_binding.hp_commit,
+        source_material.hp_aead_key,
+    )?);
+    let rebuilt = build_barrier_hp_envelope(
+        target_header_map,
+        hp_plain.as_slice(),
+        target_binding.xk_hash,
+        target_binding.hp_commit,
+        barrier_key,
     )?;
     Ok(ReboundHpEnvelope {
         envelope: rebuilt.envelope,
@@ -3136,6 +3378,11 @@ pub fn joiner_kgen_merge_or_with_state<'a>(
         forward_state,
         witness_bytes,
     )?;
+    let local_hp_commit = result.hp_commit;
+    let source_local_xk_hash = result.xk_hash;
+    let source_local_hp_commit = result.hp_commit;
+    let source_local_hp_ciphertext = result.hp_ciphertext.clone();
+    let source_local_hp_aead_key = result.hp_aead_key;
 
     let fs_policy_version = parse_fs_policy_version(params.fs_policy_version)?;
     let fs_base_ts = params.fs_epoch_base_ts;
@@ -3349,9 +3596,10 @@ pub fn joiner_kgen_merge_or_with_state<'a>(
     )?;
     result.seed_commit = seed_commit;
 
-    result
-        .header_map
-        .insert(HDR_HP_COMMIT, Value::Bytes(pivot.hp_commit.to_vec()));
+    result.header_map.insert(
+        HDR_HP_COMMIT,
+        Value::Bytes(local_hp_commit.to_vec()),
+    );
     let pivot_fs_policy_version = parse_fs_policy_version(pivot.policy_version.as_str())?;
     result.header_map.insert(
         HDR_FS_POLICY_VERSION,
@@ -3427,7 +3675,31 @@ pub fn joiner_kgen_merge_or_with_state<'a>(
     result.epoch_key = [0u8; 32];
     result.eid = [0u8; 32];
 
-    result.hp_commit = pivot.hp_commit;
+    result.hp_commit = local_hp_commit;
+    let local_hp_plain = Zeroizing::new(decrypt_hp_bytes(
+        &source_local_hp_ciphertext,
+        &source_local_xk_hash,
+        &source_local_hp_commit,
+        &source_local_hp_aead_key,
+    )?);
+    let rebuilt_local_hp = build_kbroad_envelope(
+        &result.header_map,
+        local_hp_plain.as_slice(),
+        &result.xk_hash,
+        &result.hp_commit,
+    )?;
+    result.hp_ciphertext = rebuilt_local_hp.c_hp;
+    result.hp_aead_key = rebuilt_local_hp.k_hp;
+    let proof_inputs = HpBindingInputs {
+        msphf_crs_id: params.msphf_crs_id,
+        params_id: params.params_id,
+        seed_ctx_hash: &result.seed_ctx_hash,
+        seed_commit: &result.seed_commit,
+        rho_commit: &result.rho_commit,
+        xk_hash: &result.xk_hash,
+        hp_commit: &result.hp_commit,
+    };
+    result.hp_proof = prove_hp_k(&proof_inputs)?;
     result.capss_witness = CapssWitnessBundle::default();
 
     Ok(result)
@@ -5625,7 +5897,7 @@ mod tests {
     }
 
     #[test]
-    fn joiner_merge_inherits_parity_and_strips_join_payload()
+    fn joiner_merge_keeps_pivot_rollup_metadata_but_uses_local_hp_commit()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = sample_fixture();
         let params = fixture.params();
@@ -5683,7 +5955,8 @@ mod tests {
         else {
             panic!("hp commit not bytes");
         };
-        assert_eq!(hp_commit_bytes.as_slice(), pivot.hp_commit.as_ref());
+        assert_eq!(hp_commit_bytes.as_slice(), result.hp_commit.as_ref());
+        assert_ne!(hp_commit_bytes.as_slice(), pivot.hp_commit.as_ref());
 
         let Value::Bytes(vrf_public) = result
             .header_map
@@ -5724,7 +5997,7 @@ mod tests {
         assert_eq!(seed_bundle_bytes.as_slice(), expected_seed_bundle.as_ref());
 
         assert_eq!(result.rho_commit, pivot.rho_commit);
-        assert_eq!(result.hp_commit, pivot.hp_commit);
+        assert_ne!(result.hp_commit, pivot.hp_commit);
         assert_eq!(result.mh_note(), Some("note"));
         Ok(())
     }
@@ -5759,7 +6032,15 @@ mod tests {
         assert_eq!(vrf_public, &parity_lo.vrf_public);
 
         assert_eq!(result.rho_commit, parity_lo.rho_commit);
-        assert_eq!(result.hp_commit, parity_lo.hp_commit);
+        assert_ne!(result.hp_commit, parity_lo.hp_commit);
+        let Value::Bytes(hp_commit_bytes) = result
+            .header_map
+            .get(&HDR_HP_COMMIT)
+            .ok_or_else(|| Box::<dyn std::error::Error>::from("HDR_HP_COMMIT missing"))?
+        else {
+            panic!("hp commit not bytes");
+        };
+        assert_eq!(hp_commit_bytes.as_slice(), result.hp_commit.as_ref());
         Ok(())
     }
 

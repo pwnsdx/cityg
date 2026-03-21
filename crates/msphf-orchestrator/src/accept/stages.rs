@@ -2,7 +2,8 @@
 
 use super::{ml_dsa_public_key_bytes, ml_dsa_signature_bytes, verify_ml_dsa, *};
 use crate::{
-    KBROAD_ML_KEM_ALG, KBROAD_MODE, TSWE_ALG_CODE, TSWE_ALG_LABEL,
+    AEAD_TAG_LEN, BARRIER_HP_MODE, KBROAD_AEAD_SUITE, KBROAD_ML_KEM_ALG, KBROAD_MODE,
+    MAX_HP_BYTES, TSWE_ALG_CODE, TSWE_ALG_LABEL,
     proofs::srx_smallwood::{self, SRX_SMALLWOOD_MAX_BYTES},
 };
 use ciborium::de;
@@ -188,11 +189,8 @@ pub(super) fn verify_join_payload_kbroad(
         debug!("verify_join_payload_kbroad: envelope not array");
         return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     };
-    if items.len() != 5 {
-        debug!(
-            "verify_join_payload_kbroad: envelope len {} != 5",
-            items.len()
-        );
+    if items.is_empty() {
+        debug!("verify_join_payload_kbroad: envelope empty");
         return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     }
 
@@ -207,6 +205,49 @@ pub(super) fn verify_join_payload_kbroad(
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     };
+    if mode == BARRIER_HP_MODE {
+        if items.len() != 3 {
+            debug!(
+                "verify_join_payload_kbroad: barrier envelope len {} != 3",
+                items.len()
+            );
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+        match &items[1] {
+            Value::Bytes(bytes)
+                if !bytes.is_empty() && bytes.len() <= (MAX_HP_BYTES + AEAD_TAG_LEN) => {}
+            Value::Bytes(_) => {
+                debug!("verify_join_payload_kbroad: barrier ciphertext length invalid");
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+            }
+            _ => {
+                debug!("verify_join_payload_kbroad: barrier ciphertext not bytes");
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+            }
+        }
+        let aead = match &items[2] {
+            Value::Text(text) => text.as_str(),
+            Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
+                debug!("verify_join_payload_kbroad: barrier aead invalid utf8");
+                AcceptanceError::Freeze(FREEZE_HASH_CBOR)
+            })?,
+            _ => {
+                debug!("verify_join_payload_kbroad: barrier aead not bytes/text");
+                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+            }
+        };
+        if aead != KBROAD_AEAD_SUITE {
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+        return Ok(());
+    }
+    if items.len() != 5 {
+        debug!(
+            "verify_join_payload_kbroad: legacy envelope len {} != 5",
+            items.len()
+        );
+        return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+    }
     if mode != KBROAD_MODE {
         return Err(AcceptanceError::Freeze(FREEZE_PARENT_EID_FORBIDDEN));
     }
@@ -982,6 +1023,27 @@ mod tests {
         )
         .expect_err("non-array envelope should freeze");
         expect_freeze(err, FREEZE_HASH_CBOR);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_join_payload_kbroad_accepts_barrier_sealed_envelope() -> Result<()> {
+        let mut header = base_header();
+        header.insert(
+            super::HDR_HP_BYTES,
+            Value::Array(vec![
+                Value::Text(BARRIER_HP_MODE.to_string()),
+                Value::Bytes(vec![0xA5; crate::AEAD_TAG_LEN + 32]),
+                Value::Text(KBROAD_AEAD_SUITE.to_string()),
+            ]),
+        );
+        verify_join_payload_kbroad(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )?;
         Ok(())
     }
 

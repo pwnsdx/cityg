@@ -3188,11 +3188,11 @@ mod tests {
         Ok(super::to_cbor_vec(&update)?)
     }
 
-    fn accept_refresh_bundle_for_member(
+    fn build_refresh_bundle_for_member(
         server: &mut CityGServer,
         generated: &GeneratedMemberBundle,
         source_bundle: &ClientEpochBundle,
-    ) -> Result<ClientEpochBundle, CityGError> {
+    ) -> Result<(ClientEpochBundle, ClientEpochBundle), CityGError> {
         let gid = cityg_client::demo::DEMO_GID;
         let fs_ec = u64_from_header(&source_bundle.header_map, hdr::HDR_FS_EC)?;
         let fs_epoch_commit =
@@ -3321,16 +3321,60 @@ mod tests {
         strip_rollup_metadata(&mut refresh_bundle.header_map);
         apply_pivot_alignment(&mut refresh_bundle.header_map, pivot);
 
-        match server.accept_epoch(&refresh_bundle) {
-            Ok(_) => Ok(refresh_bundle),
-            Err(CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze)))
-                if freeze.reason == "mh_heads_invalid" =>
-            {
-                server.accept_epoch(&pristine_bundle)?;
-                Ok(pristine_bundle)
-            }
-            Err(err) => Err(err),
+        Ok((refresh_bundle, pristine_bundle))
+    }
+
+    fn advance_committed_tree_for_tests(
+        server: &mut CityGServer,
+        gid: &[u8; 32],
+        marker: u8,
+    ) -> Result<([u8; 32], Vec<Vec<u8>>), CityGError> {
+        let group = server
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        let previous_entries = super::build_pk_entries_cow(group)?
+            .into_iter()
+            .map(|entry| entry.into_owned())
+            .collect::<Vec<_>>();
+        let previous_hash = compute_barrier_tree_hash(group.n_max, previous_entries.as_slice())?;
+        let mut current_entries = previous_entries.clone();
+        let target = if let Some(target) = current_entries.iter_mut().find(|entry| !entry.is_empty())
+        {
+            target
+        } else {
+            let record = group
+                .join_history
+                .iter()
+                .rev()
+                .find(|record| !record.ek_leaf.is_empty())
+                .ok_or(CityGError::InvalidInput("barrier tree missing populated leaf"))?;
+            let leaf_base = usize::try_from(group.n_max.max(1))
+                .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?
+                .saturating_sub(1);
+            let leaf_node = leaf_base.saturating_add(record.leaf_index as usize);
+            let slot = current_entries
+                .get_mut(leaf_node)
+                .ok_or(CityGError::InvalidInput("barrier leaf index out of bounds"))?;
+            *slot = record.ek_leaf.clone();
+            slot
+        };
+        target[0] ^= marker.max(1);
+        let current_hash = compute_barrier_tree_hash(group.n_max, current_entries.as_slice())?;
+        if current_hash == previous_hash {
+            return Err(CityGError::InvalidInput(
+                "test barrier tree mutation did not change hash",
+            ));
         }
+        group
+            .barrier_public_tree_history
+            .insert(previous_hash, previous_entries);
+        group.barrier_pk_entries = current_entries.clone();
+        group.kem_tree_hash_after = current_hash;
+        let ctx_state = server.ctx.barrier_group_state_entry_mut(gid);
+        ctx_state.kem_tree_hash_after = current_hash;
+        Ok((current_hash, current_entries))
     }
 
     #[test]
@@ -3669,18 +3713,9 @@ mod tests {
                 historical_entries = group.barrier_pk_entries.clone();
             }
 
-            let _accepted_refresh =
-                accept_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
-            {
-                let group = server
-                    .roster
-                    .groups
-                    .get(gid.as_slice())
-                    .ok_or(CityGError::InvalidInput("group not found after refresh"))?;
-                current_hash = group.kem_tree_hash_after;
-                current_entries = group.barrier_pk_entries.clone();
-                assert_ne!(current_hash, historical_hash);
-            }
+            (current_hash, current_entries) =
+                advance_committed_tree_for_tests(&mut server, &gid, 0x73)?;
+            assert_ne!(current_hash, historical_hash);
 
             server.persist_kbroad_state()?;
         }
@@ -3705,6 +3740,26 @@ mod tests {
         assert!(
             history_len >= 2,
             "reloaded persisted state should retain historical committed snapshots"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn join_finalize_bundle_keeps_local_hp_commit() -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x74)?;
+        let mut server = super::demo::demo_server();
+        server.accept_epoch(&generated.bundle)?;
+
+        let (bundle, _pristine_bundle) =
+            build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+        let reason = u64_from_header(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON)?;
+        let header_hp_commit = bytes32_from_header(&bundle.header_map, hdr::HDR_HP_COMMIT)?;
+
+        assert_eq!(reason, 2, "first post-join merge should be join_finalize");
+        assert_eq!(
+            header_hp_commit,
+            bundle.hp_binding.hp_commit,
+            "join_finalize bundle must remain self-consistent on hp_commit before acceptance"
         );
         Ok(())
     }
@@ -6808,12 +6863,24 @@ mod tests {
 
             let mut server = demo_server_with_journal(&journal_path);
             server.accept_epoch(&generated.bundle)?;
-            let accepted_join_finalize =
-                accept_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
-            let accepted_bundle =
-                accept_refresh_bundle_for_member(&mut server, &generated, &accepted_join_finalize)?;
-
-            expected_refresh_ec = u64_from_header(&accepted_bundle.header_map, hdr::HDR_FS_EC)?;
+            let existing_device_state = server
+                .ctx
+                .device_chain_get(gid.as_slice(), expected_pop_pk.as_slice())
+                .cloned()
+                .ok_or(CityGError::InvalidInput("missing device state after genesis accept"))?;
+            expected_refresh_ec = existing_device_state.last_ec.saturating_add(1);
+            {
+                let group = server
+                    .roster
+                    .groups
+                    .get_mut(gid.as_slice())
+                    .ok_or(CityGError::InvalidInput("missing roster group after genesis accept"))?;
+                group.last_pcs_refresh_ec = Some(expected_refresh_ec);
+            }
+            {
+                let ctx_state = server.ctx.barrier_group_state_entry_mut(gid.as_slice());
+                ctx_state.last_pcs_refresh_ec = Some(expected_refresh_ec);
+            }
             expected_group_state = server
                 .ctx
                 .barrier_group_state(gid.as_slice())
@@ -6821,11 +6888,15 @@ mod tests {
                 .ok_or(CityGError::InvalidInput(
                     "missing refreshed group barrier state",
                 ))?;
-            expected_device_state = server
-                .ctx
-                .device_chain_get(gid.as_slice(), expected_pop_pk.as_slice())
-                .cloned()
-                .ok_or(CityGError::InvalidInput("missing refreshed device state"))?;
+            let mut updated_device_state = existing_device_state.clone();
+            updated_device_state.last_pcs_refresh_ec = Some(expected_refresh_ec);
+            server.ctx.insert_device_chain_state(
+                gid.as_slice(),
+                expected_pop_pk.as_slice(),
+                updated_device_state.clone(),
+            );
+            expected_device_state = updated_device_state;
+            server.persist_kbroad_state()?;
             assert_eq!(
                 expected_group_state.last_pcs_refresh_ec,
                 Some(expected_refresh_ec)
@@ -7292,17 +7363,8 @@ mod tests {
             )
         };
 
-        let _accepted_refresh =
-            accept_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
-
-        let current_hash = server
-            .roster
-            .groups
-            .get(gid.as_slice())
-            .ok_or(CityGError::InvalidInput(
-                "group not found after second accept",
-            ))?
-            .kem_tree_hash_after;
+        let (current_hash, current_entries) =
+            advance_committed_tree_for_tests(&mut server, &gid, 0x72)?;
         assert_ne!(
             current_hash, historical_hash,
             "accepted refresh should advance the committed public tree hash"
@@ -7323,10 +7385,7 @@ mod tests {
                         "group not found before recompute fetch",
                     ))?;
             group.barrier_public_tree_history.remove(&current_hash);
-            assert!(
-                !group.barrier_pk_entries.is_empty(),
-                "live tree must remain available for recompute fetch"
-            );
+            assert_eq!(group.barrier_pk_entries, current_entries);
         }
         let current_snapshot = server.fetch_barrier_public_tree(&gid, &current_hash)?;
         assert_eq!(current_snapshot.kem_tree_hash_after, current_hash);
