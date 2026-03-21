@@ -173,12 +173,18 @@ Y* = Proj(pk, Δ_B) ⊕ M_B   (if Branch B valid)
 
 ### Q2.6: What is KBROAD?
 
-**A**: **KBROAD** is the group key distribution mechanism:
+**A**: **KBROAD** is the current HP transport mechanism:
 
 1. Publisher encrypts hp using ML-KEM-768 (KBROAD public key)
 2. Envelope structure: `["kbroad-v1", ct_kem, wrap, C_hp, "chacha20-poly1305"]`
 3. Server **never decrypts** (structural validation only)
-4. Clients decrypt hp using KBROAD secret key (device-specific)
+4. Clients decrypt hp using KBROAD secret key
+
+Important implementation note:
+
+- In the current codebase, this still creates an async-first product gap for cross-device joins, because recovering remote epochs depends on confidential provisioning of KBROAD material.
+- ME-OR still protects witness-dependent epoch-key derivation and keeps the server blind to `hp`, but ME-OR does not by itself solve the transport/provisioning problem for a newly joined device.
+- See [18 — Async-First Join Provisioning Gap](./18-async-first-join-provisioning.md).
 
 **Security**: Server cannot learn hp (type-safe, no decryption primitives).
 

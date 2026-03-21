@@ -3233,7 +3233,7 @@ impl AppModel {
                     .items_center()
                     .text_size(px(12.0))
                     .text_color(subtext_color)
-                    .child("Paste a City-G invite or enter a 64-character room ID.")
+                    .child("Paste a City-G legacy invite or enter a 64-character room ID.")
                     .child(
                         div()
                             .px(px(12.0))
@@ -3478,7 +3478,7 @@ impl AppModel {
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(UI_PANEL_TEXT))
             .cursor(CursorStyle::PointingHand)
-            .child("Copy invite");
+            .child("Copy legacy invite");
         copy_invite_button = copy_invite_button
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_copy_room_invite));
 
@@ -8483,9 +8483,9 @@ fn categorize_error(err: &anyhow::Error, context: &str) -> CategorizedError {
     if technical_details_lower.contains("missing room kbroad secret") {
         return CategorizedError::new(
             ErrorCategory::Validation,
-            "Room invite required",
+            "Confidential provisioning required",
             technical_details.clone(),
-            "This client does not know the room secret needed to finalize the join. Use `Copy invite` from an existing member and paste that invite into the Room field, or provide CITYG_GUI_KBROAD_SECRET_HEX.",
+            "This build still requires confidential room provisioning to finalize a cross-device join. `Copy legacy invite` is only a compatibility workaround; the intended async-first flow is not fully implemented yet. For debugging, you can still use a legacy invite or provide CITYG_GUI_KBROAD_SECRET_HEX.",
             false,
         );
     }
@@ -8735,6 +8735,12 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     } else {
         Vec::new()
     };
+    if parent_root != [0u8; 32] && kbroad_secret.is_empty() {
+        return Err(anyhow!(
+            "missing room KBROAD secret for cross-device join into an existing room; this build still requires confidential provisioning for remote epoch recovery (legacy workaround: paste a City-G legacy invite from an existing member or provide {})",
+            KBROAD_SECRET_ENV
+        ));
+    }
     let bootstrap_public = ticket.bootstrap_public.clone();
 
     let witness_bytes = if ticket.witness_cbor.is_empty() {
@@ -10914,7 +10920,7 @@ fn active_kbroad_secret_for_merge(kbroad_secret: &[u8]) -> Result<Vec<u8>> {
     }
     configured_kbroad_secret_from_env()?.ok_or_else(|| {
         anyhow!(
-            "missing room KBROAD secret for merge publication; paste a City-G invite from an existing member or provide {}",
+            "missing room KBROAD secret for merge publication; this build still relies on confidential room provisioning for cross-device join finalize (legacy workaround: paste a City-G legacy invite from an existing member or provide {})",
             KBROAD_SECRET_ENV
         )
     })
@@ -17316,6 +17322,9 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
         let _restore = KbroadEnvVarRestore {
             original: std::env::var(KBROAD_SECRET_ENV).ok(),
         };
@@ -17333,7 +17342,6 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x7Du8; 32]);
-        bootstrap_test_room(&server_url, &room_id).await?;
 
         let mut alice = perform_join(JoinParams {
             server_url: server_url.clone(),
@@ -17343,12 +17351,15 @@ mod tests {
             invite_kbroad_secret: None,
         })
         .await?;
+        let invite = build_join_invite(&alice)?;
+        let parsed_invite = parse_join_invite(&invite)?
+            .ok_or_else(|| anyhow!("expected join invite for second member"))?;
         let _bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
+            invite_kbroad_public: Some(hex_decode(parsed_invite.kbroad_public_hex.as_str())?),
+            invite_kbroad_secret: Some(hex_decode(parsed_invite.kbroad_secret_hex.as_str())?),
         })
         .await?;
 
@@ -17979,6 +17990,71 @@ mod tests {
         assert!(
             err_text.contains(KBROAD_PUBLIC_ENV) && err_text.contains("does not match"),
             "error should report KBROAD public mismatch: {err_text}"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_rejects_existing_room_without_confidential_provisioning()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let _secret_restore = KbroadEnvVarRestore {
+            original: std::env::var(KBROAD_SECRET_ENV).ok(),
+        };
+        let _public_restore = KbroadPublicEnvVarRestore {
+            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
+        };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
+        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+
+        let port = next_test_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex_encode([0x8Cu8; 32]);
+
+        let _alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
+        })
+        .await?;
+
+        let err = match perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id,
+            alias: "bob".to_string(),
+            invite_kbroad_public: None,
+            invite_kbroad_secret: None,
+        })
+        .await
+        {
+            Ok(_) => {
+                return Err(anyhow!(
+                    "existing room join should fail without confidential provisioning"
+                )
+                .into());
+            }
+            Err(err) => err,
+        };
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("missing room KBROAD secret")
+                && err_text.contains("cross-device join"),
+            "error should explain confidential provisioning requirement: {err_text}"
         );
 
         handle.abort();
@@ -19014,12 +19090,12 @@ mod tests {
     fn categorize_error_missing_kbroad_secret_from_join_finalize_context()
     -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!(
-            "missing room KBROAD secret for merge publication; paste a City-G invite from an existing member or provide CITYG_GUI_KBROAD_SECRET_HEX"
+            "missing room KBROAD secret for merge publication; this build still relies on confidential room provisioning for cross-device join finalize (legacy workaround: paste a City-G legacy invite from an existing member or provide CITYG_GUI_KBROAD_SECRET_HEX)"
         )
         .context("complete join barrier finalization");
         let result = categorize_error(&err, "join");
         assert!(matches!(result.category, ErrorCategory::Validation));
-        assert_eq!(result.user_message, "Room invite required");
+        assert_eq!(result.user_message, "Confidential provisioning required");
         assert!(
             result
                 .technical_details
@@ -19028,7 +19104,7 @@ mod tests {
             result.technical_details
         );
         assert!(
-            result.recovery_suggestion.contains("Copy invite"),
+            result.recovery_suggestion.contains("Copy legacy invite"),
             "expected invite guidance: {}",
             result.recovery_suggestion
         );
