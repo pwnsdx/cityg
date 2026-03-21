@@ -8272,6 +8272,17 @@ fn http_error_detail_from_anyhow(err: &anyhow::Error) -> Option<String> {
     None
 }
 
+fn flatten_anyhow_chain(err: &anyhow::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for cause in err.chain() {
+        let text = cause.to_string();
+        if parts.last() != Some(&text) {
+            parts.push(text);
+        }
+    }
+    parts.join(": ")
+}
+
 fn api_http_status_from_anyhow(err: &anyhow::Error) -> Option<(u16, String)> {
     for cause in err.chain() {
         if let Some(ApiClientError::HttpStatus {
@@ -8301,7 +8312,9 @@ fn is_stale_server_session_error(err: &anyhow::Error) -> bool {
 // Categorize errors into user-friendly messages with recovery suggestions
 fn categorize_error(err: &anyhow::Error, context: &str) -> CategorizedError {
     let err_str = err.to_string().to_lowercase();
-    let technical_details = http_error_detail_from_anyhow(err).unwrap_or_else(|| err.to_string());
+    let technical_details =
+        http_error_detail_from_anyhow(err).unwrap_or_else(|| flatten_anyhow_chain(err));
+    let technical_details_lower = technical_details.to_lowercase();
 
     // Network errors
     if err_str.contains("connection refused") {
@@ -8463,6 +8476,16 @@ fn categorize_error(err: &anyhow::Error, context: &str) -> CategorizedError {
             "Missing required information",
             technical_details.clone(),
             "Required information is missing. Please provide all necessary details.",
+            false,
+        );
+    }
+
+    if technical_details_lower.contains("missing room kbroad secret") {
+        return CategorizedError::new(
+            ErrorCategory::Validation,
+            "Room invite required",
+            technical_details.clone(),
+            "This client does not know the room secret needed to finalize the join. Use `Copy invite` from an existing member and paste that invite into the Room field, or provide CITYG_GUI_KBROAD_SECRET_HEX.",
             false,
         );
     }
@@ -18984,6 +19007,32 @@ mod tests {
                 .contains("CITYG_CLIENT_MESSAGE_AUTH_TOKEN")
         );
         assert!(result.can_retry);
+        Ok(())
+    }
+
+    #[test]
+    fn categorize_error_missing_kbroad_secret_from_join_finalize_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let err = anyhow!(
+            "missing room KBROAD secret for merge publication; paste a City-G invite from an existing member or provide CITYG_GUI_KBROAD_SECRET_HEX"
+        )
+        .context("complete join barrier finalization");
+        let result = categorize_error(&err, "join");
+        assert!(matches!(result.category, ErrorCategory::Validation));
+        assert_eq!(result.user_message, "Room invite required");
+        assert!(
+            result
+                .technical_details
+                .contains("missing room KBROAD secret"),
+            "expected full error chain in technical details: {}",
+            result.technical_details
+        );
+        assert!(
+            result.recovery_suggestion.contains("Copy invite"),
+            "expected invite guidance: {}",
+            result.recovery_suggestion
+        );
+        assert!(!result.can_retry);
         Ok(())
     }
 
