@@ -2747,7 +2747,7 @@ mod tests {
     };
     use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, keypair as ml_dsa_keypair};
     use pqcrypto_traits::sign::PublicKey;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
     use serde::Serialize;
     use std::{
         borrow::Cow,
@@ -4585,7 +4585,10 @@ mod tests {
     #[test]
     fn parse_barrier_update_reason_covers_presence_and_bounds() {
         let empty = BTreeMap::new();
-        assert!(matches!(super::parse_barrier_update_reason(&empty), Ok(None)));
+        assert!(matches!(
+            super::parse_barrier_update_reason(&empty),
+            Ok(None)
+        ));
 
         let mut reason_without_update = BTreeMap::new();
         reason_without_update.insert(hdr::HDR_BARRIER_UPDATE_REASON, Value::Integer(1.into()));
@@ -7113,7 +7116,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0xC17C5EED);
 
         for step in 0..64 {
-            let action = if step < 3 { 0 } else { rng.gen_range(0..3) };
+            let action = if step < 3 { 0 } else { rng.random_range(0..3) };
             match action {
                 0 => perform_single_join(
                     &mut primary,
@@ -7148,7 +7151,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0xC17F_1A17);
 
         for step in 0..96 {
-            let action = if step < 2 { 0 } else { rng.gen_range(0..3) };
+            let action = if step < 2 { 0 } else { rng.random_range(0..3) };
             match action {
                 0 => perform_single_join(
                     &mut primary,
