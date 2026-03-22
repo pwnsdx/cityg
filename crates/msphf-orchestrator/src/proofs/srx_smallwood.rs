@@ -14,7 +14,7 @@ use capss::{
 };
 use ciborium::ser::into_writer;
 use msphf_core::MsphfError;
-use rand_core::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 use serde::Serialize;
 
 /// Maximum SRX Smallwood transcript size (16 KiB per spec).
@@ -57,7 +57,7 @@ impl Proof {
     }
 }
 
-pub fn prove<R: RngCore + CryptoRng>(_: &mut R, inputs: &Inputs<'_>) -> Result<Proof, MsphfError> {
+pub fn prove<R: Rng + CryptoRng>(_: &mut R, inputs: &Inputs<'_>) -> Result<Proof, MsphfError> {
     let (context, statement) = build_capss_components(inputs)?;
     let prover = smallwood_prover(context);
     let signature = prover

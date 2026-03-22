@@ -26,7 +26,7 @@ use msphf_rlwe::{
     FullHashResult, derive_branch_material, hash_full as rlwe_hash_full,
     hash_proj as rlwe_hash_proj,
 };
-use rand::rngs::OsRng;
+use rand::{SeedableRng, rngs::SysRng};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -1213,7 +1213,8 @@ fn generate_case(
             fs_dev_commit: &fs_dev_commit,
         },
     };
-    let mut fs_rng = OsRng;
+    let mut fs_rng =
+        rand::rngs::StdRng::try_from_rng(&mut SysRng).map_err(MsphfError::serialization)?;
     let fs_capss_proof = capss::prove(&mut fs_rng, &fs_capss_inputs)?;
     let fs_capss_bytes = fs_capss_proof.as_bytes().to_vec();
     let srx_root_sw_bytes = header_map

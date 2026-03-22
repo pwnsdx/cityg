@@ -39,7 +39,7 @@ use msphf_rlwe::{
 use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign};
 use pqcrypto_traits::sign::DetachedSignature;
 use proofs::{capss, srx_smallwood, zk_vrf};
-use rand_core::{OsRng, RngCore};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -754,7 +754,7 @@ pub(crate) fn build_local_barrier_hp_envelope(
     hp_commit: &[u8; 32],
 ) -> Result<BarrierHpEnvelopeWire, MsphfError> {
     let mut hp_key = Zeroizing::new([0u8; 32]);
-    OsRng.fill_bytes(hp_key.as_mut());
+    rand::rng().fill_bytes(hp_key.as_mut());
     let hp_ciphertext = encrypt_hp_bytes(hp_k, xk_hash, hp_commit, &hp_key)?;
     let envelope = Value::Array(vec![
         Value::Text(BARRIER_HP_MODE.to_string()),
@@ -2462,7 +2462,7 @@ fn attach_srx_smallwood_proof(
         vrf_id: params.vrf_id,
     };
 
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let proof = srx_smallwood::prove(&mut rng, &inputs)?;
     let proof_bytes = proof.as_bytes();
     if proof_bytes.len() > srx_smallwood::SRX_SMALLWOOD_MAX_BYTES {
@@ -2585,7 +2585,10 @@ pub fn joiner_kgen_or<'a>(
     }
 
     header_map.insert(HDR_PARENT_ROOT, Value::Bytes(parts.parent_root.to_vec()));
-    header_map.insert(HDR_JOIN_DELTA_ROOT, Value::Bytes(parts.join_delta_root.to_vec()));
+    header_map.insert(
+        HDR_JOIN_DELTA_ROOT,
+        Value::Bytes(parts.join_delta_root.to_vec()),
+    );
     header_map.insert(112, Value::Bytes(parts.revoked_since_prev_root.to_vec()));
     header_map.insert(113, Value::Bytes(parts.revoked_root.to_vec()));
     header_map.insert(
@@ -2775,7 +2778,7 @@ pub fn joiner_kgen_or<'a>(
             header_map.remove(&108);
             header_map.remove(&109);
             let mut rho = [0u8; 32];
-            OsRng.fill_bytes(&mut rho);
+            rand::rng().fill_bytes(&mut rho);
             let rho_commit = hash_bytes_with_label(ds::MSPHF_KGEN_RHO, &rho)?;
             (rho, rho_commit)
         }
@@ -2961,7 +2964,7 @@ pub fn joiner_kgen_or<'a>(
             fs_dev_commit: &fs_dev_commit,
         },
     };
-    let mut fs_rng = OsRng;
+    let mut fs_rng = rand::rng();
     let fs_capss_proof = capss::prove(&mut fs_rng, &fs_capss_inputs)?;
     let fs_capss_bytes = fs_capss_proof.as_bytes().to_vec();
 

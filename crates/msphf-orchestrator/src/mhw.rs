@@ -287,8 +287,7 @@ mod tests {
     )]
     use super::*;
     use crate::time::AcceptInstant;
-    use rand::seq::SliceRandom;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, prelude::IndexedRandom, rngs::StdRng};
 
     fn sample_record(weid: u8) -> HeadRecord {
         HeadRecord::new(
@@ -446,8 +445,8 @@ mod tests {
             let now = AcceptInstant::from_ticks(step);
             naive.retain(|rec| now.duration_since(rec.accept_time) <= ttl);
 
-            if rng.gen_bool(0.6) || naive.is_empty() {
-                let weid = rng.r#gen::<u8>();
+            if rng.random_bool(0.6) || naive.is_empty() {
+                let weid = rng.random::<u8>();
                 let head = sample_record(weid);
                 let mut naive_record = head.clone();
                 naive_record.accept_time = now;
@@ -461,9 +460,9 @@ mod tests {
                     assert_eq!(result.unwrap_err(), FreezeError::WINDOW_FULL);
                 }
             } else {
-                let retire_count = rng.gen_range(1..=naive.len());
+                let retire_count = rng.random_range(1..=naive.len());
                 let mut retire: Vec<[u8; 32]> = naive
-                    .choose_multiple(&mut rng, retire_count)
+                    .sample(&mut rng, retire_count)
                     .map(|record| record.we_epoch_id)
                     .collect();
                 retire.sort();
@@ -472,7 +471,7 @@ mod tests {
                     continue;
                 }
 
-                let new_weid = rng.r#gen::<u8>();
+                let new_weid = rng.random::<u8>();
                 let merge_head = sample_record(new_weid);
                 let mut expected = naive.clone();
                 let mut valid = true;

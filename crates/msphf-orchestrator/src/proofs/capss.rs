@@ -10,7 +10,7 @@ use capss::{
 };
 use ciborium::ser::into_writer;
 use msphf_core::MsphfError;
-use rand_core::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 use serde::Serialize;
 
 #[derive(Clone)]
@@ -62,7 +62,7 @@ impl Proof {
     }
 }
 
-pub fn prove<R: RngCore + CryptoRng>(_: &mut R, inputs: &Inputs<'_>) -> Result<Proof, MsphfError> {
+pub fn prove<R: Rng + CryptoRng>(_: &mut R, inputs: &Inputs<'_>) -> Result<Proof, MsphfError> {
     let (context, statement) = build_capss_components(inputs)?;
     let prover = smallwood_prover(context);
     let signature = prover
@@ -216,8 +216,8 @@ fn map_smallwood_verify_error(_: Error) -> AcceptanceError {
 mod tests {
     use super::*;
     use anyhow::{Result, anyhow, bail};
+    use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
-    use rand_core::{OsRng, SeedableRng};
 
     const CRS_ID: &str = "crs/test";
     const PARAMS_ID: &str = "params/test";
@@ -369,7 +369,7 @@ mod tests {
             &fs_dev_commit,
         );
 
-        let mut rng = OsRng;
+        let mut rng = rand::rng();
         let proof = prove(&mut rng, &inputs)?;
         let bytes = proof.as_bytes().to_vec();
         let decoded = Proof::from_bytes(bytes.clone())?;

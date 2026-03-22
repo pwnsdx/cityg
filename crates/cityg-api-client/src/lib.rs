@@ -1251,12 +1251,29 @@ impl CitygApiClient {
     fn requires_admin_token(path: &str) -> bool {
         matches!(
             path,
-            "/v1/config/window" | "/v1/rooms/bootstrap" | "/v1/rooms/rotate_kbroad"
+            "/v1/config/window"
+                | "/v1/rooms/bootstrap"
+                | "/v1/rooms/rotate_kbroad"
+                | "/v1/debug/window/seed"
         )
     }
 
     fn requires_message_auth(path: &str) -> bool {
-        matches!(path, "/v1/send_message" | "/v1/messages")
+        matches!(
+            path,
+            "/v1/send_message"
+                | "/v1/messages"
+                | "/v1/members"
+                | "/v1/members/search"
+                | "/v1/rooms/merge_ticket"
+                | "/v1/barrier/resolve_revoked_leaves"
+                | "/v1/barrier/resolve_joins_since"
+                | "/v1/barrier/fetch_public_tree"
+                | "/v1/bundle"
+                | "/v1/window"
+                | "/v1/telemetry"
+                | "/v1/pivot/refresh"
+        )
     }
 }
 
@@ -1723,10 +1740,30 @@ mod tests {
         assert!(CitygApiClient::requires_admin_token(
             "/v1/rooms/rotate_kbroad"
         ));
+        assert!(CitygApiClient::requires_admin_token(
+            "/v1/debug/window/seed"
+        ));
         assert!(!CitygApiClient::requires_admin_token("/v1/members"));
         assert!(CitygApiClient::requires_message_auth("/v1/send_message"));
         assert!(CitygApiClient::requires_message_auth("/v1/messages"));
-        assert!(!CitygApiClient::requires_message_auth("/v1/window"));
+        assert!(CitygApiClient::requires_message_auth("/v1/members"));
+        assert!(CitygApiClient::requires_message_auth("/v1/members/search"));
+        assert!(CitygApiClient::requires_message_auth(
+            "/v1/rooms/merge_ticket"
+        ));
+        assert!(CitygApiClient::requires_message_auth(
+            "/v1/barrier/resolve_revoked_leaves"
+        ));
+        assert!(CitygApiClient::requires_message_auth(
+            "/v1/barrier/resolve_joins_since"
+        ));
+        assert!(CitygApiClient::requires_message_auth(
+            "/v1/barrier/fetch_public_tree"
+        ));
+        assert!(CitygApiClient::requires_message_auth("/v1/bundle"));
+        assert!(CitygApiClient::requires_message_auth("/v1/window"));
+        assert!(CitygApiClient::requires_message_auth("/v1/telemetry"));
+        assert!(CitygApiClient::requires_message_auth("/v1/pivot/refresh"));
 
         let client = CitygApiClient::new("http://localhost:8080").with_admin_token("  secret  ");
         assert_eq!(client.admin_token.as_deref(), Some("secret"));

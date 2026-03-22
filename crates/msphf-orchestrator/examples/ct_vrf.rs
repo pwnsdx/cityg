@@ -1,7 +1,8 @@
-use dudect_bencher::{BenchRng, Class, CtRunner, ctbench_main};
+use dudect_bencher::{
+    BenchRng, Class, CtRunner, ctbench_main,
+    rand::{Rng, seq::SliceRandom},
+};
 use msphf_orchestrator::{MaskDigest, VrfCtx, lb, zk_vrf_impl};
-use rand::Rng;
-use rand::seq::SliceRandom;
 
 const SAMPLE_COUNT: usize = 100_000;
 const EPOCH_ID: [u8; 32] = [0xAB; 32];

@@ -762,6 +762,24 @@ fn allow_insecure_admin() -> bool {
     parse_bool_env(std::env::var(ALLOW_INSECURE_ADMIN_ENV).ok())
 }
 
+fn warn_if_admin_auth_is_open() {
+    if !allow_insecure_admin() {
+        return;
+    }
+    if configured_rooms_admin_token().is_none() {
+        warn!(
+            "{}=true with no {} or {} configured; room admin endpoints are unauthenticated",
+            ALLOW_INSECURE_ADMIN_ENV, ROOMS_ADMIN_TOKEN_ENV, WINDOW_CONFIG_ADMIN_TOKEN_ENV
+        );
+    }
+    if configured_window_admin_token().is_none() {
+        warn!(
+            "{}=true with no {} configured; window admin endpoints are unauthenticated",
+            ALLOW_INSECURE_ADMIN_ENV, WINDOW_CONFIG_ADMIN_TOKEN_ENV
+        );
+    }
+}
+
 fn enforce_admin_token_with_policy(
     headers: &HeaderMap,
     expected_token: Option<&str>,
@@ -1254,7 +1272,12 @@ async fn map_accept_error(
 const MEMBERS_DEFAULT_PAGE_SIZE: u32 = 256;
 const MEMBERS_MAX_PAGE_SIZE: u32 = 2000;
 
-async fn members(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+async fn members(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = MembersRequest::decode(body)?;
     if request.gid.is_empty() {
         return Err(ApiError::InvalidRequest("gid must be provided"));
@@ -1336,7 +1359,12 @@ async fn members(State(state): State<ApiState>, body: Bytes) -> Result<Response,
     Ok(protobuf_response(&reply))
 }
 
-async fn search_members(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+async fn search_members(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = pb::SearchMembersRequest::decode(body)?;
     if request.gid.is_empty() {
         return Err(ApiError::InvalidRequest("gid must be provided"));
@@ -1637,7 +1665,12 @@ async fn rotate_room_kbroad(
     Ok(protobuf_response(&response))
 }
 
-async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+async fn merge_ticket(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = MergeTicketRequest::decode(body)?;
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
@@ -1771,8 +1804,10 @@ async fn merge_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Resp
 
 async fn barrier_resolve_revoked_leaves(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = BarrierResolveRevokedLeavesRequest::decode(body)?;
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
@@ -1800,8 +1835,10 @@ async fn barrier_resolve_revoked_leaves(
 
 async fn barrier_resolve_joins_since(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = BarrierResolveJoinsSinceRequest::decode(body)?;
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
@@ -1837,8 +1874,10 @@ async fn barrier_resolve_joins_since(
 
 async fn barrier_fetch_public_tree(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = BarrierFetchPublicTreeRequest::decode(body)?;
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
@@ -2091,7 +2130,7 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, subscribed_gid: [u
                                 }
                             };
 
-                            if let Err(e) = sender.send(WsMessage::Text(text)).await {
+                            if let Err(e) = sender.send(WsMessage::Text(text.into())).await {
                                 warn!("Failed to send WebSocket message: {}", e);
                                 connection_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
                                 break;
@@ -2109,7 +2148,7 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, subscribed_gid: [u
                                     "max_lag": max_lag,
                                 });
                                 if let Ok(text) = serde_json::to_string(&disconnect_notification) {
-                                    let _ = sender.send(WsMessage::Text(text)).await;
+                                    let _ = sender.send(WsMessage::Text(text.into())).await;
                                 }
                                 warn!(
                                     "WebSocket client exceeded lag threshold; disconnecting"
@@ -2125,7 +2164,7 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, subscribed_gid: [u
                                 "recommendation": "consider reconnecting"
                             });
                             if let Ok(text) = serde_json::to_string(&lag_notification) {
-                                let _ = sender.send(WsMessage::Text(text)).await;
+                                let _ = sender.send(WsMessage::Text(text.into())).await;
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
@@ -2138,7 +2177,7 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, subscribed_gid: [u
                 // Send periodic ping to keep connection alive
                 _ = tokio::time::sleep(ping_interval) => {
                     if last_ping.elapsed() >= ping_interval {
-                        if let Err(e) = sender.send(WsMessage::Ping(vec![])).await {
+                        if let Err(e) = sender.send(WsMessage::Ping(vec![].into())).await {
                             warn!("Failed to send ping: {}", e);
                             connection_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
                             break;
@@ -2165,7 +2204,12 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, subscribed_gid: [u
     info!("WebSocket client disconnected");
 }
 
-async fn get_bundle(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+async fn get_bundle(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = GetBundleRequest::decode(body)?;
     if request.we_epoch_id.len() != 32 {
         return Err(ApiError::InvalidRequest("we_epoch_id must be 32 bytes"));
@@ -2236,7 +2280,12 @@ async fn health_detailed(State(_state): State<ApiState>) -> Response {
         .into_response()
 }
 
-async fn get_window(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+async fn get_window(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let _ = GetWindowRequest::decode(body)?;
     let mut snapshot: Vec<WindowEntry> = Vec::new();
     for lane in state.all_server_lanes() {
@@ -2277,7 +2326,12 @@ async fn get_window(State(state): State<ApiState>, body: Bytes) -> Result<Respon
     Ok(protobuf_response(&reply))
 }
 
-async fn get_telemetry(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+async fn get_telemetry(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let _ = GetTelemetryRequest::decode(body)?;
     let mut report = Vec::new();
     for lane in state.all_server_lanes() {
@@ -2601,6 +2655,7 @@ pub async fn run_with_config(
 ) -> anyhow::Result<()> {
     // Initialize structured logging based on environment
     init_logging()?;
+    warn_if_admin_auth_is_open();
 
     // Initialize metrics exporter
     let prometheus_handle = match middleware::init_metrics_exporter() {
@@ -2761,8 +2816,10 @@ fn init_logging() -> anyhow::Result<()> {
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 async fn seed_window_head(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    enforce_window_config_auth(&headers, configured_window_admin_token().as_deref())?;
     use msphf_core::hash::h_l;
     use msphf_orchestrator::mhw::HeadRecord;
     use serde::Serialize;
@@ -2832,7 +2889,12 @@ async fn seed_window_head(
     Ok(protobuf_response(&reply))
 }
 
-async fn refresh_pivot(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+async fn refresh_pivot(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = RefreshPivotRequest::decode(body)?;
     if request.bundle_cbor.is_empty() {
         return Err(ApiError::InvalidRequest("bundle_cbor must be provided"));
@@ -2929,6 +2991,28 @@ mod tests {
 
     fn test_api_state() -> ApiState {
         test_api_state_with_lanes(1)
+    }
+
+    fn empty_test_api_state() -> ApiState {
+        let cfg = CityGConfig::default();
+        let server = Arc::new(RwLock::new(server_from_config(&cfg)));
+        ApiState {
+            server: server.clone(),
+            server_lanes: Arc::new(vec![server]),
+            messages: Arc::new(RwLock::new(AHashMap::new())),
+            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
+            fs_epoch_period_seconds: cfg.protocol.fs_policy.h_seconds.max(1),
+            freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
+            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
+            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
+            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
+            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
+            notification_tx: broadcast::channel(4).0,
+            alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
+            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
+        }
     }
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -3235,6 +3319,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sensitive_endpoints_require_message_auth_header() {
+        ensure_test_admin_tokens();
+        let state = empty_test_api_state();
+        let empty_headers = HeaderMap::new();
+
+        let members_err = members(State(state.clone()), empty_headers.clone(), Bytes::new())
+            .await
+            .expect_err("members should require message auth");
+        assert!(matches!(
+            members_err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+
+        let search_err = search_members(State(state.clone()), empty_headers.clone(), Bytes::new())
+            .await
+            .expect_err("member search should require message auth");
+        assert!(matches!(
+            search_err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+
+        let merge_err = merge_ticket(State(state.clone()), empty_headers.clone(), Bytes::new())
+            .await
+            .expect_err("merge ticket should require message auth");
+        assert!(matches!(
+            merge_err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+
+        let revoked_err = barrier_resolve_revoked_leaves(
+            State(state.clone()),
+            empty_headers.clone(),
+            Bytes::new(),
+        )
+        .await
+        .expect_err("revoked leaves should require message auth");
+        assert!(matches!(
+            revoked_err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+
+        let joins_err =
+            barrier_resolve_joins_since(State(state.clone()), empty_headers.clone(), Bytes::new())
+                .await
+                .expect_err("joins-since should require message auth");
+        assert!(matches!(
+            joins_err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+
+        let tree_err =
+            barrier_fetch_public_tree(State(state.clone()), empty_headers.clone(), Bytes::new())
+                .await
+                .expect_err("public tree should require message auth");
+        assert!(matches!(
+            tree_err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+
+        let bundle_err = get_bundle(State(state.clone()), empty_headers.clone(), Bytes::new())
+            .await
+            .expect_err("bundle fetch should require message auth");
+        assert!(matches!(
+            bundle_err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+
+        let window_err = get_window(State(state.clone()), empty_headers.clone(), Bytes::new())
+            .await
+            .expect_err("window snapshot should require message auth");
+        assert!(matches!(
+            window_err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+
+        let telemetry_err =
+            get_telemetry(State(state.clone()), empty_headers.clone(), Bytes::new())
+                .await
+                .expect_err("telemetry should require message auth");
+        assert!(matches!(
+            telemetry_err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+
+        let pivot_err = refresh_pivot(State(state), empty_headers, Bytes::new())
+            .await
+            .expect_err("pivot refresh should require message auth");
+        assert!(matches!(
+            pivot_err,
+            ApiError::Unauthorized("missing or invalid message auth token")
+        ));
+    }
+
+    #[cfg(any(debug_assertions, feature = "debug-api"))]
+    #[tokio::test]
+    async fn debug_window_seed_requires_window_admin_auth() {
+        ensure_test_admin_tokens();
+        let state = empty_test_api_state();
+        let err = seed_window_head(State(state), HeaderMap::new(), Bytes::new())
+            .await
+            .expect_err("debug window seed should require admin auth");
+        assert!(matches!(
+            err,
+            ApiError::Unauthorized("missing or invalid admin token")
+        ));
+    }
+
+    #[tokio::test]
     async fn api_error_rate_limit_and_unauthorized_map_to_expected_http_responses() {
         let rate_limited = ApiError::RateLimited.into_response();
         assert_eq!(rate_limited.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -3255,7 +3447,9 @@ mod tests {
 
     #[tokio::test]
     async fn api_error_helpers_cover_decode_notfound_and_context_payload() {
-        let decode = ApiError::Decode(prost::DecodeError::new("bad payload")).into_response();
+        let decode_err = GetBundleRequest::decode(Bytes::from_static(b"\xFF"))
+            .expect_err("invalid protobuf should yield decode error");
+        let decode = ApiError::Decode(decode_err).into_response();
         assert_eq!(decode.status(), StatusCode::BAD_REQUEST);
 
         let not_found = ApiError::NotFound.into_response();
@@ -3868,6 +4062,7 @@ mod tests {
     #[tokio::test]
     async fn search_members_filters_by_alias_or_leaf_hex_and_validates_inputs() {
         let state = test_api_state();
+        let headers = message_auth_headers();
         let alice = demo_bundle("alice").expect("alice demo bundle");
         let bob = demo_bundle("bob").expect("bob demo bundle");
 
@@ -3903,7 +4098,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode alias query request");
-        let response = search_members(State(state.clone()), Bytes::from(body))
+        let response = search_members(State(state.clone()), headers.clone(), Bytes::from(body))
             .await
             .expect("alias query should succeed");
         let decoded: pb::SearchMembersResponse = decode_proto_response(response).await;
@@ -3922,7 +4117,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode leaf query request");
-        let response = search_members(State(state.clone()), Bytes::from(body))
+        let response = search_members(State(state.clone()), headers.clone(), Bytes::from(body))
             .await
             .expect("leaf query should succeed");
         let decoded: pb::SearchMembersResponse = decode_proto_response(response).await;
@@ -3938,7 +4133,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode paged alias query request");
-        let response = search_members(State(state.clone()), Bytes::from(body))
+        let response = search_members(State(state.clone()), headers.clone(), Bytes::from(body))
             .await
             .expect("paged alias query should succeed");
         let decoded: pb::SearchMembersResponse = decode_proto_response(response).await;
@@ -3955,7 +4150,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode missing query request");
-        let err = search_members(State(state.clone()), Bytes::from(body))
+        let err = search_members(State(state.clone()), headers.clone(), Bytes::from(body))
             .await
             .expect_err("empty query should fail");
         assert!(matches!(
@@ -3973,7 +4168,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode missing gid request");
-        let err = search_members(State(state.clone()), Bytes::from(body))
+        let err = search_members(State(state.clone()), headers.clone(), Bytes::from(body))
             .await
             .expect_err("missing gid should fail");
         assert!(matches!(
@@ -3991,7 +4186,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode invalid parent root request");
-        let err = search_members(State(state), Bytes::from(body))
+        let err = search_members(State(state), headers, Bytes::from(body))
             .await
             .expect_err("bad parent root should fail");
         assert!(matches!(
@@ -4003,6 +4198,7 @@ mod tests {
     #[tokio::test]
     async fn merge_ticket_validates_inputs_and_returns_ticket_payload() {
         let state = test_api_state();
+        let headers = message_auth_headers();
         let alice = demo_bundle("alice").expect("alice demo bundle");
 
         let leaf_id = {
@@ -4024,7 +4220,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode missing room id request");
-        let err = merge_ticket(State(state.clone()), Bytes::from(body))
+        let err = merge_ticket(State(state.clone()), headers.clone(), Bytes::from(body))
             .await
             .expect_err("empty room id should fail");
         assert!(matches!(
@@ -4040,7 +4236,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode bad leaf request");
-        let err = merge_ticket(State(state.clone()), Bytes::from(body))
+        let err = merge_ticket(State(state.clone()), headers.clone(), Bytes::from(body))
             .await
             .expect_err("invalid leaf length should fail");
         assert!(matches!(
@@ -4056,7 +4252,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode invalid room-id merge request");
-        let err = merge_ticket(State(state.clone()), Bytes::from(body))
+        let err = merge_ticket(State(state.clone()), headers.clone(), Bytes::from(body))
             .await
             .expect_err("invalid room id format should fail");
         assert!(matches!(
@@ -4072,7 +4268,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode unknown room merge request");
-        let err = merge_ticket(State(state.clone()), Bytes::from(body))
+        let err = merge_ticket(State(state.clone()), headers.clone(), Bytes::from(body))
             .await
             .expect_err("unknown room should fail");
         assert!(matches!(
@@ -4088,7 +4284,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode invalid intent request");
-        let err = merge_ticket(State(state.clone()), Bytes::from(body))
+        let err = merge_ticket(State(state.clone()), headers.clone(), Bytes::from(body))
             .await
             .expect_err("invalid intent should fail");
         assert!(matches!(
@@ -4104,7 +4300,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode valid merge request");
-        let response = merge_ticket(State(state), Bytes::from(body))
+        let response = merge_ticket(State(state), headers.clone(), Bytes::from(body))
             .await
             .expect("valid merge ticket request");
         let decoded: MergeTicketResponse = decode_proto_response(response).await;
@@ -4140,7 +4336,7 @@ mod tests {
         }
         .encode(&mut refresh_body)
         .expect("encode refresh merge request");
-        let refresh_response = merge_ticket(State(state), Bytes::from(refresh_body))
+        let refresh_response = merge_ticket(State(state), headers, Bytes::from(refresh_body))
             .await
             .expect("refresh merge ticket request");
         let refresh_decoded: MergeTicketResponse = decode_proto_response(refresh_response).await;
@@ -4155,6 +4351,7 @@ mod tests {
     #[tokio::test]
     async fn merge_ticket_coalesces_duplicate_leave_requests() {
         let state = test_api_state();
+        let headers = message_auth_headers();
         let alice = demo_bundle("alice").expect("alice demo bundle");
         let leaf_id = {
             let lane = state.server_for_gid(&DEMO_GID);
@@ -4173,12 +4370,20 @@ mod tests {
             leaf_id: leaf_id.to_vec(),
             intent: MergeTicketIntent::Leave as i32,
         };
-        let response_a = merge_ticket(State(state.clone()), encode_proto_request(&request))
-            .await
-            .expect("first leave merge ticket");
-        let response_b = merge_ticket(State(state.clone()), encode_proto_request(&request))
-            .await
-            .expect("second leave merge ticket should be coalesced");
+        let response_a = merge_ticket(
+            State(state.clone()),
+            headers.clone(),
+            encode_proto_request(&request),
+        )
+        .await
+        .expect("first leave merge ticket");
+        let response_b = merge_ticket(
+            State(state.clone()),
+            headers,
+            encode_proto_request(&request),
+        )
+        .await
+        .expect("second leave merge ticket should be coalesced");
         let bytes_a = to_bytes(response_a.into_body(), usize::MAX)
             .await
             .expect("first response bytes");
@@ -4255,6 +4460,7 @@ mod tests {
     #[tokio::test]
     async fn high_contention_merge_refresh_and_leave_requests_converge() {
         let state = test_api_state_with_lanes(4);
+        let headers = message_auth_headers();
         let alice = demo_bundle("alice").expect("alice demo bundle");
         let leaf_id = {
             let lane = state.server_for_gid(&DEMO_GID);
@@ -4272,6 +4478,7 @@ mod tests {
         let mut tasks = Vec::new();
         for idx in 0..task_count {
             let state = state.clone();
+            let headers = headers.clone();
             let room_id = hex::encode(DEMO_GID);
             let leaf = leaf_id.to_vec();
             tasks.push(tokio::spawn(async move {
@@ -4285,7 +4492,7 @@ mod tests {
                     leaf_id: leaf,
                     intent,
                 };
-                let response = merge_ticket(State(state), encode_proto_request(&request))
+                let response = merge_ticket(State(state), headers, encode_proto_request(&request))
                     .await
                     .map_err(|err| format!("merge_ticket failed: {err}"))?;
                 let decoded: MergeTicketResponse = decode_proto_response(response).await;
@@ -4326,6 +4533,7 @@ mod tests {
     #[tokio::test]
     async fn barrier_resolve_joins_since_returns_join_records() {
         let state = test_api_state();
+        let headers = message_auth_headers();
         let alice = demo_bundle("alice").expect("alice demo bundle");
 
         let mut bad_body = Vec::new();
@@ -4335,9 +4543,13 @@ mod tests {
         }
         .encode(&mut bad_body)
         .expect("encode bad joins-since request");
-        let err = barrier_resolve_joins_since(State(state.clone()), Bytes::from(bad_body))
-            .await
-            .expect_err("joins-since missing room id should fail");
+        let err = barrier_resolve_joins_since(
+            State(state.clone()),
+            headers.clone(),
+            Bytes::from(bad_body),
+        )
+        .await
+        .expect_err("joins-since missing room id should fail");
         assert!(matches!(
             err,
             ApiError::InvalidRequest("room_id must be provided")
@@ -4355,7 +4567,7 @@ mod tests {
         }
         .encode(&mut body)
         .expect("encode joins-since request");
-        let response = barrier_resolve_joins_since(State(state), Bytes::from(body))
+        let response = barrier_resolve_joins_since(State(state), headers, Bytes::from(body))
             .await
             .expect("joins-since request should succeed");
         let decoded: BarrierResolveJoinsSinceResponse = decode_proto_response(response).await;
@@ -4375,6 +4587,7 @@ mod tests {
     #[tokio::test]
     async fn barrier_tree_and_revoked_leaves_endpoints_validate_inputs() {
         let state = test_api_state();
+        let headers = message_auth_headers();
         let alice = demo_bundle("alice").expect("alice demo bundle");
 
         let (revocation_roots_hash, kem_tree_hash_after, n_max) = {
@@ -4400,10 +4613,13 @@ mod tests {
         }
         .encode(&mut bad_revoked_body)
         .expect("encode missing room revoked request");
-        let err =
-            barrier_resolve_revoked_leaves(State(state.clone()), Bytes::from(bad_revoked_body))
-                .await
-                .expect_err("missing room_id should fail");
+        let err = barrier_resolve_revoked_leaves(
+            State(state.clone()),
+            headers.clone(),
+            Bytes::from(bad_revoked_body),
+        )
+        .await
+        .expect_err("missing room_id should fail");
         assert!(matches!(
             err,
             ApiError::InvalidRequest("room_id must be provided")
@@ -4416,10 +4632,13 @@ mod tests {
         }
         .encode(&mut bad_revoked_room)
         .expect("encode invalid room revoked request");
-        let err =
-            barrier_resolve_revoked_leaves(State(state.clone()), Bytes::from(bad_revoked_room))
-                .await
-                .expect_err("invalid room_id should fail");
+        let err = barrier_resolve_revoked_leaves(
+            State(state.clone()),
+            headers.clone(),
+            Bytes::from(bad_revoked_room),
+        )
+        .await
+        .expect_err("invalid room_id should fail");
         assert!(matches!(
             err,
             ApiError::InvalidRequest("room_id must be 64 hex characters")
@@ -4432,10 +4651,13 @@ mod tests {
         }
         .encode(&mut bad_revoked_hash)
         .expect("encode short hash revoked request");
-        let err =
-            barrier_resolve_revoked_leaves(State(state.clone()), Bytes::from(bad_revoked_hash))
-                .await
-                .expect_err("short revocation_roots_hash should fail");
+        let err = barrier_resolve_revoked_leaves(
+            State(state.clone()),
+            headers.clone(),
+            Bytes::from(bad_revoked_hash),
+        )
+        .await
+        .expect_err("short revocation_roots_hash should fail");
         assert!(matches!(
             err,
             ApiError::InvalidRequest("revocation_roots_hash must be 32 bytes")
@@ -4448,10 +4670,13 @@ mod tests {
         }
         .encode(&mut revoked_body)
         .expect("encode revoked leaves request");
-        let revoked_response =
-            barrier_resolve_revoked_leaves(State(state.clone()), Bytes::from(revoked_body))
-                .await
-                .expect("revoked leaves request should succeed");
+        let revoked_response = barrier_resolve_revoked_leaves(
+            State(state.clone()),
+            headers.clone(),
+            Bytes::from(revoked_body),
+        )
+        .await
+        .expect("revoked leaves request should succeed");
         let revoked_decoded: BarrierResolveRevokedLeavesResponse =
             decode_proto_response(revoked_response).await;
         assert!(revoked_decoded.leaf_indices.is_empty());
@@ -4463,9 +4688,13 @@ mod tests {
         }
         .encode(&mut bad_tree_body)
         .expect("encode missing room tree request");
-        let err = barrier_fetch_public_tree(State(state.clone()), Bytes::from(bad_tree_body))
-            .await
-            .expect_err("missing room tree request should fail");
+        let err = barrier_fetch_public_tree(
+            State(state.clone()),
+            headers.clone(),
+            Bytes::from(bad_tree_body),
+        )
+        .await
+        .expect_err("missing room tree request should fail");
         assert!(matches!(
             err,
             ApiError::InvalidRequest("room_id must be provided")
@@ -4478,9 +4707,13 @@ mod tests {
         }
         .encode(&mut bad_tree_hash)
         .expect("encode short hash tree request");
-        let err = barrier_fetch_public_tree(State(state.clone()), Bytes::from(bad_tree_hash))
-            .await
-            .expect_err("short tree hash should fail");
+        let err = barrier_fetch_public_tree(
+            State(state.clone()),
+            headers.clone(),
+            Bytes::from(bad_tree_hash),
+        )
+        .await
+        .expect_err("short tree hash should fail");
         assert!(matches!(
             err,
             ApiError::InvalidRequest("kem_tree_hash_after must be 32 bytes")
@@ -4493,9 +4726,13 @@ mod tests {
         }
         .encode(&mut tree_body)
         .expect("encode barrier tree request");
-        let tree_response = barrier_fetch_public_tree(State(state.clone()), Bytes::from(tree_body))
-            .await
-            .expect("barrier tree request should succeed");
+        let tree_response = barrier_fetch_public_tree(
+            State(state.clone()),
+            headers.clone(),
+            Bytes::from(tree_body),
+        )
+        .await
+        .expect("barrier tree request should succeed");
         let tree_decoded: BarrierFetchPublicTreeResponse =
             decode_proto_response(tree_response).await;
         assert_eq!(tree_decoded.n_max, n_max);
@@ -4515,7 +4752,7 @@ mod tests {
         }
         .encode(&mut bad_tree_body)
         .expect("encode bad barrier tree request");
-        let err = barrier_fetch_public_tree(State(state), Bytes::from(bad_tree_body))
+        let err = barrier_fetch_public_tree(State(state), headers, Bytes::from(bad_tree_body))
             .await
             .expect_err("mismatched tree hash must fail");
         assert!(matches!(
@@ -4652,6 +4889,7 @@ mod tests {
     #[tokio::test]
     async fn members_handler_covers_validation_notfound_and_alias_metadata() {
         let state = test_api_state();
+        let headers = message_auth_headers();
         let alice = demo_bundle("alice").expect("alice demo bundle");
         let (root, leaf) = {
             let mut guard = state.server.write().await;
@@ -4672,6 +4910,7 @@ mod tests {
 
         let err = members(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&MembersRequest {
                 gid: Vec::new(),
                 parent_root: Vec::new(),
@@ -4688,6 +4927,7 @@ mod tests {
 
         let err = members(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&MembersRequest {
                 gid: DEMO_GID.to_vec(),
                 parent_root: vec![0x01],
@@ -4704,6 +4944,7 @@ mod tests {
 
         let err = members(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&MembersRequest {
                 gid: DEMO_GID.to_vec(),
                 parent_root: vec![0x99; 32],
@@ -4717,6 +4958,7 @@ mod tests {
 
         let response = members(
             State(state.clone()),
+            headers,
             encode_proto_request(&MembersRequest {
                 gid: DEMO_GID.to_vec(),
                 parent_root: root.to_vec(),
@@ -4908,9 +5150,11 @@ mod tests {
     #[tokio::test]
     async fn get_bundle_refresh_pivot_and_health_handlers_cover_core_paths() {
         let state = test_api_state();
+        let headers = message_auth_headers();
 
         let err = get_bundle(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&GetBundleRequest {
                 we_epoch_id: vec![0x01; 31],
             }),
@@ -4924,6 +5168,7 @@ mod tests {
 
         let err = get_bundle(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&GetBundleRequest {
                 we_epoch_id: vec![0x02; 32],
             }),
@@ -4936,6 +5181,7 @@ mod tests {
         store_bundle_bytes(&state, weid, vec![0xAA, 0xBB]).await;
         let response = get_bundle(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&GetBundleRequest {
                 we_epoch_id: weid.to_vec(),
             }),
@@ -4947,6 +5193,7 @@ mod tests {
 
         let err = refresh_pivot(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&RefreshPivotRequest {
                 bundle_cbor: Vec::new(),
             }),
@@ -4960,6 +5207,7 @@ mod tests {
 
         let err = refresh_pivot(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&RefreshPivotRequest {
                 bundle_cbor: vec![0x01, 0x02],
             }),
@@ -4978,6 +5226,7 @@ mod tests {
         );
         let err = refresh_pivot(
             State(state.clone()),
+            headers,
             encode_proto_request(&RefreshPivotRequest {
                 bundle_cbor: demo_bundle.to_cbor().expect("bundle cbor"),
             }),
@@ -5095,6 +5344,7 @@ mod tests {
     #[tokio::test]
     async fn window_and_telemetry_handlers_emit_snapshot_and_freeze_stats() {
         let state = test_api_state();
+        let headers = message_auth_headers();
         let bundle = demo_bundle("alice").expect("alice bundle");
         apply_bundle(&state, &bundle)
             .await
@@ -5108,6 +5358,7 @@ mod tests {
 
         let window_response = get_window(
             State(state.clone()),
+            headers.clone(),
             encode_proto_request(&GetWindowRequest {}),
         )
         .await
@@ -5123,10 +5374,13 @@ mod tests {
         assert_eq!(first_head.seed_commit.len(), 32);
         assert_eq!(first_head.xk_hash.len(), 32);
 
-        let telemetry_response =
-            get_telemetry(State(state), encode_proto_request(&GetTelemetryRequest {}))
-                .await
-                .expect("telemetry snapshot should succeed");
+        let telemetry_response = get_telemetry(
+            State(state),
+            headers,
+            encode_proto_request(&GetTelemetryRequest {}),
+        )
+        .await
+        .expect("telemetry snapshot should succeed");
         let telemetry: GetTelemetryResponse = decode_proto_response(telemetry_response).await;
         assert!(!telemetry.entries.is_empty());
         assert!(
@@ -5222,7 +5476,9 @@ mod tests {
         assert_eq!(third_json["timestamp_ms"], 303);
 
         socket
-            .send(tokio_tungstenite::tungstenite::Message::Ping(vec![1, 2, 3]))
+            .send(tokio_tungstenite::tungstenite::Message::Ping(
+                vec![1, 2, 3].into(),
+            ))
             .await
             .expect("send ping");
         socket
