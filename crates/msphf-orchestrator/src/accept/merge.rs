@@ -158,14 +158,22 @@ impl AcceptanceContext {
         debug!("merge: fs purge metadata ok");
 
         debug!("merge: extracting parent root");
-        let parent_root =
-            header_bytes32_or_freeze(header_map, 110, FREEZE_FIELD_MISSING, "parent_root")?;
+        let parent_root = header_bytes32_or_freeze(
+            header_map,
+            HDR_PARENT_ROOT,
+            FREEZE_FIELD_MISSING,
+            "parent_root",
+        )?;
         if parts.parent_root != parent_root.as_slice() {
             return Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING));
         }
         debug!("merge: parent root ok");
-        let join_delta_root =
-            header_bytes32_or_freeze(header_map, 111, FREEZE_FIELD_MISSING, "join_delta_root")?;
+        let join_delta_root = header_bytes32_or_freeze(
+            header_map,
+            HDR_JOIN_DELTA_ROOT,
+            FREEZE_FIELD_MISSING,
+            "join_delta_root",
+        )?;
         if parts.join_delta_root != join_delta_root.as_slice() {
             return Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING));
         }
@@ -1610,7 +1618,7 @@ mod tests {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
         let (mut header, heads) =
             ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
-        header.insert(110, Value::Bytes([0xA1; 32].to_vec()));
+        header.insert(HDR_PARENT_ROOT, Value::Bytes([0xA1; 32].to_vec()));
         expect_merge_freeze(
             &mut ctx,
             &parts,
@@ -1646,7 +1654,7 @@ mod tests {
 
         let (mut header, heads) =
             ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
-        header.insert(111, Value::Bytes([0xB2; 32].to_vec()));
+        header.insert(HDR_JOIN_DELTA_ROOT, Value::Bytes([0xB2; 32].to_vec()));
         expect_merge_freeze(
             &mut ctx,
             &parts,

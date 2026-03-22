@@ -14,6 +14,8 @@ pub const HDR_PARAMS_ID: u64 = 106;
 pub const HDR_POP_ALG: u64 = 107;
 pub const HDR_POP_PK: u64 = 108;
 pub const HDR_POP_SIG: u64 = 109;
+pub const HDR_PARENT_ROOT: u64 = 110;
+pub const HDR_JOIN_DELTA_ROOT: u64 = 111;
 pub const HDR_VRF_ID: u64 = 116;
 pub const HDR_PROOF_MODE: u64 = 119;
 pub const HDR_SRX_MODE: u64 = 120;
@@ -79,6 +81,8 @@ mod tests {
             HDR_POP_ALG,
             HDR_POP_PK,
             HDR_POP_SIG,
+            HDR_PARENT_ROOT,
+            HDR_JOIN_DELTA_ROOT,
             HDR_VRF_ID,
             HDR_PROOF_MODE,
             HDR_SRX_MODE,

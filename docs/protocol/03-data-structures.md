@@ -66,7 +66,7 @@ Unknown/duplicate/malformed keys map to `907.1` (`cbor_malformed`).
 | 143 | `HDR_FS_EPOCH_BASE_TS` | uint64 | fixed group FS base timestamp |
 | 146 | `HDR_FS_CAPSS` | bstr | CAPSS Smallwood transcript |
 | 152 | `HDR_FS_DEV_PREV_COMMIT` | bstr32 | previous device-chain commit |
-| 153 | `HDR_FS_DEV_COMMIT` | bstr32 | `H_L("fs/dev/chain", [108,141,152])` |
+| 153 | `HDR_FS_DEV_COMMIT` | bstr32 | `H_L("fs/dev/chain/v2", [108,141,152,176,barrier_update_digest])` |
 
 ### 2.4 Merge-Only Keys
 

@@ -313,7 +313,8 @@ pub fn h_branch_bytes(
 | **fs/epoch/sk_salt** | `[weid, fs_ec]` | salt [32B] | Salt for epoch_sk derivation |
 | **fs/epoch/commit** | `[epoch_sk]` | commitment [32B] | Commitment to epoch secret (field 142) |
 | **fs/kfs/salt** | `[weid]` | salt [32B] | Salt for K_fs evolution |
-| **fs/dev/chain** | `[device_pk, fs_ec, fs_dev_prev_commit]` | commit [32B] | Device chain commit (field 153) |
+| **fs/dev/chain/v2** | `[device_pk, fs_ec, fs_dev_prev_commit, barrier_version, barrier_update_digest]` | commit [32B] | Device chain commit (field 153) |
+| **barrier/update/digest** | `[raw_barrier_update_bytes]` | digest [32B] | Bound digest of header[175] bytes used by FS device-chain v2 |
 | **msphf/lin_fs/chal** | `[bind_fs_tuple]` | digest [32B] | CAPSS Smallwood+ binding digest |
 | **msphf/lin_fs/tag/tau** | `[fs_epoch_commit, round, mask]` | digest [32B] | ROM-tag for τ clause round `round` |
 | **msphf/lin_fs/tag/hp** | `[hp_commit, round, mask]` | digest [32B] | ROM-tag for HP clause round `round` |
@@ -350,8 +351,12 @@ let epoch_sk = HKDF_BLAKE3(
 // 3. Commit to epoch_sk (field 142)
 let fs_epoch_commit = h_l("fs/epoch/commit", &[epoch_sk])?;
 
-// 4. Device chain commit (field 153)
-let fs_dev_commit = h_l("fs/dev/chain", &[device_pk, fs_ec, fs_dev_prev_commit])?;
+// 4. Barrier update digest + device chain commit (field 153)
+let barrier_update_digest = h_l("barrier/update/digest", &[raw_barrier_update_bytes])?;
+let fs_dev_commit = h_l(
+    "fs/dev/chain/v2",
+    &[device_pk, fs_ec, fs_dev_prev_commit, barrier_version, barrier_update_digest],
+)?;
 
 // 5. Evolve K_fs (after anchor creation)
 K_fs^(t+1) = HKDF_BLAKE3(
@@ -495,7 +500,7 @@ The City-G `tswe/msphf-we/fs-hybrid` protocol uses **34 unique domain-separation
 8. **ZK-VRF** (2): `vrf/mask`, `vrf/ctx`
 9. **VCK** (1): `msphf/vck`
 10. **Branch** (2): `msphf/branch/a`, `msphf/branch/b`
-11. **Forward-Secrecy (FS-Hybrid)** (7): `fs/epoch/salt`, `fs/epoch/sk_salt`, `fs/epoch/commit`, `fs/kfs/salt`, `fs/dev/chain`, `msphf/lin_fs/chal`, `tswe/epoch/key`
+11. **Forward-Secrecy (FS-Hybrid)** (8): `fs/epoch/salt`, `fs/epoch/sk_salt`, `fs/epoch/commit`, `fs/kfs/salt`, `fs/dev/chain/v2`, `barrier/update/digest`, `msphf/lin_fs/chal`, `tswe/epoch/key`
 
 **Properties**:
 - ✅ **Unique**: No duplicate labels

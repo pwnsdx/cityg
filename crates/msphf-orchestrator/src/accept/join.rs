@@ -30,13 +30,21 @@ impl AcceptanceContext {
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
 
-        let parent_root =
-            header_bytes32_or_freeze(header_map, 110, FREEZE_FIELD_MISSING, "parent_root")?;
+        let parent_root = header_bytes32_or_freeze(
+            header_map,
+            HDR_PARENT_ROOT,
+            FREEZE_FIELD_MISSING,
+            "parent_root",
+        )?;
         if parts.parent_root != parent_root.as_slice() {
             return Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING));
         }
-        let join_delta_root =
-            header_bytes32_or_freeze(header_map, 111, FREEZE_FIELD_MISSING, "join_delta_root")?;
+        let join_delta_root = header_bytes32_or_freeze(
+            header_map,
+            HDR_JOIN_DELTA_ROOT,
+            FREEZE_FIELD_MISSING,
+            "join_delta_root",
+        )?;
         if parts.join_delta_root != join_delta_root.as_slice() {
             return Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING));
         }

@@ -67,7 +67,7 @@ Key profile facts:
 
 - Enforce fixed FS base: `143 == GroupState.fs_epoch_base_ts` (`945.0` on mismatch).
 - Device-chain checks:
-  - recompute `153 == H_L("fs/dev/chain", [108,141,152])`
+  - recompute `153 == H_L("fs/dev/chain/v2", [108,141,152,176,barrier_update_digest])`
   - verify `152` continuity from stored device state
 - FLG checks against stored group/device counters:
   - global forward jump guard

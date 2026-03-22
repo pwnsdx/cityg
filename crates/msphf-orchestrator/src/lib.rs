@@ -2584,8 +2584,8 @@ pub fn joiner_kgen_or<'a>(
         }
     }
 
-    header_map.insert(110, Value::Bytes(parts.parent_root.to_vec()));
-    header_map.insert(111, Value::Bytes(parts.join_delta_root.to_vec()));
+    header_map.insert(HDR_PARENT_ROOT, Value::Bytes(parts.parent_root.to_vec()));
+    header_map.insert(HDR_JOIN_DELTA_ROOT, Value::Bytes(parts.join_delta_root.to_vec()));
     header_map.insert(112, Value::Bytes(parts.revoked_since_prev_root.to_vec()));
     header_map.insert(113, Value::Bytes(parts.revoked_root.to_vec()));
     header_map.insert(
