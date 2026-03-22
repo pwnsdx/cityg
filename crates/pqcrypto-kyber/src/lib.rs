@@ -227,8 +227,8 @@ pub mod kyber768 {
 
         #[allow(deprecated)]
         let dk_expanded = <MlKemSecretKey as ExpandedKeyEncoding>::to_expanded_bytes(&dk);
-        let mut sk_raw = [0u8; SECRET_KEY_BYTES];
-        sk_raw.copy_from_slice(dk_expanded.as_slice());
+        let mut dk_raw = [0u8; SECRET_KEY_BYTES];
+        dk_raw.copy_from_slice(dk_expanded.as_slice());
 
         (
             PublicKey {
@@ -236,7 +236,7 @@ pub mod kyber768 {
                 inner: ek,
             },
             SecretKey {
-                raw: sk_raw,
+                raw: dk_raw,
                 inner: dk,
             },
         )

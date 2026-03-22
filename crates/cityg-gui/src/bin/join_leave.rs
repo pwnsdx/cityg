@@ -1057,7 +1057,7 @@ fn verify_message_signature(
     Ok(())
 }
 
-async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
+async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
     let client = new_api_client(server_url);
     let (pop_pk, pop_sk) = dilithium5::keypair();
     let pop_public_key = DilithiumPublicKeyTrait::as_bytes(&pop_pk).to_vec();
@@ -1304,6 +1304,11 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         #[cfg(test)]
         msg_replay_state: MsgReplayState::default(),
     };
+    Ok(session)
+}
+
+async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
+    let session = prepare_join_session(server_url, room_id, alias).await?;
     perform_join_finalize(session).await
 }
 
@@ -3161,6 +3166,14 @@ mod tests {
         revoked_leaf_indices: Vec<u32>,
     }
 
+    struct JoinFinalizeFixture {
+        session: Session,
+        ticket: cityg_api_client::MergeTicket,
+        barrier_tree_snapshot: cityg_api_client::BarrierPublicTree,
+        join_records: Vec<BarrierJoinRecord>,
+        revoked_leaf_indices: Vec<u32>,
+    }
+
     #[derive(Serialize)]
     struct PivotParitySerializable {
         gid: ByteBuf,
@@ -3245,6 +3258,46 @@ mod tests {
         let _ = handle.await;
 
         Ok(LeaveFixture {
+            session,
+            ticket,
+            barrier_tree_snapshot,
+            join_records,
+            revoked_leaf_indices,
+        })
+    }
+
+    async fn capture_join_finalize_fixture() -> Result<JoinFinalizeFixture> {
+        let port = next_free_local_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = random_room_id();
+        bootstrap_test_room(&server_url, &room_id).await?;
+        let session = prepare_join_session(&server_url, &room_id, "join-finalize-mock").await?;
+
+        let client = new_api_client(&server_url);
+        let ticket = client
+            .merge_ticket_refresh(&room_id, &session.leaf_id)
+            .await?;
+        let pivot = select_ticket_pivot(&ticket.parities)
+            .ok_or_else(|| anyhow!("merge ticket missing pivot parity entries"))?;
+        let committed_revocation_roots_hash =
+            compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+        let barrier_tree_snapshot = client
+            .barrier_fetch_public_tree(&room_id, &ticket.kem_tree_hash_after)
+            .await?;
+        let join_records = client
+            .barrier_resolve_joins_since(&room_id, ticket.barrier_version)
+            .await?;
+        let revoked_leaf_indices = client
+            .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
+            .await?;
+
+        handle.abort();
+        let _ = handle.await;
+
+        Ok(JoinFinalizeFixture {
             session,
             ticket,
             barrier_tree_snapshot,
@@ -4657,6 +4710,159 @@ mod tests {
                 "stored second join-finalize bundle missing barrier_update_reason"
             ))?;
         assert_eq!(reason, 2);
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_finalize_rejects_tickets_with_srx_payload() -> Result<()> {
+        let fixture = capture_join_finalize_fixture().await?;
+        let mut bad_ticket = fixture.ticket.clone();
+        bad_ticket.srx_cbor = vec![0x01, 0x02, 0x03];
+
+        let state = LeaveMockState::new([(
+            "/v1/rooms/merge_ticket",
+            vec![MockResponse::proto_bytes(encode_merge_ticket(&bad_ticket)?)],
+        )]);
+        let (server_url, handle) = start_leave_mock_server(state).await?;
+
+        let mut session = fixture.session;
+        session.server_url = server_url;
+        let err = match perform_join_finalize(session).await {
+            Ok(_) => return Err(anyhow!("join finalize should reject unexpected SRX payloads")),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("join finalize merge ticket unexpectedly contained SRX payload"),
+            "unexpected error: {err}"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_finalize_retries_ticket_conflict_and_falls_back_to_pristine_bundle(
+    ) -> Result<()> {
+        let fixture = capture_join_finalize_fixture().await?;
+        let state = LeaveMockState::new([
+            (
+                "/v1/rooms/merge_ticket",
+                vec![
+                    MockResponse::json(
+                        HttpStatusCode::CONFLICT,
+                        "pivot head missing",
+                        Some(925),
+                        None,
+                    ),
+                    MockResponse::proto_bytes(encode_merge_ticket(&fixture.ticket)?),
+                ],
+            ),
+            (
+                "/v1/barrier/fetch_public_tree",
+                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                    &fixture.barrier_tree_snapshot,
+                ))],
+            ),
+            (
+                "/v1/barrier/resolve_joins_since",
+                vec![MockResponse::proto_bytes(encode_join_records(
+                    fixture.join_records.as_slice(),
+                ))],
+            ),
+            (
+                "/v1/barrier/resolve_revoked_leaves",
+                vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
+                    fixture.revoked_leaf_indices.as_slice(),
+                ))],
+            ),
+            ("/v1/pivot/refresh", vec![MockResponse::empty_proto(), MockResponse::empty_proto()]),
+            (
+                "/v1/accept_epoch",
+                vec![
+                    MockResponse::json(
+                        HttpStatusCode::CONFLICT,
+                        "mh_heads_invalid",
+                        None,
+                        Some("mh_heads_invalid"),
+                    ),
+                    MockResponse::empty_proto(),
+                ],
+            ),
+        ]);
+        let (server_url, handle) = start_leave_mock_server(state.clone()).await?;
+
+        let mut session = fixture.session;
+        session.server_url = server_url;
+        let finalized = perform_join_finalize(session).await?;
+        assert_eq!(
+            finalized.barrier_version,
+            fixture.ticket.barrier_version.saturating_add(1)
+        );
+        assert_ne!(finalized.k_barrier, [0u8; 32]);
+        assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 2);
+        assert_eq!(state.call_count("/v1/pivot/refresh"), 2);
+        assert_eq!(state.call_count("/v1/accept_epoch"), 2);
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_join_finalize_rotates_kbroad_and_defaults_zero_nmax() -> Result<()> {
+        let fixture = capture_join_finalize_fixture().await?;
+        let mut ticket = fixture.ticket.clone();
+        ticket.n_max = 0;
+
+        let state = LeaveMockState::new([
+            (
+                "/v1/rooms/merge_ticket",
+                vec![
+                    MockResponse::json(
+                        HttpStatusCode::INTERNAL_SERVER_ERROR,
+                        "kbroad rotation required",
+                        None,
+                        None,
+                    ),
+                    MockResponse::proto_bytes(encode_merge_ticket(&ticket)?),
+                ],
+            ),
+            ("/v1/rooms/rotate_kbroad", vec![MockResponse::empty_proto()]),
+            (
+                "/v1/barrier/fetch_public_tree",
+                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                    &fixture.barrier_tree_snapshot,
+                ))],
+            ),
+            (
+                "/v1/barrier/resolve_joins_since",
+                vec![MockResponse::proto_bytes(encode_join_records(
+                    fixture.join_records.as_slice(),
+                ))],
+            ),
+            (
+                "/v1/barrier/resolve_revoked_leaves",
+                vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
+                    fixture.revoked_leaf_indices.as_slice(),
+                ))],
+            ),
+            ("/v1/pivot/refresh", vec![MockResponse::empty_proto()]),
+            ("/v1/accept_epoch", vec![MockResponse::empty_proto()]),
+        ]);
+        let (server_url, handle) = start_leave_mock_server(state.clone()).await?;
+
+        let mut session = fixture.session;
+        session.server_url = server_url;
+        let finalized = perform_join_finalize(session).await?;
+        assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 2);
+        assert_eq!(state.call_count("/v1/rooms/rotate_kbroad"), 1);
+        assert_eq!(finalized.barrier_version, ticket.barrier_version.saturating_add(1));
+        assert_ne!(finalized.k_barrier, [0u8; 32]);
 
         handle.abort();
         let _ = handle.await;
