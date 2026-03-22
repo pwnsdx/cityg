@@ -4583,6 +4583,65 @@ mod tests {
     }
 
     #[test]
+    fn parse_barrier_update_reason_covers_presence_and_bounds() {
+        let empty = BTreeMap::new();
+        assert!(matches!(super::parse_barrier_update_reason(&empty), Ok(None)));
+
+        let mut reason_without_update = BTreeMap::new();
+        reason_without_update.insert(hdr::HDR_BARRIER_UPDATE_REASON, Value::Integer(1.into()));
+        assert!(matches!(
+            super::parse_barrier_update_reason(&reason_without_update),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let mut update_without_reason = BTreeMap::new();
+        update_without_reason.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(vec![0xAA]));
+        assert!(matches!(
+            super::parse_barrier_update_reason(&update_without_reason),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let mut invalid_type = update_without_reason.clone();
+        invalid_type.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Text("not-an-integer".to_string()),
+        );
+        assert!(matches!(
+            super::parse_barrier_update_reason(&invalid_type),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let mut negative = update_without_reason.clone();
+        negative.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(-1i64)),
+        );
+        assert!(matches!(
+            super::parse_barrier_update_reason(&negative),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        let mut too_large = update_without_reason.clone();
+        too_large.insert(hdr::HDR_BARRIER_UPDATE_REASON, Value::Integer(3.into()));
+        assert!(matches!(
+            super::parse_barrier_update_reason(&too_large),
+            Err(CityGError::InvalidInput("barrier_update malformed"))
+        ));
+
+        for reason in 0u64..=2 {
+            let mut header = update_without_reason.clone();
+            header.insert(
+                hdr::HDR_BARRIER_UPDATE_REASON,
+                Value::Integer(Integer::from(reason)),
+            );
+            assert_eq!(
+                super::parse_barrier_update_reason(&header).expect("valid reason"),
+                Some(reason)
+            );
+        }
+    }
+
+    #[test]
     fn parse_deterministic_cbor_rejects_noncanonical_map_bytes() {
         // Non-canonical key order for map {1:1, 0:0}; canonical form must sort keys.
         let noncanonical = vec![0xA2, 0x01, 0x01, 0x00, 0x00];
@@ -4608,6 +4667,70 @@ mod tests {
             super::compute_barrier_tree_hash(0, &[] as &[&[u8]]),
             Err(CityGError::InvalidInput(_))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_tree_path_and_cow_helpers_cover_mutation_paths() -> Result<(), CityGError> {
+        assert_eq!(super::direct_path_nodes(5), vec![5, 2, 0]);
+        assert_eq!(super::sibling_node(0), None);
+        assert_eq!(super::sibling_node(5), Some(6));
+        assert_eq!(super::sibling_node(6), Some(5));
+
+        let mut borrowed = vec![
+            Cow::Borrowed(&[0x00][..]),
+            Cow::Borrowed(&[0x01][..]),
+            Cow::Borrowed(&[0x02][..]),
+            Cow::Borrowed(&[0x03][..]),
+            Cow::Borrowed(&[0x04][..]),
+            Cow::Borrowed(&[0x05][..]),
+            Cow::Borrowed(&[0x06][..]),
+        ];
+        super::blank_internal_path_from_leaf_cow(&mut borrowed, 5);
+        assert_eq!(borrowed[5].as_ref(), &[0x05]);
+        assert!(borrowed[2].is_empty());
+        assert!(borrowed[0].is_empty());
+        assert_eq!(borrowed[1].as_ref(), &[0x01]);
+
+        super::blank_leaf_and_path_cow(&mut borrowed, 4);
+        assert!(borrowed[4].is_empty());
+        assert!(borrowed[1].is_empty());
+        assert!(borrowed[0].is_empty());
+        assert_eq!(borrowed[6].as_ref(), &[0x06]);
+
+        let blanks = super::build_all_blank_pk_entries_cow(4)?;
+        assert_eq!(blanks.len(), 7);
+        assert!(blanks.iter().all(|entry| entry.is_empty()));
+        assert!(matches!(
+            super::build_all_blank_pk_entries_cow(u64::MAX),
+            Err(CityGError::InvalidInput(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_resolution_and_pk_entries_cow_helpers_cover_branches() -> Result<(), CityGError> {
+        let snapshot: Vec<Cow<'_, [u8]>> = vec![
+            Cow::Borrowed(&[]),
+            Cow::Borrowed(&[]),
+            Cow::Borrowed(&[0xC2][..]),
+            Cow::Borrowed(&[0xD3][..]),
+            Cow::Borrowed(&[]),
+            Cow::Borrowed(&[]),
+            Cow::Borrowed(&[]),
+        ];
+        let mut targets = Vec::new();
+        super::collect_resolution_nodes(snapshot.as_slice(), 0, 3, &mut targets);
+        assert_eq!(targets, vec![3, 2]);
+
+        let mut state = super::GroupState {
+            n_max: 4,
+            ..super::GroupState::default()
+        };
+        state.barrier_pk_entries = (0..7).map(|idx| vec![idx as u8]).collect();
+        let borrowed = super::build_pk_entries_cow(&state)?;
+        assert_eq!(borrowed.len(), 7);
+        assert_eq!(borrowed[6].as_ref(), &[6]);
         Ok(())
     }
 
