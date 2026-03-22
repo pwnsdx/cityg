@@ -18,19 +18,19 @@ bench = []
 
 [dependencies]
 libc = "0.2"
-rand = { version = "0.8", features = ["std"] }
-rand_chacha = "0.3"
+rand = { version = "0.10", features = ["std"] }
+rand_chacha = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 zeroize = { version = "1", features = ["zeroize_derive"] }
-thiserror = "1"
+thiserror = "2"
 subtle = "2.6"
 blake3 = "1.8"
 
 
 [dev-dependencies]
 bencher = "0.1.5"
-criterion = "0.5"
+criterion = "0.8"
 proptest = "1.10"
 
 

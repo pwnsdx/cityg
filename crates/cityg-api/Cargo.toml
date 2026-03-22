@@ -14,20 +14,20 @@ default = []
 debug-api = ["cityg-server/debug-api"]
 
 [dependencies]
-axum = { version = "0.7", features = ["macros", "ws"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tokio = { version = "1.49", features = ["macros", "rt-multi-thread", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
-tower = { version = "0.4", features = ["make"] }
+tower = { version = "0.5", features = ["make"] }
 bytes = "1"
-prost = "0.12"
-prost-types = "0.12"
-thiserror = "1"
+prost = "0.14"
+prost-types = "0.14"
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-metrics = "0.23"
-metrics-exporter-prometheus = "0.15"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
 cityg-server = { path = "../cityg-server" }
 cityg-client = { path = "../cityg-client" }
 cityg-config = { path = "../cityg-config" }
@@ -49,10 +49,10 @@ ahash = { version = "0.8", features = ["serde"] }
 cityg-api-client = { path = "../cityg-api-client" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tokio = { version = "1.49", features = ["macros", "rt-multi-thread"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 chacha20poly1305 = "0.10"
-reqwest = "0.12"
+reqwest = "0.13"
 
 [build-dependencies]
-prost-build = "0.12"
+prost-build = "0.14"
 protoc-bin-vendored = "3"

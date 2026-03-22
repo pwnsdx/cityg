@@ -8,6 +8,6 @@ edition = "2024"
 [dependencies]
 msphf-core = { path = "../msphf-core" }
 ciborium = { version = "0.2", features = ["std"] }
-thiserror = "1.0"
+thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"

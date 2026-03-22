@@ -23,17 +23,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 futures = "0.3"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-rand = "0.8"
+rand = "0.10"
 pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
 pqcrypto-kyber = { version = "0.8", default-features = false, features = ["std"] }
 pqcrypto-traits = "0.3"
 ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }
 hex = "0.4"
 ciborium = "0.2"
-dirs = "5"
+dirs = "6"
 blake3 = "1"
 humantime = "2"
 msphf-core = { path = "../msphf-core" }
@@ -51,8 +51,8 @@ core-text = "=21.0.0"
 gpui = { version = "0.2.2", features = ["test-support"] }
 tempfile = "3"
 cityg-api = { path = "../cityg-api" }
-axum = "0.7"
-prost = "0.12"
+axum = "0.8"
+prost = "0.14"
 
 [[bin]]
 name = "join_leave"
