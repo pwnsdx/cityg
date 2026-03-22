@@ -1185,6 +1185,30 @@ mod tests {
     }
 
     #[test]
+    fn unsealed_wire_bundle_is_not_peer_recoverable_until_barrier_sealed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut bundle = demo_bundle_bob()?;
+        let barrier_key = demo_barrier_key();
+
+        let wire_bytes = bundle.to_cbor()?;
+        let unsealed_wire = ClientEpochBundle::from_cbor(&wire_bytes)?;
+        assert!(
+            unsealed_wire
+                .derive_epoch_secrets_with_barrier_key(&barrier_key)
+                .is_err(),
+            "author-local wire bundles must not be recoverable from barrier_key alone"
+        );
+
+        bundle.seal_local_hp_header_with_barrier_key(&barrier_key)?;
+        let sealed_bytes = bundle.to_cbor()?;
+        let sealed_wire = ClientEpochBundle::from_cbor(&sealed_bytes)?;
+        let (epoch_key, eid) = sealed_wire.derive_epoch_secrets_with_barrier_key(&barrier_key)?;
+        assert_eq!(epoch_key, bundle.epoch_key);
+        assert_eq!(eid, bundle.eid);
+        Ok(())
+    }
+
+    #[test]
     fn cityg_error_display_and_conversion_paths() {
         let msphf_err = MsphfError::invalid_input("bad input");
         let converted: CityGError = msphf_err.into();

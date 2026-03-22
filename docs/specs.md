@@ -188,7 +188,9 @@ In profile `v0.1.4`, the only in-profile encoding is:
 Scope / presence clarification (normative):
 * `header[97]` remains REQUIRED on all anchors by S4.2.1.
 * On JOIN, REGULAR, and MERGE anchors, `BarrierHpPlaintext` is the exact `hp_k` byte string bound to that anchor's final authenticated header context.
+* `BarrierHpPlaintext` MUST be non-empty.
 * `hp_k` MUST equal `CBOR_det(HpArtifact)`. No additional outer wrapper is permitted inside `BarrierHpPlaintext`.
+* `header[99]` MUST equal `H_L("msphf/hp/commit", [BarrierHpPlaintext])`.
 * Receivers MAY ignore `header[97]` on code paths that do not perform HP recovery, but any implementation that attempts recovery from `header[97]` MUST apply the validation and binding rules below.
 
 Normative constants:
@@ -202,11 +204,31 @@ Constraints (MUST):
 * element 1 MUST be a non-empty ciphertext byte string whose length is at least `AEAD_TAG_LEN` and at most `MAX_HP_ENVELOPE_BYTES`,
 * element 2 MUST equal the UTF-8 text string `"chacha20-poly1305"`.
 
-Encryption / binding algorithm (normative):
+Publication contexts (normative):
+* `header[97]` has the same wire shape in two publication contexts:
+  * `author-local form`: the form produced by the author while constructing a new JOIN/REGULAR anchor, and by a locally built MERGE bundle before it is rebound/sealed for peer recovery;
+  * `barrier-recovery form`: the form carried by a MERGE publication intended for cross-client recovery from serialized wire state.
+* The initial JOIN anchor published by a pending joiner MUST use the `author-local form`; the joiner does not yet know `K_barrier`, and no server-side provisioning of `K_barrier` is permitted.
+* Cross-client recovery from serialized wire state is defined only for the `barrier-recovery form`. A JOIN anchor by itself is not a peer-recoverable HP transport artifact.
+
+Author-local sealing algorithm (normative):
+* Let `xk_hash` be the transcript hash / handshake binding for the published anchor.
+* Let `hp_commit := header[99]`.
+* Let `hp_key_local` be a fresh uniformly random 32-byte key sampled by the author for this authored bundle only.
+* Let:
+  * `hp_nonce := H_L("hp/nonce", [xk_hash, hp_commit])[0..11]`
+  * `hp_aad := hp_commit`
+* Then:
+  * `hp_ciphertext := AEAD_Seal(hp_key_local, hp_nonce, hp_aad, BarrierHpPlaintext)`
+* `hp_key_local` is author-local secret material and MUST NOT be transmitted. Any implementation consuming the author-local form from wire without retained local key material MUST treat it as non-recoverable.
+
+Barrier-recovery sealing algorithm (normative):
 * Let `barrier_version := header[176]`.
 * Let `xk_hash` be the transcript hash / handshake binding for the published anchor.
 * Let `hp_commit := header[99]`.
 * Let `barrier_key` be the client's locally held barrier key for the authenticated barrier state selected for this recovery attempt.
+* For a MERGE carrying `header[175]`, `barrier_key` MUST be the post-activation barrier key corresponding to the published `barrier_version = header[176]`.
+* For a MERGE that does not carry `header[175]`, `barrier_key` MUST be the currently authenticated barrier key already bound locally to the published `barrier_version = header[176]`.
 * Let:
   * `hp_salt := H_L("hp/barrier/salt", [barrier_version, xk_hash])`
   * `hp_info := ASCII("city-g|hp/barrier/v1") || hp_commit`
@@ -220,18 +242,19 @@ Encryption / binding algorithm (normative):
 Semantics / security properties (normative):
 * `hp_ciphertext` is an opaque client-to-client transport blob.
 * The server MAY store, replay, and authenticate this blob as part of the anchor header, but MUST treat it as opaque and MUST NOT claim knowledge of the underlying HP keying material.
-* The confidentiality/binding tuple is `(barrier_key, barrier_version, xk_hash, hp_commit)`.
+* `header[99]` is the authenticated commitment to `BarrierHpPlaintext`. Implementations MUST freshly sample each authored `HpArtifact` and MUST NOT deliberately reuse a prior `BarrierHpPlaintext` for a distinct anchor publication.
+* In `barrier-recovery form`, the confidentiality/binding tuple is `(barrier_key, barrier_version, xk_hash, hp_commit)`.
 * A cut-and-paste of `hp_ciphertext` into another anchor with a different `barrier_version`, `xk_hash`, `hp_commit`, or barrier key MUST fail client recovery.
-* `BarrierHpPlaintext` length MUST be `<= MAX_HP_BYTES` both before encryption and after decryption.
+* `BarrierHpPlaintext` length MUST be in `[1, MAX_HP_BYTES]` both before encryption and after decryption.
 
 Validation / rejection rules (normative):
 * Server-side acceptance MUST validate `header[97]` during S10.1 pre-filters before JOIN/MERGE-specific acceptance logic continues.
 * JOIN/MERGE validation that explicitly consumes `header[97]` MUST re-check the S3.4 shape/mode/size/AEAD constraints on the decoded value before using it.
 * Any parse failure, wrong mode, wrong AEAD suite, empty ciphertext, ciphertext shorter than `AEAD_TAG_LEN`, or ciphertext longer than `MAX_HP_ENVELOPE_BYTES` MUST be rejected as malformed.
-* A client recovery path MUST derive `hp_key` exactly as above and MUST reject/ignore the envelope for recovery if:
+* A client recovery path that expects `barrier-recovery form` MUST derive `hp_key` exactly as above and MUST reject/ignore the envelope for recovery if:
   * `header[176]` is missing or malformed,
   * AEAD open fails,
-  * the recovered plaintext length exceeds `MAX_HP_BYTES`.
+  * the recovered plaintext length is zero or exceeds `MAX_HP_BYTES`.
 * A client MUST NOT silently substitute another transport mode or fall back to a legacy room-secret transport when `header[97]` validation fails.
 
 Out-of-profile rule (normative):
@@ -1296,6 +1319,7 @@ If the genesis provisioning artifact is absent, incomplete, or inconsistent, the
 S12.1 Join anchor requirement
 Joiner generates (ek_leaf, dk_leaf) := ML-KEM-768.KeyGen() and publishes ek_leaf in header[177].
 Joiner MUST store dk_leaf locally and MUST also store pkhash_leaf := H_pk(ek_leaf) locally.
+The initial JOIN anchor published by the joiner MUST carry `header[97]` in the S3.4 `author-local form`, not the `barrier-recovery form`; no knowledge of the current `K_barrier` is required or permitted for this initial JOIN publication.
 
 S12.2 Provisioning to joiner
 Join provisioning MUST deliver to the joiner (authenticated, confidential as per base provisioning rules):
@@ -1327,6 +1351,7 @@ While in `pending_barrier_recovery`:
 * The joiner CANNOT encrypt outgoing payload messages (`SendParams` MUST be suspended or buffered).
 * The joiner CANNOT decrypt incoming payload messages encoded with `K_barrier` (or subsequent epochs).
 * The joiner MUST process any observed `barrier_update` messages (S11.13.4).
+* The joiner MUST NOT assume its own initial JOIN-anchor `header[97]` is peer-recoverable from wire; peer-recoverable HP transport begins only once a `barrier-recovery form` envelope is published on an accepted MERGE.
 * The joiner MUST NOT originate reason 0 (`revocation_or_bootstrap`) or reason 1 (`pcs_refresh`) while `pending_barrier_recovery == true`.
 * Exception: the joiner MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if:
   * it satisfies the S11.11.1 join_finalize bootstrap exception,
@@ -1469,6 +1494,7 @@ The test suite MUST include a scenario where:
 S14.9 KAT: barrier-sealed-v1 transport validation and binding (MUST)
 The test suite MUST include:
 * Positive case:
+  * a valid author-local JOIN envelope with mode `"barrier-sealed-v1"` is accepted by S10.1/S12.1 shape validation without requiring `K_barrier`,
   * a valid `BarrierHpEnvelope` with mode `"barrier-sealed-v1"`,
   * ciphertext length in `[AEAD_TAG_LEN, MAX_HP_ENVELOPE_BYTES]`,
   * AEAD suite `"chacha20-poly1305"`,
@@ -1476,6 +1502,7 @@ The test suite MUST include:
 * Negative cases:
   * any legacy/unknown transport mode in `header[97]` -> reject as malformed,
   * empty ciphertext, ciphertext shorter than `AEAD_TAG_LEN`, or ciphertext longer than `MAX_HP_ENVELOPE_BYTES` -> reject as malformed,
+  * successful AEAD open to an empty `BarrierHpPlaintext` -> reject as malformed,
   * wrong AEAD suite or malformed UTF-8/text shape -> reject as malformed,
   * replay / cut-and-paste of a valid `hp_ciphertext` into a different `(barrier_version, xk_hash, hp_commit)` context -> recovery MUST fail,
   * recovery attempted under the wrong barrier key -> recovery MUST fail.

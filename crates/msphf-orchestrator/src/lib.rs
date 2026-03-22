@@ -472,6 +472,9 @@ pub(crate) fn encrypt_hp_bytes(
     commit: &[u8; 32],
     key: &[u8; 32],
 ) -> Result<Vec<u8>, MsphfError> {
+    if plaintext.is_empty() {
+        return Err(MsphfError::invalid_input("hp_k empty"));
+    }
     if plaintext.len() > MAX_HP_BYTES {
         return Err(MsphfError::invalid_input("hp_k too large"));
     }
@@ -502,6 +505,9 @@ pub(crate) fn decrypt_hp_bytes(
         ciphertext,
         "msphf_hp_ciphertext tag mismatch",
     )?;
+    if plaintext.is_empty() {
+        return Err(MsphfError::invalid_input("hp_k empty"));
+    }
     if plaintext.len() > MAX_HP_BYTES {
         return Err(MsphfError::invalid_input("hp_k too large"));
     }
@@ -3791,6 +3797,17 @@ mod tests {
             decrypt_hp_bytes(&ciphertext, &xk_hash, &hp_commit, &key)?,
             plaintext
         );
+        assert!(encrypt_hp_bytes(&[], &xk_hash, &hp_commit, &key).is_err());
+
+        let empty_nonce = derive_hp_nonce(&xk_hash, &hp_commit)?;
+        let empty_ciphertext = encrypt_chacha20(
+            &key,
+            &empty_nonce,
+            &hp_commit,
+            &[],
+            "msphf_hp_ciphertext encrypt failure",
+        )?;
+        assert!(decrypt_hp_bytes(&empty_ciphertext, &xk_hash, &hp_commit, &key).is_err());
 
         assert!(
             encrypt_hp_bytes(&vec![0x55; MAX_HP_BYTES + 1], &xk_hash, &hp_commit, &key).is_err()
