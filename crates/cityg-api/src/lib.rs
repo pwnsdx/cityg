@@ -54,7 +54,7 @@ use pb::{
 use pb::{SeedHeadRequest, SeedHeadResponse};
 use prost::Message;
 use thiserror::Error;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use unicode_normalization::UnicodeNormalization;
@@ -181,6 +181,30 @@ const GROUP_LANES_ENV: &str = "CITYG_SERVER_GROUP_LANES";
 const DEFAULT_GROUP_LANES: usize = 4;
 const MERGE_COALESCE_TTL_MS: u64 = 2_000;
 const MERGE_COALESCE_MAX_ENTRIES: usize = 8_192;
+const ACCEPT_EPOCH_MAX_IN_FLIGHT_ENV: &str = "CITYG_SERVER_ACCEPT_EPOCH_MAX_IN_FLIGHT";
+const JOIN_TICKET_MAX_IN_FLIGHT_ENV: &str = "CITYG_SERVER_JOIN_TICKET_MAX_IN_FLIGHT";
+const DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT: usize = 8;
+const DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT: usize = 16;
+
+#[derive(Clone)]
+struct EndpointConcurrencyLimiter {
+    semaphore: Arc<Semaphore>,
+}
+
+impl EndpointConcurrencyLimiter {
+    fn new(limit: usize) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(limit.max(1))),
+        }
+    }
+
+    fn try_acquire(&self) -> Result<OwnedSemaphorePermit, ApiError> {
+        self.semaphore
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ApiError::RateLimited)
+    }
+}
 
 #[derive(Clone)]
 struct ApiState {
@@ -205,6 +229,8 @@ struct ApiState {
     message_prune_due_ms: Arc<AtomicU64>,
     bundle_prune_due_ms: Arc<AtomicU64>,
     merge_ticket_cache: Arc<RwLock<AHashMap<MergeTicketCacheKey, MergeTicketCacheEntry>>>,
+    accept_epoch_limiter: EndpointConcurrencyLimiter,
+    join_ticket_limiter: EndpointConcurrencyLimiter,
 }
 
 #[derive(Clone, Debug)]
@@ -926,6 +952,22 @@ fn parse_ws_max_lag(raw: Option<&str>) -> u64 {
         .unwrap_or(WS_MAX_LAG_DEFAULT)
 }
 
+fn configured_accept_epoch_max_in_flight() -> usize {
+    std::env::var(ACCEPT_EPOCH_MAX_IN_FLIGHT_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT)
+}
+
+fn configured_join_ticket_max_in_flight() -> usize {
+    std::env::var(JOIN_TICKET_MAX_IN_FLIGHT_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT)
+}
+
 fn configured_ws_max_lag() -> u64 {
     let raw = std::env::var(WS_MAX_LAG_ENV).ok();
     parse_ws_max_lag(raw.as_deref())
@@ -1063,6 +1105,7 @@ fn verify_identity_binding(binding: &IdentityBinding) -> Result<(), ApiError> {
 }
 
 async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let _permit = state.accept_epoch_limiter.try_acquire()?;
     let request = AcceptEpochRequest::decode(body)?;
     let bundle = match ClientEpochBundle::from_cbor(&request.bundle_cbor) {
         Ok(bundle) => bundle,
@@ -1552,6 +1595,7 @@ async fn search_members(
 }
 
 async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
+    let _permit = state.join_ticket_limiter.try_acquire()?;
     let request = JoinTicketRequest::decode(body)?;
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
@@ -2769,10 +2813,16 @@ pub async fn run_with_config(
     });
     let server_lanes = Arc::new(server_lanes_vec);
     let message_retention = message_retention_from_config(&config);
+    let accept_epoch_max_in_flight = configured_accept_epoch_max_in_flight();
+    let join_ticket_max_in_flight = configured_join_ticket_max_in_flight();
     info!(
         "message retention window set to {}s (group execution lanes: {})",
         message_retention.as_secs(),
         lane_count
+    );
+    info!(
+        "endpoint concurrency limits: accept_epoch={} join_ticket={}",
+        accept_epoch_max_in_flight, join_ticket_max_in_flight
     );
     // Create broadcast channel for WebSocket notifications (capacity from config)
     let (notification_tx, _) = broadcast::channel(config.server.websocket_capacity);
@@ -2797,6 +2847,8 @@ pub async fn run_with_config(
         message_prune_due_ms: Arc::new(AtomicU64::new(0)),
         bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
         merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
+        accept_epoch_limiter: EndpointConcurrencyLimiter::new(accept_epoch_max_in_flight),
+        join_ticket_limiter: EndpointConcurrencyLimiter::new(join_ticket_max_in_flight),
     };
 
     // Build router with all routes
@@ -3076,6 +3128,10 @@ mod tests {
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
             bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
+            accept_epoch_limiter: EndpointConcurrencyLimiter::new(
+                DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
+            ),
+            join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
         }
     }
 
@@ -3103,6 +3159,10 @@ mod tests {
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
             bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
+            accept_epoch_limiter: EndpointConcurrencyLimiter::new(
+                DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
+            ),
+            join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
         }
     }
 
@@ -3258,6 +3318,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn configured_endpoint_concurrency_limits_use_env_or_default() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::remove_var(ACCEPT_EPOCH_MAX_IN_FLIGHT_ENV);
+            std::env::remove_var(JOIN_TICKET_MAX_IN_FLIGHT_ENV);
+        }
+        assert_eq!(
+            configured_accept_epoch_max_in_flight(),
+            DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT
+        );
+        assert_eq!(
+            configured_join_ticket_max_in_flight(),
+            DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT
+        );
+
+        unsafe {
+            std::env::set_var(ACCEPT_EPOCH_MAX_IN_FLIGHT_ENV, "3");
+            std::env::set_var(JOIN_TICKET_MAX_IN_FLIGHT_ENV, "5");
+        }
+        assert_eq!(configured_accept_epoch_max_in_flight(), 3);
+        assert_eq!(configured_join_ticket_max_in_flight(), 5);
+
+        unsafe {
+            std::env::remove_var(ACCEPT_EPOCH_MAX_IN_FLIGHT_ENV);
+            std::env::remove_var(JOIN_TICKET_MAX_IN_FLIGHT_ENV);
+        }
+    }
+
     #[tokio::test]
     async fn server_lane_helpers_fallback_when_lane_set_is_empty() {
         let cfg = CityGConfig::default();
@@ -3279,6 +3368,10 @@ mod tests {
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
             bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
+            accept_epoch_limiter: EndpointConcurrencyLimiter::new(
+                DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
+            ),
+            join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
         };
 
         let gid = [0x44; 32];
@@ -3775,6 +3868,10 @@ mod tests {
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
             bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
+            accept_epoch_limiter: EndpointConcurrencyLimiter::new(
+                DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
+            ),
+            join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
         };
 
         let alias = "alice";
@@ -3824,6 +3921,10 @@ mod tests {
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
             bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
+            accept_epoch_limiter: EndpointConcurrencyLimiter::new(
+                DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
+            ),
+            join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
         };
 
         let (pop_pk, pop_sk) = dilithium5::keypair();
@@ -5795,6 +5896,37 @@ mod tests {
         assert!(!state.weid_to_leaf.read().await.contains_key(&expired_weid));
     }
 
+    #[tokio::test]
+    async fn accept_epoch_returns_rate_limited_when_concurrency_budget_is_exhausted() {
+        let mut state = empty_test_api_state();
+        state.accept_epoch_limiter = EndpointConcurrencyLimiter::new(1);
+        let _permit = state
+            .accept_epoch_limiter
+            .try_acquire()
+            .expect("test should acquire the only permit");
+
+        let result = accept_epoch(State(state), Bytes::new()).await;
+        assert!(matches!(result, Err(ApiError::RateLimited)));
+    }
+
+    #[tokio::test]
+    async fn join_ticket_returns_rate_limited_when_concurrency_budget_is_exhausted() {
+        let mut state = empty_test_api_state();
+        state.join_ticket_limiter = EndpointConcurrencyLimiter::new(1);
+        let _permit = state
+            .join_ticket_limiter
+            .try_acquire()
+            .expect("test should acquire the only permit");
+
+        let request = JoinTicketRequest {
+            room_id: hex::encode(DEMO_GID),
+            alias: String::new(),
+            identity_binding: None,
+        };
+        let result = join_ticket(State(state), encode_proto_request(&request)).await;
+        assert!(matches!(result, Err(ApiError::RateLimited)));
+    }
+
     #[test]
     fn should_prune_messages_throttles_global_pruning() {
         let due = AtomicU64::new(0);
@@ -5855,6 +5987,10 @@ mod tests {
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
             bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
+            accept_epoch_limiter: EndpointConcurrencyLimiter::new(
+                DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
+            ),
+            join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
         };
         let leaf = [0x01u8; 32];
         let key = vec![0xAB; 8];
