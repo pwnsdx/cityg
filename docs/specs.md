@@ -60,7 +60,7 @@ MUST use deterministic CBOR per RFC 8949 S4.2:
 
 Deterministic-encoding verification rule (normative, MUST):
 For any object that MUST be encoded as CBOR_det, verifiers MUST check that the received bytes are deterministic.
-A conforming method is:
+The conforming verification method is:
 1. Parse the received CBOR bytes using a parser that:
    * rejects floats,
    * rejects indefinite-length items,
@@ -104,7 +104,7 @@ S2.3 HKDF-BLAKE3 (normative, L=32 only)
 HKDF-BLAKE3.Extract(salt32, ikm) -> prk32:
   prk32 := BLAKE3_keyed(key=salt32, message=ikm)
 HKDF-BLAKE3.Expand(prk32, info_bytes, L=32) -> okm32:
-  okm32 := BLAKE3_keyed(key=prk32, message=(info_bytes || 0x01))[0..31]
+  okm32 := BLAKE3_keyed(key=prk32, message=(info_bytes || 0x01))[0..32]  /* first 32 bytes */
 HKDF-BLAKE3(ikm, salt32, info_bytes, L=32) -> okm32:
   prk32 := Extract(salt32, ikm)
   okm32 := Expand(prk32, info_bytes, 32)
@@ -194,9 +194,9 @@ Scope / presence clarification (normative):
 * Receivers MAY ignore `header[97]` on code paths that do not perform HP recovery, but any implementation that attempts recovery from `header[97]` MUST apply the validation and binding rules below.
 
 Normative constants:
-* `MAX_HP_BYTES := 16384`
+* `MAX_HP_BYTES := 16384`                                          /* maximum BarrierHpPlaintext byte length */
 * `AEAD_TAG_LEN := 16`
-* `MAX_HP_ENVELOPE_BYTES := MAX_HP_BYTES + AEAD_TAG_LEN = 16400`
+* `MAX_HP_ENVELOPE_BYTES := MAX_HP_BYTES + AEAD_TAG_LEN = 16400`  /* maximum hp_ciphertext byte length; excludes the surrounding CBOR array/tag overhead */
 
 Constraints (MUST):
 * the array length MUST equal 3,
@@ -519,6 +519,9 @@ K_msg_epoch := HKDF-BLAKE3(
 )
 Where `E_k` is the locally derived epoch key for the active `weid`.
 `tau_e(t)` remains normative for FS chain/proof context per S6, while payload encryption in this profile binds to `E_k` in S8.
+
+Security note (informative):
+K_msg_epoch depends on E_k (ME-OR derived, independent of K_fs) and K_barrier (PRS derived, independent of K_fs). Compromise of K_fs alone does NOT yield K_msg_epoch or any payload decryption capability. Payload confidentiality requires compromise of both E_k and K_barrier for the authenticated epoch. Within an epoch, K_msg_epoch is shared across all messages; compromise of K_msg_epoch enables derivation of all K_msg values for that epoch via the deterministic msg_index binding in S8.4.
 
 S8.4 K_msg, nonce, and AAD
 K_msg := HKDF-BLAKE3(
@@ -867,6 +870,9 @@ Genesis convention:
 When barrier_initialized == false, prev_barrier_version MUST be treated as 0 for JoinSet enumeration, and ResolveJoinsSince(0) MUST return the complete active leaf set for genesis.
 Leaf-allocation invariant (normative):
 * cover leaf indices are single-assignment for the lifetime of `gid` and MUST NOT be reused after revocation.
+
+Leaf-exhaustion note (informative):
+Because cover leaf indices are single-assignment and N_max is fixed, a group that churns members will eventually exhaust its leaf address space. Deployments SHOULD monitor the ratio of (active + historically revoked) leaves to N_max. When this ratio approaches saturation, the deployment SHOULD initiate group retirement and re-creation with a fresh gid and appropriately sized N_max. This profile does not define an in-protocol group migration or N_max extension mechanism; such a mechanism MAY be defined by a future profile.
 snapshot_base:
 * genesis: all-blank tree (every pk_i := empty bstr for all 2*N_max-1 nodes)
 * non-genesis: current committed pk_entries
