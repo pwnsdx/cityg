@@ -37,7 +37,7 @@ use pqcrypto_traits::sign::{
     DetachedSignature as DilithiumDetachedSignatureTrait, PublicKey as DilithiumPublicKeyTrait,
     SecretKey as DilithiumSecretKeyTrait,
 };
-use rand::{Rng, RngCore, thread_rng};
+use rand::{RngExt, rng};
 use serde::Serialize;
 use serde_bytes::ByteBuf;
 use serde_json::Value as JsonValue;
@@ -45,18 +45,26 @@ use tokio::{
     sync::mpsc,
     time::{sleep, timeout},
 };
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{HeaderValue, Request},
+        protocol::Message as WsMessage,
+    },
+};
 use tracing::warn;
 
 fn random_room_id() -> String {
-    let mut rng = thread_rng();
+    let mut rng = rng();
     let mut bytes = [0u8; 32];
-    rng.fill_bytes(&mut bytes);
+    rng.fill(&mut bytes);
     hex::encode(bytes)
 }
 
 const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
 const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
+const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
 const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
 const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
 const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
@@ -86,7 +94,7 @@ fn ticket_retry_delay(attempt: u32) -> Duration {
     let exponent = attempt.min(5);
     let base = TICKET_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << exponent);
     let capped = base.min(TICKET_RETRY_MAX_DELAY_MS);
-    let jitter = thread_rng().gen_range(0..=TICKET_RETRY_JITTER_MS);
+    let jitter = rng().random_range(0..=TICKET_RETRY_JITTER_MS);
     Duration::from_millis(capped.saturating_add(jitter))
 }
 
@@ -122,9 +130,9 @@ fn new_api_client(server_url: &str) -> CitygApiClient {
 fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
     let mut params_seed = [0u8; 32];
     let mut key_seed = [0u8; 32];
-    let mut rng = thread_rng();
-    rng.fill_bytes(&mut params_seed);
-    rng.fill_bytes(&mut key_seed);
+    let mut rng = rng();
+    rng.fill(&mut params_seed);
+    rng.fill(&mut key_seed);
     let params = msphf_orchestrator::lb::generate_parameters(params_seed)
         .map_err(|err| anyhow!("generate VRF params: {err}"))?;
     msphf_orchestrator::lb::generate_keypair(&params, key_seed)
@@ -444,7 +452,7 @@ fn build_barrier_update_bytes(
 
     let mut path_secrets = BTreeMap::new();
     let mut path_secret_leaf = [0u8; 32];
-    thread_rng().fill_bytes(&mut path_secret_leaf);
+    rng().fill(&mut path_secret_leaf);
     path_secrets.insert(path_nodes[0], path_secret_leaf);
     for idx in 1..path_nodes.len() {
         let parent_node = path_nodes[idx];
@@ -509,9 +517,9 @@ fn build_barrier_update_bytes(
             let target_pkhash = compute_barrier_pkhash(target_pk.as_slice())?;
             let mut kem_ct = vec![0u8; kyber768::ciphertext_bytes()];
             let mut wrapped_ps = vec![0u8; 48];
-            let mut rng = thread_rng();
-            rng.fill_bytes(kem_ct.as_mut_slice());
-            rng.fill_bytes(wrapped_ps.as_mut_slice());
+            let mut rng = rng();
+            rng.fill(kem_ct.as_mut_slice());
+            rng.fill(wrapped_ps.as_mut_slice());
             node_ciphertexts.push(NodeCiphertextWire(
                 source_node,
                 target_node,
@@ -1165,7 +1173,7 @@ async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> R
 
     let mut fs_state = ForwardSecrecyState::new({
         let mut seed = [0u8; 32];
-        thread_rng().fill_bytes(&mut seed);
+        rng().fill(&mut seed);
         seed
     });
 
@@ -2195,13 +2203,9 @@ async fn run_watch_mode(
     log_fingerprints(&first_session);
     let message_token = configured_client_message_token()
         .ok_or_else(|| anyhow!("message auth token is not configured"))?;
-    let ws_url = websocket_url(
-        server_url,
-        &first_session.gid,
-        &first_session.leaf_id,
-        &message_token,
-    );
-    let (mut event_rx, ws_handle) = spawn_notification_listener(&ws_url).await?;
+    let ws_url = websocket_url(server_url, &first_session.gid, &first_session.leaf_id);
+    let (mut event_rx, ws_handle) =
+        spawn_notification_listener(&ws_url, Some(&message_token)).await?;
     sessions.push(first_session);
 
     for i in 1..count {
@@ -2399,10 +2403,24 @@ async fn send_message_burst(
     Ok(())
 }
 
+fn websocket_request(ws_url: &str, token: Option<&str>) -> Result<Request<()>> {
+    let mut request = ws_url
+        .into_client_request()
+        .map_err(|err| anyhow!("failed to build websocket handshake request: {err}"))?;
+    if let Some(token) = token {
+        let token =
+            HeaderValue::from_str(token).context("message auth token is not a valid header")?;
+        request.headers_mut().insert(MESSAGE_AUTH_HEADER, token);
+    }
+    Ok(request)
+}
+
 async fn spawn_notification_listener(
     ws_url: &str,
+    token: Option<&str>,
 ) -> Result<(mpsc::Receiver<Notification>, tokio::task::JoinHandle<()>)> {
-    let (stream, _) = connect_async(ws_url)
+    let request = websocket_request(ws_url, token)?;
+    let (stream, _) = connect_async(request)
         .await
         .with_context(|| format!("failed to connect to websocket {ws_url}"))?;
     let (_write, mut read) = stream.split();
@@ -2506,7 +2524,7 @@ async fn expect_message_event(
     .await?
 }
 
-fn websocket_url(server_url: &str, gid: &[u8; 32], leaf_id: &[u8; 32], token: &str) -> String {
+fn websocket_url(server_url: &str, gid: &[u8; 32], leaf_id: &[u8; 32]) -> String {
     let base = if let Some(rest) = server_url.strip_prefix("https://") {
         format!("wss://{rest}")
     } else if let Some(rest) = server_url.strip_prefix("http://") {
@@ -2515,7 +2533,7 @@ fn websocket_url(server_url: &str, gid: &[u8; 32], leaf_id: &[u8; 32], token: &s
         format!("ws://{server_url}")
     };
     format!(
-        "{base}/v1/ws?gid={}&leaf_id={}&token={token}",
+        "{base}/v1/ws?gid={}&leaf_id={}",
         hex::encode(gid),
         hex::encode(leaf_id)
     )
@@ -3739,25 +3757,25 @@ mod tests {
         let gid = [0x11u8; 32];
         let leaf_id = [0x22u8; 32];
         assert_eq!(
-            websocket_url("http://127.0.0.1:18080", &gid, &leaf_id, "token"),
+            websocket_url("http://127.0.0.1:18080", &gid, &leaf_id),
             format!(
-                "ws://127.0.0.1:18080/v1/ws?gid={}&leaf_id={}&token=token",
+                "ws://127.0.0.1:18080/v1/ws?gid={}&leaf_id={}",
                 hex::encode(gid),
                 hex::encode(leaf_id)
             )
         );
         assert_eq!(
-            websocket_url("https://example.com", &gid, &leaf_id, "token"),
+            websocket_url("https://example.com", &gid, &leaf_id),
             format!(
-                "wss://example.com/v1/ws?gid={}&leaf_id={}&token=token",
+                "wss://example.com/v1/ws?gid={}&leaf_id={}",
                 hex::encode(gid),
                 hex::encode(leaf_id)
             )
         );
         assert_eq!(
-            websocket_url("localhost:9000", &gid, &leaf_id, "token"),
+            websocket_url("localhost:9000", &gid, &leaf_id),
             format!(
-                "ws://localhost:9000/v1/ws?gid={}&leaf_id={}&token=token",
+                "ws://localhost:9000/v1/ws?gid={}&leaf_id={}",
                 hex::encode(gid),
                 hex::encode(leaf_id)
             )
@@ -3806,7 +3824,11 @@ mod tests {
     fn barrier_snapshot_mutation_helpers_clear_expected_paths() -> Result<()> {
         let mut snapshot = (0..7).map(|idx| vec![idx as u8]).collect::<Vec<_>>();
         blank_internal_path_from_leaf(snapshot.as_mut_slice(), 5)?;
-        assert_eq!(snapshot[5], vec![5], "leaf node itself must remain populated");
+        assert_eq!(
+            snapshot[5],
+            vec![5],
+            "leaf node itself must remain populated"
+        );
         assert!(snapshot[2].is_empty(), "parent on path must be blanked");
         assert!(snapshot[0].is_empty(), "root on path must be blanked");
         assert_eq!(snapshot[1], vec![1], "unrelated branch must remain intact");
@@ -3843,7 +3865,10 @@ mod tests {
         let mut snapshot = (0..7).map(|idx| vec![idx as u8]).collect::<Vec<_>>();
         apply_revoked_set_to_snapshot(snapshot.as_mut_slice(), 4, &[1])?;
         assert!(snapshot[4].is_empty(), "revoked leaf must be blanked");
-        assert!(snapshot[1].is_empty(), "revoked path parent must be blanked");
+        assert!(
+            snapshot[1].is_empty(),
+            "revoked path parent must be blanked"
+        );
         assert!(snapshot[0].is_empty(), "revoked path root must be blanked");
 
         let mut snapshot = vec![vec![0x11]; 7];
@@ -3892,8 +3917,7 @@ mod tests {
         newer.accept_seq = 5;
         newer.xk_hash = [0xCC; 32];
         let parities = [older.clone(), newer.clone()];
-        let chosen = select_pivot_parity(&parities)
-            .expect("highest accept_seq must be selected");
+        let chosen = select_pivot_parity(&parities).expect("highest accept_seq must be selected");
         assert_eq!(chosen.accept_seq, newer.accept_seq);
 
         let mut tie_large = sample_pivot_parity();
@@ -3929,7 +3953,10 @@ mod tests {
         let decoded = decode_authenticated_message(encoded.as_slice())?;
         assert_eq!(decoded.timestamp_ms, timestamp_ms);
         assert_eq!(decoded.plaintext, plaintext);
-        assert_eq!(decoded.public_key, DilithiumPublicKeyTrait::as_bytes(&public_key));
+        assert_eq!(
+            decoded.public_key,
+            DilithiumPublicKeyTrait::as_bytes(&public_key)
+        );
         assert_eq!(decoded.signature, signature.as_slice());
         verify_message_signature(
             &leaf_id,
@@ -4731,7 +4758,11 @@ mod tests {
         let mut session = fixture.session;
         session.server_url = server_url;
         let err = match perform_join_finalize(session).await {
-            Ok(_) => return Err(anyhow!("join finalize should reject unexpected SRX payloads")),
+            Ok(_) => {
+                return Err(anyhow!(
+                    "join finalize should reject unexpected SRX payloads"
+                ));
+            }
             Err(err) => err,
         };
         assert!(
@@ -4746,8 +4777,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn perform_join_finalize_retries_ticket_conflict_and_falls_back_to_pristine_bundle(
-    ) -> Result<()> {
+    async fn perform_join_finalize_retries_ticket_conflict_and_falls_back_to_pristine_bundle()
+    -> Result<()> {
         let fixture = capture_join_finalize_fixture().await?;
         let state = LeaveMockState::new([
             (
@@ -4780,7 +4811,10 @@ mod tests {
                     fixture.revoked_leaf_indices.as_slice(),
                 ))],
             ),
-            ("/v1/pivot/refresh", vec![MockResponse::empty_proto(), MockResponse::empty_proto()]),
+            (
+                "/v1/pivot/refresh",
+                vec![MockResponse::empty_proto(), MockResponse::empty_proto()],
+            ),
             (
                 "/v1/accept_epoch",
                 vec![
@@ -4861,7 +4895,10 @@ mod tests {
         let finalized = perform_join_finalize(session).await?;
         assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 2);
         assert_eq!(state.call_count("/v1/rooms/rotate_kbroad"), 1);
-        assert_eq!(finalized.barrier_version, ticket.barrier_version.saturating_add(1));
+        assert_eq!(
+            finalized.barrier_version,
+            ticket.barrier_version.saturating_add(1)
+        );
         assert_ne!(finalized.k_barrier, [0u8; 32]);
 
         handle.abort();
@@ -5509,7 +5546,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_notification_listener_rejects_unreachable_server() -> Result<()> {
-        let err = spawn_notification_listener("ws://127.0.0.1:9/v1/ws")
+        let err = spawn_notification_listener("ws://127.0.0.1:9/v1/ws", None)
             .await
             .expect_err("connecting to unreachable websocket endpoint should fail");
         assert!(err.to_string().contains("failed to connect to websocket"));
@@ -5526,15 +5563,17 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
             let mut ws = tokio_tungstenite::accept_async(stream).await?;
-            ws.send(WsMessage::Text(format!(
-                r#"{{"type":"message","we_epoch_id":"{weid_hex}","timestamp_ms":42}}"#
-            )))
+            ws.send(WsMessage::Text(
+                format!(r#"{{"type":"message","we_epoch_id":"{weid_hex}","timestamp_ms":42}}"#)
+                    .into(),
+            ))
             .await?;
             ws.close(None).await?;
             Ok::<(), anyhow::Error>(())
         });
 
-        let (mut rx, handle) = spawn_notification_listener(&format!("ws://{addr}/v1/ws")).await?;
+        let (mut rx, handle) =
+            spawn_notification_listener(&format!("ws://{addr}/v1/ws"), None).await?;
         let event = timeout(Duration::from_secs(2), rx.recv())
             .await?
             .ok_or(anyhow!("notification channel closed unexpectedly"))?;
@@ -5565,12 +5604,13 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
             let mut ws = tokio_tungstenite::accept_async(stream).await?;
-            ws.send(WsMessage::Binary(vec![1, 2, 3])).await?;
+            ws.send(WsMessage::Binary(vec![1, 2, 3].into())).await?;
             ws.close(None).await?;
             Ok::<(), anyhow::Error>(())
         });
 
-        let (mut rx, handle) = spawn_notification_listener(&format!("ws://{addr}/v1/ws")).await?;
+        let (mut rx, handle) =
+            spawn_notification_listener(&format!("ws://{addr}/v1/ws"), None).await?;
         let event = timeout(Duration::from_secs(2), rx.recv()).await?;
         assert!(
             event.is_none(),

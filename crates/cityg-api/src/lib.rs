@@ -899,6 +899,27 @@ fn enforce_message_auth_query(
     }
 }
 
+fn websocket_message_auth_token<'a>(
+    headers: &'a HeaderMap,
+    query_token: Option<&'a str>,
+) -> Option<&'a str> {
+    headers
+        .get(MESSAGE_AUTH_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .or(query_token)
+}
+
+fn enforce_message_auth_websocket(
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    expected_token: Option<&str>,
+) -> Result<(), ApiError> {
+    enforce_message_auth_query(
+        websocket_message_auth_token(headers, query_token),
+        expected_token,
+    )
+}
+
 fn parse_ws_max_lag(raw: Option<&str>) -> u64 {
     raw.and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
@@ -2064,9 +2085,11 @@ async fn fetch_messages(
 async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Query(query): Query<WebSocketSubscriptionQuery>,
 ) -> Result<Response, ApiError> {
-    enforce_message_auth_query(
+    enforce_message_auth_websocket(
+        &headers,
         query.token.as_deref(),
         configured_message_auth_token().as_deref(),
     )?;
@@ -3385,6 +3408,24 @@ mod tests {
                 "missing or invalid message auth token"
             ))
         ));
+    }
+
+    #[test]
+    fn websocket_message_auth_prefers_header_and_falls_back_to_query() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            MESSAGE_AUTH_HEADER,
+            HeaderValue::from_static("header-token"),
+        );
+        assert_eq!(
+            websocket_message_auth_token(&headers, Some("query-token")),
+            Some("header-token")
+        );
+        let empty_headers = HeaderMap::new();
+        assert_eq!(
+            websocket_message_auth_token(&empty_headers, Some("query-token")),
+            Some("query-token")
+        );
     }
 
     #[tokio::test]
@@ -5494,12 +5535,19 @@ mod tests {
         );
 
         let url = format!(
-            "ws://{addr}/v1/ws?gid={}&leaf_id={}&token={}",
+            "ws://{addr}/v1/ws?gid={}&leaf_id={}",
             hex::encode(DEMO_GID),
-            hex::encode(leaf),
-            token
+            hex::encode(leaf)
         );
-        let (mut socket, _) = tokio_tungstenite::connect_async(url)
+        let mut request =
+            tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
+                .expect("websocket auth request");
+        request.headers_mut().insert(
+            MESSAGE_AUTH_HEADER,
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&token)
+                .expect("valid websocket auth header"),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request)
             .await
             .expect("connect websocket");
 

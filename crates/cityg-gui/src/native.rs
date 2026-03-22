@@ -72,10 +72,17 @@ use pqcrypto_traits::kem::{
 use pqcrypto_traits::sign::{
     DetachedSignature, PublicKey as DilithiumPublicKey, SecretKey as DilithiumSecretKey,
 };
-use rand::{Rng, RngCore, thread_rng};
+use rand::{RngExt, rng};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{HeaderValue, Request},
+        protocol::Message as WsMessage,
+    },
+};
 use tracing::{debug, info, warn};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -85,9 +92,9 @@ use cityg_client::demo;
 fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
     let mut params_seed = [0u8; 32];
     let mut key_seed = [0u8; 32];
-    let mut rng = thread_rng();
-    rng.fill_bytes(&mut params_seed);
-    rng.fill_bytes(&mut key_seed);
+    let mut rng = rng();
+    rng.fill(&mut params_seed);
+    rng.fill(&mut key_seed);
     let params = msphf_orchestrator::lb::generate_parameters(params_seed)
         .map_err(|err| anyhow!("generate VRF params: {err}"))?;
     msphf_orchestrator::lb::generate_keypair(&params, key_seed)
@@ -134,7 +141,7 @@ fn ticket_retry_delay(attempt: u32) -> Duration {
     let exponent = attempt.min(5);
     let base = TICKET_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << exponent);
     let capped = base.min(TICKET_RETRY_MAX_DELAY_MS);
-    let jitter = thread_rng().gen_range(0..=TICKET_RETRY_JITTER_MS);
+    let jitter = rng().random_range(0..=TICKET_RETRY_JITTER_MS);
     Duration::from_millis(capped.saturating_add(jitter))
 }
 
@@ -1444,7 +1451,7 @@ fn build_barrier_update_bytes(
 
     let mut path_secrets = BTreeMap::new();
     let mut ps_leaf = [0u8; 32];
-    thread_rng().fill_bytes(&mut ps_leaf);
+    rng().fill(&mut ps_leaf);
     path_secrets.insert(path_nodes[0], ps_leaf);
     ps_leaf.zeroize();
     for k in 1..path_nodes.len() {
@@ -1848,13 +1855,15 @@ struct MembershipSignal {
 
 async fn run_websocket_worker(
     ws_url: String,
+    message_token: Option<String>,
     reconnect_delay: Duration,
     tx: futures_mpsc::UnboundedSender<WebSocketEvent>,
 ) -> Result<()> {
     loop {
         debug!("Attempting WebSocket connection to {}", ws_url);
 
-        match connect_async(&ws_url).await {
+        let request = websocket_request(&ws_url, message_token.as_deref())?;
+        match connect_async(request).await {
             Ok((ws_stream, _)) => {
                 info!("WebSocket connected successfully");
                 if tx.unbounded_send(WebSocketEvent::Connected).is_err() {
@@ -1947,6 +1956,18 @@ async fn run_websocket_worker(
 
         sleep(reconnect_delay).await;
     }
+}
+
+fn websocket_request(ws_url: &str, token: Option<&str>) -> Result<Request<()>> {
+    let mut request = ws_url
+        .into_client_request()
+        .map_err(|err| anyhow!("failed to build websocket handshake request: {err}"))?;
+    if let Some(token) = token {
+        let token =
+            HeaderValue::from_str(token).context("message auth token is not a valid header")?;
+        request.headers_mut().insert("x-cityg-message-token", token);
+    }
+    Ok(request)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -2875,7 +2896,7 @@ impl Render for AppModel {
 impl AppModel {
     fn random_room_id() -> String {
         let mut bytes = [0u8; 32];
-        thread_rng().fill_bytes(&mut bytes);
+        rng().fill(&mut bytes);
         hex_encode(bytes)
     }
 
@@ -4406,11 +4427,10 @@ impl AppModel {
             .replace("http://", "ws://")
             .replace("https://", "wss://");
         let ws_url = format!(
-            "{}/v1/ws?gid={}&leaf_id={}&token={}",
+            "{}/v1/ws?gid={}&leaf_id={}",
             ws_url,
             hex_encode(session.gid),
-            hex_encode(session.leaf_id),
-            message_token
+            hex_encode(session.leaf_id)
         );
         let reconnect_delay = self.config.client.websocket_reconnect_delay();
 
@@ -4421,7 +4441,12 @@ impl AppModel {
         let task = cx.spawn(async move |_, cx| {
             let runner = match Tokio::spawn_result(
                 cx,
-                run_websocket_worker(ws_url.clone(), reconnect_delay, event_tx),
+                run_websocket_worker(
+                    ws_url.clone(),
+                    Some(message_token.clone()),
+                    reconnect_delay,
+                    event_tx,
+                ),
             ) {
                 Ok(task) => task,
                 Err(err) => {
@@ -5961,7 +5986,7 @@ impl AppModel {
         if plaintext.is_empty() {
             return;
         }
-        let msg_index = thread_rng().next_u64();
+        let msg_index: u64 = rng().random();
         let params = match SendParams::from_session(&session_snapshot, plaintext.clone(), msg_index)
         {
             Ok(params) => params,
@@ -7567,7 +7592,7 @@ fn write_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<()> {
 
     for attempt in 0..32u8 {
         let mut suffix = [0u8; 8];
-        thread_rng().fill_bytes(&mut suffix);
+        rng().fill(&mut suffix);
         let suffix = u64::from_le_bytes(suffix);
         let temp_path = parent.join(format!(
             ".{file_name}.tmp-{}-{suffix}-{attempt}",
@@ -7834,7 +7859,7 @@ fn load_or_create_local_session_key(session_path: &std::path::Path) -> Result<[u
     }
 
     let mut key = [0u8; 32];
-    thread_rng().fill_bytes(&mut key);
+    rng().fill(&mut key);
 
     match fs::OpenOptions::new()
         .write(true)
@@ -8642,7 +8667,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     );
 
     let mut k_fs = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut k_fs);
+    rand::rng().fill(&mut k_fs);
     let mut fs_state = ForwardSecrecyState::new(k_fs);
 
     // pop_pk, pop_sk, pop_public_key, pop_secret_key already generated above
@@ -11116,7 +11141,7 @@ mod tests {
     use futures::SinkExt;
     use gpui::{Modifiers, TestAppContext};
     use msphf_rlwe::CapssBranchWitness;
-    use rand::{RngCore, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
     use std::sync::{Arc, Once, atomic::AtomicU16};
     use tempfile::TempDir;
     use tokio::{task::JoinHandle, time::sleep};
@@ -11213,7 +11238,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut random_vec = |len: usize| {
             let mut buf = vec![0u8; len];
-            rng.fill_bytes(&mut buf);
+            rng.fill(&mut buf);
             buf
         };
 
@@ -15287,6 +15312,7 @@ mod tests {
         let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
         let worker = tokio::spawn(run_websocket_worker(
             format!("ws://{addr}/v1/ws"),
+            None,
             Duration::from_millis(20),
             tx,
         ));
@@ -15331,7 +15357,12 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_secs(1),
-            run_websocket_worker(format!("ws://{addr}/v1/ws"), Duration::from_secs(1), tx),
+            run_websocket_worker(
+                format!("ws://{addr}/v1/ws"),
+                None,
+                Duration::from_secs(1),
+                tx,
+            ),
         )
         .await??;
 
@@ -15376,6 +15407,7 @@ mod tests {
         let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
         let worker = tokio::spawn(run_websocket_worker(
             format!("ws://{addr}/v1/ws"),
+            None,
             Duration::from_millis(20),
             tx,
         ));
@@ -15449,6 +15481,7 @@ mod tests {
         let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
         let worker = tokio::spawn(run_websocket_worker(
             format!("ws://{addr}/v1/ws"),
+            None,
             Duration::from_millis(20),
             tx,
         ));
@@ -15496,6 +15529,7 @@ mod tests {
         let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
         let worker = tokio::spawn(run_websocket_worker(
             format!("ws://{addr}/v1/ws"),
+            None,
             Duration::from_secs(1),
             tx,
         ));
@@ -15530,6 +15564,7 @@ mod tests {
         let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
         let worker = tokio::spawn(run_websocket_worker(
             format!("ws://{addr}/v1/ws"),
+            None,
             Duration::from_secs(1),
             tx,
         ));
@@ -15562,6 +15597,7 @@ mod tests {
         let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
         let worker = tokio::spawn(run_websocket_worker(
             format!("ws://{addr}/v1/ws"),
+            None,
             Duration::from_millis(20),
             tx,
         ));
@@ -15612,6 +15648,7 @@ mod tests {
         let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
         let worker = tokio::spawn(run_websocket_worker(
             format!("ws://{addr}/v1/ws"),
+            None,
             Duration::from_millis(20),
             tx,
         ));
@@ -15653,7 +15690,7 @@ mod tests {
 
         let mut random_vec = |len: usize| {
             let mut buf = vec![0u8; len];
-            rng.fill_bytes(&mut buf);
+            rng.fill(&mut buf);
             buf
         };
 
@@ -18757,12 +18794,12 @@ mod tests {
     #[test]
     fn encode_decode_capss_witness_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         use msphf_rlwe::CapssBranchWitness;
-        use rand::{RngCore, SeedableRng, rngs::StdRng};
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
 
         let mut rng = StdRng::seed_from_u64(12345);
         let mut random_vec = |len: usize| {
             let mut buf = vec![0u8; len];
-            rng.fill_bytes(&mut buf);
+            rng.fill(&mut buf);
             buf
         };
 
@@ -18840,7 +18877,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(999);
         let mut random_vec = |len: usize| {
             let mut buf = vec![0u8; len];
-            rng.fill_bytes(&mut buf);
+            rng.fill(&mut buf);
             buf
         };
 
