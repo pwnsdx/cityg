@@ -3730,6 +3730,237 @@ mod tests {
     }
 
     #[test]
+    fn barrier_tree_hash_and_pkhash_bind_inputs() -> Result<()> {
+        let entries = (0..7).map(|idx| vec![idx as u8; 4]).collect::<Vec<_>>();
+        let first = compute_barrier_tree_hash(4, &entries)?;
+        let second = compute_barrier_tree_hash(4, &entries)?;
+        assert_eq!(first, second, "tree hash must be deterministic");
+
+        let mut changed = entries.clone();
+        changed[6].push(0xFF);
+        let changed_hash = compute_barrier_tree_hash(4, &changed)?;
+        assert_ne!(first, changed_hash, "tree hash must bind pk entries");
+
+        let pkhash_a = compute_barrier_pkhash(&vec![0xAA; kyber768::public_key_bytes()])?;
+        let pkhash_b = compute_barrier_pkhash(&vec![0xAA; kyber768::public_key_bytes()])?;
+        let pkhash_c = compute_barrier_pkhash(&vec![0xAB; kyber768::public_key_bytes()])?;
+        assert_eq!(pkhash_a, pkhash_b, "pk hash must be deterministic");
+        assert_ne!(pkhash_a, pkhash_c, "pk hash must bind pk bytes");
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_snapshot_mutation_helpers_clear_expected_paths() -> Result<()> {
+        let mut snapshot = (0..7).map(|idx| vec![idx as u8]).collect::<Vec<_>>();
+        blank_internal_path_from_leaf(snapshot.as_mut_slice(), 5)?;
+        assert_eq!(snapshot[5], vec![5], "leaf node itself must remain populated");
+        assert!(snapshot[2].is_empty(), "parent on path must be blanked");
+        assert!(snapshot[0].is_empty(), "root on path must be blanked");
+        assert_eq!(snapshot[1], vec![1], "unrelated branch must remain intact");
+
+        let mut snapshot = (0..7).map(|idx| vec![idx as u8]).collect::<Vec<_>>();
+        blank_leaf_and_path(snapshot.as_mut_slice(), 4)?;
+        assert!(snapshot[4].is_empty(), "revoked leaf must be blanked");
+        assert!(snapshot[1].is_empty(), "ancestor must be blanked");
+        assert!(snapshot[0].is_empty(), "root must be blanked");
+        assert_eq!(snapshot[2], vec![2], "disjoint branch must remain intact");
+
+        let mut snapshot = vec![vec![0x11]; 7];
+        assert!(blank_internal_path_from_leaf(snapshot.as_mut_slice(), 99).is_err());
+        assert!(blank_leaf_and_path(snapshot.as_mut_slice(), 99).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn apply_join_and_revoke_mutate_snapshot_and_validate_bounds() -> Result<()> {
+        let mut snapshot = (0..7).map(|idx| vec![idx as u8]).collect::<Vec<_>>();
+        apply_join_set_to_snapshot(
+            snapshot.as_mut_slice(),
+            4,
+            &[BarrierJoinRecord {
+                device_pk: vec![0x01],
+                leaf_index: 2,
+                ek_leaf: vec![0xFE, 0xED],
+            }],
+        )?;
+        assert_eq!(snapshot[5], vec![0xFE, 0xED]);
+        assert!(snapshot[2].is_empty(), "join path parent must be blanked");
+        assert!(snapshot[0].is_empty(), "join path root must be blanked");
+
+        let mut snapshot = (0..7).map(|idx| vec![idx as u8]).collect::<Vec<_>>();
+        apply_revoked_set_to_snapshot(snapshot.as_mut_slice(), 4, &[1])?;
+        assert!(snapshot[4].is_empty(), "revoked leaf must be blanked");
+        assert!(snapshot[1].is_empty(), "revoked path parent must be blanked");
+        assert!(snapshot[0].is_empty(), "revoked path root must be blanked");
+
+        let mut snapshot = vec![vec![0x11]; 7];
+        assert!(
+            apply_join_set_to_snapshot(
+                snapshot.as_mut_slice(),
+                4,
+                &[BarrierJoinRecord {
+                    device_pk: vec![0x01],
+                    leaf_index: 7,
+                    ek_leaf: vec![0xFF],
+                }],
+            )
+            .is_err()
+        );
+        assert!(apply_revoked_set_to_snapshot(snapshot.as_mut_slice(), 4, &[7]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn collect_resolution_targets_descends_empty_internal_nodes() -> Result<()> {
+        let snapshot = vec![
+            Vec::new(),
+            Vec::new(),
+            vec![0xC2],
+            vec![0xD3],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ];
+        let mut targets = Vec::new();
+        collect_resolution_targets(snapshot.as_slice(), 0, 3, &mut targets)?;
+        assert_eq!(targets, vec![3, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn select_pivot_parity_prefers_highest_seq_then_lowest_hash() {
+        assert!(select_pivot_parity(&[]).is_none());
+
+        let mut older = sample_pivot_parity();
+        older.accept_seq = 4;
+        older.xk_hash = [0xBB; 32];
+
+        let mut newer = sample_pivot_parity();
+        newer.accept_seq = 5;
+        newer.xk_hash = [0xCC; 32];
+        let parities = [older.clone(), newer.clone()];
+        let chosen = select_pivot_parity(&parities)
+            .expect("highest accept_seq must be selected");
+        assert_eq!(chosen.accept_seq, newer.accept_seq);
+
+        let mut tie_large = sample_pivot_parity();
+        tie_large.accept_seq = 7;
+        tie_large.xk_hash = [0x22; 32];
+        let mut tie_small = sample_pivot_parity();
+        tie_small.accept_seq = 7;
+        tie_small.xk_hash = [0x11; 32];
+        let parities = [tie_large, tie_small.clone()];
+        let chosen = select_pivot_parity(&parities)
+            .expect("tie must select lexicographically smaller xk_hash");
+        assert_eq!(chosen.xk_hash, tie_small.xk_hash);
+    }
+
+    #[test]
+    fn authenticated_message_helpers_cover_roundtrip_and_error_paths() -> Result<()> {
+        let leaf_id = [0x44; 32];
+        let timestamp_ms = 123_456u64;
+        let plaintext = b"hello world";
+        let (public_key, secret_key) = dilithium3::keypair();
+        let signature = sign_message(
+            &leaf_id,
+            timestamp_ms,
+            plaintext,
+            DilithiumSecretKeyTrait::as_bytes(&secret_key),
+        )?;
+        let encoded = encode_authenticated_message(
+            timestamp_ms,
+            plaintext,
+            DilithiumPublicKeyTrait::as_bytes(&public_key),
+            signature.as_slice(),
+        );
+        let decoded = decode_authenticated_message(encoded.as_slice())?;
+        assert_eq!(decoded.timestamp_ms, timestamp_ms);
+        assert_eq!(decoded.plaintext, plaintext);
+        assert_eq!(decoded.public_key, DilithiumPublicKeyTrait::as_bytes(&public_key));
+        assert_eq!(decoded.signature, signature.as_slice());
+        verify_message_signature(
+            &leaf_id,
+            decoded.timestamp_ms,
+            decoded.plaintext,
+            decoded.signature,
+            decoded.public_key,
+        )?;
+
+        assert!(sign_message(&leaf_id, timestamp_ms, plaintext, &[0xAA; 32]).is_err());
+        assert!(decode_authenticated_message(&[]).is_err());
+
+        let mut bad_prefix = encoded.clone();
+        bad_prefix[0] ^= 0xFF;
+        assert!(
+            decode_authenticated_message(bad_prefix.as_slice())
+                .expect_err("bad prefix must fail")
+                .to_string()
+                .contains("invalid message prefix")
+        );
+
+        let truncated_plaintext = &encoded[..MESSAGE_PREFIX.len() + 8 + 4 + plaintext.len() - 1];
+        assert!(
+            decode_authenticated_message(truncated_plaintext)
+                .expect_err("truncated plaintext must fail")
+                .to_string()
+                .contains("truncated (plaintext)")
+        );
+
+        let plaintext_len = plaintext.len();
+        let public_len_offset = MESSAGE_PREFIX.len() + 8 + 4 + plaintext_len;
+        let public_key_len = DilithiumPublicKeyTrait::as_bytes(&public_key).len();
+        let truncated_public = &encoded[..public_len_offset + 4 + public_key_len - 1];
+        assert!(
+            decode_authenticated_message(truncated_public)
+                .expect_err("truncated public key must fail")
+                .to_string()
+                .contains("truncated (public key)")
+        );
+
+        let truncated_signature = &encoded[..encoded.len() - 1];
+        assert!(
+            decode_authenticated_message(truncated_signature)
+                .expect_err("truncated signature must fail")
+                .to_string()
+                .contains("truncated (signature)")
+        );
+
+        let mut tampered_plaintext = plaintext.to_vec();
+        tampered_plaintext[0] ^= 0x01;
+        assert!(
+            verify_message_signature(
+                &leaf_id,
+                timestamp_ms,
+                tampered_plaintext.as_slice(),
+                signature.as_slice(),
+                DilithiumPublicKeyTrait::as_bytes(&public_key),
+            )
+            .is_err()
+        );
+        assert!(
+            verify_message_signature(
+                &leaf_id,
+                timestamp_ms,
+                plaintext,
+                &signature[..signature.len() - 1],
+                DilithiumPublicKeyTrait::as_bytes(&public_key),
+            )
+            .is_err()
+        );
+        assert!(
+            verify_message_signature(
+                &leaf_id,
+                timestamp_ms,
+                plaintext,
+                signature.as_slice(),
+                &DilithiumPublicKeyTrait::as_bytes(&public_key)[..8],
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn parse_cli_args_defaults_and_flags() -> Result<()> {
         let opts = parse_cli_args(vec!["--batch".to_string(), "--count=2".to_string()])?;
         assert_eq!(opts.server_url, "http://127.0.0.1:8080");
