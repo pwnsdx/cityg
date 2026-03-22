@@ -95,7 +95,35 @@ mod tests {
     use axum::{Router, middleware, routing::get};
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
+    use tokio::time::{Duration, sleep};
     use uuid::Uuid;
+
+    async fn send_health_request(
+        addr: SocketAddr,
+        request_id: Option<String>,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/health");
+        let mut last_connect_err = None;
+
+        for _ in 0..20 {
+            let mut request = client.get(&url);
+            if let Some(value) = &request_id {
+                request = request.header(X_REQUEST_ID, value);
+            }
+
+            match request.send().await {
+                Ok(response) => return Ok(response),
+                Err(err) if err.is_connect() => {
+                    last_connect_err = Some(err);
+                    sleep(Duration::from_millis(20)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(last_connect_err.expect("at least one connect error should be recorded"))
+    }
 
     #[test]
     fn get_request_id_accepts_valid_uuid_header() {
@@ -131,10 +159,7 @@ mod tests {
         });
 
         let id = Uuid::new_v4();
-        let response = reqwest::Client::new()
-            .get(format!("http://{addr}/health"))
-            .header(X_REQUEST_ID, id.to_string())
-            .send()
+        let response = send_health_request(addr, Some(id.to_string()))
             .await
             .expect("request should succeed");
         assert!(response.status().is_success());
@@ -162,10 +187,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let response = reqwest::Client::new()
-            .get(format!("http://{addr}/health"))
-            .header(X_REQUEST_ID, "definitely-not-a-uuid")
-            .send()
+        let response = send_health_request(addr, Some("definitely-not-a-uuid".to_string()))
             .await
             .expect("request should succeed");
         assert!(response.status().is_success());
