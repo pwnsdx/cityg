@@ -2,6 +2,10 @@
 use std::env;
 use std::{collections::BTreeMap, convert::TryInto, time::Duration};
 
+#[allow(dead_code)]
+#[path = "../message_crypto.rs"]
+mod message_crypto;
+
 use anchor_seed::{
     SeedCommitFields, build_anchor_seed_ctx, compute_seed_bundle_commit, compute_seed_commit,
     compute_seed_ctx_hash,
@@ -17,16 +21,21 @@ use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
 use futures::StreamExt;
 use hex::decode as hex_decode;
+use message_crypto::{MessageCryptoContext, encrypt_message_v2};
+#[cfg(test)]
+use message_crypto::{MsgReplayState, decrypt_message_v2_with_index, derive_msg_replay_tuple_tag};
 use msphf_core::{ds, hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
     OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
 };
+use pqcrypto_dilithium::dilithium3;
 use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
 use pqcrypto_kyber::kyber768;
 use pqcrypto_traits::kem::{PublicKey as KemPublicKeyTrait, SecretKey as KemSecretKeyTrait};
 use pqcrypto_traits::sign::{
     DetachedSignature as DilithiumDetachedSignatureTrait, PublicKey as DilithiumPublicKeyTrait,
+    SecretKey as DilithiumSecretKeyTrait,
 };
 use rand::{Rng, RngCore, thread_rng};
 use serde::Serialize;
@@ -816,7 +825,7 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
 
         if message_burst_count > 0 {
             send_message_burst(
-                &sessions,
+                &mut sessions,
                 message_burst_count,
                 Duration::from_millis(message_burst_interval_ms),
                 None,
@@ -888,8 +897,14 @@ struct Session {
     room_id: String,
     gid: [u8; 32],
     leaf_id: [u8; 32],
+    xk_hash: [u8; 32],
+    epoch_key: [u8; 32],
+    barrier_version: u64,
+    k_barrier: [u8; 32],
     pop_public_key: Vec<u8>,
     pop_secret: Box<MlDsaSecretKey>,
+    msg_sign_public_key: Vec<u8>,
+    msg_sign_secret_key: Vec<u8>,
     vrf_secret_key: Vec<u8>,
     vrf_public_key: Vec<u8>,
     forward_state: ForwardSecrecyState,
@@ -903,9 +918,144 @@ struct Session {
     seed_bundle_commit: [u8; 32],
     fs_fingerprint: Option<[u8; 32]>,
     stored_header_map: BTreeMap<u64, Value>,
+    next_msg_index: u64,
+    #[cfg(test)]
+    msg_replay_state: MsgReplayState,
 }
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
+const MESSAGE_PREFIX: &[u8; 4] = b"CGM1";
+
+#[cfg(test)]
+#[derive(Debug)]
+struct AuthenticatedMessage<'a> {
+    timestamp_ms: u64,
+    plaintext: &'a [u8],
+    public_key: &'a [u8],
+    signature: &'a [u8],
+}
+
+fn encode_authenticated_message(
+    timestamp_ms: u64,
+    plaintext: &[u8],
+    public_key: &[u8],
+    signature: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        MESSAGE_PREFIX.len() + 8 + 4 + plaintext.len() + 4 + public_key.len() + 4 + signature.len(),
+    );
+    out.extend_from_slice(MESSAGE_PREFIX);
+    out.extend_from_slice(&timestamp_ms.to_le_bytes());
+    out.extend_from_slice(&(plaintext.len() as u32).to_le_bytes());
+    out.extend_from_slice(plaintext);
+    out.extend_from_slice(&(public_key.len() as u32).to_le_bytes());
+    out.extend_from_slice(public_key);
+    out.extend_from_slice(&(signature.len() as u32).to_le_bytes());
+    out.extend_from_slice(signature);
+    out
+}
+
+fn sign_message(
+    leaf_id: &[u8; 32],
+    timestamp_ms: u64,
+    plaintext: &[u8],
+    secret_key: &[u8],
+) -> Result<Vec<u8>> {
+    let sk = dilithium3::SecretKey::from_bytes(secret_key)
+        .map_err(|_| anyhow!("invalid ML-DSA-65 secret key"))?;
+    let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
+    payload.extend_from_slice(leaf_id);
+    payload.extend_from_slice(&timestamp_ms.to_le_bytes());
+    payload.extend_from_slice(plaintext);
+    let signature = dilithium3::detached_sign(&payload, &sk);
+    Ok(signature.as_bytes().to_vec())
+}
+
+#[cfg(test)]
+fn decode_authenticated_message(data: &[u8]) -> Result<AuthenticatedMessage<'_>> {
+    if data.len() < MESSAGE_PREFIX.len() + 8 + 4 + 4 + 4 {
+        return Err(anyhow!("authenticated message too short"));
+    }
+
+    if &data[..MESSAGE_PREFIX.len()] != MESSAGE_PREFIX {
+        return Err(anyhow!("invalid message prefix"));
+    }
+
+    let mut cursor = MESSAGE_PREFIX.len();
+
+    let timestamp_ms = {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&data[cursor..cursor + 8]);
+        cursor += 8;
+        u64::from_le_bytes(buf)
+    };
+
+    let plaintext_len = {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&data[cursor..cursor + 4]);
+        cursor += 4;
+        u32::from_le_bytes(buf) as usize
+    };
+    if data.len() < cursor + plaintext_len {
+        return Err(anyhow!("authenticated message truncated (plaintext)"));
+    }
+    let plaintext = &data[cursor..cursor + plaintext_len];
+    cursor += plaintext_len;
+
+    let public_key_len = {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&data[cursor..cursor + 4]);
+        cursor += 4;
+        u32::from_le_bytes(buf) as usize
+    };
+    if data.len() < cursor + public_key_len {
+        return Err(anyhow!("authenticated message truncated (public key)"));
+    }
+    let public_key = &data[cursor..cursor + public_key_len];
+    cursor += public_key_len;
+
+    let signature_len = {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&data[cursor..cursor + 4]);
+        cursor += 4;
+        u32::from_le_bytes(buf) as usize
+    };
+    if data.len() != cursor + signature_len {
+        return Err(anyhow!("authenticated message truncated (signature)"));
+    }
+    let signature = &data[cursor..];
+
+    Ok(AuthenticatedMessage {
+        timestamp_ms,
+        plaintext,
+        public_key,
+        signature,
+    })
+}
+
+#[cfg(test)]
+fn verify_message_signature(
+    leaf_id: &[u8; 32],
+    timestamp_ms: u64,
+    plaintext: &[u8],
+    signature_bytes: &[u8],
+    public_key_bytes: &[u8],
+) -> Result<()> {
+    let pk = dilithium3::PublicKey::from_bytes(public_key_bytes)
+        .map_err(|_| anyhow!("invalid ML-DSA-65 public key"))?;
+    let signature = dilithium3::DetachedSignature::from_bytes(signature_bytes)
+        .map_err(|_| anyhow!("invalid ML-DSA-65 signature"))?;
+
+    let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
+    payload.extend_from_slice(leaf_id);
+    payload.extend_from_slice(&timestamp_ms.to_le_bytes());
+    payload.extend_from_slice(plaintext);
+
+    dilithium3::verify_detached_signature(&signature, &payload, &pk)
+        .map_err(|_| anyhow!("signature verification failed"))?;
+
+    Ok(())
+}
 
 async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
     let client = new_api_client(server_url);
@@ -1019,6 +1169,10 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         seed
     });
 
+    let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
+    let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
+    let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
+
     let (vrf_secret_key, vrf_public_key) =
         generate_vrf_keys().context("generate runtime VRF keypair")?;
 
@@ -1125,8 +1279,14 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         room_id: room_id.to_string(),
         gid,
         leaf_id,
+        xk_hash: bundle.hp_binding.xk_hash,
+        epoch_key: bundle.epoch_key,
+        barrier_version: ticket.barrier_version,
+        k_barrier: [0u8; 32],
         pop_public_key,
         pop_secret,
+        msg_sign_public_key,
+        msg_sign_secret_key,
         vrf_secret_key,
         vrf_public_key,
         forward_state: fs_state,
@@ -1140,6 +1300,9 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
         seed_bundle_commit,
         fs_fingerprint,
         stored_header_map: stored.header_map.clone(),
+        next_msg_index: 0,
+        #[cfg(test)]
+        msg_replay_state: MsgReplayState::default(),
     };
     perform_join_finalize(session).await
 }
@@ -1378,8 +1541,8 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
     bundle.we_epoch_id = derived_we_epoch_id;
     bundle
-        .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
-        .context("rebind merge HP envelope for join finalize")?;
+        .seal_local_hp_header_with_barrier_key(&barrier_update.k_barrier_new)
+        .context("seal merge HP envelope for join finalize")?;
     bundle
         .header_map
         .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
@@ -1482,6 +1645,12 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     session.fs_epoch_commit = fs_epoch_commit;
     session.fs_dev_prev_commit = fs_dev_prev_commit;
     session.we_epoch_id = bundle.we_epoch_id;
+    session.xk_hash = bundle.hp_binding.xk_hash;
+    session.epoch_key = bundle.epoch_key;
+    session.barrier_version = next_barrier_version;
+    session
+        .k_barrier
+        .copy_from_slice(barrier_update.k_barrier_new.as_ref());
     session.anchor_hdr_ctx = bundle.anchor.anchor_hdr_ctx.clone();
     session.seed_ctx_hash = bundle.hp_binding.seed_ctx_hash;
     session.seed_commit = bundle.hp_binding.seed_commit;
@@ -2049,7 +2218,7 @@ async fn run_watch_mode(
 
     let effective_message_burst_count = message_burst.count.max(1);
     send_message_burst(
-        &sessions,
+        &mut sessions,
         effective_message_burst_count,
         message_burst.interval,
         Some(&mut event_rx),
@@ -2088,18 +2257,110 @@ async fn run_watch_mode(
     Ok(())
 }
 
-async fn send_dummy_message(session: &Session) -> Result<()> {
+async fn send_text_message(session: &mut Session, plaintext: &str) -> Result<()> {
     let client = new_api_client(&session.server_url);
-    let mut ciphertext = vec![0u8; 64];
-    thread_rng().fill_bytes(&mut ciphertext);
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let signature = sign_message(
+        &session.leaf_id,
+        timestamp_ms,
+        plaintext.as_bytes(),
+        &session.msg_sign_secret_key,
+    )?;
+    let authenticated = encode_authenticated_message(
+        timestamp_ms,
+        plaintext.as_bytes(),
+        &session.msg_sign_public_key,
+        &signature,
+    );
+    let ciphertext = encrypt_message_v2(
+        &authenticated,
+        &MessageCryptoContext {
+            gid: &session.gid,
+            we_epoch_id: &session.we_epoch_id,
+            xk_hash: &session.xk_hash,
+            fs_ec: session.fs_ec,
+            barrier_version: session.barrier_version,
+            sender_leaf: &session.leaf_id,
+            epoch_key: &session.epoch_key,
+            k_barrier: &session.k_barrier,
+        },
+        session.next_msg_index,
+    )?;
     client
         .send_message(&session.we_epoch_id, &ciphertext, Some(&session.leaf_id))
         .await?;
+    session.next_msg_index = session.next_msg_index.saturating_add(1);
     Ok(())
 }
 
+async fn send_dummy_message(session: &mut Session) -> Result<()> {
+    let plaintext = format!("join_leave-message-{}", hex::encode(&session.leaf_id[..4]));
+    send_text_message(session, plaintext.as_str()).await
+}
+
+#[cfg(test)]
+async fn fetch_and_decrypt_messages(session: &mut Session) -> Result<Vec<String>> {
+    let client = new_api_client(&session.server_url);
+    let response = client
+        .fetch_messages(&session.we_epoch_id, &session.leaf_id)
+        .await?;
+
+    let mut plaintexts = Vec::new();
+    for message in response.messages {
+        let sender_leaf: [u8; 32] = match message.sender.as_slice().try_into() {
+            Ok(leaf) => leaf,
+            Err(_) => continue,
+        };
+        let replay_context = MessageCryptoContext {
+            gid: &session.gid,
+            we_epoch_id: &session.we_epoch_id,
+            xk_hash: &session.xk_hash,
+            fs_ec: session.fs_ec,
+            barrier_version: session.barrier_version,
+            sender_leaf: &sender_leaf,
+            epoch_key: &session.epoch_key,
+            k_barrier: &session.k_barrier,
+        };
+        let replay_tuple_tag =
+            derive_msg_replay_tuple_tag(&replay_context).context("derive fs/msg/replay/tuple")?;
+        session.msg_replay_state.ensure_tuple(replay_tuple_tag);
+        let (msg_index, authenticated) =
+            match decrypt_message_v2_with_index(&message.ciphertext, &replay_context) {
+                Ok(outcome) => outcome,
+                Err(_) => continue,
+            };
+        if session
+            .msg_replay_state
+            .contains(replay_tuple_tag, msg_index)
+        {
+            continue;
+        }
+        let envelope = match decode_authenticated_message(&authenticated) {
+            Ok(envelope) => envelope,
+            Err(_) => continue,
+        };
+        if verify_message_signature(
+            &sender_leaf,
+            envelope.timestamp_ms,
+            envelope.plaintext,
+            envelope.signature,
+            envelope.public_key,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        session.msg_replay_state.record(replay_tuple_tag, msg_index);
+        plaintexts.push(String::from_utf8_lossy(envelope.plaintext).into_owned());
+    }
+    Ok(plaintexts)
+}
+
 async fn send_message_burst(
-    sessions: &[Session],
+    sessions: &mut [Session],
     message_burst_count: usize,
     message_burst_interval: Duration,
     mut event_rx: Option<&mut mpsc::Receiver<Notification>>,
@@ -2109,7 +2370,7 @@ async fn send_message_burst(
     }
 
     for idx in 0..message_burst_count {
-        let session = &sessions[idx % sessions.len()];
+        let session = &mut sessions[idx % sessions.len()];
         println!(
             "sending dummy message {}/{} via {}",
             idx + 1,
@@ -2587,8 +2848,14 @@ mod tests {
             room_id: hex::encode([0xAA; 32]),
             gid: [0x11; 32],
             leaf_id: [0x22; 32],
+            xk_hash: [0x23; 32],
+            epoch_key: [0x24; 32],
+            barrier_version: 1,
+            k_barrier: [0x25; 32],
             pop_public_key: vec![0x33; 32],
             pop_secret: Box::new(pop_sk),
+            msg_sign_public_key: vec![0x34; 1952],
+            msg_sign_secret_key: vec![0x35; 4032],
             vrf_secret_key: vec![0x44; 32],
             vrf_public_key: vec![0x55; 32],
             forward_state: ForwardSecrecyState::with_state([0x10; 32], 7, [0x77; 32], [0x88; 32]),
@@ -2602,6 +2869,9 @@ mod tests {
             seed_bundle_commit: [0xCD; 32],
             fs_fingerprint: None,
             stored_header_map: BTreeMap::new(),
+            next_msg_index: 0,
+            #[cfg(test)]
+            msg_replay_state: MsgReplayState::default(),
         }
     }
 
@@ -3948,8 +4218,14 @@ mod tests {
             room_id: hex::encode([0xAA; 32]),
             gid: [0x01; 32],
             leaf_id: [0x02; 32],
+            xk_hash: [0x03; 32],
+            epoch_key: [0x04; 32],
+            barrier_version: 1,
+            k_barrier: [0x05; 32],
             pop_public_key: vec![0x11],
             pop_secret: Box::new(sk),
+            msg_sign_public_key: vec![0x12; 1952],
+            msg_sign_secret_key: vec![0x13; 4032],
             vrf_secret_key: vec![0x22],
             vrf_public_key: vec![0x33],
             forward_state: ForwardSecrecyState::with_state([0x12; 32], 5, [0x55; 32], [0x66; 32]),
@@ -3963,6 +4239,9 @@ mod tests {
             seed_bundle_commit: [0x99; 32],
             fs_fingerprint: None,
             stored_header_map: BTreeMap::new(),
+            next_msg_index: 0,
+            #[cfg(test)]
+            msg_replay_state: MsgReplayState::default(),
         };
         log_fingerprints(&session);
 
@@ -4012,7 +4291,7 @@ mod tests {
         let room_id = hex::encode([0x91u8; 32]);
         bootstrap_test_room(&server_url, &room_id).await?;
         let alice = perform_join(&server_url, &room_id, "alice").await?;
-        let bob = perform_join(&server_url, &room_id, "bob").await?;
+        let mut bob = perform_join(&server_url, &room_id, "bob").await?;
         let client = new_api_client(&server_url);
         let before_leave = client.members(&alice.gid, None).await?;
         assert_eq!(before_leave.total_count, 2);
@@ -4029,7 +4308,7 @@ mod tests {
                 .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice())
         );
 
-        send_dummy_message(&bob).await?;
+        send_dummy_message(&mut bob).await?;
         perform_leave(&alice, true).await?;
         let after_alice_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_alice_leave.total_count, 1);
@@ -4049,6 +4328,35 @@ mod tests {
         let after_bob_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_bob_leave.total_count, 0);
         assert!(after_bob_leave.members.is_empty());
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repeated_sender_messages_roundtrip_with_monotonic_msg_index() -> Result<()> {
+        let port = next_free_local_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex::encode([0xA1u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+        let mut alice = perform_join(&server_url, &room_id, "alice").await?;
+
+        send_text_message(&mut alice, "one").await?;
+        send_text_message(&mut alice, "two").await?;
+        assert_eq!(alice.next_msg_index, 2, "msg_index must advance per send");
+
+        let fetched = fetch_and_decrypt_messages(&mut alice).await?;
+        assert_eq!(fetched, vec!["one".to_string(), "two".to_string()]);
+
+        let fetched_again = fetch_and_decrypt_messages(&mut alice).await?;
+        assert!(
+            fetched_again.is_empty(),
+            "replay-tracked fetch should not re-emit already seen messages"
+        );
 
         handle.abort();
         let _ = handle.await;
@@ -4757,8 +5065,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_burst_is_noop_for_empty_sessions() -> Result<()> {
-        send_message_burst(&[], 3, Duration::ZERO, None).await?;
-        send_message_burst(&[], 0, Duration::from_millis(1), None).await?;
+        send_message_burst(&mut [], 3, Duration::ZERO, None).await?;
+        send_message_burst(&mut [], 0, Duration::from_millis(1), None).await?;
         Ok(())
     }
 
