@@ -2030,7 +2030,7 @@ mod tests {
             &merge_joiner,
             &header,
             heads,
-            FREEZE_KBROAD_PARENT_MISMATCH,
+            FREEZE_HASH_CBOR,
         )
     }
 

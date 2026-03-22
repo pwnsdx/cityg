@@ -13,8 +13,6 @@ use std::time::{Duration, Instant};
 
 use anchor_seed::{build_anchor_seed_ctx, compute_seed_ctx_hash};
 use blake3::Hasher;
-use chacha20poly1305::aead::{Aead, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 use ciborium::ser::into_writer;
 use ciborium::value::{Integer, Value};
 use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_A1};
@@ -32,17 +30,15 @@ use msphf_orchestrator::mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW};
 use msphf_orchestrator::{
     AcceptanceContext, AcceptanceError, AcceptanceKind, AcceptanceOptions, AnchorInstanceParts,
     BarrierGroupState, BootstrapPolicy, DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
-    FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair, SrxInputs, SrxMode,
-    SrxNonMembershipAnchor, build_bootstrap_digest, extract_epoch_msphf_or, joiner_kgen_merge_or,
-    joiner_kgen_or,
+    FsJoinInputs, FsMergeInputs, HpEnvelopeBinding, LeafIdMode, LocalHpEnvelopeMaterial,
+    OrchestrationParams, PopKeypair, SrxInputs, SrxMode, SrxNonMembershipAnchor,
+    build_bootstrap_digest, extract_epoch_msphf_or, joiner_kgen_merge_or, joiner_kgen_or,
+    rebind_local_hp_envelope_with_barrier_key, recover_barrier_hp_material_from_header,
 };
 use pqcrypto_dilithium::dilithium5::{
     SecretKey as MlDsaSecretKey, detached_sign, keypair as dsa_keypair,
 };
 use pqcrypto_kyber::kyber768::keypair as kyber_keypair;
-use pqcrypto_kyber::kyber768::{
-    Ciphertext as MlKemCiphertext, SecretKey as MlKemSecretKey, decapsulate as ml_kem_decapsulate,
-};
 use pqcrypto_traits::sign::{
     DetachedSignature as SignDetachedSignatureTrait, PublicKey as SignPublicKeyTrait,
 };
@@ -742,7 +738,6 @@ struct JoinerFixture {
     joiner: msphf_orchestrator::JoinerKGenResult,
     header_with_pop: BTreeMap<u64, Value>,
     witness_bytes: Vec<u8>,
-    kbroad_secret: Vec<u8>,
     kbroad_registry: BTreeMap<Vec<u8>, Vec<u8>>,
     bootstrap_pk: Vec<u8>,
     bootstrap_sk: pqcrypto_dilithium::dilithium5::SecretKey,
@@ -767,8 +762,7 @@ impl JoinerFixture {
             && config.revoked_root.iter().all(|&b| b == 0);
 
         let (parts, params, _) = make_anchor_fixture(config).unwrap();
-        let (kbroad_pk, kbroad_sk) = kyber_keypair();
-        let kbroad_secret = kbroad_sk.as_bytes().to_vec();
+        let (kbroad_pk, _kbroad_sk) = kyber_keypair();
         let kbroad_public = kbroad_pk.as_bytes().to_vec();
 
         let mut join_root = [0u8; 32];
@@ -820,7 +814,6 @@ impl JoinerFixture {
             joiner,
             header_with_pop,
             witness_bytes,
-            kbroad_secret,
             kbroad_registry,
             bootstrap_pk: bootstrap_pk.as_bytes().to_vec(),
             bootstrap_sk,
@@ -871,10 +864,6 @@ impl JoinerFixture {
             xk_hash: &self.joiner.xk_hash,
             hp_commit: &self.joiner.hp_commit,
         }
-    }
-
-    fn kb_secret(&self) -> &[u8] {
-        &self.kbroad_secret
     }
 
     fn resign_bootstrap(
@@ -962,103 +951,29 @@ fn base_header(kbroad_pk_bytes: &[u8]) -> BTreeMap<u64, Value> {
     map
 }
 
-#[derive(Serialize)]
-struct KekSalt<'a> {
-    #[serde(with = "serde_bytes")]
-    xk_hash: &'a [u8; 32],
-}
-
-#[derive(Serialize)]
-struct NonceCtx<'a> {
-    #[serde(with = "serde_bytes")]
-    xk_hash: &'a [u8; 32],
-    #[serde(with = "serde_bytes")]
-    hp_commit: &'a [u8; 32],
-}
-
-fn hkdf_blake3_local(salt: &[u8; 32], ikm: &[u8], info: &[u8]) -> [u8; 32] {
-    let mut extract = Hasher::new_keyed(salt);
-    extract.update(ikm);
-    let prk = extract.finalize();
-
-    let mut expand = Hasher::new_keyed(prk.as_bytes());
-    expand.update(info);
-    expand.update(&[1u8]);
-    let okm = expand.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(okm.as_bytes());
-    out
-}
-
-fn derive_nonce_bytes(
-    label: &str,
-    xk_hash: &[u8; 32],
-    hp_commit: &[u8; 32],
-) -> Result<[u8; 12], Box<dyn std::error::Error>> {
-    let digest = h_l(label, &NonceCtx { xk_hash, hp_commit })?;
-    let mut out = [0u8; 12];
-    out.copy_from_slice(&digest[..12]);
-    Ok(out)
-}
-
-fn decrypt_chacha20_local(
-    key: &[u8; 32],
-    nonce_bytes: &[u8; 12],
-    aad: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let cipher = ChaCha20Poly1305::new(key.into());
-    let nonce = nonce_bytes.into();
-    Ok(cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
-        .map_err(|e| format!("{:?}", e))?)
-}
-
-fn derive_hp_material(
+fn derive_barrier_sealed_hp_material(
     header: &BTreeMap<u64, Value>,
+    hp_ciphertext: &[u8],
+    hp_aead_key: &[u8; 32],
     xk_hash: &[u8; 32],
     hp_commit: &[u8; 32],
-    kbroad_sk: &MlKemSecretKey,
+    barrier_key: &[u8; 32],
 ) -> Result<([u8; 32], Vec<u8>), Box<dyn std::error::Error>> {
-    let Value::Array(items) = header.get(&97).ok_or("msphf_hp not found")? else {
-        panic!("msphf_hp not array");
-    };
-    assert_eq!(items.len(), 5, "msphf_hp length");
-    let ct_bytes = match &items[1] {
-        Value::Bytes(bytes) => bytes.clone(),
-        _ => panic!("ct bytes"),
-    };
-    let wrap_bytes = match &items[2] {
-        Value::Bytes(bytes) => bytes.clone(),
-        _ => panic!("wrap bytes"),
-    };
-    let c_hp_bytes = match &items[3] {
-        Value::Bytes(bytes) => bytes.clone(),
-        _ => panic!("C_hp bytes"),
-    };
-
-    let kem_ct = MlKemCiphertext::from_bytes(ct_bytes.as_slice())?;
-    let shared = ml_kem_decapsulate(&kem_ct, kbroad_sk);
-    let shared_bytes = shared.as_bytes();
-
-    let salt = h_l("hp/kek/salt", &KekSalt { xk_hash })?;
-    let mut info = b"city-g|hp/kek/v1".to_vec();
-    info.extend_from_slice(hp_commit);
-    let kek = hkdf_blake3_local(&salt, shared_bytes, &info);
-
-    let wrap_nonce = derive_nonce_bytes("hp/kek/nonce", xk_hash, hp_commit)?;
-    let k_hp_bytes = decrypt_chacha20_local(&kek, &wrap_nonce, hp_commit, &wrap_bytes)?;
-    assert_eq!(k_hp_bytes.len(), 32, "k_hp size");
-    let mut k_hp = [0u8; 32];
-    k_hp.copy_from_slice(&k_hp_bytes);
-
-    Ok((k_hp, c_hp_bytes))
+    let rebound = rebind_local_hp_envelope_with_barrier_key(
+        header,
+        HpEnvelopeBinding { xk_hash, hp_commit },
+        LocalHpEnvelopeMaterial {
+            hp_ciphertext,
+            hp_aead_key,
+        },
+        barrier_key,
+        HpEnvelopeBinding { xk_hash, hp_commit },
+    )?;
+    let mut sealed_header = header.clone();
+    sealed_header.insert(97, rebound.envelope);
+    let (sealed_ciphertext, sealed_key) =
+        recover_barrier_hp_material_from_header(&sealed_header, xk_hash, hp_commit, barrier_key)?;
+    Ok((sealed_key, sealed_ciphertext))
 }
 
 #[test]
@@ -1717,12 +1632,14 @@ fn stale_witness_rejected_after_new_anchor() -> Result<(), Box<dyn std::error::E
     )
     .map_err(|e| format!("{:?}", e))?;
 
-    let kbroad_sk_round1 = MlKemSecretKey::from_bytes(fixture_round1.kbroad_secret.as_slice())?;
-    let (k_hp, c_hp) = derive_hp_material(
+    let barrier_key_round1 = [0xA1; 32];
+    let (k_hp, c_hp) = derive_barrier_sealed_hp_material(
         &header_with_pop1,
+        &fixture_round1.joiner.hp_ciphertext,
+        &fixture_round1.joiner.hp_aead_key,
         &fixture_round1.joiner.xk_hash,
         &fixture_round1.joiner.hp_commit,
-        &kbroad_sk_round1,
+        &barrier_key_round1,
     )?;
 
     let err = match extract_epoch_msphf_or(
@@ -1845,14 +1762,16 @@ fn two_anchor_members_converge_on_epoch_key() -> Result<(), Box<dyn std::error::
     .map_err(|e| format!("{:?}", e))?;
     assert_eq!(acceptance1.outcome.wid, expected_wid1);
 
-    let kbroad_sk_round1 = MlKemSecretKey::from_bytes(fixture_round1.kb_secret())?;
-    let (k_hp, c_hp) = derive_hp_material(
+    let barrier_key_round1 = [0xB2; 32];
+    let (k_hp, c_hp) = derive_barrier_sealed_hp_material(
         &header_with_pop1,
+        &fixture_round1.joiner.hp_ciphertext,
+        &fixture_round1.joiner.hp_aead_key,
         &fixture_round1.joiner.xk_hash,
         &fixture_round1.joiner.hp_commit,
-        &kbroad_sk_round1,
+        &barrier_key_round1,
     )?;
-    assert_eq!(k_hp, fixture_round1.joiner.hp_aead_key);
+    assert_ne!(k_hp, fixture_round1.joiner.hp_aead_key);
 
     let witness_member_a_parent =
         serialize_witness(&witness_branch_a(&join_leaf_member_a)).unwrap();

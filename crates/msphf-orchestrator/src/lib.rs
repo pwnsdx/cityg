@@ -3933,8 +3933,22 @@ mod tests {
         assert!(run_recover_case(bad_ct_type));
 
         let mut bad_ct_len = base_items.clone();
-        bad_ct_len[1] = Value::Bytes(vec![0u8; 8]);
+        bad_ct_len[1] = Value::Bytes(vec![0u8; MAX_HP_BYTES + AEAD_TAG_LEN + 1]);
         assert!(run_recover_case(bad_ct_len));
+
+        let mut truncated_ct = base_items.clone();
+        truncated_ct[1] = Value::Bytes(vec![0u8; 8]);
+        let mut truncated_header = base.clone();
+        truncated_header.insert(HDR_HP_BYTES, Value::Array(truncated_ct));
+        let (truncated_ciphertext, truncated_key) = recover_barrier_hp_material_from_header(
+            &truncated_header,
+            &xk_hash,
+            &hp_commit,
+            &barrier_key,
+        )?;
+        assert!(
+            decrypt_hp_bytes(&truncated_ciphertext, &xk_hash, &hp_commit, &truncated_key).is_err()
+        );
 
         let mut bad_aead_utf8 = base_items.clone();
         bad_aead_utf8[2] = Value::Bytes(vec![0xFF]);
@@ -3944,9 +3958,16 @@ mod tests {
         bad_aead[2] = Value::Text("aes-gcm".to_string());
         assert!(run_recover_case(bad_aead));
 
+        let (wrong_key_ciphertext, wrong_key_material) =
+            recover_barrier_hp_material_from_header(&base, &xk_hash, &hp_commit, &[0u8; 32])?;
         assert!(
-            recover_barrier_hp_material_from_header(&base, &xk_hash, &hp_commit, &[0u8; 32])
-                .is_err()
+            decrypt_hp_bytes(
+                &wrong_key_ciphertext,
+                &xk_hash,
+                &hp_commit,
+                &wrong_key_material,
+            )
+            .is_err()
         );
         Ok(())
     }

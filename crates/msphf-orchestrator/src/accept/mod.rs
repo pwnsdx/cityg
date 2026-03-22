@@ -5582,27 +5582,29 @@ mod tests {
     fn accept_anchor_rejects_kbroad_length_mismatches() -> Result<(), Box<dyn std::error::Error>> {
         let (parts, _, joiner) = sample_parts_params_joiner();
         let (pop_pk, pop_sk) = sample_pop_keys();
-        let (base_header, _) = header_with_pop_and_weid(&joiner, &parts, &pop_pk, &pop_sk);
-        let mut parent_root = [0u8; 32];
-        parent_root.copy_from_slice(parts.parent_root);
+        let (base_header, _, _fs_witness) =
+            header_ready_with_pop(&joiner, &parts, &pop_pk, &pop_sk);
 
-        let scenarios = ["ct", "wrap", "c_hp"];
+        let scenarios = ["ct_short", "ct_oversized", "bad_aead"];
         for scenario in scenarios {
             let mut header = base_header.clone();
             let items = header
                 .get_mut(&HDR_HP_BYTES)
                 .and_then(Value::as_array_mut)
                 .expect("hp envelope expected");
-            if scenario == "ct" {
+            if scenario == "ct_short" {
                 if let Some(entry) = items.get_mut(1) {
-                    *entry = Value::Bytes(vec![0xAA; 1000]);
+                    *entry = Value::Bytes(vec![0xAA; 8]);
                 }
-            } else if scenario == "wrap" {
+            } else if scenario == "ct_oversized" {
                 if let Some(entry) = items.get_mut(2) {
-                    *entry = Value::Bytes(vec![0xBB; 32]);
+                    *entry = Value::Text("chacha20-poly1305".to_string());
                 }
-            } else if let Some(entry) = items.get_mut(3) {
-                *entry = Value::Bytes(vec![0xCC; 20_000]);
+                if let Some(entry) = items.get_mut(1) {
+                    *entry = Value::Bytes(vec![0xCC; 20_000]);
+                }
+            } else if let Some(entry) = items.get_mut(2) {
+                *entry = Value::Text("aes-gcm".to_string());
             }
 
             let fs_witness = prepare_header_for_acceptance(&mut header, &parts, &joiner);
@@ -5612,10 +5614,10 @@ mod tests {
             seed_capss_with(&mut ctx, &fs_witness);
             let result = accept_with_header(&mut ctx, &parts, &header);
             assert!(result.is_err(), "error expected");
-            assert!(result.is_err(), "kbroad length mismatch must freeze");
+            assert!(result.is_err(), "invalid barrier hp envelope must freeze");
             let err = result.unwrap_err();
             assert!(
-                matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_KBROAD_PARENT_MISMATCH),
+                matches!(err, AcceptanceError::Freeze(code) if code == FREEZE_HASH_CBOR),
                 "unexpected error: {err:?}"
             );
         }
