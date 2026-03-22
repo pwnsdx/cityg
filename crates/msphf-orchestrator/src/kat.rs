@@ -1135,7 +1135,7 @@ fn generate_case(
         envelope: kbroad_envelope,
         c_hp: hp_ciphertext,
         k_hp: _hp_aead_key,
-    } = super::build_kbroad_envelope(&header_map, &hp_k, &xk_hash, &hp_commit)?;
+    } = super::build_local_barrier_hp_envelope(&hp_k, &xk_hash, &hp_commit)?;
     header_map.insert(97, kbroad_envelope);
 
     let proof_inputs = HpBindingInputs {

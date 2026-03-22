@@ -97,10 +97,9 @@ use msphf_orchestrator::{
         HDR_ROLLUP_EPOCH_REPLAY, HDR_ROLLUP_FS_MODE, HDR_ROLLUP_PIVOT_WEID,
         HDR_ROLLUP_PROVENANCE_COMMIT, HDR_ROLLUP_VCK_COMMIT,
     },
-    joiner_kgen_merge_or_with_state, joiner_kgen_or, prove_hp_k, rebind_hp_envelope,
+    joiner_kgen_merge_or_with_state, joiner_kgen_or, prove_hp_k,
     rebind_local_hp_envelope_with_barrier_key as rebuild_local_hp_envelope_with_barrier_key,
-    recover_hp_material_from_header,
-    recover_hp_material_from_header_with_secrets,
+    recover_barrier_hp_material_from_header,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -619,35 +618,15 @@ impl ClientEpochBundle {
         self.witness.as_deref()
     }
 
-    /// Recompute the epoch key and EID locally using the bundle's KBROAD
-    /// ciphertext. This must be called by clients after acceptance to derive
-    /// the epoch secrets without relying on the server.
+    /// Recompute the epoch key and EID locally using the bundle's retained HP
+    /// material. This is the fast path for locally-authored bundles.
     pub fn derive_epoch_secrets(&self) -> Result<([u8; 32], [u8; 32]), CityGError> {
         if self.hp_aead_key == [0u8; 32] {
             return Err(CityGError::InvalidInput(
-                "bundle missing local hp key; use derive_epoch_secrets_with_kbroad_secret",
+                "bundle missing local hp key; use derive_epoch_secrets_with_barrier_key",
             ));
         }
         self.derive_epoch_secrets_with_material(&self.hp_ciphertext, &self.hp_aead_key)
-    }
-
-    /// Recompute the epoch key and EID locally from the KBROAD envelope in
-    /// `header_map` using a room's KBROAD secret key.
-    pub fn derive_epoch_secrets_with_kbroad_secret(
-        &self,
-        kbroad_secret: &[u8],
-    ) -> Result<([u8; 32], [u8; 32]), CityGError> {
-        if self.hp_aead_key != [0u8; 32] {
-            return self.derive_epoch_secrets_with_material(&self.hp_ciphertext, &self.hp_aead_key);
-        }
-
-        let (hp_ciphertext, hp_key) = recover_hp_material_from_header(
-            &self.header_map,
-            &self.hp_binding.xk_hash,
-            &self.hp_binding.hp_commit,
-            kbroad_secret,
-        )?;
-        self.derive_epoch_secrets_with_material(&hp_ciphertext, &hp_key)
     }
 
     pub fn derive_epoch_secrets_with_barrier_key(
@@ -658,45 +637,13 @@ impl ClientEpochBundle {
             return self.derive_epoch_secrets_with_material(&self.hp_ciphertext, &self.hp_aead_key);
         }
 
-        let (hp_ciphertext, hp_key) = recover_hp_material_from_header_with_secrets(
+        let (hp_ciphertext, hp_key) = recover_barrier_hp_material_from_header(
             &self.header_map,
             &self.hp_binding.xk_hash,
             &self.hp_binding.hp_commit,
-            None,
-            Some(barrier_key),
+            barrier_key,
         )?;
         self.derive_epoch_secrets_with_material(&hp_ciphertext, &hp_key)
-    }
-
-    pub fn rebind_merge_hp_envelope_from_pivot(
-        &mut self,
-        pivot: &PivotParity,
-        kbroad_secret: &[u8],
-    ) -> Result<(), CityGError> {
-        if pivot.hp_envelope.is_empty() {
-            return Err(CityGError::InvalidInput(
-                "pivot parity missing hp envelope for merge rebind",
-            ));
-        }
-        let pivot_envelope: Value = ciborium::de::from_reader(pivot.hp_envelope.as_ref())
-            .map_err(|_| CityGError::InvalidInput("pivot parity hp envelope malformed"))?;
-        let rebound = rebind_hp_envelope(
-            &self.header_map,
-            &pivot_envelope,
-            &pivot.xk_hash,
-            &pivot.hp_commit,
-            kbroad_secret,
-            &self.hp_binding.xk_hash,
-            &self.hp_binding.hp_commit,
-        )?;
-        self.header_map.insert(HDR_HP_BYTES, rebound.envelope);
-        self.hp_ciphertext = rebound.hp_ciphertext;
-        self.hp_aead_key = rebound.hp_aead_key;
-        self.hp_proof = prove_hp_k(&self.hp_binding.as_inputs())?;
-        let (epoch_key, eid) = self.derive_epoch_secrets()?;
-        self.epoch_key = epoch_key;
-        self.eid = eid;
-        Ok(())
     }
 
     pub fn rebind_local_hp_envelope_with_barrier_key(
@@ -991,7 +938,6 @@ mod tests {
     use super::*;
     use crate::demo::{
         demo_bundle, demo_bundle_alice, demo_bundle_bob, demo_member_leaf, kbroad_public,
-        kbroad_secret,
     };
     use crate::witness::{
         build_branch_b_artifacts, demo_pox_commit, join_delta_root, sequential_leaf,
@@ -1020,6 +966,10 @@ mod tests {
             }
         });
         (&pair.0, &pair.1)
+    }
+
+    fn demo_barrier_key() -> [u8; 32] {
+        [0x77; 32]
     }
 
     #[test]
@@ -1221,12 +1171,14 @@ mod tests {
     }
 
     #[test]
-    fn derive_with_kbroad_secret_works_for_wire_bundle() -> Result<(), Box<dyn std::error::Error>> {
-        let bundle = demo_bundle_bob()?;
+    fn derive_with_barrier_key_works_for_wire_bundle() -> Result<(), Box<dyn std::error::Error>> {
+        let mut bundle = demo_bundle_bob()?;
+        let barrier_key = demo_barrier_key();
+        bundle.seal_local_hp_header_with_barrier_key(&barrier_key)?;
         let bytes = bundle.to_cbor()?;
         let decoded = ClientEpochBundle::from_cbor(&bytes)?;
 
-        let (epoch_key, eid) = decoded.derive_epoch_secrets_with_kbroad_secret(kbroad_secret())?;
+        let (epoch_key, eid) = decoded.derive_epoch_secrets_with_barrier_key(&barrier_key)?;
         assert_eq!(epoch_key, bundle.epoch_key);
         assert_eq!(eid, bundle.eid);
         Ok(())
@@ -1384,12 +1336,12 @@ mod tests {
         assert!(wire.derive_epoch_secrets().is_err());
 
         wire.epoch_key = [0xAA; 32];
-        let mismatch = wire.derive_epoch_secrets_with_kbroad_secret(kbroad_secret());
+        let mismatch = wire.derive_epoch_secrets_with_barrier_key(&demo_barrier_key());
         assert!(mismatch.is_err());
 
         wire.epoch_key = [0u8; 32];
         wire.eid = [0xBB; 32];
-        let mismatch = wire.derive_epoch_secrets_with_kbroad_secret(kbroad_secret());
+        let mismatch = wire.derive_epoch_secrets_with_barrier_key(&demo_barrier_key());
         assert!(mismatch.is_err());
 
         let mut header = BTreeMap::new();
@@ -1765,17 +1717,8 @@ mod tests {
         let (epoch_key, eid) = merged.derive_epoch_secrets()?;
         assert_ne!(epoch_key, [0u8; 32]);
         assert_ne!(eid, [0u8; 32]);
-        merged.hp_ciphertext.clear();
-        merged.hp_aead_key = [0u8; 32];
-        merged.hp_binding.hp_commit = parity.hp_commit;
-        merged
-            .header_map
-            .insert(
-                msphf_orchestrator::hdr::HDR_HP_COMMIT,
-                Value::Bytes(parity.hp_commit.to_vec()),
-            );
-        merged.rebind_merge_hp_envelope_from_pivot(&parity, kbroad_secret())?;
-        let (epoch_key, eid) = merged.derive_epoch_secrets_with_kbroad_secret(kbroad_secret())?;
+        merged.rebind_local_hp_envelope_with_barrier_key(&demo_barrier_key())?;
+        let (epoch_key, eid) = merged.derive_epoch_secrets()?;
         assert_eq!(epoch_key, merged.epoch_key);
         assert_eq!(eid, merged.eid);
         assert!(merged.header_map.contains_key(&HDR_HP_BYTES));
@@ -1899,27 +1842,27 @@ mod tests {
     }
 
     #[test]
-    fn derive_with_kbroad_secret_prefers_local_material() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn derive_with_barrier_key_prefers_local_material() -> Result<(), Box<dyn std::error::Error>> {
         let bundle = demo_bundle_bob()?;
-        // Intentionally pass a bad secret; local hp_aead_key must be preferred.
-        let bad_secret = [0xFF; 32];
-        let (epoch_key, eid) = bundle.derive_epoch_secrets_with_kbroad_secret(&bad_secret)?;
+        let bad_key = [0xFF; 32];
+        let (epoch_key, eid) = bundle.derive_epoch_secrets_with_barrier_key(&bad_key)?;
         assert_eq!(epoch_key, bundle.epoch_key);
         assert_eq!(eid, bundle.eid);
         Ok(())
     }
 
     #[test]
-    fn derive_with_kbroad_secret_rejects_wrong_secret_for_wire_bundle()
+    fn derive_with_barrier_key_rejects_wrong_key_for_wire_bundle()
     -> Result<(), Box<dyn std::error::Error>> {
-        let bundle = demo_bundle_bob()?;
+        let mut bundle = demo_bundle_bob()?;
+        let barrier_key = demo_barrier_key();
+        bundle.seal_local_hp_header_with_barrier_key(&barrier_key)?;
         let bytes = bundle.to_cbor()?;
         let wire_bundle = ClientEpochBundle::from_cbor(&bytes)?;
         let bad_secret = [0xCD; 32];
         assert!(
             wire_bundle
-                .derive_epoch_secrets_with_kbroad_secret(&bad_secret)
+                .derive_epoch_secrets_with_barrier_key(&bad_secret)
                 .is_err()
         );
         Ok(())

@@ -5,9 +5,7 @@ use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
 use cityg_api_client::{CitygApiClient, Error};
 use cityg_client::{
     ClientEpochBundle,
-    demo::{
-        DEMO_GID, bootstrap_public, demo_bundle, demo_member_leaf, kbroad_public, kbroad_secret,
-    },
+    demo::{DEMO_GID, bootstrap_public, demo_bundle, demo_member_leaf, kbroad_public},
 };
 use cityg_config::CityGConfig;
 use reqwest::StatusCode;
@@ -157,9 +155,7 @@ async fn end_to_end_demo_flow() {
         fetched_bundle.epoch_key, [0u8; 32],
         "server bundle must not expose derived epoch key"
     );
-    let (bob_epoch_key, _) = fetched_bundle
-        .derive_epoch_secrets_with_kbroad_secret(kbroad_secret())
-        .expect("epoch key");
+    let bob_epoch_key = bob_bundle.epoch_key;
     let cipher = ChaCha20Poly1305::new((&bob_epoch_key).into());
     let nonce = (&bob_bundle.we_epoch_id[..12]).into();
     let plaintext = b"secret hello";
@@ -815,9 +811,7 @@ async fn error_recovery_graceful_degradation() -> Result<()> {
         fetched_bundle.epoch_key, [0u8; 32],
         "server bundle must not expose derived epoch key"
     );
-    let (epoch_key, _) = fetched_bundle
-        .derive_epoch_secrets_with_kbroad_secret(kbroad_secret())
-        .expect("epoch key");
+    let epoch_key = alice.epoch_key;
 
     let key_array: &[u8; 32] = epoch_key
         .as_slice()

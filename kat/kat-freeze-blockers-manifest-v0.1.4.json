@@ -1,0 +1,79 @@
+{
+  "profile_version": "v0.1.4",
+  "kind": "freeze-blockers-manifest",
+  "notes": [
+    "This manifest tracks repository-side blocker closures carried into profile v0.1.4.",
+    "Each requirement maps a resolved blocker or ambiguity to deterministic implementation tests."
+  ],
+  "requirements": [
+    {
+      "id": "ERRATA.1",
+      "title": "sender-scoped payload tuple and receiver duplicate rejection",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "message_crypto::tests::derive_msg_replay_tuple_tag_changes_with_sender_scope",
+          "expectation": "distinct_tuple_tag"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "message_crypto::tests::same_msg_index_from_different_senders_is_not_replayed",
+          "expectation": "accept_distinct_senders"
+        }
+      ]
+    },
+    {
+      "id": "ERRATA.2",
+      "title": "client barrier recovery enforces local version adjacency and local reason/roots consistency",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::try_recover_barrier_from_header_rejects_local_barrier_version_mismatch",
+          "expectation": "reject_9607_local"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::try_recover_barrier_from_header_rejects_reason_mismatch_for_local_roots",
+          "expectation": "reject_9607_local"
+        }
+      ]
+    },
+    {
+      "id": "ERRATA.3",
+      "title": "recover-only pending clients cannot originate barrier updates or pcs_refresh merges",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::perform_leave_rejects_while_barrier_recovery_is_pending",
+          "expectation": "reject_local"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::perform_pcs_refresh_rejects_while_barrier_recovery_is_pending",
+          "expectation": "reject_local"
+        }
+      ]
+    },
+    {
+      "id": "ERRATA.4",
+      "title": "updater activation correlation binds exact accepted merge fields and authenticated history lookup",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_barrier_activation_applies_on_digest_match",
+          "expectation": "activate_exact_match"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_barrier_activation_does_not_activate_on_digest_match_with_newer_observed_version",
+          "expectation": "retain_pending_without_activation"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_barrier_history_activation_succeeds_even_when_current_version_is_newer",
+          "expectation": "activate_via_authenticated_history"
+        }
+      ]
+    }
+  ]
+}

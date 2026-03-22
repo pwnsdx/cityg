@@ -357,10 +357,12 @@ impl AcceptanceContext {
                 .get(&HDR_HP_BYTES)
                 .ok_or(AcceptanceError::Freeze(FREEZE_FIELD_MISSING))?
         } else {
-            header_map.get(&HDR_HP_BYTES).unwrap_or(&pivot_envelope_value)
+            header_map
+                .get(&HDR_HP_BYTES)
+                .unwrap_or(&pivot_envelope_value)
         };
 
-        verify_join_payload_kbroad(
+        verify_join_payload_hp_envelope(
             self,
             header_map,
             Some(envelope_value),
@@ -529,7 +531,7 @@ impl AcceptanceContext {
                     return Err(AcceptanceError::Freeze(FREEZE_MH_HEADS_INVALID));
                 }
                 if replay.is_join {
-                    validate_kbroad_envelope_bytes(&parity.hp_envelope)?;
+                    validate_barrier_hp_envelope_bytes(&parity.hp_envelope)?;
                     if parity.hp_envelope.is_empty() {
                         return Err(AcceptanceError::Freeze(FREEZE_FIELD_MISSING));
                     }
@@ -739,7 +741,7 @@ mod tests {
         sample_header, sample_parts_params_joiner, sample_pop_keys, seed_capss_with,
     };
     use crate::{
-        JoinerKGenResult, KBROAD_MODE, OrchestrationParams, compute_proofs_commit_bytes,
+        BARRIER_HP_MODE, JoinerKGenResult, OrchestrationParams, compute_proofs_commit_bytes,
         joiner_kgen_merge_or, mhw::HeadRecord,
     };
     use anyhow::{Result, anyhow};
@@ -782,7 +784,10 @@ mod tests {
         );
 
         let mut header_map = sample_header();
-        header_map.insert(HDR_BARRIER_UPDATE_REASON, Value::Integer(Integer::from(2u64)));
+        header_map.insert(
+            HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(2u64)),
+        );
         let merge_joiner = joiner_kgen_merge_or(
             header_map,
             &parities,
@@ -932,7 +937,10 @@ mod tests {
         retired_heads: &[[u8; 32]],
     ) -> Result<PreparedMergeHeader> {
         let mut header = merge_joiner.header_map.clone();
-        header.insert(HDR_BARRIER_UPDATE_REASON, Value::Integer(Integer::from(2u64)));
+        header.insert(
+            HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(2u64)),
+        );
         recompute_proofs_commit(&mut header)?;
 
         let pivot_weid = header
@@ -2006,9 +2014,8 @@ mod tests {
 
         let mut parity = pivot_parity_from_store(&mut ctx, &parts, pivot_weid)?;
         let invalid_envelope = Value::Array(vec![
-            Value::Text(KBROAD_MODE.to_string()),
+            Value::Text(BARRIER_HP_MODE.to_string()),
             Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
-            Value::Bytes(vec![0u8; KBROAD_WRAP_CIPHERTEXT_BYTES]),
             Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);

@@ -316,8 +316,8 @@ impl VckCache {
 # Server endpoint
 server_url = "https://cityg.example.com"
 
-# KBROAD secret key storage
-kbroad_secret_path = "/secure/keystore/kbroad_sk.bin" # Device-specific
+# Client secret-state storage
+client_secret_state_path = "/secure/keystore/cityg-client-secrets.bin" # Device-specific
 
 # Retry configuration
 max_retries = 3
@@ -329,7 +329,7 @@ request_timeout_ms = 30000  # 30 seconds
 
 ---
 
-### 4.2 KBROAD Secret Key Management
+### 4.2 Client Secret-State Management
 
 **Storage Options**:
 1. **OS Keychain**: Secure enclave (iOS Keychain, Android Keystore, macOS Keychain)
@@ -341,8 +341,8 @@ request_timeout_ms = 30000  # 30 seconds
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
 
-fn store_kbroad_secret(
-    kbroad_sk: &[u8],
+fn store_client_secret_state(
+    secret_state: &[u8],
     password: &str,
     path: &Path,
 ) -> Result<(), Error> {
@@ -355,19 +355,19 @@ fn store_kbroad_secret(
     // Encrypt secret key (ChaCha20-Poly1305)
     let cipher = ChaCha20Poly1305::new_from_slice(key)?;
     let nonce = [0u8; 12]; // NONCE FROM KDF (DO NOT REUSE)
-    let ciphertext = cipher.encrypt(&nonce.into(), kbroad_sk)?;
+    let ciphertext = cipher.encrypt(&nonce.into(), secret_state)?;
 
     // Write to file
     fs::write(path, ciphertext)?;
     Ok(())
 }
 
-fn load_kbroad_secret(
+fn load_client_secret_state(
     password: &str,
     path: &Path,
 ) -> Result<Vec<u8>, Error> {
     let ciphertext = fs::read(path)?;
-    // Derive key, decrypt (inverse of store_kbroad_secret)
+    // Derive key, decrypt (inverse of store_client_secret_state)
     // ...
     Ok(plaintext)
 }
@@ -617,9 +617,9 @@ as “rho replay detected” without scraping every `(gid,parent_root)` row.
 - [ ] Zeroize memory after use:
   ```rust
   use zeroize::Zeroize;
-  let mut kbroad_sk = load_kbroad_secret(...);
-  // Use kbroad_sk
-  kbroad_sk.zeroize();
+  let mut secret_state = load_client_secret_state(...);
+  // Use secret_state
+  secret_state.zeroize();
   ```
 
 **✅ Witness Validation**:

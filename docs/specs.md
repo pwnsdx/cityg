@@ -1,14 +1,14 @@
 CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER)
 
-Version: v0.1.3
-Date: 2026-03-20
+Version: v0.1.4
+Date: 2026-03-22
 Status: Active wire/API profile revision
-Profile ID: tswe/msphf-we/fs-hybrid + prs-barrier (native; no legacy interop)
+Profile ID: tswe/msphf-we/fs-hybrid + prs-barrier (native async-first barrier transport)
 
 PROFILE STATUS
-* The wire/API `profile_version` exposed by the current implementation is `v0.1.3`.
-* `v0.1.3` is a wire-profile revision from `v0.1.2`, not a repository-only errata layer, because it adds `barrier_update_reason = 2 (join_finalize)` and changes acceptance / client validation behavior.
-* For commit-level traceability of this profile revision, see `docs/spec-conformance-changelog-v0.1.3.md`.
+* The wire/API `profile_version` exposed by the current implementation is `v0.1.4`.
+* `v0.1.4` is a wire-profile revision from `v0.1.3`, because it removes the legacy HP envelope transport and makes `barrier-sealed-v1` the sole in-profile transport for header[97].
+* For commit-level traceability of this profile revision, see `docs/spec-conformance-changelog-v0.1.4.md`.
 
 IMPORTANT (label supersession / no mixing)
 * All H_L label strings and HKDF info strings in THIS document are NORMATIVE for this profile version.
@@ -176,6 +176,26 @@ If FetchBarrierPublicTree(kem_tree_hash_after) returns pk_entries with TreeHash(
 Verification levels (normative):
 * A client that has A) and B) but not C) MUST NOT claim FULL barrier chain-check (it may still recover K_barrier via unique match).
 * A client that has A), B), and C) and performs the MUST checks in S11.11.2 (FULL chain-check) and S11.13.6 (ek_n verification) is a FULL-verifying client.
+
+S3.4 Header[97] HP envelope transport (normative)
+`header[97]` carries the opaque HP transport envelope used by merge/join-finalize publication and client recovery.
+
+In profile `v0.1.4`, the only in-profile encoding is:
+* `BarrierHpEnvelope := ["barrier-sealed-v1", hp_ciphertext:bstr, "chacha20-poly1305"]`
+
+Constraints (MUST):
+* the array length MUST equal 3,
+* element 0 MUST equal the UTF-8 text string `"barrier-sealed-v1"`,
+* element 1 MUST be a non-empty ciphertext byte string whose length is at least one AEAD tag and at most `MAX_HP_BYTES + AEAD_TAG_LEN`,
+* element 2 MUST equal the UTF-8 text string `"chacha20-poly1305"`.
+
+Semantics (normative):
+* `hp_ciphertext` is an opaque client-to-client transport blob.
+* The server MAY store, replay, and authenticate this blob as part of the anchor header, but MUST treat it as opaque and MUST NOT claim knowledge of the underlying HP keying material.
+* Clients derive the local HP AEAD key from authenticated barrier state and local secret state; the server never provisions that key.
+
+Out-of-profile rule (normative):
+* Any other header[97] transport mode is out of profile for `v0.1.4` and MUST be rejected as malformed.
 
 S4. ANCHOR TYPES, HEADER-KEY REGISTRY, AND PRESENCE MATRIX (NORMATIVE)
 
@@ -1405,4 +1425,4 @@ The test suite MUST include a scenario where:
   * retries reason 2 after authenticated history establishes non-acceptance and the join_finalize eligibility predicate still holds,
 * the implementation MUST NOT clear `pending_barrier_recovery` solely because a timer elapsed or because the current barrier version advanced.
 
-END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.3
+END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.4

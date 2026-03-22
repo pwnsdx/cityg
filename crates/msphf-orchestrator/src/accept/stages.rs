@@ -2,8 +2,7 @@
 
 use super::{ml_dsa_public_key_bytes, ml_dsa_signature_bytes, verify_ml_dsa, *};
 use crate::{
-    AEAD_TAG_LEN, BARRIER_HP_MODE, KBROAD_AEAD_SUITE, KBROAD_ML_KEM_ALG, KBROAD_MODE,
-    MAX_HP_BYTES, TSWE_ALG_CODE, TSWE_ALG_LABEL,
+    BARRIER_HP_MODE, KBROAD_AEAD_SUITE, KBROAD_ML_KEM_ALG, TSWE_ALG_CODE, TSWE_ALG_LABEL,
     proofs::srx_smallwood::{self, SRX_SMALLWOOD_MAX_BYTES},
 };
 use ciborium::de;
@@ -170,7 +169,7 @@ pub(super) fn ensure_bootstrap_absent(
     Ok(())
 }
 
-pub(super) fn verify_join_payload_kbroad(
+pub(super) fn verify_join_payload_hp_envelope(
     _ctx: &AcceptanceContext,
     header: &BTreeMap<u64, Value>,
     envelope_override: Option<&Value>,
@@ -180,140 +179,72 @@ pub(super) fn verify_join_payload_kbroad(
     let envelope_value = match envelope_override {
         Some(value) => value,
         None => header.get(&super::HDR_HP_BYTES).ok_or_else(|| {
-            debug!("verify_join_payload_kbroad: missing HDR_HP_BYTES");
+            debug!("verify_join_payload_hp_envelope: missing HDR_HP_BYTES");
             AcceptanceError::Freeze(FREEZE_FIELD_MISSING)
         })?,
     };
 
     let Value::Array(items) = envelope_value else {
-        debug!("verify_join_payload_kbroad: envelope not array");
+        debug!("verify_join_payload_hp_envelope: envelope not array");
         return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     };
     if items.is_empty() {
-        debug!("verify_join_payload_kbroad: envelope empty");
+        debug!("verify_join_payload_hp_envelope: envelope empty");
         return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     }
 
     let mode = match &items[0] {
         Value::Text(text) => text.as_str(),
         Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
-            debug!("verify_join_payload_kbroad: mode bytes invalid utf8");
+            debug!("verify_join_payload_hp_envelope: mode bytes invalid utf8");
             AcceptanceError::Freeze(FREEZE_HASH_CBOR)
         })?,
         _ => {
-            debug!("verify_join_payload_kbroad: mode not bytes/text");
+            debug!("verify_join_payload_hp_envelope: mode not bytes/text");
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     };
-    if mode == BARRIER_HP_MODE {
-        if items.len() != 3 {
-            debug!(
-                "verify_join_payload_kbroad: barrier envelope len {} != 3",
-                items.len()
-            );
-            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
-        }
-        match &items[1] {
-            Value::Bytes(bytes)
-                if !bytes.is_empty() && bytes.len() <= (MAX_HP_BYTES + AEAD_TAG_LEN) => {}
-            Value::Bytes(_) => {
-                debug!("verify_join_payload_kbroad: barrier ciphertext length invalid");
-                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
-            }
-            _ => {
-                debug!("verify_join_payload_kbroad: barrier ciphertext not bytes");
-                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
-            }
-        }
-        let aead = match &items[2] {
-            Value::Text(text) => text.as_str(),
-            Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
-                debug!("verify_join_payload_kbroad: barrier aead invalid utf8");
-                AcceptanceError::Freeze(FREEZE_HASH_CBOR)
-            })?,
-            _ => {
-                debug!("verify_join_payload_kbroad: barrier aead not bytes/text");
-                return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
-            }
-        };
-        if aead != KBROAD_AEAD_SUITE {
-            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
-        }
-        return Ok(());
+    if mode != BARRIER_HP_MODE {
+        return Err(AcceptanceError::Freeze(FREEZE_PARENT_EID_FORBIDDEN));
     }
-    if items.len() != 5 {
+    if items.len() != 3 {
         debug!(
-            "verify_join_payload_kbroad: legacy envelope len {} != 5",
+            "verify_join_payload_hp_envelope: barrier envelope len {} != 3",
             items.len()
         );
         return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     }
-    if mode != KBROAD_MODE {
-        return Err(AcceptanceError::Freeze(FREEZE_PARENT_EID_FORBIDDEN));
-    }
-
-    let expected_ct_len = super::ml_kem_ciphertext_bytes();
     match &items[1] {
-        Value::Bytes(bytes) if bytes.len() == expected_ct_len => {}
-        Value::Bytes(_) => {
-            debug!(
-                "verify_join_payload_kbroad: item[1] len {} != {}",
-                items[1].as_bytes().map(|b| b.len()).unwrap_or_default(),
-                expected_ct_len
-            );
-            return Err(AcceptanceError::Freeze(FREEZE_KBROAD_PARENT_MISMATCH));
-        }
-        _ => {
-            debug!("verify_join_payload_kbroad: item[1] not bytes");
-            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
-        }
-    }
-    match &items[2] {
-        Value::Bytes(bytes) if bytes.len() == super::KBROAD_WRAP_CIPHERTEXT_BYTES => {}
-        Value::Bytes(_) => {
-            debug!(
-                "verify_join_payload_kbroad: item[2] len {} != {}",
-                items[2].as_bytes().map(|b| b.len()).unwrap_or_default(),
-                super::KBROAD_WRAP_CIPHERTEXT_BYTES
-            );
-            return Err(AcceptanceError::Freeze(FREEZE_KBROAD_PARENT_MISMATCH));
-        }
-        _ => {
-            debug!("verify_join_payload_kbroad: item[2] not bytes");
-            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
-        }
-    }
-    match &items[3] {
         Value::Bytes(bytes)
             if bytes.len() >= crate::AEAD_TAG_LEN
                 && bytes.len() <= super::KBROAD_HP_MAX_CIPHERTEXT_BYTES => {}
         Value::Bytes(_) => {
             debug!(
-                "verify_join_payload_kbroad: item[3] len {} outside [{}, {}]",
-                items[3].as_bytes().map(|b| b.len()).unwrap_or_default(),
+                "verify_join_payload_hp_envelope: item[1] len {} outside [{}, {}]",
+                items[1].as_bytes().map(|b| b.len()).unwrap_or_default(),
                 crate::AEAD_TAG_LEN,
                 super::KBROAD_HP_MAX_CIPHERTEXT_BYTES
             );
-            return Err(AcceptanceError::Freeze(FREEZE_KBROAD_PARENT_MISMATCH));
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
         _ => {
-            debug!("verify_join_payload_kbroad: item[3] not bytes");
+            debug!("verify_join_payload_hp_envelope: item[1] not bytes");
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     }
-    let aead = match &items[4] {
+    let aead = match &items[2] {
         Value::Text(text) => text.as_str(),
         Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
-            debug!("verify_join_payload_kbroad: item[4] invalid utf8");
+            debug!("verify_join_payload_hp_envelope: item[2] invalid utf8");
             AcceptanceError::Freeze(FREEZE_HASH_CBOR)
         })?,
         _ => {
-            debug!("verify_join_payload_kbroad: item[4] not bytes/text");
+            debug!("verify_join_payload_hp_envelope: item[2] not bytes/text");
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     };
-    if aead != "chacha20-poly1305" {
-        return Err(AcceptanceError::Freeze(FREEZE_SUITE_DEPRECATED));
+    if aead != KBROAD_AEAD_SUITE {
+        return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     }
     Ok(())
 }
@@ -713,25 +644,22 @@ mod tests {
     };
     use crate::{AEAD_TAG_LEN, KBROAD_AEAD_SUITE};
     use anyhow::Result;
-    use pqcrypto_kyber::kyber768::ciphertext_bytes as ml_kem_ciphertext_bytes;
 
     fn base_header() -> BTreeMap<u64, Value> {
         BTreeMap::new()
     }
 
     #[test]
-    fn verify_join_payload_kbroad_accepts_well_formed_envelope() -> Result<()> {
+    fn verify_join_payload_hp_envelope_accepts_well_formed_envelope() -> Result<()> {
         let mut header = base_header();
         let envelope = Value::Array(vec![
-            Value::Text(KBROAD_MODE.to_string()),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
-            Value::Text("chacha20-poly1305".to_string()),
+            Value::Text(BARRIER_HP_MODE.to_string()),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
+            Value::Text(KBROAD_AEAD_SUITE.to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, envelope);
 
-        verify_join_payload_kbroad(
+        verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -742,18 +670,16 @@ mod tests {
     }
 
     #[test]
-    fn verify_join_payload_kbroad_rejects_invalid_ciphertext_length() -> Result<()> {
+    fn verify_join_payload_hp_envelope_rejects_invalid_ciphertext_length() -> Result<()> {
         let mut header = base_header();
         let envelope = Value::Array(vec![
-            Value::Text(KBROAD_MODE.to_string()),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes() - 1]),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
-            Value::Text("chacha20-poly1305".to_string()),
+            Value::Text(BARRIER_HP_MODE.to_string()),
+            Value::Bytes(Vec::new()),
+            Value::Text(KBROAD_AEAD_SUITE.to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, envelope);
 
-        let err = verify_join_payload_kbroad(
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -761,7 +687,7 @@ mod tests {
             &[0u8; 32],
         )
         .expect_err("expected failure");
-        expect_freeze(err, FREEZE_KBROAD_PARENT_MISMATCH);
+        expect_freeze(err, FREEZE_HASH_CBOR);
         Ok(())
     }
 
@@ -782,9 +708,7 @@ mod tests {
         header.insert(
             super::HDR_HP_BYTES,
             Value::Array(vec![
-                Value::Text(super::KBROAD_MODE.to_string()),
-                Value::Bytes(vec![0x11; super::ml_kem_ciphertext_bytes()]),
-                Value::Bytes(vec![0x22; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+                Value::Text(super::BARRIER_HP_MODE.to_string()),
                 Value::Bytes(vec![0x33; AEAD_TAG_LEN]),
                 Value::Text(KBROAD_AEAD_SUITE.to_string()),
             ]),
@@ -975,17 +899,15 @@ mod tests {
     }
 
     #[test]
-    fn verify_join_payload_kbroad_rejects_mode_aead_and_shape_errors() -> Result<()> {
+    fn verify_join_payload_hp_envelope_rejects_mode_aead_and_shape_errors() -> Result<()> {
         let mut header = base_header();
         let wrong_mode = Value::Array(vec![
             Value::Text("wrong-mode".to_string()),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, wrong_mode);
-        let err = verify_join_payload_kbroad(
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -996,14 +918,12 @@ mod tests {
         expect_freeze(err, FREEZE_PARENT_EID_FORBIDDEN);
 
         let wrong_aead = Value::Array(vec![
-            Value::Text(KBROAD_MODE.to_string()),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Text(BARRIER_HP_MODE.to_string()),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
             Value::Text("aes-gcm".to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, wrong_aead);
-        let err = verify_join_payload_kbroad(
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -1011,10 +931,10 @@ mod tests {
             &[0u8; 32],
         )
         .expect_err("wrong AEAD label should freeze");
-        expect_freeze(err, FREEZE_SUITE_DEPRECATED);
+        expect_freeze(err, FREEZE_HASH_CBOR);
 
         header.insert(super::HDR_HP_BYTES, Value::Map(Vec::new()));
-        let err = verify_join_payload_kbroad(
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -1027,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_join_payload_kbroad_accepts_barrier_sealed_envelope() -> Result<()> {
+    fn verify_join_payload_hp_envelope_accepts_barrier_sealed_envelope() -> Result<()> {
         let mut header = base_header();
         header.insert(
             super::HDR_HP_BYTES,
@@ -1037,7 +957,7 @@ mod tests {
                 Value::Text(KBROAD_AEAD_SUITE.to_string()),
             ]),
         );
-        verify_join_payload_kbroad(
+        verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -1191,9 +1111,9 @@ mod tests {
     }
 
     #[test]
-    fn verify_join_payload_kbroad_rejects_missing_and_malformed_items() {
+    fn verify_join_payload_hp_envelope_rejects_missing_and_malformed_items() {
         let mut header = base_header();
-        let err = verify_join_payload_kbroad(
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -1204,13 +1124,11 @@ mod tests {
         expect_freeze(err, FREEZE_FIELD_MISSING);
 
         let short = Value::Array(vec![
-            Value::Text(KBROAD_MODE.to_string()),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
+            Value::Text(BARRIER_HP_MODE.to_string()),
             Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
         ]);
         header.insert(super::HDR_HP_BYTES, short);
-        let err = verify_join_payload_kbroad(
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -1222,13 +1140,11 @@ mod tests {
 
         let malformed_mode = Value::Array(vec![
             Value::Bytes(vec![0xFF]),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, malformed_mode);
-        let err = verify_join_payload_kbroad(
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -1240,13 +1156,11 @@ mod tests {
 
         let wrong_mode_type = Value::Array(vec![
             Value::Integer(Integer::from(7u64)),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, wrong_mode_type);
-        let err = verify_join_payload_kbroad(
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -1257,14 +1171,12 @@ mod tests {
         expect_freeze(err, FREEZE_HASH_CBOR);
 
         let wrong_ct_type = Value::Array(vec![
-            Value::Text(KBROAD_MODE.to_string()),
+            Value::Text(BARRIER_HP_MODE.to_string()),
             Value::Text("bad".to_string()),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, wrong_ct_type);
-        let err = verify_join_payload_kbroad(
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -1274,51 +1186,13 @@ mod tests {
         .expect_err("ct type mismatch must freeze");
         expect_freeze(err, FREEZE_HASH_CBOR);
 
-        let wrong_wrap_type = Value::Array(vec![
-            Value::Text(KBROAD_MODE.to_string()),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
-            Value::Text("bad".to_string()),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
-            Value::Text("chacha20-poly1305".to_string()),
-        ]);
-        header.insert(super::HDR_HP_BYTES, wrong_wrap_type);
-        let err = verify_join_payload_kbroad(
-            &AcceptanceContext::with_defaults(),
-            &header,
-            None,
-            &[0u8; 32],
-            &[0u8; 32],
-        )
-        .expect_err("wrap type mismatch must freeze");
-        expect_freeze(err, FREEZE_HASH_CBOR);
-
-        let wrong_hp_type = Value::Array(vec![
-            Value::Text(KBROAD_MODE.to_string()),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
-            Value::Text("bad".to_string()),
-            Value::Text("chacha20-poly1305".to_string()),
-        ]);
-        header.insert(super::HDR_HP_BYTES, wrong_hp_type);
-        let err = verify_join_payload_kbroad(
-            &AcceptanceContext::with_defaults(),
-            &header,
-            None,
-            &[0u8; 32],
-            &[0u8; 32],
-        )
-        .expect_err("hp ciphertext type mismatch must freeze");
-        expect_freeze(err, FREEZE_HASH_CBOR);
-
-        let malformed_aead = Value::Array(vec![
-            Value::Text(KBROAD_MODE.to_string()),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+        let wrong_aead_utf8 = Value::Array(vec![
+            Value::Text(BARRIER_HP_MODE.to_string()),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
             Value::Bytes(vec![0xFF]),
         ]);
-        header.insert(super::HDR_HP_BYTES, malformed_aead);
-        let err = verify_join_payload_kbroad(
+        header.insert(super::HDR_HP_BYTES, wrong_aead_utf8);
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
@@ -1329,14 +1203,12 @@ mod tests {
         expect_freeze(err, FREEZE_HASH_CBOR);
 
         let wrong_aead_type = Value::Array(vec![
-            Value::Text(KBROAD_MODE.to_string()),
-            Value::Bytes(vec![0u8; ml_kem_ciphertext_bytes()]),
-            Value::Bytes(vec![0u8; super::KBROAD_WRAP_CIPHERTEXT_BYTES]),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
+            Value::Text(BARRIER_HP_MODE.to_string()),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
             Value::Integer(Integer::from(1u64)),
         ]);
         header.insert(super::HDR_HP_BYTES, wrong_aead_type);
-        let err = verify_join_payload_kbroad(
+        let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,

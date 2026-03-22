@@ -189,16 +189,16 @@ The group-wide barrier secret (32 bytes) used to bind the payload key schedule (
 
 **See also**: Barrier, BarrierUpdate
 
-### KBROAD (Key Broadcasting)
-Group key broadcasting envelope that encrypts `hp` using ML-KEM-768 + ChaCha20-Poly1305. Structure:
+### Barrier-Sealed HP Envelope
+Barrier-scoped envelope that transports `hp` as an opaque client-to-client blob. Structure:
 ```
-["kbroad-v1", ct_kem, wrap, C_hp, "chacha20-poly1305"]
+["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
 ```
 
 **Server Role**: Validates structure only, never decrypts
-**Field**: `97: kbroad_envelope` in anchor headers
+**Field**: `97: msphf_hp` in anchor headers
 
-**See also**: [Protocol Overview](./protocol/01-overview.md#33-kbroad-envelope)
+**See also**: [Protocol Overview](./protocol/01-overview.md#33-barrier-sealed-hp-envelope)
 
 ---
 

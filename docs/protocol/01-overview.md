@@ -159,24 +159,22 @@ Result: Y* = Y*_A = Y*_B  (masks ensure equality for valid members)
 
 **Implementation:** [`crates/msphf-rlwe/src/lib.rs`](../../crates/msphf-rlwe/src/lib.rs)
 
-### 3.3 KBROAD Envelope (Group Key Broadcasting)
+### 3.3 Barrier-Sealed HP Envelope
 
 **Blueprint:** §12.3, Appendix D
 
 **Structure:**
 ```rust
-["kbroad-v1", ct_kem, wrap, C_hp, "chacha20-poly1305"]
+["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
 ```
 
 **Flow:**
-1. Joiner: `KEM.Encap(kbroad_pub) → (ct_kem, ss)`
-2. Joiner: `KEK := HKDF-BLAKE3(ss, ...)`
-3. Joiner: `wrap := AEAD(KEK, K_HP)` — wraps AEAD key
-4. Joiner: `C_hp := AEAD(K_HP, hp_k_bytes)` — encrypts HP artifact
-5. Server: **Validates structure only, never decrypts**
-6. Devices: Decrypt with `kbroad_secret`, extract hp, compute Y* and E_k
+1. Publisher: derive a barrier-scoped HP AEAD key from authenticated barrier state
+2. Publisher: encrypt the local HP artifact into `hp_ciphertext`
+3. Server: **validates structure only, never decrypts**
+4. Devices: derive the same barrier-scoped HP AEAD key, decrypt hp, compute `Y*` and `E_k`
 
-**Innovation:** Server validates envelope correctness without learning secrets.
+**Innovation:** Server validates and relays the transport blob without ever learning the HP material or the AEAD key.
 
 **Implementation:** [`crates/msphf-orchestrator/src/accept/mod.rs`](../../crates/msphf-orchestrator/src/accept/mod.rs)
 
@@ -322,7 +320,7 @@ Both produce cryptographically identical anchors - the difference is **policy** 
 6. Decrypt messages with E_k
 
 **Capabilities:**
-- Knows: kbroad_secret (group KEM secret key)
+- Knows: authenticated barrier state plus local secret state
 - Can: Decrypt hp, compute Y* and E_k, read messages
 - Validates: Envelope correctness, witness validity (optional)
 

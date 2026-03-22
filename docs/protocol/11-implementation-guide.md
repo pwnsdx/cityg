@@ -1030,7 +1030,7 @@ WID [32 bytes]
    └─► zk_vrf_proof = ZK-VRF.Prove(hp, vrf_ctx)
 
 6. Assemble header
-   └─► header[97] = ["kbroad-v1", ct_kem, wrap, C_hp, "chacha20-poly1305"]
+   └─► header[97] = ["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
    └─► header[146] = capss_proof
    └─► header[95] = zk_vrf_proof
 
@@ -1060,8 +1060,8 @@ WID [32 bytes]
    └─► Recompute rho_raw = H_L("msphf/rho/der", [pop_sig, xk_hash])
    └─► Verify: H_L("msphf/kgen/rho", [rho_raw]) == header[93]
 
-6. KBROAD envelope structure (NO DECRYPT)
-   └─► Validate: header[97] = ["kbroad-v1", _, _, _, "chacha20-poly1305"]
+6. Barrier-sealed HP envelope structure (NO DECRYPT)
+   └─► Validate: header[97] = ["barrier-sealed-v1", _, "chacha20-poly1305"]
 
 7. SRX validation (merge-only, conditional)
    └─► Join mode forbids 121/122/160/161

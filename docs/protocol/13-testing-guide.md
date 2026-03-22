@@ -258,15 +258,15 @@ fn test_fs_capss_invalid() {
 
 ---
 
-**`test_kbroad_envelope_structure`**:
+**`test_barrier_hp_envelope_structure`**:
 ```rust
 #[test]
-fn test_kbroad_envelope_structure() {
+fn test_barrier_hp_envelope_structure() {
     let mut header = valid_header();
     // Change AEAD suite
     header[&97] = Value::Array(vec![
-        Value::Text("kbroad-v1".into()),
-        /* ct_kem, wrap, C_hp */,
+        Value::Text("barrier-sealed-v1".into()),
+        /* hp_ciphertext */,
         Value::Text("aes-gcm".into()), // Wrong AEAD
     ]);
 
@@ -416,9 +416,9 @@ fn test_e2e_joiner_to_server() {
         &params,
     ).unwrap();
 
-    // 3. Joiner: Encrypt hp in KBROAD
-    let (kbroad_pub, _) = kyber_keypair();
-    let kbroad_envelope = build_kbroad_envelope(&kgen_output.hp, &kbroad_pub);
+    // 3. Joiner: Seal hp in the barrier-scoped envelope
+    let barrier_hp_envelope =
+        build_local_barrier_hp_envelope(&kgen_output.hp, &xk_hash, &hp_commit);
 
     // 4. Joiner: Generate proofs
     let mut rng = rand_core::OsRng;

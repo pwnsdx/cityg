@@ -310,11 +310,11 @@ let (ss, ct_kem) = encapsulate(&kbroad_pub);
 // Key decapsulation (receiver side)
 use pqcrypto_kyber::kyber768::{decapsulate, SecretKey};
 
-let kbroad_secret = SecretKey::from_bytes(&sk_bytes)?;
-let ss = decapsulate(&ct_kem, &kbroad_secret);
+let receiver_secret = SecretKey::from_bytes(&sk_bytes)?;
+let ss = decapsulate(&ct_kem, &receiver_secret);
 ```
 
-**Server Constraint:** Server MUST NOT have `kbroad_secret` or call `decapsulate()`.
+**Server Constraint:** Server MUST NOT have client decapsulation keys or call `decapsulate()`.
 
 **Implementation:** [`crates/msphf-orchestrator/src/accept/mod.rs`](../../crates/msphf-orchestrator/src/accept/mod.rs) (validation only, no decapsulation)
 
@@ -927,43 +927,34 @@ Both client and server MUST derive the same digests for a given `(xk_hash, hp_co
 
 **Envelope Structure:**
 ```
-KBROAD_V1 := ["kbroad-v1", ct_kem, wrap, C_hp, "chacha20-poly1305"]
+BARRIER_HP_V1 := ["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
 ```
 
 **Server Validation:**
 ```rust
 // Server checks structure only (no decryption)
-if envelope[0] != "kbroad-v1" {
+if envelope[0] != "barrier-sealed-v1" {
     return Freeze(921, "parent_eid_forbidden");
 }
-if envelope[4] != "chacha20-poly1305" {
+if envelope[2] != "chacha20-poly1305" {
     return Freeze(934, "suite_deprecated");
 }
-// Validate sizes: ct_kem (1088 bytes), wrap, C_hp
+// Validate sizes: hp_ciphertext only
 ```
 
 **Client Decryption:**
 ```rust
-// 1. KEM decapsulation
-let ss = decapsulate(&ct_kem, &kbroad_secret);
+// 1. Derive the barrier-scoped HP AEAD key
+let hp_key = derive_barrier_hp_key(&k_barrier, barrier_version, &xk_hash, &hp_commit)?;
 
-// 2. Derive KEK
-let salt = h_l("hp/kek/salt", &xk_hash)?;
-let info = b"city-g|hp/kek/v1";
-let kek = hkdf_blake3_extract_expand(&ss, &salt, info, &hp_commit, 32)?;
-
-// 3. Unwrap K_HP
-let nonce_wrap = h_l("hp/kek/nonce", &(&xk_hash, &hp_commit))?;
-let k_hp = aead_decrypt(&kek, &nonce_wrap[..12], &hp_commit, &wrap)?;
-
-// 4. Decrypt hp
+// 2. Decrypt hp
 let nonce_hp = h_l("hp/nonce", &(&xk_hash, &hp_commit))?;
-let hp_k_bytes = aead_decrypt(&k_hp, &nonce_hp[..12], &hp_commit, &c_hp)?;
+let hp_k_bytes = aead_decrypt(&hp_key, &nonce_hp[..12], &hp_commit, &hp_ciphertext)?;
 ```
 
 **Security:** Three-layer defense:
-1. ML-KEM-768 (post-quantum KEM)
-2. HKDF-BLAKE3 (key derivation with binding)
+1. Authenticated barrier state
+2. Barrier-scoped HP key derivation with transcript binding
 3. ChaCha20-Poly1305 (AEAD with unique nonces)
 
 ---

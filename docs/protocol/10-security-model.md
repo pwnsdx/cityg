@@ -40,7 +40,7 @@ City-G `tswe/msphf-we/fs-hybrid` is designed to provide **publisher-blind** epoc
 > The server **cannot learn** the hash projection key (hp), VRF output (Y\*), or epoch key (E_k) **by construction** — not as a policy, but as a **type-level guarantee** enforced by Rust's type system.
 
 This is achieved by:
-1. **No KBROAD secret keys** in server data structures
+1. **No client-only secret state** in server data structures
 2. **No decapsulation/decryption functions** in server code
 3. **ZK-VRF** proves Y\* correctness without revealing it
 4. **Client-side** epoch key derivation only
@@ -341,7 +341,7 @@ Every valid member has a witness to parent_root OR join_delta_root
 
 ### 6.1 Type-Level Proof
 
-**Theorem**: The server cannot hold KBROAD secret keys in `AcceptanceContext`.
+**Theorem**: The server cannot hold client-only secret state in `AcceptanceContext`.
 
 **Proof**:
 ```rust
@@ -355,7 +355,7 @@ pub struct AcceptanceContext {
 }
 
 // ❌ NO FIELD:
-// - kbroad_secret: MlKemSecretKey
+// - barrier_hp_key: [u8; 32]
 // - epoch_key: [u8; 32]
 // - hp: Vec<u8>
 ```
@@ -363,7 +363,7 @@ pub struct AcceptanceContext {
 **Compiler Enforcement**:
 ```rust
 let ctx = AcceptanceContext::with_options(h_max, ttl, opts);
-let secret = ctx.kbroad_secret; // ❌ COMPILE ERROR: no field `kbroad_secret`
+let secret = ctx.barrier_hp_key; // ❌ COMPILE ERROR: no field `barrier_hp_key`
 ```
 
 **QED**: Rust's type system prevents secret key storage at compile time. ∎
@@ -387,13 +387,13 @@ $ rg "decrypt_hp|unwrap_kbroad_envelope" crates/msphf-orchestrator/src/
 **Server Code** (structural validation only):
 ```rust
 // crates/msphf-orchestrator/src/accept/mod.rs
-fn validate_kbroad_envelope_structure(
+fn validate_barrier_hp_envelope_bytes(
     header: &BTreeMap<u64, Value>
 ) -> Result<(), AcceptanceError> {
-    let items = /* extract 5-element array */;
-    if items[0] != "kbroad-v1" { return Err(FREEZE_PARENT_EID_FORBIDDEN); }
-    if items[4] != "chacha20-poly1305" { return Err(FREEZE_SUITE_DEPRECATED); }
-    // ✅ NO decapsulation, NO decryption
+    let items = /* extract 3-element array */;
+    if items[0] != "barrier-sealed-v1" { return Err(FREEZE_PARENT_EID_FORBIDDEN); }
+    if items[2] != "chacha20-poly1305" { return Err(FREEZE_HASH_CBOR); }
+    // ✅ NO HP-key derivation, NO decryption
     Ok(())
 }
 ```

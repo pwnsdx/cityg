@@ -608,44 +608,32 @@ let msphf_hp_cbor = to_cbor_vec(&[
 ])?;
 ```
 
-### KBROAD Envelope
+### Barrier-Sealed HP Envelope
 
-The MSPHF_HP tuple is encrypted in the **KBROAD** envelope:
+The MSPHF_HP tuple is encrypted in the barrier-scoped HP envelope:
 
 ```cbor
-KBROAD_V1 := [
-  "kbroad-v1",              # Type tag
-  ct_kem: bstr,             # ML-KEM-768 ciphertext (~1088 bytes)
-  wrap: bstr,               # ChaCha20-Poly1305 wrapped KEK (48 bytes)
-  C_hp: bstr,               # ChaCha20-Poly1305 encrypted MSPHF_HP (~9.5 KB)
+BARRIER_HP_V1 := [
+  "barrier-sealed-v1",      # Type tag
+  hp_ciphertext: bstr,      # ChaCha20-Poly1305 encrypted MSPHF_HP
   "chacha20-poly1305"       # AEAD algorithm tag
 ]
 ```
 
 **Construction**:
-1. **KEM encapsulation**: `(ct_kem, ss) := ML-KEM-768.Encap(kbroad_pub)`
-2. **KEK derivation**:
+1. **Barrier-key derivation**:
    ```rust
-   KEK := HKDF-BLAKE3(
-       ss,
-       salt = H_L("hp/kek/salt", [xk_hash]),
-       info = "city-g|hp/kek/v1" || hp_commit,
-       L = 32
+   HP_KEY := DeriveBarrierHpKey(
+       barrier_key,
+       barrier_version,
+       xk_hash,
+       hp_commit,
    )
    ```
-3. **Wrap K_HP**:
+2. **Encrypt MSPHF_HP**:
    ```rust
-   wrap := ChaCha20-Poly1305.Encrypt(
-       key = KEK,
-       nonce = H_L("hp/kek/nonce", [xk_hash, hp_commit])[0..12],
-       aad = hp_commit,
-       plaintext = K_HP  // 32-byte symmetric key
-   )
-   ```
-4. **Encrypt MSPHF_HP**:
-   ```rust
-   C_hp := ChaCha20-Poly1305.Encrypt(
-       key = K_HP,
+   hp_ciphertext := ChaCha20-Poly1305.Encrypt(
+       key = HP_KEY,
        nonce = H_L("hp/nonce", [xk_hash, hp_commit])[0..12],
        aad = hp_commit,
        plaintext = CBOR_det(MSPHF_HP)
@@ -653,12 +641,12 @@ KBROAD_V1 := [
    ```
 
 **Server validation** (blind):
-- Check envelope shape is `[tstr, bstr, bstr, bstr, tstr]`
-- Require `envelope[0] == "kbroad-v1"`
-- Require `envelope[4] == "chacha20-poly1305"`
-- **NEVER** KEM-decapsulate or AEAD-decrypt
+- Check envelope shape is `[tstr, bstr, tstr]`
+- Require `envelope[0] == "barrier-sealed-v1"`
+- Require `envelope[2] == "chacha20-poly1305"`
+- **NEVER** derive the client HP key or AEAD-decrypt
 
-**Blueprint**: Alpha (0.1.0) §12.3 (hp transport)
+**Blueprint**: `v0.1.4` §3.4 / §12.3 (hp transport)
 
 **Implementation**: [`crates/cityg-client/src/lib.rs`](../../crates/cityg-client/src/lib.rs)
 

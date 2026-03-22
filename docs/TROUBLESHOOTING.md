@@ -588,12 +588,11 @@ curl -X POST http://localhost:8080/v1/messages \
    let epoch_key = H_epoch(&xk, &y_star)?;
    ```
 
-2. **Check KBROAD decryption**:
+2. **Check barrier-sealed HP recovery**:
    ```rust
-   // Ensure you have correct kbroad_secret
-   let ss = ml_kem_decapsulate(&ct_kem, &kbroad_secret)?;
-   let kek = hkdf_expand(&ss, ...)?;
-   let hp = decrypt_kbroad(&kbroad_envelope, &kek)?;
+   // Ensure the client has the right authenticated barrier state
+   let hp_key = derive_barrier_hp_key(&k_barrier, barrier_version, &xk_hash, &hp_commit)?;
+   let hp = decrypt_hp_bytes(&hp_ciphertext, &xk_hash, &hp_commit, &hp_key)?;
    ```
 
 3. **Verify message format**:

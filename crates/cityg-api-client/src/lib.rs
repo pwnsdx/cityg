@@ -154,7 +154,7 @@ use tracing::warn;
 
 const ADMIN_TOKEN_HEADER: &str = "x-cityg-admin-token";
 const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
-const EXPECTED_PROFILE_VERSION: &str = "v0.1.3";
+const EXPECTED_PROFILE_VERSION: &str = "v0.1.4";
 
 /// HTTP client for the City-G API server.
 ///

@@ -3052,7 +3052,7 @@ mod tests {
             fs_epoch_base_ts: ticket.fs_epoch_base_ts,
             kbroad_generation: ticket.kbroad_generation,
             barrier_version: ticket.barrier_version,
-            profile_version: "v0.1.3".to_string(),
+            profile_version: "v0.1.4".to_string(),
             cover_leaf_index: ticket.cover_leaf_index,
             kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
             n_max: ticket.n_max,

@@ -28,12 +28,12 @@ struct S14Coverage {
 
 fn manifest_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../kat/kat-s14-conformance-manifest-v0.1.3.json")
+        .join("../../kat/kat-s14-conformance-manifest-v0.1.4.json")
 }
 
 fn freeze_blockers_manifest_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../kat/kat-freeze-blockers-manifest-v0.1.3.json")
+        .join("../../kat/kat-freeze-blockers-manifest-v0.1.4.json")
 }
 
 fn crate_root(crate_name: &str) -> PathBuf {
@@ -82,7 +82,7 @@ fn validate_manifest(
     manifest: S14Manifest,
     expected: BTreeSet<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(manifest.profile_version, "v0.1.3");
+    assert_eq!(manifest.profile_version, "v0.1.4");
     assert_eq!(manifest.requirements.len(), expected.len());
 
     let mut ids = BTreeSet::new();

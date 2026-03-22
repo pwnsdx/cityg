@@ -219,34 +219,20 @@ fn ensure_kbroad_shape(bytes: &[u8]) -> anyhow::Result<()> {
     let Value::Array(items) = value else {
         anyhow::bail!("envelope must be array");
     };
-    if items.len() != 5 {
-        anyhow::bail!("envelope must have 5 elements");
+    if items.len() != 3 {
+        anyhow::bail!("envelope must have 3 elements");
     }
-    if items[0] != Value::Text("kbroad-v1".to_string()) {
-        anyhow::bail!("unexpected KBROAD mode");
+    if items[0] != Value::Text("barrier-sealed-v1".to_string()) {
+        anyhow::bail!("unexpected barrier hp mode");
     }
-    if let Value::Bytes(ct) = &items[1] {
-        if ct.len() != 1088 {
-            anyhow::bail!("ct_kem must be 1088 bytes");
+    if let Value::Bytes(ciphertext) = &items[1] {
+        if ciphertext.len() < 16 {
+            anyhow::bail!("barrier hp ciphertext must be at least 16 bytes");
         }
     } else {
-        anyhow::bail!("ct_kem must be bytes");
+        anyhow::bail!("barrier hp ciphertext must be bytes");
     }
-    if let Value::Bytes(wrap) = &items[2] {
-        if wrap.len() != 48 {
-            anyhow::bail!("wrap must be 48 bytes");
-        }
-    } else {
-        anyhow::bail!("wrap must be bytes");
-    }
-    if let Value::Bytes(c_hp) = &items[3] {
-        if c_hp.len() < 16 {
-            anyhow::bail!("C_hp must be at least 16 bytes (Poly1305 tag)");
-        }
-    } else {
-        anyhow::bail!("C_hp must be bytes");
-    }
-    if items[4] != Value::Text("chacha20-poly1305".to_string()) {
+    if items[2] != Value::Text("chacha20-poly1305".to_string()) {
         anyhow::bail!("unexpected AEAD suite");
     }
     Ok(())
@@ -366,11 +352,9 @@ fn sample_rollup_header() -> anyhow::Result<BTreeMap<u64, Value>> {
         ]),
     );
 
-    // One KBROAD clone corresponding to the join epoch.
+    // One barrier-sealed envelope corresponding to the join epoch.
     let kbroad_envelope = Value::Array(vec![
-        Value::Text("kbroad-v1".to_string()),
-        Value::Bytes(vec![0xAA; 1088]),
-        Value::Bytes(vec![0xBB; 48]),
+        Value::Text("barrier-sealed-v1".to_string()),
         Value::Bytes(vec![0xCC; 80]),
         Value::Text("chacha20-poly1305".to_string()),
     ]);

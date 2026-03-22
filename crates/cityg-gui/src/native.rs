@@ -2337,7 +2337,6 @@ struct AppSession {
     vrf_secret_key: Vec<u8>,
     vrf_public_key: Vec<u8>,
     kbroad_public: Vec<u8>,
-    kbroad_secret: Vec<u8>,
     bootstrap_public: Vec<u8>,
     proof_mode: String,
     vrf_id: String,
@@ -2528,8 +2527,6 @@ impl AppModel {
                 server: config.client.default_server_url.clone(),
                 room_id: AppModel::random_room_id(),
                 alias: String::new(),
-                invite_kbroad_public: None,
-                invite_kbroad_secret: None,
                 active: Some(ActiveField::Alias),
             },
             join_status: JoinStatus::Idle,
@@ -2612,8 +2609,6 @@ struct JoinFormState {
     server: String,
     room_id: String,
     alias: String,
-    invite_kbroad_public: Option<Vec<u8>>,
-    invite_kbroad_secret: Option<Vec<u8>>,
     active: Option<ActiveField>,
 }
 
@@ -2622,10 +2617,6 @@ struct JoinInvitePayload {
     version: u8,
     server_url: String,
     room_id: String,
-    #[serde(default)]
-    kbroad_public_hex: Option<String>,
-    #[serde(default)]
-    kbroad_secret_hex: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2662,11 +2653,9 @@ fn sanitize_clipboard_text(raw: &str) -> String {
 
 fn build_join_invite(session: &AppSession) -> Result<String> {
     let payload = JoinInvitePayload {
-        version: 2,
+        version: 3,
         server_url: session.server_url.clone(),
         room_id: session.room_id.clone(),
-        kbroad_public_hex: None,
-        kbroad_secret_hex: None,
     };
     let encoded = serde_json::to_string(&payload).context("failed to encode room invite")?;
     Ok(format!("{JOIN_INVITE_PREFIX}{encoded}"))
@@ -2680,7 +2669,7 @@ fn parse_join_invite(raw: &str) -> Result<Option<JoinInvitePayload>> {
 
     let invite: JoinInvitePayload =
         serde_json::from_str(payload).context("invalid City-G invite payload")?;
-    if invite.version != 1 && invite.version != 2 {
+    if invite.version != 1 && invite.version != 2 && invite.version != 3 {
         return Err(anyhow!(
             "unsupported City-G invite version {}",
             invite.version
@@ -2691,20 +2680,6 @@ fn parse_join_invite(raw: &str) -> Result<Option<JoinInvitePayload>> {
     }
     if !JoinFormState::is_valid_room_id(invite.room_id.trim()) {
         return Err(anyhow!("invite room ID is not valid"));
-    }
-    if let Some(public_hex) = invite.kbroad_public_hex.as_deref() {
-        let kbroad_public =
-            hex_decode(public_hex.trim()).context("invite KBROAD public key is not valid hex")?;
-        if kbroad_public.is_empty() {
-            return Err(anyhow!("invite KBROAD public key is missing"));
-        }
-    }
-    if let Some(secret_hex) = invite.kbroad_secret_hex.as_deref() {
-        let kbroad_secret =
-            hex_decode(secret_hex.trim()).context("invite KBROAD secret is not valid hex")?;
-        if kbroad_secret.is_empty() {
-            return Err(anyhow!("invite KBROAD secret is missing"));
-        }
     }
     Ok(Some(invite))
 }
@@ -2724,30 +2699,13 @@ fn apply_join_field_paste(field: ActiveField, existing: &str, pasted: &str) -> S
 }
 
 impl JoinFormState {
-    fn clear_invite_material(&mut self) {
-        self.invite_kbroad_public = None;
-        self.invite_kbroad_secret = None;
-    }
-
     fn apply_invite(&mut self, invite: JoinInvitePayload) -> Result<()> {
         self.server = invite.server_url;
         self.room_id = invite.room_id;
-        self.invite_kbroad_public = match invite.kbroad_public_hex.as_deref() {
-            Some(public_hex) => Some(
-                hex_decode(public_hex.trim())
-                    .context("invite KBROAD public key is not valid hex")?,
-            ),
-            None => None,
-        };
-        self.invite_kbroad_secret = match invite.kbroad_secret_hex.as_deref() {
-            Some(secret_hex) => Some(
-                hex_decode(secret_hex.trim())
-                    .context("invite KBROAD secret is not valid hex")?,
-            ),
-            None => None,
-        };
         Ok(())
     }
+
+    fn clear_invite_material(&mut self) {}
 
     fn is_ready(&self) -> bool {
         let server = self.server.trim();
@@ -2817,9 +2775,6 @@ impl JoinFormState {
         }
 
         if ks.key == "backspace" {
-            if matches!(active, ActiveField::Server | ActiveField::Room) {
-                self.clear_invite_material();
-            }
             let field = self.field_mut(active);
             if !field.is_empty() {
                 field.pop();
@@ -2829,9 +2784,6 @@ impl JoinFormState {
         }
 
         if ks.key == "delete" {
-            if matches!(active, ActiveField::Server | ActiveField::Room) {
-                self.clear_invite_material();
-            }
             let field = self.field_mut(active);
             field.clear();
             return KeyOutcome::Updated;
@@ -2846,9 +2798,6 @@ impl JoinFormState {
 
         if ks.key == "space" {
             // Some layouts report space without key_char.
-            if matches!(active, ActiveField::Server | ActiveField::Room) {
-                self.clear_invite_material();
-            }
             let field = self.field_mut(active);
             field.push(' ');
             return KeyOutcome::Updated;
@@ -2867,9 +2816,6 @@ impl JoinFormState {
                 return KeyOutcome::None;
             }
 
-            if matches!(active, ActiveField::Server | ActiveField::Room) {
-                self.clear_invite_material();
-            }
             let field = self.field_mut(active);
             field.push_str(ch);
             return KeyOutcome::Updated;
@@ -2883,8 +2829,6 @@ impl JoinFormState {
             server_url: self.server.trim().to_string(),
             room_id: self.room_id.trim().to_string(),
             alias: self.alias.trim().to_string(),
-            invite_kbroad_public: self.invite_kbroad_public.clone(),
-            invite_kbroad_secret: self.invite_kbroad_secret.clone(),
         }
     }
 }
@@ -6729,8 +6673,6 @@ struct JoinParams {
     server_url: String,
     room_id: String,
     alias: String,
-    invite_kbroad_public: Option<Vec<u8>>,
-    invite_kbroad_secret: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -6739,7 +6681,6 @@ struct LeaveRequest {
     room_id: String,
     gid: [u8; 32],
     leaf_id: [u8; 32],
-    kbroad_secret: Vec<u8>,
     forward_state: ForwardSecrecyState,
     pop_public_key: Vec<u8>,
     pop_secret_key: Vec<u8>,
@@ -6777,7 +6718,6 @@ impl LeaveRequest {
             room_id: session.room_id.clone(),
             gid: session.gid,
             leaf_id: session.leaf_id,
-            kbroad_secret: session.kbroad_secret.clone(),
             forward_state: session.forward_state.clone(),
             pop_public_key: session.pop_public_key.clone(),
             pop_secret_key: session.pop_secret_key.clone(),
@@ -6945,8 +6885,6 @@ struct PersistedSession {
     fs_policy_version: String,
     fs_epoch_base_ts: u64,
     kbroad_public_hex: String,
-    #[serde(default)]
-    kbroad_secret_hex: String,
     bootstrap_public_hex: String,
     pop_public_hex: String,
     pop_secret_hex: String,
@@ -6994,8 +6932,6 @@ const UI_WARN_TEXT: u32 = 0xffb384;
 const ENCRYPTED_SESSION_ENVELOPE_VERSION: u32 = 1;
 const ENCRYPTED_SESSION_ALG: &str = "chacha20poly1305";
 const SESSION_PASSPHRASE_ENV: &str = "CITYG_GUI_SESSION_PASSPHRASE";
-const KBROAD_SECRET_ENV: &str = "CITYG_GUI_KBROAD_SECRET_HEX";
-const KBROAD_PUBLIC_ENV: &str = "CITYG_GUI_KBROAD_PUBLIC_HEX";
 const BARRIER_HP_MODE: &str = "barrier-sealed-v1";
 const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
 const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
@@ -7399,7 +7335,6 @@ impl PersistedSession {
             fs_policy_version: session.fs_policy_version.clone(),
             fs_epoch_base_ts: session.fs_epoch_base_ts,
             kbroad_public_hex: hex_encode(&session.kbroad_public),
-            kbroad_secret_hex: hex_encode(&session.kbroad_secret),
             bootstrap_public_hex: hex_encode(&session.bootstrap_public),
             pop_public_hex: hex_encode(&session.pop_public_key),
             pop_secret_hex: hex_encode(&session.pop_secret_key),
@@ -7457,7 +7392,6 @@ impl PersistedSession {
             fs_policy_version,
             fs_epoch_base_ts,
             kbroad_public_hex,
-            kbroad_secret_hex,
             bootstrap_public_hex,
             pop_public_hex,
             pop_secret_hex,
@@ -7507,7 +7441,6 @@ impl PersistedSession {
         let epoch_key = decode_hex32("epoch_key_hex", &epoch_key_hex)?;
 
         let kbroad_public = decode_hex_vec("kbroad_public_hex", &kbroad_public_hex)?;
-        let kbroad_secret = decode_hex_vec("kbroad_secret_hex", &kbroad_secret_hex)?;
         let bootstrap_public = decode_hex_vec("bootstrap_public_hex", &bootstrap_public_hex)?;
         let pop_public_key = decode_hex_vec("pop_public_hex", &pop_public_hex)?;
         let pop_secret_key = decode_hex_vec("pop_secret_hex", &pop_secret_hex)?;
@@ -7583,7 +7516,6 @@ impl PersistedSession {
             vrf_secret_key,
             vrf_public_key,
             kbroad_public,
-            kbroad_secret,
             bootstrap_public,
             proof_mode,
             vrf_id,
@@ -8550,8 +8482,6 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         server_url,
         room_id,
         alias,
-        invite_kbroad_public,
-        invite_kbroad_secret,
     } = params;
 
     if server_url.is_empty() {
@@ -8596,15 +8526,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         })
     };
 
-    let configured_kbroad_public = match invite_kbroad_public {
-        Some(public) => Some(public),
-        None => configured_kbroad_public_from_env()?,
-    };
-    let configured_kbroad_secret = match invite_kbroad_secret {
-        Some(secret) => Some(secret),
-        None => configured_kbroad_secret_from_env()?,
-    };
-    let mut generated_kbroad_keypair: Option<(Vec<u8>, Vec<u8>)> = None;
+    let mut generated_kbroad_public: Option<Vec<u8>> = None;
     let mut bootstrap_attempted = false;
     let mut retry_attempt = 0u32;
 
@@ -8627,24 +8549,12 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
                     && !bootstrap_attempted
                 {
                     bootstrap_attempted = true;
-
-                    let provisioning_public = if let Some(public) =
-                        configured_kbroad_public.as_ref()
+                    let provisioning_public = if let Some(public) = generated_kbroad_public.as_ref()
                     {
                         public.clone()
-                    } else if let Some((public, _)) = generated_kbroad_keypair.as_ref() {
-                        public.clone()
                     } else {
-                        if configured_kbroad_secret.is_some() {
-                            return Err(anyhow!(
-                                "{} is set but {} is missing; cannot bootstrap an unprovisioned room",
-                                KBROAD_SECRET_ENV,
-                                KBROAD_PUBLIC_ENV
-                            ));
-                        }
-                        let pair = generate_kbroad_keypair();
-                        let public = pair.0.clone();
-                        generated_kbroad_keypair = Some(pair);
+                        let public = generate_kbroad_keypair().0;
+                        generated_kbroad_public = Some(public.clone());
                         public
                     };
 
@@ -8681,17 +8591,12 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
                     continue;
                 }
 
-                let mut detail = describe_http_failure(
+                let detail = describe_http_failure(
                     status.as_str(),
                     &message,
                     freeze_code,
                     freeze_reason.as_deref(),
                 );
-                if status.is_server_error() && message.contains("kbroad key missing") {
-                    detail.push_str(
-                        " (room is not KBROAD-provisioned; set CITYG_GUI_KBROAD_PUBLIC_HEX or allow local key generation)",
-                    );
-                }
                 return Err(anyhow!(detail));
             }
             Err(err) => return Err(err.into()),
@@ -8711,25 +8616,6 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         return Err(anyhow!("server returned empty KBROAD public key"));
     } else {
         ticket.kbroad_public.clone()
-    };
-    if let Some(expected_public) = configured_kbroad_public.as_ref()
-        && expected_public != &kbroad_public
-    {
-        return Err(anyhow!(
-            "{} does not match server room key for this room",
-            KBROAD_PUBLIC_ENV
-        ));
-    }
-    let kbroad_secret = if let Some(secret) = configured_kbroad_secret {
-        secret
-    } else if let Some((generated_public, generated_secret)) = generated_kbroad_keypair.as_ref() {
-        if generated_public == &kbroad_public {
-            generated_secret.clone()
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
     };
     let bootstrap_public = ticket.bootstrap_public.clone();
 
@@ -8935,7 +8821,6 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         vrf_secret_key,
         vrf_public_key,
         kbroad_public,
-        kbroad_secret,
         bootstrap_public,
         proof_mode,
         vrf_id,
@@ -9148,7 +9033,6 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
         room_id,
         gid,
         leaf_id,
-        kbroad_secret: _kbroad_secret,
         mut forward_state,
         pop_public_key,
         pop_secret_key,
@@ -9538,7 +9422,6 @@ async fn perform_barrier_merge_inner(
         room_id,
         gid,
         leaf_id,
-        kbroad_secret,
         mut forward_state,
         pop_public_key,
         pop_secret_key,
@@ -9866,20 +9749,9 @@ async fn perform_barrier_merge_inner(
                 .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
                 .context(format!("rebind merge HP envelope for {}", mode.label()))?;
         }
-    } else if !kbroad_secret.is_empty() {
-        bundle.hp_binding.hp_commit = pivot.hp_commit;
-        bundle
-            .header_map
-            .insert(hdr::HDR_HP_COMMIT, Value::Bytes(pivot.hp_commit.to_vec()));
-        bundle
-            .rebind_merge_hp_envelope_from_pivot(pivot, kbroad_secret.as_slice())
-            .context(format!(
-                "rebind merge HP envelope from pivot for {}",
-                mode.label()
-            ))?;
     } else {
         return Err(anyhow!(
-            "{} merge bundle missing local HP material and room KBROAD secret",
+            "{} merge bundle missing local HP material",
             mode.label()
         ));
     }
@@ -10509,15 +10381,6 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
         ));
     }
 
-    let mut active_kbroad_secret = if session.kbroad_secret.is_empty() {
-        None
-    } else {
-        Some(session.kbroad_secret.clone())
-    };
-    if active_kbroad_secret.is_none() {
-        active_kbroad_secret = configured_kbroad_secret_from_env()?;
-    }
-
     let defer_epoch_derivation = uses_barrier_hp_envelope && has_barrier_update;
     let mut derived_epoch_key = None;
     if !defer_epoch_derivation {
@@ -10525,24 +10388,10 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
             bundle
                 .derive_epoch_secrets_with_barrier_key(&session.barrier_state.k_barrier)
                 .context("failed to derive epoch key during sync from barrier state")?
-        } else if let Some(kbroad_secret) = active_kbroad_secret.as_ref() {
-            bundle
-                .derive_epoch_secrets_with_kbroad_secret(kbroad_secret.as_slice())
-                .context("failed to derive epoch key during sync")?
         } else {
-            bundle.derive_epoch_secrets().map_err(|err| {
-                if err
-                    .to_string()
-                    .contains("bundle missing local hp key; use derive_epoch_secrets_with_kbroad_secret")
-                {
-                    anyhow!(
-                        "failed to derive epoch key during sync: bundle is redacted; provide room KBROAD secret via {}",
-                        KBROAD_SECRET_ENV
-                    )
-                } else {
-                    anyhow!("failed to derive epoch key during sync: {err}")
-                }
-            })?
+            bundle
+                .derive_epoch_secrets()
+                .map_err(|err| anyhow!("failed to derive epoch key during sync: {err}"))?
         };
         derived_epoch_key = Some(epoch_key);
     }
@@ -10587,9 +10436,6 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
     }
     if let Some(Value::Bytes(kbroad_pub)) = bundle.header_map.get(&hdr::HDR_KBROAD_PUB) {
         session.kbroad_public = kbroad_pub.clone();
-    }
-    if let Some(secret) = active_kbroad_secret {
-        session.kbroad_secret = secret;
     }
 
     let accepted_digest = extract_barrier_update_digest(&bundle.header_map)?;
@@ -10922,6 +10768,7 @@ fn decode_hex_32(input: &str) -> Option<[u8; 32]> {
     Some(result)
 }
 
+#[cfg(test)]
 fn configured_hex_from_env(var_name: &str) -> Result<Option<Vec<u8>>> {
     let raw = match std::env::var(var_name) {
         Ok(value) => value,
@@ -10945,14 +10792,6 @@ fn configured_hex_from_env(var_name: &str) -> Result<Option<Vec<u8>>> {
     let bytes =
         hex_decode(normalized).with_context(|| format!("{var_name} must contain hex bytes"))?;
     Ok(Some(bytes))
-}
-
-fn configured_kbroad_secret_from_env() -> Result<Option<Vec<u8>>> {
-    configured_hex_from_env(KBROAD_SECRET_ENV)
-}
-
-fn configured_kbroad_public_from_env() -> Result<Option<Vec<u8>>> {
-    configured_hex_from_env(KBROAD_PUBLIC_ENV)
 }
 
 fn generate_kbroad_keypair() -> (Vec<u8>, Vec<u8>) {
@@ -11424,7 +11263,6 @@ mod tests {
             vrf_secret_key: random_vec(32),
             vrf_public_key: random_vec(32),
             kbroad_public: random_vec(24),
-            kbroad_secret: random_vec(32),
             bootstrap_public: random_vec(24),
             proof_mode: "lin+zkvrf".to_string(),
             vrf_id: "vrf-demo".to_string(),
@@ -12605,44 +12443,6 @@ mod tests {
                 None => {
                     // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
                     unsafe { std::env::remove_var(SESSION_PASSPHRASE_ENV) };
-                }
-            }
-        }
-    }
-
-    struct KbroadEnvVarRestore {
-        original: Option<String>,
-    }
-
-    impl Drop for KbroadEnvVarRestore {
-        fn drop(&mut self) {
-            match self.original.as_deref() {
-                Some(value) => {
-                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-                    unsafe { std::env::set_var(KBROAD_SECRET_ENV, value) };
-                }
-                None => {
-                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-                    unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
-                }
-            }
-        }
-    }
-
-    struct KbroadPublicEnvVarRestore {
-        original: Option<String>,
-    }
-
-    impl Drop for KbroadPublicEnvVarRestore {
-        fn drop(&mut self) {
-            match self.original.as_deref() {
-                Some(value) => {
-                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-                    unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, value) };
-                }
-                None => {
-                    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-                    unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
                 }
             }
         }
@@ -13833,45 +13633,6 @@ mod tests {
     }
 
     #[test]
-    fn configured_kbroad_secret_env_parses_prefixed_hex() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let _env_lock = ENV_VAR_LOCK
-            .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_SECRET_ENV, " 0x0a0B0c ") };
-
-        let parsed = configured_kbroad_secret_from_env()?
-            .ok_or_else(|| anyhow!("expected configured secret bytes"))?;
-        assert_eq!(parsed, vec![0x0a, 0x0b, 0x0c]);
-        Ok(())
-    }
-
-    #[test]
-    fn configured_kbroad_secret_env_rejects_bad_hex() -> Result<(), Box<dyn std::error::Error>> {
-        let _env_lock = ENV_VAR_LOCK
-            .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_SECRET_ENV, "not-hex") };
-
-        let err = configured_kbroad_secret_from_env().expect_err("invalid hex should fail");
-        assert!(
-            err.to_string().contains(KBROAD_SECRET_ENV),
-            "error should reference env var: {err}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn session_encryption_key_uses_local_key_file_when_env_missing()
     -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
@@ -14992,27 +14753,12 @@ mod tests {
     }
 
     #[test]
-    fn env_hex_parsing_and_kbroad_helper_paths() -> Result<(), Box<dyn std::error::Error>> {
+    fn env_hex_parsing_and_kgen_helper_paths() -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         let temp_var = "CITYG_GUI_TEST_HEX_ENV";
         let temp_original = std::env::var_os(temp_var);
-
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, " \n\t ") };
-        assert_eq!(configured_kbroad_public_from_env()?, None);
-
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, "0x") };
-        assert_eq!(configured_kbroad_public_from_env()?, None);
-
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, "0Xa1b2") };
-        assert_eq!(configured_kbroad_public_from_env()?, Some(vec![0xA1, 0xB2]));
 
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         unsafe { std::env::set_var(temp_var, "zz") };
@@ -15161,19 +14907,13 @@ mod tests {
             server: String::new(),
             room_id: String::new(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
             active: Some(ActiveField::Room),
         };
         form.apply_invite(parsed)?;
         assert_eq!(form.server, session.server_url);
         assert_eq!(form.room_id, session.room_id);
-        assert_eq!(form.invite_kbroad_public, None);
-        assert_eq!(form.invite_kbroad_secret, None);
 
-        let params = form.join_params();
-        assert_eq!(params.invite_kbroad_public, None);
-        assert_eq!(params.invite_kbroad_secret, None);
+        let _params = form.join_params();
         Ok(())
     }
 
@@ -15266,8 +15006,6 @@ mod tests {
             server: "http://127.0.0.1:18080".to_string(),
             room_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
             active: Some(ActiveField::Server),
         };
 
@@ -15458,8 +15196,6 @@ mod tests {
             server: " http://127.0.0.1:18080 ".to_string(),
             room_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
             alias: " alice ".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
             active: None,
         };
         let tab = Keystroke::parse("tab")?;
@@ -15966,7 +15702,6 @@ mod tests {
             vrf_secret_key: random_vec(32),
             vrf_public_key: random_vec(32),
             kbroad_public: random_vec(24),
-            kbroad_secret: random_vec(32),
             bootstrap_public: random_vec(24),
             proof_mode: "lin+zkvrf".to_string(),
             vrf_id: "vrf-demo".to_string(),
@@ -16091,7 +15826,6 @@ mod tests {
         assert_eq!(loaded.we_epoch_id, session.we_epoch_id);
         assert_eq!(loaded.epoch_key, session.epoch_key);
         assert_eq!(loaded.kbroad_public, session.kbroad_public);
-        assert_eq!(loaded.kbroad_secret, session.kbroad_secret);
         assert_eq!(loaded.bootstrap_public, session.bootstrap_public);
         assert_eq!(loaded.pop_public_key, session.pop_public_key);
         assert_eq!(loaded.pop_secret_key, session.pop_secret_key);
@@ -16285,17 +16019,7 @@ mod tests {
     async fn epoch_sync_adopts_new_member_head() -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+            .map_err(|_| anyhow!("env var lock poisoned"))?; // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -16309,8 +16033,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -16318,8 +16040,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         bob.barrier_state.barrier_recovery_pending = false;
@@ -16346,16 +16066,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -16369,8 +16081,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         let sync = perform_epoch_sync(alice.clone()).await?;
@@ -16399,17 +16109,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+            .map_err(|_| anyhow!("env var lock poisoned"))?; // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
 
         let temp_dir = TempDir::new()?;
         let base = temp_dir.path().join("cityg").join("gui");
@@ -16427,8 +16127,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -16438,7 +16136,6 @@ mod tests {
 
         let mut pending_alice = load_session_at(&alice.server_url, &alice.room_id)?
             .ok_or_else(|| anyhow!("expected persisted alice session after pcs refresh"))?;
-        pending_alice.kbroad_secret = demo::kbroad_secret().to_vec();
         let pending_state = pending_alice
             .barrier_state
             .pending
@@ -16548,16 +16245,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -16573,8 +16262,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -16582,8 +16269,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         bob.barrier_state.barrier_recovery_pending = false;
@@ -16642,17 +16327,7 @@ mod tests {
     async fn send_fetch_and_members_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+            .map_err(|_| anyhow!("env var lock poisoned"))?; // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -16666,8 +16341,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -16675,8 +16348,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         bob.barrier_state.barrier_recovery_pending = false;
@@ -16823,17 +16494,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+            .map_err(|_| anyhow!("env var lock poisoned"))?; // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
 
         let temp_dir = TempDir::new()?;
         let base = temp_dir.path().join("cityg").join("gui");
@@ -16850,8 +16511,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id,
             alias: "bench-sender".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -16992,16 +16651,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -17015,16 +16666,12 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         let mut bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -17068,16 +16715,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -17091,16 +16730,12 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         let mut bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -17142,16 +16777,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -17165,8 +16792,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -17174,8 +16799,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         assert_ne!(
@@ -17211,17 +16834,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+            .map_err(|_| anyhow!("env var lock poisoned"))?; // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -17235,16 +16848,12 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         let bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -17291,17 +16900,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
             .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
+            .map_err(|_| anyhow!("env var lock poisoned"))?; // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -17315,8 +16914,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -17324,8 +16921,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -17354,16 +16949,8 @@ mod tests {
         let temp_dir = TempDir::new().expect("create temp dir");
         let base = temp_dir.path().join("cityg").join("gui");
         let _override_guard = set_config_dir_override_for_tests(Some(base));
-        let _restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -17372,24 +16959,19 @@ mod tests {
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x7Du8; 32]);
 
-        let mut alice = perform_join(JoinParams {
+        let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         let _bob = perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
 
-        alice.kbroad_secret.clear();
         assert!(
             !perform_epoch_sync(alice)
                 .await?
@@ -17410,16 +16992,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
@@ -17435,8 +17009,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -17455,16 +17027,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
@@ -17480,8 +17044,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "barrier-keys".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
 
@@ -17542,16 +17104,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
@@ -17564,17 +17118,11 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
             !session.kbroad_public.is_empty(),
             "auto-bootstrap join should persist room KBROAD public key"
-        );
-        assert!(
-            !session.kbroad_secret.is_empty(),
-            "auto-bootstrap join should persist generated KBROAD secret"
         );
         assert!(
             !session.barrier_state.barrier_recovery_pending,
@@ -17600,16 +17148,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
@@ -17622,8 +17162,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id,
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -17649,16 +17187,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
@@ -17671,8 +17201,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -17731,16 +17259,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
@@ -17753,8 +17273,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -17766,8 +17284,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -17801,16 +17317,8 @@ mod tests {
         let temp_dir = TempDir::new().expect("create temp dir");
         let alice_base = temp_dir.path().join("cityg").join("gui-alice");
         let bob_base = temp_dir.path().join("cityg").join("gui-bob");
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_with_seed_demo_room(port, false).await;
@@ -17825,8 +17333,6 @@ mod tests {
                 server_url: server_url.clone(),
                 room_id: room_id.clone(),
                 alias: "alice".to_string(),
-                invite_kbroad_public: None,
-                invite_kbroad_secret: None,
             })
             .await?
         };
@@ -17838,8 +17344,6 @@ mod tests {
                 server_url: server_url.clone(),
                 room_id: room_id.clone(),
                 alias: "bob".to_string(),
-                invite_kbroad_public: None,
-                invite_kbroad_secret: None,
             })
             .await?
         };
@@ -17866,151 +17370,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn perform_join_bootstraps_with_configured_kbroad_material()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let _env_lock = ENV_VAR_LOCK
-            .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, hex_encode(demo::kbroad_public())) };
-
-        let port = next_test_port();
-        let handle = spawn_server_with_seed_demo_room(port, false).await;
-        sleep(Duration::from_millis(250)).await;
-
-        let server_url = format!("http://127.0.0.1:{port}");
-        let room_id = hex_encode([0x8Du8; 32]);
-        let session = perform_join(JoinParams {
-            server_url: server_url.clone(),
-            room_id,
-            alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
-        })
-        .await?;
-        assert_eq!(
-            session.kbroad_public,
-            demo::kbroad_public(),
-            "configured KBROAD public should match room key"
-        );
-        assert_eq!(
-            session.kbroad_secret,
-            demo::kbroad_secret(),
-            "configured KBROAD secret should be persisted in session"
-        );
-
-        handle.abort();
-        let _ = handle.await;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn perform_join_errors_when_kbroad_secret_set_without_public_on_unprovisioned_room()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let _env_lock = ENV_VAR_LOCK
-            .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_SECRET_ENV, hex_encode(demo::kbroad_secret())) };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
-
-        let port = next_test_port();
-        let handle = spawn_server_with_seed_demo_room(port, false).await;
-        sleep(Duration::from_millis(250)).await;
-
-        let server_url = format!("http://127.0.0.1:{port}");
-        let room_id = hex_encode([0x8Au8; 32]);
-        let err = match perform_join(JoinParams {
-            server_url: server_url.clone(),
-            room_id,
-            alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
-        })
-        .await
-        {
-            Ok(_) => return Err(anyhow!("join should fail when only KBROAD secret is set").into()),
-            Err(err) => err,
-        };
-        let err_text = err.to_string();
-        assert!(
-            err_text.contains(KBROAD_SECRET_ENV) && err_text.contains(KBROAD_PUBLIC_ENV),
-            "error should explain missing paired KBROAD public env var: {err_text}"
-        );
-
-        handle.abort();
-        let _ = handle.await;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn perform_join_rejects_configured_kbroad_public_that_does_not_match_room()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let _env_lock = ENV_VAR_LOCK
-            .lock()
-            .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
-        // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::set_var(KBROAD_PUBLIC_ENV, hex_encode(vec![0xEE; 1184])) };
-
-        let port = next_test_port();
-        let handle = spawn_server_with_seed_demo_room(port, false).await;
-        sleep(Duration::from_millis(250)).await;
-
-        let server_url = format!("http://127.0.0.1:{port}");
-        let room_id = hex_encode([0x8Bu8; 32]);
-        new_api_client(&server_url)
-            .bootstrap_room(&room_id, demo::kbroad_public())
-            .await?;
-
-        let err = match perform_join(JoinParams {
-            server_url: server_url.clone(),
-            room_id,
-            alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
-        })
-        .await
-        {
-            Ok(_) => {
-                return Err(anyhow!("join should fail when KBROAD public does not match").into());
-            }
-            Err(err) => err,
-        };
-        let err_text = err.to_string();
-        assert!(
-            err_text.contains(KBROAD_PUBLIC_ENV) && err_text.contains("does not match"),
-            "error should report KBROAD public mismatch: {err_text}"
-        );
-
-        handle.abort();
-        let _ = handle.await;
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn perform_join_existing_room_can_self_finalize_without_room_secret()
     -> Result<(), Box<dyn std::error::Error>> {
         let _env_lock = ENV_VAR_LOCK
@@ -18019,16 +17378,8 @@ mod tests {
         let temp_dir = TempDir::new().expect("create temp dir");
         let base = temp_dir.path().join("cityg").join("gui");
         let _override_guard = set_config_dir_override_for_tests(Some(base));
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -18041,8 +17392,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -18054,8 +17403,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id,
             alias: "bob".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         assert!(
@@ -18078,16 +17425,8 @@ mod tests {
         let _env_lock = ENV_VAR_LOCK
             .lock()
             .map_err(|_| anyhow!("env var lock poisoned"))?;
-        let _secret_restore = KbroadEnvVarRestore {
-            original: std::env::var(KBROAD_SECRET_ENV).ok(),
-        };
-        let _public_restore = KbroadPublicEnvVarRestore {
-            original: std::env::var(KBROAD_PUBLIC_ENV).ok(),
-        };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_SECRET_ENV) };
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-        unsafe { std::env::remove_var(KBROAD_PUBLIC_ENV) };
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -18101,8 +17440,6 @@ mod tests {
             server_url: server_url.clone(),
             room_id: room_id.clone(),
             alias: "alice".to_string(),
-            invite_kbroad_public: None,
-            invite_kbroad_secret: None,
         })
         .await?;
         alice.barrier_state.barrier_recovery_pending = false;
@@ -19096,7 +18433,6 @@ mod tests {
         Ok(())
     }
 
-
     #[test]
     fn categorize_error_403_forbidden() -> Result<(), Box<dyn std::error::Error>> {
         let err = anyhow!("403 forbidden");
@@ -19553,7 +18889,6 @@ mod tests {
             vrf_secret_key: random_vec(32),
             vrf_public_key: random_vec(32),
             kbroad_public: random_vec(24),
-            kbroad_secret: random_vec(32),
             bootstrap_public: random_vec(24),
             proof_mode: "lin+zkvrf".to_string(),
             vrf_id: "vrf-demo".to_string(),

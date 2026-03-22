@@ -1,0 +1,168 @@
+{
+  "profile_version": "v0.1.4",
+  "kind": "s14-conformance-manifest",
+  "notes": [
+    "This manifest links S14 normative requirements to deterministic implementation tests for profile v0.1.4.",
+    "Requirement IDs follow docs/specs.md section S14."
+  ],
+  "requirements": [
+    {
+      "id": "S14.1",
+      "title": "new_public_keys exact ExpectedNodeSet + ordering",
+      "coverage": [
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::barrier::tests::parse_barrier_update_accepts_valid_shape",
+          "expectation": "accept"
+        },
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::barrier::tests::parse_barrier_update_rejects_new_public_keys_contract_violation",
+          "expectation": "reject_9607"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::validate_barrier_update_accepts_expected_pairs_and_pkhash_binding",
+          "expectation": "accept"
+        }
+      ]
+    },
+    {
+      "id": "S14.2",
+      "title": "FULL client ek_n mismatch detection",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::try_recover_barrier_from_header_rejects_new_public_key_mismatch",
+          "expectation": "reject_9607"
+        }
+      ]
+    },
+    {
+      "id": "S14.3",
+      "title": "recover AAD uses pkhash_t",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::try_recover_barrier_from_header_recovers_key_and_pcs_reseed",
+          "expectation": "accept"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad",
+          "expectation": "reject_9607"
+        }
+      ]
+    },
+    {
+      "id": "S14.4",
+      "title": "updater activation stores pkhash_n",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_barrier_activation_applies_on_digest_match",
+          "expectation": "accept"
+        }
+      ]
+    },
+    {
+      "id": "S14.5",
+      "title": "proactive PCS refresh gating and rate-limit",
+      "coverage": [
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::tests::proactive_pcs_refresh_gating_accepts_valid_merge",
+          "expectation": "accept"
+        },
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::tests::proactive_pcs_refresh_gating_enforces_rate_limits",
+          "expectation": "reject_96012"
+        },
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::tests::proactive_pcs_refresh_gating_enforces_device_rate_limit",
+          "expectation": "reject_96012"
+        },
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::tests::revocation_change_requires_barrier_update_even_for_merge",
+          "expectation": "reject_96013"
+        }
+      ]
+    },
+    {
+      "id": "S14.6",
+      "title": "PCS reseed consistency and crash-safe activation",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::try_recover_barrier_from_header_recovers_key_and_pcs_reseed",
+          "expectation": "accept"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_barrier_activation_applies_on_digest_match",
+          "expectation": "accept"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_barrier_history_activation_succeeds_even_when_current_version_is_newer",
+          "expectation": "accept_restart_history_activation"
+        }
+      ]
+    },
+    {
+      "id": "S14.7",
+      "title": "join_finalize gating, activation, and no-K_fs-reseed",
+      "coverage": [
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::tests::join_finalize_gating_accepts_valid_merge_without_rate_limit",
+          "expectation": "accept"
+        },
+        {
+          "crate": "msphf-orchestrator",
+          "test": "accept::tests::join_finalize_commit_does_not_touch_refresh_markers",
+          "expectation": "accept_no_kfs_reseed"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::validate_barrier_update_rejects_join_finalize_reason_for_non_joiner",
+          "expectation": "reject_9605"
+        },
+        {
+          "crate": "cityg-server",
+          "test": "tests::validate_barrier_update_rejects_pcs_refresh_reason_for_unresolved_joiner",
+          "expectation": "reject_9605"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs",
+          "expectation": "accept_no_kfs_reseed"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::perform_join_second_member_can_send_immediately",
+          "expectation": "accept_message_ready"
+        }
+      ]
+    },
+    {
+      "id": "S14.8",
+      "title": "join_finalize race / loss behavior",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_join_finalize_activation_does_not_activate_on_digest_match_with_newer_observed_version",
+          "expectation": "reject_false_activation"
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "native::tests::pending_join_finalize_history_lookup_discards_after_newer_version_404",
+          "expectation": "accept_history_non_acceptance_discard"
+        }
+      ]
+    }
+  ]
+}

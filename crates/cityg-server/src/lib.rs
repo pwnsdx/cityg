@@ -3340,26 +3340,28 @@ mod tests {
             .collect::<Vec<_>>();
         let previous_hash = compute_barrier_tree_hash(group.n_max, previous_entries.as_slice())?;
         let mut current_entries = previous_entries.clone();
-        let target = if let Some(target) = current_entries.iter_mut().find(|entry| !entry.is_empty())
-        {
-            target
-        } else {
-            let record = group
-                .join_history
-                .iter()
-                .rev()
-                .find(|record| !record.ek_leaf.is_empty())
-                .ok_or(CityGError::InvalidInput("barrier tree missing populated leaf"))?;
-            let leaf_base = usize::try_from(group.n_max.max(1))
-                .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?
-                .saturating_sub(1);
-            let leaf_node = leaf_base.saturating_add(record.leaf_index as usize);
-            let slot = current_entries
-                .get_mut(leaf_node)
-                .ok_or(CityGError::InvalidInput("barrier leaf index out of bounds"))?;
-            *slot = record.ek_leaf.clone();
-            slot
-        };
+        let target =
+            if let Some(target) = current_entries.iter_mut().find(|entry| !entry.is_empty()) {
+                target
+            } else {
+                let record = group
+                    .join_history
+                    .iter()
+                    .rev()
+                    .find(|record| !record.ek_leaf.is_empty())
+                    .ok_or(CityGError::InvalidInput(
+                        "barrier tree missing populated leaf",
+                    ))?;
+                let leaf_base = usize::try_from(group.n_max.max(1))
+                    .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?
+                    .saturating_sub(1);
+                let leaf_node = leaf_base.saturating_add(record.leaf_index as usize);
+                let slot = current_entries
+                    .get_mut(leaf_node)
+                    .ok_or(CityGError::InvalidInput("barrier leaf index out of bounds"))?;
+                *slot = record.ek_leaf.clone();
+                slot
+            };
         target[0] ^= marker.max(1);
         let current_hash = compute_barrier_tree_hash(group.n_max, current_entries.as_slice())?;
         if current_hash == previous_hash {
@@ -3757,8 +3759,7 @@ mod tests {
 
         assert_eq!(reason, 2, "first post-join merge should be join_finalize");
         assert_eq!(
-            header_hp_commit,
-            bundle.hp_binding.hp_commit,
+            header_hp_commit, bundle.hp_binding.hp_commit,
             "join_finalize bundle must remain self-consistent on hp_commit before acceptance"
         );
         Ok(())
@@ -6867,14 +6868,14 @@ mod tests {
                 .ctx
                 .device_chain_get(gid.as_slice(), expected_pop_pk.as_slice())
                 .cloned()
-                .ok_or(CityGError::InvalidInput("missing device state after genesis accept"))?;
+                .ok_or(CityGError::InvalidInput(
+                    "missing device state after genesis accept",
+                ))?;
             expected_refresh_ec = existing_device_state.last_ec.saturating_add(1);
             {
-                let group = server
-                    .roster
-                    .groups
-                    .get_mut(gid.as_slice())
-                    .ok_or(CityGError::InvalidInput("missing roster group after genesis accept"))?;
+                let group = server.roster.groups.get_mut(gid.as_slice()).ok_or(
+                    CityGError::InvalidInput("missing roster group after genesis accept"),
+                )?;
                 group.last_pcs_refresh_ec = Some(expected_refresh_ec);
             }
             {
