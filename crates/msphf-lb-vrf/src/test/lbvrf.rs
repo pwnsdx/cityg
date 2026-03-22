@@ -4,7 +4,7 @@ use crate::lbvrf::*;
 use crate::param::*;
 use crate::poly::PolyArith;
 use crate::poly256::Poly256;
-use crate::rand::RngCore;
+use crate::rand::Rng;
 use crate::serde::Serdes;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 #[test]
@@ -30,7 +30,7 @@ fn test_hash_to_challenge() {
 #[test]
 fn test_lbvrf() -> Result<(), Box<dyn std::error::Error>> {
     let seed = [0u8; 32];
-    // let mut rng = rand::thread_rng();
+    // let mut rng = rand::rng();
     // let param = Param::init(&mut rng);
 
     let param: Param = <LBVRF as VRF>::paramgen(seed)?;
@@ -56,7 +56,7 @@ fn test_lbvrf() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_rs() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut pp_seed = [0u8; 32];
     let mut key_seed = [0u8; 32];
     let mut vrf_seed = [0u8; 32];
@@ -112,6 +112,22 @@ fn check_norm_rejects_out_of_range_coefficients() {
         if let Error::NormViolation { poly, coeff } = err {
             assert_eq!(poly, 3);
             assert_eq!(coeff, 42);
+        }
+    }
+}
+
+#[test]
+fn check_norm_rejects_i64_min_coefficients() {
+    let mut z = [Poly256::zero(); 9];
+    z[4].coeff[17] = i64::MIN;
+
+    let result = check_norm(&z);
+    assert!(result.is_err(), "expected norm violation");
+    if let Err(err) = result {
+        assert!(matches!(err, Error::NormViolation { .. }));
+        if let Error::NormViolation { poly, coeff } = err {
+            assert_eq!(poly, 4);
+            assert_eq!(coeff, 17);
         }
     }
 }

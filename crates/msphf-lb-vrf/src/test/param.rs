@@ -2,19 +2,19 @@ use crate::VRF;
 use crate::lbvrf::LBVRF;
 use crate::param::Param;
 use crate::serde::Serdes;
-use rand::RngCore;
+use rand::Rng;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 
 #[test]
 fn test_param() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let _param = Param::init(&mut rng).ok();
 }
 
 #[test]
 fn test_serdes_param() -> Result<(), Box<dyn std::error::Error>> {
     let seed = [0u8; 32];
-    // let mut rng = rand::thread_rng();
+    // let mut rng = rand::rng();
     // let param = Param::init(&mut rng);
 
     let param: Param = <LBVRF as VRF>::paramgen(seed)?;

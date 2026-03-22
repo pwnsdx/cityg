@@ -1,4 +1,4 @@
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 
 // #[derive(Clone, Debug)]
 // pub struct Poly32 {
@@ -49,18 +49,18 @@ pub trait PolyArith {
     fn zero() -> Self;
 
     // random polynomials modulo Q
-    fn uniform_random<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Self;
+    fn uniform_random<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Self;
 
     // random polynomials modulus beta
-    fn rand_mod_beta<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Self;
+    fn rand_mod_beta<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Self;
 
-    fn rand_trinary<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Self;
+    fn rand_trinary<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Self;
 }
 
 #[cfg(test)]
 mod tests {
     use super::PolyArith;
-    use rand::{RngCore, SeedableRng, rngs::StdRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct DummyPoly(i64);
@@ -104,15 +104,15 @@ mod tests {
             Self(0)
         }
 
-        fn uniform_random<R: RngCore + rand::CryptoRng + ?Sized>(rng: &mut R) -> Self {
+        fn uniform_random<R: Rng + rand::CryptoRng + ?Sized>(rng: &mut R) -> Self {
             Self((rng.next_u64() % Self::MODULUS as u64) as i64)
         }
 
-        fn rand_mod_beta<R: RngCore + rand::CryptoRng + ?Sized>(rng: &mut R) -> Self {
+        fn rand_mod_beta<R: Rng + rand::CryptoRng + ?Sized>(rng: &mut R) -> Self {
             Self((rng.next_u64() % 5) as i64 - 2)
         }
 
-        fn rand_trinary<R: RngCore + rand::CryptoRng + ?Sized>(rng: &mut R) -> Self {
+        fn rand_trinary<R: Rng + rand::CryptoRng + ?Sized>(rng: &mut R) -> Self {
             match rng.next_u32() % 3 {
                 0 => Self(-1),
                 1 => Self(0),

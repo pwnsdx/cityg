@@ -3,7 +3,7 @@
 use crate::param::{BETA, BETA_M2_P1, P, R, R_BASE};
 use crate::poly::PolyArith;
 use crate::poly256::Poly256;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 use std::convert::From;
 use subtle::Choice;
 use zeroize::Zeroize;
@@ -105,7 +105,7 @@ impl PolyArith for Poly32 {
         }
     }
     // random polynomials modulo Q
-    fn uniform_random<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Self {
+    fn uniform_random<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut coeff = [0i64; Self::DEGREE];
         let modulus = Self::MODULUS as u64;
         for e in coeff.iter_mut() {
@@ -117,7 +117,7 @@ impl PolyArith for Poly32 {
     }
 
     // random polynomials modulus beta
-    fn rand_mod_beta<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Self {
+    fn rand_mod_beta<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut coeff = [0i64; Self::DEGREE];
         let range = BETA_M2_P1 as u64;
         for e in coeff.iter_mut() {
@@ -128,7 +128,7 @@ impl PolyArith for Poly32 {
         Poly32 { coeff }
     }
 
-    fn rand_trinary<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Self {
+    fn rand_trinary<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut coeff = [0i64; Self::DEGREE];
         for e in coeff.iter_mut() {
             let tmp = rng.next_u32() as u64;

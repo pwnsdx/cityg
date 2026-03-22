@@ -6,7 +6,7 @@ use msphf_lb_vrf::lbvrf::LBVRF;
 use msphf_lb_vrf::param::Param;
 use msphf_lb_vrf::poly::PolyArith;
 use msphf_lb_vrf::poly256::*;
-use rand::RngCore;
+use rand::Rng;
 use std::time::Duration;
 
 fn ot_lbvrf(c: &mut Criterion) {
@@ -14,7 +14,7 @@ fn ot_lbvrf(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(100);
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut seed = [0u8; 32];
 
     group.bench_function(BenchmarkId::new("paramgen", "chaos"), |b| {
@@ -76,7 +76,7 @@ fn trinary_poly(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(100);
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     group.bench_function(BenchmarkId::new("mul_trinary", "trinary"), |b| {
         b.iter(|| {

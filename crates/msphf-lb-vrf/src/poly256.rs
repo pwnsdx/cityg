@@ -3,7 +3,7 @@
 use crate::param::Q;
 use crate::param::{BETA, BETA_M2_P1};
 use crate::poly::PolyArith;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 use std::fmt;
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
@@ -114,7 +114,7 @@ impl PolyArith for Poly256 {
         }
     }
     // random polynomials modulo Q
-    fn uniform_random<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Self {
+    fn uniform_random<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut coeff = [0i64; Self::DEGREE];
         let modulus = Self::MODULUS as u64;
         for e in coeff.iter_mut() {
@@ -126,7 +126,7 @@ impl PolyArith for Poly256 {
     }
 
     // random polynomials modulus beta
-    fn rand_mod_beta<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Self {
+    fn rand_mod_beta<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut coeff = [0i64; Self::DEGREE];
         let range = BETA_M2_P1 as u64;
         for e in coeff.iter_mut() {
@@ -137,7 +137,7 @@ impl PolyArith for Poly256 {
         Poly256 { coeff }
     }
 
-    fn rand_trinary<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Self {
+    fn rand_trinary<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut coeff = [0i64; Self::DEGREE];
         for e in coeff.iter_mut() {
             let tmp = rng.next_u32() as u64;
@@ -256,7 +256,7 @@ pub(crate) fn school_book_without_reduction(a: &[i64], b: &[i64], c: &mut [i64],
 
 #[test]
 fn test_karatsuba() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut a = [0i64; 64];
     for e in a.iter_mut() {
         *e = rng.next_u32() as i64 % Q;
@@ -279,7 +279,7 @@ fn test_karatsuba() {
 
 #[test]
 fn test_mul_trinary() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let a = Poly256::uniform_random(&mut rng);
     let b = Poly256::rand_trinary(&mut rng);
     let mut c1 = Poly256::mul_trinary(&a, &b);

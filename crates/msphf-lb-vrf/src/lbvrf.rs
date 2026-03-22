@@ -9,7 +9,7 @@ use crate::poly32::poly32_inner_product;
 use crate::poly256::*;
 use crate::serde::Serdes;
 use blake3::Hasher as Blake3Hasher;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 use sha2::{Digest, Sha512};
 use subtle::{Choice, ConstantTimeEq};
@@ -119,18 +119,18 @@ impl VRF for LBVRF {
 }
 
 impl LBVRF {
-    pub fn paramgen_with_rng<R: RngCore + CryptoRng + ?Sized>(rng: &mut R) -> Result<Param> {
+    pub fn paramgen_with_rng<R: Rng + CryptoRng + ?Sized>(rng: &mut R) -> Result<Param> {
         Param::init(rng)
     }
 
-    pub fn keygen_with_rng<R: RngCore + CryptoRng + ?Sized>(
+    pub fn keygen_with_rng<R: Rng + CryptoRng + ?Sized>(
         rng: &mut R,
         pp: Param,
     ) -> Result<(crate::keypair::PublicKey, crate::keypair::SecretKey)> {
         Ok(keypair_from_rng(rng, pp))
     }
 
-    pub fn master_keygen_with_rng<R: RngCore + CryptoRng + ?Sized>(
+    pub fn master_keygen_with_rng<R: Rng + CryptoRng + ?Sized>(
         rng: &mut R,
     ) -> crate::keypair::MasterSecretKey {
         let mut seed = [0u8; 32];
@@ -155,7 +155,7 @@ pub fn derive_epoch_keypair(
     keypair_from_rng(&mut rng, *params)
 }
 
-fn keypair_from_rng<R: RngCore + CryptoRng + ?Sized>(
+fn keypair_from_rng<R: Rng + CryptoRng + ?Sized>(
     rng: &mut R,
     pp: Param,
 ) -> (crate::keypair::PublicKey, crate::keypair::SecretKey) {
@@ -240,9 +240,7 @@ pub(crate) fn check_norm(z: &[Poly256; 9]) -> Result<()> {
     let mut ok = Choice::from(1u8);
     for poly in z.iter() {
         for coeff in poly.coeff.iter() {
-            let value = *coeff;
-            let mask = value >> 63;
-            let abs = (value ^ mask) - mask;
+            let abs = coeff.saturating_abs();
             let within = Choice::from((abs <= BETA_M_KAPPA) as u8);
             ok &= within;
         }
@@ -252,9 +250,7 @@ pub(crate) fn check_norm(z: &[Poly256; 9]) -> Result<()> {
     }
     for (poly_idx, poly) in z.iter().enumerate() {
         for (coeff_idx, coeff) in poly.coeff.iter().enumerate() {
-            let value = *coeff;
-            let mask = value >> 63;
-            let abs = (value ^ mask) - mask;
+            let abs = coeff.saturating_abs();
             if abs > BETA_M_KAPPA {
                 return Err(Error::NormViolation {
                     poly: poly_idx,

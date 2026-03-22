@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::poly::PolyArith;
 use crate::poly256::Poly256;
 use crate::serde::Serdes;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 use sha2::{Digest, Sha512};
 use zeroize::Zeroize;
 /// P is the modulus for `B part`
@@ -66,7 +66,7 @@ pub struct Param {
 }
 
 impl Param {
-    pub fn init<R: RngCore + CryptoRng + ?Sized>(mut rng: &mut R) -> Result<Self> {
+    pub fn init<R: Rng + CryptoRng + ?Sized>(mut rng: &mut R) -> Result<Self> {
         let mut res = Self {
             matrix: [[Poly256::zero(); 9]; 4],
             digest: [0; 32],

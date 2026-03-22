@@ -9,7 +9,7 @@ use zeroize::Zeroize;
 
 #[test]
 fn test_rand_mod_p() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let a: Poly32 = PolyArith::uniform_random(&mut rng);
     for e in a.coeff.iter() {
         assert!(*e < Poly32::MODULUS, "coefficient greater than Q")
@@ -18,7 +18,7 @@ fn test_rand_mod_p() {
 
 #[test]
 fn test_poly32_mul() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // zero
     let a = Poly32::zero();
@@ -120,7 +120,7 @@ fn test_poly32_serdes() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(a, b);
 
     // random poly
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let a: Poly32 = PolyArith::uniform_random(&mut rng);
     let mut buf: Vec<u8> = vec![];
     assert!(a.serialize(&mut buf).is_ok());
@@ -133,7 +133,7 @@ fn test_poly32_serdes() -> Result<(), Box<dyn std::error::Error>> {
 fn test_karatsuba() {
     use crate::poly32::{karatsuba, school_book};
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // Test 100 random pairs to ensure correctness
     for _ in 0..100 {
@@ -194,7 +194,7 @@ fn test_from_poly256_matches_manual_fold() {
 
 #[test]
 fn test_wrapper_methods_and_zeroize() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let a = Poly32::uniform_random(&mut rng);
     let b = Poly32::rand_trinary(&mut rng);
 
@@ -265,7 +265,7 @@ fn test_normalized_centered_and_random_ranges() {
         assert_eq!(*after, expected, "centered mismatch at index {i}");
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let beta_poly = Poly32::rand_mod_beta(&mut rng);
     let beta_high = crate::param::BETA_M2_P1 as i64 - crate::param::BETA - 1;
     assert!(
@@ -294,7 +294,7 @@ fn bench_poly32_multiplication() {
     use crate::poly32::{karatsuba, school_book};
     use std::time::Instant;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let test_pairs: Vec<(Poly32, Poly32)> = (0..1000)
         .map(|_| {
             (

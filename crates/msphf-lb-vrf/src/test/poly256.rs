@@ -10,7 +10,7 @@ use std::convert::Into;
 
 #[test]
 fn test_rand_mod_q() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let a: Poly256 = PolyArith::uniform_random(&mut rng);
     for e in a.coeff.iter() {
         assert!(*e < Poly256::MODULUS, "coefficient greater than Q")
@@ -19,7 +19,7 @@ fn test_rand_mod_q() {
 
 #[test]
 fn test_rand_mod_beta() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let a: Poly256 = PolyArith::rand_mod_beta(&mut rng);
     for e in a.coeff.iter() {
         assert!(
@@ -31,7 +31,7 @@ fn test_rand_mod_beta() {
 
 #[test]
 fn test_rand_trinary() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let a: Poly256 = PolyArith::rand_trinary(&mut rng);
     for e in a.coeff.iter() {
         assert!(*e <= 1 && *e >= -1, "coefficient not trinary")
@@ -40,7 +40,7 @@ fn test_rand_trinary() {
 
 #[test]
 fn test_poly256_mul() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // zero
     let a = Poly256::zero();
@@ -154,7 +154,7 @@ fn test_poly256_serdes() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(a, b);
 
     // random poly
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let a: Poly256 = PolyArith::uniform_random(&mut rng);
     let mut buf: Vec<u8> = vec![];
     assert!(a.serialize(&mut buf).is_ok());

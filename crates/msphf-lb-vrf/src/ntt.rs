@@ -759,8 +759,8 @@ fn rearrange(a: &mut [i64; 256]) {
 
 #[test]
 fn test_ntt() {
-    use rand::RngCore;
-    let mut rng = rand::thread_rng();
+    use rand::Rng;
+    let mut rng = rand::rng();
     let mut a = [0i64; 256];
     for e in a.iter_mut() {
         *e = rng.next_u32() as i64 % Q;

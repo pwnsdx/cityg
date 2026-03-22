@@ -284,7 +284,7 @@ fn unpack_mod_p_poly<R: Read>(res: &mut Poly32, reader: &mut R) -> Result<()> {
 
 #[test]
 fn test_packing() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let p = Poly256::uniform_random(&mut rng);
     let mut v: Vec<u8> = vec![];
     pack_mod_q_poly(&p, &mut v)?;
