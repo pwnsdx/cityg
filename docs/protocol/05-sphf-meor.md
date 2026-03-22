@@ -620,6 +620,11 @@ BARRIER_HP_V1 := [
 ]
 ```
 
+Normative bounds:
+- `MAX_HP_BYTES = 16384`
+- `AEAD_TAG_LEN = 16`
+- `MAX_HP_ENVELOPE_BYTES = 16400`
+
 **Construction**:
 1. **Barrier-key derivation**:
    ```rust
@@ -639,12 +644,25 @@ BARRIER_HP_V1 := [
        plaintext = CBOR_det(MSPHF_HP)
    )
    ```
+3. **Exact KDF binding**:
+   ```rust
+   hp_salt := H_L("hp/barrier/salt", [barrier_version, xk_hash])
+   hp_info := "city-g|hp/barrier/v1" || hp_commit
+   HP_KEY := HKDF-BLAKE3(ikm = barrier_key, salt32 = hp_salt, info_bytes = hp_info, L = 32)
+   ```
 
 **Server validation** (blind):
 - Check envelope shape is `[tstr, bstr, tstr]`
 - Require `envelope[0] == "barrier-sealed-v1"`
+- Require `AEAD_TAG_LEN <= len(envelope[1]) <= MAX_HP_ENVELOPE_BYTES`
 - Require `envelope[2] == "chacha20-poly1305"`
 - **NEVER** derive the client HP key or AEAD-decrypt
+
+**Client rejection conditions**:
+- Reject if `barrier_version` is missing/malformed
+- Reject if AEAD open fails under the locally selected `barrier_key`
+- Reject if the recovered plaintext exceeds `MAX_HP_BYTES`
+- Reject if a valid ciphertext is transplanted into a different `(barrier_version, xk_hash, hp_commit)` context
 
 **Blueprint**: `v0.1.4` §3.4 / §12.3 (hp transport)
 

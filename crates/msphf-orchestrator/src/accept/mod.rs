@@ -43,7 +43,7 @@ use tracing::{debug, info};
 use crate::proofs::zk_vrf::{MaskDigest, VrfCtx, VrfProof, zk_vrf_impl};
 use crate::{
     AnchorInstanceParts, BARRIER_HP_MODE, CapssWitnessBundle, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
-    KBROAD_AEAD_SUITE, MERKLE_DS_ID, PivotParity, PivotParityStore, compute_proofs_commit_bytes,
+    HP_AEAD_SUITE, MERKLE_DS_ID, PivotParity, PivotParityStore, compute_proofs_commit_bytes,
     compute_window_id, derive_we_epoch_id,
     hdr::*,
     mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW, FreezeError, HeadRecord, MultiHeadWindow},
@@ -114,7 +114,7 @@ pub(crate) fn derive_srx_empty_root_sw(profile: &str) -> Result<[u8; 32], MsphfE
     h_l("srx/root_sw/empty", &SrxEmptyRootProfile(profile))
 }
 
-const KBROAD_HP_MAX_CIPHERTEXT_BYTES: usize = crate::MAX_HP_BYTES + crate::AEAD_TAG_LEN;
+const HP_MAX_CIPHERTEXT_BYTES: usize = crate::MAX_HP_BYTES + crate::AEAD_TAG_LEN;
 
 #[cfg(feature = "bench-fixtures")]
 mod bench {
@@ -2120,8 +2120,7 @@ pub(crate) fn validate_barrier_hp_envelope_bytes(bytes: &[u8]) -> Result<(), Acc
     }
     match &items[1] {
         Value::Bytes(bytes)
-            if bytes.len() >= crate::AEAD_TAG_LEN
-                && bytes.len() <= KBROAD_HP_MAX_CIPHERTEXT_BYTES => {}
+            if bytes.len() >= crate::AEAD_TAG_LEN && bytes.len() <= HP_MAX_CIPHERTEXT_BYTES => {}
         Value::Bytes(_) => {
             debug!("barrier hp envelope: ciphertext len mismatch");
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
@@ -2142,7 +2141,7 @@ pub(crate) fn validate_barrier_hp_envelope_bytes(bytes: &[u8]) -> Result<(), Acc
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     };
-    if aead != KBROAD_AEAD_SUITE {
+    if aead != HP_AEAD_SUITE {
         return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     }
     Ok(())
@@ -3005,7 +3004,7 @@ mod tests {
         ])
     }
 
-    fn valid_kbroad_envelope_value() -> Value {
+    fn valid_barrier_hp_envelope_value() -> Value {
         Value::Array(vec![
             Value::Text("barrier-sealed-v1".to_string()),
             Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
@@ -3465,7 +3464,7 @@ mod tests {
             Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_CBOR
         ));
 
-        let envelope_bytes = encode_value(&valid_kbroad_envelope_value());
+        let envelope_bytes = encode_value(&valid_barrier_hp_envelope_value());
         validate_barrier_hp_envelope_bytes(&envelope_bytes)?;
         assert!(matches!(
             validate_barrier_hp_envelope_bytes(&[0xFF]),
@@ -3523,6 +3522,34 @@ mod tests {
                 Err(AcceptanceError::Freeze(code)) if code == expected
             ));
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn validate_barrier_hp_envelope_rejects_legacy_mode_and_oversized_ciphertext()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let legacy_mode = Value::Array(vec![
+            Value::Text("kbroad-v1".to_string()),
+            Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
+            Value::Text("chacha20-poly1305".to_string()),
+        ]);
+        let encoded_legacy = encode_value(&legacy_mode);
+        assert!(matches!(
+            validate_barrier_hp_envelope_bytes(&encoded_legacy),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_PARENT_EID_FORBIDDEN
+        ));
+
+        let oversized = Value::Array(vec![
+            Value::Text("barrier-sealed-v1".to_string()),
+            Value::Bytes(vec![0x55; crate::MAX_HP_BYTES + crate::AEAD_TAG_LEN + 1]),
+            Value::Text("chacha20-poly1305".to_string()),
+        ]);
+        let encoded_oversized = encode_value(&oversized);
+        assert!(matches!(
+            validate_barrier_hp_envelope_bytes(&encoded_oversized),
+            Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_CBOR
+        ));
 
         Ok(())
     }

@@ -1131,7 +1131,7 @@ fn generate_case(
     let hp_commit = hash_bytes_with_label(ds::MSPHF_HP_COMMIT, &hp_k)?;
     anchor_instance.msphf_hp_commit = Some(&hp_commit);
 
-    let super::KbroadEnvelope {
+    let super::BarrierHpEnvelopeWire {
         envelope: kbroad_envelope,
         c_hp: hp_ciphertext,
         k_hp: _hp_aead_key,

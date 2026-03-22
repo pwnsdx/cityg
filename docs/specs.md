@@ -182,17 +182,57 @@ S3.4 Header[97] HP envelope transport (normative)
 
 In profile `v0.1.4`, the only in-profile encoding is:
 * `BarrierHpEnvelope := ["barrier-sealed-v1", hp_ciphertext:bstr, "chacha20-poly1305"]`
+* `BarrierHpPlaintext := hp_k:bstr`
+* `HpArtifact := { hp_a:bstr, hp_b:bstr, m_a:bstr32, m_b:bstr32, params_id:tstr, hp_version:uint }`
+
+Scope / presence clarification (normative):
+* `header[97]` remains REQUIRED on all anchors by S4.2.1.
+* On JOIN, REGULAR, and MERGE anchors, `BarrierHpPlaintext` is the exact `hp_k` byte string bound to that anchor's final authenticated header context.
+* `hp_k` MUST equal `CBOR_det(HpArtifact)`. No additional outer wrapper is permitted inside `BarrierHpPlaintext`.
+* Receivers MAY ignore `header[97]` on code paths that do not perform HP recovery, but any implementation that attempts recovery from `header[97]` MUST apply the validation and binding rules below.
+
+Normative constants:
+* `MAX_HP_BYTES := 16384`
+* `AEAD_TAG_LEN := 16`
+* `MAX_HP_ENVELOPE_BYTES := MAX_HP_BYTES + AEAD_TAG_LEN = 16400`
 
 Constraints (MUST):
 * the array length MUST equal 3,
 * element 0 MUST equal the UTF-8 text string `"barrier-sealed-v1"`,
-* element 1 MUST be a non-empty ciphertext byte string whose length is at least one AEAD tag and at most `MAX_HP_BYTES + AEAD_TAG_LEN`,
+* element 1 MUST be a non-empty ciphertext byte string whose length is at least `AEAD_TAG_LEN` and at most `MAX_HP_ENVELOPE_BYTES`,
 * element 2 MUST equal the UTF-8 text string `"chacha20-poly1305"`.
 
-Semantics (normative):
+Encryption / binding algorithm (normative):
+* Let `barrier_version := header[176]`.
+* Let `xk_hash` be the transcript hash / handshake binding for the published anchor.
+* Let `hp_commit := header[99]`.
+* Let `barrier_key` be the client's locally held barrier key for the authenticated barrier state selected for this recovery attempt.
+* Let:
+  * `hp_salt := H_L("hp/barrier/salt", [barrier_version, xk_hash])`
+  * `hp_info := ASCII("city-g|hp/barrier/v1") || hp_commit`
+  * `hp_key := HKDF-BLAKE3(ikm=barrier_key, salt32=hp_salt, info_bytes=hp_info, L=32)`
+  * `hp_nonce := H_L("hp/nonce", [xk_hash, hp_commit])[0..11]`
+  * `hp_aad := hp_commit`
+* Then:
+  * `hp_ciphertext := AEAD_Seal(hp_key, hp_nonce, hp_aad, BarrierHpPlaintext)`
+  * `BarrierHpPlaintext := AEAD_Open(hp_key, hp_nonce, hp_aad, hp_ciphertext)`
+
+Semantics / security properties (normative):
 * `hp_ciphertext` is an opaque client-to-client transport blob.
 * The server MAY store, replay, and authenticate this blob as part of the anchor header, but MUST treat it as opaque and MUST NOT claim knowledge of the underlying HP keying material.
-* Clients derive the local HP AEAD key from authenticated barrier state and local secret state; the server never provisions that key.
+* The confidentiality/binding tuple is `(barrier_key, barrier_version, xk_hash, hp_commit)`.
+* A cut-and-paste of `hp_ciphertext` into another anchor with a different `barrier_version`, `xk_hash`, `hp_commit`, or barrier key MUST fail client recovery.
+* `BarrierHpPlaintext` length MUST be `<= MAX_HP_BYTES` both before encryption and after decryption.
+
+Validation / rejection rules (normative):
+* Server-side acceptance MUST validate `header[97]` during S10.1 pre-filters before JOIN/MERGE-specific acceptance logic continues.
+* JOIN/MERGE validation that explicitly consumes `header[97]` MUST re-check the S3.4 shape/mode/size/AEAD constraints on the decoded value before using it.
+* Any parse failure, wrong mode, wrong AEAD suite, empty ciphertext, ciphertext shorter than `AEAD_TAG_LEN`, or ciphertext longer than `MAX_HP_ENVELOPE_BYTES` MUST be rejected as malformed.
+* A client recovery path MUST derive `hp_key` exactly as above and MUST reject/ignore the envelope for recovery if:
+  * `header[176]` is missing or malformed,
+  * AEAD open fails,
+  * the recovered plaintext length exceeds `MAX_HP_BYTES`.
+* A client MUST NOT silently substitute another transport mode or fall back to a legacy room-secret transport when `header[97]` validation fails.
 
 Out-of-profile rule (normative):
 * Any other header[97] transport mode is out of profile for `v0.1.4` and MUST be rejected as malformed.
@@ -537,6 +577,7 @@ S10.1 Pre-filters
 * Parse header as CBOR_det map; reject floats/indefinite/duplicate keys.
 * Reject unknown keys (closed-world registry).
 * Enforce size limits.
+* Validate required `header[97]` against S3.4 before JOIN/MERGE-specific acceptance logic continues.
 * Determine anchor_type per S4.1 and enforce mutual exclusivity.
 * header[139] fs_policy_version MUST be supported by the deployment/profile. Unsupported values MUST be rejected with 944.6.
 
@@ -1424,5 +1465,19 @@ The test suite MUST include a scenario where:
   * recovers from the accepted competing barrier_update, or
   * retries reason 2 after authenticated history establishes non-acceptance and the join_finalize eligibility predicate still holds,
 * the implementation MUST NOT clear `pending_barrier_recovery` solely because a timer elapsed or because the current barrier version advanced.
+
+S14.9 KAT: barrier-sealed-v1 transport validation and binding (MUST)
+The test suite MUST include:
+* Positive case:
+  * a valid `BarrierHpEnvelope` with mode `"barrier-sealed-v1"`,
+  * ciphertext length in `[AEAD_TAG_LEN, MAX_HP_ENVELOPE_BYTES]`,
+  * AEAD suite `"chacha20-poly1305"`,
+  * decryption using the authenticated `(barrier_key, barrier_version, xk_hash, hp_commit)` tuple succeeds and recovers the original `BarrierHpPlaintext`.
+* Negative cases:
+  * any legacy/unknown transport mode in `header[97]` -> reject as malformed,
+  * empty ciphertext, ciphertext shorter than `AEAD_TAG_LEN`, or ciphertext longer than `MAX_HP_ENVELOPE_BYTES` -> reject as malformed,
+  * wrong AEAD suite or malformed UTF-8/text shape -> reject as malformed,
+  * replay / cut-and-paste of a valid `hp_ciphertext` into a different `(barrier_version, xk_hash, hp_commit)` context -> recovery MUST fail,
+  * recovery attempted under the wrong barrier key -> recovery MUST fail.
 
 END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.4

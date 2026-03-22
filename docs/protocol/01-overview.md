@@ -170,9 +170,17 @@ Result: Y* = Y*_A = Y*_B  (masks ensure equality for valid members)
 
 **Flow:**
 1. Publisher: derive a barrier-scoped HP AEAD key from authenticated barrier state
-2. Publisher: encrypt the local HP artifact into `hp_ciphertext`
+2. Publisher: encrypt `CBOR_det(MSPHF_HP)` into `hp_ciphertext`
 3. Server: **validates structure only, never decrypts**
 4. Devices: derive the same barrier-scoped HP AEAD key, decrypt hp, compute `Y*` and `E_k`
+
+Binding tuple:
+- `barrier_key`
+- `barrier_version`
+- `xk_hash`
+- `hp_commit`
+
+So a cut-and-paste of `hp_ciphertext` into a different anchor context is rejected by client recovery.
 
 **Innovation:** Server validates and relays the transport blob without ever learning the HP material or the AEAD key.
 

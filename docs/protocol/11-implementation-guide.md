@@ -1047,7 +1047,7 @@ WID [32 bytes]
    └─► header = CBOR.Decode(header_cbor)
 
 2. Pre-filter checks
-   └─► Validate sizes: |95| ≤ 8192, |97| ≤ 262144, |146| ≤ 16384, |161| ≤ 16384, |122| ≤ 1048576
+   └─► Validate sizes: |95| ≤ 8192, |97| ≤ 16400, |146| ≤ 16384, |161| ≤ 16384, |122| ≤ 1048576
 
 3. Structure validation
    └─► Verify required keys present (90, 91, 92, ...)
@@ -1061,7 +1061,9 @@ WID [32 bytes]
    └─► Verify: H_L("msphf/kgen/rho", [rho_raw]) == header[93]
 
 6. Barrier-sealed HP envelope structure (NO DECRYPT)
-   └─► Validate: header[97] = ["barrier-sealed-v1", _, "chacha20-poly1305"]
+   └─► Validate: header[97] = ["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
+   └─► Require: 16 <= len(hp_ciphertext) <= 16400
+   └─► Reject any legacy/unknown mode before JOIN/MERGE-specific acceptance continues
 
 7. SRX validation (merge-only, conditional)
    └─► Join mode forbids 121/122/160/161

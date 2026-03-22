@@ -2,7 +2,7 @@
 
 use super::{ml_dsa_public_key_bytes, ml_dsa_signature_bytes, verify_ml_dsa, *};
 use crate::{
-    BARRIER_HP_MODE, KBROAD_AEAD_SUITE, KBROAD_ML_KEM_ALG, TSWE_ALG_CODE, TSWE_ALG_LABEL,
+    BARRIER_HP_MODE, HP_AEAD_SUITE, KBROAD_ML_KEM_ALG, TSWE_ALG_CODE, TSWE_ALG_LABEL,
     proofs::srx_smallwood::{self, SRX_SMALLWOOD_MAX_BYTES},
 };
 use ciborium::de;
@@ -217,13 +217,13 @@ pub(super) fn verify_join_payload_hp_envelope(
     match &items[1] {
         Value::Bytes(bytes)
             if bytes.len() >= crate::AEAD_TAG_LEN
-                && bytes.len() <= super::KBROAD_HP_MAX_CIPHERTEXT_BYTES => {}
+                && bytes.len() <= super::HP_MAX_CIPHERTEXT_BYTES => {}
         Value::Bytes(_) => {
             debug!(
                 "verify_join_payload_hp_envelope: item[1] len {} outside [{}, {}]",
                 items[1].as_bytes().map(|b| b.len()).unwrap_or_default(),
                 crate::AEAD_TAG_LEN,
-                super::KBROAD_HP_MAX_CIPHERTEXT_BYTES
+                super::HP_MAX_CIPHERTEXT_BYTES
             );
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
@@ -243,7 +243,7 @@ pub(super) fn verify_join_payload_hp_envelope(
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     };
-    if aead != KBROAD_AEAD_SUITE {
+    if aead != HP_AEAD_SUITE {
         return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     }
     Ok(())
@@ -642,7 +642,7 @@ mod tests {
     use crate::accept::fixtures::{
         anchor_from_result, header_ready_with_pop, sample_parts_params_joiner, sample_pop_keys,
     };
-    use crate::{AEAD_TAG_LEN, KBROAD_AEAD_SUITE};
+    use crate::{AEAD_TAG_LEN, HP_AEAD_SUITE};
     use anyhow::Result;
 
     fn base_header() -> BTreeMap<u64, Value> {
@@ -655,7 +655,7 @@ mod tests {
         let envelope = Value::Array(vec![
             Value::Text(BARRIER_HP_MODE.to_string()),
             Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
-            Value::Text(KBROAD_AEAD_SUITE.to_string()),
+            Value::Text(HP_AEAD_SUITE.to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, envelope);
 
@@ -675,7 +675,7 @@ mod tests {
         let envelope = Value::Array(vec![
             Value::Text(BARRIER_HP_MODE.to_string()),
             Value::Bytes(Vec::new()),
-            Value::Text(KBROAD_AEAD_SUITE.to_string()),
+            Value::Text(HP_AEAD_SUITE.to_string()),
         ]);
         header.insert(super::HDR_HP_BYTES, envelope);
 
@@ -710,7 +710,7 @@ mod tests {
             Value::Array(vec![
                 Value::Text(super::BARRIER_HP_MODE.to_string()),
                 Value::Bytes(vec![0x33; AEAD_TAG_LEN]),
-                Value::Text(KBROAD_AEAD_SUITE.to_string()),
+                Value::Text(HP_AEAD_SUITE.to_string()),
             ]),
         );
         ensure_merge_join_keys_absent(&header)?;
@@ -954,7 +954,7 @@ mod tests {
             Value::Array(vec![
                 Value::Text(BARRIER_HP_MODE.to_string()),
                 Value::Bytes(vec![0xA5; crate::AEAD_TAG_LEN + 32]),
-                Value::Text(KBROAD_AEAD_SUITE.to_string()),
+                Value::Text(HP_AEAD_SUITE.to_string()),
             ]),
         );
         verify_join_payload_hp_envelope(

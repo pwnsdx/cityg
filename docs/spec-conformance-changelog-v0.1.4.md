@@ -32,7 +32,7 @@ The entries below include the carried-forward `v0.1.2` baseline and the `v0.1.4`
 | 2026-03-14 | `00eb972` | Switched updater restart correlation from current-version heuristics to specific merge-history correlation | S11.14.1-S11.14.4 | Uses persisted pending merge identity and authenticated history instead of treating `current barrier_version > pending_barrier_version` as a loss signal. |
 | 2026-03-15 | `2f36dee` | Forbade timeout-only pending-state discard without authenticated finality | S11.14.3, S11.14.4 | Prevents updater self-stranding when acceptance history is delayed or temporarily unavailable. |
 | 2026-03-15 | `896c44c` | Clarified finality-vs-supersession discard rule for pending updater state | S11.14.3, S11.14.4 | Makes discard semantics explicitly disjunctive: either superseded by a committed update or dead by authenticated finality. |
-| 2026-03-22 | `TBD` | Removed legacy HP transport, made `barrier-sealed-v1` the sole header[97] mode, and bumped the advertised wire profile to `v0.1.4` | S3.4, S10.4-S10.4C, S11.11.1, S11.11.3, S11.12.1, S11.14.2, S12.2, S12.3, S14.7-S14.8 | Makes `barrier-sealed-v1` the only in-profile HP transport, removes legacy room-secret interop, and keeps async-first self-finalizing joins as the sole supported flow. |
+| 2026-03-22 | `58b8532` | Removed legacy HP transport, made `barrier-sealed-v1` the sole header[97] mode, and bumped the advertised wire profile to `v0.1.4` | S3.4, S10.4-S10.4C, S11.11.1, S11.11.3, S11.12.1, S11.14.2, S12.2, S12.3, S14.7-S14.8 | Makes `barrier-sealed-v1` the only in-profile HP transport, removes legacy room-secret interop, and keeps async-first self-finalizing joins as the sole supported flow. |
 
 ## Hardening and Performance Follow-through
 
