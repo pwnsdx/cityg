@@ -190,7 +190,7 @@ struct ApiState {
     // are routed to one lane to reduce cross-group lock contention.
     server_lanes: Arc<Vec<Arc<RwLock<CityGServer>>>>,
     messages: Arc<RwLock<AHashMap<[u8; 32], Vec<StoredMessage>>>>,
-    bundles: Arc<RwLock<AHashMap<[u8; 32], Vec<u8>>>>,
+    bundles: Arc<RwLock<AHashMap<[u8; 32], StoredBundle>>>,
     message_retention: Duration,
     fs_epoch_period_seconds: u64,
     freeze_counts: Arc<RwLock<BTreeMap<(u32, String), u64>>>,
@@ -203,6 +203,7 @@ struct ApiState {
     notification_tx: broadcast::Sender<BroadcastNotification>,
     alias_rate_limiter: AliasRateLimiter,
     message_prune_due_ms: Arc<AtomicU64>,
+    bundle_prune_due_ms: Arc<AtomicU64>,
     merge_ticket_cache: Arc<RwLock<AHashMap<MergeTicketCacheKey, MergeTicketCacheEntry>>>,
 }
 
@@ -483,6 +484,12 @@ struct StoredMessage {
     timestamp_ms: u64,
 }
 
+#[derive(Clone)]
+struct StoredBundle {
+    bytes: Vec<u8>,
+    stored_at_ms: u64,
+}
+
 const DEFAULT_FS_MESSAGE_RETENTION_SECS: u64 = 600;
 
 fn current_timestamp_ms() -> u64 {
@@ -524,6 +531,40 @@ fn should_prune_messages(prune_due_ms: &AtomicU64, now_ms: u64) -> bool {
             Ordering::Relaxed,
         )
         .is_ok()
+}
+
+fn prune_expired_bundles(
+    store: &mut AHashMap<[u8; 32], StoredBundle>,
+    now_ms: u64,
+    retention: Duration,
+) -> Vec<[u8; 32]> {
+    let retention_ms_u128 = retention.as_millis().min(u128::from(u64::MAX));
+    let retention_ms = retention_ms_u128 as u64;
+    let cutoff = now_ms.saturating_sub(retention_ms);
+    let mut expired = Vec::new();
+
+    store.retain(|weid, bundle| {
+        let keep = bundle.stored_at_ms >= cutoff;
+        if !keep {
+            expired.push(*weid);
+        }
+        keep
+    });
+
+    expired
+}
+
+async fn prune_bundle_indexes(state: &ApiState, expired: &[[u8; 32]]) {
+    if expired.is_empty() {
+        return;
+    }
+    let expired_set: HashSet<[u8; 32]> = expired.iter().copied().collect();
+    let mut scopes = state.epoch_scopes.write().await;
+    scopes.retain(|weid, _| !expired_set.contains(weid));
+    drop(scopes);
+
+    let mut weid_to_leaf = state.weid_to_leaf.write().await;
+    weid_to_leaf.retain(|weid, _| !expired_set.contains(weid));
 }
 
 fn maybe_prune_expired_messages(
@@ -1126,8 +1167,24 @@ fn is_merge_bundle_header(header: &BTreeMap<u64, ciborium::value::Value>) -> boo
 }
 
 async fn store_bundle_bytes(state: &ApiState, weid: [u8; 32], bytes: Vec<u8>) {
-    let mut guard = state.bundles.write().await;
-    guard.insert(weid, bytes);
+    let now_ms = current_timestamp_ms();
+    let expired = {
+        let mut guard = state.bundles.write().await;
+        let expired = if should_prune_messages(state.bundle_prune_due_ms.as_ref(), now_ms) {
+            prune_expired_bundles(&mut guard, now_ms, state.message_retention)
+        } else {
+            Vec::new()
+        };
+        guard.insert(
+            weid,
+            StoredBundle {
+                bytes,
+                stored_at_ms: now_ms,
+            },
+        );
+        expired
+    };
+    prune_bundle_indexes(state, &expired).await;
 }
 
 async fn persist_bundle(
@@ -2217,10 +2274,18 @@ async fn get_bundle(
     let mut weid = [0u8; 32];
     weid.copy_from_slice(&request.we_epoch_id);
 
-    let bytes = {
-        let guard = state.bundles.read().await;
-        guard.get(&weid).cloned().ok_or(ApiError::NotFound)?
+    let now_ms = current_timestamp_ms();
+    let (bundle, expired) = {
+        let mut guard = state.bundles.write().await;
+        let expired = if should_prune_messages(state.bundle_prune_due_ms.as_ref(), now_ms) {
+            prune_expired_bundles(&mut guard, now_ms, state.message_retention)
+        } else {
+            Vec::new()
+        };
+        (guard.get(&weid).cloned(), expired)
     };
+    prune_bundle_indexes(&state, &expired).await;
+    let bytes = bundle.ok_or(ApiError::NotFound)?.bytes;
 
     let reply = GetBundleResponse { bundle_cbor: bytes };
 
@@ -2707,6 +2772,7 @@ pub async fn run_with_config(
             Duration::from_secs(ALIAS_RATE_LIMIT_WINDOW_SECS),
         ),
         message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+        bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
         merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
     };
 
@@ -2985,6 +3051,7 @@ mod tests {
                 Duration::from_secs(ALIAS_RATE_LIMIT_WINDOW_SECS),
             ),
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         }
     }
@@ -3011,6 +3078,7 @@ mod tests {
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         }
     }
@@ -3186,6 +3254,7 @@ mod tests {
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         };
 
@@ -3663,6 +3732,7 @@ mod tests {
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         };
 
@@ -3711,6 +3781,7 @@ mod tests {
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         };
 
@@ -5633,6 +5704,49 @@ mod tests {
         assert_eq!(retained[0].timestamp_ms, now_ms);
     }
 
+    #[tokio::test]
+    async fn store_bundle_bytes_prunes_expired_bundle_indexes() {
+        let mut state = empty_test_api_state();
+        state.message_retention = Duration::from_secs(1);
+
+        let expired_weid = [0xD1; 32];
+        let fresh_weid = [0xD2; 32];
+        let expired_leaf = [0xE1; 32];
+        state
+            .record_epoch_scope(
+                expired_weid,
+                EpochScope {
+                    gid: DEMO_GID,
+                    membership_root: [0xAB; 32],
+                },
+            )
+            .await;
+        state
+            .record_member_join(expired_leaf, expired_weid, 0)
+            .await;
+        {
+            let mut guard = state.bundles.write().await;
+            guard.insert(
+                expired_weid,
+                StoredBundle {
+                    bytes: vec![0xAA],
+                    stored_at_ms: 0,
+                },
+            );
+        }
+
+        store_bundle_bytes(&state, fresh_weid, vec![0xBB]).await;
+
+        let bundles = state.bundles.read().await;
+        assert!(!bundles.contains_key(&expired_weid));
+        let fresh = bundles.get(&fresh_weid).expect("fresh bundle retained");
+        assert_eq!(fresh.bytes, vec![0xBB]);
+        drop(bundles);
+
+        assert!(state.epoch_scope_for_weid(&expired_weid).await.is_none());
+        assert!(!state.weid_to_leaf.read().await.contains_key(&expired_weid));
+    }
+
     #[test]
     fn should_prune_messages_throttles_global_pruning() {
         let due = AtomicU64::new(0);
@@ -5691,6 +5805,7 @@ mod tests {
             // Burst of 1 so the second attempt triggers rate limit
             alias_rate_limiter: AliasRateLimiter::new(1, Duration::from_secs(60)),
             message_prune_due_ms: Arc::new(AtomicU64::new(0)),
+            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         };
         let leaf = [0x01u8; 32];
