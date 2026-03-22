@@ -234,17 +234,21 @@ pub fn compute_shadow_root(
     hasher.update(join_root);
     hasher.update(revoked_since_root);
     hasher.update(revoked_root);
-    if let Some(commit) = srx_commit {
-        hasher.update(commit);
-    } else {
-        hasher.update(&[0u8; 32]);
-    }
-    if let Some(digest) = payload_digest {
-        hasher.update(digest);
-    } else {
-        hasher.update(&[0u8; 32]);
-    }
+    hash_optional_bytes32(&mut hasher, srx_commit);
+    hash_optional_bytes32(&mut hasher, payload_digest);
     hasher.finalize().into()
+}
+
+fn hash_optional_bytes32(hasher: &mut Hasher, value: Option<&[u8; 32]>) {
+    match value {
+        Some(bytes) => {
+            hasher.update(&[1]);
+            hasher.update(bytes);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +285,46 @@ mod tests {
             Some(&payload_digest),
         );
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn compute_shadow_root_distinguishes_absent_and_zero_commit() {
+        let (parent, join, revoked_since, revoked_root, _commit) = sample_roots();
+        let zero = [0u8; 32];
+        let without_commit =
+            compute_shadow_root(&parent, &join, &revoked_since, &revoked_root, None, None);
+        let with_zero_commit = compute_shadow_root(
+            &parent,
+            &join,
+            &revoked_since,
+            &revoked_root,
+            Some(&zero),
+            None,
+        );
+        assert_ne!(without_commit, with_zero_commit);
+    }
+
+    #[test]
+    fn compute_shadow_root_distinguishes_absent_and_zero_payload_digest() {
+        let (parent, join, revoked_since, revoked_root, commit) = sample_roots();
+        let zero = [0u8; 32];
+        let without_payload = compute_shadow_root(
+            &parent,
+            &join,
+            &revoked_since,
+            &revoked_root,
+            Some(&commit),
+            None,
+        );
+        let with_zero_payload = compute_shadow_root(
+            &parent,
+            &join,
+            &revoked_since,
+            &revoked_root,
+            Some(&commit),
+            Some(&zero),
+        );
+        assert_ne!(without_payload, with_zero_payload);
     }
 
     #[test]
@@ -438,11 +482,11 @@ mod tests {
         );
         assert_eq!(
             shadow_before,
-            hex_literal::hex!("118855408a1269386421c00e9ed1ca7ff0580c92b6ee64daecce4ffe6a1f5814")
+            hex_literal::hex!("105f267feee1dd25e661d46839c7cba1a5e82207222e1b2857a9be58bf2047c0")
         );
         assert_eq!(
             shadow_after,
-            hex_literal::hex!("42b3332a4002263ad346cbfceaf832dd44f4940537662808dcb1124e1e791a30")
+            hex_literal::hex!("eda7afb92a88b83c8c3eb346d6ff1f1cf9ed7f9bf34b155a496a3168b6b1dfbc")
         );
     }
 

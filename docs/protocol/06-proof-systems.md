@@ -135,8 +135,8 @@ Inputs: `parent = 0x11…11`, `join = 0x22…22`, `revoked_since = 0x33…33`, `
 
 | Case | `compute_shadow_root(...)` |
 |------|--------------------------------------------|
-| Before (no SRX commit/payload) | `118855408a1269386421c00e9ed1ca7ff0580c92b6ee64daecce4ffe6a1f5814` |
-| After (with commit + payload)  | `42b3332a4002263ad346cbfceaf832dd44f4940537662808dcb1124e1e791a30` |
+| Before (no SRX commit/payload) | `105f267feee1dd25e661d46839c7cba1a5e82207222e1b2857a9be58bf2047c0` |
+| After (with commit + payload)  | `eda7afb92a88b83c8c3eb346d6ff1f1cf9ed7f9bf34b155a496a3168b6b1dfbc` |
 
 Implementations MUST reproduce the values above for the given inputs before shipping; the corresponding unit test (`shadow_root_sample_vector`) asserts them.
 
@@ -160,10 +160,10 @@ All digests inside `encode_statement_payload` (payload, hint counts, hint sizes)
 For the canonical test tuple (`parent = 0x11…11`, `join = 0x22…22`, `revoked_since = 0x33…33`, `revoked_root = 0x44…44`, `srx_commit = 0x55…55`, `payload_digest = 0x66…66`), the deterministic hash yields:
 
 ```
-shadow_root_before = 42b3 3302 a400 223a d346 cbfc eaf8 32dd
-                     44f4 9405 3766 2808 dcb1 124e 1e79 1a30
-shadow_root_after  = 42b3 3302 a400 223a d346 cbfc eaf8 32dd
-                     44f4 9405 3766 2808 dcb1 124e 1e79 1a30
+shadow_root_before = 105f 267f eee1 dd25 e661 d468 39c7 cba1
+                     a5e8 2207 222e 1b28 57a9 be58 bf20 47c0
+shadow_root_after  = eda7 afb9 2a88 b83c 8c3e b346 d6ff 1f1c
+                     f9ed 7f9b f34b 155a 496a 3168 b6b1 dfbc
 ```
 
 Any implementation of `compute_shadow_root` MUST reproduce the bytes above for the sample inputs before shipping.
