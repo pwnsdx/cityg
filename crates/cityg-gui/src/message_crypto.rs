@@ -208,6 +208,11 @@ struct MsgReplayTupleArgs<'a> {
 #[derive(Serialize, Deserialize)]
 struct PayloadEnvelopeV2(String, u64, #[serde(with = "serde_bytes")] Vec<u8>);
 
+/// Derives the per-message encryption key (K_msg).
+///
+/// **Security**: Payload confidentiality requires BOTH E_k (from ME-OR, independent of K_fs)
+/// AND K_barrier (from KEM-tree PRS, independent of K_fs). Compromising K_fs alone does NOT
+/// yield payload decryption keys. See specs.md S8 (Payload Key Schedule).
 fn derive_msg_key_material(context: &MessageCryptoContext<'_>, msg_index: u64) -> Result<[u8; 32]> {
     let epoch_salt = h_l(
         "fs/msg/epoch_salt",

@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**City‑G** is a research‑grade protocol for end‑to‑end encrypted groups designed for very large audiences (millions of members). The server validates activity cryptographically without ever learning message keys. New members can post and send messages even when everyone else is offline. The shipping profile is `tswe/msphf-we/fs-hybrid + prs-barrier`, integrating server blindness, multi-head windows, minutes-grade forward secrecy, and post-revocation secrecy by default.
+**City‑G** is a research‑grade protocol for end‑to‑end encrypted groups designed for very large audiences (architecturally O(log N), targeting millions of members; tested to N_max=2048, large-scale benchmarks pending). The server validates activity cryptographically without ever learning message keys. New members can post and send messages even when everyone else is offline. The shipping profile is `tswe/msphf-we/fs-hybrid + prs-barrier`, integrating server blindness, multi-head windows, minutes-grade forward secrecy, and post-revocation secrecy by default.
 
 ---
 
@@ -125,7 +125,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 |----------|-----------|-------------------------|------------|-------------------------|
 | **Confidentiality & server blindness** | Server validates CAPSS Smallwood + ZK-VRF; epoch keys never reach the server. Metadata (who joined/when) remains visible. | Content keys stay client-side, but "server-blind acceptance" is not part of the protocol; operators must ship the audited binaries. | Content keys remain on devices; trust rests on Signal’s infrastructure choices. | Servers store ciphertext; clients share session keys out-of-band. No cryptographic proof that the homeserver stays blind beyond enforcing transport encryption. |
 | **Authentication & membership integrity** | ML-DSA PoP + SRX proofs + CAPSS Smallwood binding freeze anchors if roots or membership drift. | TreeKEM commits authenticate the tree but require an online committer. | Membership is service-controlled; no cryptographic completeness proof. | Membership events are server-signed; authenticity depends on the homeserver you trust. |
-| **Forward secrecy granularity** | Minutes-grade per epoch (`H`, default 5 min) with time-blind enforcement. | Per commit (interactive). | Per message (Double Ratchet + Sender Keys). | Megolm ratchets forward per message, but compromise leaks future traffic until the sender rotates the session. |
+| **Forward secrecy granularity** | Minutes-grade per epoch (`H`, default 5 min) with time-blind enforcement. Payload keys require both E_k (ME-OR, independent) and K_barrier (PRS, independent) — K_fs compromise alone cannot decrypt messages. | Per commit (interactive). | Per message (Double Ratchet + Sender Keys). | Megolm ratchets forward per message, but compromise leaks future traffic until the sender rotates the session. |
 | **Post-compromise recovery** | Publish a new anchor (FS purge) to rotate `K_fs` (PCS); K_barrier rotation via KEM-tree cover revokes access for compromised members (PRS). | Honest member must commit an update replacing the compromised leaf. | One new ratchet step (send/receive) restores PCS. | Requires establishing a new Megolm session; existing session remains compromised. |
 | **Asynchronous join?** | ✅ Yes — joiner fetches anchor + witness; server validates alone. | ⚠️ Needs a live committer. Batching is optional but adds latency while the batch finalises. | ❌ Requires admin/service interaction; no offline admission. | ⚠️ Homeserver accepts the join, but a member must be online to share session keys/history. |
 | **Scalability & concurrency** | Multi-Head Windows (default 16 parallel) + deterministic simulations to ~10⁶ members; real deployments >100k are still research pilots. | Sequential commits; batching reduces round-trips but increases wait time. OpenMLS reports strain beyond ≈1–2 k participants.[1] | Service limit 1 000 members per group.[2] | Large rooms are routine, but key-share fan-out grows with membership and stresses clients at very high scale. |
@@ -162,7 +162,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 ## Current limits & honest trade‑offs
 
 * **Metadata exposure**: City‑G does not hide metadata (e.g., that an update happened).
-* **FS granularity**: minutes‑grade by design; if you need per‑message FS, that's a different trade‑off space.
+* **FS granularity**: minutes‑grade epoch rotation for the FS chain; payload keys additionally depend on E_k (ME-OR, independent of K_fs) and K_barrier (PRS), so K_fs compromise alone does not yield payload decryption. Within an epoch, all messages share K_msg_epoch. If you need per‑message FS, that's a different trade‑off space.
 * **Scale in practice**: the architecture and simulations support millions; **real‑world** rollouts above **~100k** are still research pilots at this time.
 
 ---
@@ -180,7 +180,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 
 ## Read next
 
-* **Unified spec (final, v0.1.3):** publisher‑blind acceptance, offline admission, joins that self-finalize without another client online, merges/rollups, FS-hybrid, and PRS barrier — [`docs/specs.md`](docs/specs.md).
+* **Unified spec (v0.1.4):** publisher‑blind acceptance, offline admission, joins that self-finalize without another client online, merges/rollups, FS-hybrid, and PRS barrier — [`docs/specs.md`](docs/specs.md).
 * **Protocol companion docs:** chapterized legacy companion material — [`docs/protocol/`](docs/protocol/00-README.md).
 * **Workflows & diagrams:** visual sequence diagrams for common operations — [`docs/workflows.md`](docs/workflows.md).
 
@@ -196,7 +196,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 * **KBROAD** — Group key broadcasting envelope (ML-KEM-768 + ChaCha20-Poly1305) that encrypts hp; server validates structure without decryption.
 * **hp** — Hash projection key (RLWE parameters) used to compute Y* via smooth projective hash functions.
 * **Y\*** — VRF output computed via ME-OR (Masked-Equality OR), used to derive epoch key E_k.
-* **E_k** — Epoch key derived from SPHF output; in v0.1.3, message keys are further bound to `K_barrier` via HKDF-BLAKE3 (spec S8.3).
+* **E_k** — Epoch key derived from SPHF output; in v0.1.4, message keys are further bound to `K_barrier` via HKDF-BLAKE3 (spec S8.3). E_k is independent of K_fs; payload confidentiality requires both E_k and K_barrier.
 
 ---
 

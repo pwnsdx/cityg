@@ -24,7 +24,7 @@
 This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Layer Security)** RFC 9420, the IETF standard for group end-to-end encryption. While both protocols provide group E2EE, they differ fundamentally in:
 
 - **Server blindness**: Cryptographic (City-G) vs. transparency logs (MLS)
-- **Scalability**: Millions (City-G) vs. ~50K practical limit (MLS)
+- **Scalability**: Architecturally O(log N) targeting millions (City-G; tested to N_max=2048) vs. ~50K practical limit (MLS)
 - **Join mechanism**: Non-interactive (City-G) vs. interactive commit (MLS)
 - **Post-quantum**: Native (City-G) vs. hybrid mode (MLS)
 
@@ -39,7 +39,7 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 **Design Goals**:
 - **Publisher-blind**: Server cannot learn epoch keys (cryptographic guarantee)
 - **Offline-ready**: Devices derive keys without server interaction
-- **Extreme scale**: Millions of members with O(log N) overhead
+- **Extreme scale**: O(log N) overhead targeting millions of members (tested to N_max=2048; large-scale benchmarks pending)
 - **Parallel joins**: Multiple devices join simultaneously (Multi-Head Window)
 
 **Key Mechanisms**:
@@ -51,7 +51,7 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 **Trade-offs**:
 - Modern cryptography portfolio (fewer third-party deployments today)
 - Higher proof complexity (CAPSS Smallwood ≤16KB, typically ~12KB; ZK-VRF ≤8KB)
-- No per-message forward secrecy (per-epoch only)
+- No per-message forward secrecy (per-epoch only), though payload keys depend on E_k + K_barrier (independent of K_fs)
 
 ---
 
@@ -83,12 +83,12 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 
 | Feature | City-G | MLS | Advantage |
 |---------|--------|-----|-----------|
-| **Group Size** | Millions | ~50K practical | City-G |
+| **Group Size** | Architecturally O(log N) to millions; tested to N_max=2048, large-scale benchmarks pending | ~50K practical | City-G |
 | **Server Blindness** | ✅ Cryptographic (SPHF) | ❌ Transparency logs (trust) | City-G |
 | **Offline Join** | ✅ Non-interactive (ME-OR) | ❌ Requires commit from server | City-G |
 | **Parallel Joins** | ✅ Multi-Head Window (16 concurrent) | ❌ Sequential (TreeKEM) | City-G |
 | **Post-Quantum** | ✅ Native (ML-KEM/DSA) | ⚠️ Hybrid mode (experimental) | City-G |
-| **Forward Secrecy** | ⚠️ Per-epoch (KBROAD rotation) | ✅ Per-commit (TreeKEM) | MLS |
+| **Forward Secrecy** | ⚠️ Per-epoch (minutes-grade). Payload keys require E_k (ME-OR) + K_barrier (PRS), both independent of K_fs — K_fs compromise alone cannot decrypt. | ✅ Per-commit (TreeKEM) | Nuanced (see §4.4) |
 | **Maturity** | ⚠️ City-G 0.1.0 (alpha stage, not production-ready) | ✅ IETF Standard (RFC 9420) | MLS |
 | **Ecosystem** | ⚠️ Focused (Rust toolchain today) | ✅ Wide adoption | MLS |
 
@@ -190,7 +190,7 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 - **City-G**: Compromise of epoch E_i does not affect E_{i+1} (new hp, new seed)
 - **MLS**: Compromise of epoch E_i does not affect E_{i+1} (TreeKEM ratchet)
 
-**Difference**: MLS has finer-grained FS (per-commit), City-G has per-epoch FS.
+**Difference**: MLS has finer-grained FS (per-commit), City-G has per-epoch FS. However, City-G's payload key schedule requires both E_k (derived via ME-OR, independent of K_fs) and K_barrier (derived via KEM-tree PRS, independent of K_fs). Compromising K_fs alone does **not** yield payload decryption keys — an attacker must also compromise the ME-OR or PRS paths. This layered design partially mitigates the coarser epoch granularity.
 
 ---
 
@@ -223,7 +223,7 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 
 | Artifact | City-G | MLS |
 |----------|--------|-----|
-| **Anchor/Commit** | ~300KB (w/ SRX ~1MB) | ~10KB (TreeKEM commit) |
+| **Anchor/Commit** | ~300KB estimated (w/ SRX ~1MB; pending validation at scale) | ~10KB (TreeKEM commit) |
 | **Witness** | ~2KB (O(log N) path) | ~5KB (TreeKEM path) |
 | **Message** | ~100B (AEAD overhead) | ~100B (AEAD overhead) |
 
@@ -238,8 +238,8 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 | **1K members** | ✅ | ✅ |
 | **10K members** | ✅ | ✅ |
 | **50K members** | ✅ | ⚠️ (TreeKEM rebalancing) |
-| **100K members** | ✅ | ❌ (impractical) |
-| **1M members** | ✅ | ❌ (not supported) |
+| **100K members** | ⚠️ (architectural; untested beyond 2048) | ❌ (impractical) |
+| **1M members** | ⚠️ (architectural; untested beyond 2048) | ❌ (not supported) |
 
 **Bottleneck**:
 - **City-G**: SRX payload size (~1MB for 20K joins)
@@ -328,15 +328,15 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 
 | Dimension | City-G | MLS | Winner |
 |-----------|--------|-----|--------|
-| **Scale** | 1M+ members | ~50K practical | City-G |
+| **Scale** | O(log N) to 1M+ (tested to 2048) | ~50K practical | City-G |
 | **Server Blindness** | Cryptographic | Transparency logs | City-G |
 | **Offline Join** | Non-interactive | Interactive | City-G |
 | **Parallel Joins** | 16 concurrent | Sequential | City-G |
 | **Post-Quantum** | Native | Hybrid (draft) | City-G |
-| **Forward Secrecy** | Per-epoch | Per-commit | MLS |
+| **Forward Secrecy** | Per-epoch (E_k + K_barrier independent of K_fs) | Per-commit | Nuanced |
 | **Maturity** | Alpha (0.1.0) | IETF RFC 9420 | MLS |
 | **Ecosystem** | Limited | Wide adoption | MLS |
-| **Join Overhead** | ~300KB | ~10KB | MLS |
+| **Join Overhead** | ~300KB (estimated, pending validation) | ~10KB | MLS |
 | **Proof Complexity** | High (CAPSS Smallwood + ZK-VRF) | Low (signatures) | MLS |
 
 **Conclusion**:
@@ -353,7 +353,7 @@ This document compares City-G `tswe/msphf-we/fs-hybrid` with **MLS (Message Laye
 
 ---
 
-**Document Version**: 0.1.0
+**Document Version**: 0.1.4
 **References**:
-- City-G: Alpha (0.1.0)
+- City-G: v0.1.4 (`tswe/msphf-we/fs-hybrid + prs-barrier`)
 - MLS: RFC 9420 (January 2023)
