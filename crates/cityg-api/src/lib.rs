@@ -835,13 +835,13 @@ fn warn_if_admin_auth_is_open() {
     }
     if configured_rooms_admin_token().is_none() {
         warn!(
-            "{}=true with no {} or {} configured; room admin endpoints are unauthenticated",
+            "{}=true with no {} or {} configured; insecure admin bypass is ignored and room admin endpoints remain unavailable",
             ALLOW_INSECURE_ADMIN_ENV, ROOMS_ADMIN_TOKEN_ENV, WINDOW_CONFIG_ADMIN_TOKEN_ENV
         );
     }
     if configured_window_admin_token().is_none() {
         warn!(
-            "{}=true with no {} configured; window admin endpoints are unauthenticated",
+            "{}=true with no {} configured; insecure admin bypass is ignored and window admin endpoints remain unavailable",
             ALLOW_INSECURE_ADMIN_ENV, WINDOW_CONFIG_ADMIN_TOKEN_ENV
         );
     }
@@ -854,7 +854,10 @@ fn enforce_admin_token_with_policy(
 ) -> Result<(), ApiError> {
     let Some(expected_token) = expected_token else {
         if allow_insecure {
-            return Ok(());
+            warn!(
+                "{}=true was set without an admin token; refusing unauthenticated admin access",
+                ALLOW_INSECURE_ADMIN_ENV
+            );
         }
         return Err(ApiError::Unauthorized("admin token is not configured"));
     };
@@ -3415,9 +3418,12 @@ mod tests {
     }
 
     #[test]
-    fn admin_auth_policy_supports_explicit_insecure_override() {
+    fn admin_auth_policy_refuses_missing_token_even_with_insecure_flag() {
         let empty_headers = HeaderMap::new();
-        assert!(enforce_admin_token_with_policy(&empty_headers, None, true).is_ok());
+        assert!(matches!(
+            enforce_admin_token_with_policy(&empty_headers, None, true),
+            Err(ApiError::Unauthorized("admin token is not configured"))
+        ));
         assert!(matches!(
             enforce_admin_token_with_policy(&empty_headers, None, false),
             Err(ApiError::Unauthorized("admin token is not configured"))

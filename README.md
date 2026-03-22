@@ -235,7 +235,7 @@ Notes:
 
 * `CITYG_GUI_CONFIG_DIR` keeps the two GUI instances isolated so they do not share session files.
 * The GUI now defaults to the `cityg-gui` binary, so `cargo run -p cityg-gui --features native-app` is sufficient.
-* For local-only testing, you can replace `CITYG_SERVER_ROOMS_ADMIN_TOKEN` with `CITYG_SERVER_ALLOW_INSECURE_ADMIN=1`, but keep `CITYG_SERVER_MESSAGE_AUTH_TOKEN` set if you want to send messages.
+* `CITYG_SERVER_ALLOW_INSECURE_ADMIN=1` no longer opens admin endpoints without a token. Even for local testing, set an explicit `CITYG_SERVER_ROOMS_ADMIN_TOKEN` and the matching `CITYG_CLIENT_ADMIN_TOKEN`.
 
 ---
 

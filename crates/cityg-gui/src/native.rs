@@ -8330,7 +8330,7 @@ fn categorize_error(err: &anyhow::Error, context: &str) -> CategorizedError {
             ErrorCategory::Policy,
             "Admin authentication required",
             technical_details.clone(),
-            "This action requires a room admin token. Configure CITYG_CLIENT_ADMIN_TOKEN for the client and the matching admin token on the server, or allow insecure admin only for local development.",
+            "This action requires a room admin token. Configure CITYG_CLIENT_ADMIN_TOKEN for the client and the matching admin token on the server.",
             true,
         );
     }
