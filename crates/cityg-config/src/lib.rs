@@ -388,166 +388,66 @@ impl CityGConfig {
     where
         F: for<'a> FnMut(&'a str) -> std::result::Result<String, VarError>,
     {
+        /// Parse an env var into a field, producing a uniform validation error.
+        macro_rules! env_parse {
+            ($get_var:expr, $env:literal, $field:expr, $name:literal) => {
+                if let Ok(val) = $get_var($env) {
+                    $field = val.parse().map_err(|e| {
+                        ConfigError::Validation(format!(concat!("Invalid ", $name, ": {}"), e))
+                    })?;
+                }
+            };
+        }
+
+        // Server
         if let Ok(val) = get_var("CITYG_SERVER_ADDRESS") {
             self.server.address = val;
         }
         if let Ok(val) = get_var("CITYG_SERVER_STATE_PATH") {
             self.server.state_path = Some(PathBuf::from(val));
         }
-        if let Ok(val) = get_var("CITYG_SERVER_WEBSOCKET_CAPACITY") {
-            self.server.websocket_capacity = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid websocket_capacity: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_SERVER_WINDOW_TTL_SECS") {
-            self.server.window_ttl_secs = val
-                .parse()
-                .map_err(|e| ConfigError::Validation(format!("Invalid window_ttl_secs: {}", e)))?;
-        }
-        if let Ok(val) = get_var("CITYG_SERVER_SEED_DEMO_ROOM") {
-            self.server.seed_demo_room = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid seed_demo_room flag: {}", e))
-            })?;
-        }
+        env_parse!(get_var, "CITYG_SERVER_WEBSOCKET_CAPACITY", self.server.websocket_capacity, "websocket_capacity");
+        env_parse!(get_var, "CITYG_SERVER_WINDOW_TTL_SECS", self.server.window_ttl_secs, "window_ttl_secs");
+        env_parse!(get_var, "CITYG_SERVER_SEED_DEMO_ROOM", self.server.seed_demo_room, "seed_demo_room flag");
 
+        // Client
         if let Ok(val) = get_var("CITYG_CLIENT_DEFAULT_SERVER_URL") {
             self.client.default_server_url = val;
         }
-        if let Ok(val) = get_var("CITYG_CLIENT_FETCH_POLL_INTERVAL_SECS") {
-            self.client.fetch_poll_interval_secs = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid fetch_poll_interval_secs: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_CLIENT_FETCH_RETRY_INTERVAL_SECS") {
-            self.client.fetch_retry_interval_secs = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid fetch_retry_interval_secs: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_CLIENT_WEBSOCKET_RECONNECT_DELAY_SECS") {
-            self.client.websocket_reconnect_delay_secs = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid websocket_reconnect_delay_secs: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_CLIENT_API_TIMEOUT_SECS") {
-            self.client.api_timeout_secs = val
-                .parse()
-                .map_err(|e| ConfigError::Validation(format!("Invalid api_timeout_secs: {}", e)))?;
-        }
+        env_parse!(get_var, "CITYG_CLIENT_FETCH_POLL_INTERVAL_SECS", self.client.fetch_poll_interval_secs, "fetch_poll_interval_secs");
+        env_parse!(get_var, "CITYG_CLIENT_FETCH_RETRY_INTERVAL_SECS", self.client.fetch_retry_interval_secs, "fetch_retry_interval_secs");
+        env_parse!(get_var, "CITYG_CLIENT_WEBSOCKET_RECONNECT_DELAY_SECS", self.client.websocket_reconnect_delay_secs, "websocket_reconnect_delay_secs");
+        env_parse!(get_var, "CITYG_CLIENT_API_TIMEOUT_SECS", self.client.api_timeout_secs, "api_timeout_secs");
 
-        if let Ok(val) = get_var("CITYG_PROTOCOL_WINDOW_DURATION_SECS") {
-            self.protocol.window_duration_secs = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid window_duration_secs: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_MAX_CONCURRENT_HEADS") {
-            self.protocol.max_concurrent_heads = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid max_concurrent_heads: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS") {
-            self.protocol.epoch_rotation_interval_secs = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid epoch_rotation_interval_secs: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_DEFAULT_SRX_MAX_BYTES") {
-            self.protocol.default_srx_max_bytes = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid default_srx_max_bytes: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_MAX_HP_PROOF_BYTES") {
-            self.protocol.max_hp_proof_bytes = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid max_hp_proof_bytes: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_MAX_VRF_PROOF_BYTES") {
-            self.protocol.max_vrf_proof_bytes = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid max_vrf_proof_bytes: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_FS_CAPSS_MAX_BYTES") {
-            self.protocol.fs_capss_max_bytes = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid fs_capss_max_bytes: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_SRX_SMALLWOOD_MAX_BYTES") {
-            self.protocol.srx_smallwood_max_bytes = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid srx_smallwood_max_bytes: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_MAX_HP_ENVELOPE_BYTES") {
-            self.protocol.max_hp_envelope_bytes = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid max_hp_envelope_bytes: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_MIN_SRX_MAX_BYTES") {
-            self.protocol.min_srx_max_bytes = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid min_srx_max_bytes: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_RECEIVER_CACHE_TTL_SECS") {
-            self.protocol.receiver_cache_ttl_secs = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid receiver_cache_ttl_secs: {}", e))
-            })?;
-        }
+        // Protocol
+        env_parse!(get_var, "CITYG_PROTOCOL_WINDOW_DURATION_SECS", self.protocol.window_duration_secs, "window_duration_secs");
+        env_parse!(get_var, "CITYG_PROTOCOL_MAX_CONCURRENT_HEADS", self.protocol.max_concurrent_heads, "max_concurrent_heads");
+        env_parse!(get_var, "CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS", self.protocol.epoch_rotation_interval_secs, "epoch_rotation_interval_secs");
+        env_parse!(get_var, "CITYG_PROTOCOL_DEFAULT_SRX_MAX_BYTES", self.protocol.default_srx_max_bytes, "default_srx_max_bytes");
+        env_parse!(get_var, "CITYG_PROTOCOL_MAX_HP_PROOF_BYTES", self.protocol.max_hp_proof_bytes, "max_hp_proof_bytes");
+        env_parse!(get_var, "CITYG_PROTOCOL_MAX_VRF_PROOF_BYTES", self.protocol.max_vrf_proof_bytes, "max_vrf_proof_bytes");
+        env_parse!(get_var, "CITYG_PROTOCOL_FS_CAPSS_MAX_BYTES", self.protocol.fs_capss_max_bytes, "fs_capss_max_bytes");
+        env_parse!(get_var, "CITYG_PROTOCOL_SRX_SMALLWOOD_MAX_BYTES", self.protocol.srx_smallwood_max_bytes, "srx_smallwood_max_bytes");
+        env_parse!(get_var, "CITYG_PROTOCOL_MAX_HP_ENVELOPE_BYTES", self.protocol.max_hp_envelope_bytes, "max_hp_envelope_bytes");
+        env_parse!(get_var, "CITYG_PROTOCOL_MIN_SRX_MAX_BYTES", self.protocol.min_srx_max_bytes, "min_srx_max_bytes");
+        env_parse!(get_var, "CITYG_PROTOCOL_RECEIVER_CACHE_TTL_SECS", self.protocol.receiver_cache_ttl_secs, "receiver_cache_ttl_secs");
         if let Ok(val) = get_var("CITYG_PROTOCOL_FS_POLICY_VERSION") {
             self.protocol.fs_policy_version = val;
         }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_FS_POLICY_H_SECONDS") {
-            self.protocol.fs_policy.h_seconds = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid fs_policy.h_seconds: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_FS_POLICY_CHECKPOINT_INTERVAL_SECS") {
-            self.protocol.fs_policy.checkpoint_interval_seconds = val.parse().map_err(|e| {
-                ConfigError::Validation(format!(
-                    "Invalid fs_policy.checkpoint_interval_seconds: {}",
-                    e
-                ))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_FS_POLICY_CHECKPOINT_HEAD_THRESHOLD") {
-            self.protocol.fs_policy.checkpoint_head_threshold = val.parse().map_err(|e| {
-                ConfigError::Validation(format!(
-                    "Invalid fs_policy.checkpoint_head_threshold: {}",
-                    e
-                ))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_FS_POLICY_SLACK_ANCHOR") {
-            self.protocol.fs_policy.slack_anchor = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid fs_policy.slack_anchor: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_FS_POLICY_SLACK_FIRST_DEVICE") {
-            self.protocol.fs_policy.slack_first_device = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid fs_policy.slack_first_device: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_PROTOCOL_FS_POLICY_SLACK_DEVICE") {
-            self.protocol.fs_policy.slack_device = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid fs_policy.slack_device: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_GUI_DEFAULT_WINDOW_WIDTH") {
-            self.gui.default_window_width = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid default_window_width: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_GUI_DEFAULT_WINDOW_HEIGHT") {
-            self.gui.default_window_height = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid default_window_height: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_GUI_MEMBERS_PAGE_LIMIT") {
-            self.gui.members_page_limit = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid members_page_limit: {}", e))
-            })?;
-        }
-        if let Ok(val) = get_var("CITYG_GUI_MEMBERS_REFRESH_INTERVAL_SECS") {
-            self.gui.members_refresh_interval_secs = val.parse().map_err(|e| {
-                ConfigError::Validation(format!("Invalid members_refresh_interval_secs: {}", e))
-            })?;
-        }
+
+        // FS policy
+        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_H_SECONDS", self.protocol.fs_policy.h_seconds, "fs_policy.h_seconds");
+        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_CHECKPOINT_INTERVAL_SECS", self.protocol.fs_policy.checkpoint_interval_seconds, "fs_policy.checkpoint_interval_seconds");
+        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_CHECKPOINT_HEAD_THRESHOLD", self.protocol.fs_policy.checkpoint_head_threshold, "fs_policy.checkpoint_head_threshold");
+        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_SLACK_ANCHOR", self.protocol.fs_policy.slack_anchor, "fs_policy.slack_anchor");
+        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_SLACK_FIRST_DEVICE", self.protocol.fs_policy.slack_first_device, "fs_policy.slack_first_device");
+        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_SLACK_DEVICE", self.protocol.fs_policy.slack_device, "fs_policy.slack_device");
+
+        // GUI
+        env_parse!(get_var, "CITYG_GUI_DEFAULT_WINDOW_WIDTH", self.gui.default_window_width, "default_window_width");
+        env_parse!(get_var, "CITYG_GUI_DEFAULT_WINDOW_HEIGHT", self.gui.default_window_height, "default_window_height");
+        env_parse!(get_var, "CITYG_GUI_MEMBERS_PAGE_LIMIT", self.gui.members_page_limit, "members_page_limit");
+        env_parse!(get_var, "CITYG_GUI_MEMBERS_REFRESH_INTERVAL_SECS", self.gui.members_refresh_interval_secs, "members_refresh_interval_secs");
 
         Ok(self)
     }
