@@ -1898,30 +1898,15 @@ fn parse_barrier_update(
 }
 
 fn build_pk_entries_view<'a>(state: &'a GroupState) -> Result<Cow<'a, [Vec<u8>]>, CityGError> {
-    let n_max = usize::try_from(state.n_max)
-        .map_err(|_| CityGError::InvalidInput("barrier n_max does not fit usize"))?;
-    if n_max == 0 {
-        return Err(CityGError::InvalidInput("barrier n_max must be positive"));
-    }
-    let expected_len = n_max.saturating_mul(2).saturating_sub(1);
+    let (_, expected_len, _) = barrier_pk_entry_layout(state.n_max)?;
     if state.barrier_pk_entries.len() == expected_len {
         return Ok(Cow::Borrowed(state.barrier_pk_entries.as_slice()));
     }
-
-    let leaf_base = n_max.saturating_sub(1);
-    let mut pk_entries = vec![Vec::new(); expected_len];
-    if let Some(snapshot) = state.latest_snapshot() {
-        for leaf in snapshot.members() {
-            let index = cover_leaf_index(leaf, state.n_max) as usize;
-            if index >= n_max {
-                continue;
-            }
-            if let Some(ek_leaf) = state.leaf_barrier_public.get(leaf) {
-                pk_entries[leaf_base + index] = ek_leaf.clone();
-            }
-        }
-    }
-    Ok(Cow::Owned(pk_entries))
+    Ok(Cow::Owned(build_fallback_pk_entries(
+        state,
+        Vec::new(),
+        |ek_leaf| ek_leaf.clone(),
+    )?))
 }
 
 #[cfg(test)]
@@ -2310,14 +2295,54 @@ fn compute_revocation_roots_hash(
     h_l("barrier/roots", &Preimage(revoked_since_root, revoked_root)).map_err(CityGError::from)
 }
 
+fn barrier_pk_entry_layout(n_max: u64) -> Result<(usize, usize, usize), CityGError> {
+    let n_max_usize = usize::try_from(n_max)
+        .map_err(|_| CityGError::InvalidInput("barrier n_max does not fit usize"))?;
+    if n_max_usize == 0 {
+        return Err(CityGError::InvalidInput("barrier n_max must be positive"));
+    }
+    let expected_len = n_max_usize.saturating_mul(2).saturating_sub(1);
+    let leaf_base = n_max_usize.saturating_sub(1);
+    Ok((n_max_usize, expected_len, leaf_base))
+}
+
+fn build_fallback_pk_entries<'a, T, F>(
+    state: &'a GroupState,
+    empty: T,
+    leaf_entry: F,
+) -> Result<Vec<T>, CityGError>
+where
+    T: Clone,
+    F: Fn(&'a Vec<u8>) -> T,
+{
+    let (n_max, expected_len, leaf_base) = barrier_pk_entry_layout(state.n_max)?;
+    let mut pk_entries = vec![empty; expected_len];
+    if let Some(snapshot) = state.latest_snapshot() {
+        for leaf in snapshot.members() {
+            let index = cover_leaf_index(leaf, state.n_max) as usize;
+            if index >= n_max {
+                continue;
+            }
+            if let Some(ek_leaf) = state.leaf_barrier_public.get(leaf) {
+                pk_entries[leaf_base + index] = leaf_entry(ek_leaf);
+            }
+        }
+    }
+    Ok(pk_entries)
+}
+
 fn build_all_blank_pk_entries(n_max: u64) -> Result<Vec<Vec<u8>>, CityGError> {
+    build_blank_pk_entries(n_max, Vec::new())
+}
+
+fn build_blank_pk_entries<T: Clone>(n_max: u64, empty: T) -> Result<Vec<T>, CityGError> {
     let n_max_usize =
         usize::try_from(n_max).map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
     let len = n_max_usize
         .checked_mul(2)
         .and_then(|v| v.checked_sub(1))
         .ok_or(CityGError::InvalidInput("barrier tree size overflow"))?;
-    Ok(vec![Vec::new(); len])
+    Ok(vec![empty; len])
 }
 
 fn barrier_update_malformed_freeze_error() -> CityGError {
@@ -2333,39 +2358,40 @@ fn map_barrier_update_validation_error(err: CityGError) -> CityGError {
     }
 }
 
-fn blank_internal_path_from_leaf_cow(pk_entries: &mut [Cow<'_, [u8]>], leaf_node: usize) {
-    for node in direct_path_nodes(leaf_node).into_iter().skip(1) {
+fn clear_barrier_path<T>(
+    pk_entries: &mut [T],
+    leaf_node: usize,
+    include_leaf: bool,
+    mut clear_slot: impl FnMut(&mut T),
+) {
+    for (offset, node) in direct_path_nodes(leaf_node).into_iter().enumerate() {
+        if !include_leaf && offset == 0 {
+            continue;
+        }
         if let Some(slot) = pk_entries.get_mut(node) {
-            *slot = Cow::Borrowed(b"");
+            clear_slot(slot);
         }
     }
+}
+
+fn blank_internal_path_from_leaf_cow(pk_entries: &mut [Cow<'_, [u8]>], leaf_node: usize) {
+    clear_barrier_path(pk_entries, leaf_node, false, |slot| {
+        *slot = Cow::Borrowed(b"");
+    });
 }
 
 fn blank_leaf_and_path_cow(pk_entries: &mut [Cow<'_, [u8]>], leaf_node: usize) {
-    for node in direct_path_nodes(leaf_node) {
-        if let Some(slot) = pk_entries.get_mut(node) {
-            *slot = Cow::Borrowed(b"");
-        }
-    }
+    clear_barrier_path(pk_entries, leaf_node, true, |slot| {
+        *slot = Cow::Borrowed(b"");
+    });
 }
 
 fn build_all_blank_pk_entries_cow(n_max: u64) -> Result<Vec<Cow<'static, [u8]>>, CityGError> {
-    let n_max_usize =
-        usize::try_from(n_max).map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
-    let len = n_max_usize
-        .checked_mul(2)
-        .and_then(|v| v.checked_sub(1))
-        .ok_or(CityGError::InvalidInput("barrier tree size overflow"))?;
-    Ok(vec![Cow::Borrowed(b""); len])
+    build_blank_pk_entries(n_max, Cow::Borrowed(b""))
 }
 
 fn build_pk_entries_cow<'a>(state: &'a GroupState) -> Result<Vec<Cow<'a, [u8]>>, CityGError> {
-    let n_max = usize::try_from(state.n_max)
-        .map_err(|_| CityGError::InvalidInput("barrier n_max does not fit usize"))?;
-    if n_max == 0 {
-        return Err(CityGError::InvalidInput("barrier n_max must be positive"));
-    }
-    let expected_len = n_max.saturating_mul(2).saturating_sub(1);
+    let (_, expected_len, _) = barrier_pk_entry_layout(state.n_max)?;
     if state.barrier_pk_entries.len() == expected_len {
         return Ok(state
             .barrier_pk_entries
@@ -2373,21 +2399,9 @@ fn build_pk_entries_cow<'a>(state: &'a GroupState) -> Result<Vec<Cow<'a, [u8]>>,
             .map(|v| Cow::Borrowed(v.as_slice()))
             .collect());
     }
-
-    let leaf_base = n_max.saturating_sub(1);
-    let mut pk_entries = vec![Cow::Borrowed(b"".as_slice()); expected_len];
-    if let Some(snapshot) = state.latest_snapshot() {
-        for leaf in snapshot.members() {
-            let index = cover_leaf_index(leaf, state.n_max) as usize;
-            if index >= n_max {
-                continue;
-            }
-            if let Some(ek_leaf) = state.leaf_barrier_public.get(leaf) {
-                pk_entries[leaf_base + index] = Cow::Borrowed(ek_leaf.as_slice());
-            }
-        }
-    }
-    Ok(pk_entries)
+    build_fallback_pk_entries(state, Cow::Borrowed(b""), |ek_leaf| {
+        Cow::Borrowed(ek_leaf.as_slice())
+    })
 }
 
 fn verify_barrier_update_pairs_and_targets(
@@ -2801,20 +2815,12 @@ fn header_string(
 
 #[cfg(test)]
 fn blank_internal_path_from_leaf(pk_entries: &mut [Vec<u8>], leaf_node: usize) {
-    for node in direct_path_nodes(leaf_node).into_iter().skip(1) {
-        if let Some(slot) = pk_entries.get_mut(node) {
-            slot.clear();
-        }
-    }
+    clear_barrier_path(pk_entries, leaf_node, false, Vec::clear);
 }
 
 #[cfg(test)]
 fn blank_leaf_and_path(pk_entries: &mut [Vec<u8>], leaf_node: usize) {
-    for node in direct_path_nodes(leaf_node) {
-        if let Some(slot) = pk_entries.get_mut(node) {
-            slot.clear();
-        }
-    }
+    clear_barrier_path(pk_entries, leaf_node, true, Vec::clear);
 }
 
 /// Light-weight acceptance output.
