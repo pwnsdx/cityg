@@ -34,15 +34,12 @@ const FORBIDDEN_SEED_CTX_KEYS: &[u64] = &[
 /// Build the deterministic CBOR encoding of `ANCHOR_SEED_CTX` by removing the
 /// keys listed in [`VOLATILE_KEYS`] and excluding proof/SRX/bootstrap keys.
 pub fn build_anchor_seed_ctx(header_map: &BTreeMap<u64, Value>) -> Result<Vec<u8>, MsphfError> {
-    let mut filtered = BTreeMap::new();
-    for (key, value) in header_map.iter() {
-        if VOLATILE_KEYS.contains(key) || FORBIDDEN_SEED_CTX_KEYS.contains(key) {
-            continue;
-        }
-        filtered.insert(*key, value.clone());
-    }
+    let filtered: BTreeMap<&u64, &Value> = header_map
+        .iter()
+        .filter(|(key, _)| !VOLATILE_KEYS.contains(key) && !FORBIDDEN_SEED_CTX_KEYS.contains(key))
+        .collect();
 
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(512);
     ciborium::ser::into_writer(&filtered, &mut buf).map_err(MsphfError::serialization)?;
     Ok(buf)
 }

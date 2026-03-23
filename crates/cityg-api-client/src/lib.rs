@@ -1173,7 +1173,7 @@ impl CitygApiClient {
         R: Message + Default,
     {
         let url = format!("{}{}", self.base_url, path);
-        let buf = request.encode_to_vec();
+        let buf = bytes::Bytes::from(request.encode_to_vec());
         let mut last_network_error: Option<reqwest::Error> = None;
 
         for attempt in 0..=max_retries {

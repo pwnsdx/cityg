@@ -81,11 +81,9 @@ impl PolyArith for Poly256 {
         let mut c = [0i64; Self::DEGREE << 1];
         karatsuba(&a.coeff, &b.coeff, &mut c, Self::DEGREE);
         let mut res = [0i64; Self::DEGREE];
-        res.copy_from_slice(
-            &(0..Self::DEGREE)
-                .map(|i| c[i] - c[Self::DEGREE + i])
-                .collect::<Vec<i64>>(),
-        );
+        for i in 0..Self::DEGREE {
+            res[i] = c[i] - c[Self::DEGREE + i];
+        }
         let mut rt = Self { coeff: res };
         rt.normalized();
         rt

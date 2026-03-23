@@ -83,7 +83,7 @@ impl VRF for LBVRF {
         hash_input.zeroize();
         let b = hash_to_new_basis(digest.as_ref());
 
-        let z_p: Vec<Poly32> = proof.z.iter().map(|x| (*x).into()).collect();
+        let z_p: [Poly32; 9] = proof.z.map(|x| x.into());
         let c_p: Poly32 = proof.c.into();
 
         // step 1: compute w1_prime = A z - c t
@@ -310,7 +310,7 @@ pub(crate) fn prove_with_rs<Blob: AsRef<[u8]>>(
     let mut y = [Poly256::zero(); 9];
     let mut rs = 0;
     // step 0: s_p = s mod (p, x^32+R)
-    let mut s_p: Vec<Poly32> = sk.s.iter().map(|x| (*x).into()).collect();
+    let mut s_p: [Poly32; 9] = sk.s.map(|x| x.into());
 
     // step 1: b = hash_to_new_basis (pp, pk, message)
     let mut hash_input: Vec<u8> = Vec::new();
@@ -342,7 +342,7 @@ pub(crate) fn prove_with_rs<Blob: AsRef<[u8]>>(
         for e in y.iter_mut() {
             *e = Poly256::rand_mod_beta(&mut rng);
         }
-        let y_p: Vec<Poly32> = y.iter().map(|x| (*x).into()).collect();
+        let y_p: [Poly32; 9] = y.map(|x| x.into());
 
         // step 4: w1 = Ay, w2 = by
         let mut w1 = [Poly256::zero(); 4];
