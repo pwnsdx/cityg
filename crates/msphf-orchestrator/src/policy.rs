@@ -138,41 +138,24 @@ pub struct PolicyDocument {
 
 impl PolicyDocument {
     pub fn apply_to_context(&self, ctx: &mut AcceptanceContext) -> Result<(), PolicyError> {
-        match &self.allow.msphf_crs_id {
-            Some(list) => ctx.set_allowed_crs_ids(Some(list.clone())),
-            None => ctx.set_allowed_crs_ids(None),
-        }
-        match &self.allow.params_id {
-            Some(list) => ctx.set_allowed_params_ids(Some(list.clone())),
-            None => ctx.set_allowed_params_ids(None),
-        }
-        match &self.allow.meor_vrf_id {
-            Some(list) => ctx.set_allowed_vrf_ids(Some(list.clone())),
-            None => ctx.set_allowed_vrf_ids(None),
-        }
-        let proof_modes = match &self.allow.proof_modes {
-            Some(list) => list.clone(),
-            None => {
-                let mut single = BTreeSet::new();
-                single.insert(self.proof_mode.clone());
-                single
-            }
-        };
+        ctx.set_allowed_crs_ids(self.allow.msphf_crs_id.clone());
+        ctx.set_allowed_params_ids(self.allow.params_id.clone());
+        ctx.set_allowed_vrf_ids(self.allow.meor_vrf_id.clone());
+        let proof_modes = self
+            .allow
+            .proof_modes
+            .clone()
+            .unwrap_or_else(|| BTreeSet::from([self.proof_mode.clone()]));
         ctx.set_allowed_proof_modes(Some(proof_modes));
-        match &self.allow.srx_modes {
-            Some(list) => ctx.set_allowed_srx_modes(Some(list.clone())),
-            None => ctx.set_allowed_srx_modes(None),
-        }
+        ctx.set_allowed_srx_modes(self.allow.srx_modes.clone());
         ctx.set_leaf_id_mode(self.leaf_id_mode);
         ctx.set_h_max(self.h_max);
-        match &self.kbroad_registry {
-            Some(map) => ctx.set_kbroad_registry(Some(map.clone())),
-            None => ctx.set_kbroad_registry(None),
-        }
+        ctx.set_kbroad_registry(self.kbroad_registry.clone());
         ctx.set_policy_state(self.version.raw.clone(), self.version.timestamp);
         ctx.invalidate_policy_caches();
-        ctx.set_allowed_fs_policy_version(Some(self.fs_policy_version.clone()));
-        ctx.set_fs_policy_version(Some(self.fs_policy_version.clone()));
+        let fs_policy_version = self.fs_policy_version.clone();
+        ctx.set_allowed_fs_policy_version(Some(fs_policy_version.clone()));
+        ctx.set_fs_policy_version(Some(fs_policy_version));
         let fs_config = self.fs_policy.clone();
         ctx.apply_fs_policy_config(fs_config)
             .map_err(|_| PolicyError::FsPolicyWindowIncompatible)?;
@@ -290,10 +273,7 @@ pub fn load_policy_journal_from_reader<R: Read>(
         latest_document = Some(document);
     }
 
-    match latest_document {
-        Some(doc) => Ok(doc),
-        None => unreachable!("file.entries is checked non-empty at function start"),
-    }
+    latest_document.ok_or(PolicyError::EmptyJournal)
 }
 
 fn serialize_payload(payload: &PolicyPayloadSer) -> Result<Vec<u8>, PolicyError> {
