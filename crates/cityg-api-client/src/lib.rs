@@ -1552,7 +1552,7 @@ mod tests {
     {
         let app = Router::new()
             .route("/health", get(mock_health))
-            .route("/*path", post(mock_post));
+            .route("/{*path}", post(mock_post));
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr: SocketAddr = listener.local_addr()?;
@@ -1608,7 +1608,7 @@ mod tests {
     -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn StdError>> {
         let app = Router::new()
             .route("/health", get(mock_health))
-            .route("/*path", post(profile_mismatch_post));
+            .route("/{*path}", post(profile_mismatch_post));
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr: SocketAddr = listener.local_addr()?;
         let base = format!("http://{}", addr);
@@ -1699,7 +1699,7 @@ mod tests {
 
     async fn start_auth_header_server()
     -> Result<(String, tokio::task::JoinHandle<()>), Box<dyn StdError>> {
-        let app = Router::new().route("/*path", post(auth_header_post));
+        let app = Router::new().route("/{*path}", post(auth_header_post));
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr: SocketAddr = listener.local_addr()?;
         let base = format!("http://{}", addr);

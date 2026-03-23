@@ -1000,6 +1000,24 @@ fn try_recover_barrier_from_header_with_expected_before(
     }))
 }
 
+#[cfg(test)]
+fn try_recover_barrier_from_header(
+    session: &AppSession,
+    header_map: &BTreeMap<u64, Value>,
+    weid: &[u8; 32],
+    fs_ec: u64,
+    max_barrier_update_bytes: usize,
+) -> Result<Option<BarrierRecoverResult>> {
+    try_recover_barrier_from_header_with_expected_before(
+        session,
+        header_map,
+        weid,
+        fs_ec,
+        max_barrier_update_bytes,
+        None,
+    )
+}
+
 fn extract_barrier_update_digest(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]>> {
     match header.get(&hdr::HDR_BARRIER_UPDATE) {
         Some(Value::Bytes(raw)) => Ok(Some(compute_barrier_update_digest(raw)?)),

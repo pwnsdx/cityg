@@ -2920,7 +2920,7 @@ mod tests {
     ) -> Result<(String, tokio::task::JoinHandle<()>)> {
         let app = Router::new()
             .route("/health", get(mock_leave_health))
-            .route("/*path", post(mock_leave_post))
+            .route("/{*path}", post(mock_leave_post))
             .with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
