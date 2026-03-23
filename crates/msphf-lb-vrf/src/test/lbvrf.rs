@@ -19,12 +19,29 @@ fn test_hash_to_challenge() {
     let c = hash_to_challenge(input.as_ref());
     let mut sum = 0;
     for e in c.coeff.iter() {
-        assert!(*e <= 1 || *e >= -1, "coefficients out of range {}", *e);
+        assert!((-1..=1).contains(e), "coefficients out of range {}", *e);
         if *e != 0 {
             sum += 1;
         }
     }
     assert_eq!(sum, KAPPA)
+}
+
+#[test]
+fn hash_to_challenge_regression_keeps_full_weight_for_probe_input() {
+    let c = hash_to_challenge(b"probe-8");
+    let weight = c.coeff.iter().filter(|coeff| **coeff != 0).count();
+    assert_eq!(weight, KAPPA, "challenge weight must remain exactly KAPPA");
+}
+
+#[test]
+fn hash_to_challenge_keeps_full_weight_across_regression_range() {
+    for idx in 0..128u32 {
+        let input = format!("probe-{idx}");
+        let c = hash_to_challenge(input.as_bytes());
+        let weight = c.coeff.iter().filter(|coeff| **coeff != 0).count();
+        assert_eq!(weight, KAPPA, "challenge weight drifted for {input}");
+    }
 }
 
 #[test]
@@ -72,6 +89,10 @@ fn test_rs() -> Result<(), Box<dyn std::error::Error>> {
         let message = "this is a message that vrf signs";
         let (proof, rs) = prove_with_rs(message, param, pk, sk, vrf_seed)?;
         t += rs;
+        assert!(
+            rs <= MAX_REJECTION_SAMPLING_ATTEMPTS,
+            "rejection sampling exceeded hard cap"
+        );
         let res = <LBVRF as VRF>::verify(message, param, pk, proof)?;
         let vrf_output = match res {
             Some(output) => output,

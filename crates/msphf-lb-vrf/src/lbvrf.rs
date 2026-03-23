@@ -15,6 +15,8 @@ use sha2::{Digest, Sha512};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
 
+pub(crate) const MAX_REJECTION_SAMPLING_ATTEMPTS: usize = 1_000_000;
+
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub struct Proof {
     pub(crate) z: [Poly256; 9],
@@ -199,36 +201,69 @@ pub(crate) fn hash_to_new_basis(input: &[u8]) -> [Poly32; 9] {
     res
 }
 
-pub(crate) fn hash_to_challenge(input: &[u8]) -> Poly256 {
+fn challenge_block(input: &[u8], counter: u64) -> [u8; 64] {
     let mut hasher = Sha512::new();
     hasher.update(input);
     hasher.update(b"domain seperator: hash to challenge");
+    hasher.update(counter.to_le_bytes());
     let digest = hasher.finalize();
-    let mut res = [0i64; 256];
-    let mut sign_pt = 0;
-    let mut coeff_pt = 0;
-    let mut ct = 0;
-    let mut tmp = digest[63];
-    for _i in 0..KAPPA {
-        let coeff = tmp & 0b1;
-        tmp >>= 1;
-        ct += 1;
-        if ct == 4 {
-            ct = 0;
-            sign_pt += 1;
-            tmp = digest[64 - sign_pt - 1];
-        }
-        if res[digest[coeff_pt] as usize] != 0 {
-            coeff_pt += 1;
-        }
-        res[digest[coeff_pt] as usize] = if coeff == 1 { 1 } else { -1 };
-        coeff_pt += 1;
+    let mut block = [0u8; 64];
+    block.copy_from_slice(&digest);
+    block
+}
 
-        if coeff_pt + sign_pt == 64 {
-            debug_assert!(
-                false,
-                "hash_to_challenge exhausted entropy; check PRNG and domain separation"
-            );
+struct ChallengeStream<'a> {
+    input: &'a [u8],
+    counter: u64,
+    block: [u8; 64],
+    cursor: usize,
+}
+
+impl<'a> ChallengeStream<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self {
+            input,
+            counter: 1,
+            block: challenge_block(input, 0),
+            cursor: 0,
+        }
+    }
+
+    fn next_byte(&mut self) -> u8 {
+        if self.cursor == self.block.len() {
+            self.block = challenge_block(self.input, self.counter);
+            self.counter = self.counter.saturating_add(1);
+            self.cursor = 0;
+        }
+        let byte = self.block[self.cursor];
+        self.cursor += 1;
+        byte
+    }
+}
+
+pub(crate) fn hash_to_challenge(input: &[u8]) -> Poly256 {
+    let mut res = [0i64; 256];
+    let mut used = [false; 256];
+    let mut stream = ChallengeStream::new(input);
+    let mut sign_bits = 0u8;
+    let mut bits_remaining = 0u8;
+
+    for _ in 0..KAPPA {
+        if bits_remaining == 0 {
+            sign_bits = stream.next_byte();
+            bits_remaining = 8;
+        }
+        let sign = if (sign_bits & 0b1) == 1 { 1 } else { -1 };
+        sign_bits >>= 1;
+        bits_remaining -= 1;
+
+        loop {
+            let idx = stream.next_byte() as usize;
+            if used[idx] {
+                continue;
+            }
+            used[idx] = true;
+            res[idx] = sign;
             break;
         }
     }
@@ -294,6 +329,15 @@ pub(crate) fn prove_with_rs<Blob: AsRef<[u8]>>(
     // we start rejection sampling here
     loop {
         rs += 1;
+        if rs > MAX_REJECTION_SAMPLING_ATTEMPTS {
+            y.zeroize();
+            for poly in s_p.iter_mut() {
+                poly.zeroize();
+            }
+            return Err(Error::RejectionSamplingExhausted {
+                attempts: MAX_REJECTION_SAMPLING_ATTEMPTS,
+            });
+        }
         // step 3: sample y
         for e in y.iter_mut() {
             *e = Poly256::rand_mod_beta(&mut rng);

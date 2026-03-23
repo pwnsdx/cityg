@@ -14,6 +14,8 @@ pub enum Error {
     Domain(&'static str),
     #[error("challenge generation failed")]
     ChallengeFailure,
+    #[error("rejection sampling exceeded {attempts} attempts")]
+    RejectionSamplingExhausted { attempts: usize },
     #[error("rng error")]
     Rng,
     #[error("unexpected state: {0}")]
