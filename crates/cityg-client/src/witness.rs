@@ -262,22 +262,26 @@ fn build_srx_inputs_owned(
         let right_key = right_anchor.map(|anchor_leaf| (parent_root, anchor_leaf));
 
         if let Some((root, leaf_id)) = left_key {
-            anchor_map
-                .entry((root, leaf_id))
-                .or_insert_with(|| RawMembershipWitness {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                anchor_map.entry((root, leaf_id))
+            {
+                entry.insert(RawMembershipWitness {
                     leaf_id: leaf_id.to_vec(),
                     root: root.to_vec(),
-                    path: canonical_membership_path(&parent_sorted, &leaf_id),
+                    path: canonical_membership_path(&parent_sorted, &leaf_id)?,
                 });
+            }
         }
         if let Some((root, leaf_id)) = right_key {
-            anchor_map
-                .entry((root, leaf_id))
-                .or_insert_with(|| RawMembershipWitness {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                anchor_map.entry((root, leaf_id))
+            {
+                entry.insert(RawMembershipWitness {
                     leaf_id: leaf_id.to_vec(),
                     root: root.to_vec(),
-                    path: canonical_membership_path(&parent_sorted, &leaf_id),
+                    path: canonical_membership_path(&parent_sorted, &leaf_id)?,
                 });
+            }
         }
 
         join_nonmem_parent_temp.push((witness, left_key, right_key));
@@ -292,14 +296,28 @@ fn build_srx_inputs_owned(
 
     let join_nonmem_parent = join_nonmem_parent_temp
         .into_iter()
-        .map(
-            |(witness, left_key, right_key)| SrxNonMembershipAnchorOwned {
-                left_ref: left_key.map(|key| anchor_lookup[&key]),
-                right_ref: right_key.map(|key| anchor_lookup[&key]),
+        .map(|(witness, left_key, right_key)| {
+            Ok(SrxNonMembershipAnchorOwned {
+                left_ref: left_key
+                    .map(|key| {
+                        anchor_lookup
+                            .get(&key)
+                            .copied()
+                            .ok_or(CityGError::InvalidInput("missing left anchor reference"))
+                    })
+                    .transpose()?,
+                right_ref: right_key
+                    .map(|key| {
+                        anchor_lookup
+                            .get(&key)
+                            .copied()
+                            .ok_or(CityGError::InvalidInput("missing right anchor reference"))
+                    })
+                    .transpose()?,
                 witness,
-            },
-        )
-        .collect();
+            })
+        })
+        .collect::<Result<Vec<_>, CityGError>>()?;
 
     let join_nonmem_revoked_since = join_leaves
         .iter()
@@ -324,7 +342,7 @@ fn build_srx_inputs_owned(
                 path: if revoked_sorted.is_empty() {
                     Vec::new()
                 } else {
-                    canonical_membership_path(&revoked_sorted, leaf)
+                    canonical_membership_path(&revoked_sorted, leaf)?
                 },
             })
         })
@@ -367,10 +385,7 @@ fn parent_nonmem_witness(
         ));
     }
 
-    let mut pos = 0;
-    while pos < parent_leaves.len() && parent_leaves[pos] < query {
-        pos += 1;
-    }
+    let pos = parent_leaves.partition_point(|leaf| leaf < &query);
 
     let left = if pos > 0 {
         Some(parent_leaves[pos - 1])
@@ -385,8 +400,8 @@ fn parent_nonmem_witness(
 
     let witness = match (left, right) {
         (Some(l), Some(r)) => {
-            let left_path = canonical_membership_path(parent_leaves, &l);
-            let right_path = canonical_membership_path(parent_leaves, &r);
+            let left_path = canonical_membership_path(parent_leaves, &l)?;
+            let right_path = canonical_membership_path(parent_leaves, &r)?;
             let (left_below, right_below, above, lca_left_h, lca_right_h) =
                 split_interval_paths(l, &left_path, r, &right_path, parent_root)?;
 
@@ -407,7 +422,7 @@ fn parent_nonmem_witness(
             }
         }
         (Some(l), None) => {
-            let path = canonical_membership_path(parent_leaves, &l);
+            let path = canonical_membership_path(parent_leaves, &l)?;
             RawNonMembershipWitness {
                 query: query.to_vec(),
                 root: parent_root.to_vec(),
@@ -423,7 +438,7 @@ fn parent_nonmem_witness(
             }
         }
         (None, Some(r)) => {
-            let path = canonical_membership_path(parent_leaves, &r);
+            let path = canonical_membership_path(parent_leaves, &r)?;
             RawNonMembershipWitness {
                 query: query.to_vec(),
                 root: parent_root.to_vec(),
@@ -438,7 +453,11 @@ fn parent_nonmem_witness(
                 lca_right_height: None,
             }
         }
-        (None, None) => unreachable!("non-empty parent set must yield at least one boundary"),
+        (None, None) => {
+            return Err(CityGError::InvalidInput(
+                "non-empty parent set yielded no interval boundary",
+            ));
+        }
     };
 
     Ok((witness, left, right))
@@ -460,16 +479,22 @@ fn sentinel_nonmem(root: [u8; 32], query: [u8; 32]) -> RawNonMembershipWitness {
     }
 }
 
-fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Vec<RawPathEntry> {
+fn canonical_membership_path(
+    leaves: &[[u8; 32]],
+    target: &[u8; 32],
+) -> Result<Vec<RawPathEntry>, CityGError> {
     if leaves.len() <= 1 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut level: Vec<[u8; 32]> = leaves.to_vec();
-    let mut index = match level.iter().position(|leaf| leaf == target) {
-        Some(idx) => idx,
-        None => unreachable!(),
-    };
+    let mut index =
+        level
+            .iter()
+            .position(|leaf| leaf == target)
+            .ok_or(CityGError::InvalidInput(
+                "membership target missing from leaf set",
+            ))?;
     let mut path = Vec::new();
 
     while level.len() > 1 {
@@ -501,7 +526,7 @@ fn canonical_membership_path(leaves: &[[u8; 32]], target: &[u8; 32]) -> Vec<RawP
         index /= 2;
     }
 
-    path
+    Ok(path)
 }
 
 fn split_interval_paths(
@@ -816,6 +841,17 @@ mod tests {
 
     #[test]
     fn build_srx_inputs_owned_anchor_pool_is_stable_across_join_order() {
+        fn encode_anchor_pool(pool: &[RawMembershipWitness]) -> Vec<Vec<u8>> {
+            pool.iter()
+                .map(|witness| {
+                    let mut buf = Vec::new();
+                    ciborium::ser::into_writer(witness, &mut buf)
+                        .expect("anchor witness should serialize");
+                    buf
+                })
+                .collect()
+        }
+
         let parent_leaves = vec![
             sequential_leaf(10),
             sequential_leaf(20),
@@ -847,7 +883,21 @@ mod tests {
         )
         .expect("reverse SRX inputs should build");
 
-        assert_eq!(forward.anchor_mem_pool, reverse.anchor_mem_pool);
+        assert_eq!(
+            encode_anchor_pool(&forward.anchor_mem_pool),
+            encode_anchor_pool(&reverse.anchor_mem_pool)
+        );
+    }
+
+    #[test]
+    fn canonical_membership_path_rejects_unknown_leaf() {
+        let leaves = vec![sequential_leaf(1), sequential_leaf(2)];
+        let err = canonical_membership_path(&leaves, &sequential_leaf(9))
+            .expect_err("unknown target must be rejected");
+        assert!(
+            err.to_string()
+                .contains("membership target missing from leaf set")
+        );
     }
 
     #[test]
