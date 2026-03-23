@@ -205,6 +205,13 @@ struct MsgReplayTupleArgs<'a> {
     sender_leaf: &'a [u8; 32],
 }
 
+#[derive(Serialize)]
+struct PayloadEnvelopeV2Ref<'a>(
+    &'a str,
+    u64,
+    #[serde(with = "serde_bytes")] &'a [u8],
+);
+
 #[derive(Serialize, Deserialize)]
 struct PayloadEnvelopeV2(String, u64, #[serde(with = "serde_bytes")] Vec<u8>);
 
@@ -316,10 +323,10 @@ pub(crate) fn encrypt_message_v2(
         )
         .map_err(|e| anyhow!("encryption failed: {}", e))?;
 
-    to_cbor_vec(&PayloadEnvelopeV2(
-        PAYLOAD_ENVELOPE_V2_MODE.to_string(),
+    to_cbor_vec(&PayloadEnvelopeV2Ref(
+        PAYLOAD_ENVELOPE_V2_MODE,
         msg_index,
-        ct_payload,
+        &ct_payload,
     ))
     .context("encode payload envelope v2")
 }
