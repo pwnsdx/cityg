@@ -1682,7 +1682,10 @@ fn header_value_bytes<'a>(
         return Err(AcceptanceError::Freeze(freeze));
     };
     if key == HDR_PARENT_ROOT {
-        debug!("header_bytes32_or_freeze: key HDR_PARENT_ROOT value {:?}", value);
+        debug!(
+            "header_bytes32_or_freeze: key HDR_PARENT_ROOT value {:?}",
+            value
+        );
     }
     match value {
         Value::Bytes(bytes) => Ok(Cow::Borrowed(bytes.as_slice())),
@@ -2003,9 +2006,18 @@ fn compute_barrier_update_digest(
 fn compute_revocation_roots_hash(
     header: &BTreeMap<u64, Value>,
 ) -> Result<[u8; 32], AcceptanceError> {
-    let revoked_since_root =
-        header_bytes32_or_freeze(header, HDR_REVOKED_SINCE_ROOT, FREEZE_FIELD_MISSING, "revoked_since_prev_root")?;
-    let revoked_root = header_bytes32_or_freeze(header, HDR_REVOKED_ROOT, FREEZE_FIELD_MISSING, "revoked_root")?;
+    let revoked_since_root = header_bytes32_or_freeze(
+        header,
+        HDR_REVOKED_SINCE_ROOT,
+        FREEZE_FIELD_MISSING,
+        "revoked_since_prev_root",
+    )?;
+    let revoked_root = header_bytes32_or_freeze(
+        header,
+        HDR_REVOKED_ROOT,
+        FREEZE_FIELD_MISSING,
+        "revoked_root",
+    )?;
     h_l(
         "barrier/roots",
         &BarrierRootsPreimage(&revoked_since_root, &revoked_root),

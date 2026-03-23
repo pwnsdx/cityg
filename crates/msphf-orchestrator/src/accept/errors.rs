@@ -216,4 +216,3 @@ pub const FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIO
         code: 96013,
         reason: "barrier_non_revocation_reason_forbidden_while_pending_revocations",
     };
-
