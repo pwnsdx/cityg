@@ -1540,6 +1540,60 @@ async fn map_accept_error(
 const MEMBERS_DEFAULT_PAGE_SIZE: u32 = 256;
 const MEMBERS_MAX_PAGE_SIZE: u32 = 2000;
 
+type AliasLookup = AHashMap<[u8; 32], (String, Vec<u8>)>;
+
+async fn members_for_request(
+    state: &ApiState,
+    gid: &[u8],
+    parent_root: &[u8],
+) -> Result<(Vec<[u8; 32]>, [u8; 32]), ApiError> {
+    let lane = state.server_for_gid_bytes(gid);
+    let guard = lane.read().await;
+
+    if parent_root.is_empty() {
+        let latest_root = guard.latest_parent_root(gid).ok_or(ApiError::NotFound)?;
+        let members = guard.members_for_root(gid, &latest_root).unwrap_or_default();
+        Ok((members, latest_root))
+    } else {
+        if parent_root.len() != 32 {
+            return Err(ApiError::InvalidRequest("parent_root must be 32 bytes"));
+        }
+        let mut root = [0u8; 32];
+        root.copy_from_slice(parent_root);
+        let members = guard.members_for_root(gid, &root).ok_or(ApiError::NotFound)?;
+        Ok((members, root))
+    }
+}
+
+async fn alias_lookup_by_leaf(state: &ApiState) -> AliasLookup {
+    let registry = state.alias_registry.read().await;
+    let mut lookup = AliasLookup::with_capacity(registry.len());
+    for (alias, binding) in registry.iter() {
+        lookup.insert(
+            binding.leaf_id,
+            (alias.clone(), binding.pop_public_key.clone()),
+        );
+    }
+    lookup
+}
+
+fn member_response(
+    leaf: &[u8; 32],
+    alias_lookup: &AliasLookup,
+    metadata: &AHashMap<[u8; 32], MemberMetadata>,
+) -> Member {
+    let alias_info = alias_lookup.get(leaf);
+    let metadata_entry = metadata.get(leaf);
+
+    Member {
+        leaf_id: leaf.to_vec(),
+        alias: alias_info.map(|(alias, _)| alias.clone()),
+        pop_public_key: alias_info.map(|(_, pk)| pk.clone()),
+        join_date: metadata_entry.map(|entry| entry.join_timestamp_ms),
+        last_seen: metadata_entry.map(|entry| entry.last_seen_timestamp_ms),
+    }
+}
+
 async fn members(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -1558,28 +1612,7 @@ async fn members(
         .limit
         .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
         .clamp(1, MEMBERS_MAX_PAGE_SIZE);
-    let lane = state.server_for_gid_bytes(&gid);
-
-    let (members, root) = {
-        let guard = lane.read().await;
-        if request.parent_root.is_empty() {
-            let latest_root = guard.latest_parent_root(&gid).ok_or(ApiError::NotFound)?;
-            let list = guard
-                .members_for_root(&gid, &latest_root)
-                .unwrap_or_default();
-            (list, latest_root)
-        } else {
-            if request.parent_root.len() != 32 {
-                return Err(ApiError::InvalidRequest("parent_root must be 32 bytes"));
-            }
-            let mut root = [0u8; 32];
-            root.copy_from_slice(&request.parent_root);
-            let list = guard
-                .members_for_root(&gid, &root)
-                .ok_or(ApiError::NotFound)?;
-            (list, root)
-        }
-    };
+    let (members, root) = members_for_request(&state, &gid, &request.parent_root).await?;
 
     let total_count = members.len() as u64;
     let start = offset.min(total_count) as usize;
@@ -1592,34 +1625,13 @@ async fn members(
 
     let slice = &members[start..end];
 
-    let alias_lookup = {
-        let registry = state.alias_registry.read().await;
-        let mut map: AHashMap<[u8; 32], (String, Vec<u8>)> = AHashMap::new();
-        for (alias, binding) in registry.iter() {
-            map.insert(
-                binding.leaf_id,
-                (alias.clone(), binding.pop_public_key.clone()),
-            );
-        }
-        map
-    };
+    let alias_lookup = alias_lookup_by_leaf(&state).await;
     let metadata = state.member_metadata.read().await;
 
     let reply = MembersResponse {
         members: slice
             .iter()
-            .map(|leaf| {
-                let alias_info = alias_lookup.get(leaf);
-                let metadata_entry = metadata.get(leaf);
-
-                Member {
-                    leaf_id: leaf.to_vec(),
-                    alias: alias_info.map(|(alias, _)| alias.clone()),
-                    pop_public_key: alias_info.map(|(_, pk)| pk.clone()),
-                    join_date: metadata_entry.map(|entry| entry.join_timestamp_ms),
-                    last_seen: metadata_entry.map(|entry| entry.last_seen_timestamp_ms),
-                }
-            })
+            .map(|leaf| member_response(leaf, &alias_lookup, &metadata))
             .collect(),
         root: root.to_vec(),
         total_count,
@@ -1655,41 +1667,9 @@ async fn search_members(
         .limit
         .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
         .clamp(1, MEMBERS_MAX_PAGE_SIZE);
-    let lane = state.server_for_gid_bytes(&gid);
+    let (members, root) = members_for_request(&state, &gid, &request.parent_root).await?;
 
-    let (members, root) = {
-        let guard = lane.read().await;
-        if request.parent_root.is_empty() {
-            let latest_root = guard.latest_parent_root(&gid).ok_or(ApiError::NotFound)?;
-            let list = guard
-                .members_for_root(&gid, &latest_root)
-                .unwrap_or_default();
-            (list, latest_root)
-        } else {
-            if request.parent_root.len() != 32 {
-                return Err(ApiError::InvalidRequest("parent_root must be 32 bytes"));
-            }
-            let mut root = [0u8; 32];
-            root.copy_from_slice(&request.parent_root);
-            let list = guard
-                .members_for_root(&gid, &root)
-                .ok_or(ApiError::NotFound)?;
-            (list, root)
-        }
-    };
-
-    // Get alias registry for filtering
-    let alias_lookup = {
-        let registry = state.alias_registry.read().await;
-        let mut map: AHashMap<[u8; 32], (String, Vec<u8>)> = AHashMap::new();
-        for (alias, binding) in registry.iter() {
-            map.insert(
-                binding.leaf_id,
-                (alias.clone(), binding.pop_public_key.clone()),
-            );
-        }
-        map
-    };
+    let alias_lookup = alias_lookup_by_leaf(&state).await;
     let metadata = state.member_metadata.read().await;
 
     // Filter members by query (alias or leaf_id hex)
@@ -1703,13 +1683,9 @@ async fn search_members(
             }
 
             // Check if alias matches query
-            for (leaf_id, (alias, _)) in alias_lookup.iter() {
-                if leaf_id == *leaf && alias.to_lowercase().contains(&query) {
-                    return true;
-                }
-            }
-
-            false
+            alias_lookup
+                .get(*leaf)
+                .is_some_and(|(alias, _)| alias.to_lowercase().contains(&query))
         })
         .copied()
         .collect();
@@ -1728,18 +1704,7 @@ async fn search_members(
     let reply = pb::SearchMembersResponse {
         members: slice
             .iter()
-            .map(|leaf| {
-                let alias_info = alias_lookup.get(leaf);
-                let metadata_entry = metadata.get(leaf);
-
-                Member {
-                    leaf_id: leaf.to_vec(),
-                    alias: alias_info.map(|(alias, _)| alias.clone()),
-                    pop_public_key: alias_info.map(|(_, pk)| pk.clone()),
-                    join_date: metadata_entry.map(|entry| entry.join_timestamp_ms),
-                    last_seen: metadata_entry.map(|entry| entry.last_seen_timestamp_ms),
-                }
-            })
+            .map(|leaf| member_response(leaf, &alias_lookup, &metadata))
             .collect(),
         root: root.to_vec(),
         total_count,
