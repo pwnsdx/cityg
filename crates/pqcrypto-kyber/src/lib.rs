@@ -37,10 +37,14 @@ pub mod kyber768 {
         }
     }
 
-    fn decode_public_key(bytes: &[u8]) -> PqResult<(MlKemPublicKey, [u8; PUBLIC_KEY_BYTES])> {
-        let raw: [u8; PUBLIC_KEY_BYTES] = bytes
+    fn decode_array<const N: usize>(name: &'static str, bytes: &[u8]) -> PqResult<[u8; N]> {
+        bytes
             .try_into()
-            .map_err(|_| bad_length("kyber768::PublicKey", bytes.len(), PUBLIC_KEY_BYTES))?;
+            .map_err(|_| bad_length(name, bytes.len(), N))
+    }
+
+    fn decode_public_key(bytes: &[u8]) -> PqResult<(MlKemPublicKey, [u8; PUBLIC_KEY_BYTES])> {
+        let raw = decode_array("kyber768::PublicKey", bytes)?;
         let key_bytes: ml_kem::kem::Key<MlKemPublicKey> = raw.into();
         let inner = MlKemPublicKey::new(&key_bytes)
             .map_err(|_| bad_length("kyber768::PublicKey", bytes.len(), PUBLIC_KEY_BYTES))?;
@@ -48,9 +52,7 @@ pub mod kyber768 {
     }
 
     fn decode_secret_key(bytes: &[u8]) -> PqResult<(MlKemSecretKey, [u8; SECRET_KEY_BYTES])> {
-        let raw: [u8; SECRET_KEY_BYTES] = bytes
-            .try_into()
-            .map_err(|_| bad_length("kyber768::SecretKey", bytes.len(), SECRET_KEY_BYTES))?;
+        let raw = decode_array("kyber768::SecretKey", bytes)?;
         #[allow(deprecated)]
         let expanded: MlKemExpandedSecretKey = raw.into();
         #[allow(deprecated)]
@@ -68,7 +70,7 @@ pub mod kyber768 {
     impl PublicKey {
         #[must_use]
         pub fn as_bytes(&self) -> &[u8] {
-            self.raw.as_slice()
+            <Self as KemPublicKeyTrait>::as_bytes(self)
         }
 
         pub fn from_bytes(bytes: &[u8]) -> PqResult<Self> {
@@ -102,7 +104,7 @@ pub mod kyber768 {
     impl SecretKey {
         #[must_use]
         pub fn as_bytes(&self) -> &[u8] {
-            self.raw.as_slice()
+            <Self as KemSecretKeyTrait>::as_bytes(self)
         }
 
         pub fn from_bytes(bytes: &[u8]) -> PqResult<Self> {
@@ -135,7 +137,7 @@ pub mod kyber768 {
     impl Ciphertext {
         #[must_use]
         pub fn as_bytes(&self) -> &[u8] {
-            self.raw.as_slice()
+            <Self as KemCiphertextTrait>::as_bytes(self)
         }
 
         pub fn from_bytes(bytes: &[u8]) -> PqResult<Self> {
@@ -149,9 +151,7 @@ pub mod kyber768 {
         }
 
         fn from_bytes(bytes: &[u8]) -> PqResult<Self> {
-            let raw: [u8; CIPHERTEXT_BYTES] = bytes
-                .try_into()
-                .map_err(|_| bad_length("kyber768::Ciphertext", bytes.len(), CIPHERTEXT_BYTES))?;
+            let raw = decode_array("kyber768::Ciphertext", bytes)?;
             Ok(Self { raw })
         }
     }
@@ -170,7 +170,7 @@ pub mod kyber768 {
     impl SharedSecret {
         #[must_use]
         pub fn as_bytes(&self) -> &[u8] {
-            self.raw.as_slice()
+            <Self as KemSharedSecretTrait>::as_bytes(self)
         }
 
         pub fn from_bytes(bytes: &[u8]) -> PqResult<Self> {
@@ -184,9 +184,7 @@ pub mod kyber768 {
         }
 
         fn from_bytes(bytes: &[u8]) -> PqResult<Self> {
-            let raw: [u8; SHARED_SECRET_BYTES] = bytes.try_into().map_err(|_| {
-                bad_length("kyber768::SharedSecret", bytes.len(), SHARED_SECRET_BYTES)
-            })?;
+            let raw = decode_array("kyber768::SharedSecret", bytes)?;
             Ok(Self { raw })
         }
     }
