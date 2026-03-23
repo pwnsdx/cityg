@@ -17,7 +17,8 @@ pub fn encode_proof(proof: &SmallwoodProof) -> Result<Vec<u8>> {
 
 /// Decode a canonical proof byte string back into the structured [`SmallwoodProof`].
 pub fn decode_proof(bytes: &[u8]) -> Result<SmallwoodProof> {
-    let proof: SmallwoodProof = bincode::deserialize(bytes).context("deserialize Smallwood proof")?;
+    let proof: SmallwoodProof =
+        bincode::deserialize(bytes).context("deserialize Smallwood proof")?;
     let canonical = encode_proof(&proof).context("re-serialize canonical Smallwood proof")?;
     if canonical != bytes {
         anyhow::bail!("non-canonical Smallwood proof encoding");
