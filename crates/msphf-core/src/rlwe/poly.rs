@@ -31,7 +31,8 @@ impl Poly {
 
     pub fn reduce(&mut self) {
         for c in self.coeffs.iter_mut() {
-            *c = ((barrett_reduce(*c as i32) as i32 + Q as i32) % Q as i32) as i16;
+            let reduced = barrett_reduce(*c as i32);
+            *c = if reduced < 0 { reduced + Q } else { reduced };
         }
     }
 

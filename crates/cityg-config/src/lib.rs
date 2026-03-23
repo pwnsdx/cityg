@@ -713,8 +713,8 @@ default_window_height = 1080.0
 
     #[test]
     fn test_env_overrides() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        use ahash::AHashMap;
-        let mut overrides = AHashMap::new();
+        use std::collections::HashMap;
+        let mut overrides = HashMap::new();
         overrides.insert("CITYG_SERVER_ADDRESS", "0.0.0.0:9999".to_string());
         overrides.insert("CITYG_CLIENT_FETCH_POLL_INTERVAL_SECS", "7".to_string());
 
@@ -957,8 +957,8 @@ default_window_height = 1080.0
 
     #[test]
     fn test_comprehensive_env_overrides() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        use ahash::AHashMap;
-        let mut overrides = AHashMap::new();
+        use std::collections::HashMap;
+        let mut overrides = HashMap::new();
 
         // Server overrides
         overrides.insert("CITYG_SERVER_ADDRESS", "1.2.3.4:5000".to_string());
@@ -1081,7 +1081,7 @@ default_window_height = 1080.0
 
     #[test]
     fn test_env_override_parse_errors() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        use ahash::AHashMap;
+        use std::collections::HashMap;
         let cases = [
             (
                 "CITYG_SERVER_WEBSOCKET_CAPACITY",
@@ -1216,7 +1216,7 @@ default_window_height = 1080.0
         ];
 
         for (key, value, expected_msg) in cases {
-            let mut overrides = AHashMap::new();
+            let mut overrides = HashMap::new();
             overrides.insert(key, value.to_string());
             let result = CityGConfig::default().apply_env_overrides_with(|lookup| {
                 overrides.get(lookup).cloned().ok_or(VarError::NotPresent)
