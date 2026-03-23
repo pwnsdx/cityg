@@ -5,6 +5,7 @@ use blake3::Hasher;
 #[derive(Clone, Debug)]
 pub struct Blake3MerkleTree {
     levels: Vec<Vec<[u8; 32]>>,
+    root: [u8; 32],
 }
 
 impl Blake3MerkleTree {
@@ -27,19 +28,15 @@ impl Blake3MerkleTree {
             current = next;
             levels.push(current.clone());
         }
-        Self { levels }
+        Self {
+            levels,
+            root: current[0],
+        }
     }
 
     /// Return the Merkle root.
     pub fn root(&self) -> [u8; 32] {
-        self.levels
-            .last()
-            .and_then(|level| level.first())
-            .copied()
-            .unwrap_or_else(|| {
-                // This should never happen if the tree was constructed properly
-                unreachable!("merkle tree root not available")
-            })
+        self.root
     }
 
     /// Return the authentication path for a given leaf index (bottom-up order).

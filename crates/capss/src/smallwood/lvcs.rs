@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use ark_ff::{One, PrimeField, Zero};
 use sha3::{
     Shake128,
@@ -285,7 +285,7 @@ impl PolynomialCommitment for LvcsCommitment {
         let interpolated = extended_rows
             .iter()
             .map(|row| interpolate_row(row, &interpolation_points))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let (commitment, dec_state) = self.decs.commit(salt, &interpolated, round_seeder)?;
         Ok((
             commitment,
@@ -400,7 +400,7 @@ impl LvcsCommitment {
                 extended.extend(rnd.clone());
                 interpolate_row(&extended, &interpolation_points)
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
         let mut v_values = Vec::with_capacity(dec_nb_queries);
         for query in dec_queries {
@@ -423,14 +423,20 @@ impl LvcsCommitment {
                 &v_values[row_idx],
                 sub_row,
             );
-            dec_opened.push(merge_columns(&pivot, sub_row, fullrank_cols, nb_rows));
+            dec_opened.push(merge_columns(&pivot, sub_row, fullrank_cols, nb_rows)?);
         }
 
         Ok(dec_opened)
     }
 }
 
-fn interpolate_row(values: &[BaseField], points: &[BaseField]) -> Vec<BaseField> {
+fn interpolate_row(values: &[BaseField], points: &[BaseField]) -> Result<Vec<BaseField>> {
+    ensure!(
+        values.len() == points.len(),
+        "interpolation point/value length mismatch: expected {}, got {}",
+        points.len(),
+        values.len()
+    );
     let relations = values
         .iter()
         .zip(points.iter())
@@ -538,30 +544,39 @@ fn merge_columns(
     remainder: &[BaseField],
     fullrank_cols: &[usize],
     total_cols: usize,
-) -> Vec<BaseField> {
+) -> Result<Vec<BaseField>> {
+    ensure!(
+        pivot.len() == fullrank_cols.len(),
+        "pivot column count mismatch: expected {}, got {}",
+        fullrank_cols.len(),
+        pivot.len()
+    );
+    let expected_remainder = total_cols
+        .checked_sub(fullrank_cols.len())
+        .ok_or_else(|| anyhow!("full-rank column count exceeds total columns"))?;
+    ensure!(
+        remainder.len() == expected_remainder,
+        "remainder column count mismatch: expected {}, got {}",
+        expected_remainder,
+        remainder.len()
+    );
     let mut out = vec![BaseField::zero(); total_cols];
     let mut pivot_iter = pivot.iter();
     let mut remainder_iter = remainder.iter();
     let mut next_pivot = fullrank_cols.iter().copied().peekable();
     for (idx, slot) in out.iter_mut().enumerate() {
         if matches!(next_pivot.peek(), Some(&col) if col == idx) {
-            *slot = if let Some(val) = pivot_iter.next() {
-                *val
-            } else {
-                // This is a programming error - lengths should match
-                unreachable!("pivot length mismatch")
-            };
+            *slot = *pivot_iter
+                .next()
+                .ok_or_else(|| anyhow!("pivot iterator ended before full-rank columns"))?;
             next_pivot.next();
         } else {
-            *slot = if let Some(val) = remainder_iter.next() {
-                *val
-            } else {
-                // This is a programming error - lengths should match
-                unreachable!("remainder length mismatch")
-            };
+            *slot = *remainder_iter
+                .next()
+                .ok_or_else(|| anyhow!("remainder iterator ended before row completion"))?;
         }
     }
-    out
+    Ok(out)
 }
 
 fn invert_matrix(matrix: &[Vec<BaseField>]) -> Result<Vec<Vec<BaseField>>> {

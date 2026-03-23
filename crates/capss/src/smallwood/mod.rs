@@ -439,10 +439,10 @@ fn build_decs_commitment(
         config.nb_queries,
         input_degree,
         seeder,
-    );
+    )?;
     let mask_degree =
         pacs_instance.constraint_degree() * input_degree + pacs_instance.nb_wit_cols();
-    let mask_polys = create_mask_polynomials(config.rho, &support, mask_degree, seeder);
+    let mask_polys = create_mask_polynomials(config.rho, &support, mask_degree, seeder)?;
     let mut all_polys = Vec::with_capacity(witness_polys.len() + mask_polys.len());
     all_polys.extend(witness_polys.iter().cloned());
     all_polys.extend(mask_polys.iter().cloned());

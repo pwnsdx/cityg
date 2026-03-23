@@ -1,3 +1,4 @@
+use anyhow::{Result, anyhow, ensure};
 use ark_ff::{Field, Zero};
 use ark_poly::{DenseUVPolynomial, univariate::DensePolynomial};
 
@@ -25,8 +26,13 @@ pub fn get_high_coeffs(coeffs: &[BaseField], degree: usize, nb: usize) -> Vec<Ba
 pub fn restore_only_from_relation(
     relations: &[(BaseField, Vec<BaseField>)],
     degree: usize,
-) -> Vec<BaseField> {
-    assert_eq!(relations.len(), degree + 1);
+) -> Result<Vec<BaseField>> {
+    ensure!(
+        relations.len() == degree + 1,
+        "polynomial relation count mismatch: expected {}, got {}",
+        degree + 1,
+        relations.len()
+    );
     let mut matrix = Vec::with_capacity(degree + 1);
     let mut rhs = Vec::with_capacity(degree + 1);
     for (alpha, vs) in relations {
@@ -41,13 +47,8 @@ pub fn restore_only_from_relation(
         }
         matrix.push(row);
     }
-    match linear::solve_linear_system(matrix, rhs) {
-        Ok(solution) => solution,
-        Err(_) => {
-            // This should not fail if the matrix is well-conditioned
-            unreachable!("failed to solve linear system for polynomial restoration")
-        }
-    }
+    linear::solve_linear_system(matrix, rhs)
+        .map_err(|err| anyhow!("failed to solve linear system for polynomial restoration: {err}"))
 }
 
 /// Restore coefficients given high-degree coefficients and relations.
@@ -55,10 +56,15 @@ pub fn restore_from_relations(
     relations: &[(BaseField, Vec<BaseField>)],
     high_coeffs: &[BaseField],
     degree: usize,
-) -> Vec<BaseField> {
+) -> Result<Vec<BaseField>> {
     let high_len = high_coeffs.len();
+    ensure!(
+        high_len <= degree,
+        "high coefficient count {} exceeds degree {}",
+        high_len,
+        degree
+    );
     let degree_l = degree - high_len;
-    assert_eq!(relations.len(), degree_l + 1);
 
     let mut adjusted_relations = Vec::with_capacity(relations.len());
     for (alpha, vs) in relations {
@@ -75,9 +81,9 @@ pub fn restore_from_relations(
         adjusted_relations.push((value, vs.clone()));
     }
 
-    let mut coeffs = restore_only_from_relation(&adjusted_relations, degree_l);
+    let mut coeffs = restore_only_from_relation(&adjusted_relations, degree_l)?;
     coeffs.extend_from_slice(high_coeffs);
-    coeffs
+    Ok(coeffs)
 }
 
 /// Convert coefficients into DensePolynomial.
@@ -143,22 +149,20 @@ mod tests {
             (bf(6), vec![bf(1)]),
             (bf(12), vec![bf(2)]),
         ];
-        let coeffs = restore_only_from_relation(&relations, 2);
+        let coeffs = restore_only_from_relation(&relations, 2).expect("relations restore");
         assert_eq!(coeffs, vec![bf(2), bf(3), bf(1)]);
     }
 
     #[test]
-    #[should_panic]
     fn restore_only_from_relation_rejects_wrong_relation_count() {
         let relations = vec![(bf(1), vec![bf(0)])];
-        let _ = restore_only_from_relation(&relations, 1);
+        assert!(restore_only_from_relation(&relations, 1).is_err());
     }
 
     #[test]
-    #[should_panic]
-    fn restore_only_from_relation_panics_on_singular_system() {
+    fn restore_only_from_relation_rejects_singular_system() {
         let relations = vec![(bf(1), vec![bf(0)]), (bf(1), vec![bf(0)])];
-        let _ = restore_only_from_relation(&relations, 1);
+        assert!(restore_only_from_relation(&relations, 1).is_err());
     }
 
     #[test]
@@ -166,14 +170,16 @@ mod tests {
         // polynomial P(x) = 4 + 5x + 7x^2 + 11x^3
         let high_coeffs = vec![bf(7), bf(11)];
         let relations = vec![(bf(4), vec![bf(0)]), (bf(27), vec![bf(1)])];
-        let coeffs = restore_from_relations(&relations, &high_coeffs, 3);
+        let coeffs = restore_from_relations(&relations, &high_coeffs, 3)
+            .expect("relations restore with high coeffs");
         assert_eq!(coeffs, vec![bf(4), bf(5), bf(7), bf(11)]);
     }
 
     #[test]
     fn restore_from_relations_without_high_coeffs_roundtrips() {
         let relations = vec![(bf(3), vec![bf(0)]), (bf(5), vec![bf(1)])];
-        let coeffs = restore_from_relations(&relations, &[], 1);
+        let coeffs =
+            restore_from_relations(&relations, &[], 1).expect("relations restore without high");
         assert_eq!(coeffs, vec![bf(3), bf(2)]);
     }
 

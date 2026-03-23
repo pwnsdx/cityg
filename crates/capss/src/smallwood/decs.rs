@@ -546,11 +546,7 @@ impl DecsCommitment {
             .iter()
             .map(|(point, value)| (*value, vec![*point]))
             .collect();
-        Ok(super::polynomial::restore_from_relations(
-            &rels,
-            high,
-            self.config.degree,
-        ))
+        super::polynomial::restore_from_relations(&rels, high, self.config.degree)
     }
 
     fn evaluation_domain_size(&self) -> usize {

@@ -1,3 +1,4 @@
+use anyhow::Result;
 use ark_ff::Zero;
 
 use crate::{
@@ -11,7 +12,7 @@ pub fn create_witness_polynomials(
     nb_queries: usize,
     degree: usize,
     seeder: &SmallwoodSeeder,
-) -> Vec<Vec<BaseField>> {
+) -> Result<Vec<Vec<BaseField>>> {
     rows.iter()
         .enumerate()
         .map(|(row_idx, row)| {
@@ -34,7 +35,7 @@ pub fn create_mask_polynomials(
     support: &[BaseField],
     degree: usize,
     seeder: &SmallwoodSeeder,
-) -> Vec<Vec<BaseField>> {
+) -> Result<Vec<Vec<BaseField>>> {
     (0..count)
         .map(|mask_idx| {
             let relation = vec![(BaseField::zero(), support.to_vec())];

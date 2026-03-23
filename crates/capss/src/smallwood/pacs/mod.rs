@@ -1,3 +1,4 @@
+use anyhow::Result;
 use ark_ff::Zero;
 use blake3::Hasher;
 
@@ -51,7 +52,7 @@ pub fn evaluate_parallel_constraints_over_polynomials<P: Pacs>(
     input_polys: &[Vec<BaseField>],
     theta_polys: &[Vec<Vec<BaseField>>],
     deg_q: usize,
-) -> Vec<Vec<BaseField>> {
+) -> Result<Vec<Vec<BaseField>>> {
     let eval_points: Vec<BaseField> = (0..=deg_q).map(|i| BaseField::from(i as u64)).collect();
     let mut evals = Vec::with_capacity(eval_points.len());
 
@@ -82,7 +83,7 @@ pub fn evaluate_aggregated_constraints_over_polynomials<P: Pacs>(
     input_polys: &[Vec<BaseField>],
     theta_polys: &[Vec<Vec<BaseField>>],
     deg_q: usize,
-) -> Vec<Vec<BaseField>> {
+) -> Result<Vec<Vec<BaseField>>> {
     let eval_points: Vec<BaseField> = (0..=deg_q).map(|i| BaseField::from(i as u64)).collect();
     let mut evals = Vec::with_capacity(eval_points.len());
 
@@ -234,7 +235,8 @@ mod tests {
         let input_polys = vec![vec![bf(1), bf(1)]]; // 1 + x
         let theta_polys = vec![vec![vec![bf(2)]]]; // constant 2
         let constraints =
-            evaluate_parallel_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 2);
+            evaluate_parallel_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 2)
+                .expect("parallel constraint interpolation");
         assert_eq!(constraints.len(), 1);
         let coeffs = &constraints[0];
         // Witness eval times theta => (1 + x) * 2 => 2 + 2x
@@ -248,7 +250,8 @@ mod tests {
         let input_polys = vec![vec![bf(3), bf(0)]]; // constant 3
         let theta_polys = vec![vec![vec![bf(4)]]]; // constant 4
         let constraints =
-            evaluate_aggregated_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 2);
+            evaluate_aggregated_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 2)
+                .expect("aggregated constraint interpolation");
         assert_eq!(constraints.len(), 1);
         // witness eval + theta constant -> 3 + 4 = 7 everywhere -> polynomial 7
         assert_eq!(constraints[0][0], bf(7));
