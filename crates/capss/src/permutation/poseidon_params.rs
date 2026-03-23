@@ -16,15 +16,8 @@ fn params_for_rate(rate: u8) -> Result<PoseidonParams> {
     read_constants(rate)
 }
 
-pub fn poseidon_config_rate_2() -> PoseidonConfig<BaseField> {
-    let params = match params_for_rate(2) {
-        Ok(p) => p,
-        Err(_) => {
-            // This should never fail for valid rates like 2
-            // If it does, it's a programming error, not a runtime error
-            unreachable!("Failed to read Poseidon constants for rate 2")
-        }
-    };
+pub fn poseidon_config_rate_2() -> Result<PoseidonConfig<BaseField>> {
+    let params = params_for_rate(2)?;
     let t = (2 + 1) as usize;
     let ark = params
         .c
@@ -37,7 +30,7 @@ pub fn poseidon_config_rate_2() -> PoseidonConfig<BaseField> {
         .map(|row| row.iter().copied().map(convert_element).collect())
         .collect();
 
-    PoseidonConfig::new(
+    Ok(PoseidonConfig::new(
         params.num_full_rounds,
         params.num_partial_rounds,
         5,
@@ -45,7 +38,7 @@ pub fn poseidon_config_rate_2() -> PoseidonConfig<BaseField> {
         ark,
         2,
         1,
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -54,8 +47,8 @@ mod tests {
     use crate::field::BaseField;
 
     #[test]
-    fn poseidon_config_rate_2_has_expected_dimensions() {
-        let config = poseidon_config_rate_2();
+    fn poseidon_config_rate_2_has_expected_dimensions() -> Result<(), Box<dyn std::error::Error>> {
+        let config = poseidon_config_rate_2()?;
         assert_eq!(config.rate, 2);
         assert_eq!(config.capacity, 1);
         let width = config.rate + config.capacity;
@@ -64,6 +57,7 @@ mod tests {
         assert_eq!(config.mds.len(), width);
         assert!(config.mds.iter().all(|row| row.len() == width));
         assert_ne!(config.ark[0][0], BaseField::from(0u64));
+        Ok(())
     }
 
     #[test]

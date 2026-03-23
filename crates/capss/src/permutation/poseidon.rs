@@ -17,7 +17,7 @@ impl PoseidonPermutation {
                 "poseidon parameters currently only available for rate=2"
             ));
         }
-        let config = poseidon_params::poseidon_config_rate_2();
+        let config = poseidon_params::poseidon_config_rate_2()?;
         Ok(Self { config })
     }
 
