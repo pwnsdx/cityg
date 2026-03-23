@@ -37,8 +37,32 @@ impl AcceptClock {
 
     pub fn tick(&mut self) -> AcceptInstant {
         let instant = AcceptInstant::from_ticks(self.next_tick);
-        self.next_tick = self.next_tick.wrapping_add(1);
+        self.next_tick = self.next_tick.saturating_add(1);
         self.last = instant;
         instant
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accept_clock_saturates_instead_of_wrapping() {
+        let mut clock = AcceptClock {
+            next_tick: u64::MAX,
+            last: AcceptInstant::from_ticks(u64::MAX - 1),
+        };
+
+        let first = clock.tick();
+        let second = clock.tick();
+
+        assert_eq!(first, AcceptInstant::from_ticks(u64::MAX));
+        assert_eq!(second, AcceptInstant::from_ticks(u64::MAX));
+        assert_eq!(clock.now(), AcceptInstant::from_ticks(u64::MAX));
+        assert_eq!(
+            clock.now().duration_since(AcceptInstant::from_ticks(u64::MAX - 1)),
+            Duration::from_secs(1)
+        );
     }
 }

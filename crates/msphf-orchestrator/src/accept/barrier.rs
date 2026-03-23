@@ -130,10 +130,11 @@ fn validate_path_nodes(
     for pair in path_nodes.windows(2) {
         let child = pair[0];
         let parent = pair[1];
-        if child == 0 {
-            return Err(malformed());
-        }
-        if (child - 1) / 2 != parent {
+        let expected_parent = child
+            .checked_sub(1)
+            .map(|value| value / 2)
+            .ok_or_else(malformed)?;
+        if expected_parent != parent {
             return Err(malformed());
         }
     }

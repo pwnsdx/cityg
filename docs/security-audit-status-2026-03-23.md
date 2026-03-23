@@ -15,6 +15,8 @@ Scope: consolidation of the March 2026 security and spec-conformance review thre
 | API-WS-01 | Fixed | Native clients moved WebSocket auth off the query string. |
 | API-MEM-01 | Fixed | Stored epoch bundles are pruned with their indexes. |
 | API-DOS-01 | Mitigated | Expensive endpoints now have explicit concurrency budgets. |
+| ORCH-POLICY-01 | Fixed | `FsPolicyConfig::synthesize_caps` now uses checked additions for all slack-derived caps and rejects overflow fail-closed. |
+| ORCH-BARRIER-01 | Fixed | Barrier path-parent validation now uses checked subtraction instead of relying on `child - 1` arithmetic. |
 | SPEC-DOC-01 | Fixed | Secondary protocol docs now use `fs/dev/chain/v2`. |
 | SPEC-DOC-02 | Fixed | `HDR_PARENT_ROOT` and `HDR_JOIN_DELTA_ROOT` are named constants. |
 | SPEC-DOC-03 | Fixed | `barrier/update/digest` is listed in the label registry doc. |
@@ -26,6 +28,7 @@ Scope: consolidation of the March 2026 security and spec-conformance review thre
 | --- | --- | --- |
 | SERVER-KBROAD-REPLAY-01 | Not confirmed | The claimed replay failure path depends on `accept_epoch`, but recovery replays via `stage_bundle`. Existing persisted KBROAD restart tests are green. |
 | CAPSS-BINCODE-01 | Mitigated | `decode_proof` now re-encodes and requires byte-for-byte canonical equality before accepting CAPSS proof bytes. |
+| ORCH-CLOCK-01 | Mitigated | The deterministic accept clock now saturates instead of wrapping at `u64::MAX`, preserving monotonicity under theoretical exhaustion. |
 
 ## Still Open / Further Investigation
 

@@ -91,12 +91,15 @@ impl FsPolicyConfig {
         if window_periods == 0 {
             return Err(FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE);
         }
-        let anchor_max = window_periods + self.slack_anchor;
-        let first_device = window_periods + self.slack_first_device;
-        let device_max = window_periods + self.slack_device;
-        if anchor_max < window_periods || first_device < window_periods {
-            return Err(FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE);
-        }
+        let anchor_max = window_periods
+            .checked_add(self.slack_anchor)
+            .ok_or(FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE)?;
+        let first_device = window_periods
+            .checked_add(self.slack_first_device)
+            .ok_or(FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE)?;
+        let device_max = window_periods
+            .checked_add(self.slack_device)
+            .ok_or(FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE)?;
         Ok(FsCaps {
             window_periods,
             anchor_max,
@@ -160,6 +163,39 @@ mod tests {
         assert_eq!(caps.anchor_max, 6);
         assert_eq!(caps.first_device, 7);
         assert_eq!(caps.device_max, 8);
+    }
+
+    #[test]
+    fn synthesize_caps_rejects_overflowing_slack_values() {
+        let cfg = FsPolicyConfig {
+            slack_anchor: u64::MAX,
+            ..FsPolicyConfig::default()
+        };
+        assert_eq!(
+            cfg.synthesize_caps()
+                .expect_err("anchor slack overflow must freeze"),
+            FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE
+        );
+
+        let cfg = FsPolicyConfig {
+            slack_first_device: u64::MAX,
+            ..FsPolicyConfig::default()
+        };
+        assert_eq!(
+            cfg.synthesize_caps()
+                .expect_err("first-device slack overflow must freeze"),
+            FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE
+        );
+
+        let cfg = FsPolicyConfig {
+            slack_device: u64::MAX,
+            ..FsPolicyConfig::default()
+        };
+        assert_eq!(
+            cfg.synthesize_caps()
+                .expect_err("device slack overflow must freeze"),
+            FREEZE_FS_POLICY_WINDOW_INCOMPATIBLE
+        );
     }
 
     #[test]
