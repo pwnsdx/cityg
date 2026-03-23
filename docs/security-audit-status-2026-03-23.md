@@ -24,7 +24,7 @@ Scope: consolidation of the March 2026 security and spec-conformance review thre
 | ID | Status | Notes |
 | --- | --- | --- |
 | SERVER-KBROAD-REPLAY-01 | Not confirmed | The claimed replay failure path depends on `accept_epoch`, but recovery replays via `stage_bundle`. Existing persisted KBROAD restart tests are green. |
-| CAPSS-BINCODE-01 | Not confirmed | Non-canonical `bincode` use remains a hygiene concern, but no acceptance/cache bypass has been demonstrated. |
+| CAPSS-BINCODE-01 | Mitigated | `decode_proof` now re-encodes and requires byte-for-byte canonical equality before accepting CAPSS proof bytes. |
 
 ## Still Open / Further Investigation
 

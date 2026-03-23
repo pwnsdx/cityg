@@ -17,7 +17,12 @@ pub fn encode_proof(proof: &SmallwoodProof) -> Result<Vec<u8>> {
 
 /// Decode a canonical proof byte string back into the structured [`SmallwoodProof`].
 pub fn decode_proof(bytes: &[u8]) -> Result<SmallwoodProof> {
-    bincode::deserialize(bytes).context("deserialize Smallwood proof")
+    let proof: SmallwoodProof = bincode::deserialize(bytes).context("deserialize Smallwood proof")?;
+    let canonical = encode_proof(&proof).context("re-serialize canonical Smallwood proof")?;
+    if canonical != bytes {
+        anyhow::bail!("non-canonical Smallwood proof encoding");
+    }
+    Ok(proof)
 }
 
 /// Convert a [`SmallwoodProof`] into a [`CapssSignature`], preserving canonical encoding.
@@ -71,5 +76,25 @@ mod tests {
     fn decode_proof_rejects_invalid_bytes() {
         let err = decode_proof(b"not-a-valid-proof");
         assert!(err.is_err(), "garbage proof bytes should fail decoding");
+    }
+
+    #[test]
+    fn decode_proof_rejects_trailing_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = CapssConfig::default();
+        let smallwood_cfg = cfg.smallwood_config();
+        let statement = CapssStatement {
+            public_key: CapssPublicKey::default(),
+            message: b"capss-trailing".to_vec(),
+        };
+        let proof = smallwood::prove(&smallwood_cfg, &statement)?;
+        let mut encoded = encode_proof(&proof)?;
+        encoded.push(0);
+
+        let err = decode_proof(&encoded);
+        assert!(
+            err.is_err(),
+            "proof bytes with trailing garbage must fail canonical decode"
+        );
+        Ok(())
     }
 }
