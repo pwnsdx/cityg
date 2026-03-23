@@ -9,14 +9,14 @@ use msphf_core::rlwe::{
     constants::{BARRETT_MU, Q},
     matrix::expand_a,
 };
-use once_cell::sync::Lazy;
 use rand::{
-    Rng, SeedableRng,
-    distributions::{Distribution, Standard},
+    RngExt, SeedableRng,
+    distr::{Distribution, StandardUniform},
     rngs::StdRng,
 };
 use std::{
     fmt,
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
@@ -163,7 +163,9 @@ fn measure(args: &Args, cls: u8, rng: &mut StdRng, stats: &mut Stats) {
             let mu = i64::from(BARRETT_MU.max(1));
             let mul_bound = (i64::from(i32::MAX) - (1_i64 << 25)) / mu;
             let tight = q_bound.min(mul_bound).max(1) as i32;
-            let mut inputs: Vec<i32> = (0..inner).map(|_| rng.gen_range(-tight..=tight)).collect();
+            let mut inputs: Vec<i32> = (0..inner)
+                .map(|_| rng.random_range(-tight..=tight))
+                .collect();
             if cls == 1 {
                 for val in &mut inputs {
                     *val ^= 1;
@@ -176,7 +178,7 @@ fn measure(args: &Args, cls: u8, rng: &mut StdRng, stats: &mut Stats) {
             start.elapsed()
         }
         Target::MontgomeryReduce => {
-            let mut inputs: Vec<i32> = (0..inner).map(|_| Standard.sample(rng)).collect();
+            let mut inputs: Vec<i32> = (0..inner).map(|_| StandardUniform.sample(rng)).collect();
             if cls == 1 {
                 for val in &mut inputs {
                     *val ^= 1;
@@ -190,7 +192,7 @@ fn measure(args: &Args, cls: u8, rng: &mut StdRng, stats: &mut Stats) {
         }
         Target::MontgomeryAdd | Target::MontgomerySub => {
             let mut inputs: Vec<(i16, i16)> = (0..inner)
-                .map(|_| (Standard.sample(rng), Standard.sample(rng)))
+                .map(|_| (StandardUniform.sample(rng), StandardUniform.sample(rng)))
                 .collect();
             if cls == 1 {
                 for (a, b) in &mut inputs {
@@ -271,8 +273,8 @@ impl SmallwoodFixture {
     }
 }
 
-static SMALLWOOD_FIXTURES: Lazy<[SmallwoodFixture; 2]> =
-    Lazy::new(|| [SmallwoodFixture::new(0), SmallwoodFixture::new(1)]);
+static SMALLWOOD_FIXTURES: LazyLock<[SmallwoodFixture; 2]> =
+    LazyLock::new(|| [SmallwoodFixture::new(0), SmallwoodFixture::new(1)]);
 
 fn smallwood_fixture(cls: u8) -> &'static SmallwoodFixture {
     &SMALLWOOD_FIXTURES[cls as usize]
