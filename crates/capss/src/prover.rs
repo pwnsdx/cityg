@@ -16,8 +16,7 @@ impl SmallwoodProver {
 
 impl CapssProver for SmallwoodProver {
     fn prove(&self, statement: &CapssStatement) -> anyhow::Result<CapssSignature> {
-        let config = self.context.smallwood_config().clone();
-        let proof = smallwood::prove(&config, statement)?;
+        let proof = smallwood::prove(self.context.smallwood_config(), statement)?;
         Ok(proof.into())
     }
 }

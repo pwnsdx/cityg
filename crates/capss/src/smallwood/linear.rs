@@ -37,22 +37,30 @@ impl LinearSolver for GaussianSolver {
                 *value *= inv;
             }
             rhs[i] *= inv;
-            let row_i = matrix[i].clone();
-            let rhs_i = rhs[i];
+            let (rows_before, rows_after) = matrix.split_at_mut(i);
+            let (pivot_row, rows_after) = rows_after
+                .split_first_mut()
+                .ok_or("pivot row missing after normalization")?;
+            let (rhs_before, rhs_after) = rhs.split_at_mut(i);
+            let (pivot_rhs, rhs_after) = rhs_after
+                .split_first_mut()
+                .ok_or("pivot rhs missing after normalization")?;
+            let rhs_i = *pivot_rhs;
 
             // Eliminate the column from the remaining rows.
-            for (row_idx, row) in matrix.iter_mut().enumerate() {
-                if row_idx == i {
-                    continue;
-                }
+            for (row, rhs_entry) in rows_before
+                .iter_mut()
+                .zip(rhs_before.iter_mut())
+                .chain(rows_after.iter_mut().zip(rhs_after.iter_mut()))
+            {
                 let factor = row[i];
                 if factor.is_zero() {
                     continue;
                 }
-                for (entry, pivot_entry) in row.iter_mut().zip(row_i.iter()).skip(i) {
+                for (entry, pivot_entry) in row.iter_mut().zip(pivot_row.iter()).skip(i) {
                     *entry -= factor * *pivot_entry;
                 }
-                rhs[row_idx] -= factor * rhs_i;
+                *rhs_entry -= factor * rhs_i;
             }
         }
         Ok(rhs)
@@ -141,17 +149,26 @@ impl LinearSolver for ConstantTimeSolver {
             }
             rhs[col] *= inv;
 
-            let pivot_row = matrix[col].clone();
-            let pivot_rhs = rhs[col];
+            let (rows_before, rows_after) = matrix.split_at_mut(col);
+            let (pivot_row, rows_after) = rows_after
+                .split_first_mut()
+                .ok_or("pivot row missing after normalization")?;
+            let (rhs_before, rhs_after) = rhs.split_at_mut(col);
+            let (pivot_rhs, rhs_after) = rhs_after
+                .split_first_mut()
+                .ok_or("pivot rhs missing after normalization")?;
+            let pivot_rhs = *pivot_rhs;
 
-            for row in 0..n {
-                let factor = matrix[row][col];
-                let mask = Self::bool_mask((row != col) as u8);
-                let adjusted = factor * mask;
-                for (entry, &pivot_entry) in matrix[row].iter_mut().zip(pivot_row.iter()) {
-                    *entry -= adjusted * pivot_entry;
+            for (row, rhs_entry) in rows_before
+                .iter_mut()
+                .zip(rhs_before.iter_mut())
+                .chain(rows_after.iter_mut().zip(rhs_after.iter_mut()))
+            {
+                let factor = row[col];
+                for (entry, &pivot_entry) in row.iter_mut().zip(pivot_row.iter()) {
+                    *entry -= factor * pivot_entry;
                 }
-                rhs[row] -= adjusted * pivot_rhs;
+                *rhs_entry -= factor * pivot_rhs;
             }
         }
 
