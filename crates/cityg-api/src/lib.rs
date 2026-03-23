@@ -166,6 +166,12 @@ impl AliasRateLimiter {
 const ALIAS_RATE_LIMIT_BURST: u32 = 10;
 const ALIAS_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const ALIAS_RATE_LIMIT_MAX_BUCKETS: usize = 100_000;
+const EXPENSIVE_RATE_LIMIT_BURST_ENV: &str = "CITYG_SERVER_EXPENSIVE_RATE_LIMIT_BURST";
+const EXPENSIVE_RATE_LIMIT_WINDOW_SECS_ENV: &str = "CITYG_SERVER_EXPENSIVE_RATE_LIMIT_WINDOW_SECS";
+const EXPENSIVE_RATE_LIMIT_MAX_KEYS_ENV: &str = "CITYG_SERVER_EXPENSIVE_RATE_LIMIT_MAX_KEYS";
+const DEFAULT_EXPENSIVE_RATE_LIMIT_BURST: u32 = 120;
+const DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+const DEFAULT_EXPENSIVE_RATE_LIMIT_MAX_KEYS: usize = 100_000;
 const API_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const WINDOW_CONFIG_ADMIN_HEADER: &str = "x-cityg-admin-token";
 const WINDOW_CONFIG_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_WINDOW_ADMIN_TOKEN";
@@ -206,6 +212,62 @@ impl EndpointConcurrencyLimiter {
     }
 }
 
+/// Sliding-window limiter for expensive endpoints keyed by a stable request scope.
+#[derive(Clone)]
+struct RequestRateLimiter {
+    attempts: Arc<RwLock<AHashMap<(&'static str, u64), Vec<Instant>>>>,
+    burst: u32,
+    window: Duration,
+    max_keys: usize,
+}
+
+impl RequestRateLimiter {
+    #[cfg(test)]
+    fn new(burst: u32, window: Duration) -> Self {
+        Self::with_max_keys(burst, window, DEFAULT_EXPENSIVE_RATE_LIMIT_MAX_KEYS)
+    }
+
+    fn with_max_keys(burst: u32, window: Duration, max_keys: usize) -> Self {
+        Self {
+            attempts: Arc::new(RwLock::new(AHashMap::new())),
+            burst: burst.max(1),
+            window,
+            max_keys: max_keys.max(1),
+        }
+    }
+
+    async fn check_and_record(&self, endpoint: &'static str, key: u64) -> bool {
+        let now = Instant::now();
+        let mut guard = self.attempts.write().await;
+        let window = self.window;
+        guard.retain(|_, entries| {
+            entries.retain(|ts| now.duration_since(*ts) <= window);
+            !entries.is_empty()
+        });
+
+        let bucket = (endpoint, key);
+        if !guard.contains_key(&bucket) && guard.len() >= self.max_keys {
+            let evict_key = guard
+                .iter()
+                .filter_map(|(candidate, entries)| {
+                    entries.last().copied().map(|ts| (*candidate, ts))
+                })
+                .min_by_key(|(_, ts)| *ts)
+                .map(|(candidate, _)| candidate);
+            if let Some(evict_key) = evict_key {
+                guard.remove(&evict_key);
+            }
+        }
+
+        let entries = guard.entry(bucket).or_default();
+        if entries.len() >= self.burst as usize {
+            return false;
+        }
+        entries.push(now);
+        true
+    }
+}
+
 #[derive(Clone)]
 struct ApiState {
     // Compatibility handle for tests and single-lane deployments.
@@ -231,6 +293,7 @@ struct ApiState {
     merge_ticket_cache: Arc<RwLock<AHashMap<MergeTicketCacheKey, MergeTicketCacheEntry>>>,
     accept_epoch_limiter: EndpointConcurrencyLimiter,
     join_ticket_limiter: EndpointConcurrencyLimiter,
+    expensive_request_limiter: RequestRateLimiter,
 }
 
 #[derive(Clone, Debug)]
@@ -971,6 +1034,32 @@ fn configured_join_ticket_max_in_flight() -> usize {
         .unwrap_or(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT)
 }
 
+fn configured_expensive_rate_limit_burst() -> u32 {
+    std::env::var(EXPENSIVE_RATE_LIMIT_BURST_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_EXPENSIVE_RATE_LIMIT_BURST)
+}
+
+fn configured_expensive_rate_limit_window() -> Duration {
+    Duration::from_secs(
+        std::env::var(EXPENSIVE_RATE_LIMIT_WINDOW_SECS_ENV)
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS),
+    )
+}
+
+fn configured_expensive_rate_limit_max_keys() -> usize {
+    std::env::var(EXPENSIVE_RATE_LIMIT_MAX_KEYS_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_EXPENSIVE_RATE_LIMIT_MAX_KEYS)
+}
+
 fn configured_ws_max_lag() -> u64 {
     let raw = std::env::var(WS_MAX_LAG_ENV).ok();
     parse_ws_max_lag(raw.as_deref())
@@ -982,6 +1071,60 @@ fn configured_group_lane_count() -> usize {
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_GROUP_LANES)
+}
+
+fn fingerprint_rate_limit_parts(parts: &[&[u8]]) -> u64 {
+    let mut hasher = AHasher::default();
+    for part in parts {
+        hasher.write_u64(part.len() as u64);
+        hasher.write(part);
+    }
+    hasher.finish()
+}
+
+fn message_scoped_rate_limit_key(headers: &HeaderMap, scope: &[u8]) -> u64 {
+    if let Some(token) = headers.get(MESSAGE_AUTH_HEADER) {
+        return fingerprint_rate_limit_parts(&[token.as_bytes(), scope]);
+    }
+    fingerprint_rate_limit_parts(&[scope])
+}
+
+fn join_ticket_rate_limit_key(request: &JoinTicketRequest) -> u64 {
+    let mut parts: Vec<&[u8]> = vec![request.room_id.as_bytes(), request.alias.as_bytes()];
+    if let Some(binding) = request.identity_binding.as_ref() {
+        parts.push(binding.alias.as_bytes());
+        parts.push(binding.pop_public_key.as_slice());
+    }
+    fingerprint_rate_limit_parts(&parts)
+}
+
+fn accept_epoch_rate_limit_key(bundle: &ClientEpochBundle) -> u64 {
+    fingerprint_rate_limit_parts(&[
+        bundle.gid(),
+        &bundle.anchor.parent_root,
+        &bundle.anchor.join_delta_root,
+        &bundle.anchor.revoked_root,
+    ])
+}
+
+async fn enforce_expensive_rate_limit(
+    state: &ApiState,
+    endpoint: &'static str,
+    key: u64,
+) -> Result<(), ApiError> {
+    if state
+        .expensive_request_limiter
+        .check_and_record(endpoint, key)
+        .await
+    {
+        return Ok(());
+    }
+    metrics::counter!(
+        "cityg_endpoint_rate_limited_total",
+        "endpoint" => endpoint.to_string()
+    )
+    .increment(1);
+    Err(ApiError::RateLimited)
 }
 
 fn should_disconnect_for_lag(lagged_messages: u64, max_lag: u64) -> bool {
@@ -1117,6 +1260,7 @@ async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Resp
         }
         Err(err) => return Err(ApiError::from(err)),
     };
+    enforce_expensive_rate_limit(&state, "accept_epoch", accept_epoch_rate_limit_key(&bundle)).await?;
 
     let response = apply_bundle(&state, &bundle).await?;
     Ok(protobuf_response(&response))
@@ -1407,6 +1551,8 @@ async fn members(
         return Err(ApiError::InvalidRequest("gid must be provided"));
     }
     let gid = request.gid;
+    enforce_expensive_rate_limit(&state, "members", message_scoped_rate_limit_key(&headers, &gid))
+        .await?;
     let offset = request.offset.unwrap_or(0);
     let limit = request
         .limit
@@ -1497,6 +1643,12 @@ async fn search_members(
         return Err(ApiError::InvalidRequest("query must be provided"));
     }
     let gid = request.gid;
+    enforce_expensive_rate_limit(
+        &state,
+        "search_members",
+        message_scoped_rate_limit_key(&headers, &gid),
+    )
+    .await?;
     let query = request.query.to_lowercase();
     let offset = request.offset.unwrap_or(0);
     let limit = request
@@ -1603,6 +1755,8 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
     }
+    enforce_expensive_rate_limit(&state, "join_ticket", join_ticket_rate_limit_key(&request))
+        .await?;
     let gid = parse_gid(&request.room_id)?;
 
     // Verify identity binding if provided; persist TOFU alias only after ticket succeeds.
@@ -1807,6 +1961,19 @@ async fn merge_ticket(
     let gid = parse_gid(&request.room_id)?;
     let mut leaf_id = [0u8; 32];
     leaf_id.copy_from_slice(&request.leaf_id);
+    enforce_expensive_rate_limit(
+        &state,
+        "merge_ticket",
+        fingerprint_rate_limit_parts(&[
+            headers
+                .get(MESSAGE_AUTH_HEADER)
+                .map(HeaderValue::as_bytes)
+                .unwrap_or_default(),
+            &gid,
+            &leaf_id,
+        ]),
+    )
+    .await?;
     let intent = MergeTicketIntent::try_from(request.intent)
         .map_err(|_| ApiError::InvalidRequest("merge ticket intent is invalid"))?;
     let cache_key = MergeTicketCacheKey {
@@ -1943,6 +2110,12 @@ async fn barrier_resolve_revoked_leaves(
         ));
     }
     let gid = parse_gid(&request.room_id)?;
+    enforce_expensive_rate_limit(
+        &state,
+        "barrier_resolve_revoked_leaves",
+        message_scoped_rate_limit_key(&headers, &gid),
+    )
+    .await?;
     let mut revocation_roots_hash = [0u8; 32];
     revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
 
@@ -1969,6 +2142,12 @@ async fn barrier_resolve_joins_since(
         return Err(ApiError::InvalidRequest("room_id must be provided"));
     }
     let gid = parse_gid(&request.room_id)?;
+    enforce_expensive_rate_limit(
+        &state,
+        "barrier_resolve_joins_since",
+        message_scoped_rate_limit_key(&headers, &gid),
+    )
+    .await?;
 
     let records = {
         let lane = state.server_for_gid(&gid);
@@ -2013,6 +2192,12 @@ async fn barrier_fetch_public_tree(
         ));
     }
     let gid = parse_gid(&request.room_id)?;
+    enforce_expensive_rate_limit(
+        &state,
+        "barrier_fetch_public_tree",
+        message_scoped_rate_limit_key(&headers, &gid),
+    )
+    .await?;
     let mut kem_tree_hash_after = [0u8; 32];
     kem_tree_hash_after.copy_from_slice(&request.kem_tree_hash_after);
 
@@ -2343,6 +2528,12 @@ async fn get_bundle(
     }
     let mut weid = [0u8; 32];
     weid.copy_from_slice(&request.we_epoch_id);
+    enforce_expensive_rate_limit(
+        &state,
+        "get_bundle",
+        message_scoped_rate_limit_key(&headers, &weid),
+    )
+    .await?;
 
     let now_ms = current_timestamp_ms();
     let (bundle, expired) = {
@@ -2422,6 +2613,12 @@ async fn get_window(
 ) -> Result<Response, ApiError> {
     enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let _ = GetWindowRequest::decode(body)?;
+    enforce_expensive_rate_limit(
+        &state,
+        "get_window",
+        message_scoped_rate_limit_key(&headers, b"window"),
+    )
+    .await?;
     let mut snapshot: Vec<WindowEntry> = Vec::new();
     for lane in state.all_server_lanes() {
         let guard = lane.read().await;
@@ -2468,6 +2665,12 @@ async fn get_telemetry(
 ) -> Result<Response, ApiError> {
     enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let _ = GetTelemetryRequest::decode(body)?;
+    enforce_expensive_rate_limit(
+        &state,
+        "get_telemetry",
+        message_scoped_rate_limit_key(&headers, b"telemetry"),
+    )
+    .await?;
     let mut report = Vec::new();
     for lane in state.all_server_lanes() {
         let guard = lane.read().await;
@@ -2818,6 +3021,9 @@ pub async fn run_with_config(
     let message_retention = message_retention_from_config(&config);
     let accept_epoch_max_in_flight = configured_accept_epoch_max_in_flight();
     let join_ticket_max_in_flight = configured_join_ticket_max_in_flight();
+    let expensive_rate_limit_burst = configured_expensive_rate_limit_burst();
+    let expensive_rate_limit_window = configured_expensive_rate_limit_window();
+    let expensive_rate_limit_max_keys = configured_expensive_rate_limit_max_keys();
     info!(
         "message retention window set to {}s (group execution lanes: {})",
         message_retention.as_secs(),
@@ -2826,6 +3032,12 @@ pub async fn run_with_config(
     info!(
         "endpoint concurrency limits: accept_epoch={} join_ticket={}",
         accept_epoch_max_in_flight, join_ticket_max_in_flight
+    );
+    info!(
+        "expensive endpoint rate limit: burst={} window={}s max_keys={}",
+        expensive_rate_limit_burst,
+        expensive_rate_limit_window.as_secs(),
+        expensive_rate_limit_max_keys
     );
     // Create broadcast channel for WebSocket notifications (capacity from config)
     let (notification_tx, _) = broadcast::channel(config.server.websocket_capacity);
@@ -2852,6 +3064,11 @@ pub async fn run_with_config(
         merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         accept_epoch_limiter: EndpointConcurrencyLimiter::new(accept_epoch_max_in_flight),
         join_ticket_limiter: EndpointConcurrencyLimiter::new(join_ticket_max_in_flight),
+        expensive_request_limiter: RequestRateLimiter::with_max_keys(
+            expensive_rate_limit_burst,
+            expensive_rate_limit_window,
+            expensive_rate_limit_max_keys,
+        ),
     };
 
     // Build router with all routes
@@ -3051,12 +3268,18 @@ async fn refresh_pivot(
         }
         Err(err) => return Err(ApiError::server_message(err.to_string())),
     };
+    let gid: [u8; 32] = bundle
+        .gid()
+        .try_into()
+        .map_err(|_| ApiError::InvalidRequest("bundle gid must be 32 bytes"))?;
+    enforce_expensive_rate_limit(
+        &state,
+        "refresh_pivot",
+        message_scoped_rate_limit_key(&headers, &gid),
+    )
+    .await?;
 
     {
-        let gid: [u8; 32] = bundle
-            .gid()
-            .try_into()
-            .map_err(|_| ApiError::InvalidRequest("bundle gid must be 32 bytes"))?;
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         guard.refresh_pivot(&bundle).map_err(|err| match err {
@@ -3135,6 +3358,10 @@ mod tests {
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
             ),
             join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
+            expensive_request_limiter: RequestRateLimiter::new(
+                DEFAULT_EXPENSIVE_RATE_LIMIT_BURST,
+                Duration::from_secs(DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS),
+            ),
         }
     }
 
@@ -3166,6 +3393,10 @@ mod tests {
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
             ),
             join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
+            expensive_request_limiter: RequestRateLimiter::new(
+                DEFAULT_EXPENSIVE_RATE_LIMIT_BURST,
+                Duration::from_secs(DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS),
+            ),
         }
     }
 
@@ -3375,6 +3606,10 @@ mod tests {
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
             ),
             join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
+            expensive_request_limiter: RequestRateLimiter::new(
+                DEFAULT_EXPENSIVE_RATE_LIMIT_BURST,
+                Duration::from_secs(DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS),
+            ),
         };
 
         let gid = [0x44; 32];
@@ -3831,6 +4066,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_alias_coalesces_multiple_canonical_unicode_forms() {
+        let state = test_api_state();
+        let canonical = "Ångström";
+        let variants = [
+            "A\u{30A}ngström",
+            "Ångstro\u{308}m",
+            "A\u{30A}ngstro\u{308}m",
+        ];
+        let leaf = [0x5B; 32];
+        let pop_key = vec![0x7D; 8];
+
+        assert!(
+            state
+                .register_alias(variants[0], leaf, pop_key.clone())
+                .await
+                .expect("first canonical variant should register")
+        );
+
+        for variant in &variants[1..] {
+            assert!(
+                !state
+                    .register_alias(variant, leaf, pop_key.clone())
+                    .await
+                    .expect("canonically equivalent alias should coalesce")
+            );
+        }
+
+        let registry = state.alias_registry.read().await;
+        assert_eq!(registry.len(), 1);
+        assert!(registry.contains_key(canonical));
+    }
+
+    #[tokio::test]
     async fn record_member_revocations_prunes_metadata_and_weid_map() {
         let state = test_api_state();
         let leaf_a = [0xA1; 32];
@@ -3878,6 +4146,10 @@ mod tests {
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
             ),
             join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
+            expensive_request_limiter: RequestRateLimiter::new(
+                DEFAULT_EXPENSIVE_RATE_LIMIT_BURST,
+                Duration::from_secs(DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS),
+            ),
         };
 
         let alias = "alice";
@@ -3931,6 +4203,10 @@ mod tests {
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
             ),
             join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
+            expensive_request_limiter: RequestRateLimiter::new(
+                DEFAULT_EXPENSIVE_RATE_LIMIT_BURST,
+                Duration::from_secs(DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS),
+            ),
         };
 
         let (pop_pk, pop_sk) = dilithium5::keypair();
@@ -5933,6 +6209,169 @@ mod tests {
         assert!(matches!(result, Err(ApiError::RateLimited)));
     }
 
+    #[tokio::test]
+    async fn request_rate_limiter_allows_burst_then_rejects() {
+        let limiter = RequestRateLimiter::with_max_keys(2, Duration::from_secs(60), 8);
+        let key = fingerprint_rate_limit_parts(&[b"room-a"]);
+        assert!(limiter.check_and_record("join_ticket", key).await);
+        assert!(limiter.check_and_record("join_ticket", key).await);
+        assert!(!limiter.check_and_record("join_ticket", key).await);
+        assert!(
+            limiter
+                .check_and_record("join_ticket", fingerprint_rate_limit_parts(&[b"room-b"]))
+                .await
+        );
+    }
+
+    #[test]
+    fn configured_expensive_rate_limit_uses_env_or_defaults() {
+        let _lock = env_lock();
+        unsafe {
+            std::env::remove_var(EXPENSIVE_RATE_LIMIT_BURST_ENV);
+            std::env::remove_var(EXPENSIVE_RATE_LIMIT_WINDOW_SECS_ENV);
+            std::env::remove_var(EXPENSIVE_RATE_LIMIT_MAX_KEYS_ENV);
+        }
+        assert_eq!(
+            configured_expensive_rate_limit_burst(),
+            DEFAULT_EXPENSIVE_RATE_LIMIT_BURST
+        );
+        assert_eq!(
+            configured_expensive_rate_limit_window(),
+            Duration::from_secs(DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS)
+        );
+        assert_eq!(
+            configured_expensive_rate_limit_max_keys(),
+            DEFAULT_EXPENSIVE_RATE_LIMIT_MAX_KEYS
+        );
+
+        unsafe {
+            std::env::set_var(EXPENSIVE_RATE_LIMIT_BURST_ENV, "7");
+            std::env::set_var(EXPENSIVE_RATE_LIMIT_WINDOW_SECS_ENV, "9");
+            std::env::set_var(EXPENSIVE_RATE_LIMIT_MAX_KEYS_ENV, "11");
+        }
+        assert_eq!(configured_expensive_rate_limit_burst(), 7);
+        assert_eq!(configured_expensive_rate_limit_window(), Duration::from_secs(9));
+        assert_eq!(configured_expensive_rate_limit_max_keys(), 11);
+    }
+
+    #[tokio::test]
+    async fn accept_epoch_returns_rate_limited_when_request_budget_is_exhausted() {
+        let mut state = test_api_state();
+        state.expensive_request_limiter =
+            RequestRateLimiter::with_max_keys(1, Duration::from_secs(60), 1);
+        let bundle = demo_bundle("rate-limit-accept").expect("demo bundle");
+        let request = AcceptEpochRequest {
+            bundle_cbor: bundle.to_cbor().expect("bundle cbor"),
+        };
+        assert!(
+            state
+                .expensive_request_limiter
+                .check_and_record("accept_epoch", accept_epoch_rate_limit_key(&bundle))
+                .await
+        );
+
+        let result = accept_epoch(State(state), encode_proto_request(&request)).await;
+        assert!(matches!(result, Err(ApiError::RateLimited)));
+    }
+
+    #[tokio::test]
+    async fn accept_epoch_rejects_malformed_bundle_cbor_matrix() {
+        let state = test_api_state();
+        let malformed_bundles = [
+            Vec::new(),
+            vec![0x01],
+            vec![0x9f, 0x01],
+            vec![0xbf, 0x61, 0x61],
+            vec![0x5a, 0x00, 0x00, 0x00, 0x08, 0x01, 0x02],
+        ];
+
+        for bundle_cbor in malformed_bundles {
+            let err = accept_epoch(
+                State(state.clone()),
+                encode_proto_request(&AcceptEpochRequest { bundle_cbor }),
+            )
+            .await
+            .expect_err("malformed bundle must be rejected");
+            assert!(matches!(err, ApiError::InvalidRequest("invalid bundle encoding")));
+        }
+    }
+
+    #[tokio::test]
+    async fn join_ticket_returns_rate_limited_when_request_budget_is_exhausted() {
+        let mut state = test_api_state();
+        state.expensive_request_limiter =
+            RequestRateLimiter::with_max_keys(1, Duration::from_secs(60), 1);
+        let request = JoinTicketRequest {
+            room_id: hex::encode(DEMO_GID),
+            alias: "rate-limit-join".to_string(),
+            identity_binding: None,
+        };
+        assert!(
+            state
+                .expensive_request_limiter
+                .check_and_record("join_ticket", join_ticket_rate_limit_key(&request))
+                .await
+        );
+
+        let result = join_ticket(State(state), encode_proto_request(&request)).await;
+        assert!(matches!(result, Err(ApiError::RateLimited)));
+    }
+
+    #[tokio::test]
+    async fn search_members_returns_rate_limited_when_request_budget_is_exhausted() {
+        let mut state = test_api_state();
+        state.expensive_request_limiter =
+            RequestRateLimiter::with_max_keys(1, Duration::from_secs(60), 1);
+        let headers = message_auth_headers();
+        let request = pb::SearchMembersRequest {
+            gid: DEMO_GID.to_vec(),
+            parent_root: Vec::new(),
+            query: "alice".to_string(),
+            offset: Some(0),
+            limit: Some(10),
+        };
+        assert!(
+            state
+                .expensive_request_limiter
+                .check_and_record(
+                    "search_members",
+                    message_scoped_rate_limit_key(&headers, &DEMO_GID),
+                )
+                .await
+        );
+
+        let result = search_members(State(state), headers, encode_proto_request(&request)).await;
+        assert!(matches!(result, Err(ApiError::RateLimited)));
+    }
+
+    #[tokio::test]
+    async fn refresh_pivot_rejects_malformed_bundle_cbor_matrix() {
+        let state = test_api_state();
+        let headers = message_auth_headers();
+        let malformed_bundles = [
+            Vec::new(),
+            vec![0x01],
+            vec![0x9f, 0x01],
+            vec![0xbf, 0x61, 0x61],
+            vec![0x5a, 0x00, 0x00, 0x00, 0x08, 0x01, 0x02],
+        ];
+
+        for bundle_cbor in malformed_bundles {
+            let err = refresh_pivot(
+                State(state.clone()),
+                headers.clone(),
+                encode_proto_request(&RefreshPivotRequest { bundle_cbor }),
+            )
+            .await
+            .expect_err("malformed refresh bundle must be rejected");
+
+            if matches!(&err, ApiError::InvalidRequest("bundle_cbor must be provided")) {
+                continue;
+            }
+            assert!(matches!(err, ApiError::InvalidRequest("invalid bundle encoding")));
+        }
+    }
+
     #[test]
     fn should_prune_messages_throttles_global_pruning() {
         let due = AtomicU64::new(0);
@@ -5997,6 +6436,10 @@ mod tests {
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
             ),
             join_ticket_limiter: EndpointConcurrencyLimiter::new(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT),
+            expensive_request_limiter: RequestRateLimiter::new(
+                DEFAULT_EXPENSIVE_RATE_LIMIT_BURST,
+                Duration::from_secs(DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS),
+            ),
         };
         let leaf = [0x01u8; 32];
         let key = vec![0xAB; 8];

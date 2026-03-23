@@ -32,8 +32,8 @@ Scope: consolidation of the March 2026 security and spec-conformance review thre
 | ID | Status | Notes |
 | --- | --- | --- |
 | LBVRF-RS-BOUND-01 | Mitigated | `prove_with_rs` now hard-fails after a large deterministic cap; keep collecting empirical attempt counts if this path is exercised in practice. |
-| API-RATE-02 | Open | Concurrency limits are in place, but per-client or per-token rate limiting is still worth adding. |
-| TEST-FUZZ-01 | Open | CBOR malformed inputs, journal truncation, and alias normalization deserve dedicated fuzz/property coverage. |
+| API-RATE-02 | Fixed | Expensive endpoints now enforce a keyed sliding-window budget in addition to concurrency caps, with regression coverage on `accept_epoch`, `join_ticket`, and `search_members`. |
+| TEST-FUZZ-01 | Mitigated | Added malformed `bundle_cbor` matrices for `accept_epoch` and `refresh_pivot`, a partial-length journal truncation regression, and broader canonical-Unicode alias coverage. Keep full fuzz/property jobs on the backlog. |
 
 ## Evidence
 

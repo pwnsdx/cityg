@@ -6897,6 +6897,22 @@ mod tests {
     }
 
     #[test]
+    fn journal_helpers_ignore_partial_length_prefix() -> Result<(), CityGError> {
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("partial-len.journal");
+        let mut file = File::create(&journal_path)?;
+        file.write_all(&[0x05, 0x00, 0x00])?;
+        file.flush()?;
+
+        let loaded = super::ServerJournal::load_entries(&journal_path)?;
+        assert!(
+            loaded.is_empty(),
+            "partial length prefixes should be ignored fail-closed"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn update_window_limits_updates_context_and_receiver_ttl() {
         let mut server = super::demo::demo_server();
         server.update_window_limits(Some(3), Some(Duration::from_secs(9)));
