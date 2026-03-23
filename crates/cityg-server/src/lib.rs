@@ -1185,120 +1185,24 @@ impl CityGServer {
         registry
             .into_iter()
             .map(|(gid, kbroad_public)| {
-                let room = PersistedKbroadRoomState {
+                let group_state = self.roster.groups.get(gid.as_slice());
+                let device_chain_states = self
+                    .ctx
+                    .device_chain_entries_for_gid(gid.as_slice())
+                    .map(|(device_pk, device_state)| PersistedDeviceChainState {
+                        device_pk: device_pk.clone(),
+                        last_commit: device_state.last_commit,
+                        last_ec: device_state.last_ec,
+                        last_pcs_refresh_ec: device_state.last_pcs_refresh_ec,
+                    })
+                    .collect();
+                let room = persisted_kbroad_room_state(
+                    group_state,
                     kbroad_public,
-                    kbroad_generation: self.roster.kbroad_generation(gid.as_slice()),
-                    rotation_required: self.roster.kbroad_rotation_required(gid.as_slice()),
-                    barrier_initialized: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.barrier_initialized)
-                        .unwrap_or(false),
-                    barrier_version: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.barrier_version)
-                        .unwrap_or(0),
-                    barrier_roots_hash: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.barrier_roots_hash)
-                        .unwrap_or([0u8; 32]),
-                    kem_tree_hash_after: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.kem_tree_hash_after)
-                        .unwrap_or([0u8; 32]),
-                    srx_root_sw: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .and_then(|state| state.srx_root_sw),
-                    barrier_pk_entries: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.barrier_pk_entries.clone())
-                        .unwrap_or_default(),
-                    barrier_public_tree_history: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| {
-                            state
-                                .barrier_public_tree_history
-                                .iter()
-                                .map(|(hash, pk_entries)| PersistedBarrierPublicTreeSnapshot {
-                                    kem_tree_hash_after_hex: hex::encode(hash),
-                                    pk_entries: pk_entries.clone(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    n_max: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.n_max.max(1))
-                        .unwrap_or(DEFAULT_BARRIER_N_MAX),
-                    last_checkpoint_ec: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.last_checkpoint_ec)
-                        .unwrap_or(0),
-                    last_accepted_ec: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.last_accepted_ec)
-                        .unwrap_or(0),
-                    last_pcs_refresh_ec: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .and_then(|state| state.last_pcs_refresh_ec),
-                    pcs_refresh_min_delta_device_ec: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.pcs_refresh_min_delta_device_ec.max(1))
-                        .unwrap_or_else(default_pcs_refresh_min_delta_device_ec),
-                    pcs_refresh_min_delta_group_ec: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.pcs_refresh_min_delta_group_ec.max(1))
-                        .unwrap_or_else(default_pcs_refresh_min_delta_group_ec),
-                    pcs_refresh_slot_width_ec: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| state.pcs_refresh_slot_width_ec.max(1))
-                        .unwrap_or_else(default_pcs_refresh_slot_width_ec),
-                    max_barrier_update_bytes: self
-                        .roster
-                        .groups
-                        .get(gid.as_slice())
-                        .map(|state| {
-                            u64::try_from(state.max_barrier_update_bytes).unwrap_or(u64::MAX)
-                        })
-                        .unwrap_or_else(default_max_barrier_update_bytes),
-                    device_chain_states: self
-                        .ctx
-                        .device_chain_entries_for_gid(gid.as_slice())
-                        .map(|(device_pk, device_state)| PersistedDeviceChainState {
-                            device_pk: device_pk.clone(),
-                            last_commit: device_state.last_commit,
-                            last_ec: device_state.last_ec,
-                            last_pcs_refresh_ec: device_state.last_pcs_refresh_ec,
-                        })
-                        .collect(),
-                };
+                    self.roster.kbroad_generation(gid.as_slice()),
+                    self.roster.kbroad_rotation_required(gid.as_slice()),
+                    device_chain_states,
+                );
                 (gid, room)
             })
             .collect()
@@ -2358,6 +2262,59 @@ fn map_barrier_update_validation_error(err: CityGError) -> CityGError {
     }
 }
 
+fn persisted_barrier_public_tree_history(
+    state: &GroupState,
+) -> Vec<PersistedBarrierPublicTreeSnapshot> {
+    state
+        .barrier_public_tree_history
+        .iter()
+        .map(|(hash, pk_entries)| PersistedBarrierPublicTreeSnapshot {
+            kem_tree_hash_after_hex: hex::encode(hash),
+            pk_entries: pk_entries.clone(),
+        })
+        .collect()
+}
+
+fn persisted_kbroad_room_state(
+    state: Option<&GroupState>,
+    kbroad_public: Vec<u8>,
+    kbroad_generation: u64,
+    rotation_required: bool,
+    device_chain_states: Vec<PersistedDeviceChainState>,
+) -> PersistedKbroadRoomState {
+    let mut room = PersistedKbroadRoomState {
+        kbroad_public,
+        kbroad_generation,
+        rotation_required,
+        n_max: DEFAULT_BARRIER_N_MAX,
+        pcs_refresh_min_delta_device_ec: default_pcs_refresh_min_delta_device_ec(),
+        pcs_refresh_min_delta_group_ec: default_pcs_refresh_min_delta_group_ec(),
+        pcs_refresh_slot_width_ec: default_pcs_refresh_slot_width_ec(),
+        max_barrier_update_bytes: default_max_barrier_update_bytes(),
+        device_chain_states,
+        ..PersistedKbroadRoomState::default()
+    };
+    if let Some(state) = state {
+        room.barrier_initialized = state.barrier_initialized;
+        room.barrier_version = state.barrier_version;
+        room.barrier_roots_hash = state.barrier_roots_hash;
+        room.kem_tree_hash_after = state.kem_tree_hash_after;
+        room.last_checkpoint_ec = state.last_checkpoint_ec;
+        room.last_accepted_ec = state.last_accepted_ec;
+        room.srx_root_sw = state.srx_root_sw;
+        room.barrier_pk_entries = state.barrier_pk_entries.clone();
+        room.barrier_public_tree_history = persisted_barrier_public_tree_history(state);
+        room.n_max = state.n_max.max(1);
+        room.last_pcs_refresh_ec = state.last_pcs_refresh_ec;
+        room.pcs_refresh_min_delta_device_ec = state.pcs_refresh_min_delta_device_ec.max(1);
+        room.pcs_refresh_min_delta_group_ec = state.pcs_refresh_min_delta_group_ec.max(1);
+        room.pcs_refresh_slot_width_ec = state.pcs_refresh_slot_width_ec.max(1);
+        room.max_barrier_update_bytes =
+            u64::try_from(state.max_barrier_update_bytes).unwrap_or(u64::MAX);
+    }
+    room
+}
+
 fn clear_barrier_path<T>(
     pk_entries: &mut [T],
     leaf_node: usize,
@@ -2739,32 +2696,16 @@ fn header_bytes32(
     key: u64,
     label: &'static str,
 ) -> Result<[u8; 32], CityGError> {
-    match header.get(&key) {
-        Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(bytes);
-            Ok(arr)
-        }
-        Some(Value::Bytes(_)) => Err(CityGError::InvalidInput("pivot field wrong length")),
-        Some(_) => Err(CityGError::InvalidInput("pivot field wrong type")),
-        None => Err(CityGError::InvalidInput(label)),
-    }
+    header_bytes32_from_slice(header_required_bytes(header, key, label)?)
 }
 
 fn header_bytes32_opt(
     header: &BTreeMap<u64, Value>,
     key: u64,
 ) -> Result<Option<[u8; 32]>, CityGError> {
-    match header.get(&key) {
-        Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(bytes);
-            Ok(Some(arr))
-        }
-        Some(Value::Bytes(_)) => Err(CityGError::InvalidInput("pivot field wrong length")),
-        Some(Value::Null) | None => Ok(None),
-        Some(_) => Err(CityGError::InvalidInput("pivot field wrong type")),
-    }
+    header_optional_bytes(header, key)?
+        .map(header_bytes32_from_slice)
+        .transpose()
 }
 
 fn header_bytes(
@@ -2772,22 +2713,14 @@ fn header_bytes(
     key: u64,
     label: &'static str,
 ) -> Result<Vec<u8>, CityGError> {
-    match header.get(&key) {
-        Some(Value::Bytes(bytes)) => Ok(bytes.clone()),
-        Some(_) => Err(CityGError::InvalidInput("pivot field wrong type")),
-        None => Err(CityGError::InvalidInput(label)),
-    }
+    Ok(header_required_bytes(header, key, label)?.to_vec())
 }
 
 fn header_bytes_opt(
     header: &BTreeMap<u64, Value>,
     key: u64,
 ) -> Result<Option<Vec<u8>>, CityGError> {
-    match header.get(&key) {
-        Some(Value::Bytes(bytes)) => Ok(Some(bytes.clone())),
-        Some(Value::Null) | None => Ok(None),
-        Some(_) => Err(CityGError::InvalidInput("pivot field wrong type")),
-    }
+    Ok(header_optional_bytes(header, key)?.map(|bytes| bytes.to_vec()))
 }
 
 fn header_string(
@@ -2795,21 +2728,56 @@ fn header_string(
     key: u64,
     default: Option<&'static str>,
 ) -> Result<String, CityGError> {
+    header_optional_string(header, key)?
+        .map(Cow::into_owned)
+        .or_else(|| default.map(str::to_string))
+        .ok_or(CityGError::InvalidInput("pivot field missing"))
+}
+
+fn header_required_bytes<'a>(
+    header: &'a BTreeMap<u64, Value>,
+    key: u64,
+    label: &'static str,
+) -> Result<&'a [u8], CityGError> {
     match header.get(&key) {
-        Some(Value::Text(text)) => Ok(text.clone()),
+        Some(Value::Bytes(bytes)) => Ok(bytes.as_slice()),
+        Some(_) => Err(CityGError::InvalidInput("pivot field wrong type")),
+        None => Err(CityGError::InvalidInput(label)),
+    }
+}
+
+fn header_optional_bytes<'a>(
+    header: &'a BTreeMap<u64, Value>,
+    key: u64,
+) -> Result<Option<&'a [u8]>, CityGError> {
+    match header.get(&key) {
+        Some(Value::Bytes(bytes)) => Ok(Some(bytes.as_slice())),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(CityGError::InvalidInput("pivot field wrong type")),
+    }
+}
+
+fn header_bytes32_from_slice(bytes: &[u8]) -> Result<[u8; 32], CityGError> {
+    let raw: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| CityGError::InvalidInput("pivot field wrong length"))?;
+    Ok(raw)
+}
+
+fn header_optional_string<'a>(
+    header: &'a BTreeMap<u64, Value>,
+    key: u64,
+) -> Result<Option<Cow<'a, str>>, CityGError> {
+    match header.get(&key) {
+        Some(Value::Text(text)) => Ok(Some(Cow::Borrowed(text.as_str()))),
         Some(Value::Integer(value)) => u64::try_from(*value)
-            .map(|v| v.to_string())
+            .map(|v| Some(Cow::Owned(v.to_string())))
             .map_err(|_| CityGError::InvalidInput("pivot field wrong type")),
         Some(Value::Bytes(bytes)) => std::str::from_utf8(bytes)
-            .map(|s| s.to_string())
+            .map(|s| Some(Cow::Owned(s.to_string())))
             .map_err(|_| CityGError::InvalidInput("pivot field invalid utf8")),
-        Some(Value::Null) => default
-            .map(|s| s.to_string())
-            .ok_or(CityGError::InvalidInput("pivot field missing")),
+        Some(Value::Null) | None => Ok(None),
         Some(_) => Err(CityGError::InvalidInput("pivot field wrong type")),
-        None => default
-            .map(|s| s.to_string())
-            .ok_or(CityGError::InvalidInput("pivot field missing")),
     }
 }
 
