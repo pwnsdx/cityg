@@ -524,6 +524,11 @@ impl ApiState {
             metadata.remove(leaf);
         }
         map.retain(|_, existing| !revoked.contains(existing));
+
+        // Unbind aliases whose leaf_id was revoked so the same alias can
+        // rejoin with a fresh identity key without triggering a TOFU violation.
+        let mut alias_guard = self.alias_registry.write().await;
+        alias_guard.retain(|_, binding| !revoked.contains(&binding.leaf_id));
     }
 
     async fn record_epoch_scope(&self, we_epoch_id: [u8; 32], scope: EpochScope) {
@@ -4053,19 +4058,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_member_revocations_prunes_metadata_and_weid_map() {
+    async fn record_member_revocations_prunes_metadata_weid_map_and_aliases() {
         let state = test_api_state();
         let leaf_a = [0xA1; 32];
         let leaf_b = [0xB2; 32];
         let weid_a = [0x01; 32];
         let weid_b = [0x02; 32];
+        let key_a = vec![0xAA; 32];
+        let key_b = vec![0xBB; 32];
 
         state.record_member_join(leaf_a, weid_a, 100).await;
         state.record_member_join(leaf_b, weid_b, 200).await;
+        state
+            .register_alias("alice", leaf_a, key_a.clone())
+            .await
+            .expect("register alice");
+        state
+            .register_alias("bob", leaf_b, key_b.clone())
+            .await
+            .expect("register bob");
 
         state.record_member_revocations(&[]).await;
         assert_eq!(state.member_metadata.read().await.len(), 2);
         assert_eq!(state.weid_to_leaf.read().await.len(), 2);
+        assert_eq!(state.alias_registry.read().await.len(), 2);
 
         state.record_member_revocations(&[leaf_a]).await;
         let metadata = state.member_metadata.read().await;
@@ -4074,6 +4090,31 @@ mod tests {
         assert!(metadata.contains_key(&leaf_b));
         assert!(!weid_map.values().any(|leaf| leaf == &leaf_a));
         assert!(weid_map.values().any(|leaf| leaf == &leaf_b));
+        drop(metadata);
+        drop(weid_map);
+
+        // Alias for the revoked leaf must be unbound so the same alias
+        // can rejoin with a new identity key.
+        let registry = state.alias_registry.read().await;
+        assert!(
+            !registry.contains_key("alice"),
+            "revoked member's alias must be unbound"
+        );
+        assert!(
+            registry.contains_key("bob"),
+            "non-revoked member's alias must remain"
+        );
+        drop(registry);
+
+        // After revocation, re-registering the same alias with a new key must succeed.
+        let new_key_a = vec![0xCC; 32];
+        assert!(
+            state
+                .register_alias("alice", leaf_a, new_key_a)
+                .await
+                .expect("re-register alice after revocation"),
+            "re-registration with new key must succeed as a fresh binding"
+        );
     }
 
     #[tokio::test]
