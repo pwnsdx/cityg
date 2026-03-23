@@ -541,10 +541,7 @@ pub fn parent_nonmem_witness(
         return (witness, None, None);
     }
 
-    let mut pos = 0;
-    while pos < parent_leaves.len() && parent_leaves[pos] < query {
-        pos += 1;
-    }
+    let pos = parent_leaves.partition_point(|leaf| leaf < &query);
 
     let left = if pos > 0 {
         Some(parent_leaves[pos - 1])
