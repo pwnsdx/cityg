@@ -192,6 +192,9 @@ const JOIN_TICKET_MAX_IN_FLIGHT_ENV: &str = "CITYG_SERVER_JOIN_TICKET_MAX_IN_FLI
 const DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT: usize = 8;
 const DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT: usize = 16;
 
+type RequestRateKey = (&'static str, u64);
+type RequestRateBuckets = AHashMap<RequestRateKey, Vec<Instant>>;
+
 #[derive(Clone)]
 struct EndpointConcurrencyLimiter {
     semaphore: Arc<Semaphore>,
@@ -215,7 +218,7 @@ impl EndpointConcurrencyLimiter {
 /// Sliding-window limiter for expensive endpoints keyed by a stable request scope.
 #[derive(Clone)]
 struct RequestRateLimiter {
-    attempts: Arc<RwLock<AHashMap<(&'static str, u64), Vec<Instant>>>>,
+    attempts: Arc<RwLock<RequestRateBuckets>>,
     burst: u32,
     window: Duration,
     max_keys: usize,

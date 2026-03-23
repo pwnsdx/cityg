@@ -2746,10 +2746,10 @@ fn header_required_bytes<'a>(
     }
 }
 
-fn header_optional_bytes<'a>(
-    header: &'a BTreeMap<u64, Value>,
+fn header_optional_bytes(
+    header: &BTreeMap<u64, Value>,
     key: u64,
-) -> Result<Option<&'a [u8]>, CityGError> {
+) -> Result<Option<&[u8]>, CityGError> {
     match header.get(&key) {
         Some(Value::Bytes(bytes)) => Ok(Some(bytes.as_slice())),
         Some(Value::Null) | None => Ok(None),

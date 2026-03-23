@@ -26,7 +26,7 @@ use crossterm::{
 };
 use hex::encode as hex_encode;
 use rand::seq::SliceRandom;
-use rand::{Rng, RngCore, thread_rng};
+use rand::{RngExt, rng};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -647,13 +647,13 @@ fn open_append(path: &Path) -> Result<File> {
 
 fn random_room_id() -> String {
     let mut bytes = [0u8; 32];
-    thread_rng().fill_bytes(&mut bytes);
+    rng().fill(&mut bytes);
     hex_encode(bytes)
 }
 
 fn random_leave_order(count: usize, limit: usize) -> String {
     let mut values: Vec<usize> = (1..=count).collect();
-    values.shuffle(&mut thread_rng());
+    values.shuffle(&mut rng());
     values
         .into_iter()
         .take(limit.min(count))
@@ -985,8 +985,8 @@ async fn run_worker(
             break;
         }
         let started = Instant::now();
-        let mut count = thread_rng().gen_range(config.min_count..=config.max_count);
-        let watch_mode = thread_rng().gen_range(0..100) < config.watch_percent;
+        let mut count = rng().random_range(config.min_count..=config.max_count);
+        let watch_mode = rng().random_range(0..100) < config.watch_percent;
         if watch_mode && count < 2 {
             count = 2;
         }
@@ -1231,7 +1231,7 @@ async fn run_worker_round_attempt(
         .with_context(|| format!("bootstrap room {}", attempt.room_id))?;
 
     if config.jitter_max_secs > 0 {
-        let jitter = thread_rng().gen_range(0..=config.jitter_max_secs);
+        let jitter = rng().random_range(0..=config.jitter_max_secs);
         if jitter > 0 {
             sleep(Duration::from_secs(jitter)).await;
         }
