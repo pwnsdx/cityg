@@ -12,6 +12,14 @@ use std::{
 
 #[cfg(test)]
 use crate::message_crypto::{MSG_INDEX_REPLAY_WINDOW, decrypt_message_v2};
+use crate::barrier_shared::{
+    BARRIER_KEY_INFO, BARRIER_TREE_INFO, DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS,
+    BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage, apply_join_set_to_snapshot,
+    apply_revoked_set_to_snapshot, barrier_path_nodes, blank_leaf_and_path,
+    collect_resolution_targets, compute_barrier_pkhash, compute_barrier_tree_hash,
+    compute_revocation_roots_hash, expected_barrier_tree_nodes, should_retry_ticket_http_error,
+    sibling_node, ticket_retry_delay,
+};
 use crate::message_crypto::{
     MessageCryptoContext, MsgReplayState, PersistedMsgReplayState, decrypt_message_v2_with_index,
     derive_msg_replay_tuple_tag, encrypt_message_v2,
@@ -101,11 +109,8 @@ fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
         .map_err(|err| anyhow!("generate VRF keypair: {err}"))
 }
 
-const DEFAULT_BARRIER_N_MAX: u64 = 1_024;
 #[cfg(test)]
 const DEFAULT_MAX_BARRIER_UPDATE_BYTES: u64 = 1_048_576;
-const BARRIER_TREE_INFO: &[u8] = b"city-g|barrier/tree|v1";
-const BARRIER_KEY_INFO: &[u8] = b"city-g|barrier/key|v1";
 const BARRIER_KEYGEN_D_INFO: &[u8] = b"city-g|barrier/keygen-d|v1";
 const BARRIER_KEYGEN_Z_INFO: &[u8] = b"city-g|barrier/keygen-z|v1";
 const FS_PCS_INFO: &[u8] = b"city-g|fs/pcs|v1";
@@ -113,37 +118,7 @@ const ML_KEM_SEED_BYTES: usize = 64;
 const ML_KEM_EXPANDED_DK_BYTES: usize = 2400;
 const BARRIER_CODE_RECOVER_NO_MATCH: u32 = 9606;
 const BARRIER_CODE_SNAPSHOT_AUTH_FAILURE: u32 = 9609;
-const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
-const TICKET_RETRY_BASE_DELAY_MS: u64 = 50;
-const TICKET_RETRY_MAX_DELAY_MS: u64 = 800;
-const TICKET_RETRY_JITTER_MS: u64 = 40;
 const JOIN_INVITE_PREFIX: &str = "cityg-invite:";
-
-fn should_retry_ticket_http_error(
-    status_code: u16,
-    message: &str,
-    freeze_code: Option<u32>,
-) -> bool {
-    let lowered = message.to_ascii_lowercase();
-    let looks_like_concurrency_race = lowered.contains("window full")
-        || lowered.contains("mh_heads_invalid")
-        || lowered.contains("barrier_version")
-        || lowered.contains("pivot head missing")
-        || lowered.contains("refresh payload diverges from stored parity")
-        || lowered.contains("barrier_update required on revocation change")
-        || lowered.contains("barrier update required on revocation change");
-    let status_hint = matches!(status_code, 409 | 429 | 500 | 503);
-    let freeze_hint = matches!(freeze_code, Some(925));
-    status_hint && (looks_like_concurrency_race || freeze_hint)
-}
-
-fn ticket_retry_delay(attempt: u32) -> Duration {
-    let exponent = attempt.min(5);
-    let base = TICKET_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << exponent);
-    let capped = base.min(TICKET_RETRY_MAX_DELAY_MS);
-    let jitter = rng().random_range(0..=TICKET_RETRY_JITTER_MS);
-    Duration::from_millis(capped.saturating_add(jitter))
-}
 
 fn is_refresh_pivot_conflict(status_code: u16, message: &str) -> bool {
     matches!(status_code, 409 | 500)
@@ -152,36 +127,7 @@ fn is_refresh_pivot_conflict(status_code: u16, message: &str) -> bool {
 }
 
 #[derive(Serialize)]
-struct BarrierRootsPreimage<'a>(
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-);
-
-#[derive(Serialize)]
 struct BarrierUpdateDigestPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
-
-#[derive(Serialize)]
-struct BarrierPkHashPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
-
-#[derive(Serialize)]
-struct BarrierTreeLeafHashPreimage<'a> {
-    n_max: u64,
-    node_index: u64,
-    #[serde(with = "serde_bytes")]
-    pk: &'a [u8],
-}
-
-#[derive(Serialize)]
-struct BarrierTreeNodeHashPreimage<'a> {
-    n_max: u64,
-    node_index: u64,
-    #[serde(with = "serde_bytes")]
-    pk: &'a [u8],
-    #[serde(with = "serde_bytes")]
-    left_hash: &'a [u8; 32],
-    #[serde(with = "serde_bytes")]
-    right_hash: &'a [u8; 32],
-}
 
 #[derive(Serialize)]
 struct BarrierWrapNoncePreimage(u64, u64);
@@ -196,12 +142,6 @@ struct BarrierWrapAadPreimage<'a>(
     u64,
     #[serde(with = "serde_bytes")] &'a [u8; 32],
 );
-
-#[derive(Serialize)]
-struct BarrierTreePathSaltPreimage(u64);
-
-#[derive(Serialize)]
-struct BarrierDeriveSaltPreimage<'a>(u64, #[serde(with = "serde_bytes")] &'a [u8; 32]);
 
 #[derive(Serialize)]
 struct FsPcsSaltPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8; 32], u64, u64);
@@ -282,91 +222,12 @@ struct BarrierUpdateBuildResult {
     on_path_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
 }
 
-fn compute_revocation_roots_hash(
-    revoked_since_root: &[u8; 32],
-    revoked_root: &[u8; 32],
-) -> Result<[u8; 32]> {
-    h_l(
-        "barrier/roots",
-        &BarrierRootsPreimage(revoked_since_root, revoked_root),
-    )
-    .map_err(|err| anyhow!("compute revocation_roots_hash: {err}"))
-}
-
-fn compute_barrier_pkhash(ek: &[u8]) -> Result<[u8; 32]> {
-    h_l("barrier/pk-hash", &BarrierPkHashPreimage(ek))
-        .map_err(|err| anyhow!("compute barrier/pk-hash: {err}"))
-}
-
 fn compute_barrier_update_digest(raw_update: &[u8]) -> Result<[u8; 32]> {
     h_l(
         "barrier/update/digest",
         &BarrierUpdateDigestPreimage(raw_update),
     )
     .map_err(|err| anyhow!("compute barrier_update_digest: {err}"))
-}
-
-fn compute_barrier_tree_hash(n_max: u64, pk_entries: &[Vec<u8>]) -> Result<[u8; 32]> {
-    let n_max_usize =
-        usize::try_from(n_max).map_err(|_| anyhow!("barrier tree n_max too large"))?;
-    let expected_len = n_max_usize
-        .checked_mul(2)
-        .and_then(|v| v.checked_sub(1))
-        .ok_or_else(|| anyhow!("barrier tree size overflow"))?;
-    if pk_entries.len() != expected_len {
-        return Err(anyhow!(
-            "barrier tree size mismatch: expected {expected_len}, got {}",
-            pk_entries.len()
-        ));
-    }
-    let leaf_base = n_max.saturating_sub(1);
-    compute_barrier_tree_hash_recursive(0, leaf_base, n_max, pk_entries)
-}
-
-fn compute_barrier_tree_hash_recursive(
-    node: u64,
-    leaf_base: u64,
-    n_max: u64,
-    pk_entries: &[Vec<u8>],
-) -> Result<[u8; 32]> {
-    let node_index =
-        usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
-    let pk = pk_entries
-        .get(node_index)
-        .ok_or_else(|| anyhow!("barrier node index out of range"))?;
-    if node >= leaf_base {
-        return h_l(
-            "barrier/tree/leaf-hash",
-            &BarrierTreeLeafHashPreimage {
-                n_max,
-                node_index: node,
-                pk: pk.as_slice(),
-            },
-        )
-        .map_err(|err| anyhow!("compute barrier leaf hash: {err}"));
-    }
-
-    let left = node
-        .checked_mul(2)
-        .and_then(|v| v.checked_add(1))
-        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
-    let right = node
-        .checked_mul(2)
-        .and_then(|v| v.checked_add(2))
-        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
-    let left_hash = compute_barrier_tree_hash_recursive(left, leaf_base, n_max, pk_entries)?;
-    let right_hash = compute_barrier_tree_hash_recursive(right, leaf_base, n_max, pk_entries)?;
-    h_l(
-        "barrier/tree/node-hash",
-        &BarrierTreeNodeHashPreimage {
-            n_max,
-            node_index: node,
-            pk: pk.as_slice(),
-            left_hash: &left_hash,
-            right_hash: &right_hash,
-        },
-    )
-    .map_err(|err| anyhow!("compute barrier node hash: {err}"))
 }
 
 fn validate_barrier_tree_snapshot_auth(
@@ -388,80 +249,6 @@ fn validate_barrier_tree_snapshot_auth(
     Ok(())
 }
 
-fn sibling_node(node: u64) -> Option<u64> {
-    if node == 0 {
-        return None;
-    }
-    if node.is_multiple_of(2) {
-        Some(node - 1)
-    } else {
-        Some(node + 1)
-    }
-}
-
-fn blank_leaf_and_path(snapshot: &mut [Vec<u8>], leaf_node: u64) -> Result<()> {
-    let mut node = leaf_node;
-    loop {
-        let index =
-            usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
-        let slot = snapshot
-            .get_mut(index)
-            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
-        slot.clear();
-        if node == 0 {
-            break;
-        }
-        node = (node - 1) / 2;
-    }
-    Ok(())
-}
-
-fn blank_internal_path_from_leaf(snapshot: &mut [Vec<u8>], leaf_node: u64) -> Result<()> {
-    let mut node = leaf_node;
-    while node > 0 {
-        node = (node - 1) / 2;
-        let index =
-            usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
-        let slot = snapshot
-            .get_mut(index)
-            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
-        slot.clear();
-    }
-    Ok(())
-}
-
-fn apply_join_set_to_snapshot(
-    snapshot: &mut [Vec<u8>],
-    n_max: u64,
-    join_records: &[BarrierJoinRecord],
-) -> Result<()> {
-    let leaf_base = n_max.saturating_sub(1);
-    for record in join_records {
-        let leaf_node = leaf_base.saturating_add(u64::from(record.leaf_index));
-        let index =
-            usize::try_from(leaf_node).map_err(|_| anyhow!("barrier node index out of range"))?;
-        let slot = snapshot
-            .get_mut(index)
-            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
-        *slot = record.ek_leaf.clone();
-        blank_internal_path_from_leaf(snapshot, leaf_node)?;
-    }
-    Ok(())
-}
-
-fn apply_revoked_set_to_snapshot(
-    snapshot: &mut [Vec<u8>],
-    n_max: u64,
-    revoked_indices: &[u32],
-) -> Result<()> {
-    let leaf_base = n_max.saturating_sub(1);
-    for leaf_index in revoked_indices {
-        let leaf_node = leaf_base.saturating_add(u64::from(*leaf_index));
-        blank_leaf_and_path(snapshot, leaf_node)?;
-    }
-    Ok(())
-}
-
 fn expected_same_rrh_barrier_reason(join_records: &[BarrierJoinRecord], updater_leaf: u64) -> u64 {
     if join_records
         .iter()
@@ -471,36 +258,6 @@ fn expected_same_rrh_barrier_reason(join_records: &[BarrierJoinRecord], updater_
     } else {
         1
     }
-}
-
-fn collect_resolution_targets(
-    snapshot: &[Vec<u8>],
-    node: u64,
-    leaf_base: u64,
-    targets: &mut Vec<u64>,
-) -> Result<()> {
-    let index = usize::try_from(node).map_err(|_| anyhow!("barrier node index out of range"))?;
-    let Some(pk) = snapshot.get(index) else {
-        return Ok(());
-    };
-    if !pk.is_empty() {
-        targets.push(node);
-        return Ok(());
-    }
-    if node >= leaf_base {
-        return Ok(());
-    }
-    let left = node
-        .checked_mul(2)
-        .and_then(|v| v.checked_add(1))
-        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
-    let right = node
-        .checked_mul(2)
-        .and_then(|v| v.checked_add(2))
-        .ok_or_else(|| anyhow!("barrier tree index overflow"))?;
-    collect_resolution_targets(snapshot, left, leaf_base, targets)?;
-    collect_resolution_targets(snapshot, right, leaf_base, targets)?;
-    Ok(())
 }
 
 fn zeroize_path_secret_map(path_secrets: &mut BTreeMap<u64, [u8; 32]>) {
@@ -1431,11 +1188,7 @@ fn build_barrier_update_bytes(
     if n_max == 0 || !n_max.is_power_of_two() || updater_leaf >= n_max {
         return Err(anyhow!("invalid barrier update tree parameters"));
     }
-    let expected_nodes = usize::try_from(n_max)
-        .ok()
-        .and_then(|n| n.checked_mul(2))
-        .and_then(|v| v.checked_sub(1))
-        .ok_or_else(|| anyhow!("invalid barrier n_max"))?;
+    let expected_nodes = expected_barrier_tree_nodes(n_max)?;
     if snapshot_pre.len() != expected_nodes {
         return Err(anyhow!(
             "barrier snapshot size mismatch: expected {expected_nodes}, got {}",
@@ -1444,13 +1197,7 @@ fn build_barrier_update_bytes(
     }
 
     let leaf_base = n_max.saturating_sub(1);
-    let mut path_nodes = vec![leaf_base.saturating_add(updater_leaf)];
-    while let Some(&node) = path_nodes.last() {
-        if node == 0 {
-            break;
-        }
-        path_nodes.push((node - 1) / 2);
-    }
+    let path_nodes = barrier_path_nodes(n_max, updater_leaf)?;
 
     let mut path_secrets = BTreeMap::new();
     let mut ps_leaf = [0u8; 32];
