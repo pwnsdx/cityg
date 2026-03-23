@@ -1460,7 +1460,10 @@ mod tests {
             &parent_leaves,
             &join_leaves,
             parent_root,
+            &[],
             revoked_since_root,
+            &[],
+            revoked_root,
         )
         .expect("branch-b artifact generation should succeed");
         let witness_bytes = witness_to_cbor(&canonical_witness)?;

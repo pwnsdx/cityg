@@ -509,14 +509,7 @@ impl CityGServer {
                 }
             })
             .filter(|state| !state.is_empty());
-        let mut options = config.acceptance_options.unwrap_or_default();
-        if let Some(state) = persisted_kbroad_state.as_ref() {
-            let registry: BTreeMap<Vec<u8>, Vec<u8>> = state
-                .iter()
-                .map(|(gid, room)| (gid.clone(), room.kbroad_public.clone()))
-                .collect();
-            options.kbroad_registry = Some(registry);
-        }
+        let options = config.acceptance_options.unwrap_or_default();
         let journal = config
             .state_path
             .as_ref()
@@ -534,7 +527,7 @@ impl CityGServer {
         };
         #[allow(clippy::collapsible_if)]
         if let Some(path) = config.state_path {
-            if let Err(err) = server.recover_from_state(&path) {
+            if let Err(err) = server.recover_from_state(&path, persisted_kbroad_state.as_ref()) {
                 eprintln!("cityg-server: state recovery failed: {err:?}");
             }
         }
@@ -604,7 +597,10 @@ impl CityGServer {
             &parent_leaves,
             &join_leaves,
             parent_root,
+            &revoked_all,
             revoked_since_root,
+            &revoked_all,
+            revoked_root,
         )?;
         let witness_cbor = witness::witness_to_cbor(&canonical_witness)?;
         let srx_cbor = srx_owned.to_cbor()?;
@@ -739,11 +735,75 @@ impl CityGServer {
         let tswe_salt_hash = msphf_core::instance::tswe_salt_hash(gid, &parent_root)?;
         let pox_r_commit = witness::demo_pox_commit();
 
-        let mut parities = self.ctx.pivot_parities_for(gid, &parent_root);
-        if parities.is_empty() {
+        let live_parities: Vec<(Vec<u8>, PivotParity)> = self
+            .ctx
+            .pivot_parities_for(gid, &parent_root)
+            .into_iter()
+            .filter_map(|parity| {
+                let wid = self.ctx.mh_window.find_head_window(&parity.we_epoch_id)?;
+                self.ctx
+                    .mh_window
+                    .find_head(wid.as_slice(), &parity.we_epoch_id)
+                    .map(|_| (wid, parity))
+            })
+            .collect();
+        if live_parities.is_empty() {
             return Err(CityGError::InvalidInput("no pivot parity available"));
         }
 
+        let mut parities_by_window: BTreeMap<Vec<u8>, Vec<PivotParity>> = BTreeMap::new();
+        for (wid, parity) in live_parities {
+            parities_by_window.entry(wid).or_default().push(parity);
+        }
+        let Some((_, mut parities)) =
+            parities_by_window
+                .into_iter()
+                .max_by(|(_, left), (_, right)| {
+                    let left_max_fs = left
+                        .iter()
+                        .filter_map(|parity| parity.fs_ec)
+                        .max()
+                        .unwrap_or(0);
+                    let right_max_fs = right
+                        .iter()
+                        .filter_map(|parity| parity.fs_ec)
+                        .max()
+                        .unwrap_or(0);
+                    match left_max_fs.cmp(&right_max_fs) {
+                        core::cmp::Ordering::Equal => {
+                            let left_best_accept = left
+                                .iter()
+                                .map(|parity| parity.accept_seq)
+                                .max()
+                                .unwrap_or(0);
+                            let right_best_accept = right
+                                .iter()
+                                .map(|parity| parity.accept_seq)
+                                .max()
+                                .unwrap_or(0);
+                            match left_best_accept.cmp(&right_best_accept) {
+                                core::cmp::Ordering::Equal => {
+                                    let left_best_weid = left
+                                        .iter()
+                                        .map(|parity| parity.we_epoch_id)
+                                        .min()
+                                        .unwrap_or([0u8; 32]);
+                                    let right_best_weid = right
+                                        .iter()
+                                        .map(|parity| parity.we_epoch_id)
+                                        .min()
+                                        .unwrap_or([0u8; 32]);
+                                    right_best_weid.cmp(&left_best_weid)
+                                }
+                                other => other,
+                            }
+                        }
+                        other => other,
+                    }
+                })
+        else {
+            return Err(CityGError::InvalidInput("no pivot parity available"));
+        };
         parities.sort_by(|a, b| match b.accept_seq.cmp(&a.accept_seq) {
             core::cmp::Ordering::Equal => a.we_epoch_id.cmp(&b.we_epoch_id),
             other => other,
@@ -990,23 +1050,33 @@ impl CityGServer {
             ctx_state.max_barrier_update_bytes = state.max_barrier_update_bytes.max(1);
         }
 
-        // Keep at least one pivot parity available on the resulting root so members
-        // can always fetch a merge ticket for subsequent membership changes.
-        let mut mirrored = ctx
+        // Carry live pivot parities forward onto the resulting root so a new root
+        // can still build merge tickets against the freshest checkpoint window.
+        let mut live_prior_parities: Vec<PivotParity> = ctx
             .pivot_parities_for(bundle.gid(), &bundle.anchor.parent_root)
             .into_iter()
-            .find(|parity| parity.we_epoch_id == acceptance.outcome.we_epoch_id)
-            .unwrap_or_else(|| acceptance.pivot_parity.clone());
-        if mirrored.parent_root != new_root {
-            mirrored.parent_root = new_root;
+            .filter(|parity| {
+                ctx.mh_window
+                    .find_head_window(&parity.we_epoch_id)
+                    .and_then(|wid| ctx.mh_window.find_head(wid.as_slice(), &parity.we_epoch_id))
+                    .is_some()
+            })
+            .collect();
+        if live_prior_parities.is_empty() {
+            live_prior_parities.push(acceptance.pivot_parity.clone());
         }
-        // Keep parity roots aligned with the accepted anchor when mirroring to
-        // a new parent root; otherwise downstream tickets can diverge from the
-        // barrier state after revocation-changing merges.
-        mirrored.join_delta_root = bundle.anchor.join_delta_root;
-        mirrored.revoked_since_root = bundle.anchor.revoked_since_prev_root;
-        mirrored.revoked_root = bundle.anchor.revoked_root;
-        ctx.insert_pivot_parity(mirrored, acceptance.outcome.accept_time);
+        for mut mirrored in live_prior_parities {
+            if mirrored.parent_root != new_root {
+                mirrored.parent_root = new_root;
+            }
+            // Keep parity roots aligned with the accepted anchor when mirroring to
+            // a new parent root; otherwise downstream tickets can diverge from the
+            // barrier state after revocation-changing merges.
+            mirrored.join_delta_root = bundle.anchor.join_delta_root;
+            mirrored.revoked_since_root = bundle.anchor.revoked_since_prev_root;
+            mirrored.revoked_root = bundle.anchor.revoked_root;
+            ctx.insert_pivot_parity(mirrored, acceptance.outcome.accept_time);
+        }
         if !delta.revoked.is_empty() {
             roster.mark_kbroad_rotation_required(bundle.gid());
         }
@@ -1254,12 +1324,41 @@ impl CityGServer {
         }
     }
 
-    fn recover_from_state(&mut self, path: &Path) -> Result<(), CityGError> {
+    fn seed_registered_groups_from_persisted_kbroad_state(
+        &mut self,
+        state: &PersistedKbroadState,
+    ) -> Result<(), CityGError> {
+        for (gid, room_state) in state {
+            let Ok(gid_arr) = gid.as_slice().try_into() else {
+                continue;
+            };
+            let group = self.roster.groups.entry(gid.clone()).or_default();
+            group.kbroad_generation = room_state.kbroad_generation;
+            group.rotation_required = room_state.rotation_required;
+            group.n_max = room_state.n_max.max(1);
+            group.max_barrier_update_bytes = usize::try_from(room_state.max_barrier_update_bytes)
+                .unwrap_or(
+                    msphf_orchestrator::BarrierGroupState::default().max_barrier_update_bytes,
+                )
+                .max(1);
+            self.initialize_group_barrier_bootstrap_state(&gid_arr)?;
+        }
+        Ok(())
+    }
+
+    fn recover_from_state(
+        &mut self,
+        path: &Path,
+        persisted_kbroad_state: Option<&PersistedKbroadState>,
+    ) -> Result<(), CityGError> {
         let entries = ServerJournal::load_entries(path)?;
         if entries.is_empty() {
             return Ok(());
         }
         self.reset_state();
+        if let Some(state) = persisted_kbroad_state {
+            self.seed_registered_groups_from_persisted_kbroad_state(state)?;
+        }
         self.replaying = true;
         let replay_result = (|| -> Result<(), CityGError> {
             for entry in entries {
@@ -2852,8 +2951,15 @@ mod tests {
         .map_err(|_| CityGError::InvalidInput("leaf id derivation"))?;
         let join_delta_root = canonical_set_root(&[leaf_id])?;
 
-        let (canonical_witness, srx_owned) =
-            witness::build_branch_b_artifacts(&[], &[leaf_id], parent_root, revoked_since_root)?;
+        let (canonical_witness, srx_owned) = witness::build_branch_b_artifacts(
+            &[],
+            &[leaf_id],
+            parent_root,
+            &[],
+            revoked_since_root,
+            &[],
+            [0u8; 32],
+        )?;
         let witness_cbor = witness::witness_to_cbor(&canonical_witness)?;
         let srx_inputs = srx_owned.into_srx_inputs();
 
@@ -4410,6 +4516,11 @@ mod tests {
             .next()
             .ok_or(CityGError::InvalidInput("pivot parity missing"))?;
         let now = server.context().current_time();
+        let wid = server
+            .context()
+            .mh_window
+            .find_head_window(&base_parity.we_epoch_id)
+            .ok_or(CityGError::InvalidInput("pivot head missing"))?;
 
         let mut higher_seq = base_parity.clone();
         higher_seq.accept_seq = base_parity.accept_seq.saturating_add(5);
@@ -4417,6 +4528,29 @@ mod tests {
         higher_seq.proof_mode = "higher-seq".to_string();
         higher_seq.vrf_id = "higher-seq".to_string();
         higher_seq.policy_version = "41".to_string();
+        server
+            .context_mut()
+            .mh_window
+            .accept_head(
+                wid.as_slice(),
+                HeadRecord::new(
+                    higher_seq.we_epoch_id,
+                    higher_seq.hp_commit,
+                    higher_seq.seed_ctx_hash,
+                    higher_seq.rho_commit,
+                    higher_seq.seed_commit,
+                    higher_seq.xk_hash,
+                    higher_seq.join_delta_root,
+                    higher_seq.revoked_since_root,
+                    higher_seq.revoked_root,
+                    higher_seq.accept_seq,
+                    now,
+                ),
+                now,
+            )
+            .map_err(|err| {
+                CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(err))
+            })?;
         server.context_mut().insert_pivot_parity(higher_seq, now);
 
         let mut tie_winner = base_parity.clone();
@@ -4425,6 +4559,29 @@ mod tests {
         tie_winner.proof_mode = "tie-winner".to_string();
         tie_winner.vrf_id = "tie-winner".to_string();
         tie_winner.policy_version = "42".to_string();
+        server
+            .context_mut()
+            .mh_window
+            .accept_head(
+                wid.as_slice(),
+                HeadRecord::new(
+                    tie_winner.we_epoch_id,
+                    tie_winner.hp_commit,
+                    tie_winner.seed_ctx_hash,
+                    tie_winner.rho_commit,
+                    tie_winner.seed_commit,
+                    tie_winner.xk_hash,
+                    tie_winner.join_delta_root,
+                    tie_winner.revoked_since_root,
+                    tie_winner.revoked_root,
+                    tie_winner.accept_seq,
+                    now,
+                ),
+                now,
+            )
+            .map_err(|err| {
+                CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(err))
+            })?;
         server.context_mut().insert_pivot_parity(tie_winner, now);
 
         let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
@@ -4432,6 +4589,86 @@ mod tests {
         assert_eq!(ticket.proof_mode, "tie-winner");
         assert_eq!(ticket.vrf_id, "tie-winner");
         assert_eq!(ticket.policy_version, "42");
+        Ok(())
+    }
+
+    #[test]
+    fn build_merge_ticket_ignores_stale_parity_without_live_head() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let parent_root = server
+            .latest_parent_root(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("latest root missing"))?;
+        let leaf_id = cityg_client::demo::demo_member_leaf("alice");
+        let base_parity = server
+            .context_mut()
+            .pivot_parities_for(gid.as_slice(), &parent_root)
+            .into_iter()
+            .next()
+            .ok_or(CityGError::InvalidInput("pivot parity missing"))?;
+        let now = server.context().current_time();
+
+        let mut stale = base_parity.clone();
+        stale.accept_seq = base_parity.accept_seq.saturating_add(9);
+        stale.we_epoch_id = [0xEE; 32];
+        stale.proof_mode = "stale".to_string();
+        stale.vrf_id = "stale".to_string();
+        stale.policy_version = "99".to_string();
+        server.context_mut().insert_pivot_parity(stale, now);
+
+        let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+        assert_eq!(
+            ticket.pivot_we_epoch_id, base_parity.we_epoch_id,
+            "merge ticket must ignore parity entries whose heads are no longer live in mh_window"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn join_root_carries_forward_live_checkpoint_parity() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let alice = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&alice)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice_root = server
+            .latest_parent_root(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("latest root missing"))?;
+        let now = server.context().current_time();
+        let mut carried = server
+            .context_mut()
+            .pivot_parities_for(gid.as_slice(), &alice_root)
+            .into_iter()
+            .next()
+            .ok_or(CityGError::InvalidInput("pivot parity missing"))?;
+        carried.fs_ec = Some(carried.fs_ec.unwrap_or(0).saturating_add(50));
+        server
+            .context_mut()
+            .insert_pivot_parity(carried.clone(), now);
+
+        let bob = cityg_client::demo::demo_bundle("bob")?;
+        server.accept_epoch(&bob)?;
+
+        let new_root = server
+            .latest_parent_root(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("latest root missing after bob"))?;
+        let bob_leaf = cityg_client::demo::demo_member_leaf("bob");
+        let ticket = server.build_merge_ticket(&gid, &bob_leaf)?;
+        let max_ticket_fs = ticket
+            .parities
+            .iter()
+            .filter_map(|parity| parity.fs_ec)
+            .max()
+            .ok_or(CityGError::InvalidInput("ticket missing fs_ec"))?;
+        assert_eq!(
+            max_ticket_fs,
+            carried.fs_ec.unwrap_or(0),
+            "new roots must keep a live parity at least as fresh as the prior checkpoint window"
+        );
+        assert_eq!(ticket.parent_root, new_root);
         Ok(())
     }
 

@@ -172,7 +172,10 @@ fn demo_bundle_inner(
         &parent_leaves,
         &join_leaves,
         parent_root,
+        &[],
         revoked_since_root,
+        &[],
+        revoked_root,
     )?;
     let witness_bytes = witness::witness_to_cbor(&canonical_witness)?;
     let srx_inputs = srx_owned.into_srx_inputs();

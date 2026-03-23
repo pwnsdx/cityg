@@ -18,6 +18,7 @@ Scope: consolidation of the March 2026 security and spec-conformance review thre
 | SPEC-DOC-01 | Fixed | Secondary protocol docs now use `fs/dev/chain/v2`. |
 | SPEC-DOC-02 | Fixed | `HDR_PARENT_ROOT` and `HDR_JOIN_DELTA_ROOT` are named constants. |
 | SPEC-DOC-03 | Fixed | `barrier/update/digest` is listed in the label registry doc. |
+| SERVER-KBROAD-LIVE-01 | Fixed | Persisted restart now seeds KBROAD room state before replay, carries live pivot parities across new roots, and passes the canonical restart + survivor refresh + fresh join regression. |
 
 ## Not Confirmed
 
@@ -31,7 +32,6 @@ Scope: consolidation of the March 2026 security and spec-conformance review thre
 | ID | Status | Notes |
 | --- | --- | --- |
 | LBVRF-RS-BOUND-01 | Mitigated | `prove_with_rs` now hard-fails after a large deterministic cap; keep collecting empirical attempt counts if this path is exercised in practice. |
-| SERVER-KBROAD-LIVE-01 | Open | A live post-revocation refresh scenario still needs a canonical client-side builder in tests before making stronger claims about restart/replay. |
 | API-RATE-02 | Open | Concurrency limits are in place, but per-client or per-token rate limiting is still worth adding. |
 | TEST-FUZZ-01 | Open | CBOR malformed inputs, journal truncation, and alias normalization deserve dedicated fuzz/property coverage. |
 
@@ -45,3 +45,5 @@ Scope: consolidation of the March 2026 security and spec-conformance review thre
 - `12ad0ee` `bound expensive api endpoint concurrency`
 - `13ad55b` `fail closed admin auth without configured tokens`
 - `91268ec` `align v0.1.4 label docs and header constants`
+- `647fd65` `fix lb-vrf challenge sampling and bound retries`
+- `32690bf` `enforce canonical CAPSS proof transcripts`

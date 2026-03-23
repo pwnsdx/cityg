@@ -113,7 +113,10 @@ fn test_build_branch_b_artifacts_produces_valid_data() -> Result<(), Box<dyn std
         &parent_leaves,
         &join_leaves,
         parent_root,
+        &[],
         revoked_since_root,
+        &[],
+        [0u8; 32],
     );
     assert!(result.is_ok(), "Should succeed with valid inputs");
 
@@ -135,9 +138,38 @@ fn test_build_branch_b_with_parent() -> Result<(), Box<dyn std::error::Error>> {
         &parent_leaves,
         &join_leaves,
         parent_root,
+        &[],
         revoked_since_root,
+        &[],
+        [0u8; 32],
     );
     assert!(result.is_ok(), "Should handle parent leaves");
+    Ok(())
+}
+
+#[test]
+fn test_build_branch_b_artifacts_accepts_revoked_since_set()
+-> Result<(), Box<dyn std::error::Error>> {
+    use msphf_core::merkle::canonical_set_root;
+
+    let parent_leaves = vec![[0x10; 32], [0x20; 32]];
+    let join_leaves = vec![[0x30; 32]];
+    let revoked_since_leaves = vec![[0xA5; 32]];
+    let parent_root = canonical_set_root(&parent_leaves)?;
+    let revoked_since_root = canonical_set_root(&revoked_since_leaves)?;
+
+    let (_witness, srx_owned) = build_branch_b_artifacts(
+        &parent_leaves,
+        &join_leaves,
+        parent_root,
+        &revoked_since_leaves,
+        revoked_since_root,
+        &revoked_since_leaves,
+        revoked_since_root,
+    )?;
+
+    assert_eq!(srx_owned.since_leaf_ids, revoked_since_leaves);
+    assert_eq!(srx_owned.since_mem_revoked.len(), 1);
     Ok(())
 }
 
@@ -154,7 +186,10 @@ fn test_srx_inputs_cbor_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         &parent_leaves,
         &join_leaves,
         parent_root,
+        &[],
         revoked_since_root,
+        &[],
+        [0u8; 32],
     )?;
 
     let bytes = srx_owned.to_cbor()?;
@@ -170,8 +205,16 @@ fn test_build_branch_b_artifacts_rejects_parent_root_mismatch() {
     let join_leaves = vec![[0x30; 32]];
     let bad_parent_root = [0xFF; 32];
 
-    let maybe_err =
-        build_branch_b_artifacts(&parent_leaves, &join_leaves, bad_parent_root, [0u8; 32]).err();
+    let maybe_err = build_branch_b_artifacts(
+        &parent_leaves,
+        &join_leaves,
+        bad_parent_root,
+        &[],
+        [0u8; 32],
+        &[],
+        [0u8; 32],
+    )
+    .err();
     assert!(maybe_err.is_some(), "mismatched parent root must fail");
     if let Some(err) = maybe_err {
         assert!(err.to_string().contains("parent root mismatch"));
@@ -299,8 +342,15 @@ fn test_build_branch_b_artifacts_interval_nonmembership_includes_anchors()
     let parent_root = msphf_core::merkle::canonical_set_root(&parent_leaves)?;
     let join_leaves = vec![[0x40; 32]];
 
-    let (_witness, srx) =
-        build_branch_b_artifacts(&parent_leaves, &join_leaves, parent_root, [0u8; 32])?;
+    let (_witness, srx) = build_branch_b_artifacts(
+        &parent_leaves,
+        &join_leaves,
+        parent_root,
+        &[],
+        [0u8; 32],
+        &[],
+        [0u8; 32],
+    )?;
     assert_eq!(srx.join_nonmem_parent.len(), 1);
     let interval = &srx.join_nonmem_parent[0];
     assert!(interval.witness.left.is_some());
@@ -318,8 +368,15 @@ fn test_build_branch_b_artifacts_left_boundary_nonmembership()
     let parent_root = msphf_core::merkle::canonical_set_root(&parent_leaves)?;
     let join_leaves = vec![[0x10; 32]];
 
-    let (_witness, srx) =
-        build_branch_b_artifacts(&parent_leaves, &join_leaves, parent_root, [0u8; 32])?;
+    let (_witness, srx) = build_branch_b_artifacts(
+        &parent_leaves,
+        &join_leaves,
+        parent_root,
+        &[],
+        [0u8; 32],
+        &[],
+        [0u8; 32],
+    )?;
     let nm = &srx.join_nonmem_parent[0].witness;
     assert!(nm.left.is_none());
     assert!(nm.right.is_some());
@@ -334,8 +391,15 @@ fn test_build_branch_b_artifacts_right_boundary_nonmembership()
     let parent_root = msphf_core::merkle::canonical_set_root(&parent_leaves)?;
     let join_leaves = vec![[0x40; 32]];
 
-    let (_witness, srx) =
-        build_branch_b_artifacts(&parent_leaves, &join_leaves, parent_root, [0u8; 32])?;
+    let (_witness, srx) = build_branch_b_artifacts(
+        &parent_leaves,
+        &join_leaves,
+        parent_root,
+        &[],
+        [0u8; 32],
+        &[],
+        [0u8; 32],
+    )?;
     let nm = &srx.join_nonmem_parent[0].witness;
     assert!(nm.left.is_some());
     assert!(nm.right.is_none());

@@ -166,19 +166,32 @@ pub fn build_branch_b_artifacts(
     parent_leaves: &[[u8; 32]],
     join_leaves: &[[u8; 32]],
     parent_root: [u8; 32],
+    revoked_since_leaves: &[[u8; 32]],
     revoked_since_root: [u8; 32],
+    revoked_leaves: &[[u8; 32]],
+    revoked_root: [u8; 32],
 ) -> Result<(CanonicalWitness, SrxInputsOwned), CityGError> {
     let join_root = canonical_set_root(join_leaves)?;
-    let witness = witness_branch_b(&join_root, &revoked_since_root);
-    let empty: [[u8; 32]; 0] = [];
+    let (nonmem, _, _) = parent_nonmem_witness(revoked_leaves, revoked_root, join_root)?;
+    let witness = CanonicalWitness {
+        inner: WitnessVariants::B {
+            witness: RawMembershipWitness {
+                leaf_id: join_root.to_vec(),
+                root: join_root.to_vec(),
+                path: Vec::new(),
+            },
+            nonmem: Some(nonmem),
+            pop: None,
+        },
+    };
     let srx_owned = build_srx_inputs_owned(
         join_leaves,
         parent_leaves,
         parent_root,
-        &[],
+        revoked_since_leaves,
         revoked_since_root,
-        &empty,
-        [0u8; 32],
+        revoked_leaves,
+        revoked_root,
     )?;
     Ok((witness, srx_owned))
 }
@@ -201,32 +214,6 @@ pub fn build_merge_srx_inputs(
         revoked_leaves,
         revoked_root,
     )
-}
-
-fn witness_branch_b(join_root: &[u8; 32], revoked_root: &[u8; 32]) -> CanonicalWitness {
-    CanonicalWitness {
-        inner: WitnessVariants::B {
-            witness: RawMembershipWitness {
-                leaf_id: join_root.to_vec(),
-                root: join_root.to_vec(),
-                path: Vec::new(),
-            },
-            nonmem: Some(RawNonMembershipWitness {
-                query: join_root.to_vec(),
-                root: revoked_root.to_vec(),
-                left: None,
-                right: None,
-                path: Vec::new(),
-                left_below: Vec::new(),
-                right_below: Vec::new(),
-                above: Vec::new(),
-                nmint: None,
-                lca_left_height: None,
-                lca_right_height: None,
-            }),
-            pop: None,
-        },
-    }
 }
 
 fn build_srx_inputs_owned(

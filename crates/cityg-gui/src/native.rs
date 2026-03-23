@@ -722,7 +722,7 @@ async fn full_chain_check_barrier_update(
     header_map: &BTreeMap<u64, Value>,
     raw_update: &[u8],
     max_barrier_update_bytes: usize,
-) -> Result<()> {
+) -> Result<[u8; 32]> {
     let n_max = session.barrier_state.n_max.max(1);
     let parsed = parse_barrier_update_for_recover(raw_update, n_max, max_barrier_update_bytes)
         .map_err(|err| anyhow!("barrier full chain-check prevalidation failed (960.7): {err}"))?;
@@ -841,7 +841,7 @@ async fn full_chain_check_barrier_update(
         ));
     }
 
-    Ok(())
+    Ok(expected_before)
 }
 
 fn self_path_nodes(n_max: u64, cover_leaf_index: u64) -> Vec<u64> {
@@ -929,12 +929,13 @@ fn decapsulate_internal_node_shared_secret(
     Ok(ss)
 }
 
-fn try_recover_barrier_from_header(
+fn try_recover_barrier_from_header_with_expected_before(
     session: &AppSession,
     header_map: &BTreeMap<u64, Value>,
     weid: &[u8; 32],
     fs_ec: u64,
     max_barrier_update_bytes: usize,
+    expected_before_hash: Option<[u8; 32]>,
 ) -> Result<Option<BarrierRecoverResult>> {
     if max_barrier_update_bytes == 0 {
         return Err(anyhow!("max_barrier_update_bytes must be positive"));
@@ -972,7 +973,9 @@ fn try_recover_barrier_from_header(
     }
     let reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON)
         .ok_or_else(|| anyhow!("barrier_update_reason is missing or malformed"))?;
-    if reason != 2 && parsed.kem_tree_hash_before != session.barrier_state.kem_tree_hash_after {
+    let required_before_hash =
+        expected_before_hash.unwrap_or(session.barrier_state.kem_tree_hash_after);
+    if reason != 2 && parsed.kem_tree_hash_before != required_before_hash {
         return Err(anyhow!("barrier hash-chain before-hash mismatch"));
     }
 
@@ -10301,10 +10304,54 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
 
 async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome> {
     let client = new_api_client(&session.server_url);
-    let ticket = client
-        .merge_ticket_refresh(&session.room_id, &session.leaf_id)
-        .await
-        .context("failed to fetch merge ticket for epoch sync")?;
+    let mut kbroad_rotation_attempted = false;
+    let mut retry_attempt = 0u32;
+    let ticket = loop {
+        match client
+            .merge_ticket_refresh(&session.room_id, &session.leaf_id)
+            .await
+        {
+            Ok(ticket) => break ticket,
+            Err(err) => {
+                if let ApiClientError::HttpStatus {
+                    status,
+                    message,
+                    freeze_code,
+                    ..
+                } = &err
+                {
+                    if status.is_server_error()
+                        && message.contains("kbroad rotation required")
+                        && !kbroad_rotation_attempted
+                    {
+                        kbroad_rotation_attempted = true;
+                        rotate_room_kbroad_with_fresh_key(&client, &session.room_id)
+                            .await
+                            .context("rotate KBROAD before epoch sync")?;
+                        continue;
+                    }
+
+                    if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                        && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
+                    {
+                        let delay = ticket_retry_delay(retry_attempt);
+                        retry_attempt = retry_attempt.saturating_add(1);
+                        warn!(
+                            attempt = retry_attempt,
+                            delay_ms = delay.as_millis() as u64,
+                            status = status.as_u16(),
+                            message = %message,
+                            "merge_ticket_refresh race/concurrency rejection during epoch sync; retrying"
+                        );
+                        sleep(delay).await;
+                        continue;
+                    }
+                }
+
+                return Err(err).context("failed to fetch merge ticket for epoch sync");
+            }
+        }
+    };
     let ticket_kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
     let ticket_n_max = if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
@@ -10486,7 +10533,7 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
             Some(_) => return Err(anyhow!("header barrier_update must be bytes")),
             None => return Err(anyhow!("missing barrier_update bytes")),
         };
-        full_chain_check_barrier_update(
+        let expected_before_hash = full_chain_check_barrier_update(
             &client,
             &session.room_id,
             &session,
@@ -10495,12 +10542,13 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
             ticket_max_barrier_update_bytes,
         )
         .await?;
-        match try_recover_barrier_from_header(
+        match try_recover_barrier_from_header_with_expected_before(
             &session,
             &bundle.header_map,
             &session.we_epoch_id,
             session.fs_ec,
             ticket_max_barrier_update_bytes,
+            Some(expected_before_hash),
         ) {
             Ok(Some(recovered)) => {
                 let BarrierRecoverResult {
@@ -12510,6 +12558,22 @@ mod tests {
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             let mut config = CityGConfig::default();
             config.server.seed_demo_room = false;
+            if let Err(err) = cityg_api::run_with_config(addr, config).await {
+                eprintln!("server exited with error: {err}");
+            }
+        })
+    }
+
+    async fn spawn_server_on_with_state_path(
+        port: u16,
+        state_path: std::path::PathBuf,
+    ) -> JoinHandle<()> {
+        init_test_auth_env();
+        tokio::spawn(async move {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            let mut config = CityGConfig::default();
+            config.server.seed_demo_room = false;
+            config.server.state_path = Some(state_path);
             if let Err(err) = cityg_api::run_with_config(addr, config).await {
                 eprintln!("server exited with error: {err}");
             }
@@ -17400,6 +17464,138 @@ mod tests {
             let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
             perform_pcs_refresh(LeaveRequest::from_session(&synced_alice)).await?;
         }
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_after_leave_preserves_survivor_refresh_and_new_join()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+        let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+        let charlie_base = temp_dir.path().join("cityg").join("gui-charlie");
+        let journal_dir = temp_dir.path().join("cityg").join("server");
+        std::fs::create_dir_all(&journal_dir)?;
+        let journal_path = journal_dir.join("restart-after-leave.journal");
+
+        let port = next_test_port();
+        let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let mut room_id_bytes = [0x94u8; 32];
+        room_id_bytes[..2].copy_from_slice(&port.to_le_bytes());
+        let room_id = hex_encode(room_id_bytes);
+
+        let alice = {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+            perform_join(JoinParams {
+                server_url: server_url.clone(),
+                room_id: room_id.clone(),
+                alias: "alice".to_string(),
+            })
+            .await?
+        };
+        let bob = {
+            let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+            perform_join(JoinParams {
+                server_url: server_url.clone(),
+                room_id: room_id.clone(),
+                alias: "bob".to_string(),
+            })
+            .await?
+        };
+        let alice = {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+            let synced = perform_epoch_sync(alice).await?.session;
+            persist_session(&synced)?;
+            synced
+        };
+
+        {
+            let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+            persist_session(&bob)?;
+            perform_leave(LeaveRequest::from_session(&bob)).await?;
+        }
+
+        let synced_alice = {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+            let synced = perform_epoch_sync(alice).await?.session;
+            persist_session(&synced)?;
+            synced
+        };
+        let client = new_api_client(&server_url);
+        let after_leave = client.members(&synced_alice.gid, None).await?;
+        assert_eq!(after_leave.total_count, 1);
+        assert!(
+            after_leave
+                .members
+                .iter()
+                .any(|member| member.leaf_id.as_slice() == synced_alice.leaf_id.as_slice()),
+            "survivor must remain visible before restart"
+        );
+        assert!(
+            !after_leave
+                .members
+                .iter()
+                .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice()),
+            "revoked leaver must stay absent before restart"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        sleep(Duration::from_millis(150)).await;
+
+        handle = spawn_server_on_with_state_path(port, journal_path).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let after_restart = new_api_client(&server_url)
+            .members(&synced_alice.gid, None)
+            .await?;
+        assert_eq!(after_restart.total_count, 1);
+        assert!(
+            after_restart
+                .members
+                .iter()
+                .any(|member| member.leaf_id.as_slice() == synced_alice.leaf_id.as_slice()),
+            "survivor must remain visible after restart"
+        );
+        assert!(
+            !after_restart
+                .members
+                .iter()
+                .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice()),
+            "revoked leaver must stay absent after restart"
+        );
+
+        {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+            persist_session(&synced_alice)?;
+            perform_pcs_refresh(LeaveRequest::from_session(&synced_alice))
+                .await
+                .context("post-restart alice PCS refresh")?;
+        }
+
+        let charlie = {
+            let _override_guard = set_config_dir_override_for_tests(Some(charlie_base));
+            perform_join(JoinParams {
+                server_url: server_url.clone(),
+                room_id,
+                alias: "charlie".to_string(),
+            })
+            .await
+            .context("post-restart charlie join")?
+        };
+        assert!(
+            !charlie.barrier_state.barrier_recovery_pending,
+            "new join must remain self-finalizing after restart"
+        );
 
         handle.abort();
         let _ = handle.await;
