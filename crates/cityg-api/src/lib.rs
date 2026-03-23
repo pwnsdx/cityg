@@ -1121,7 +1121,7 @@ async fn enforce_expensive_rate_limit(
     }
     metrics::counter!(
         "cityg_endpoint_rate_limited_total",
-        "endpoint" => endpoint.to_string()
+        "endpoint" => endpoint
     )
     .increment(1);
     Err(ApiError::RateLimited)
@@ -1168,8 +1168,8 @@ fn classify_refresh_pivot_conflict(message: &str) -> Option<&'static str> {
 fn record_concurrency_pressure(endpoint: &'static str, reason: &'static str) {
     metrics::counter!(
         "cityg_concurrency_pressure_total",
-        "endpoint" => endpoint.to_string(),
-        "reason" => reason.to_string()
+        "endpoint" => endpoint,
+        "reason" => reason
     )
     .increment(1);
 }
@@ -1287,15 +1287,9 @@ async fn apply_bundle(
                 drop(guard);
                 let mapped = map_accept_error(state, err, None, None).await;
                 maybe_record_api_concurrency_error("accept_epoch", &mapped);
-                metrics::counter!(
-                    "cityg_accept_epoch_total",
-                    "result" => "error".to_string()
-                )
+                metrics::counter!("cityg_accept_epoch_total", "result" => "error")
                 .increment(1);
-                metrics::histogram!(
-                    "cityg_accept_epoch_duration_seconds",
-                    "result" => "error".to_string()
-                )
+                metrics::histogram!("cityg_accept_epoch_duration_seconds", "result" => "error")
                 .record(started.elapsed().as_secs_f64());
                 return Err(mapped);
             }
@@ -1306,15 +1300,8 @@ async fn apply_bundle(
 
     persist_bundle(state, bundle, weid, sanitized_bundle, outcome.new_root).await?;
     state.clear_merge_ticket_cache_for_gid(gid).await;
-    metrics::counter!(
-        "cityg_accept_epoch_total",
-        "result" => "ok".to_string()
-    )
-    .increment(1);
-    metrics::histogram!(
-        "cityg_accept_epoch_duration_seconds",
-        "result" => "ok".to_string()
-    )
+    metrics::counter!("cityg_accept_epoch_total", "result" => "ok").increment(1);
+    metrics::histogram!("cityg_accept_epoch_duration_seconds", "result" => "ok")
     .record(started.elapsed().as_secs_f64());
     Ok(accept_response_from(&outcome))
 }
@@ -1752,8 +1739,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             Ok(bundle) => bundle,
             Err(err) => {
                 maybe_record_client_concurrency_error("join_ticket", &err);
-                metrics::counter!("cityg_join_ticket_total", "result" => "error".to_string())
-                    .increment(1);
+                metrics::counter!("cityg_join_ticket_total", "result" => "error").increment(1);
                 return Err(ApiError::from(err));
             }
         };
@@ -1827,7 +1813,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         max_barrier_update_bytes: ticket.max_barrier_update_bytes,
     };
 
-    metrics::counter!("cityg_join_ticket_total", "result" => "ok".to_string()).increment(1);
+    metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);
     Ok(protobuf_response(&response))
 }
 
@@ -1952,10 +1938,10 @@ async fn merge_ticket(
     {
         metrics::counter!(
             "cityg_merge_ticket_coalesced_total",
-            "intent" => "leave".to_string()
+            "intent" => "leave"
         )
         .increment(1);
-        metrics::counter!("cityg_merge_ticket_total", "result" => "ok".to_string()).increment(1);
+        metrics::counter!("cityg_merge_ticket_total", "result" => "ok").increment(1);
         return Ok(protobuf_response_bytes(cached));
     }
 
@@ -1966,7 +1952,7 @@ async fn merge_ticket(
             MergeTicketIntent::Leave => {
                 guard.build_merge_ticket(&gid, &leaf_id).map_err(|err| {
                     maybe_record_client_concurrency_error("merge_ticket", &err);
-                    metrics::counter!("cityg_merge_ticket_total", "result" => "error".to_string())
+                    metrics::counter!("cityg_merge_ticket_total", "result" => "error")
                         .increment(1);
                     ApiError::from(err)
                 })?
@@ -1975,7 +1961,7 @@ async fn merge_ticket(
                 .build_merge_ticket_for_refresh(&gid, &leaf_id)
                 .map_err(|err| {
                     maybe_record_client_concurrency_error("merge_ticket_refresh", &err);
-                    metrics::counter!("cityg_merge_ticket_total", "result" => "error".to_string())
+                    metrics::counter!("cityg_merge_ticket_total", "result" => "error")
                         .increment(1);
                     ApiError::from(err)
                 })?,
@@ -2055,7 +2041,7 @@ async fn merge_ticket(
             .coalesced_merge_ticket_store(cache_key, response_bytes.clone(), now_ms)
             .await;
     }
-    metrics::counter!("cityg_merge_ticket_total", "result" => "ok".to_string()).increment(1);
+    metrics::counter!("cityg_merge_ticket_total", "result" => "ok").increment(1);
     Ok(protobuf_response_bytes(response_bytes))
 }
 
