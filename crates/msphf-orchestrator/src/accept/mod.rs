@@ -1681,8 +1681,8 @@ fn header_value_bytes<'a>(
     let Some(value) = header.get(&key) else {
         return Err(AcceptanceError::Freeze(freeze));
     };
-    if key == 110 {
-        debug!("header_bytes32_or_freeze: key 110 value {:?}", value);
+    if key == HDR_PARENT_ROOT {
+        debug!("header_bytes32_or_freeze: key HDR_PARENT_ROOT value {:?}", value);
     }
     match value {
         Value::Bytes(bytes) => Ok(Cow::Borrowed(bytes.as_slice())),
@@ -1891,9 +1891,9 @@ fn is_known_header_key(key: u64, is_merge: bool) -> bool {
             | HDR_POP_ALG
             | HDR_POP_PK
             | HDR_POP_SIG
-            | 110
-            | 111
-            | 112
+            | HDR_PARENT_ROOT
+            | HDR_JOIN_DELTA_ROOT
+            | HDR_REVOKED_SINCE_ROOT
             | HDR_REVOKED_ROOT
             | HDR_VRF_ID
             | HDR_PROOF_MODE
@@ -2004,8 +2004,8 @@ fn compute_revocation_roots_hash(
     header: &BTreeMap<u64, Value>,
 ) -> Result<[u8; 32], AcceptanceError> {
     let revoked_since_root =
-        header_bytes32_or_freeze(header, 112, FREEZE_FIELD_MISSING, "revoked_since_prev_root")?;
-    let revoked_root = header_bytes32_or_freeze(header, 113, FREEZE_FIELD_MISSING, "revoked_root")?;
+        header_bytes32_or_freeze(header, HDR_REVOKED_SINCE_ROOT, FREEZE_FIELD_MISSING, "revoked_since_prev_root")?;
+    let revoked_root = header_bytes32_or_freeze(header, HDR_REVOKED_ROOT, FREEZE_FIELD_MISSING, "revoked_root")?;
     h_l(
         "barrier/roots",
         &BarrierRootsPreimage(&revoked_since_root, &revoked_root),
@@ -2908,7 +2908,7 @@ fn header_bytes32_or_freeze(
         return Err(AcceptanceError::Freeze(freeze));
     };
     let result = value_bytes32(value, freeze);
-    if matches!(key, 110..=113) {
+    if matches!(key, HDR_PARENT_ROOT..=HDR_REVOKED_ROOT) {
         match &result {
             Ok(bytes) => debug!(
                 "header_bytes32_or_freeze: key {} success {:02x?}",
@@ -4854,8 +4854,8 @@ mod tests {
     fn header_type_mismatch_helpers_emit_freeze_errors() {
         let freeze = FREEZE_FIELD_MISSING;
         let mut header = BTreeMap::new();
-        header.insert(110, Value::Integer(Integer::from(7)));
-        let bytes_err = header_bytes32_or_freeze(&header, 110, freeze, "parent_root")
+        header.insert(HDR_PARENT_ROOT, Value::Integer(Integer::from(7)));
+        let bytes_err = header_bytes32_or_freeze(&header, HDR_PARENT_ROOT, freeze, "parent_root")
             .expect_err("bytes32 type mismatch should freeze");
         assert!(matches!(
             bytes_err,
@@ -7950,13 +7950,13 @@ mod tests {
                     mutated.insert(HDR_POP_SIG, Value::Text("not-bytes".to_string()));
                 }
                 14 => {
-                    mutated.remove(&110);
+                    mutated.remove(&HDR_PARENT_ROOT);
                 }
                 15 => {
-                    mutated.insert(110, Value::Bytes(vec![0xAA; 31]));
+                    mutated.insert(HDR_PARENT_ROOT, Value::Bytes(vec![0xAA; 31]));
                 }
                 16 => {
-                    mutated.remove(&111);
+                    mutated.remove(&HDR_JOIN_DELTA_ROOT);
                 }
                 17 => {
                     mutated.insert(HDR_REVOKED_ROOT, Value::Bytes(vec![0xBB; 31]));
