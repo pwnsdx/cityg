@@ -439,10 +439,6 @@ pub fn build_srx_inputs(
     parent_root: [u8; 32],
     revoked_since_root: [u8; 32],
 ) -> SrxInputs<'static> {
-    use std::collections::BTreeMap;
-
-    use ahash::AHashMap;
-
     let mut parent_sorted = parent_leaves.to_vec();
     parent_sorted.sort();
     let expected_parent_root = match canonical_set_root(&parent_sorted) {
@@ -483,7 +479,7 @@ pub fn build_srx_inputs(
     }
 
     let mut anchor_mem_pool = Vec::new();
-    let mut anchor_lookup: AHashMap<([u8; 32], [u8; 32]), u32> = AHashMap::new();
+    let mut anchor_lookup: BTreeMap<([u8; 32], [u8; 32]), u32> = BTreeMap::new();
     for (idx, (key, witness)) in anchor_map.into_iter().enumerate() {
         anchor_mem_pool.push(witness);
         anchor_lookup.insert(key, idx as u32);

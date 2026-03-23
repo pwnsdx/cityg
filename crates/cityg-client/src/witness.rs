@@ -8,9 +8,7 @@ use msphf_core::{
 };
 use msphf_orchestrator::{SrxInputs, SrxNonMembershipAnchor};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
-
-use ahash::AHashMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 const MAX_WITNESS_CBOR_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SRX_CBOR_BYTES: usize = 4 * 1024 * 1024;
@@ -254,7 +252,7 @@ fn build_srx_inputs_owned(
         }
     }
 
-    let mut anchor_map: AHashMap<([u8; 32], [u8; 32]), RawMembershipWitness> = AHashMap::new();
+    let mut anchor_map: BTreeMap<([u8; 32], [u8; 32]), RawMembershipWitness> = BTreeMap::new();
     let mut join_nonmem_parent_temp = Vec::new();
 
     for &leaf in join_leaves {
@@ -286,7 +284,7 @@ fn build_srx_inputs_owned(
     }
 
     let mut anchor_mem_pool = Vec::new();
-    let mut anchor_lookup: AHashMap<([u8; 32], [u8; 32]), u32> = AHashMap::new();
+    let mut anchor_lookup: BTreeMap<([u8; 32], [u8; 32]), u32> = BTreeMap::new();
     for (idx, (key, witness)) in anchor_map.into_iter().enumerate() {
         anchor_lookup.insert(key, idx as u32);
         anchor_mem_pool.push(witness);
@@ -814,6 +812,42 @@ mod tests {
             .expect("right anchor leaf bytes");
         assert_eq!(left_leaf, left);
         assert_eq!(right_leaf, right);
+    }
+
+    #[test]
+    fn build_srx_inputs_owned_anchor_pool_is_stable_across_join_order() {
+        let parent_leaves = vec![
+            sequential_leaf(10),
+            sequential_leaf(20),
+            sequential_leaf(30),
+            sequential_leaf(40),
+        ];
+        let parent_root = canonical_set_root(&parent_leaves).expect("parent root should compute");
+        let join_forward = vec![sequential_leaf(15), sequential_leaf(35)];
+        let join_reverse = vec![sequential_leaf(35), sequential_leaf(15)];
+
+        let forward = build_srx_inputs_owned(
+            &join_forward,
+            &parent_leaves,
+            parent_root,
+            &[],
+            [0u8; 32],
+            &[],
+            [0u8; 32],
+        )
+        .expect("forward SRX inputs should build");
+        let reverse = build_srx_inputs_owned(
+            &join_reverse,
+            &parent_leaves,
+            parent_root,
+            &[],
+            [0u8; 32],
+            &[],
+            [0u8; 32],
+        )
+        .expect("reverse SRX inputs should build");
+
+        assert_eq!(forward.anchor_mem_pool, reverse.anchor_mem_pool);
     }
 
     #[test]
