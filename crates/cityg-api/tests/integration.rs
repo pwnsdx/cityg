@@ -32,6 +32,14 @@ fn test_client(base_url: impl Into<String>) -> CitygApiClient {
         .with_message_auth_token(TEST_MESSAGE_TOKEN)
 }
 
+fn with_window_admin(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    builder.header("x-cityg-admin-token", TEST_ADMIN_TOKEN)
+}
+
+fn with_message_auth(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    builder.header("x-cityg-message-token", TEST_MESSAGE_TOKEN)
+}
+
 #[allow(clippy::expect_used)]
 fn next_free_local_port() -> u16 {
     std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -283,16 +291,14 @@ async fn debug_seed_window_endpoint_handles_validation_paths() {
     let http = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{port}");
 
-    let response = http
-        .post(format!("{base}/v1/debug/window/seed"))
+    let response = with_window_admin(http.post(format!("{base}/v1/debug/window/seed")))
         .body(encode_field1_bytes(&[]))
         .send()
         .await
         .expect("seed endpoint request");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let response = http
-        .post(format!("{base}/v1/debug/window/seed"))
+    let response = with_window_admin(http.post(format!("{base}/v1/debug/window/seed")))
         .body(encode_field1_bytes(&[0x01, 0x02]))
         .send()
         .await
@@ -300,8 +306,7 @@ async fn debug_seed_window_endpoint_handles_validation_paths() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let valid_bundle = demo_bundle("alice").expect("demo bundle");
-    let response = http
-        .post(format!("{base}/v1/debug/window/seed"))
+    let response = with_window_admin(http.post(format!("{base}/v1/debug/window/seed")))
         .body(encode_field1_bytes(
             &valid_bundle.to_cbor().expect("bundle cbor"),
         ))
@@ -323,16 +328,14 @@ async fn refresh_pivot_endpoint_rejects_empty_and_invalid_payloads() {
     let http = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{port}");
 
-    let response = http
-        .post(format!("{base}/v1/pivot/refresh"))
+    let response = with_message_auth(http.post(format!("{base}/v1/pivot/refresh")))
         .body(encode_field1_bytes(&[]))
         .send()
         .await
         .expect("refresh endpoint empty payload");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let response = http
-        .post(format!("{base}/v1/pivot/refresh"))
+    let response = with_message_auth(http.post(format!("{base}/v1/pivot/refresh")))
         .body(encode_field1_bytes(&[0xFF]))
         .send()
         .await
