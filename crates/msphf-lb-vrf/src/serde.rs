@@ -234,7 +234,6 @@ fn pack_mod_beta_poly<W: Write>(p: &Poly256, writer: &mut W) -> Result<()> {
 }
 
 fn unpack_mod_beta_poly<R: Read>(res: &mut Poly256, reader: &mut R) -> Result<()> {
-    println!();
     for i in 0..64 {
         let mut buf = [0u8; 16];
         reader.read_exact(&mut buf[7..16])?;

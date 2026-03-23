@@ -217,6 +217,3 @@ pub const FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIO
         reason: "barrier_non_revocation_reason_forbidden_while_pending_revocations",
     };
 
-#[allow(dead_code)]
-pub const FREEZE_BARRIER_PCS_REFRESH_FORBIDDEN_WHILE_PENDING_REVOCATIONS: FreezeError =
-    FREEZE_BARRIER_NON_REVOCATION_REASON_FORBIDDEN_WHILE_PENDING_REVOCATIONS;

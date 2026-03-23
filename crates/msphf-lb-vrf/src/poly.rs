@@ -1,12 +1,5 @@
 use rand::{CryptoRng, Rng};
 
-// #[derive(Clone, Debug)]
-// pub struct Poly32 {
-//     coeff: [u32; 32],
-//     degree: usize,
-//     modulus: u32,
-// }
-
 pub trait PolyArith {
     const DEGREE: usize = 0;
     const MODULUS: i64 = 0;

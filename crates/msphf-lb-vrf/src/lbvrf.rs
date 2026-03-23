@@ -372,10 +372,6 @@ pub(crate) fn prove_with_rs<Blob: AsRef<[u8]>>(
         for e in z.iter_mut() {
             (*e).centered();
         }
-        // #[cfg(debug_assertions)]
-        // println!("rejection sampling {} times", rs);
-        // #[cfg(debug_assertions)]
-        // println!("z:\n{:?}", z);
         if check_norm(&z).is_ok() {
             y.zeroize();
             for poly in s_p.iter_mut() {
