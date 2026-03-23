@@ -5920,6 +5920,25 @@ impl AppModel {
         self.leave_status = LeaveStatus::Idle;
         match result {
             Ok(()) => {
+                // Reload the persisted session so the in-memory state includes
+                // the pending barrier state written to disk by perform_pcs_refresh.
+                // Without this, schedule_epoch_sync would clone a stale session
+                // that lacks the pending barrier activation data, causing the
+                // epoch sync to fail with "barrier recover produced no match".
+                if let Some(session) = &self.session {
+                    match load_session_at(&session.server_url, &session.room_id) {
+                        Ok(Some(persisted)) => {
+                            self.session = Some(persisted);
+                        }
+                        Ok(None) => {
+                            warn!("persisted session missing after PCS refresh");
+                        }
+                        Err(err) => {
+                            warn!("failed to reload session after PCS refresh: {err:?}");
+                        }
+                    }
+                }
+
                 self.clear_error();
                 self.info_message =
                     Some("PCS refresh submitted. Syncing latest epoch…".to_string());
@@ -13112,6 +13131,52 @@ mod tests {
                     .as_deref()
                     .unwrap_or_default()
                     .contains("failed to remove session data")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_on_refresh_finished_reloads_persisted_pending_barrier_state(cx: &mut TestAppContext) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let stale_session = build_test_session(
+            0xCAFE,
+            "http://127.0.0.1:18081",
+            "11aabbccddeeff00112233445566778899aabbccddeeff001122334455667799",
+            "refresh-reload",
+        )
+        .expect("build stale session");
+        let mut persisted_session = stale_session.clone();
+        persisted_session.barrier_state.barrier_initialized = true;
+        persisted_session.barrier_state.barrier_version = 7;
+        persisted_session.barrier_state.barrier_recovery_pending = true;
+        persisted_session.barrier_state.pending = Some(BarrierPendingState {
+            barrier_version: 8,
+            we_epoch_id: [0x44; 32],
+            barrier_update_digest: [0x55; 32],
+            barrier_update_reason: Some(1),
+            ..BarrierPendingState::default()
+        });
+        persist_session(&persisted_session).expect("persist session with pending barrier state");
+
+        view.update(cx, |model, view_cx| {
+            model.session = Some(stale_session);
+            model.on_refresh_finished(Ok(()), view_cx);
+
+            let reloaded = model.session.as_ref().expect("reloaded session");
+            assert_eq!(reloaded.barrier_state.barrier_version, 7);
+            assert!(reloaded.barrier_state.barrier_recovery_pending);
+            assert!(
+                reloaded.barrier_state.pending.is_some(),
+                "refresh completion must reload pending barrier activation data"
+            );
+            assert_eq!(
+                model.info_message.as_deref(),
+                Some("PCS refresh submitted. Syncing latest epoch…")
             );
         });
     }
