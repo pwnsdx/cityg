@@ -619,7 +619,7 @@ impl CityGServer {
             .cloned()
             .unwrap_or_default();
         let barrier_version = barrier_state.barrier_version;
-        let cover_leaf_index = u64::from(cover_leaf_index(&leaf_id, barrier_state.n_max.max(1)));
+        let cover_leaf_index = u64::from(cover_leaf_index(&leaf_id, barrier_state.n_max));
         let max_barrier_update_bytes =
             u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
 
@@ -822,7 +822,7 @@ impl CityGServer {
             .cloned()
             .unwrap_or_default();
         let barrier_version = barrier_state.barrier_version;
-        let cover_leaf_index = u64::from(cover_leaf_index(leaf_id, barrier_state.n_max.max(1)));
+        let cover_leaf_index = u64::from(cover_leaf_index(leaf_id, barrier_state.n_max));
         let max_barrier_update_bytes =
             u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
 
@@ -1000,7 +1000,7 @@ impl CityGServer {
         if !delta.joined.is_empty() || !delta.revoked.is_empty() {
             let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
             for leaf in &delta.joined {
-                let leaf_index = cover_leaf_index(leaf, state.n_max.max(1));
+                let leaf_index = cover_leaf_index(leaf, state.n_max);
                 let device_pk = maybe_device_pk.clone().unwrap_or_else(|| leaf.to_vec());
                 let ek_leaf =
                     required_join_barrier_leaf_pk
@@ -1535,7 +1535,7 @@ impl CityGServer {
         let mut indices: Vec<u32> = state
             .revoked
             .iter()
-            .map(|leaf| cover_leaf_index(leaf, state.n_max.max(1)))
+            .map(|leaf| cover_leaf_index(leaf, state.n_max))
             .collect();
         indices.sort_unstable();
         indices.dedup();
@@ -1556,7 +1556,7 @@ impl CityGServer {
         if prev_barrier_version == 0 && state.barrier_version == 0 {
             if let Some(snapshot) = state.latest_snapshot() {
                 for leaf in snapshot.members() {
-                    let leaf_index = cover_leaf_index(leaf, state.n_max.max(1));
+                    let leaf_index = cover_leaf_index(leaf, state.n_max);
                     by_leaf.insert(
                         leaf_index,
                         BarrierJoinLeafRecord {
@@ -1912,7 +1912,7 @@ fn build_pk_entries_view<'a>(state: &'a GroupState) -> Result<Cow<'a, [Vec<u8>]>
     let mut pk_entries = vec![Vec::new(); expected_len];
     if let Some(snapshot) = state.latest_snapshot() {
         for leaf in snapshot.members() {
-            let index = cover_leaf_index(leaf, state.n_max.max(1)) as usize;
+            let index = cover_leaf_index(leaf, state.n_max) as usize;
             if index >= n_max {
                 continue;
             }
@@ -2378,7 +2378,7 @@ fn build_pk_entries_cow<'a>(state: &'a GroupState) -> Result<Vec<Cow<'a, [u8]>>,
     let mut pk_entries = vec![Cow::Borrowed(b"".as_slice()); expected_len];
     if let Some(snapshot) = state.latest_snapshot() {
         for leaf in snapshot.members() {
-            let index = cover_leaf_index(leaf, state.n_max.max(1)) as usize;
+            let index = cover_leaf_index(leaf, state.n_max) as usize;
             if index >= n_max {
                 continue;
             }
@@ -2440,7 +2440,7 @@ fn validate_barrier_update_against_roster(
         }
 
         let barrier_update_reason = parse_barrier_update_reason(header)?;
-        let Some(parsed) = parse_barrier_update(header, state_before.n_max.max(1))? else {
+        let Some(parsed) = parse_barrier_update(header, state_before.n_max)? else {
             return Ok(None);
         };
 
@@ -3329,7 +3329,7 @@ mod tests {
             .map(|record| record.leaf_index)
             .collect();
         let barrier_update_reason = if unresolved_join_leaf_indices.contains(
-            &super::cover_leaf_index(&generated.leaf_id, ticket.n_max.max(1)),
+            &super::cover_leaf_index(&generated.leaf_id, ticket.n_max),
         ) {
             2u64
         } else {
@@ -3458,7 +3458,7 @@ mod tests {
                     .ok_or(CityGError::InvalidInput(
                         "barrier tree missing populated leaf",
                     ))?;
-                let leaf_base = usize::try_from(group.n_max.max(1))
+                let leaf_base = usize::try_from(group.n_max)
                     .map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?
                     .saturating_sub(1);
                 let leaf_node = leaf_base.saturating_add(record.leaf_index as usize);
@@ -5206,7 +5206,7 @@ mod tests {
             joined: vec![leaf],
             revoked: Vec::new(),
         };
-        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max.max(1));
+        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
         let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         let leaf_node = leaf_base
@@ -5310,7 +5310,7 @@ mod tests {
             joined: vec![leaf],
             revoked: Vec::new(),
         };
-        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max.max(1));
+        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
         let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         let leaf_node = leaf_base
@@ -5411,7 +5411,7 @@ mod tests {
         let leaf_ek = vec![0xA5; 1184];
         state.leaf_device_pk.insert(leaf, pop_pk.clone());
 
-        let leaf_index = super::cover_leaf_index(&leaf, state.n_max.max(1));
+        let leaf_index = super::cover_leaf_index(&leaf, state.n_max);
         let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         let leaf_node = leaf_base
@@ -5521,7 +5521,7 @@ mod tests {
             joined: vec![leaf],
             revoked: Vec::new(),
         };
-        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max.max(1));
+        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
         let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         let leaf_node = leaf_base
@@ -5623,7 +5623,7 @@ mod tests {
             joined: vec![leaf],
             revoked: Vec::new(),
         };
-        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max.max(1));
+        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
         let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         let leaf_node = leaf_base
@@ -5727,7 +5727,7 @@ mod tests {
             joined: vec![leaf],
             revoked: Vec::new(),
         };
-        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max.max(1));
+        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
         let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         let leaf_node = leaf_base
@@ -5834,7 +5834,7 @@ mod tests {
             joined: vec![leaf],
             revoked: Vec::new(),
         };
-        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max.max(1));
+        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
         let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
             .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
         let leaf_node = leaf_base
@@ -5963,7 +5963,7 @@ mod tests {
 
         let pk_entries = super::build_pk_entries(&state)?;
         assert_eq!(pk_entries.len(), 7);
-        let leaf_index = usize::try_from(super::cover_leaf_index(&leaf, state.n_max.max(1)))
+        let leaf_index = usize::try_from(super::cover_leaf_index(&leaf, state.n_max))
             .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
         assert_eq!(pk_entries[3 + leaf_index], leaf_ek);
         let group_hash = super::compute_group_barrier_tree_hash(&state)?;
@@ -6080,7 +6080,7 @@ mod tests {
         state.latest_root = Some(root);
         state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
 
-        let updater_leaf = u64::from(super::cover_leaf_index(&leaf, state.n_max.max(1)));
+        let updater_leaf = u64::from(super::cover_leaf_index(&leaf, state.n_max));
         let leaf_node = state.n_max.saturating_sub(1) + updater_leaf;
         let parent_node = (leaf_node - 1) / 2;
         let path_nodes = vec![leaf_node, parent_node, 0];
@@ -6588,7 +6588,7 @@ mod tests {
         state.latest_root = Some(root);
         state.leaf_barrier_public.insert(leaf, leaf_ek.clone());
 
-        let updater_leaf = u64::from(super::cover_leaf_index(&leaf, state.n_max.max(1)));
+        let updater_leaf = u64::from(super::cover_leaf_index(&leaf, state.n_max));
         let leaf_node = state.n_max.saturating_sub(1) + updater_leaf;
         let parent_node = (leaf_node - 1) / 2;
         let path_nodes = vec![leaf_node, parent_node, 0];
@@ -7788,7 +7788,7 @@ mod tests {
             &ticket.kem_tree_hash_after,
         )?;
         assert_eq!(snapshot.kem_tree_hash_after, ticket.kem_tree_hash_after);
-        assert_eq!(snapshot.n_max, ticket.n_max.max(1));
+        assert_eq!(snapshot.n_max, ticket.n_max);
         Ok(())
     }
 
