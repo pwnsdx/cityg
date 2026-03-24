@@ -251,7 +251,7 @@ Initializes a new City-G room (group) on the server.
 ```protobuf
 message RoomAdminProof {
   bytes pop_public_key = 1;  // Persisted room identity public key
-  bytes signature = 2;       // Signature over CBOR([op, room_id, kbroad_public])
+  bytes signature = 2;       // Signature over CBOR([op, room_id, payload_bytes])
 }
 
 message BootstrapRoomRequest {
@@ -301,6 +301,70 @@ println!("Room bootstrapped successfully!");
 - There is no `x-cityg-admin-token` fallback for this endpoint
 - The desktop GUI handles this automatically by persisting a room-scoped
   identity per `(server_url, room_id)`
+
+#### `POST /v1/rooms/grant_admin`
+
+Delegates room-admin authority to another persisted room identity.
+
+**Protobuf Request:** `RoomAdminMutationRequest`
+```protobuf
+message RoomAdminMutationRequest {
+  string room_id = 1;
+  bytes target_pop_public_key = 2;  // Persisted room identity to grant
+  optional RoomAdminProof admin_proof = 3;
+}
+```
+
+**Protobuf Response:** `RoomAdminMutationResponse`
+```protobuf
+message RoomAdminMutationResponse {
+  string status = 1;       // "granted" or "already_granted"
+  uint64 admin_count = 2;  // Current number of room admins
+}
+```
+
+**Notes:**
+- Requires a valid room-admin proof from an existing room admin
+- Authority is delegated to a persistent room identity, never to an alias
+- There is no legacy token fallback for this endpoint
+
+#### `POST /v1/rooms/revoke_admin`
+
+Revokes room-admin authority from a persisted room identity.
+
+**Protobuf Request:** `RoomAdminMutationRequest`
+
+**Protobuf Response:** `RoomAdminMutationResponse`
+
+**Notes:**
+- Requires a valid room-admin proof from an existing room admin
+- Returns `"revoked"` or `"already_revoked"`
+- Rejects attempts to revoke the last remaining room admin
+- There is no legacy token fallback for this endpoint
+
+#### `POST /v1/rooms/list_admins`
+
+Lists the persisted room identities that currently hold room-admin authority.
+
+**Protobuf Request:** `ListRoomAdminsRequest`
+```protobuf
+message ListRoomAdminsRequest {
+  string room_id = 1;
+  optional RoomAdminProof admin_proof = 2;
+}
+```
+
+**Protobuf Response:** `ListRoomAdminsResponse`
+```protobuf
+message ListRoomAdminsResponse {
+  repeated bytes admin_pop_public_keys = 1;
+}
+```
+
+**Notes:**
+- Requires a valid room-admin proof from an existing room admin
+- Returned identities are room-admin principals, not display aliases
+- There is no legacy token fallback for this endpoint
 
 #### `POST /v1/rooms/rotate_kbroad`
 

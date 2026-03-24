@@ -34,6 +34,9 @@ Current implementation behavior for the room control plane:
   persistent room identity,
 * the creator becomes the initial room admin on the first successful room
   claim/bootstrap,
+* room-admin lifecycle operations are `grant_admin`, `revoke_admin`, and
+  `list_admins`, all authenticated by room-admin proofs rather than legacy
+  tokens,
 * alias text is never an authorization principal,
 * there is no legacy admin-token fallback for room-scoped endpoints,
 * KBROAD maintenance is automatic/server-managed in normal join/merge ticket

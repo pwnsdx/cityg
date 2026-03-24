@@ -49,6 +49,8 @@ sequenceDiagram
 - Only the first member bootstraps the room
 - The creator becomes the initial room admin
 - Room admin authority is tied to the persisted room identity, not the alias
+- Room-admin delegation and revocation happen through `grant_admin` and `revoke_admin`
+  using the same persisted room identity model
 - Normal join/leave/refresh flows do not require a manual KBROAD rotation call
 - Room ID becomes the persistent identifier
 
