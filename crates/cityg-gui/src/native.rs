@@ -3,7 +3,7 @@ use std::cell::RefCell;
 #[cfg(not(test))]
 use std::sync::{LazyLock, Mutex};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     io::Write,
     path::PathBuf,
@@ -34,7 +34,8 @@ use blake3::hash as blake3_hash;
 use ciborium::value::{Integer, Value};
 use cityg_api_client::{
     BarrierJoinRecord, BarrierPublicTree, CitygApiClient, Error as ApiClientError, MergeTicket,
-    RoomAdminOperation, build_room_admin_proof,
+    RoomAdminOperation, build_room_admin_listing_proof, build_room_admin_proof,
+    build_room_admin_target_proof,
 };
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
@@ -1650,6 +1651,10 @@ struct AppModel {
     members_refresh_task: Option<Task<()>>,
     alias_bindings: AHashMap<String, AliasBindingRecord>,
     leaf_alias_index: AHashMap<[u8; 32], String>,
+    room_admins: Vec<Vec<u8>>,
+    room_admins_loaded: bool,
+    room_admin_status: RoomAdminStatus,
+    room_admin_target: RoomAdminTargetState,
     epoch_sync_task: Option<Task<()>>, // Background task for membership-driven epoch sync
     ws_task: Option<Task<()>>,         // WebSocket connection task
     ws_connected: bool,                // WebSocket connection status
@@ -1686,6 +1691,13 @@ enum FetchStatus {
 enum SendStatus {
     Idle,
     Sending,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum RoomAdminStatus {
+    Idle,
+    Loading(String),
+    Error(String),
 }
 
 enum WebSocketEvent {
@@ -2111,6 +2123,94 @@ impl MembersSearchState {
 }
 
 #[derive(Clone, Default)]
+struct RoomAdminTargetState {
+    value: String,
+    active: bool,
+}
+
+impl RoomAdminTargetState {
+    fn focus(&mut self) {
+        self.active = true;
+    }
+
+    fn blur(&mut self) {
+        self.active = false;
+    }
+
+    fn clear(&mut self) {
+        self.value.clear();
+    }
+
+    fn set_value(&mut self, value: String) {
+        self.value = value;
+    }
+
+    fn value(&self) -> &str {
+        self.value.as_str()
+    }
+
+    fn handle_keystroke(&mut self, ks: &Keystroke) -> KeyOutcome {
+        if !self.active {
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "escape" {
+            self.blur();
+            return KeyOutcome::Updated;
+        }
+
+        if ks.key == "tab" {
+            self.blur();
+            return KeyOutcome::Updated;
+        }
+
+        if ks.key == "return" || ks.key == "enter" {
+            return KeyOutcome::Submit;
+        }
+
+        if ks.key == "backspace" {
+            if !self.value.is_empty() {
+                self.value.pop();
+                return KeyOutcome::Updated;
+            }
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "delete" {
+            if !self.value.is_empty() {
+                self.value.clear();
+                return KeyOutcome::Updated;
+            }
+            return KeyOutcome::None;
+        }
+
+        if ks.key == "space" {
+            self.value.push(' ');
+            return KeyOutcome::Updated;
+        }
+
+        if let Some(ch) = ks.key_char.as_ref() {
+            if ks.modifiers.control
+                || ks.modifiers.alt
+                || ks.modifiers.platform
+                || ks.modifiers.function
+            {
+                return KeyOutcome::None;
+            }
+
+            if ch.chars().any(|c| c == '\n' || c == '\r' || c == '\t') {
+                return KeyOutcome::None;
+            }
+
+            self.value.push_str(ch);
+            return KeyOutcome::Updated;
+        }
+
+        KeyOutcome::None
+    }
+}
+
+#[derive(Clone, Default)]
 enum MembersMode {
     #[default]
     Full,
@@ -2441,6 +2541,10 @@ impl AppModel {
             members_refresh_task: None,
             alias_bindings: AHashMap::new(),
             leaf_alias_index: AHashMap::new(),
+            room_admins: Vec::new(),
+            room_admins_loaded: false,
+            room_admin_status: RoomAdminStatus::Idle,
+            room_admin_target: RoomAdminTargetState::default(),
             epoch_sync_task: None,
             ws_task: None,
             ws_connected: false,
@@ -2722,6 +2826,7 @@ impl Render for AppModel {
         self.ensure_websocket_task(cx);
         self.ensure_epoch_sync_task(cx);
         self.ensure_members_refresh_task(cx);
+        self.ensure_room_admins_loaded(cx);
         self.cleanup_expired_toasts();
 
         let background = rgb(0x0f1118);
@@ -3246,6 +3351,7 @@ impl AppModel {
             .overflow_y_scroll()
             .block_mouse_except_scroll()
             .child(self.render_overview_panel(session, cx))
+            .child(self.render_room_admin_panel(session, cx))
             .child(self.render_members_panel(cx))
             .child(self.render_security_panel(cx))
             .child(self.render_activity_panel(cx));
@@ -3504,6 +3610,12 @@ impl AppModel {
                 cx,
             ))
             .child(self.session_row("Alias", &session.alias))
+            .child(self.render_copyable_session_row(
+                "Room identity",
+                &room_admin_identity_preview(&session.pop_public_key),
+                Self::on_copy_room_identity,
+                cx,
+            ))
             .child(self.session_row("WEID", &hex_encode(session.we_epoch_id)))
             .child(self.session_row("Epoch key", &hex_encode(session.epoch_key)))
             .child(self.session_row("Parent root", &hex_encode(session.parent_root)))
@@ -3518,6 +3630,239 @@ impl AppModel {
             .child(self.session_row("FS policy", &session.fs_policy_version))
             .child(self.render_epoch_age_row(session))
             .child(self.session_row("KBROAD key (hex)", &hex_encode(&session.kbroad_public)))
+    }
+
+    fn render_room_admin_panel(&self, session: &AppSession, cx: &mut ViewContext<Self>) -> Div {
+        let can_list = self.room_admins_loaded;
+        let self_is_admin = self
+            .room_admin_membership(session.pop_public_key.as_slice())
+            .unwrap_or(false);
+        let role_text = match self.room_admin_membership(session.pop_public_key.as_slice()) {
+            Some(true) => "This device currently holds room-admin authority.".to_string(),
+            Some(false) => "This device does not currently hold room-admin authority.".to_string(),
+            None => "Refresh to load current room-admin state.".to_string(),
+        };
+        let status_text = match &self.room_admin_status {
+            RoomAdminStatus::Idle => None,
+            RoomAdminStatus::Loading(message) => Some(message.clone()),
+            RoomAdminStatus::Error(message) => Some(message.clone()),
+        };
+
+        let target_active = self.room_admin_target.active;
+        let target_border = if target_active {
+            rgb(UI_ACCENT_TEXT)
+        } else {
+            rgb(UI_PANEL_BORDER)
+        };
+        let target_background = if target_active {
+            rgb(0x1b2840)
+        } else {
+            rgb(UI_ROW_BG)
+        };
+        let target_text_color = if self.room_admin_target.value().is_empty() {
+            rgb(UI_MUTED_TEXT)
+        } else {
+            rgb(UI_PANEL_TEXT)
+        };
+        let target_display = if self.room_admin_target.value().is_empty() {
+            "Paste target room identity public key (hex)".to_string()
+        } else {
+            self.room_admin_target.value().to_string()
+        };
+
+        let target_field = div()
+            .flex()
+            .items_center()
+            .flex_grow()
+            .px(px(10.0))
+            .py(px(7.0))
+            .rounded(px(10.0))
+            .border(px(1.0))
+            .border_color(target_border)
+            .bg(target_background)
+            .cursor(CursorStyle::IBeam)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_room_admin_target_field_clicked),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(target_text_color)
+                    .child(target_display),
+            );
+
+        let refresh_button = div()
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(10.0))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_PANEL_TEXT))
+            .bg(rgb(UI_BUTTON_BG))
+            .cursor(CursorStyle::PointingHand)
+            .child("Refresh")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_room_admins_refresh_clicked),
+            );
+        let copy_button = div()
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(10.0))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_PANEL_TEXT))
+            .bg(rgb(UI_BUTTON_BG))
+            .cursor(CursorStyle::PointingHand)
+            .child("Copy my identity")
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_copy_room_identity));
+        let grant_button = div()
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(10.0))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_ACCENT_BUTTON_TEXT))
+            .bg(rgb(UI_ACCENT_TEXT))
+            .cursor(CursorStyle::PointingHand)
+            .child("Grant")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_room_admin_grant_clicked),
+            );
+        let revoke_button = div()
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(10.0))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_PANEL_TEXT))
+            .bg(rgb(0x6a3443))
+            .cursor(CursorStyle::PointingHand)
+            .child("Revoke")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_room_admin_revoke_clicked),
+            );
+        let clear_button = div()
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(10.0))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_PANEL_TEXT))
+            .bg(rgb(0x3e4b66))
+            .cursor(CursorStyle::PointingHand)
+            .child("Clear")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_room_admin_target_clear_clicked),
+            );
+
+        let mut admin_list = div().flex().flex_col().gap(px(6.0));
+        if !can_list {
+            admin_list = admin_list.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
+                    .child("Current room-admin identities are unavailable until this device refreshes admin state."),
+            );
+        } else if self.room_admins.is_empty() {
+            admin_list = admin_list.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
+                    .child("No room-admin identities reported."),
+            );
+        } else {
+            for admin in &self.room_admins {
+                let is_self = admin.as_slice() == session.pop_public_key.as_slice();
+                let label = if is_self {
+                    format!("{} · this device", room_admin_identity_preview(admin))
+                } else {
+                    room_admin_identity_preview(admin)
+                };
+                admin_list = admin_list.child(
+                    div()
+                        .px(px(9.0))
+                        .py(px(7.0))
+                        .rounded(px(10.0))
+                        .bg(rgb(UI_ROW_BG))
+                        .border(px(1.0))
+                        .border_color(rgb(0x2c3952))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(UI_PANEL_TEXT))
+                                .child(label),
+                        ),
+                );
+            }
+        }
+
+        let mut root = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .px(px(12.0))
+            .py(px(12.0))
+            .rounded(px(14.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
+            .bg(rgb(UI_PANEL_BG))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(UI_PANEL_TEXT))
+                            .child("Room admins"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(refresh_button)
+                            .child(copy_button),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(if self_is_admin {
+                        rgb(UI_ACCENT_TEXT)
+                    } else {
+                        rgb(UI_SUBTLE_TEXT)
+                    })
+                    .child(role_text),
+            )
+            .child(target_field)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .child(grant_button)
+                    .child(revoke_button)
+                    .child(clear_button),
+            );
+
+        if let Some(text) = status_text {
+            root = root.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(UI_WARN_TEXT))
+                    .child(text),
+            );
+        }
+
+        root.child(admin_list)
     }
 
     fn session_row(&self, label: &str, value: &str) -> Div {
@@ -3842,6 +4187,21 @@ impl AppModel {
 
         if self.members_refresh_task.is_none() {
             self.start_members_refresh_task(cx);
+        }
+    }
+
+    fn ensure_room_admins_loaded(&mut self, cx: &mut ViewContext<Self>) {
+        if self.session.is_none() {
+            self.room_admins.clear();
+            self.room_admins_loaded = false;
+            self.room_admin_status = RoomAdminStatus::Idle;
+            self.room_admin_target.clear();
+            self.room_admin_target.blur();
+            return;
+        }
+
+        if !self.room_admins_loaded && matches!(self.room_admin_status, RoomAdminStatus::Idle) {
+            self.refresh_room_admins(cx);
         }
     }
 
@@ -5073,6 +5433,55 @@ impl AppModel {
                     );
                 }
 
+                if let Some(pop_public_key) =
+                    member.pop_public_key.as_ref().filter(|pk| !pk.is_empty())
+                {
+                    let mut identity_row = div().flex().items_center().gap(px(8.0)).child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(UI_MUTED_TEXT))
+                            .child(format!(
+                                "identity {}",
+                                room_admin_identity_preview(pop_public_key)
+                            )),
+                    );
+
+                    if self.room_admin_membership(pop_public_key.as_slice()) == Some(true) {
+                        identity_row = identity_row.child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(2.0))
+                                .rounded(px(999.0))
+                                .bg(rgb(0x224336))
+                                .text_size(px(10.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x9cf5be))
+                                .child("Room admin"),
+                        );
+                    }
+
+                    let target_pop_key = pop_public_key.clone();
+                    let use_identity_button = div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(8.0))
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(UI_PANEL_TEXT))
+                        .bg(rgb(UI_BUTTON_BG))
+                        .cursor(CursorStyle::PointingHand)
+                        .child("Use identity")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.set_room_admin_target(target_pop_key.clone(), cx);
+                            }),
+                        );
+                    identity_row = identity_row.child(use_identity_button);
+
+                    entry = entry.child(identity_row);
+                }
+
                 list = list.child(entry);
             }
         }
@@ -5407,6 +5816,7 @@ impl AppModel {
 
     fn focus_members_search(&mut self, cx: &mut ViewContext<Self>) {
         self.members_search.focus();
+        self.room_admin_target.blur();
         self.composer.blur();
         cx.notify();
     }
@@ -5471,6 +5881,7 @@ impl AppModel {
     ) {
         self.join_form.active = None;
         self.members_search.blur();
+        self.room_admin_target.blur();
         self.composer.focus();
         self.last_error = None;
         cx.notify();
@@ -5599,6 +6010,22 @@ impl AppModel {
         if let Some(session) = &self.session {
             cx.write_to_clipboard(ClipboardItem::new_string(session.room_id.clone()));
             self.show_success("Room ID copied", cx);
+        } else {
+            self.show_error_toast("No active session", cx);
+        }
+    }
+
+    fn on_copy_room_identity(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        if let Some(session) = &self.session {
+            cx.write_to_clipboard(ClipboardItem::new_string(hex_encode(
+                &session.pop_public_key,
+            )));
+            self.show_success("Room identity copied", cx);
         } else {
             self.show_error_toast("No active session", cx);
         }
@@ -5751,6 +6178,42 @@ impl AppModel {
         KeyOutcome::None
     }
 
+    fn handle_room_admin_target_clipboard_shortcuts(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut ViewContext<Self>,
+    ) -> KeyOutcome {
+        if !self.room_admin_target.active {
+            return KeyOutcome::None;
+        }
+
+        if is_primary_shortcut(keystroke, "c") {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.room_admin_target.value().to_string(),
+            ));
+            return KeyOutcome::Updated;
+        }
+
+        if is_primary_shortcut(keystroke, "x") {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.room_admin_target.value().to_string(),
+            ));
+            self.room_admin_target.clear();
+            return KeyOutcome::Updated;
+        }
+
+        if is_primary_shortcut(keystroke, "v") {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                let mut updated = self.room_admin_target.value().to_string();
+                updated.push_str(&sanitize_clipboard_text(&text));
+                self.room_admin_target.set_value(updated);
+            }
+            return KeyOutcome::Updated;
+        }
+
+        KeyOutcome::None
+    }
+
     fn on_report_issue(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut ViewContext<Self>) {
         if let Some(error) = &self.categorized_error {
             let report = format!(
@@ -5831,6 +6294,195 @@ impl AppModel {
             });
         })
         .detach();
+    }
+
+    fn room_admin_membership(&self, pop_public_key: &[u8]) -> Option<bool> {
+        if !self.room_admins_loaded {
+            return None;
+        }
+        Some(
+            self.room_admins
+                .iter()
+                .any(|admin| admin.as_slice() == pop_public_key),
+        )
+    }
+
+    fn focus_room_admin_target(&mut self, cx: &mut ViewContext<Self>) {
+        self.room_admin_target.focus();
+        self.members_search.blur();
+        self.composer.blur();
+        cx.notify();
+    }
+
+    fn clear_room_admin_target(&mut self, cx: &mut ViewContext<Self>) {
+        self.room_admin_target.clear();
+        self.room_admin_target.blur();
+        cx.notify();
+    }
+
+    fn set_room_admin_target(
+        &mut self,
+        target_pop_public_key: Vec<u8>,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.room_admin_target
+            .set_value(hex_encode(target_pop_public_key));
+        self.focus_room_admin_target(cx);
+        self.show_info("Loaded member identity into room-admin target", cx);
+    }
+
+    fn refresh_room_admins(&mut self, cx: &mut ViewContext<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if matches!(self.room_admin_status, RoomAdminStatus::Loading(_)) {
+            return;
+        }
+        self.room_admin_status =
+            RoomAdminStatus::Loading("Loading room-admin identities…".to_string());
+        cx.notify();
+
+        let params = RoomAdminQueryParams::from_session(session);
+        let task = Tokio::spawn_result(cx, async move { perform_fetch_room_admins(params).await });
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |model, cx| {
+                model.on_room_admins_refreshed(outcome, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn on_room_admins_refreshed(
+        &mut self,
+        result: anyhow::Result<Vec<Vec<u8>>>,
+        cx: &mut ViewContext<Self>,
+    ) {
+        match result {
+            Ok(admins) => {
+                self.room_admins = admins;
+                self.room_admins_loaded = true;
+                self.room_admin_status = RoomAdminStatus::Idle;
+                cx.notify();
+            }
+            Err(err) => {
+                self.room_admins.clear();
+                self.room_admins_loaded = false;
+                self.room_admin_status =
+                    RoomAdminStatus::Error(categorize_error(&err, "room admin").user_message);
+                warn!("failed to refresh room admins: {err:?}");
+                cx.notify();
+            }
+        }
+    }
+
+    fn start_room_admin_mutation(
+        &mut self,
+        kind: RoomAdminMutationKind,
+        target_pop_public_key: Vec<u8>,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if matches!(self.room_admin_status, RoomAdminStatus::Loading(_)) {
+            return;
+        }
+        self.room_admin_status = RoomAdminStatus::Loading(kind.present_progressive().to_string());
+        cx.notify();
+
+        let params = RoomAdminMutationParams {
+            query: RoomAdminQueryParams::from_session(session),
+            target_pop_public_key,
+            kind,
+        };
+        let task =
+            Tokio::spawn_result(cx, async move { perform_room_admin_mutation(params).await });
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |model, cx| {
+                model.on_room_admin_mutation_finished(kind, outcome, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn start_room_admin_mutation_from_input(
+        &mut self,
+        kind: RoomAdminMutationKind,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let target = match decode_room_admin_target_hex(self.room_admin_target.value()) {
+            Ok(target) => target,
+            Err(err) => {
+                self.room_admin_status =
+                    RoomAdminStatus::Error(categorize_error(&err, "room admin").user_message);
+                self.show_error_toast(err.to_string(), cx);
+                cx.notify();
+                return;
+            }
+        };
+        self.start_room_admin_mutation(kind, target, cx);
+    }
+
+    fn on_room_admin_mutation_finished(
+        &mut self,
+        kind: RoomAdminMutationKind,
+        result: anyhow::Result<RoomAdminMutationOutcome>,
+        cx: &mut ViewContext<Self>,
+    ) {
+        match result {
+            Ok(outcome) => {
+                self.room_admin_status = RoomAdminStatus::Idle;
+                let success_message = match outcome.status.as_str() {
+                    "already_granted" => "Room admin was already granted",
+                    "already_revoked" => "Room admin was already revoked",
+                    _ => kind.success_message(),
+                };
+                if let Ok(target) = decode_room_admin_target_hex(self.room_admin_target.value()) {
+                    self.apply_room_admin_mutation_locally(kind, outcome.status.as_str(), target);
+                } else {
+                    self.room_admins_loaded = false;
+                }
+                self.info_message = Some(format!(
+                    "{} ({} admins).",
+                    success_message, outcome.admin_count
+                ));
+                self.show_success(success_message, cx);
+                self.refresh_room_admins(cx);
+            }
+            Err(err) => {
+                let user_message = categorize_error(&err, "room admin").user_message;
+                self.room_admin_status = RoomAdminStatus::Error(user_message.clone());
+                self.show_error_toast(user_message, cx);
+                warn!("room admin mutation failed: {err:?}");
+                cx.notify();
+            }
+        }
+    }
+
+    fn apply_room_admin_mutation_locally(
+        &mut self,
+        kind: RoomAdminMutationKind,
+        status: &str,
+        target_pop_public_key: Vec<u8>,
+    ) {
+        if !self.room_admins_loaded {
+            return;
+        }
+        let mut admins: BTreeSet<Vec<u8>> = self.room_admins.iter().cloned().collect();
+        match (kind, status) {
+            (RoomAdminMutationKind::Grant, "granted" | "already_granted") => {
+                admins.insert(target_pop_public_key);
+            }
+            (RoomAdminMutationKind::Revoke, "revoked" | "already_revoked") => {
+                admins.remove(&target_pop_public_key);
+            }
+            _ => {}
+        }
+        self.room_admins = admins.into_iter().collect();
     }
 
     fn start_send(&mut self, cx: &mut ViewContext<Self>) {
@@ -5928,6 +6580,11 @@ impl AppModel {
                 self.composer.blur();
                 self.send_status = SendStatus::Idle;
                 self.join_form.active = None;
+                self.room_admins.clear();
+                self.room_admins_loaded = false;
+                self.room_admin_status = RoomAdminStatus::Idle;
+                self.room_admin_target.clear();
+                self.room_admin_target.blur();
                 self.ws_autostart_attempted = false;
                 self.restore_epoch_sync_pending = false;
                 self.reset_fetch_state();
@@ -5935,6 +6592,7 @@ impl AppModel {
                     self.schedule_fetch(cx, Duration::from_millis(0));
                 }
                 self.refresh_members(cx);
+                self.refresh_room_admins(cx);
 
                 // Start WebSocket connection
                 self.start_websocket(cx);
@@ -6097,6 +6755,11 @@ impl AppModel {
                 self.members_search.clear();
                 self.members_search.blur();
                 self.members_alias_dirty = false;
+                self.room_admins.clear();
+                self.room_admins_loaded = false;
+                self.room_admin_status = RoomAdminStatus::Idle;
+                self.room_admin_target.clear();
+                self.room_admin_target.blur();
                 self.security_events.clear();
                 self.security_unread = 0;
                 self.security_panel_expanded = false;
@@ -6373,6 +7036,51 @@ impl AppModel {
         self.clear_members_search(cx);
     }
 
+    fn on_room_admin_target_field_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.focus_room_admin_target(cx);
+    }
+
+    fn on_room_admins_refresh_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.refresh_room_admins(cx);
+    }
+
+    fn on_room_admin_grant_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.start_room_admin_mutation_from_input(RoomAdminMutationKind::Grant, cx);
+    }
+
+    fn on_room_admin_revoke_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.start_room_admin_mutation_from_input(RoomAdminMutationKind::Revoke, cx);
+    }
+
+    fn on_room_admin_target_clear_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.clear_room_admin_target(cx);
+    }
+
     fn on_security_log_clear_clicked(
         &mut self,
         _: &MouseDownEvent,
@@ -6454,6 +7162,11 @@ impl AppModel {
         self.members_mode = MembersMode::Full;
         self.members_search.clear();
         self.members_search.blur();
+        self.room_admins.clear();
+        self.room_admins_loaded = false;
+        self.room_admin_status = RoomAdminStatus::Idle;
+        self.room_admin_target.clear();
+        self.room_admin_target.blur();
         self.security_events.clear();
         self.security_unread = 0;
         self.security_panel_expanded = false;
@@ -6522,6 +7235,24 @@ impl AppModel {
 
     fn on_keystroke(&mut self, keystroke: &Keystroke, cx: &mut ViewContext<Self>) {
         if self.session.is_some() {
+            if self.room_admin_target.active {
+                match self.handle_room_admin_target_clipboard_shortcuts(keystroke, cx) {
+                    KeyOutcome::None => {}
+                    KeyOutcome::Updated => {
+                        cx.notify();
+                        return;
+                    }
+                    KeyOutcome::Submit => {}
+                }
+                match self.room_admin_target.handle_keystroke(keystroke) {
+                    KeyOutcome::None => {}
+                    KeyOutcome::Updated => cx.notify(),
+                    KeyOutcome::Submit => {
+                        self.start_room_admin_mutation_from_input(RoomAdminMutationKind::Grant, cx)
+                    }
+                }
+                return;
+            }
             if self.members_search.active {
                 match self.handle_members_search_clipboard_shortcuts(keystroke, cx) {
                     KeyOutcome::None => {}
@@ -6610,6 +7341,56 @@ struct MembersParams {
     mode: MembersMode,
 }
 
+#[derive(Clone)]
+struct RoomAdminQueryParams {
+    server_url: String,
+    room_id: String,
+    pop_public_key: Vec<u8>,
+    pop_secret_key: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum RoomAdminMutationKind {
+    Grant,
+    Revoke,
+}
+
+impl RoomAdminMutationKind {
+    fn operation(self) -> RoomAdminOperation {
+        match self {
+            Self::Grant => RoomAdminOperation::GrantAdmin,
+            Self::Revoke => RoomAdminOperation::RevokeAdmin,
+        }
+    }
+
+    fn present_progressive(self) -> &'static str {
+        match self {
+            Self::Grant => "Granting room-admin access…",
+            Self::Revoke => "Revoking room-admin access…",
+        }
+    }
+
+    fn success_message(self) -> &'static str {
+        match self {
+            Self::Grant => "Room admin granted",
+            Self::Revoke => "Room admin revoked",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RoomAdminMutationParams {
+    query: RoomAdminQueryParams,
+    target_pop_public_key: Vec<u8>,
+    kind: RoomAdminMutationKind,
+}
+
+#[derive(Clone)]
+struct RoomAdminMutationOutcome {
+    status: String,
+    admin_count: u64,
+}
+
 struct MembersPage {
     members: Vec<MemberEntry>,
     root: [u8; 32],
@@ -6667,6 +7448,17 @@ impl MembersParams {
             offset,
             limit,
             mode,
+        }
+    }
+}
+
+impl RoomAdminQueryParams {
+    fn from_session(session: &AppSession) -> Self {
+        Self {
+            server_url: session.server_url.clone(),
+            room_id: session.room_id.clone(),
+            pop_public_key: session.pop_public_key.clone(),
+            pop_secret_key: session.pop_secret_key.clone(),
         }
     }
 }
@@ -10027,6 +10819,66 @@ async fn perform_fetch_members(params: MembersParams) -> Result<MembersPage> {
         next_offset,
     })
 }
+
+async fn perform_fetch_room_admins(params: RoomAdminQueryParams) -> Result<Vec<Vec<u8>>> {
+    let client = new_api_client(&params.server_url);
+    let admin_proof = build_room_admin_listing_proof(
+        &params.room_id,
+        &params.pop_public_key,
+        &params.pop_secret_key,
+    )
+    .context("build room admin listing proof")?;
+    let response = client
+        .list_room_admins(&params.room_id, admin_proof)
+        .await
+        .context("list room admins")?;
+    Ok(response.admin_pop_public_keys)
+}
+
+async fn perform_room_admin_mutation(
+    params: RoomAdminMutationParams,
+) -> Result<RoomAdminMutationOutcome> {
+    let client = new_api_client(&params.query.server_url);
+    let admin_proof = build_room_admin_target_proof(
+        params.kind.operation(),
+        &params.query.room_id,
+        &params.target_pop_public_key,
+        &params.query.pop_public_key,
+        &params.query.pop_secret_key,
+    )
+    .with_context(|| {
+        format!(
+            "build {} room admin proof",
+            match params.kind {
+                RoomAdminMutationKind::Grant => "grant",
+                RoomAdminMutationKind::Revoke => "revoke",
+            }
+        )
+    })?;
+    let response = match params.kind {
+        RoomAdminMutationKind::Grant => client
+            .grant_room_admin(
+                &params.query.room_id,
+                &params.target_pop_public_key,
+                admin_proof,
+            )
+            .await
+            .context("grant room admin")?,
+        RoomAdminMutationKind::Revoke => client
+            .revoke_room_admin(
+                &params.query.room_id,
+                &params.target_pop_public_key,
+                admin_proof,
+            )
+            .await
+            .context("revoke room admin")?,
+    };
+    Ok(RoomAdminMutationOutcome {
+        status: response.status,
+        admin_count: response.admin_count,
+    })
+}
+
 async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
     let SendParams {
         server_url,
@@ -10737,6 +11589,17 @@ fn hex_encode_prefix(bytes: &[u8; 32], prefix_len: usize) -> String {
     }
 }
 
+fn room_admin_identity_preview(bytes: &[u8]) -> String {
+    let hex = hex_encode(bytes);
+    if hex.len() <= 24 {
+        hex
+    } else {
+        let prefix = &hex[..12];
+        let suffix = &hex[hex.len().saturating_sub(12)..];
+        format!("{prefix}…{suffix}")
+    }
+}
+
 fn format_alias_display(alias: &str, leaf: &[u8; 32]) -> String {
     format!("{alias} ({})", hex_encode_prefix(leaf, 8))
 }
@@ -10841,6 +11704,27 @@ fn decode_hex_32(input: &str) -> Option<[u8; 32]> {
     let mut result = [0u8; 32];
     result.copy_from_slice(&bytes);
     Some(result)
+}
+
+fn decode_room_admin_target_hex(input: &str) -> Result<Vec<u8>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("room admin target identity must not be empty"));
+    }
+    let normalized = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    let bytes = hex_decode(normalized).context("room admin target must be valid hex")?;
+    let expected_len = dilithium5::public_key_bytes();
+    if bytes.len() != expected_len {
+        return Err(anyhow!(
+            "room admin target must be {} bytes (got {})",
+            expected_len,
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -13129,10 +14013,18 @@ mod tests {
         view.update(cx, |model, view_cx| {
             model.session = Some(session);
             model.ws_connected = true;
+            model.room_admins = vec![vec![0xAA; dilithium5::public_key_bytes()]];
+            model.room_admins_loaded = true;
+            model.room_admin_target.focus();
+            model
+                .room_admin_target
+                .set_value("abcd".repeat(4).to_string());
+            let panel_session = model.session.clone().expect("session available");
+            let _ = model.render_room_admin_panel(&panel_session, view_cx);
             model.members = vec![MemberEntry {
                 leaf_id: [0x11; 32],
                 alias: Some("alice".to_string()),
-                pop_public_key: Some(vec![0x01]),
+                pop_public_key: Some(vec![0xAA; dilithium5::public_key_bytes()]),
                 join_timestamp_ms: Some(1),
                 last_seen_timestamp_ms: Some(2),
             }];
@@ -14873,9 +15765,18 @@ mod tests {
         );
         assert_eq!(hex_encode_prefix(&[0xBB; 32], 8), "bbbbbbbb…");
         assert_eq!(hex_encode_prefix(&[0xBB; 32], 128), hex_encode([0xBB; 32]));
+        assert_eq!(
+            room_admin_identity_preview(&vec![0x11; dilithium5::public_key_bytes()]),
+            format!("{}…{}", "11".repeat(6), "11".repeat(6))
+        );
         assert_eq!(decode_hex_32(&hex_encode([0xCD; 32])), Some([0xCD; 32]));
         assert!(decode_hex_32("bad").is_none());
         assert!(decode_hex_32("aa").is_none());
+        assert_eq!(
+            decode_room_admin_target_hex(&hex_encode(vec![0x22; dilithium5::public_key_bytes()]))?,
+            vec![0x22; dilithium5::public_key_bytes()]
+        );
+        assert!(decode_room_admin_target_hex("aa").is_err());
         assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");
         assert_eq!(bytes32("good", &[0xEF; 32])?, [0xEF; 32]);
         assert!(bytes32("bad", &[0xEF; 31]).is_err());
