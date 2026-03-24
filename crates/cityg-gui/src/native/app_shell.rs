@@ -28,14 +28,16 @@ pub(super) fn run_native_app() {
     Application::new().run(move |app: &mut App| {
         info!("Starting City-G GUI");
         tokio_bridge::init(app);
+        app_actions::install_native_app_shell(app);
 
         let window_options = WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: None,
+                title: Some("City-G".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.0), px(12.0))),
             }),
             window_decorations: Some(WindowDecorations::Client),
+            window_background: WindowBackgroundAppearance::Blurred,
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
                 size(
@@ -48,7 +50,7 @@ pub(super) fn run_native_app() {
         };
 
         let config_clone = config.clone();
-        let window_result = app.open_window(window_options, |_, cx| {
+        let window_result = app.open_window(window_options, |window, cx| {
             let entity = cx.new(|_| AppModel::new(config_clone));
             let weak = entity.downgrade();
 
@@ -60,6 +62,14 @@ pub(super) fn run_native_app() {
                 }
             })
             .detach();
+
+            let _ = entity.update(cx, |_, cx| {
+                cx.observe_window_activation(window, |model, window, cx| {
+                    model.window_active = window.is_window_active();
+                    cx.notify();
+                })
+                .detach();
+            });
 
             entity
         });
@@ -133,6 +143,7 @@ impl AppModel {
             ws_task: None,
             ws_connected: false,
             ws_autostart_attempted: false,
+            window_active: false,
             restore_epoch_sync_pending: false,
             last_retry_action: None,
             security_events: Vec::new(),
@@ -182,9 +193,8 @@ impl Render for AppModel {
         self.ensure_epoch_sync_task(cx);
         self.ensure_members_refresh_task(cx);
         self.ensure_room_admins_loaded(cx);
-        self.cleanup_expired_toasts();
 
-        let background = rgb(0x0f1118);
+        let background = ui_canvas_fill(self.window_active);
         let has_session = self.session.is_some();
         let body: Div = if let Some(session) = &self.session {
             self.render_session(window, session, cx)
@@ -198,7 +208,19 @@ impl Render for AppModel {
             .flex_col()
             .w_full()
             .h_full()
-            .bg(background);
+            .bg(background)
+            .on_action(cx.listener(Self::on_show_about_action))
+            .on_action(cx.listener(Self::on_reveal_config_directory_action))
+            .on_action(cx.listener(Self::on_join_room_action))
+            .on_action(cx.listener(Self::on_send_message_action))
+            .on_action(cx.listener(Self::on_refresh_room_action))
+            .on_action(cx.listener(Self::on_leave_room_action))
+            .on_action(cx.listener(Self::on_focus_composer_action))
+            .on_action(cx.listener(Self::on_focus_members_search_action))
+            .on_action(cx.listener(Self::on_focus_room_admin_target_action))
+            .on_action(cx.listener(Self::on_copy_room_id_action))
+            .on_action(cx.listener(Self::on_copy_room_invite_action))
+            .on_action(cx.listener(Self::on_toggle_ciphertext_action));
 
         if has_session {
             root = root.child(body);

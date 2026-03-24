@@ -37,11 +37,12 @@ use cityg_config::CityGConfig;
 use gpui::prelude::*;
 #[cfg(not(test))]
 use gpui::{
-    App, Application, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, size,
+    App, Application, Bounds, KeyBinding, Menu, MenuItem, SystemMenuType, TitlebarOptions,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, size,
 };
 use gpui::{
     ClipboardItem, Context as ViewContext, CursorStyle, Div, FontWeight, Keystroke, MouseButton,
-    MouseDownEvent, Render, ScrollHandle, Task, Window, div, point, px, rgb,
+    MouseDownEvent, PromptLevel, Render, ScrollHandle, Task, Window, div, point, px, rgb, rgba,
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
@@ -91,6 +92,7 @@ use futures::StreamExt;
 use futures::channel::mpsc as futures_mpsc;
 
 mod activity_state;
+mod app_actions;
 mod app_shell;
 mod barrier_core;
 mod barrier_ops;
@@ -111,6 +113,7 @@ mod lifecycle_join_send;
 mod member_validation;
 mod members;
 mod message_auth;
+mod native_notifications;
 mod network_members;
 mod network_messages;
 mod network_room_admin;

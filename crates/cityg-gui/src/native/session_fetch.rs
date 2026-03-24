@@ -123,6 +123,7 @@ impl AppModel {
                             ActivityKind::Message,
                             format!("Fetched {added} new message(s)"),
                         );
+                        self.notify_background_messages(added);
                     }
                 }
 

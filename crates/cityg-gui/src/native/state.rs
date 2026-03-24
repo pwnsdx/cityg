@@ -41,6 +41,7 @@ pub(super) struct AppModel {
     pub(super) ws_task: Option<Task<()>>,         // WebSocket connection task
     pub(super) ws_connected: bool,                // WebSocket connection status
     pub(super) ws_autostart_attempted: bool,
+    pub(super) window_active: bool,
     pub(super) restore_epoch_sync_pending: bool,
     pub(super) last_retry_action: Option<RetryAction>, // Track what action to retry
     pub(super) security_events: Vec<SecurityEvent>,

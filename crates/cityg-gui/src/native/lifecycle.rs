@@ -1,18 +1,12 @@
 use super::*;
 
 impl AppModel {
-    pub(super) fn on_leave_clicked(
-        &mut self,
-        _: &MouseDownEvent,
-        _: &mut Window,
-        cx: &mut ViewContext<Self>,
-    ) {
+    pub(super) fn start_leave(&mut self, cx: &mut ViewContext<Self>) {
         if !matches!(self.leave_status, LeaveStatus::Idle) {
             return;
         }
-        let session = match &self.session {
-            Some(session) => session,
-            None => return,
+        let Some(session) = &self.session else {
+            return;
         };
 
         let request = LeaveRequest::from_session(session);
@@ -31,6 +25,15 @@ impl AppModel {
             });
         })
         .detach();
+    }
+
+    pub(super) fn on_leave_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.start_leave(cx);
     }
 
     pub(super) fn on_refresh_clicked(
