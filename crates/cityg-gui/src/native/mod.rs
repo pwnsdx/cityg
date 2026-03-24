@@ -101,6 +101,7 @@ mod persisted;
 mod pivot_helpers;
 mod render_panels;
 mod render_session;
+mod render_workspace;
 mod room_admin;
 mod session_runtime;
 mod session_state;
