@@ -81,7 +81,7 @@ use pqcrypto_traits::sign::{
     DetachedSignature, PublicKey as DilithiumPublicKey, SecretKey as DilithiumSecretKey,
 };
 use rand::{RngExt, rng};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::sleep;
 use tokio_tungstenite::{
     connect_async,
@@ -2179,6 +2179,12 @@ struct MemberEntry {
 struct AliasBindingRecord {
     pop_public_key: Vec<u8>,
     leaf_id: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RoomIdentity {
+    pop_public_key: Vec<u8>,
+    pop_secret_key: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -6812,6 +6818,15 @@ struct PersistedSession {
     barrier_state: PersistedBarrierState,
 }
 
+const ROOM_IDENTITY_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct PersistedRoomIdentity {
+    version: u32,
+    pop_public_hex: String,
+    pop_secret_hex: String,
+}
+
 const ALIAS_STORE_VERSION: u32 = 2;
 const SECURITY_LOG_VERSION: u32 = 1;
 const MAX_SECURITY_EVENTS: usize = 128;
@@ -7013,6 +7028,31 @@ impl SessionKeySource {
 struct LastSessionPointer {
     server_url: String,
     room_id: String,
+}
+
+impl PersistedRoomIdentity {
+    fn from_runtime(identity: &RoomIdentity) -> Self {
+        Self {
+            version: ROOM_IDENTITY_VERSION,
+            pop_public_hex: hex_encode(&identity.pop_public_key),
+            pop_secret_hex: hex_encode(&identity.pop_secret_key),
+        }
+    }
+
+    fn into_runtime(self) -> Result<RoomIdentity> {
+        if self.version != ROOM_IDENTITY_VERSION {
+            return Err(anyhow!(
+                "unsupported room identity file version {} (expected {})",
+                self.version,
+                ROOM_IDENTITY_VERSION
+            ));
+        }
+
+        Ok(RoomIdentity {
+            pop_public_key: decode_hex_vec("pop_public_hex", &self.pop_public_hex)?,
+            pop_secret_key: decode_hex_vec("pop_secret_hex", &self.pop_secret_hex)?,
+        })
+    }
 }
 
 impl PersistedBarrierNodeKeyMaterial {
@@ -7548,6 +7588,17 @@ fn persist_session(session: &AppSession) -> Result<()> {
     Ok(())
 }
 
+fn persist_room_identity(server_url: &str, room_id: &str, identity: &RoomIdentity) -> Result<()> {
+    let persisted = PersistedRoomIdentity::from_runtime(identity);
+    let path = room_identity_file_path(server_url, room_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let data = encrypt_persisted_room_identity(&persisted, &path)?;
+    write_file_atomic(&path, &data)
+}
+
 fn remove_persisted_session(server_url: &str, room_id: &str) -> Result<()> {
     let path = session_file_path(server_url, room_id)?;
     if path.exists() {
@@ -7611,23 +7662,48 @@ fn load_session_at(server_url: &str, room_id: &str) -> Result<Option<AppSession>
     persisted.into_app_session().map(Some)
 }
 
-fn encrypt_persisted_session(
-    persisted: &PersistedSession,
-    session_path: &std::path::Path,
+fn load_room_identity(server_url: &str, room_id: &str) -> Result<Option<RoomIdentity>> {
+    let path = room_identity_file_path(server_url, room_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let persisted = decode_persisted_room_identity(&data, &path)?;
+    persisted.into_runtime().map(Some)
+}
+
+fn load_or_create_room_identity(server_url: &str, room_id: &str) -> Result<RoomIdentity> {
+    if let Some(identity) = load_room_identity(server_url, room_id)? {
+        return Ok(identity);
+    }
+
+    let (pop_pk, pop_sk) = dilithium5::keypair();
+    let identity = RoomIdentity {
+        pop_public_key: pop_pk.as_bytes().to_vec(),
+        pop_secret_key: pop_sk.as_bytes().to_vec(),
+    };
+    persist_room_identity(server_url, room_id, &identity)?;
+    Ok(identity)
+}
+
+fn encrypt_persisted_payload<T: Serialize>(
+    persisted: &T,
+    path: &std::path::Path,
+    payload_label: &str,
 ) -> Result<Vec<u8>> {
     use chacha20poly1305::{
         ChaCha20Poly1305,
         aead::{Aead, AeadCore, KeyInit, OsRng},
     };
 
-    let payload =
-        serde_json::to_vec(persisted).context("failed to serialize session payload JSON")?;
-    let (key, key_source) = session_encryption_key(session_path)?;
+    let payload = serde_json::to_vec(persisted)
+        .with_context(|| format!("failed to serialize {payload_label} JSON"))?;
+    let (key, key_source) = session_encryption_key(path)?;
     let cipher = ChaCha20Poly1305::new((&key).into());
     let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(&nonce, payload.as_slice())
-        .context("failed to encrypt session payload")?;
+        .with_context(|| format!("failed to encrypt {payload_label}"))?;
 
     let envelope = EncryptedSessionEnvelope {
         version: ENCRYPTED_SESSION_ENVELOPE_VERSION,
@@ -7636,13 +7712,15 @@ fn encrypt_persisted_session(
         nonce_hex: hex_encode(nonce),
         ciphertext_hex: hex_encode(ciphertext),
     };
-    serde_json::to_vec_pretty(&envelope).context("failed to serialize encrypted session envelope")
+    serde_json::to_vec_pretty(&envelope)
+        .with_context(|| format!("failed to serialize encrypted {payload_label} envelope"))
 }
 
-fn decode_persisted_session(
+fn decode_persisted_payload<T: DeserializeOwned>(
     data: &[u8],
-    session_path: &std::path::Path,
-) -> Result<PersistedSession> {
+    path: &std::path::Path,
+    payload_label: &str,
+) -> Result<T> {
     use chacha20poly1305::{
         ChaCha20Poly1305,
         aead::{Aead, KeyInit},
@@ -7675,7 +7753,7 @@ fn decode_persisted_session(
         let ciphertext = hex_decode(&envelope.ciphertext_hex)
             .context("encrypted session envelope ciphertext is not valid hex")?;
 
-        let (key, active_source) = session_encryption_key(session_path)?;
+        let (key, active_source) = session_encryption_key(path)?;
         if envelope.key_source != active_source.as_str() {
             warn!(
                 "session key source mismatch (file='{}', active='{}')",
@@ -7687,12 +7765,40 @@ fn decode_persisted_session(
         let cipher = ChaCha20Poly1305::new((&key).into());
         let plaintext = cipher
             .decrypt(nonce_bytes.as_slice().into(), ciphertext.as_slice())
-            .context("failed to decrypt session payload")?;
+            .with_context(|| format!("failed to decrypt {payload_label}"))?;
         return serde_json::from_slice(&plaintext)
-            .context("invalid decrypted session payload JSON");
+            .with_context(|| format!("invalid decrypted {payload_label} JSON"));
     }
 
-    serde_json::from_slice(data).context("invalid legacy session JSON")
+    serde_json::from_slice(data).with_context(|| format!("invalid legacy {payload_label} JSON"))
+}
+
+fn encrypt_persisted_session(
+    persisted: &PersistedSession,
+    session_path: &std::path::Path,
+) -> Result<Vec<u8>> {
+    encrypt_persisted_payload(persisted, session_path, "session payload")
+}
+
+fn decode_persisted_session(
+    data: &[u8],
+    session_path: &std::path::Path,
+) -> Result<PersistedSession> {
+    decode_persisted_payload(data, session_path, "session payload")
+}
+
+fn encrypt_persisted_room_identity(
+    persisted: &PersistedRoomIdentity,
+    path: &std::path::Path,
+) -> Result<Vec<u8>> {
+    encrypt_persisted_payload(persisted, path, "room identity payload")
+}
+
+fn decode_persisted_room_identity(
+    data: &[u8],
+    path: &std::path::Path,
+) -> Result<PersistedRoomIdentity> {
+    decode_persisted_payload(data, path, "room identity payload")
 }
 
 fn session_encryption_key(session_path: &std::path::Path) -> Result<([u8; 32], SessionKeySource)> {
@@ -7806,6 +7912,12 @@ fn session_file_path(server_url: &str, room_id: &str) -> Result<PathBuf> {
     let base = session_dir()?;
     let hash = session_key_hash(server_url, room_id)?;
     Ok(base.join(format!("session-{}.json", hash)))
+}
+
+fn room_identity_file_path(server_url: &str, room_id: &str) -> Result<PathBuf> {
+    let base = session_dir()?;
+    let hash = session_key_hash(server_url, room_id)?;
+    Ok(base.join(format!("room-identity-{}.json", hash)))
 }
 
 fn roster_file_path(server_url: &str, room_id: &str) -> Result<PathBuf> {
@@ -8393,37 +8505,15 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         return Err(anyhow!("alias must not be empty"));
     }
 
-    // Generate keypair BEFORE calling join_ticket so we can sign the identity binding
-    let (pop_pk, pop_sk) = dilithium5::keypair();
-    let pop_public_key = pop_pk.as_bytes().to_vec();
-    let pop_secret_key = pop_sk.as_bytes().to_vec();
-
-    // Create identity binding by signing (alias || pop_public_key)
-    let identity_binding = {
-        use ciborium::ser::into_writer;
-        use cityg_api_client::IdentityBinding;
-        use pqcrypto_dilithium::dilithium5;
-        use pqcrypto_traits::sign::DetachedSignature as _;
-        use serde_bytes::ByteBuf;
-
-        // Create the message to sign: CBOR([alias, pop_public_key])
-        let message_data = (
-            ByteBuf::from(alias.as_bytes().to_vec()),
-            ByteBuf::from(pop_public_key.clone()),
-        );
-        let mut message = Vec::new();
-        into_writer(&message_data, &mut message)
-            .context("failed to encode identity binding message")?;
-
-        // Sign the message
-        let signature = dilithium5::detached_sign(&message, &pop_sk);
-
-        Some(IdentityBinding {
-            alias: alias.clone(),
-            pop_public_key: pop_public_key.clone(),
-            signature: signature.as_bytes().to_vec(),
-        })
-    };
+    let room_identity = load_or_create_room_identity(&server_url, &room_id)
+        .context("load or create persistent room identity")?;
+    let pop_public_key = room_identity.pop_public_key.clone();
+    let pop_secret_key = room_identity.pop_secret_key.clone();
+    let identity_binding = Some(build_identity_binding(
+        &alias,
+        &pop_public_key,
+        &pop_secret_key,
+    )?);
 
     let mut generated_kbroad_public: Option<Vec<u8>> = None;
     let mut bootstrap_attempted = false;
@@ -8543,8 +8633,10 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let mut k_fs = [0u8; 32];
     rand::rng().fill(&mut k_fs);
     let mut fs_state = ForwardSecrecyState::new(k_fs);
+    let pop_secret =
+        Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
 
-    // pop_pk, pop_sk, pop_public_key, pop_secret_key already generated above
+    // Room-scoped PoP identity was loaded or created above.
 
     // Generate ML-DSA-65 (Dilithium3) keys for message authentication
     let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
@@ -8607,7 +8699,7 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
         pop_keys: Some(PopKeypair {
             algorithm: "ML-DSA-65",
             public_key: pop_public_key.as_slice(),
-            secret_key: &pop_sk,
+            secret_key: pop_secret.as_ref(),
         }),
         leaf_id_mode: LeafIdMode::PerGroup,
         proof_mode: proof_mode.as_str(),
@@ -10795,6 +10887,34 @@ fn generate_kbroad_keypair() -> (Vec<u8>, Vec<u8>) {
         KemPublicKey::as_bytes(&public).to_vec(),
         KemSecretKey::as_bytes(&secret).to_vec(),
     )
+}
+
+fn build_identity_binding(
+    alias: &str,
+    pop_public_key: &[u8],
+    pop_secret_key: &[u8],
+) -> Result<cityg_api_client::IdentityBinding> {
+    use ciborium::ser::into_writer;
+    use cityg_api_client::IdentityBinding;
+    use pqcrypto_traits::sign::DetachedSignature as _;
+    use serde_bytes::ByteBuf;
+
+    let pop_secret = dilithium5::SecretKey::from_bytes(pop_secret_key)
+        .context("invalid persisted room identity secret key")?;
+    let message_data = (
+        ByteBuf::from(alias.as_bytes().to_vec()),
+        ByteBuf::from(pop_public_key.to_vec()),
+    );
+    let mut message = Vec::new();
+    into_writer(&message_data, &mut message)
+        .context("failed to encode identity binding message")?;
+    let signature = dilithium5::detached_sign(&message, &pop_secret);
+
+    Ok(IdentityBinding {
+        alias: alias.to_string(),
+        pop_public_key: pop_public_key.to_vec(),
+        signature: signature.as_bytes().to_vec(),
+    })
 }
 
 async fn rotate_room_kbroad_with_fresh_key(client: &CitygApiClient, room_id: &str) -> Result<()> {
@@ -16178,6 +16298,69 @@ mod tests {
 
         // Clean up persisted files to avoid leaking into other tests.
         remove_persisted_session(&session.server_url, &session.room_id)?;
+        Ok(())
+    }
+
+    #[test]
+    fn room_identity_persists_reuses_same_room_and_survives_session_removal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let server_url = "https://example.invalid";
+        let room_id = "room-identity-a";
+
+        let first = load_or_create_room_identity(server_url, room_id)?;
+        assert!(!first.pop_public_key.is_empty());
+        assert!(!first.pop_secret_key.is_empty());
+
+        let path = room_identity_file_path(server_url, room_id)?;
+        let raw = fs::read(&path)?;
+        let raw_text = String::from_utf8_lossy(&raw);
+        assert!(
+            raw_text.contains("ciphertext_hex"),
+            "room identity file must store encrypted payload envelope"
+        );
+        assert!(
+            !raw_text.contains(&hex_encode(&first.pop_secret_key)),
+            "room identity file must not expose plaintext secret bytes"
+        );
+
+        let loaded = load_room_identity(server_url, room_id)?
+            .ok_or_else(|| anyhow!("expected persisted room identity"))?;
+        assert_eq!(loaded, first);
+
+        let reused = load_or_create_room_identity(server_url, room_id)?;
+        assert_eq!(reused, first, "same room must reuse persisted identity");
+
+        let session = build_test_session(0xC31, server_url, room_id, "alice")?;
+        persist_session(&session)?;
+        remove_persisted_session(server_url, room_id)?;
+
+        let after_session_removal = load_room_identity(server_url, room_id)?
+            .ok_or_else(|| anyhow!("room identity must survive session removal"))?;
+        assert_eq!(after_session_removal, first);
+        Ok(())
+    }
+
+    #[test]
+    fn room_identity_is_scoped_per_room() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+        let server_url = "https://example.invalid";
+
+        let room_a = load_or_create_room_identity(server_url, "room-identity-a")?;
+        let room_b = load_or_create_room_identity(server_url, "room-identity-b")?;
+
+        assert_ne!(
+            room_a.pop_public_key, room_b.pop_public_key,
+            "different rooms must not share the same persisted identity"
+        );
+        assert_ne!(
+            room_a.pop_secret_key, room_b.pop_secret_key,
+            "different rooms must not share the same persisted identity secret"
+        );
         Ok(())
     }
 
