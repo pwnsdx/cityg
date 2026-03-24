@@ -19,7 +19,7 @@ impl AppModel {
                 .bg(rgb(0xff9f68))
                 .text_size(px(11.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0x0f1118))
+                .text_color(rgb(UI_ACCENT_BUTTON_TEXT))
                 .child(format!("{} new", self.security_unread));
             let ack_button = div()
                 .px(px(8.0))
@@ -67,7 +67,7 @@ impl AppModel {
                 .text_size(px(12.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(UI_PANEL_TEXT))
-                .bg(rgb(0x3d4b66))
+                .bg(rgb(UI_NEUTRAL_ELEVATED_FILL))
                 .cursor(CursorStyle::PointingHand)
                 .child("Clear log")
                 .on_mouse_down(
@@ -106,9 +106,9 @@ impl AppModel {
                     .px(px(9.0))
                     .py(px(7.0))
                     .rounded(px(10.0))
-                    .bg(rgba(0x2a1f31ea))
+                    .bg(rgba(0x241c20ef))
                     .border(px(1.0))
-                    .border_color(rgb(0x4b334f))
+                    .border_color(rgb(0x4b343a))
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
@@ -116,13 +116,13 @@ impl AppModel {
                         div()
                             .text_size(px(12.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0xffe3ee))
+                            .text_color(rgb(0xffe2e7))
                             .child(format!("{} – {}", event.alias, event.description)),
                     )
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(rgb(0xd3aec2))
+                            .text_color(rgb(0xd8b2bc))
                             .child(format_timestamp(event.timestamp_ms)),
                     );
                 list = list.child(entry);

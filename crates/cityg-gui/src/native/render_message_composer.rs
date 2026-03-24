@@ -4,9 +4,9 @@ impl AppModel {
     pub(super) fn render_message_composer(&self, cx: &mut ViewContext<Self>) -> Div {
         let barrier_pending = self.barrier_recovery_pending();
         let border_color = if self.composer.active {
-            rgb(0x72f88e)
+            rgb(UI_ACCENT_TEXT)
         } else {
-            rgb(0x2a3148)
+            rgb(UI_PANEL_BORDER)
         };
         let background = if self.composer.active {
             ui_input_fill(true)
@@ -15,9 +15,9 @@ impl AppModel {
         };
 
         let text_color = if self.composer.text.is_empty() {
-            rgb(0x5b6584)
+            rgb(UI_MUTED_TEXT)
         } else {
-            rgb(0xf5f7ff)
+            rgb(UI_PANEL_TEXT)
         };
 
         let placeholder = if barrier_pending {
@@ -67,11 +67,11 @@ impl AppModel {
             .rounded(px(10.0))
             .text_size(px(15.0))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(0x0f1118))
+            .text_color(rgb(UI_ACCENT_BUTTON_TEXT))
             .bg(if send_disabled {
-                rgba(0x3a3f57dd)
+                rgb(UI_DISABLED_FILL)
             } else {
-                rgb(0x72f88e)
+                rgb(UI_ACCENT_TEXT)
             })
             .cursor(if send_disabled {
                 CursorStyle::Arrow

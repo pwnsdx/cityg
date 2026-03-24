@@ -124,7 +124,7 @@ impl AppModel {
             .bg(if grant_enabled {
                 rgb(UI_ACCENT_TEXT)
             } else {
-                rgb(0x3a3f57)
+                rgb(UI_DISABLED_FILL)
             })
             .cursor(if grant_enabled {
                 CursorStyle::PointingHand
@@ -153,12 +153,12 @@ impl AppModel {
             })
             .bg(if revoke_enabled {
                 if revoke_staged {
-                    rgb(0x8a243a)
+                    rgb(UI_DANGER_FILL)
                 } else {
-                    rgb(0x6a3443)
+                    rgb(UI_DANGER_MUTED_FILL)
                 }
             } else {
-                rgb(0x3a3f57)
+                rgb(UI_DISABLED_FILL)
             })
             .cursor(if revoke_enabled {
                 CursorStyle::PointingHand
@@ -190,9 +190,9 @@ impl AppModel {
                 rgb(UI_MUTED_TEXT)
             })
             .bg(if clear_enabled {
-                rgb(0x3e4b66)
+                rgb(UI_NEUTRAL_ELEVATED_FILL)
             } else {
-                rgb(0x3a3f57)
+                rgb(UI_DISABLED_FILL)
             })
             .cursor(if clear_enabled {
                 CursorStyle::PointingHand
@@ -217,7 +217,7 @@ impl AppModel {
                     .text_size(px(12.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(UI_PANEL_TEXT))
-                    .bg(rgb(0x4c5369))
+                    .bg(rgb(UI_NEUTRAL_ELEVATED_FILL))
                     .cursor(CursorStyle::PointingHand)
                     .child("Cancel revoke")
                     .on_mouse_down(
@@ -259,7 +259,7 @@ impl AppModel {
                         .rounded(px(10.0))
                         .bg(ui_row_fill(self.window_active))
                         .border(px(1.0))
-                        .border_color(rgb(0x2c3952))
+                        .border_color(rgb(UI_PANEL_BORDER))
                         .child(
                             div()
                                 .text_size(px(12.0))

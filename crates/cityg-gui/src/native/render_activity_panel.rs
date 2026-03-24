@@ -43,9 +43,9 @@ impl AppModel {
                     .px(px(8.0))
                     .py(px(4.0))
                     .rounded(px(999.0))
-                    .bg(rgb(0x213146))
+                    .bg(rgb(0x2a2f38))
                     .text_size(px(11.0))
-                    .text_color(rgb(0x95c7ff))
+                    .text_color(rgb(UI_INFO_TEXT))
                     .child(ws_status),
             )
             .child(
@@ -53,9 +53,9 @@ impl AppModel {
                     .px(px(8.0))
                     .py(px(4.0))
                     .rounded(px(999.0))
-                    .bg(rgb(0x21382f))
+                    .bg(rgb(0x223128))
                     .text_size(px(11.0))
-                    .text_color(rgb(0x95f0b6))
+                    .text_color(rgb(UI_SUCCESS_TEXT))
                     .child(format!("messages {}", self.messages.len())),
             )
             .child(
@@ -63,9 +63,9 @@ impl AppModel {
                     .px(px(8.0))
                     .py(px(4.0))
                     .rounded(px(999.0))
-                    .bg(rgb(0x39272b))
+                    .bg(rgb(0x352723))
                     .text_size(px(11.0))
-                    .text_color(rgb(0xffbf93))
+                    .text_color(rgb(UI_WARN_TEXT))
                     .child(format!("members {}/{}", self.members.len(), total_members)),
             );
 
@@ -82,14 +82,20 @@ impl AppModel {
             for event in self.activity_events.iter().rev() {
                 let (label, chip_bg, chip_text, card_bg) = match event.kind {
                     ActivityKind::Connection => {
-                        ("connection", rgb(0x233553), rgb(0x95c7ff), rgb(0x1f2a3d))
+                        ("connection", rgb(0x2a313c), rgb(UI_INFO_TEXT), rgb(0x17191d))
                     }
-                    ActivityKind::Roster => ("roster", rgb(0x4b2e2e), rgb(0xffbf93), rgb(0x302428)),
+                    ActivityKind::Roster => {
+                        ("roster", rgb(0x43302c), rgb(UI_WARN_TEXT), rgb(0x1b1818))
+                    }
                     ActivityKind::Message => {
-                        ("message", rgb(0x244032), rgb(0x95f0b6), rgb(0x1f2f27))
+                        ("message", rgb(0x243129), rgb(UI_SUCCESS_TEXT), rgb(0x171a18))
                     }
-                    ActivityKind::Sync => ("sync", rgb(0x2a3f46), rgb(0x9fe7f0), rgb(0x212e34)),
-                    ActivityKind::System => ("system", rgb(0x373c4a), rgb(0xd0d6ef), rgb(0x262a36)),
+                    ActivityKind::Sync => {
+                        ("sync", rgb(0x283334), rgb(0xb4dcdf), rgb(0x171a1b))
+                    }
+                    ActivityKind::System => {
+                        ("system", rgb(0x313239), rgb(0xd6d7dc), rgb(0x18191c))
+                    }
                 };
                 let mut entry = div()
                     .px(px(9.0))
@@ -97,7 +103,7 @@ impl AppModel {
                     .rounded(px(10.0))
                     .bg(card_bg)
                     .border(px(1.0))
-                    .border_color(rgb(0x33445d))
+                    .border_color(rgb(UI_PANEL_BORDER))
                     .flex()
                     .flex_col()
                     .gap(px(3.0))

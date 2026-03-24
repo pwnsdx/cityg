@@ -2,10 +2,10 @@ use super::*;
 
 impl AppModel {
     pub(super) fn render_join(&self, cx: &mut ViewContext<Self>) -> Div {
-        let heading_color = rgb(0xf2f4ff);
-        let subtext_color = rgb(0x9aa5d3);
-        let error_color = rgb(0xff6b6b);
-        let info_color = rgb(0x72f88e);
+        let heading_color = rgb(UI_PANEL_TEXT);
+        let subtext_color = rgb(UI_SUBTLE_TEXT);
+        let error_color = rgb(UI_ERROR_TEXT);
+        let info_color = rgb(UI_SUCCESS_TEXT);
         let join_disabled =
             !self.join_form.is_ready() || matches!(self.join_status, JoinStatus::Joining);
 
@@ -61,7 +61,7 @@ impl AppModel {
                             .py(px(6.0))
                             .rounded(px(10.0))
                             .bg(ui_button_fill(self.window_active))
-                            .text_color(rgb(0xf2f4ff))
+                            .text_color(rgb(UI_PANEL_TEXT))
                             .cursor(CursorStyle::PointingHand)
                             .text_size(px(12.0))
                             .child("Generate new ID")
@@ -101,11 +101,11 @@ impl AppModel {
                     .rounded(px(12.0))
                     .text_size(px(16.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(0x0f1118))
+                    .text_color(rgb(UI_ACCENT_BUTTON_TEXT))
                     .bg(if join_disabled {
-                        rgb(0x3a3f57)
+                        rgb(UI_DISABLED_FILL)
                     } else {
-                        rgb(0x72f88e)
+                        rgb(UI_ACCENT_TEXT)
                     })
                     .cursor(if join_disabled {
                         CursorStyle::Arrow
@@ -165,9 +165,9 @@ impl AppModel {
     ) -> Div {
         let is_active = self.join_form.active == Some(field);
         let border = if is_active {
-            rgb(0x72f88e)
+            rgb(UI_ACCENT_TEXT)
         } else {
-            rgb(0x2a3148)
+            rgb(UI_PANEL_BORDER)
         };
         let background = if is_active {
             ui_input_fill(true)
@@ -175,9 +175,9 @@ impl AppModel {
             ui_input_fill(false)
         };
         let text_color = if value.is_empty() {
-            rgb(0x5b6584)
+            rgb(UI_MUTED_TEXT)
         } else {
-            rgb(0xf5f7ff)
+            rgb(UI_PANEL_TEXT)
         };
         let display = if value.is_empty() {
             placeholder.to_string()
@@ -192,7 +192,7 @@ impl AppModel {
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(0x9aa5d3))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
                     .child(label.to_string()),
             )
             .child({

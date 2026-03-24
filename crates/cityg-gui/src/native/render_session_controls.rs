@@ -12,13 +12,13 @@ impl AppModel {
             .rounded(px(12.0))
             .text_size(px(14.0))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(0xfafafa))
+            .text_color(rgb(UI_PANEL_TEXT))
             .bg(if leaving {
-                rgb(0x5a4552)
+                rgb(UI_DANGER_MUTED_FILL)
             } else if membership_op_busy {
-                rgb(0x4b3f45)
+                rgb(UI_DANGER_MUTED_FILL)
             } else {
-                rgb(0xbb4f68)
+                rgb(UI_DANGER_FILL)
             })
             .cursor(if membership_op_busy {
                 CursorStyle::Arrow
@@ -38,13 +38,17 @@ impl AppModel {
             .rounded(px(12.0))
             .text_size(px(14.0))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(0xfafafa))
-            .bg(if refreshing {
-                rgb(0x42516d)
-            } else if membership_op_busy {
-                rgb(0x3b4559)
+            .text_color(if membership_op_busy {
+                rgb(UI_MUTED_TEXT)
             } else {
-                rgb(0x4f79bb)
+                rgb(UI_ACCENT_TEXT)
+            })
+            .bg(if refreshing {
+                rgb(UI_NEUTRAL_ELEVATED_FILL)
+            } else if membership_op_busy {
+                rgb(UI_DISABLED_FILL)
+            } else {
+                rgb(UI_NEUTRAL_FILL)
             })
             .cursor(if membership_op_busy {
                 CursorStyle::Arrow

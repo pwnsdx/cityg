@@ -69,24 +69,24 @@ impl AppModel {
             let (card_bg, card_border, body_color, meta_color, status_line) = match message.delivery
             {
                 MessageDelivery::Pending => (
-                    rgba(0x1d293be8),
-                    rgb(0x2d4057),
-                    rgb(0xe1e7ff),
-                    rgb(0xa2b2d6),
+                    rgba(0x191a1de8),
+                    rgb(0x303238),
+                    rgb(UI_PANEL_TEXT),
+                    rgb(UI_SUBTLE_TEXT),
                     Some(("sending...", rgb(UI_ACCENT_TEXT))),
                 ),
                 MessageDelivery::Failed => (
-                    rgba(0x32212ce8),
-                    rgb(0x563342),
-                    rgb(0xffd7e3),
-                    rgb(0xffafc3),
-                    Some(("failed to send", rgb(0xff8ca7))),
+                    rgba(0x2a1d22e8),
+                    rgb(0x5a3740),
+                    rgb(0xffdfe6),
+                    rgb(0xdab1bb),
+                    Some(("failed to send", rgb(UI_ERROR_TEXT))),
                 ),
                 MessageDelivery::Sent => (
-                    rgba(0x171f31e0),
-                    rgb(0x243149),
-                    rgb(0xf2f5ff),
-                    rgb(0x9eabd2),
+                    rgba(0x131416e2),
+                    rgb(UI_PANEL_BORDER),
+                    rgb(UI_PANEL_TEXT),
+                    rgb(UI_SUBTLE_TEXT),
                     None,
                 ),
             };

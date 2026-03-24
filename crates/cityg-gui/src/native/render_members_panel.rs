@@ -45,7 +45,7 @@ impl AppModel {
                 .text_size(px(12.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(UI_PANEL_TEXT))
-                .bg(rgb(0x32415f))
+                .bg(rgb(UI_NEUTRAL_ELEVATED_FILL))
                 .cursor(CursorStyle::PointingHand)
                 .child("Load more")
                 .on_mouse_down(
@@ -127,7 +127,7 @@ impl AppModel {
                 .text_size(px(12.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(UI_PANEL_TEXT))
-                .bg(rgb(0x3e4b66))
+                .bg(rgb(UI_NEUTRAL_ELEVATED_FILL))
                 .cursor(CursorStyle::PointingHand)
                 .child("Clear")
                 .on_mouse_down(
@@ -155,7 +155,7 @@ impl AppModel {
                     .rounded(px(10.0))
                     .bg(ui_row_fill(self.window_active))
                     .border(px(1.0))
-                    .border_color(rgb(0x2c3952))
+                    .border_color(rgb(UI_PANEL_BORDER))
                     .flex()
                     .flex_col()
                     .gap(px(3.0))
@@ -210,10 +210,10 @@ impl AppModel {
                                 .px(px(8.0))
                                 .py(px(2.0))
                                 .rounded(px(999.0))
-                                .bg(rgb(0x224336))
+                                .bg(rgb(0x223128))
                                 .text_size(px(10.0))
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x9cf5be))
+                                .text_color(rgb(UI_SUCCESS_TEXT))
                                 .child("Room admin"),
                         );
                     }

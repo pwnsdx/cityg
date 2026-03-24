@@ -81,19 +81,19 @@ impl AppModel {
             .child(
                 div()
                     .text_size(px(16.0))
-                    .text_color(rgb(0x72f88e))
+                    .text_color(rgb(UI_ACCENT_TEXT))
                     .child("●"),
             )
             .child(
                 div()
                     .text_size(px(16.0))
-                    .text_color(rgb(0x5fd87f))
+                    .text_color(rgb(0x62d792))
                     .child("●"),
             )
             .child(
                 div()
                     .text_size(px(16.0))
-                    .text_color(rgb(0x4cb86f))
+                    .text_color(rgb(0x4eb277))
                     .child("●"),
             )
     }
@@ -102,11 +102,11 @@ impl AppModel {
         let error = self.categorized_error.as_ref()?;
 
         let (icon, color) = match error.category {
-            ErrorCategory::Network => ("⚠", rgb(0xffa500)),
-            ErrorCategory::Crypto => ("⚠", rgb(0xff6b6b)),
+            ErrorCategory::Network => ("⚠", rgb(UI_WARN_TEXT)),
+            ErrorCategory::Crypto => ("⚠", rgb(UI_ERROR_TEXT)),
             ErrorCategory::Policy => ("⛔", rgb(0xff9f68)),
-            ErrorCategory::Server => ("⚠", rgb(0xff6b6b)),
-            ErrorCategory::Validation => ("ℹ", rgb(0x72a5f8)),
+            ErrorCategory::Server => ("⚠", rgb(UI_ERROR_TEXT)),
+            ErrorCategory::Validation => ("ℹ", rgb(UI_INFO_TEXT)),
         };
 
         let mut error_box = div()
@@ -116,7 +116,7 @@ impl AppModel {
             .px(px(16.0))
             .py(px(14.0))
             .rounded(px(12.0))
-            .bg(rgba(0x1f1f2ee6))
+            .bg(rgba(0x111214ef))
             .border_1()
             .border_color(color)
             .max_w(px(640.0))
@@ -130,14 +130,14 @@ impl AppModel {
                         div()
                             .text_size(px(15.0))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0xf2f4ff))
+                            .text_color(rgb(UI_PANEL_TEXT))
                             .child(error.user_message.clone()),
                     ),
             )
             .child(
                 div()
                     .text_size(px(13.0))
-                    .text_color(rgb(0x9aa5d3))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
                     .child(error.recovery_suggestion.clone()),
             );
 
@@ -149,8 +149,8 @@ impl AppModel {
                     .px(px(14.0))
                     .py(px(8.0))
                     .rounded(px(10.0))
-                    .bg(rgb(0x72f88e))
-                    .text_color(rgb(0x0f1118))
+                    .bg(rgb(UI_ACCENT_TEXT))
+                    .text_color(rgb(UI_ACCENT_BUTTON_TEXT))
                     .text_size(px(13.0))
                     .font_weight(FontWeight::MEDIUM)
                     .cursor(CursorStyle::PointingHand)
@@ -166,7 +166,7 @@ impl AppModel {
                     .py(px(8.0))
                     .rounded(px(10.0))
                     .bg(ui_button_fill(self.window_active))
-                    .text_color(rgb(0xc8d0e8))
+                    .text_color(rgb(UI_PANEL_TEXT))
                     .text_size(px(13.0))
                     .cursor(CursorStyle::PointingHand)
                     .child("Copy Details")
@@ -178,7 +178,7 @@ impl AppModel {
                     .py(px(8.0))
                     .rounded(px(10.0))
                     .bg(ui_button_fill(self.window_active))
-                    .text_color(rgb(0xc8d0e8))
+                    .text_color(rgb(UI_PANEL_TEXT))
                     .text_size(px(13.0))
                     .cursor(CursorStyle::PointingHand)
                     .child("Report Issue")
@@ -189,8 +189,8 @@ impl AppModel {
                     .px(px(14.0))
                     .py(px(8.0))
                     .rounded(px(10.0))
-                    .bg(rgba(0x1f1f2ed8))
-                    .text_color(rgb(0x9aa5d3))
+                    .bg(rgb(UI_NEUTRAL_FILL))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
                     .text_size(px(13.0))
                     .cursor(CursorStyle::PointingHand)
                     .child("Dismiss")
@@ -217,9 +217,9 @@ impl AppModel {
         for toast in &self.toasts {
             if !toast.is_expired() {
                 let (icon, bg_color) = match toast.kind {
-                    ToastKind::Success => ("✓", rgb(0x2d5f2d)),
-                    ToastKind::Error => ("✗", rgba(0x5f2d2de8)),
-                    ToastKind::Info => ("ℹ", rgba(0x2d3d5fe8)),
+                    ToastKind::Success => ("✓", rgba(0x1f3427ee)),
+                    ToastKind::Error => ("✗", rgba(0x4a252cee)),
+                    ToastKind::Info => ("ℹ", rgba(0x22262eee)),
                 };
 
                 container = container.child(
@@ -232,17 +232,17 @@ impl AppModel {
                         .rounded(px(10.0))
                         .bg(bg_color)
                         .border_1()
-                        .border_color(rgb(0x3a3a4f))
+                        .border_color(rgb(UI_PANEL_BORDER))
                         .child(
                             div()
                                 .text_size(px(16.0))
-                                .text_color(rgb(0xf2f4ff))
+                                .text_color(rgb(UI_PANEL_TEXT))
                                 .child(icon),
                         )
                         .child(
                             div()
                                 .text_size(px(14.0))
-                                .text_color(rgb(0xf2f4ff))
+                                .text_color(rgb(UI_PANEL_TEXT))
                                 .child(toast.message.clone()),
                         ),
                 );
