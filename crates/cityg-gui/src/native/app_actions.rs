@@ -22,11 +22,28 @@ gpui::actions!(
     ]
 );
 
-#[cfg(not(test))]
-pub(super) fn install_native_app_shell(app: &mut App) {
+pub(super) fn install_action_handlers(app: &mut App) {
     app.on_action(|_: &QuitAppAction, app| app.quit());
     app.on_action(|_: &HideAppAction, app| app.hide());
     app.on_action(|_: &HideOtherAppsAction, app| app.hide_other_apps());
+    app.on_action(|_: &ShowAbout, _| {});
+    app.on_action(|_: &RevealConfigDirectory, _| {});
+    app.on_action(|_: &JoinRoomAction, _| {});
+    app.on_action(|_: &SendMessageAction, _| {});
+    app.on_action(|_: &RefreshRoomAction, _| {});
+    app.on_action(|_: &LeaveRoomAction, _| {});
+    app.on_action(|_: &FocusComposerAction, _| {});
+    app.on_action(|_: &FocusMembersSearchAction, _| {});
+    app.on_action(|_: &FocusRoomAdminTargetAction, _| {});
+    app.on_action(|_: &CopyRoomIdAction, _| {});
+    app.on_action(|_: &CopyRoomInviteAction, _| {});
+    app.on_action(|_: &ShowSessionOverviewAction, _| {});
+    app.on_action(|_: &ToggleCiphertextAction, _| {});
+}
+
+#[cfg(not(test))]
+pub(super) fn install_native_app_shell(app: &mut App) {
+    install_action_handlers(app);
 
     app.bind_keys([
         KeyBinding::new("cmd-q", QuitAppAction, None),

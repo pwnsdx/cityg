@@ -1750,6 +1750,44 @@ fn gpui_render_and_callback_paths_cover_ui_state(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
+#[test]
+fn global_action_handlers_dispatch_to_main_app_model_from_secondary_window() {
+    let mut cx = TestAppContext::single();
+    cx.update(tokio_bridge::init);
+    cx.update(|_, app| app_actions::install_action_handlers(app));
+
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+    let room_id = "fedcba98765432100123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+    let session = build_test_session(0xBEEF, "http://127.0.0.1:9", &room_id, "menu-forward")
+        .expect("build test session");
+
+    view.update(cx, |model, _| {
+        model.session = Some(session);
+    });
+    cx.refresh().expect("main window refresh");
+    cx.run_until_parked();
+
+    let (_secondary_view, cx) = cx.add_window_view(|_, _| div().size_full());
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    cx.update(|_, app| {
+        let active_is_main = app
+            .active_window()
+            .and_then(|window| window.downcast::<AppModel>())
+            .is_some();
+        assert!(
+            !active_is_main,
+            "secondary window should be active for menu forwarding coverage"
+        );
+        assert!(app.is_action_available(&CopyRoomIdAction));
+    });
+}
+
 #[gpui::test]
 fn gpui_missing_tokio_global_surfaces_scheduler_failures(cx: &mut TestAppContext) {
     cx.update(tokio_bridge::init);
