@@ -18,7 +18,7 @@ impl AppModel {
                 .text_size(px(12.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(UI_PANEL_TEXT))
-                .bg(rgb(UI_BUTTON_BG))
+                .bg(ui_button_fill(self.window_active))
                 .cursor(CursorStyle::PointingHand)
                 .child("Clear")
                 .on_mouse_down(
@@ -152,7 +152,7 @@ impl AppModel {
             .rounded(px(14.0))
             .border(px(1.0))
             .border_color(rgb(UI_PANEL_BORDER))
-            .bg(rgb(UI_PANEL_BG))
+            .bg(ui_panel_fill(self.window_active))
             .child(header)
             .child(metrics)
             .child(list)

@@ -101,7 +101,7 @@ impl AppModel {
             .px(px(16.0))
             .py(px(16.0))
             .gap(px(14.0))
-            .bg(rgb(UI_CANVAS_BG))
+            .bg(ui_canvas_fill(self.window_active))
             .child(left_column)
             .child(center_column)
             .child(right_column)

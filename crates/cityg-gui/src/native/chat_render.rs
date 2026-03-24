@@ -18,12 +18,22 @@ impl AppModel {
             .rounded(px(14.0))
             .px(px(16.0))
             .py(px(14.0))
-            .bg(rgb(UI_PANEL_BG))
+            .bg(ui_panel_fill(self.window_active))
             .child(self.render_message_list())
             .child(self.render_message_composer(cx))
     }
 
     pub(super) fn render_message_list(&self) -> impl IntoElement {
+        let mut sender_labels = AHashMap::new();
+        for member in &self.members {
+            sender_labels.insert(member.leaf_id, format_member_label(member));
+        }
+        for (leaf, alias) in &self.leaf_alias_index {
+            sender_labels
+                .entry(*leaf)
+                .or_insert_with(|| format_alias_display(alias, leaf));
+        }
+
         let mut list = div()
             .flex()
             .flex_col()
@@ -51,27 +61,29 @@ impl AppModel {
         }
 
         for message in &self.messages {
-            let timestamp =
-                format_rfc3339_seconds(UNIX_EPOCH + Duration::from_millis(message.timestamp_ms));
-            let sender = self.resolve_sender_label(message);
+            let timestamp = format_timestamp(message.timestamp_ms);
+            let sender = message
+                .sender_leaf
+                .and_then(|leaf| sender_labels.get(&leaf).cloned())
+                .unwrap_or_else(|| message.fallback_label.clone());
             let (card_bg, card_border, body_color, meta_color, status_line) = match message.delivery
             {
                 MessageDelivery::Pending => (
-                    rgb(0x1d293b),
+                    rgba(0x1d293be8),
                     rgb(0x2d4057),
                     rgb(0xe1e7ff),
                     rgb(0xa2b2d6),
                     Some(("sending...", rgb(UI_ACCENT_TEXT))),
                 ),
                 MessageDelivery::Failed => (
-                    rgb(0x32212c),
+                    rgba(0x32212ce8),
                     rgb(0x563342),
                     rgb(0xffd7e3),
                     rgb(0xffafc3),
                     Some(("failed to send", rgb(0xff8ca7))),
                 ),
                 MessageDelivery::Sent => (
-                    rgb(0x171f31),
+                    rgba(0x171f31e0),
                     rgb(0x243149),
                     rgb(0xf2f5ff),
                     rgb(0x9eabd2),

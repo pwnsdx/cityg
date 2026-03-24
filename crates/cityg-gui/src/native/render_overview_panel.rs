@@ -15,7 +15,7 @@ impl AppModel {
             .rounded(px(14.0))
             .border(px(1.0))
             .border_color(rgb(UI_PANEL_BORDER))
-            .bg(rgb(UI_PANEL_BG))
+            .bg(ui_panel_fill(self.window_active))
             .child(
                 div()
                     .text_size(px(16.0))

@@ -25,7 +25,7 @@ impl AppModel {
             .text_size(px(12.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(UI_PANEL_TEXT))
-            .bg(rgb(UI_BUTTON_BG))
+            .bg(ui_button_fill(self.window_active))
             .cursor(CursorStyle::PointingHand)
             .child("Refresh")
             .on_mouse_down(
@@ -63,9 +63,9 @@ impl AppModel {
             rgb(UI_PANEL_BORDER)
         };
         let search_background = if search_active {
-            rgb(0x1b2840)
+            ui_input_fill(true)
         } else {
-            rgb(UI_ROW_BG)
+            ui_row_fill(self.window_active)
         };
         let search_text_color = if self.members_search.query.is_empty() {
             rgb(UI_MUTED_TEXT)
@@ -107,7 +107,7 @@ impl AppModel {
             .text_size(px(12.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(UI_PANEL_TEXT))
-            .bg(rgb(UI_BUTTON_BG))
+            .bg(ui_button_fill(self.window_active))
             .cursor(CursorStyle::PointingHand)
             .child("Search")
             .on_mouse_down(
@@ -153,7 +153,7 @@ impl AppModel {
                     .px(px(9.0))
                     .py(px(7.0))
                     .rounded(px(10.0))
-                    .bg(rgb(UI_ROW_BG))
+                    .bg(ui_row_fill(self.window_active))
                     .border(px(1.0))
                     .border_color(rgb(0x2c3952))
                     .flex()
@@ -226,7 +226,7 @@ impl AppModel {
                         .text_size(px(11.0))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(UI_PANEL_TEXT))
-                        .bg(rgb(UI_BUTTON_BG))
+                        .bg(ui_button_fill(self.window_active))
                         .cursor(CursorStyle::PointingHand)
                         .child("Use identity")
                         .on_mouse_down(
@@ -259,7 +259,7 @@ impl AppModel {
             .rounded(px(14.0))
             .border(px(1.0))
             .border_color(rgb(UI_PANEL_BORDER))
-            .bg(rgb(UI_PANEL_BG))
+            .bg(ui_panel_fill(self.window_active))
             .child(header);
         root = root.child(search_row);
         if let Some(text) = status_text {

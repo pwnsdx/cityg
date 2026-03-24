@@ -9,9 +9,9 @@ impl AppModel {
             rgb(0x2a3148)
         };
         let background = if self.composer.active {
-            rgb(0x1b2135)
+            ui_input_fill(true)
         } else {
-            rgb(0x161b2a)
+            ui_input_fill(false)
         };
 
         let text_color = if self.composer.text.is_empty() {
@@ -69,7 +69,7 @@ impl AppModel {
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(0x0f1118))
             .bg(if send_disabled {
-                rgb(0x3a3f57)
+                rgba(0x3a3f57dd)
             } else {
                 rgb(0x72f88e)
             })

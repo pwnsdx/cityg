@@ -116,7 +116,7 @@ impl AppModel {
             .px(px(16.0))
             .py(px(14.0))
             .rounded(px(12.0))
-            .bg(rgb(0x1f1f2e))
+            .bg(rgba(0x1f1f2ee6))
             .border_1()
             .border_color(color)
             .max_w(px(640.0))
@@ -165,7 +165,7 @@ impl AppModel {
                     .px(px(14.0))
                     .py(px(8.0))
                     .rounded(px(10.0))
-                    .bg(rgb(0x2a3148))
+                    .bg(ui_button_fill(self.window_active))
                     .text_color(rgb(0xc8d0e8))
                     .text_size(px(13.0))
                     .cursor(CursorStyle::PointingHand)
@@ -177,7 +177,7 @@ impl AppModel {
                     .px(px(14.0))
                     .py(px(8.0))
                     .rounded(px(10.0))
-                    .bg(rgb(0x2a3148))
+                    .bg(ui_button_fill(self.window_active))
                     .text_color(rgb(0xc8d0e8))
                     .text_size(px(13.0))
                     .cursor(CursorStyle::PointingHand)
@@ -189,7 +189,7 @@ impl AppModel {
                     .px(px(14.0))
                     .py(px(8.0))
                     .rounded(px(10.0))
-                    .bg(rgb(0x1f1f2e))
+                    .bg(rgba(0x1f1f2ed8))
                     .text_color(rgb(0x9aa5d3))
                     .text_size(px(13.0))
                     .cursor(CursorStyle::PointingHand)
@@ -218,8 +218,8 @@ impl AppModel {
             if !toast.is_expired() {
                 let (icon, bg_color) = match toast.kind {
                     ToastKind::Success => ("✓", rgb(0x2d5f2d)),
-                    ToastKind::Error => ("✗", rgb(0x5f2d2d)),
-                    ToastKind::Info => ("ℹ", rgb(0x2d3d5f)),
+                    ToastKind::Error => ("✗", rgba(0x5f2d2de8)),
+                    ToastKind::Info => ("ℹ", rgba(0x2d3d5fe8)),
                 };
 
                 container = container.child(

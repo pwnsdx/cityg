@@ -16,7 +16,7 @@ impl AppModel {
             .py(px(36.0))
             .gap(px(16.0))
             .rounded(px(18.0))
-            .bg(rgb(0x151929))
+            .bg(ui_sheet_fill(self.window_active))
             .child(
                 div()
                     .flex()
@@ -60,7 +60,7 @@ impl AppModel {
                             .px(px(12.0))
                             .py(px(6.0))
                             .rounded(px(10.0))
-                            .bg(rgb(0x2a3148))
+                            .bg(ui_button_fill(self.window_active))
                             .text_color(rgb(0xf2f4ff))
                             .cursor(CursorStyle::PointingHand)
                             .text_size(px(12.0))
@@ -170,9 +170,9 @@ impl AppModel {
             rgb(0x2a3148)
         };
         let background = if is_active {
-            rgb(0x1b2135)
+            ui_input_fill(true)
         } else {
-            rgb(0x161b2a)
+            ui_input_fill(false)
         };
         let text_color = if value.is_empty() {
             rgb(0x5b6584)

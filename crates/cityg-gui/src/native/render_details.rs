@@ -9,7 +9,7 @@ impl AppModel {
             .px(px(10.0))
             .py(px(8.0))
             .rounded(px(10.0))
-            .bg(rgb(UI_ROW_BG))
+            .bg(ui_row_fill(self.window_active))
             .child(
                 div()
                     .text_size(px(11.0))
@@ -38,7 +38,7 @@ impl AppModel {
             .px(px(10.0))
             .py(px(8.0))
             .rounded(px(10.0))
-            .bg(rgb(UI_ROW_BG))
+            .bg(ui_row_fill(self.window_active))
             .child(
                 div()
                     .text_size(px(11.0))
@@ -102,7 +102,7 @@ impl AppModel {
             .px(px(10.0))
             .py(px(8.0))
             .rounded(px(10.0))
-            .bg(rgb(UI_ROW_BG))
+            .bg(ui_row_fill(self.window_active))
             .child(
                 div()
                     .text_size(px(11.0))
@@ -167,7 +167,7 @@ impl AppModel {
             .bg(if copy_enabled {
                 rgb(UI_ACCENT_TEXT)
             } else {
-                rgb(UI_BUTTON_BG)
+                ui_button_fill(self.window_active)
             })
             .cursor(if copy_enabled {
                 CursorStyle::PointingHand
@@ -187,7 +187,7 @@ impl AppModel {
             .px(px(10.0))
             .py(px(8.0))
             .rounded(px(10.0))
-            .bg(rgb(UI_ROW_BG))
+            .bg(ui_row_fill(self.window_active))
             .child(
                 div()
                     .text_size(px(11.0))
