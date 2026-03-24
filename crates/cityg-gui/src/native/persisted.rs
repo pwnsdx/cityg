@@ -15,56 +15,56 @@ pub(super) const SESSION_LOCAL_KEY_FILE: &str = "session-key-v1.bin";
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct PersistedSession {
-    version: u32,
-    server_url: String,
-    room_id: String,
-    alias: String,
-    gid_hex: String,
-    cat_hex: String,
-    leaf_hex: String,
-    parent_root_hex: String,
-    join_delta_root_hex: String,
-    revoked_since_root_hex: String,
-    revoked_root_hex: String,
-    tswe_salt_hash_hex: String,
-    pox_r_commit_hex: String,
-    we_epoch_id_hex: String,
+    pub(super) version: u32,
+    pub(super) server_url: String,
+    pub(super) room_id: String,
+    pub(super) alias: String,
+    pub(super) gid_hex: String,
+    pub(super) cat_hex: String,
+    pub(super) leaf_hex: String,
+    pub(super) parent_root_hex: String,
+    pub(super) join_delta_root_hex: String,
+    pub(super) revoked_since_root_hex: String,
+    pub(super) revoked_root_hex: String,
+    pub(super) tswe_salt_hash_hex: String,
+    pub(super) pox_r_commit_hex: String,
+    pub(super) we_epoch_id_hex: String,
     #[serde(default)]
-    xk_hash_hex: String,
-    epoch_key_hex: String,
-    proof_mode: String,
-    vrf_id: String,
-    policy_version: String,
-    msphf_crs_id: String,
-    msphf_params_id: String,
-    fs_policy_version: String,
-    fs_epoch_base_ts: u64,
-    kbroad_public_hex: String,
-    bootstrap_public_hex: String,
-    pop_public_hex: String,
-    pop_secret_hex: String,
-    msg_sign_public_hex: String,
-    msg_sign_secret_hex: String,
-    vrf_public_hex: String,
-    vrf_secret_hex: String,
-    fs_ec: u64,
-    fs_epoch_commit_hex: String,
-    fs_dev_prev_commit_hex: String,
+    pub(super) xk_hash_hex: String,
+    pub(super) epoch_key_hex: String,
+    pub(super) proof_mode: String,
+    pub(super) vrf_id: String,
+    pub(super) policy_version: String,
+    pub(super) msphf_crs_id: String,
+    pub(super) msphf_params_id: String,
+    pub(super) fs_policy_version: String,
+    pub(super) fs_epoch_base_ts: u64,
+    pub(super) kbroad_public_hex: String,
+    pub(super) bootstrap_public_hex: String,
+    pub(super) pop_public_hex: String,
+    pub(super) pop_secret_hex: String,
+    pub(super) msg_sign_public_hex: String,
+    pub(super) msg_sign_secret_hex: String,
+    pub(super) vrf_public_hex: String,
+    pub(super) vrf_secret_hex: String,
+    pub(super) fs_ec: u64,
+    pub(super) fs_epoch_commit_hex: String,
+    pub(super) fs_dev_prev_commit_hex: String,
     #[serde(default = "default_epoch_rotation_interval")]
-    fs_epoch_rotation_interval_secs: u64,
+    pub(super) fs_epoch_rotation_interval_secs: u64,
     #[serde(default)]
-    fs_epoch_created_at_unix_ms: u64,
-    forward_state: PersistedForwardState,
+    pub(super) fs_epoch_created_at_unix_ms: u64,
+    pub(super) forward_state: PersistedForwardState,
     #[serde(default)]
-    last_fetch_timestamp_ms: Option<u64>,
+    pub(super) last_fetch_timestamp_ms: Option<u64>,
     #[serde(default)]
-    msg_replay_state: PersistedMsgReplayState,
+    pub(super) msg_replay_state: PersistedMsgReplayState,
     #[serde(default)]
-    capss_witness_hex: String,
+    pub(super) capss_witness_hex: String,
     #[serde(default)]
-    regular_fingerprint_hex: String,
+    pub(super) regular_fingerprint_hex: String,
     #[serde(default)]
-    barrier_state: PersistedBarrierState,
+    pub(super) barrier_state: PersistedBarrierState,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,80 +101,80 @@ pub(super) struct PersistedSecurityEvent {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PersistedForwardState {
-    k_fs_hex: String,
-    fs_ec: u64,
-    fs_dev_commit_hex: String,
+pub(super) struct PersistedForwardState {
+    pub(super) k_fs_hex: String,
+    pub(super) fs_ec: u64,
+    pub(super) fs_dev_commit_hex: String,
     #[serde(default)]
-    fs_last_weid_hex: String,
+    pub(super) fs_last_weid_hex: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
-struct PersistedBarrierState {
+pub(super) struct PersistedBarrierState {
     #[serde(default)]
-    barrier_initialized: bool,
+    pub(super) barrier_initialized: bool,
     #[serde(default)]
-    barrier_version: u64,
+    pub(super) barrier_version: u64,
     #[serde(default)]
-    barrier_roots_hash_hex: String,
+    pub(super) barrier_roots_hash_hex: String,
     #[serde(default)]
-    k_barrier_hex: String,
+    pub(super) k_barrier_hex: String,
     #[serde(default)]
-    kem_tree_hash_after_hex: String,
+    pub(super) kem_tree_hash_after_hex: String,
     #[serde(default = "default_max_barrier_update_bytes")]
-    max_barrier_update_bytes: u64,
+    pub(super) max_barrier_update_bytes: u64,
     #[serde(default = "default_barrier_n_max")]
-    n_max: u64,
+    pub(super) n_max: u64,
     #[serde(default)]
-    cover_leaf_index: u64,
+    pub(super) cover_leaf_index: u64,
     #[serde(default)]
-    dk_leaf_hex: String,
+    pub(super) dk_leaf_hex: String,
     #[serde(default)]
-    pkhash_leaf_hex: String,
+    pub(super) pkhash_leaf_hex: String,
     #[serde(default)]
-    dk_nodes: BTreeMap<u32, PersistedBarrierNodeKeyMaterial>,
+    pub(super) dk_nodes: BTreeMap<u32, PersistedBarrierNodeKeyMaterial>,
     #[serde(default)]
-    pending: Option<PersistedBarrierPendingState>,
+    pub(super) pending: Option<PersistedBarrierPendingState>,
     #[serde(default = "default_barrier_recovery_pending")]
-    barrier_recovery_pending: bool,
+    pub(super) barrier_recovery_pending: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
-struct PersistedBarrierNodeKeyMaterial {
+pub(super) struct PersistedBarrierNodeKeyMaterial {
     #[serde(default)]
-    dk_hex: String,
+    pub(super) dk_hex: String,
     #[serde(default)]
-    pkhash_hex: String,
+    pub(super) pkhash_hex: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
-struct PersistedBarrierPendingState {
+pub(super) struct PersistedBarrierPendingState {
     #[serde(default)]
-    barrier_version: u64,
+    pub(super) barrier_version: u64,
     #[serde(default)]
-    we_epoch_id_hex: String,
+    pub(super) we_epoch_id_hex: String,
     #[serde(default)]
-    fs_ec: u64,
+    pub(super) fs_ec: u64,
     #[serde(default)]
-    next_forward_fs_ec: u64,
+    pub(super) next_forward_fs_ec: u64,
     #[serde(default)]
-    next_forward_fs_dev_commit_hex: String,
+    pub(super) next_forward_fs_dev_commit_hex: String,
     #[serde(default)]
-    next_forward_last_weid_hex: String,
+    pub(super) next_forward_last_weid_hex: String,
     #[serde(default)]
-    revocation_roots_hash_hex: String,
+    pub(super) revocation_roots_hash_hex: String,
     #[serde(default)]
-    kem_tree_hash_after_hex: String,
+    pub(super) kem_tree_hash_after_hex: String,
     #[serde(default)]
-    k_barrier_new_hex: String,
+    pub(super) k_barrier_new_hex: String,
     #[serde(default)]
-    k_fs_after_pcs_hex: String,
+    pub(super) k_fs_after_pcs_hex: String,
     #[serde(default)]
-    barrier_update_reason: Option<u64>,
+    pub(super) barrier_update_reason: Option<u64>,
     #[serde(default)]
-    barrier_update_digest_hex: String,
+    pub(super) barrier_update_digest_hex: String,
     #[serde(default)]
-    on_path_key_material: BTreeMap<u32, PersistedBarrierNodeKeyMaterial>,
+    pub(super) on_path_key_material: BTreeMap<u32, PersistedBarrierNodeKeyMaterial>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -207,7 +207,7 @@ pub(super) struct LastSessionPointer {
     pub(super) room_id: String,
 }
 
-fn default_epoch_rotation_interval() -> u64 {
+pub(super) fn default_epoch_rotation_interval() -> u64 {
     300
 }
 

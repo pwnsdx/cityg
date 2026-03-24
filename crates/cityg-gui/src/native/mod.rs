@@ -14,7 +14,10 @@ use crate::barrier_shared::{
     sibling_node, ticket_retry_delay,
 };
 #[cfg(test)]
-use crate::message_crypto::{MSG_INDEX_REPLAY_WINDOW, decrypt_message_v2};
+use crate::message_crypto::{
+    MSG_INDEX_REPLAY_WINDOW, MessageCryptoContext, decrypt_message_v2,
+    decrypt_message_v2_with_index, derive_msg_replay_tuple_tag, encrypt_message_v2,
+};
 use crate::message_crypto::{MsgReplayState, PersistedMsgReplayState};
 use ahash::AHashMap;
 use anchor_seed::{
@@ -58,7 +61,10 @@ use msphf_orchestrator::{
     derive_we_epoch_id, hdr,
 };
 use pqcrypto_dilithium::{
-    dilithium3::{self},
+    dilithium3::{
+        self, public_key_bytes as ml_dsa_public_key_bytes,
+        signature_bytes as ml_dsa_signature_bytes,
+    },
     dilithium5,
 };
 use pqcrypto_kyber::kyber768;
@@ -71,11 +77,17 @@ use pqcrypto_traits::sign::{
 use rand::{RngExt, rng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::sleep;
+#[cfg(test)]
+use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tracing::{debug, info, warn};
 use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(test)]
 use cityg_client::demo;
+#[cfg(test)]
+use futures::StreamExt;
+#[cfg(test)]
+use futures::channel::mpsc as futures_mpsc;
 
 mod activity_state;
 mod app_shell;
@@ -117,6 +129,7 @@ use activity_state::*;
 use barrier_core::*;
 use barrier_ops::*;
 use barrier_runtime::*;
+use epoch_sync::*;
 use errors::*;
 #[cfg(test)]
 use fault_injection::*;
@@ -135,6 +148,7 @@ use shell_ui::*;
 use state::*;
 use storage::*;
 use tokio_bridge::Tokio;
+use websocket::*;
 
 fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
     let mut params_seed = [0u8; 32];
