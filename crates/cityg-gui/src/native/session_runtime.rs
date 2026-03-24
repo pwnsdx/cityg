@@ -1,5 +1,6 @@
 use futures::{StreamExt, channel::mpsc as futures_mpsc};
 
+use super::epoch_sync::perform_epoch_sync;
 use super::websocket::{WebSocketEvent, run_websocket_worker};
 use super::*;
 

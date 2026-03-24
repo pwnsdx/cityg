@@ -1,3 +1,4 @@
+use super::epoch_sync::perform_epoch_sync;
 use super::*;
 
 pub(super) fn persist_pending_barrier_state_before_publish(
