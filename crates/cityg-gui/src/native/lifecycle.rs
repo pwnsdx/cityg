@@ -1,6 +1,63 @@
 use super::*;
 
 impl AppModel {
+    pub(super) fn prompt_member_expulsion(
+        &mut self,
+        target_leaf_id: [u8; 32],
+        target_label: String,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        if !matches!(self.leave_status, LeaveStatus::Idle) {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if self.room_admin_controls_locked(&session) {
+            let message = "This device does not currently hold room-admin authority for this room."
+                .to_string();
+            self.last_error = Some(message.clone());
+            self.room_admin_status = RoomAdminStatus::Error(message.clone());
+            self.show_error_toast(message, cx);
+            return;
+        }
+        if session.leaf_id == target_leaf_id {
+            let message =
+                "Use Leave room to remove this device instead of expelling the local member."
+                    .to_string();
+            self.last_error = Some(message.clone());
+            self.show_error_toast(message, cx);
+            return;
+        }
+
+        let prompt_message = format!("Expel {target_label} from this room?");
+        let prompt_detail = format!(
+            "This publishes a revocation-style roster update for the member's current leaf.\nThey will need to rejoin to come back.\n\nLeaf: {}",
+            hex_encode(target_leaf_id)
+        );
+        let answer = window.prompt(
+            PromptLevel::Critical,
+            &prompt_message,
+            Some(&prompt_detail),
+            &["Expel", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let Ok(choice) = answer.await else {
+                return;
+            };
+            if choice != 0 {
+                return;
+            }
+            let _ = this.update(cx, |model, cx| {
+                model.start_member_expulsion(target_leaf_id, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn start_leave(&mut self, cx: &mut ViewContext<Self>) {
         if !matches!(self.leave_status, LeaveStatus::Idle) {
             return;

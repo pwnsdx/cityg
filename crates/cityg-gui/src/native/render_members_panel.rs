@@ -156,6 +156,7 @@ impl AppModel {
         } else {
             for member in &self.members {
                 let primary_label = format_member_label(member);
+                let expel_label = primary_label.clone();
                 let mut entry = div()
                     .px(px(9.0))
                     .py(px(7.0))
@@ -274,8 +275,13 @@ impl AppModel {
                     if !membership_update_busy {
                         expel_button = expel_button.on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                this.start_member_expulsion(target_leaf_id, cx);
+                            cx.listener(move |this, _, window, cx| {
+                                this.prompt_member_expulsion(
+                                    target_leaf_id,
+                                    expel_label.clone(),
+                                    window,
+                                    cx,
+                                );
                             }),
                         );
                     }
