@@ -104,6 +104,10 @@ mod interactions;
 mod lifecycle;
 #[path = "native/members.rs"]
 mod members;
+#[path = "native/message_auth.rs"]
+mod message_auth;
+#[path = "native/params.rs"]
+mod params;
 #[path = "native/render_panels.rs"]
 mod render_panels;
 #[path = "native/render_session.rs"]
@@ -122,6 +126,8 @@ mod tokio_bridge;
 use errors::*;
 #[cfg(test)]
 use fault_injection::*;
+use message_auth::*;
+use params::*;
 use storage::*;
 use tokio_bridge::Tokio;
 
@@ -3307,121 +3313,6 @@ impl AppModel {
     }
 }
 
-#[derive(Clone)]
-struct JoinParams {
-    server_url: String,
-    room_id: String,
-    alias: String,
-}
-
-#[derive(Clone)]
-struct LeaveRequest {
-    server_url: String,
-    room_id: String,
-    gid: [u8; 32],
-    leaf_id: [u8; 32],
-    forward_state: ForwardSecrecyState,
-    pop_public_key: Vec<u8>,
-    pop_secret_key: Vec<u8>,
-    vrf_secret_key: Vec<u8>,
-    vrf_public_key: Vec<u8>,
-    fs_ec: u64,
-    fs_epoch_commit: [u8; 32],
-    fs_dev_prev_commit: [u8; 32],
-    k_fs_current: [u8; 32],
-    max_barrier_update_bytes: u64,
-    barrier_recovery_pending: bool,
-}
-
-#[derive(Clone)]
-struct MembersParams {
-    server_url: String,
-    gid: [u8; 32],
-    parent_root: [u8; 32],
-    offset: u64,
-    limit: u32,
-    mode: MembersMode,
-}
-
-#[derive(Clone)]
-struct RoomAdminQueryParams {
-    server_url: String,
-    room_id: String,
-    pop_public_key: Vec<u8>,
-    pop_secret_key: Vec<u8>,
-}
-
-#[derive(Clone, Copy)]
-enum RoomAdminMutationKind {
-    Grant,
-    Revoke,
-}
-
-impl RoomAdminMutationKind {
-    fn operation(self) -> RoomAdminOperation {
-        match self {
-            Self::Grant => RoomAdminOperation::GrantAdmin,
-            Self::Revoke => RoomAdminOperation::RevokeAdmin,
-        }
-    }
-
-    fn present_progressive(self) -> &'static str {
-        match self {
-            Self::Grant => "Granting room-admin access…",
-            Self::Revoke => "Revoking room-admin access…",
-        }
-    }
-
-    fn success_message(self) -> &'static str {
-        match self {
-            Self::Grant => "Room admin granted",
-            Self::Revoke => "Room admin revoked",
-        }
-    }
-}
-
-#[derive(Clone)]
-struct RoomAdminMutationParams {
-    query: RoomAdminQueryParams,
-    target_pop_public_key: Vec<u8>,
-    kind: RoomAdminMutationKind,
-}
-
-#[derive(Clone)]
-struct RoomAdminMutationOutcome {
-    status: String,
-    admin_count: u64,
-}
-
-struct MembersPage {
-    members: Vec<MemberEntry>,
-    root: [u8; 32],
-    total_count: u64,
-    next_offset: u64,
-}
-
-impl LeaveRequest {
-    fn from_session(session: &AppSession) -> Self {
-        Self {
-            server_url: session.server_url.clone(),
-            room_id: session.room_id.clone(),
-            gid: session.gid,
-            leaf_id: session.leaf_id,
-            forward_state: session.forward_state.clone(),
-            pop_public_key: session.pop_public_key.clone(),
-            pop_secret_key: session.pop_secret_key.clone(),
-            vrf_secret_key: session.vrf_secret_key.clone(),
-            vrf_public_key: session.vrf_public_key.clone(),
-            fs_ec: session.fs_ec,
-            fs_epoch_commit: session.fs_epoch_commit,
-            fs_dev_prev_commit: session.fs_dev_prev_commit,
-            k_fs_current: session.forward_state.snapshot().k_fs,
-            max_barrier_update_bytes: session.barrier_state.max_barrier_update_bytes,
-            barrier_recovery_pending: session.barrier_state.barrier_recovery_pending,
-        }
-    }
-}
-
 fn persist_pending_barrier_state_before_publish(
     request: &LeaveRequest,
     pending: BarrierPendingState,
@@ -3446,123 +3337,6 @@ fn persist_activated_joined_session(session: &AppSession) -> Result<()> {
     #[cfg(test)]
     fault_injection::trigger_fault(FaultInjectionCutPoint::AfterPersistBeforePendingClear, None)?;
     Ok(())
-}
-
-impl MembersParams {
-    fn from_session(session: &AppSession, offset: u64, limit: u32, mode: MembersMode) -> Self {
-        Self {
-            server_url: session.server_url.clone(),
-            gid: session.gid,
-            parent_root: session.parent_root,
-            offset,
-            limit,
-            mode,
-        }
-    }
-}
-
-impl RoomAdminQueryParams {
-    fn from_session(session: &AppSession) -> Self {
-        Self {
-            server_url: session.server_url.clone(),
-            room_id: session.room_id.clone(),
-            pop_public_key: session.pop_public_key.clone(),
-            pop_secret_key: session.pop_secret_key.clone(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct SendParams {
-    server_url: String,
-    gid: [u8; 32],
-    we_epoch_id: [u8; 32],
-    xk_hash: [u8; 32],
-    epoch_key: [u8; 32],
-    fs_ec: u64,
-    barrier_version: u64,
-    k_barrier: [u8; 32],
-    msg_index: u64,
-    leaf_id: [u8; 32],
-    alias: String,
-    plaintext: String,
-    msg_sign_secret_key: Vec<u8>,
-    msg_sign_public_key: Vec<u8>,
-}
-
-impl SendParams {
-    fn from_session(session: &AppSession, plaintext: String, msg_index: u64) -> Result<Self> {
-        if session.barrier_state.barrier_recovery_pending {
-            return Err(anyhow!(
-                "Cannot send messages while barrier recovery is pending. Waiting for next barrier update."
-            ));
-        }
-        Ok(Self {
-            server_url: session.server_url.clone(),
-            gid: session.gid,
-            we_epoch_id: session.we_epoch_id,
-            xk_hash: session.xk_hash,
-            epoch_key: session.epoch_key,
-            fs_ec: session.fs_ec,
-            barrier_version: session.barrier_state.barrier_version,
-            k_barrier: *session.barrier_state.k_barrier,
-            msg_index,
-            leaf_id: session.leaf_id,
-            alias: session.alias.clone(),
-            plaintext,
-            msg_sign_secret_key: session.msg_sign_secret_key.clone(),
-            msg_sign_public_key: session.msg_sign_public_key.clone(),
-        })
-    }
-}
-
-#[derive(Clone)]
-struct FetchParams {
-    server_url: String,
-    gid: [u8; 32],
-    we_epoch_id: [u8; 32],
-    xk_hash: [u8; 32],
-    epoch_key: [u8; 32],
-    fs_ec: u64,
-    barrier_version: u64,
-    k_barrier: [u8; 32],
-    msg_replay_state: MsgReplayState,
-    leaf_id: [u8; 32],
-    since: Option<u64>,
-}
-
-impl FetchParams {
-    fn from_session(session: &AppSession, since: Option<u64>) -> Result<Self> {
-        if session.barrier_state.barrier_recovery_pending {
-            return Err(anyhow!(
-                "Cannot fetch/decrypt messages while barrier recovery is pending. Waiting for next barrier update."
-            ));
-        }
-        Ok(Self {
-            server_url: session.server_url.clone(),
-            gid: session.gid,
-            we_epoch_id: session.we_epoch_id,
-            xk_hash: session.xk_hash,
-            epoch_key: session.epoch_key,
-            fs_ec: session.fs_ec,
-            barrier_version: session.barrier_state.barrier_version,
-            k_barrier: *session.barrier_state.k_barrier,
-            msg_replay_state: session.msg_replay_state.clone(),
-            leaf_id: session.leaf_id,
-            since,
-        })
-    }
-}
-
-struct FetchOutcome {
-    messages: Vec<ChatMessageEntry>,
-    last_timestamp_ms: Option<u64>,
-    msg_replay_state: MsgReplayState,
-}
-
-struct EpochSyncOutcome {
-    session: AppSession,
-    changed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -4880,22 +4654,20 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
                     freeze_code,
                     ..
                 } = &err
+                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                 {
-                    if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                        && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                    {
-                        let delay = ticket_retry_delay(retry_attempt);
-                        retry_attempt = retry_attempt.saturating_add(1);
-                        warn!(
-                            attempt = retry_attempt,
-                            delay_ms = delay.as_millis() as u64,
-                            status = status.as_u16(),
-                            message = %message,
-                            "merge_ticket race/concurrency rejection; retrying"
-                        );
-                        sleep(delay).await;
-                        continue;
-                    }
+                    let delay = ticket_retry_delay(retry_attempt);
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    warn!(
+                        attempt = retry_attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        status = status.as_u16(),
+                        message = %message,
+                        "merge_ticket race/concurrency rejection; retrying"
+                    );
+                    sleep(delay).await;
+                    continue;
                 }
 
                 return Err(err).context("failed to obtain merge ticket");
@@ -5255,22 +5027,20 @@ async fn perform_barrier_merge_inner(
                     freeze_code,
                     ..
                 } = &err
+                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                 {
-                    if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                        && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                    {
-                        let delay = ticket_retry_delay(retry_attempt);
-                        retry_attempt = retry_attempt.saturating_add(1);
-                        warn!(
-                            attempt = retry_attempt,
-                            delay_ms = delay.as_millis() as u64,
-                            status = status.as_u16(),
-                            message = %message,
-                            "merge_ticket_refresh race/concurrency rejection; retrying"
-                        );
-                        sleep(delay).await;
-                        continue;
-                    }
+                    let delay = ticket_retry_delay(retry_attempt);
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    warn!(
+                        attempt = retry_attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        status = status.as_u16(),
+                        message = %message,
+                        "merge_ticket_refresh race/concurrency rejection; retrying"
+                    );
+                    sleep(delay).await;
+                    continue;
                 }
 
                 return Err(err).context(format!("failed to obtain {} merge ticket", mode.label()));
@@ -6147,22 +5917,20 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
                     freeze_code,
                     ..
                 } = &err
+                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                 {
-                    if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                        && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                    {
-                        let delay = ticket_retry_delay(retry_attempt);
-                        retry_attempt = retry_attempt.saturating_add(1);
-                        warn!(
-                            attempt = retry_attempt,
-                            delay_ms = delay.as_millis() as u64,
-                            status = status.as_u16(),
-                            message = %message,
-                            "merge_ticket_refresh race/concurrency rejection during epoch sync; retrying"
-                        );
-                        sleep(delay).await;
-                        continue;
-                    }
+                    let delay = ticket_retry_delay(retry_attempt);
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    warn!(
+                        attempt = retry_attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        status = status.as_u16(),
+                        message = %message,
+                        "merge_ticket_refresh race/concurrency rejection during epoch sync; retrying"
+                    );
+                    sleep(delay).await;
+                    continue;
                 }
 
                 return Err(err).context("failed to fetch merge ticket for epoch sync");
@@ -6890,203 +6658,6 @@ fn bytes32(name: &str, data: &[u8]) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("{name} must be 32 bytes, received {} bytes", data.len()))
 }
 
-const MESSAGE_PREFIX: &[u8; 4] = b"CGM1";
-
-#[derive(Debug)]
-struct AuthenticatedMessage<'a> {
-    timestamp_ms: u64,
-    plaintext: &'a [u8],
-    public_key: &'a [u8],
-    signature: &'a [u8],
-}
-
-fn encode_authenticated_message(
-    timestamp_ms: u64,
-    plaintext: &[u8],
-    public_key: &[u8],
-    signature: &[u8],
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(
-        MESSAGE_PREFIX.len() + 8 + 4 + plaintext.len() + 4 + public_key.len() + 4 + signature.len(),
-    );
-
-    out.extend_from_slice(MESSAGE_PREFIX);
-    out.extend_from_slice(&timestamp_ms.to_le_bytes());
-    out.extend_from_slice(&(plaintext.len() as u32).to_le_bytes());
-    out.extend_from_slice(plaintext);
-    out.extend_from_slice(&(public_key.len() as u32).to_le_bytes());
-    out.extend_from_slice(public_key);
-    out.extend_from_slice(&(signature.len() as u32).to_le_bytes());
-    out.extend_from_slice(signature);
-
-    out
-}
-
-fn decode_authenticated_message(data: &[u8]) -> Result<AuthenticatedMessage<'_>> {
-    if data.len() < MESSAGE_PREFIX.len() + 8 + 4 + 4 + 4 {
-        return Err(anyhow!("authenticated message too short"));
-    }
-
-    if &data[..MESSAGE_PREFIX.len()] != MESSAGE_PREFIX {
-        return Err(anyhow!("invalid message prefix"));
-    }
-
-    let mut cursor = MESSAGE_PREFIX.len();
-
-    let timestamp_ms = {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(&data[cursor..cursor + 8]);
-        cursor += 8;
-        u64::from_le_bytes(buf)
-    };
-
-    let plaintext_len = {
-        let mut buf = [0u8; 4];
-        buf.copy_from_slice(&data[cursor..cursor + 4]);
-        cursor += 4;
-        u32::from_le_bytes(buf) as usize
-    };
-    if data.len() < cursor + plaintext_len {
-        return Err(anyhow!("authenticated message truncated (plaintext)"));
-    }
-    let plaintext = &data[cursor..cursor + plaintext_len];
-    cursor += plaintext_len;
-
-    let public_key_len = {
-        let mut buf = [0u8; 4];
-        buf.copy_from_slice(&data[cursor..cursor + 4]);
-        cursor += 4;
-        u32::from_le_bytes(buf) as usize
-    };
-    if data.len() < cursor + public_key_len {
-        return Err(anyhow!("authenticated message truncated (public key)"));
-    }
-    let public_key = &data[cursor..cursor + public_key_len];
-    cursor += public_key_len;
-
-    let signature_len = {
-        let mut buf = [0u8; 4];
-        buf.copy_from_slice(&data[cursor..cursor + 4]);
-        cursor += 4;
-        u32::from_le_bytes(buf) as usize
-    };
-    if data.len() != cursor + signature_len {
-        return Err(anyhow!("authenticated message truncated (signature)"));
-    }
-    let signature = &data[cursor..];
-
-    Ok(AuthenticatedMessage {
-        timestamp_ms,
-        plaintext,
-        public_key,
-        signature,
-    })
-}
-
-/// Sign a message with ML-DSA-65 (Dilithium3)
-/// The signature covers: leaf_id || timestamp_ms || plaintext
-fn sign_message(
-    leaf_id: &[u8; 32],
-    timestamp_ms: u64,
-    plaintext: &[u8],
-    secret_key: &[u8],
-) -> Result<Vec<u8>> {
-    let sk = dilithium3::SecretKey::from_bytes(secret_key)
-        .map_err(|_| anyhow!("invalid ML-DSA-65 secret key"))?;
-
-    let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
-    payload.extend_from_slice(leaf_id);
-    payload.extend_from_slice(&timestamp_ms.to_le_bytes());
-    payload.extend_from_slice(plaintext);
-
-    let signature = dilithium3::detached_sign(&payload, &sk);
-    Ok(signature.as_bytes().to_vec())
-}
-
-/// Verify a message signature using ML-DSA-65 (Dilithium3)
-/// Returns Ok(()) if signature is valid, Err otherwise
-fn verify_message_signature(
-    leaf_id: &[u8; 32],
-    timestamp_ms: u64,
-    plaintext: &[u8],
-    signature_bytes: &[u8],
-    public_key_bytes: &[u8],
-) -> Result<()> {
-    let pk = dilithium3::PublicKey::from_bytes(public_key_bytes)
-        .map_err(|_| anyhow!("invalid ML-DSA-65 public key"))?;
-
-    let signature = dilithium3::DetachedSignature::from_bytes(signature_bytes)
-        .map_err(|_| anyhow!("invalid ML-DSA-65 signature"))?;
-
-    let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
-    payload.extend_from_slice(leaf_id);
-    payload.extend_from_slice(&timestamp_ms.to_le_bytes());
-    payload.extend_from_slice(plaintext);
-
-    dilithium3::verify_detached_signature(&signature, &payload, &pk)
-        .map_err(|_| anyhow!("signature verification failed"))?;
-
-    Ok(())
-}
-
-#[cfg(test)]
-fn encrypt_message(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
-    use chacha20poly1305::{
-        ChaCha20Poly1305,
-        aead::{Aead, AeadCore, KeyInit, OsRng},
-    };
-
-    let cipher = ChaCha20Poly1305::new(key.into());
-    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-
-    let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
-        .map_err(|e| anyhow!("encryption failed: {}", e))?;
-
-    // Format: nonce (12 bytes) || ciphertext || tag (16 bytes, included in ciphertext)
-    let mut result = nonce.to_vec();
-    result.extend_from_slice(&ciphertext);
-
-    Ok(result)
-}
-
-/// Decrypt message using ChaCha20-Poly1305 (post-quantum resistant AEAD)
-/// Expects: nonce (12 bytes) || ciphertext || tag (16 bytes)
-#[cfg(test)]
-fn decrypt_message(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
-    use chacha20poly1305::{
-        ChaCha20Poly1305,
-        aead::{Aead, KeyInit},
-    };
-
-    if data.len() < 12 {
-        return Err(anyhow!(
-            "ciphertext too short (need at least 12-byte nonce)"
-        ));
-    }
-
-    let (nonce_bytes, ciphertext) = data.split_at(12);
-    let nonce = nonce_bytes.into();
-
-    let cipher = ChaCha20Poly1305::new(key.into());
-
-    cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| anyhow!("decryption failed: {}", e))
-}
-
-fn encode_capss_witness(witness: &CapssWitnessBundle) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    ciborium::ser::into_writer(witness, &mut buf).context("failed to encode CAPSS witness")?;
-    Ok(buf)
-}
-
-#[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
-fn decode_capss_witness(data: &[u8]) -> Result<CapssWitnessBundle> {
-    ciborium::de::from_reader(data).context("failed to decode CAPSS witness")
-}
-
 #[cfg(test)]
 #[allow(
     clippy::panic,
@@ -7097,224 +6668,3 @@ fn decode_capss_witness(data: &[u8]) -> Result<CapssWitnessBundle> {
 )]
 #[path = "native/tests/mod.rs"]
 mod tests;
-
-#[test]
-fn test_message_signing_and_verification() -> Result<(), Box<dyn std::error::Error>> {
-    // Generate test keys
-    let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
-    let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
-    let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
-
-    // Test data
-    let leaf_id = [0x42u8; 32];
-    let plaintext = b"Hello, authenticated world!";
-    let timestamp_ms = 1_234_567_890u64;
-
-    // Sign the message
-    let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)?;
-
-    // Verify the signature - should succeed
-    let result = verify_message_signature(
-        &leaf_id,
-        timestamp_ms,
-        plaintext,
-        &signature,
-        &msg_sign_public_key,
-    );
-    assert!(result.is_ok(), "signature verification should succeed");
-
-    // Verify with wrong plaintext - should fail
-    let wrong_plaintext = b"Wrong message";
-    let result = verify_message_signature(
-        &leaf_id,
-        timestamp_ms,
-        wrong_plaintext,
-        &signature,
-        &msg_sign_public_key,
-    );
-    assert!(
-        result.is_err(),
-        "verification should fail with wrong plaintext"
-    );
-
-    // Verify with wrong timestamp - should fail
-    let wrong_timestamp = timestamp_ms + 1;
-    let result = verify_message_signature(
-        &leaf_id,
-        wrong_timestamp,
-        plaintext,
-        &signature,
-        &msg_sign_public_key,
-    );
-    assert!(
-        result.is_err(),
-        "verification should fail with wrong timestamp"
-    );
-
-    // Verify with wrong leaf_id - should fail
-    let wrong_leaf_id = [0x99u8; 32];
-    let result = verify_message_signature(
-        &wrong_leaf_id,
-        timestamp_ms,
-        plaintext,
-        &signature,
-        &msg_sign_public_key,
-    );
-    assert!(
-        result.is_err(),
-        "verification should fail with wrong leaf_id"
-    );
-
-    // Verify with corrupted signature - should fail
-    let mut corrupted_signature = signature.clone();
-    corrupted_signature[100] ^= 0xFF; // Flip some bits
-    let result = verify_message_signature(
-        &leaf_id,
-        timestamp_ms,
-        plaintext,
-        &corrupted_signature,
-        &msg_sign_public_key,
-    );
-    assert!(
-        result.is_err(),
-        "verification should fail with corrupted signature"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn test_authenticated_message_format() -> Result<(), Box<dyn std::error::Error>> {
-    let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
-    let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
-    let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
-
-    let leaf_id = [0x42u8; 32];
-    let plaintext = b"Test message";
-    let timestamp_ms = 987_654_321u64;
-    let epoch_key = [0x55u8; 32];
-
-    let signature = sign_message(&leaf_id, timestamp_ms, plaintext, &msg_sign_secret_key)?;
-    let authenticated_msg =
-        encode_authenticated_message(timestamp_ms, plaintext, &msg_sign_public_key, &signature);
-
-    let ciphertext = encrypt_message(&authenticated_msg, &epoch_key)?;
-    let decrypted = decrypt_message(&ciphertext, &epoch_key)?;
-    assert_eq!(decrypted, authenticated_msg);
-
-    let envelope = decode_authenticated_message(&decrypted)?;
-    assert_eq!(envelope.timestamp_ms, timestamp_ms);
-    assert_eq!(envelope.plaintext, plaintext);
-    assert_eq!(envelope.public_key, msg_sign_public_key.as_slice());
-    assert_eq!(envelope.signature, signature.as_slice());
-
-    verify_message_signature(
-        &leaf_id,
-        envelope.timestamp_ms,
-        envelope.plaintext,
-        envelope.signature,
-        envelope.public_key,
-    )?;
-
-    Ok(())
-}
-
-#[test]
-fn test_message_authentication_prevents_spoofing() -> Result<(), Box<dyn std::error::Error>> {
-    // Create two different identities
-    let (pk_alice, sk_alice) = dilithium3::keypair();
-    let (pk_bob, _sk_bob) = dilithium3::keypair();
-
-    let leaf_id_alice = [0x11u8; 32];
-    let leaf_id_bob = [0x22u8; 32];
-    let plaintext = b"Message from Alice";
-    let timestamp_ms = 555_555_555u64;
-
-    // Alice signs a message
-    let signature = sign_message(&leaf_id_alice, timestamp_ms, plaintext, sk_alice.as_bytes())?;
-
-    // Verify with Alice's public key - should succeed
-    let result = verify_message_signature(
-        &leaf_id_alice,
-        timestamp_ms,
-        plaintext,
-        &signature,
-        pk_alice.as_bytes(),
-    );
-    assert!(
-        result.is_ok(),
-        "Alice's signature should verify with Alice's key"
-    );
-
-    // Try to verify with Bob's public key - should fail (prevents impersonation)
-    let result = verify_message_signature(
-        &leaf_id_alice,
-        timestamp_ms,
-        plaintext,
-        &signature,
-        pk_bob.as_bytes(),
-    );
-    assert!(
-        result.is_err(),
-        "Alice's signature should NOT verify with Bob's key"
-    );
-
-    // Try to claim message is from Bob using Alice's signature - should fail
-    let result = verify_message_signature(
-        &leaf_id_bob,
-        timestamp_ms,
-        plaintext,
-        &signature,
-        pk_alice.as_bytes(),
-    );
-    assert!(
-        result.is_err(),
-        "Cannot claim message is from Bob using Alice's signature"
-    );
-
-    // Verify with wrong timestamp - should fail
-    let result = verify_message_signature(
-        &leaf_id_alice,
-        timestamp_ms + 1,
-        plaintext,
-        &signature,
-        pk_alice.as_bytes(),
-    );
-    assert!(
-        result.is_err(),
-        "Verification should fail with wrong timestamp"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn test_message_format_size_constraints() -> Result<(), Box<dyn std::error::Error>> {
-    const MLDSA65_PUBKEY_SIZE: usize = ml_dsa_public_key_bytes();
-    const MLDSA65_SIG_SIZE: usize = ml_dsa_signature_bytes();
-    const MIN_MSG_SIZE: usize =
-        MESSAGE_PREFIX.len() + 8 + 4 + 4 + MLDSA65_PUBKEY_SIZE + 4 + MLDSA65_SIG_SIZE;
-
-    // Test that minimum size is correct
-    assert_eq!(
-        MIN_MSG_SIZE,
-        4 + 8 + 4 + 4 + MLDSA65_PUBKEY_SIZE + 4 + MLDSA65_SIG_SIZE
-    );
-
-    // Verify dilithium3 key sizes match constants
-    let (pk, sk) = dilithium3::keypair();
-    assert_eq!(pk.as_bytes().len(), MLDSA65_PUBKEY_SIZE);
-    assert_eq!(
-        sk.as_bytes().len(),
-        4032,
-        "ML-DSA-65 secret key is 4032 bytes"
-    );
-
-    // Verify signature size
-    let leaf_id = [0u8; 32];
-    let plaintext = b"test";
-    let sig = sign_message(&leaf_id, 42, plaintext, sk.as_bytes())?;
-    assert_eq!(sig.len(), MLDSA65_SIG_SIZE);
-
-    Ok(())
-}
