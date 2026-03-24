@@ -47,8 +47,8 @@ use pb::{
     GetWindowRequest, GetWindowResponse, HealthResponse, IdentityBinding, JoinTicketRequest,
     JoinTicketResponse, Member, MembersRequest, MembersResponse, MergeTicketIntent,
     MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
-    RotateRoomKbroadRequest, RotateRoomKbroadResponse, SendMessageRequest, SendMessageResponse,
-    TelemetryEntry, WindowEntry, WindowHead,
+    RoomAdminProof, RotateRoomKbroadRequest, RotateRoomKbroadResponse, SendMessageRequest,
+    SendMessageResponse, TelemetryEntry, WindowEntry, WindowHead,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -953,13 +953,6 @@ fn enforce_window_config_auth(
     enforce_admin_token(headers, expected_token)
 }
 
-fn enforce_room_admin_auth(
-    headers: &HeaderMap,
-    expected_token: Option<&str>,
-) -> Result<(), ApiError> {
-    enforce_admin_token(headers, expected_token)
-}
-
 fn enforce_message_auth_header(
     headers: &HeaderMap,
     expected_token: Option<&str>,
@@ -1258,6 +1251,51 @@ fn verify_identity_binding(binding: &IdentityBinding) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn verify_room_admin_proof(
+    proof: &RoomAdminProof,
+    operation: &'static str,
+    room_id: &str,
+    kbroad_public: &[u8],
+) -> Result<Vec<u8>, ApiError> {
+    use pqcrypto_dilithium::dilithium5;
+    use pqcrypto_traits::sign::{
+        DetachedSignature as DetachedSignatureTrait, PublicKey as PublicKeyTrait,
+    };
+
+    if proof.pop_public_key.len() != dilithium5::public_key_bytes() {
+        return Err(ApiError::InvalidRequest(
+            "invalid room admin public key length",
+        ));
+    }
+    if proof.signature.len() != dilithium5::signature_bytes() {
+        return Err(ApiError::InvalidRequest(
+            "invalid room admin signature length",
+        ));
+    }
+    if room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    if kbroad_public.is_empty() {
+        return Err(ApiError::InvalidRequest("kbroad_public must be provided"));
+    }
+
+    let message_data = (operation, room_id, ByteBuf::from(kbroad_public.to_vec()));
+    let mut message = Vec::new();
+    into_writer(&message_data, &mut message)
+        .map_err(|_| ApiError::InvalidRequest("failed to encode room admin proof message"))?;
+
+    let public_key = <dilithium5::PublicKey as PublicKeyTrait>::from_bytes(&proof.pop_public_key)
+        .map_err(|_| ApiError::InvalidRequest("invalid room admin public key"))?;
+    let signature =
+        <dilithium5::DetachedSignature as DetachedSignatureTrait>::from_bytes(&proof.signature)
+            .map_err(|_| ApiError::InvalidRequest("invalid room admin signature"))?;
+
+    dilithium5::verify_detached_signature(&signature, &message, &public_key)
+        .map_err(|_| ApiError::InvalidRequest("room admin proof verification failed"))?;
+
+    Ok(proof.pop_public_key.clone())
+}
+
 async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
     let _permit = state.accept_epoch_limiter.try_acquire()?;
     let request = AcceptEpochRequest::decode(body)?;
@@ -1268,7 +1306,8 @@ async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Resp
         }
         Err(err) => return Err(ApiError::from(err)),
     };
-    enforce_expensive_rate_limit(&state, "accept_epoch", accept_epoch_rate_limit_key(&bundle)).await?;
+    enforce_expensive_rate_limit(&state, "accept_epoch", accept_epoch_rate_limit_key(&bundle))
+        .await?;
 
     let response = apply_bundle(&state, &bundle).await?;
     Ok(protobuf_response(&response))
@@ -1295,10 +1334,9 @@ async fn apply_bundle(
                 drop(guard);
                 let mapped = map_accept_error(state, err, None, None).await;
                 maybe_record_api_concurrency_error("accept_epoch", &mapped);
-                metrics::counter!("cityg_accept_epoch_total", "result" => "error")
-                .increment(1);
+                metrics::counter!("cityg_accept_epoch_total", "result" => "error").increment(1);
                 metrics::histogram!("cityg_accept_epoch_duration_seconds", "result" => "error")
-                .record(started.elapsed().as_secs_f64());
+                    .record(started.elapsed().as_secs_f64());
                 return Err(mapped);
             }
         };
@@ -1310,7 +1348,7 @@ async fn apply_bundle(
     state.clear_merge_ticket_cache_for_gid(gid).await;
     metrics::counter!("cityg_accept_epoch_total", "result" => "ok").increment(1);
     metrics::histogram!("cityg_accept_epoch_duration_seconds", "result" => "ok")
-    .record(started.elapsed().as_secs_f64());
+        .record(started.elapsed().as_secs_f64());
     Ok(accept_response_from(&outcome))
 }
 
@@ -1547,7 +1585,9 @@ async fn members_for_request(
 
     if parent_root.is_empty() {
         let latest_root = guard.latest_parent_root(gid).ok_or(ApiError::NotFound)?;
-        let members = guard.members_for_root(gid, &latest_root).unwrap_or_default();
+        let members = guard
+            .members_for_root(gid, &latest_root)
+            .unwrap_or_default();
         Ok((members, latest_root))
     } else {
         if parent_root.len() != 32 {
@@ -1555,7 +1595,9 @@ async fn members_for_request(
         }
         let mut root = [0u8; 32];
         root.copy_from_slice(parent_root);
-        let members = guard.members_for_root(gid, &root).ok_or(ApiError::NotFound)?;
+        let members = guard
+            .members_for_root(gid, &root)
+            .ok_or(ApiError::NotFound)?;
         Ok((members, root))
     }
 }
@@ -1600,8 +1642,12 @@ async fn members(
         return Err(ApiError::InvalidRequest("gid must be provided"));
     }
     let gid = request.gid;
-    enforce_expensive_rate_limit(&state, "members", message_scoped_rate_limit_key(&headers, &gid))
-        .await?;
+    enforce_expensive_rate_limit(
+        &state,
+        "members",
+        message_scoped_rate_limit_key(&headers, &gid),
+    )
+    .await?;
     let offset = request.offset.unwrap_or(0);
     let limit = request
         .limit
@@ -1827,10 +1873,9 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
 
 async fn bootstrap_room(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    enforce_room_admin_auth(&headers, configured_rooms_admin_token().as_deref())?;
     let request = BootstrapRoomRequest::decode(body)?;
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
@@ -1846,12 +1891,22 @@ async fn bootstrap_room(
     }
 
     let gid = parse_gid(&request.room_id)?;
+    let proof = request
+        .admin_proof
+        .as_ref()
+        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
+    let initial_room_admin_pop_key = verify_room_admin_proof(
+        proof,
+        "bootstrap_room_v1",
+        &request.room_id,
+        &request.kbroad_public,
+    )?;
 
     {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         guard
-            .register_group(&gid, request.kbroad_public)
+            .register_group_with_admin(&gid, request.kbroad_public, initial_room_admin_pop_key)
             .map_err(|err| match err {
                 ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
                 other => ApiError::from(other),
@@ -1867,10 +1922,9 @@ async fn bootstrap_room(
 
 async fn rotate_room_kbroad(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    enforce_room_admin_auth(&headers, configured_rooms_admin_token().as_deref())?;
     let request = RotateRoomKbroadRequest::decode(body)?;
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
@@ -1885,11 +1939,21 @@ async fn rotate_room_kbroad(
     }
 
     let gid = parse_gid(&request.room_id)?;
+    let proof = request
+        .admin_proof
+        .as_ref()
+        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
     let kbroad_generation = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
+        let actor_pop_key = verify_room_admin_proof(
+            proof,
+            "rotate_room_kbroad_v1",
+            &request.room_id,
+            &request.kbroad_public,
+        )?;
         guard
-            .rotate_group_kbroad(&gid, request.kbroad_public)
+            .rotate_group_kbroad_with_actor(&gid, request.kbroad_public, &actor_pop_key)
             .map_err(|err| match err {
                 ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
                 other => ApiError::from(other),
@@ -1960,8 +2024,7 @@ async fn merge_ticket(
             MergeTicketIntent::Leave => {
                 guard.build_merge_ticket(&gid, &leaf_id).map_err(|err| {
                     maybe_record_client_concurrency_error("merge_ticket", &err);
-                    metrics::counter!("cityg_merge_ticket_total", "result" => "error")
-                        .increment(1);
+                    metrics::counter!("cityg_merge_ticket_total", "result" => "error").increment(1);
                     ApiError::from(err)
                 })?
             }
@@ -1969,8 +2032,7 @@ async fn merge_ticket(
                 .build_merge_ticket_for_refresh(&gid, &leaf_id)
                 .map_err(|err| {
                     maybe_record_client_concurrency_error("merge_ticket_refresh", &err);
-                    metrics::counter!("cityg_merge_ticket_total", "result" => "error")
-                        .increment(1);
+                    metrics::counter!("cityg_merge_ticket_total", "result" => "error").increment(1);
                     ApiError::from(err)
                 })?,
         }
@@ -3269,6 +3331,9 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::routing::get;
+    use cityg_api_client::{
+        RoomAdminOperation, build_room_admin_proof, generate_room_admin_keypair,
+    };
     use cityg_client::demo::{DEMO_GID, demo_bundle};
     use cityg_client::witness::SrxInputsOwned;
     use cityg_config::CityGConfig;
@@ -3365,6 +3430,27 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("env lock poisoned")
+    }
+
+    fn test_room_admin_proof(
+        operation: RoomAdminOperation,
+        room_id: &str,
+        kbroad_public: &[u8],
+        pop_public_key: &[u8],
+        pop_secret_key: &[u8],
+    ) -> RoomAdminProof {
+        let proof = build_room_admin_proof(
+            operation,
+            room_id,
+            kbroad_public,
+            pop_public_key,
+            pop_secret_key,
+        )
+        .expect("build room admin proof");
+        RoomAdminProof {
+            pop_public_key: proof.pop_public_key,
+            signature: proof.signature,
+        }
     }
 
     fn ensure_test_admin_tokens() {
@@ -3620,42 +3706,6 @@ mod tests {
         ));
         assert!(matches!(
             enforce_admin_token_with_policy(&empty_headers, None, false),
-            Err(ApiError::Unauthorized("admin token is not configured"))
-        ));
-    }
-
-    #[test]
-    fn room_admin_auth_accepts_matching_header_token() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WINDOW_CONFIG_ADMIN_HEADER,
-            HeaderValue::from_static("room-secret"),
-        );
-        assert!(enforce_room_admin_auth(&headers, Some("room-secret")).is_ok());
-    }
-
-    #[test]
-    fn room_admin_auth_rejects_missing_or_wrong_token() {
-        let empty_headers = HeaderMap::new();
-        let missing = enforce_room_admin_auth(&empty_headers, Some("room-secret"));
-        assert!(matches!(
-            missing,
-            Err(ApiError::Unauthorized("missing or invalid admin token"))
-        ));
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WINDOW_CONFIG_ADMIN_HEADER,
-            HeaderValue::from_static("wrong"),
-        );
-        let wrong = enforce_room_admin_auth(&headers, Some("room-secret"));
-        assert!(matches!(
-            wrong,
-            Err(ApiError::Unauthorized("missing or invalid admin token"))
-        ));
-
-        assert!(matches!(
-            enforce_room_admin_auth(&empty_headers, None),
             Err(ApiError::Unauthorized("admin token is not configured"))
         ));
     }
@@ -4342,6 +4392,7 @@ mod tests {
             encode(BootstrapRoomRequest {
                 room_id: String::new(),
                 kbroad_public: vec![0x11; ml_kem_public_key_bytes()],
+                admin_proof: None,
             }),
         )
         .await
@@ -4357,6 +4408,7 @@ mod tests {
             encode(BootstrapRoomRequest {
                 room_id: hex::encode([0x44u8; 32]),
                 kbroad_public: Vec::new(),
+                admin_proof: None,
             }),
         )
         .await
@@ -4372,6 +4424,7 @@ mod tests {
             encode(BootstrapRoomRequest {
                 room_id: hex::encode([0x55u8; 32]),
                 kbroad_public: vec![0x11; ml_kem_public_key_bytes() - 1],
+                admin_proof: None,
             }),
         )
         .await
@@ -4381,12 +4434,22 @@ mod tests {
             ApiError::InvalidRequest("kbroad_public has unexpected length")
         ));
 
+        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+        let room_id = hex::encode([0x66u8; 32]);
+        let kbroad_public = vec![0x33; ml_kem_public_key_bytes()];
         let response = bootstrap_room(
             State(state),
             room_admin_headers(),
             encode(BootstrapRoomRequest {
-                room_id: hex::encode([0x66u8; 32]),
-                kbroad_public: vec![0x33; ml_kem_public_key_bytes()],
+                room_id: room_id.clone(),
+                kbroad_public: kbroad_public.clone(),
+                admin_proof: Some(test_room_admin_proof(
+                    RoomAdminOperation::Bootstrap,
+                    &room_id,
+                    &kbroad_public,
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
             }),
         )
         .await
@@ -4400,6 +4463,8 @@ mod tests {
         let state = test_api_state();
         let gid = [0x77u8; 32];
         let kbroad_public = vec![0x44; ml_kem_public_key_bytes()];
+        let room_id = hex::encode(gid);
+        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
         let encode = |request: BootstrapRoomRequest| -> Bytes {
             let mut body = Vec::new();
             request.encode(&mut body).expect("encode bootstrap request");
@@ -4410,8 +4475,15 @@ mod tests {
             State(state.clone()),
             room_admin_headers(),
             encode(BootstrapRoomRequest {
-                room_id: hex::encode(gid),
+                room_id: room_id.clone(),
                 kbroad_public: kbroad_public.clone(),
+                admin_proof: Some(test_room_admin_proof(
+                    RoomAdminOperation::Bootstrap,
+                    &room_id,
+                    &kbroad_public,
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
             }),
         )
         .await
@@ -4421,8 +4493,15 @@ mod tests {
             State(state),
             room_admin_headers(),
             encode(BootstrapRoomRequest {
-                room_id: hex::encode(gid),
-                kbroad_public,
+                room_id: room_id.clone(),
+                kbroad_public: kbroad_public.clone(),
+                admin_proof: Some(test_room_admin_proof(
+                    RoomAdminOperation::Bootstrap,
+                    &room_id,
+                    &kbroad_public,
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
             }),
         )
         .await
@@ -4434,9 +4513,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bootstrap_room_requires_room_admin_proof() {
+        let state = test_api_state();
+        let encode = |request: BootstrapRoomRequest| -> Bytes {
+            let mut body = Vec::new();
+            request.encode(&mut body).expect("encode bootstrap request");
+            Bytes::from(body)
+        };
+
+        let err = bootstrap_room(
+            State(state),
+            HeaderMap::new(),
+            encode(BootstrapRoomRequest {
+                room_id: hex::encode([0x88u8; 32]),
+                kbroad_public: vec![0x55; ml_kem_public_key_bytes()],
+                admin_proof: None,
+            }),
+        )
+        .await
+        .expect_err("missing proof must fail");
+        assert!(matches!(
+            err,
+            ApiError::Unauthorized("room admin proof is required")
+        ));
+    }
+
+    #[tokio::test]
     async fn rotate_room_kbroad_validates_requests_and_updates_generation() {
         let state = test_api_state();
         let headers = room_admin_headers();
+        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
         let encode = |request: RotateRoomKbroadRequest| -> Bytes {
             let mut body = Vec::new();
             request.encode(&mut body).expect("encode rotate request");
@@ -4449,6 +4555,7 @@ mod tests {
             encode(RotateRoomKbroadRequest {
                 room_id: String::new(),
                 kbroad_public: vec![0x11; ml_kem_public_key_bytes()],
+                admin_proof: None,
             }),
         )
         .await
@@ -4464,6 +4571,7 @@ mod tests {
             encode(RotateRoomKbroadRequest {
                 room_id: hex::encode(DEMO_GID),
                 kbroad_public: vec![0x11; ml_kem_public_key_bytes() - 1],
+                admin_proof: None,
             }),
         )
         .await
@@ -4475,12 +4583,20 @@ mod tests {
 
         let mut rotated = cityg_client::demo::kbroad_public().to_vec();
         rotated[0] ^= 0x3C;
+        let room_id = hex::encode(DEMO_GID);
         let response = rotate_room_kbroad(
             State(state.clone()),
             headers.clone(),
             encode(RotateRoomKbroadRequest {
-                room_id: hex::encode(DEMO_GID),
+                room_id: room_id.clone(),
                 kbroad_public: rotated.clone(),
+                admin_proof: Some(test_room_admin_proof(
+                    RoomAdminOperation::RotateKbroad,
+                    &room_id,
+                    &rotated,
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
             }),
         )
         .await
@@ -4511,6 +4627,7 @@ mod tests {
     async fn rotate_room_kbroad_maps_server_invalid_input_paths() {
         let state = test_api_state();
         let headers = room_admin_headers();
+        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
         let encode = |request: RotateRoomKbroadRequest| -> Bytes {
             let mut body = Vec::new();
             request.encode(&mut body).expect("encode rotate request");
@@ -4518,12 +4635,20 @@ mod tests {
         };
 
         let missing_gid = [0xEEu8; 32];
+        let missing_room_id = hex::encode(missing_gid);
         let missing_err = rotate_room_kbroad(
             State(state.clone()),
             headers.clone(),
             encode(RotateRoomKbroadRequest {
-                room_id: hex::encode(missing_gid),
+                room_id: missing_room_id.clone(),
                 kbroad_public: vec![0x22; ml_kem_public_key_bytes()],
+                admin_proof: Some(test_room_admin_proof(
+                    RoomAdminOperation::RotateKbroad,
+                    &missing_room_id,
+                    &vec![0x22; ml_kem_public_key_bytes()],
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
             }),
         )
         .await
@@ -4533,12 +4658,20 @@ mod tests {
             ApiError::InvalidRequest("kbroad key missing")
         ));
 
+        let demo_room_id = hex::encode(DEMO_GID);
         let unchanged_err = rotate_room_kbroad(
             State(state),
             headers,
             encode(RotateRoomKbroadRequest {
-                room_id: hex::encode(DEMO_GID),
+                room_id: demo_room_id.clone(),
                 kbroad_public: cityg_client::demo::kbroad_public().to_vec(),
+                admin_proof: Some(test_room_admin_proof(
+                    RoomAdminOperation::RotateKbroad,
+                    &demo_room_id,
+                    cityg_client::demo::kbroad_public(),
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
             }),
         )
         .await
@@ -4546,6 +4679,60 @@ mod tests {
         assert!(matches!(
             unchanged_err,
             ApiError::InvalidRequest("kbroad key unchanged")
+        ));
+    }
+
+    #[tokio::test]
+    async fn rotate_room_kbroad_rejects_non_admin_proof() {
+        let state = test_api_state();
+        let encode = |request: RotateRoomKbroadRequest| -> Bytes {
+            let mut body = Vec::new();
+            request.encode(&mut body).expect("encode rotate request");
+            Bytes::from(body)
+        };
+        let room_id = hex::encode([0x99u8; 32]);
+        let initial_kbroad_public = vec![0x41; ml_kem_public_key_bytes()];
+        let rotated_kbroad_public = vec![0x42; ml_kem_public_key_bytes()];
+        let (creator_pop_public_key, creator_pop_secret_key) = generate_room_admin_keypair();
+        bootstrap_room(
+            State(state.clone()),
+            HeaderMap::new(),
+            encode_proto_request(&BootstrapRoomRequest {
+                room_id: room_id.clone(),
+                kbroad_public: initial_kbroad_public.clone(),
+                admin_proof: Some(test_room_admin_proof(
+                    RoomAdminOperation::Bootstrap,
+                    &room_id,
+                    &initial_kbroad_public,
+                    &creator_pop_public_key,
+                    &creator_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect("bootstrap should succeed");
+
+        let (other_pop_public_key, other_pop_secret_key) = generate_room_admin_keypair();
+        let err = rotate_room_kbroad(
+            State(state),
+            HeaderMap::new(),
+            encode(RotateRoomKbroadRequest {
+                room_id: room_id.clone(),
+                kbroad_public: rotated_kbroad_public.clone(),
+                admin_proof: Some(test_room_admin_proof(
+                    RoomAdminOperation::RotateKbroad,
+                    &room_id,
+                    &rotated_kbroad_public,
+                    &other_pop_public_key,
+                    &other_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect_err("non-admin proof must fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("room admin proof is not authorized")
         ));
     }
 
@@ -4894,18 +5081,28 @@ mod tests {
         let mut room_ids = vec![hex::encode(DEMO_GID)];
         for seed in [0x11u8, 0x22u8, 0x33u8] {
             let gid = [seed; 32];
+            let room_id = hex::encode(gid);
+            let kbroad_public = vec![seed; ml_kem_public_key_bytes()];
+            let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
             let request = BootstrapRoomRequest {
-                room_id: hex::encode(gid),
-                kbroad_public: vec![seed; ml_kem_public_key_bytes()],
+                room_id: room_id.clone(),
+                kbroad_public: kbroad_public.clone(),
+                admin_proof: Some(test_room_admin_proof(
+                    RoomAdminOperation::Bootstrap,
+                    &room_id,
+                    &kbroad_public,
+                    &pop_public_key,
+                    &pop_secret_key,
+                )),
             };
             bootstrap_room(
                 State(state.clone()),
-                room_admin_headers(),
+                HeaderMap::new(),
                 encode_proto_request(&request),
             )
             .await
             .expect("bootstrap extra room for contention test");
-            room_ids.push(hex::encode(gid));
+            room_ids.push(room_id);
         }
 
         let task_count = 48usize;
@@ -6245,7 +6442,10 @@ mod tests {
             std::env::set_var(EXPENSIVE_RATE_LIMIT_MAX_KEYS_ENV, "11");
         }
         assert_eq!(configured_expensive_rate_limit_burst(), 7);
-        assert_eq!(configured_expensive_rate_limit_window(), Duration::from_secs(9));
+        assert_eq!(
+            configured_expensive_rate_limit_window(),
+            Duration::from_secs(9)
+        );
         assert_eq!(configured_expensive_rate_limit_max_keys(), 11);
     }
 
@@ -6287,7 +6487,10 @@ mod tests {
             )
             .await
             .expect_err("malformed bundle must be rejected");
-            assert!(matches!(err, ApiError::InvalidRequest("invalid bundle encoding")));
+            assert!(matches!(
+                err,
+                ApiError::InvalidRequest("invalid bundle encoding")
+            ));
         }
     }
 
@@ -6360,10 +6563,16 @@ mod tests {
             .await
             .expect_err("malformed refresh bundle must be rejected");
 
-            if matches!(&err, ApiError::InvalidRequest("bundle_cbor must be provided")) {
+            if matches!(
+                &err,
+                ApiError::InvalidRequest("bundle_cbor must be provided")
+            ) {
                 continue;
             }
-            assert!(matches!(err, ApiError::InvalidRequest("invalid bundle encoding")));
+            assert!(matches!(
+                err,
+                ApiError::InvalidRequest("invalid bundle encoding")
+            ));
         }
     }
 

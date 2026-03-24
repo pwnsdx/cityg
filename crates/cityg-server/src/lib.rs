@@ -88,6 +88,7 @@ use msphf_orchestrator::{
     self, AcceptanceContext, AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE,
     DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes, hdr,
 };
+use pqcrypto_kyber::kyber768;
 use serde::{Deserialize, Serialize};
 
 /// Re-export commonly used client-side bundle types for convenience.
@@ -464,6 +465,23 @@ impl CityGServer {
         Ok(())
     }
 
+    pub fn register_group_with_admin(
+        &mut self,
+        gid: &[u8; 32],
+        kbroad_public: Vec<u8>,
+        initial_room_admin_pop_key: Vec<u8>,
+    ) -> Result<(), CityGError> {
+        self.register_group(gid, kbroad_public)?;
+        self.roster
+            .groups
+            .entry(gid.to_vec())
+            .or_default()
+            .room_admin_pop_keys
+            .insert(initial_room_admin_pop_key);
+        self.persist_kbroad_state()?;
+        Ok(())
+    }
+
     pub fn rotate_group_kbroad(
         &mut self,
         gid: &[u8; 32],
@@ -484,12 +502,32 @@ impl CityGServer {
         Ok(generation)
     }
 
+    pub fn rotate_group_kbroad_with_actor(
+        &mut self,
+        gid: &[u8; 32],
+        kbroad_public: Vec<u8>,
+        actor_pop_public_key: &[u8],
+    ) -> Result<u64, CityGError> {
+        if self.roster.has_explicit_room_admins(gid)
+            && !self.roster.is_room_admin(gid, actor_pop_public_key)
+        {
+            return Err(CityGError::InvalidInput(
+                "room admin proof is not authorized",
+            ));
+        }
+        self.rotate_group_kbroad(gid, kbroad_public)
+    }
+
     pub fn kbroad_generation(&self, gid: &[u8; 32]) -> u64 {
         self.roster.kbroad_generation(gid)
     }
 
     pub fn kbroad_rotation_required(&self, gid: &[u8; 32]) -> bool {
         self.roster.kbroad_rotation_required(gid)
+    }
+
+    pub fn room_uses_explicit_admins(&self, gid: &[u8; 32]) -> bool {
+        self.roster.has_explicit_room_admins(gid)
     }
 
     pub fn new(config: ServerConfig) -> Self {
@@ -549,9 +587,7 @@ impl CityGServer {
         gid: &[u8; 32],
         leaf_id_override: Option<[u8; 32]>,
     ) -> Result<JoinTicketBundle, CityGError> {
-        if self.roster.kbroad_rotation_required(gid) {
-            return Err(CityGError::InvalidInput(KBROAD_ROTATION_REQUIRED_ERR));
-        }
+        self.ensure_kbroad_ready(gid)?;
         let pox_r_commit = witness::demo_pox_commit();
 
         let (parent_root, leaf_id, parent_leaves) = {
@@ -667,9 +703,7 @@ impl CityGServer {
         leaf_id: &[u8; 32],
         intent: MergeTicketIntent,
     ) -> Result<MergeTicketBundle, CityGError> {
-        if self.roster.kbroad_rotation_required(gid) {
-            return Err(CityGError::InvalidInput(KBROAD_ROTATION_REQUIRED_ERR));
-        }
+        self.ensure_kbroad_ready(gid)?;
         let parent_root = self
             .roster
             .latest_root(gid)
@@ -891,6 +925,13 @@ impl CityGServer {
         Ok(outcome)
     }
 
+    fn ensure_kbroad_ready(&mut self, gid: &[u8; 32]) -> Result<(), CityGError> {
+        if self.roster.kbroad_rotation_required(gid) {
+            self.rotate_group_kbroad(gid, fresh_kbroad_public())?;
+        }
+        Ok(())
+    }
+
     fn stage_bundle(
         &mut self,
         bundle: &ClientEpochBundle,
@@ -1107,6 +1148,7 @@ impl CityGServer {
             let group = self.roster.groups.entry(gid.clone()).or_default();
             group.kbroad_generation = room_state.kbroad_generation;
             group.rotation_required = room_state.rotation_required;
+            group.room_admin_pop_keys = room_state.room_admin_pop_keys.iter().cloned().collect();
             group.barrier_initialized = room_state.barrier_initialized;
             group.barrier_version = room_state.barrier_version;
             group.barrier_roots_hash = room_state.barrier_roots_hash;
@@ -1239,6 +1281,7 @@ impl CityGServer {
             let group = self.roster.groups.entry(gid.clone()).or_default();
             group.kbroad_generation = room_state.kbroad_generation;
             group.rotation_required = room_state.rotation_required;
+            group.room_admin_pop_keys = room_state.room_admin_pop_keys.iter().cloned().collect();
             group.n_max = room_state.n_max.max(1);
             group.max_barrier_update_bytes = usize::try_from(room_state.max_barrier_update_bytes)
                 .unwrap_or(
@@ -2286,6 +2329,7 @@ fn persisted_kbroad_room_state(
         kbroad_public,
         kbroad_generation,
         rotation_required,
+        room_admin_pop_keys: Vec::new(),
         n_max: DEFAULT_BARRIER_N_MAX,
         pcs_refresh_min_delta_device_ec: default_pcs_refresh_min_delta_device_ec(),
         pcs_refresh_min_delta_group_ec: default_pcs_refresh_min_delta_group_ec(),
@@ -2295,6 +2339,7 @@ fn persisted_kbroad_room_state(
         ..PersistedKbroadRoomState::default()
     };
     if let Some(state) = state {
+        room.room_admin_pop_keys = state.room_admin_pop_keys.iter().cloned().collect();
         room.barrier_initialized = state.barrier_initialized;
         room.barrier_version = state.barrier_version;
         room.barrier_roots_hash = state.barrier_roots_hash;
@@ -2313,6 +2358,11 @@ fn persisted_kbroad_room_state(
             u64::try_from(state.max_barrier_update_bytes).unwrap_or(u64::MAX);
     }
     room
+}
+
+fn fresh_kbroad_public() -> Vec<u8> {
+    let (public, _) = kyber768::keypair();
+    public.as_bytes().to_vec()
 }
 
 fn clear_barrier_path<T>(
@@ -3565,19 +3615,41 @@ mod tests {
     }
 
     #[test]
-    fn kbroad_rotation_gate_blocks_until_rotated() -> Result<(), CityGError> {
+    fn room_admin_rotation_requires_authorized_identity() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0xB3; 32];
+        let initial_kbroad = vec![0x41; 16];
+        let rotated_kbroad = vec![0x42; 16];
+        let admin_pop_key = vec![0xAA; 48];
+        let other_pop_key = vec![0xBB; 48];
+
+        server.register_group_with_admin(&gid, initial_kbroad, admin_pop_key.clone())?;
+
+        let err = server
+            .rotate_group_kbroad_with_actor(&gid, rotated_kbroad.clone(), &other_pop_key)
+            .expect_err("non-admin identity must be rejected");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("room admin proof is not authorized")
+        ));
+
+        assert_eq!(
+            server.rotate_group_kbroad_with_actor(&gid, rotated_kbroad.clone(), &admin_pop_key)?,
+            1
+        );
+        assert_eq!(
+            server.build_join_ticket(&gid)?.kbroad_public,
+            rotated_kbroad
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accept_epoch_blocks_while_kbroad_rotation_is_pending() -> Result<(), CityGError> {
         let mut server = super::demo::demo_server();
         let gid = cityg_client::demo::DEMO_GID;
 
         server.roster.mark_kbroad_rotation_required(gid.as_slice());
-
-        let join_err = server
-            .build_join_ticket(&gid)
-            .expect_err("join ticket must be blocked while rotation is required");
-        assert!(matches!(
-            join_err,
-            CityGError::InvalidInput("kbroad rotation required")
-        ));
 
         let bundle = cityg_client::demo::demo_bundle("rotation-gate")?;
         let accept_err = server
@@ -3587,17 +3659,76 @@ mod tests {
             accept_err,
             CityGError::InvalidInput("kbroad rotation required")
         ));
+        Ok(())
+    }
 
-        let mut rotated_key = cityg_client::demo::kbroad_public().to_vec();
-        rotated_key[0] ^= 0x5A;
-        let generation = server.rotate_group_kbroad(&gid, rotated_key.clone())?;
-        assert_eq!(generation, 1);
-        assert_eq!(server.kbroad_generation(&gid), 1);
-        assert!(!server.kbroad_rotation_required(&gid));
+    #[test]
+    fn build_join_ticket_auto_rotates_kbroad_when_pending() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let gid = cityg_client::demo::DEMO_GID;
+        let previous_key = server
+            .ctx
+            .kbroad_registry()
+            .and_then(|registry| registry.get(gid.as_slice()).cloned())
+            .expect("demo server should start with a KBROAD key");
+
+        server.roster.mark_kbroad_rotation_required(gid.as_slice());
 
         let ticket = server.build_join_ticket(&gid)?;
-        assert_eq!(ticket.kbroad_public, rotated_key);
+        assert_eq!(server.kbroad_generation(&gid), 1);
+        assert!(!server.kbroad_rotation_required(&gid));
+        assert_ne!(ticket.kbroad_public, previous_key);
         assert_eq!(ticket.kbroad_generation, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn build_merge_ticket_auto_rotates_kbroad_when_pending() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let gid = cityg_client::demo::DEMO_GID;
+        let previous_key = server
+            .ctx
+            .kbroad_registry()
+            .and_then(|registry| registry.get(gid.as_slice()).cloned())
+            .expect("demo server should start with a KBROAD key");
+        let bundle = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&bundle)?;
+        let leaf_id = cityg_client::demo::demo_member_leaf("alice");
+
+        server.roster.mark_kbroad_rotation_required(gid.as_slice());
+
+        let ticket = server.build_merge_ticket(&gid, &leaf_id)?;
+        assert_eq!(server.kbroad_generation(&gid), 1);
+        assert!(!server.kbroad_rotation_required(&gid));
+        assert_ne!(ticket.kbroad_public, previous_key);
+        assert_eq!(ticket.kbroad_generation, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_room_admins_persist_across_restart() -> Result<(), CityGError> {
+        let _serial = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("room-admins.journal");
+        let gid = [0xB4; 32];
+        let kbroad_public = vec![0x44; 16];
+        let admin_pop_key = vec![0xCC; 48];
+
+        {
+            let mut config = ServerConfig::new();
+            config.state_path = Some(journal_path.clone());
+            let mut server = CityGServer::new(config);
+            server.register_group_with_admin(&gid, kbroad_public.clone(), admin_pop_key.clone())?;
+        }
+
+        let mut config = ServerConfig::new();
+        config.state_path = Some(journal_path);
+        let mut restarted = CityGServer::new(config);
+        let rotated_kbroad = vec![0x55; 16];
+        assert_eq!(
+            restarted.rotate_group_kbroad_with_actor(&gid, rotated_kbroad, &admin_pop_key)?,
+            1
+        );
         Ok(())
     }
 
@@ -4050,6 +4181,7 @@ mod tests {
                 kbroad_public: vec![0x44; 16],
                 kbroad_generation: 7,
                 rotation_required: true,
+                room_admin_pop_keys: Vec::new(),
                 barrier_initialized: true,
                 barrier_version: 5,
                 barrier_roots_hash: [0x55; 32],
@@ -4115,6 +4247,7 @@ mod tests {
                 kbroad_public: vec![0x77; 16],
                 kbroad_generation: 2,
                 rotation_required: false,
+                room_admin_pop_keys: Vec::new(),
                 barrier_initialized: true,
                 barrier_version: 8,
                 barrier_roots_hash: [0x88; 32],
@@ -8180,6 +8313,20 @@ impl GroupRoster {
             .or_default()
             .rotation_required = false;
     }
+
+    fn has_explicit_room_admins(&self, gid: &[u8]) -> bool {
+        self.groups
+            .get(gid)
+            .map(|state| !state.room_admin_pop_keys.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn is_room_admin(&self, gid: &[u8], actor_pop_public_key: &[u8]) -> bool {
+        self.groups
+            .get(gid)
+            .map(|state| state.room_admin_pop_keys.contains(actor_pop_public_key))
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Clone)]
@@ -8209,6 +8356,7 @@ struct GroupState {
     barrier_pk_entries: Vec<Vec<u8>>,
     barrier_public_tree_history: BTreeMap<[u8; 32], Vec<Vec<u8>>>,
     barrier_hash_cache: Option<Arc<HashMap<usize, [u8; 32]>>>,
+    room_admin_pop_keys: BTreeSet<Vec<u8>>,
 }
 
 impl Default for GroupState {
@@ -8240,6 +8388,7 @@ impl Default for GroupState {
             barrier_pk_entries: Vec::new(),
             barrier_public_tree_history: BTreeMap::new(),
             barrier_hash_cache: None,
+            room_admin_pop_keys: BTreeSet::new(),
         }
     }
 }
@@ -8310,6 +8459,8 @@ struct PersistedKbroadRoomState {
     kbroad_public: Vec<u8>,
     kbroad_generation: u64,
     rotation_required: bool,
+    #[serde(default)]
+    room_admin_pop_keys: Vec<Vec<u8>>,
     #[serde(default)]
     barrier_initialized: bool,
     #[serde(default)]

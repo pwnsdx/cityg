@@ -15,7 +15,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use cityg_api_client::CitygApiClient;
+use cityg_api_client::{
+    CitygApiClient, RoomAdminOperation, build_room_admin_proof, generate_room_admin_keypair,
+};
 use cityg_client::demo;
 use cityg_stress::metrics::{MetricsSnapshot, parse_metrics_snapshot};
 use clap::{ArgAction, Parser};
@@ -1226,7 +1228,16 @@ async fn run_worker_round_attempt(
     attempt: WorkerRoundAttempt<'_>,
 ) -> Result<()> {
     api_client
-        .bootstrap_room(attempt.room_id, demo::kbroad_public())
+        .bootstrap_room_as_admin(attempt.room_id, demo::kbroad_public(), {
+            let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+            build_room_admin_proof(
+                RoomAdminOperation::Bootstrap,
+                attempt.room_id,
+                demo::kbroad_public(),
+                &pop_public_key,
+                &pop_secret_key,
+            )?
+        })
         .await
         .with_context(|| format!("bootstrap room {}", attempt.room_id))?;
 

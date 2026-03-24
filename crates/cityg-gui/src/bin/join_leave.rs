@@ -32,6 +32,8 @@ use ciborium::value::{Integer, Value};
 use cityg_api_client::BarrierJoinRecord;
 use cityg_api_client::{CitygApiClient, Error as ApiClientError, IdentityBinding};
 #[cfg(test)]
+use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
+#[cfg(test)]
 use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
@@ -121,20 +123,6 @@ fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
         .map_err(|err| anyhow!("generate VRF params: {err}"))?;
     msphf_orchestrator::lb::generate_keypair(&params, key_seed)
         .map_err(|err| anyhow!("generate VRF keypair: {err}"))
-}
-
-fn fresh_kbroad_public() -> Vec<u8> {
-    let (public, _) = kyber768::keypair();
-    KemPublicKeyTrait::as_bytes(&public).to_vec()
-}
-
-async fn rotate_room_kbroad_with_fresh_key(client: &CitygApiClient, room_id: &str) -> Result<()> {
-    let fresh_public = fresh_kbroad_public();
-    client
-        .rotate_room_kbroad(room_id, &fresh_public)
-        .await
-        .context("rotate room KBROAD")?;
-    Ok(())
 }
 
 fn bytes32(name: &str, input: &[u8]) -> Result<[u8; 32]> {
@@ -838,7 +826,6 @@ async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> R
         signature: binding_signature.as_bytes().to_vec(),
     };
 
-    let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
         match client
@@ -853,17 +840,6 @@ async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> R
                 freeze_reason,
                 ..
             }) => {
-                if status.is_server_error()
-                    && message.contains("kbroad rotation required")
-                    && !kbroad_rotation_attempted
-                {
-                    kbroad_rotation_attempted = true;
-                    rotate_room_kbroad_with_fresh_key(&client, room_id)
-                        .await
-                        .context("rotate KBROAD before join")?;
-                    continue;
-                }
-
                 if should_retry_ticket_http_error(status.as_u16(), &message, freeze_code)
                     && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                 {
@@ -1075,7 +1051,6 @@ async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Se
 async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     let client = new_api_client(&session.server_url);
     let mut forward_state = session.forward_state.clone();
-    let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
         match client
@@ -1091,17 +1066,6 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
                     ..
                 } = &err
                 {
-                    if status.is_server_error()
-                        && message.contains("kbroad rotation required")
-                        && !kbroad_rotation_attempted
-                    {
-                        kbroad_rotation_attempted = true;
-                        rotate_room_kbroad_with_fresh_key(&client, &session.room_id)
-                            .await
-                            .context("rotate KBROAD before join finalize")?;
-                        continue;
-                    }
-
                     if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
                         && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                     {
@@ -1435,7 +1399,6 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
 async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let client = new_api_client(&session.server_url);
     let mut forward_state = session.forward_state.clone();
-    let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
         match client
@@ -1451,17 +1414,6 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
                     ..
                 } = &err
                 {
-                    if status.is_server_error()
-                        && message.contains("kbroad rotation required")
-                        && !kbroad_rotation_attempted
-                    {
-                        kbroad_rotation_attempted = true;
-                        rotate_room_kbroad_with_fresh_key(&client, &session.room_id)
-                            .await
-                            .context("rotate KBROAD before merge")?;
-                        continue;
-                    }
-
                     if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
                         && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                     {
@@ -2670,8 +2622,16 @@ mod tests {
 
     async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<()> {
         ensure_test_auth_env();
+        let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
+        let admin_proof = build_room_admin_proof(
+            RoomAdminOperation::Bootstrap,
+            room_id,
+            demo::kbroad_public(),
+            &pop_public_key,
+            &pop_secret_key,
+        )?;
         new_api_client(server_url)
-            .bootstrap_room(room_id, demo::kbroad_public())
+            .bootstrap_room_as_admin(room_id, demo::kbroad_public(), admin_proof)
             .await
             .map_err(anyhow::Error::from)
     }
@@ -4597,7 +4557,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn perform_join_finalize_rotates_kbroad_and_defaults_zero_nmax() -> Result<()> {
+    async fn perform_join_finalize_defaults_zero_nmax_without_manual_kbroad_rotation()
+    -> Result<()> {
         let fixture = capture_join_finalize_fixture().await?;
         let mut ticket = fixture.ticket.clone();
         ticket.n_max = 0;
@@ -4605,17 +4566,8 @@ mod tests {
         let state = LeaveMockState::new([
             (
                 "/v1/rooms/merge_ticket",
-                vec![
-                    MockResponse::json(
-                        HttpStatusCode::INTERNAL_SERVER_ERROR,
-                        "kbroad rotation required",
-                        None,
-                        None,
-                    ),
-                    MockResponse::proto_bytes(encode_merge_ticket(&ticket)?),
-                ],
+                vec![MockResponse::proto_bytes(encode_merge_ticket(&ticket)?)],
             ),
-            ("/v1/rooms/rotate_kbroad", vec![MockResponse::empty_proto()]),
             (
                 "/v1/barrier/fetch_public_tree",
                 vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
@@ -4642,8 +4594,7 @@ mod tests {
         let mut session = fixture.session;
         session.server_url = server_url;
         let finalized = perform_join_finalize(session).await?;
-        assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 2);
-        assert_eq!(state.call_count("/v1/rooms/rotate_kbroad"), 1);
+        assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 1);
         assert_eq!(
             finalized.barrier_version,
             ticket.barrier_version.saturating_add(1)
@@ -4987,7 +4938,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn perform_leave_rotates_kbroad_before_cover_leaf_range_rejection() -> Result<()> {
+    async fn perform_leave_reports_cover_leaf_range_rejection_without_manual_kbroad_rotation()
+    -> Result<()> {
         let fixture = capture_leave_fixture().await?;
         let barrier_n_max = if fixture.ticket.n_max == 0 {
             DEFAULT_BARRIER_N_MAX
@@ -5000,17 +4952,8 @@ mod tests {
         let state = LeaveMockState::new([
             (
                 "/v1/rooms/merge_ticket",
-                vec![
-                    MockResponse::json(
-                        HttpStatusCode::INTERNAL_SERVER_ERROR,
-                        "kbroad rotation required",
-                        None,
-                        None,
-                    ),
-                    MockResponse::proto_bytes(encode_merge_ticket(&bad_ticket)?),
-                ],
+                vec![MockResponse::proto_bytes(encode_merge_ticket(&bad_ticket)?)],
             ),
-            ("/v1/rooms/rotate_kbroad", vec![MockResponse::empty_proto()]),
             (
                 "/v1/barrier/fetch_public_tree",
                 vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
@@ -5030,8 +4973,7 @@ mod tests {
                 .contains("cover_leaf_index out of range for barrier tree"),
             "unexpected error: {err}"
         );
-        assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 2);
-        assert_eq!(state.call_count("/v1/rooms/rotate_kbroad"), 1);
+        assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 1);
 
         handle.abort();
         let _ = handle.await;

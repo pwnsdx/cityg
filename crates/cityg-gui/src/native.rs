@@ -34,6 +34,7 @@ use blake3::hash as blake3_hash;
 use ciborium::value::{Integer, Value};
 use cityg_api_client::{
     BarrierJoinRecord, BarrierPublicTree, CitygApiClient, Error as ApiClientError, MergeTicket,
+    RoomAdminOperation, build_room_admin_proof,
 };
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
@@ -8311,12 +8312,24 @@ fn categorize_error(err: &anyhow::Error, context: &str) -> CategorizedError {
         );
     }
 
+    if err_str.contains("room admin proof is required")
+        || err_str.contains("room admin proof is not authorized")
+    {
+        return CategorizedError::new(
+            ErrorCategory::Policy,
+            "Room admin authorization required",
+            technical_details.clone(),
+            "This action must be performed by the room's admin identity from a client that already owns that room-admin key.",
+            false,
+        );
+    }
+
     if err_str.contains("admin token is not configured") {
         return CategorizedError::new(
             ErrorCategory::Policy,
             "Admin authentication required",
             technical_details.clone(),
-            "This action requires a room admin token. Configure CITYG_CLIENT_ADMIN_TOKEN for the client and the matching admin token on the server.",
+            "This action requires an operator admin token. Configure CITYG_CLIENT_ADMIN_TOKEN only for server/operator endpoints such as window config or debug APIs.",
             true,
         );
     }
@@ -8546,8 +8559,19 @@ async fn perform_join(params: JoinParams) -> Result<AppSession> {
                         generated_kbroad_public = Some(public.clone());
                         public
                     };
+                    let admin_proof = build_room_admin_proof(
+                        RoomAdminOperation::Bootstrap,
+                        &room_id,
+                        &provisioning_public,
+                        &pop_public_key,
+                        &pop_secret_key,
+                    )
+                    .context("build room bootstrap admin proof")?;
 
-                    match client.bootstrap_room(&room_id, &provisioning_public).await {
+                    match client
+                        .bootstrap_room_as_admin(&room_id, &provisioning_public, admin_proof)
+                        .await
+                    {
                         Ok(_) => continue,
                         Err(ApiClientError::HttpStatus {
                             status: bootstrap_status,
@@ -9044,7 +9068,6 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
     }
 
     let client = new_api_client(&server_url);
-    let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
         match client.merge_ticket(&room_id, &leaf_id).await {
@@ -9057,17 +9080,6 @@ async fn perform_leave(request: LeaveRequest) -> Result<()> {
                     ..
                 } = &err
                 {
-                    if status.is_server_error()
-                        && message.contains("kbroad rotation required")
-                        && !kbroad_rotation_attempted
-                    {
-                        kbroad_rotation_attempted = true;
-                        rotate_room_kbroad_with_fresh_key(&client, &room_id)
-                            .await
-                            .context("rotate KBROAD before merge")?;
-                        continue;
-                    }
-
                     if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
                         && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                     {
@@ -9431,7 +9443,6 @@ async fn perform_barrier_merge_inner(
     }
 
     let client = new_api_client(&server_url);
-    let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
         match client.merge_ticket_refresh(&room_id, &leaf_id).await {
@@ -9444,17 +9455,6 @@ async fn perform_barrier_merge_inner(
                     ..
                 } = &err
                 {
-                    if status.is_server_error()
-                        && message.contains("kbroad rotation required")
-                        && !kbroad_rotation_attempted
-                    {
-                        kbroad_rotation_attempted = true;
-                        rotate_room_kbroad_with_fresh_key(&client, &room_id)
-                            .await
-                            .context("rotate KBROAD before refresh merge")?;
-                        continue;
-                    }
-
                     if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
                         && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                     {
@@ -10267,7 +10267,6 @@ async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
 
 async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome> {
     let client = new_api_client(&session.server_url);
-    let mut kbroad_rotation_attempted = false;
     let mut retry_attempt = 0u32;
     let ticket = loop {
         match client
@@ -10283,17 +10282,6 @@ async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome>
                     ..
                 } = &err
                 {
-                    if status.is_server_error()
-                        && message.contains("kbroad rotation required")
-                        && !kbroad_rotation_attempted
-                    {
-                        kbroad_rotation_attempted = true;
-                        rotate_room_kbroad_with_fresh_key(&client, &session.room_id)
-                            .await
-                            .context("rotate KBROAD before epoch sync")?;
-                        continue;
-                    }
-
                     if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
                         && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                     {
@@ -10915,15 +10903,6 @@ fn build_identity_binding(
         pop_public_key: pop_public_key.to_vec(),
         signature: signature.as_bytes().to_vec(),
     })
-}
-
-async fn rotate_room_kbroad_with_fresh_key(client: &CitygApiClient, room_id: &str) -> Result<()> {
-    let (fresh_public, _) = generate_kbroad_keypair();
-    client
-        .rotate_room_kbroad(room_id, &fresh_public)
-        .await
-        .context("rotate room KBROAD")?;
-    Ok(())
 }
 
 fn format_member_label(member: &MemberEntry) -> String {
@@ -12775,11 +12754,29 @@ mod tests {
         })
     }
 
-    async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<(), anyhow::Error> {
+    async fn bootstrap_test_room_with_admin_identity(
+        server_url: &str,
+        room_id: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>), anyhow::Error> {
+        let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
+        let admin_proof = build_room_admin_proof(
+            RoomAdminOperation::Bootstrap,
+            room_id,
+            demo::kbroad_public(),
+            &pop_public_key,
+            &pop_secret_key,
+        )?;
         new_api_client(server_url)
-            .bootstrap_room(room_id, demo::kbroad_public())
+            .bootstrap_room_as_admin(room_id, demo::kbroad_public(), admin_proof)
             .await
-            .map_err(anyhow::Error::from)
+            .map_err(anyhow::Error::from)?;
+        Ok((pop_public_key, pop_secret_key))
+    }
+
+    async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<(), anyhow::Error> {
+        bootstrap_test_room_with_admin_identity(server_url, room_id)
+            .await
+            .map(|_| ())
     }
 
     fn test_mouse_down_event() -> MouseDownEvent {
@@ -16640,6 +16637,9 @@ mod tests {
             .map_err(|_| anyhow!("env var lock poisoned"))?;
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
         // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+        let bob_base = temp_dir.path().join("cityg").join("gui-bob");
 
         let port = next_test_port();
         let handle = spawn_server_on(port).await;
@@ -16649,21 +16649,28 @@ mod tests {
         let mut room_id_bytes = [0x66u8; 32];
         room_id_bytes[..2].copy_from_slice(&port.to_le_bytes());
         let room_id = hex_encode(room_id_bytes);
-        bootstrap_test_room(&server_url, &room_id).await?;
+        let (admin_pop_public_key, admin_pop_secret_key) =
+            bootstrap_test_room_with_admin_identity(&server_url, &room_id).await?;
 
-        let mut alice = perform_join(JoinParams {
-            server_url: server_url.clone(),
-            room_id: room_id.clone(),
-            alias: "alice".to_string(),
-        })
-        .await?;
+        let mut alice = {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+            perform_join(JoinParams {
+                server_url: server_url.clone(),
+                room_id: room_id.clone(),
+                alias: "alice".to_string(),
+            })
+            .await?
+        };
         alice.barrier_state.barrier_recovery_pending = false;
-        let mut bob = perform_join(JoinParams {
-            server_url: server_url.clone(),
-            room_id: room_id.clone(),
-            alias: "bob".to_string(),
-        })
-        .await?;
+        let mut bob = {
+            let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+            perform_join(JoinParams {
+                server_url: server_url.clone(),
+                room_id: room_id.clone(),
+                alias: "bob".to_string(),
+            })
+            .await?
+        };
         bob.barrier_state.barrier_recovery_pending = false;
 
         let client = new_api_client(&server_url);
@@ -16682,8 +16689,11 @@ mod tests {
                 .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice())
         );
 
-        persist_session(&alice)?;
-        perform_leave(LeaveRequest::from_session(&alice)).await?;
+        {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+            persist_session(&alice)?;
+            perform_leave(LeaveRequest::from_session(&alice)).await?;
+        }
         let after_alice_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_alice_leave.total_count, 1);
         assert!(
@@ -16701,12 +16711,22 @@ mod tests {
 
         // Membership changes require KBROAD rotation before the next merge ticket.
         let (rotated_kbroad_public, _) = generate_kbroad_keypair();
+        let admin_proof = build_room_admin_proof(
+            RoomAdminOperation::RotateKbroad,
+            &room_id,
+            &rotated_kbroad_public,
+            &admin_pop_public_key,
+            &admin_pop_secret_key,
+        )?;
         client
-            .rotate_room_kbroad(&room_id, &rotated_kbroad_public)
+            .rotate_room_kbroad_as_admin(&room_id, &rotated_kbroad_public, admin_proof)
             .await?;
 
-        persist_session(&bob)?;
-        perform_leave(LeaveRequest::from_session(&bob)).await?;
+        {
+            let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+            persist_session(&bob)?;
+            perform_leave(LeaveRequest::from_session(&bob)).await?;
+        }
         let after_bob_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_bob_leave.total_count, 0);
         assert!(after_bob_leave.members.is_empty());
@@ -17394,9 +17414,7 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x88u8; 32]);
-        new_api_client(&server_url)
-            .bootstrap_room(&room_id, demo::kbroad_public())
-            .await?;
+        bootstrap_test_room(&server_url, &room_id).await?;
 
         let alice = perform_join(JoinParams {
             server_url: server_url.clone(),
@@ -17429,9 +17447,7 @@ mod tests {
 
         let server_url = format!("http://127.0.0.1:{port}");
         let room_id = hex_encode([0x8Fu8; 32]);
-        new_api_client(&server_url)
-            .bootstrap_room(&room_id, demo::kbroad_public())
-            .await?;
+        bootstrap_test_room(&server_url, &room_id).await?;
 
         let session = perform_join(JoinParams {
             server_url: server_url.clone(),
@@ -17958,8 +17974,15 @@ mod tests {
         );
 
         let (rotated_kbroad_public, _) = generate_kbroad_keypair();
+        let admin_proof = build_room_admin_proof(
+            RoomAdminOperation::RotateKbroad,
+            &room_id,
+            &rotated_kbroad_public,
+            &refreshed_alice.pop_public_key,
+            &refreshed_alice.pop_secret_key,
+        )?;
         new_api_client(&server_url)
-            .rotate_room_kbroad(&room_id, &rotated_kbroad_public)
+            .rotate_room_kbroad_as_admin(&room_id, &rotated_kbroad_public, admin_proof)
             .await?;
 
         {

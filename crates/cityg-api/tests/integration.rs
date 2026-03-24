@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
-use cityg_api_client::{CitygApiClient, Error};
+use cityg_api_client::{
+    CitygApiClient, Error, RoomAdminOperation, build_room_admin_proof, generate_room_admin_keypair,
+};
 use cityg_client::{
     ClientEpochBundle,
     demo::{DEMO_GID, bootstrap_public, demo_bundle, demo_member_leaf, kbroad_public},
@@ -30,6 +32,25 @@ fn test_client(base_url: impl Into<String>) -> CitygApiClient {
     CitygApiClient::new(base_url)
         .with_admin_token(TEST_ADMIN_TOKEN)
         .with_message_auth_token(TEST_MESSAGE_TOKEN)
+}
+
+async fn bootstrap_room(
+    client: &CitygApiClient,
+    room_id: &str,
+    kbroad_public: &[u8],
+) -> Result<()> {
+    let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+    let admin_proof = build_room_admin_proof(
+        RoomAdminOperation::Bootstrap,
+        room_id,
+        kbroad_public,
+        &pop_public_key,
+        &pop_secret_key,
+    )?;
+    client
+        .bootstrap_room_as_admin(room_id, kbroad_public, admin_proof)
+        .await?;
+    Ok(())
 }
 
 fn with_window_admin(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -678,7 +699,7 @@ async fn join_ticket_omits_bootstrap_key_when_policy_disabled() -> Result<()> {
 
     let client = test_client(format!("http://127.0.0.1:{port}"));
     let room_id = hex::encode([0x33u8; 32]);
-    client.bootstrap_room(&room_id, kbroad_public()).await?;
+    bootstrap_room(&client, &room_id, kbroad_public()).await?;
     let ticket = client.join_ticket(&room_id, "alice", None).await?;
     assert!(
         ticket.bootstrap_public.is_empty(),
@@ -699,7 +720,7 @@ async fn join_ticket_includes_bootstrap_key_when_policy_enabled() -> Result<()> 
 
     let client = test_client(format!("http://127.0.0.1:{port}"));
     let room_id = hex::encode([0x34u8; 32]);
-    client.bootstrap_room(&room_id, kbroad_public()).await?;
+    bootstrap_room(&client, &room_id, kbroad_public()).await?;
     let ticket = client.join_ticket(&room_id, "alice", None).await?;
     assert_eq!(ticket.bootstrap_public, bootstrap_public());
 

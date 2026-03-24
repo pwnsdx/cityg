@@ -13,6 +13,8 @@ cityg-client = { path = "../cityg-client" }
 msphf-core = { path = "../msphf-core" }
 msphf-orchestrator = { path = "../msphf-orchestrator" }
 ciborium = { version = "0.2", features = ["std"] }
+pqcrypto-kyber = { version = "0.8", default-features = false, features = ["std"] }
+pqcrypto-traits = "0.3"
 rand = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
@@ -21,4 +23,3 @@ hex = "0.4"
 [dev-dependencies]
 tempfile = "3.24"
 pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
-pqcrypto-traits = "0.3"

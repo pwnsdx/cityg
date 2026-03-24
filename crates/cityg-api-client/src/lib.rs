@@ -126,9 +126,11 @@ mod pb {
     include!(concat!(env!("OUT_DIR"), "/cityg.api.v1.rs"));
 }
 
+use ciborium::ser::into_writer;
 use cityg_client::{CityGError as ClientError, ClientEpochBundle, pivot::pivot_parity_from_cbor};
 use msphf_orchestrator::PivotParity;
 pub use pb::IdentityBinding;
+pub use pb::RoomAdminProof;
 use pb::{
     AcceptEpochRequest, AcceptEpochResponse, BarrierFetchPublicTreeRequest,
     BarrierFetchPublicTreeResponse, BarrierResolveJoinsSinceRequest,
@@ -144,9 +146,12 @@ use pb::{
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
+use pqcrypto_dilithium::dilithium5;
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use prost::Message;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use serde_bytes::ByteBuf;
 use std::convert::TryInto;
 use std::time::Duration;
 use thiserror::Error;
@@ -154,6 +159,53 @@ use tracing::warn;
 
 const ADMIN_TOKEN_HEADER: &str = "x-cityg-admin-token";
 const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomAdminOperation {
+    Bootstrap,
+    RotateKbroad,
+}
+
+impl RoomAdminOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Bootstrap => "bootstrap_room_v1",
+            Self::RotateKbroad => "rotate_room_kbroad_v1",
+        }
+    }
+}
+
+pub fn generate_room_admin_keypair() -> (Vec<u8>, Vec<u8>) {
+    let (public_key, secret_key) = dilithium5::keypair();
+    (
+        public_key.as_bytes().to_vec(),
+        secret_key.as_bytes().to_vec(),
+    )
+}
+
+pub fn build_room_admin_proof(
+    operation: RoomAdminOperation,
+    room_id: &str,
+    kbroad_public: &[u8],
+    pop_public_key: &[u8],
+    pop_secret_key: &[u8],
+) -> Result<RoomAdminProof, Error> {
+    let secret_key = dilithium5::SecretKey::from_bytes(pop_secret_key)
+        .map_err(|_| Error::Parse("invalid room admin secret key".to_string()))?;
+    let message = (
+        operation.as_str(),
+        room_id,
+        ByteBuf::from(kbroad_public.to_vec()),
+    );
+    let mut payload = Vec::new();
+    into_writer(&message, &mut payload)
+        .map_err(|err| Error::Parse(format!("encode room admin proof payload: {err}")))?;
+    let signature = dilithium5::detached_sign(&payload, &secret_key);
+    Ok(RoomAdminProof {
+        pop_public_key: pop_public_key.to_vec(),
+        signature: signature.as_bytes().to_vec(),
+    })
+}
 const EXPECTED_PROFILE_VERSION: &str = "v0.1.4";
 
 /// HTTP client for the City-G API server.
@@ -417,6 +469,23 @@ impl CitygApiClient {
         let request = BootstrapRoomRequest {
             room_id: room_id.to_string(),
             kbroad_public: kbroad_public.to_vec(),
+            admin_proof: None,
+        };
+        let _: BootstrapRoomResponse = self.post_proto("/v1/rooms/bootstrap", request).await?;
+        Ok(())
+    }
+
+    /// Bootstraps a room using room-scoped admin proof instead of a server-global token.
+    pub async fn bootstrap_room_as_admin(
+        &self,
+        room_id: &str,
+        kbroad_public: &[u8],
+        admin_proof: RoomAdminProof,
+    ) -> Result<(), Error> {
+        let request = BootstrapRoomRequest {
+            room_id: room_id.to_string(),
+            kbroad_public: kbroad_public.to_vec(),
+            admin_proof: Some(admin_proof),
         };
         let _: BootstrapRoomResponse = self.post_proto("/v1/rooms/bootstrap", request).await?;
         Ok(())
@@ -431,6 +500,24 @@ impl CitygApiClient {
         let request = RotateRoomKbroadRequest {
             room_id: room_id.to_string(),
             kbroad_public: kbroad_public.to_vec(),
+            admin_proof: None,
+        };
+        let response: RotateRoomKbroadResponse =
+            self.post_proto("/v1/rooms/rotate_kbroad", request).await?;
+        Ok(response.kbroad_generation)
+    }
+
+    /// Rotates KBROAD using room-scoped admin proof instead of a server-global token.
+    pub async fn rotate_room_kbroad_as_admin(
+        &self,
+        room_id: &str,
+        kbroad_public: &[u8],
+        admin_proof: RoomAdminProof,
+    ) -> Result<u64, Error> {
+        let request = RotateRoomKbroadRequest {
+            room_id: room_id.to_string(),
+            kbroad_public: kbroad_public.to_vec(),
+            admin_proof: Some(admin_proof),
         };
         let response: RotateRoomKbroadResponse =
             self.post_proto("/v1/rooms/rotate_kbroad", request).await?;
@@ -1249,13 +1336,7 @@ impl CitygApiClient {
     }
 
     fn requires_admin_token(path: &str) -> bool {
-        matches!(
-            path,
-            "/v1/config/window"
-                | "/v1/rooms/bootstrap"
-                | "/v1/rooms/rotate_kbroad"
-                | "/v1/debug/window/seed"
-        )
+        matches!(path, "/v1/config/window" | "/v1/debug/window/seed")
     }
 
     fn requires_message_auth(path: &str) -> bool {
@@ -1736,8 +1817,8 @@ mod tests {
     #[test]
     fn admin_token_path_classification_and_builder() {
         assert!(CitygApiClient::requires_admin_token("/v1/config/window"));
-        assert!(CitygApiClient::requires_admin_token("/v1/rooms/bootstrap"));
-        assert!(CitygApiClient::requires_admin_token(
+        assert!(!CitygApiClient::requires_admin_token("/v1/rooms/bootstrap"));
+        assert!(!CitygApiClient::requires_admin_token(
             "/v1/rooms/rotate_kbroad"
         ));
         assert!(CitygApiClient::requires_admin_token(
@@ -1809,10 +1890,35 @@ mod tests {
         let (base_url, handle) = start_mock_server().await?;
         let client = CitygApiClient::with_http_client(base_url, Client::new());
         let demo_bundle = demo_bundle_alice()?;
+        let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
 
         client.health().await?;
-        client.bootstrap_room("room-1", &[0xAB; 32]).await?;
-        let _ = client.rotate_room_kbroad("room-1", &[0xBC; 32]).await?;
+        client
+            .bootstrap_room_as_admin(
+                "room-1",
+                &[0xAB; 32],
+                build_room_admin_proof(
+                    RoomAdminOperation::Bootstrap,
+                    "room-1",
+                    &[0xAB; 32],
+                    &pop_public_key,
+                    &pop_secret_key,
+                )?,
+            )
+            .await?;
+        let _ = client
+            .rotate_room_kbroad_as_admin(
+                "room-1",
+                &[0xBC; 32],
+                build_room_admin_proof(
+                    RoomAdminOperation::RotateKbroad,
+                    "room-1",
+                    &[0xBC; 32],
+                    &pop_public_key,
+                    &pop_secret_key,
+                )?,
+            )
+            .await?;
         let _ = client.accept_epoch_bundle(&demo_bundle).await?;
         client.refresh_pivot(&demo_bundle).await?;
         #[cfg(any(debug_assertions, feature = "debug-api"))]
