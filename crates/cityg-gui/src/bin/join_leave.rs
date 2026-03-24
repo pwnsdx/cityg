@@ -408,6 +408,17 @@ struct MessageBurstOptions {
     interval: Duration,
 }
 
+struct WatchModeParams<'a> {
+    server_url: &'a str,
+    room_id: &'a str,
+    alias_base: &'a str,
+    count: usize,
+    leave_order: Option<Vec<usize>>,
+    verbose: bool,
+    message_burst: MessageBurstOptions,
+    session_artifact_dir: Option<&'a Path>,
+}
+
 fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> {
     let mut server_url = None;
     let mut room_id = None;
@@ -562,16 +573,16 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             count: message_burst_count,
             interval: Duration::from_millis(message_burst_interval_ms),
         };
-        run_watch_mode(
-            &server_url,
-            &room_id,
-            &alias_base,
+        run_watch_mode(WatchModeParams {
+            server_url: &server_url,
+            room_id: &room_id,
+            alias_base: &alias_base,
             count,
-            leave_order.clone(),
+            leave_order: leave_order.clone(),
             verbose,
             message_burst,
-            session_artifact_dir.as_deref(),
-        )
+            session_artifact_dir: session_artifact_dir.as_deref(),
+        })
         .await?;
         return Ok(());
     }
@@ -1188,22 +1199,20 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
                     freeze_code,
                     ..
                 } = &err
+                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                 {
-                    if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                        && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                    {
-                        let delay = ticket_retry_delay(retry_attempt);
-                        retry_attempt = retry_attempt.saturating_add(1);
-                        warn!(
-                            attempt = retry_attempt,
-                            delay_ms = delay.as_millis() as u64,
-                            status = status.as_u16(),
-                            message = %message,
-                            "merge_ticket_refresh race/concurrency rejection during join finalize; retrying"
-                        );
-                        sleep(delay).await;
-                        continue;
-                    }
+                    let delay = ticket_retry_delay(retry_attempt);
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    warn!(
+                        attempt = retry_attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        status = status.as_u16(),
+                        message = %message,
+                        "merge_ticket_refresh race/concurrency rejection during join finalize; retrying"
+                    );
+                    sleep(delay).await;
+                    continue;
                 }
 
                 return Err(err).context("fetch merge ticket for join finalize");
@@ -1536,22 +1545,20 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
                     freeze_code,
                     ..
                 } = &err
+                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
                 {
-                    if should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                        && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                    {
-                        let delay = ticket_retry_delay(retry_attempt);
-                        retry_attempt = retry_attempt.saturating_add(1);
-                        warn!(
-                            attempt = retry_attempt,
-                            delay_ms = delay.as_millis() as u64,
-                            status = status.as_u16(),
-                            message = %message,
-                            "merge_ticket race/concurrency rejection; retrying"
-                        );
-                        sleep(delay).await;
-                        continue;
-                    }
+                    let delay = ticket_retry_delay(retry_attempt);
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    warn!(
+                        attempt = retry_attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        status = status.as_u16(),
+                        message = %message,
+                        "merge_ticket race/concurrency rejection; retrying"
+                    );
+                    sleep(delay).await;
+                    continue;
                 }
 
                 return Err(err).context("fetch merge ticket");
@@ -2009,16 +2016,17 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     }
 }
 
-async fn run_watch_mode(
-    server_url: &str,
-    room_id: &str,
-    alias_base: &str,
-    count: usize,
-    leave_order: Option<Vec<usize>>,
-    verbose: bool,
-    message_burst: MessageBurstOptions,
-    session_artifact_dir: Option<&Path>,
-) -> Result<()> {
+async fn run_watch_mode(params: WatchModeParams<'_>) -> Result<()> {
+    let WatchModeParams {
+        server_url,
+        room_id,
+        alias_base,
+        count,
+        leave_order,
+        verbose,
+        message_burst,
+        session_artifact_dir,
+    } = params;
     println!(
         "watch mode: server={server_url} room={room_id} alias_base={alias_base} count={count}"
     );
@@ -4919,19 +4927,19 @@ mod tests {
         let room_id = hex::encode([0x7Au8; 32]);
         bootstrap_test_room(&server_url, &room_id).await?;
 
-        run_watch_mode(
-            &server_url,
-            &room_id,
-            "watch-zero-burst",
-            2,
-            Some(vec![2]),
-            false,
-            MessageBurstOptions {
+        run_watch_mode(WatchModeParams {
+            server_url: &server_url,
+            room_id: &room_id,
+            alias_base: "watch-zero-burst",
+            count: 2,
+            leave_order: Some(vec![2]),
+            verbose: false,
+            message_burst: MessageBurstOptions {
                 count: 0,
                 interval: Duration::from_millis(1),
             },
-            None,
-        )
+            session_artifact_dir: None,
+        })
         .await?;
 
         handle.abort();
@@ -4981,19 +4989,19 @@ mod tests {
         let room_id = hex::encode([0x7Bu8; 32]);
         bootstrap_test_room(&server_url, &room_id).await?;
 
-        let err = run_watch_mode(
-            &server_url,
-            &room_id,
-            "watch-invalid-order",
-            2,
-            Some(vec![3]),
-            false,
-            MessageBurstOptions {
+        let err = run_watch_mode(WatchModeParams {
+            server_url: &server_url,
+            room_id: &room_id,
+            alias_base: "watch-invalid-order",
+            count: 2,
+            leave_order: Some(vec![3]),
+            verbose: false,
+            message_burst: MessageBurstOptions {
                 count: 1,
                 interval: Duration::ZERO,
             },
-            None,
-        )
+            session_artifact_dir: None,
+        })
         .await
         .expect_err("invalid watch leave order should fail");
         assert!(err.to_string().contains("leave order index 3 invalid"));
@@ -5015,19 +5023,19 @@ mod tests {
 
         // Keep a single explicit leave in this test to avoid stale-second-leave
         // checkpoint races under heavy instrumentation (llvm-cov).
-        run_watch_mode(
-            &server_url,
-            &room_id,
-            "watcher",
-            2,
-            Some(vec![2]),
-            true,
-            MessageBurstOptions {
+        run_watch_mode(WatchModeParams {
+            server_url: &server_url,
+            room_id: &room_id,
+            alias_base: "watcher",
+            count: 2,
+            leave_order: Some(vec![2]),
+            verbose: true,
+            message_burst: MessageBurstOptions {
                 count: 3,
                 interval: Duration::ZERO,
             },
-            None,
-        )
+            session_artifact_dir: None,
+        })
         .await?;
 
         handle.abort();
