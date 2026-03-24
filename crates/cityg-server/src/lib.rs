@@ -377,9 +377,7 @@ impl CityGServer {
                 state.kem_tree_hash_after = kem_tree_hash_after;
                 state.n_max = n_max;
                 state.barrier_pk_entries = blank_entries;
-                state
-                    .barrier_public_tree_history
-                    .insert(kem_tree_hash_after, state.barrier_pk_entries.clone());
+                record_barrier_public_tree_snapshot(state)?;
             }
             (
                 state.barrier_initialized,
@@ -687,7 +685,9 @@ impl CityGServer {
             }
         }
         if let Some(state) = persisted_kbroad_state {
-            server.apply_persisted_kbroad_state(&state);
+            if let Err(err) = server.apply_persisted_kbroad_state(&state) {
+                eprintln!("cityg-server: kbroad state apply failed: {err:?}");
+            }
         }
         if let Err(err) = server.initialize_registered_groups_barrier_state() {
             eprintln!("cityg-server: barrier bootstrap initialization failed: {err:?}");
@@ -1188,7 +1188,7 @@ impl CityGServer {
             state.kem_tree_hash_after = validation.parsed.kem_tree_hash_after;
             state.n_max = validation.parsed.tree_size.max(1);
             state.barrier_hash_cache = validation.hash_cache_post.clone();
-            record_barrier_public_tree_snapshot(state);
+            record_barrier_public_tree_snapshot(state)?;
         }
         if let Some(state) = roster.groups.get(bundle.gid()) {
             let ctx_state = ctx.barrier_group_state_entry_mut(bundle.gid());
@@ -1258,7 +1258,10 @@ impl CityGServer {
         self.roster = staged_roster;
     }
 
-    fn apply_persisted_kbroad_state(&mut self, state: &PersistedKbroadState) {
+    fn apply_persisted_kbroad_state(
+        &mut self,
+        state: &PersistedKbroadState,
+    ) -> Result<(), CityGError> {
         let mut registry = self.ctx.kbroad_registry().cloned().unwrap_or_default();
         for (gid, room_state) in state {
             registry.insert(gid.clone(), room_state.kbroad_public.clone());
@@ -1275,25 +1278,52 @@ impl CityGServer {
             group.last_checkpoint_ec = room_state.last_checkpoint_ec;
             group.last_accepted_ec = room_state.last_accepted_ec;
             group.barrier_pk_entries = room_state.barrier_pk_entries.clone();
-            group.barrier_public_tree_history = room_state
-                .barrier_public_tree_history
-                .iter()
-                .filter_map(|snapshot| {
-                    let hash = hex::decode(&snapshot.kem_tree_hash_after_hex).ok()?;
-                    let hash: [u8; 32] = hash.try_into().ok()?;
-                    Some((hash, snapshot.pk_entries.clone()))
-                })
-                .collect();
+            group.barrier_public_tree_blobs = room_state.barrier_public_tree_blobs.clone();
+            rebuild_barrier_public_tree_blob_index(group)?;
+            group.barrier_public_tree_history.clear();
+            for snapshot in &room_state.barrier_public_tree_history {
+                let hash = match hex::decode(&snapshot.kem_tree_hash_after_hex)
+                    .ok()
+                    .and_then(|hash| hash.try_into().ok())
+                {
+                    Some(hash) => hash,
+                    None => continue,
+                };
+                let snapshot_ref = if snapshot.blob_indices.is_empty() {
+                    match encode_barrier_public_tree_snapshot_ref(
+                        group,
+                        snapshot.pk_entries.as_slice(),
+                    ) {
+                        Ok(snapshot_ref) => snapshot_ref,
+                        Err(_) => continue,
+                    }
+                } else {
+                    let snapshot_ref = BarrierPublicTreeSnapshotRef {
+                        blob_indices: snapshot.blob_indices.clone(),
+                    };
+                    if decode_barrier_public_tree_snapshot_ref(group, &snapshot_ref).is_err() {
+                        continue;
+                    }
+                    snapshot_ref
+                };
+                group.barrier_public_tree_history.insert(hash, snapshot_ref);
+            }
             if group.barrier_public_tree_history.is_empty() && !group.barrier_pk_entries.is_empty()
             {
-                group
-                    .barrier_public_tree_history
-                    .insert(group.kem_tree_hash_after, group.barrier_pk_entries.clone());
+                record_barrier_public_tree_snapshot(group)?;
             } else if !group.barrier_pk_entries.is_empty() {
-                group
+                let current_hash = group.kem_tree_hash_after;
+                if !group
                     .barrier_public_tree_history
-                    .entry(group.kem_tree_hash_after)
-                    .or_insert_with(|| group.barrier_pk_entries.clone());
+                    .contains_key(&current_hash)
+                {
+                    let current_entries = group.barrier_pk_entries.clone();
+                    let snapshot_ref =
+                        encode_barrier_public_tree_snapshot_ref(group, current_entries.as_slice())?;
+                    group
+                        .barrier_public_tree_history
+                        .insert(current_hash, snapshot_ref);
+                }
             }
             group.barrier_hash_cache = None;
             group.last_pcs_refresh_ec = room_state.last_pcs_refresh_ec;
@@ -1337,6 +1367,7 @@ impl CityGServer {
             }
         }
         self.ctx.set_kbroad_registry(Some(registry));
+        Ok(())
     }
 
     fn snapshot_kbroad_state(&self) -> PersistedKbroadState {
@@ -1669,7 +1700,7 @@ impl CityGServer {
         let pk_entries = if let Some(snapshot) =
             state.barrier_public_tree_history.get(kem_tree_hash_after)
         {
-            snapshot.clone()
+            decode_barrier_public_tree_snapshot_ref(state, snapshot)?
         } else {
             let pk_entries_view = build_pk_entries_view(state)?;
             let computed_hash = compute_barrier_tree_hash(state.n_max, pk_entries_view.as_ref())?;
@@ -1981,13 +2012,84 @@ fn build_pk_entries(state: &GroupState) -> Result<Vec<Vec<u8>>, CityGError> {
         .collect())
 }
 
-fn record_barrier_public_tree_snapshot(state: &mut GroupState) {
-    if state.barrier_pk_entries.is_empty() {
-        return;
+fn rebuild_barrier_public_tree_blob_index(state: &mut GroupState) -> Result<(), CityGError> {
+    state.barrier_public_tree_blob_index.clear();
+    for (index, blob) in state.barrier_public_tree_blobs.iter().enumerate() {
+        let blob_index = u32::try_from(index)
+            .map_err(|_| CityGError::InvalidInput("barrier public tree blob index overflow"))?;
+        state
+            .barrier_public_tree_blob_index
+            .insert(blob.clone(), blob_index);
     }
+    Ok(())
+}
+
+fn intern_barrier_public_tree_blob(
+    state: &mut GroupState,
+    entry: &[u8],
+) -> Result<BarrierBlobIndex, CityGError> {
+    if let Some(index) = state.barrier_public_tree_blob_index.get(entry) {
+        return Ok(*index);
+    }
+    let index = u32::try_from(state.barrier_public_tree_blobs.len())
+        .map_err(|_| CityGError::InvalidInput("barrier public tree blob index overflow"))?;
+    let owned = entry.to_vec();
+    state.barrier_public_tree_blobs.push(owned.clone());
+    state.barrier_public_tree_blob_index.insert(owned, index);
+    Ok(index)
+}
+
+fn encode_barrier_public_tree_snapshot_ref(
+    state: &mut GroupState,
+    pk_entries: &[Vec<u8>],
+) -> Result<BarrierPublicTreeSnapshotRef, CityGError> {
+    let mut blob_indices = Vec::with_capacity(pk_entries.len());
+    for entry in pk_entries {
+        blob_indices.push(intern_barrier_public_tree_blob(state, entry.as_slice())?);
+    }
+    Ok(BarrierPublicTreeSnapshotRef { blob_indices })
+}
+
+fn decode_barrier_public_tree_snapshot_ref(
+    state: &GroupState,
+    snapshot: &BarrierPublicTreeSnapshotRef,
+) -> Result<Vec<Vec<u8>>, CityGError> {
+    snapshot
+        .blob_indices
+        .iter()
+        .map(|index| {
+            let index = usize::try_from(*index)
+                .map_err(|_| CityGError::InvalidInput("barrier public tree blob index overflow"))?;
+            state
+                .barrier_public_tree_blobs
+                .get(index)
+                .cloned()
+                .ok_or(CityGError::InvalidInput("barrier public tree blob missing"))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn history_barrier_public_tree_entries(
+    state: &GroupState,
+    kem_tree_hash_after: &[u8; 32],
+) -> Option<Vec<Vec<u8>>> {
     state
         .barrier_public_tree_history
-        .insert(state.kem_tree_hash_after, state.barrier_pk_entries.clone());
+        .get(kem_tree_hash_after)
+        .and_then(|snapshot| decode_barrier_public_tree_snapshot_ref(state, snapshot).ok())
+}
+
+fn record_barrier_public_tree_snapshot(state: &mut GroupState) -> Result<(), CityGError> {
+    if state.barrier_pk_entries.is_empty() {
+        return Ok(());
+    }
+    let current_entries = state.barrier_pk_entries.clone();
+    let snapshot = encode_barrier_public_tree_snapshot_ref(state, current_entries.as_slice())?;
+    state
+        .barrier_public_tree_history
+        .insert(state.kem_tree_hash_after, snapshot);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2428,9 +2530,10 @@ fn persisted_barrier_public_tree_history(
     state
         .barrier_public_tree_history
         .iter()
-        .map(|(hash, pk_entries)| PersistedBarrierPublicTreeSnapshot {
+        .map(|(hash, snapshot)| PersistedBarrierPublicTreeSnapshot {
             kem_tree_hash_after_hex: hex::encode(hash),
-            pk_entries: pk_entries.clone(),
+            blob_indices: snapshot.blob_indices.clone(),
+            pk_entries: Vec::new(),
         })
         .collect()
 }
@@ -2465,6 +2568,7 @@ fn persisted_kbroad_room_state(
         room.last_accepted_ec = state.last_accepted_ec;
         room.srx_root_sw = state.srx_root_sw;
         room.barrier_pk_entries = state.barrier_pk_entries.clone();
+        room.barrier_public_tree_blobs = state.barrier_public_tree_blobs.clone();
         room.barrier_public_tree_history = persisted_barrier_public_tree_history(state);
         room.n_max = state.n_max.max(1);
         room.last_pcs_refresh_ec = state.last_pcs_refresh_ec;
@@ -3616,9 +3720,11 @@ mod tests {
                 "test barrier tree mutation did not change hash",
             ));
         }
+        let snapshot_ref =
+            super::encode_barrier_public_tree_snapshot_ref(group, previous_entries.as_slice())?;
         group
             .barrier_public_tree_history
-            .insert(previous_hash, previous_entries);
+            .insert(previous_hash, snapshot_ref);
         group.barrier_pk_entries = current_entries.clone();
         group.kem_tree_hash_after = current_hash;
         let ctx_state = server.ctx.barrier_group_state_entry_mut(gid);
@@ -4034,7 +4140,7 @@ mod tests {
         assert_eq!(state.pcs_refresh_slot_width_ec, 5);
         assert_eq!(state.max_barrier_update_bytes, 7777);
         assert_eq!(
-            state.barrier_public_tree_history.get(&persisted_hash),
+            super::history_barrier_public_tree_entries(state, &persisted_hash).as_ref(),
             Some(&state.barrier_pk_entries),
             "persisted live tree should be promoted into history on reload"
         );
@@ -4409,8 +4515,10 @@ mod tests {
                 last_accepted_ec: 34,
                 srx_root_sw: Some([0x66; 32]),
                 barrier_pk_entries: pk_entries.clone(),
+                barrier_public_tree_blobs: Vec::new(),
                 barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
                     kem_tree_hash_after_hex: "not-hex".to_string(),
+                    blob_indices: Vec::new(),
                     pk_entries: vec![vec![0x99; 3]],
                 }],
                 n_max: 2,
@@ -4423,7 +4531,7 @@ mod tests {
             },
         )]);
 
-        server.apply_persisted_kbroad_state(&state);
+        server.apply_persisted_kbroad_state(&state)?;
 
         let group = server
             .roster
@@ -4434,7 +4542,7 @@ mod tests {
         assert!(group.rotation_required);
         assert_eq!(group.barrier_public_tree_history.len(), 1);
         assert_eq!(
-            group.barrier_public_tree_history.get(&current_hash),
+            super::history_barrier_public_tree_entries(group, &current_hash).as_ref(),
             Some(&pk_entries)
         );
         assert_eq!(group.max_barrier_update_bytes, 1);
@@ -4475,8 +4583,10 @@ mod tests {
                 last_accepted_ec: 89,
                 srx_root_sw: None,
                 barrier_pk_entries: current_entries.clone(),
+                barrier_public_tree_blobs: Vec::new(),
                 barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
                     kem_tree_hash_after_hex: hex::encode(historical_hash),
+                    blob_indices: Vec::new(),
                     pk_entries: historical_entries.clone(),
                 }],
                 n_max: 2,
@@ -4489,7 +4599,7 @@ mod tests {
             },
         )]);
 
-        server.apply_persisted_kbroad_state(&state);
+        server.apply_persisted_kbroad_state(&state)?;
 
         let group = server
             .roster
@@ -4498,11 +4608,11 @@ mod tests {
             .ok_or(CityGError::InvalidInput("missing restored group"))?;
         assert_eq!(group.barrier_public_tree_history.len(), 2);
         assert_eq!(
-            group.barrier_public_tree_history.get(&historical_hash),
+            super::history_barrier_public_tree_entries(group, &historical_hash).as_ref(),
             Some(&historical_entries)
         );
         assert_eq!(
-            group.barrier_public_tree_history.get(&current_hash),
+            super::history_barrier_public_tree_entries(group, &current_hash).as_ref(),
             Some(&current_entries)
         );
         assert_eq!(group.pcs_refresh_min_delta_device_ec, 3);
@@ -4551,7 +4661,7 @@ mod tests {
         group.kem_tree_hash_after = tree_hash;
         group.srx_root_sw = Some([0xF4; 32]);
         group.barrier_pk_entries = tree_entries.clone();
-        group.barrier_public_tree_history = BTreeMap::from([(tree_hash, tree_entries.clone())]);
+        super::record_barrier_public_tree_snapshot(group)?;
         group.n_max = 0;
         group.last_pcs_refresh_ec = Some(11);
         group.pcs_refresh_min_delta_device_ec = 0;
@@ -4578,6 +4688,16 @@ mod tests {
         assert_eq!(
             with_group.barrier_public_tree_history[0].kem_tree_hash_after_hex,
             hex::encode(tree_hash)
+        );
+        assert_eq!(with_group.barrier_public_tree_blobs, tree_entries);
+        assert_eq!(
+            with_group.barrier_public_tree_history[0].blob_indices,
+            vec![0, 1, 2]
+        );
+        assert!(
+            with_group.barrier_public_tree_history[0]
+                .pk_entries
+                .is_empty()
         );
 
         let without_group = snapshot
@@ -5377,7 +5497,7 @@ mod tests {
             n_max: 4,
             ..super::GroupState::default()
         };
-        super::record_barrier_public_tree_snapshot(&mut state);
+        super::record_barrier_public_tree_snapshot(&mut state)?;
         assert!(state.barrier_public_tree_history.is_empty());
 
         let leaf = cityg_client::demo::demo_member_leaf("fallback-owned");
@@ -8031,9 +8151,11 @@ mod tests {
             let mut corrupted = group.barrier_pk_entries.clone();
             corrupted[0] = vec![0x55; 1184];
             let expected_hash = group.kem_tree_hash_after;
+            let snapshot_ref =
+                super::encode_barrier_public_tree_snapshot_ref(group, corrupted.as_slice())?;
             group
                 .barrier_public_tree_history
-                .insert(expected_hash, corrupted);
+                .insert(expected_hash, snapshot_ref);
             expected_hash
         };
 
@@ -8573,7 +8695,9 @@ struct GroupState {
     leaf_device_pk: BTreeMap<[u8; 32], Vec<u8>>,
     leaf_barrier_public: BTreeMap<[u8; 32], Vec<u8>>,
     barrier_pk_entries: Vec<Vec<u8>>,
-    barrier_public_tree_history: BTreeMap<[u8; 32], Vec<Vec<u8>>>,
+    barrier_public_tree_blobs: Vec<Vec<u8>>,
+    barrier_public_tree_blob_index: HashMap<Vec<u8>, BarrierBlobIndex>,
+    barrier_public_tree_history: BTreeMap<[u8; 32], BarrierPublicTreeSnapshotRef>,
     barrier_hash_cache: Option<Arc<HashMap<usize, [u8; 32]>>>,
     room_admin_pop_keys: BTreeSet<Vec<u8>>,
 }
@@ -8605,6 +8729,8 @@ impl Default for GroupState {
             leaf_device_pk: BTreeMap::new(),
             leaf_barrier_public: BTreeMap::new(),
             barrier_pk_entries: Vec::new(),
+            barrier_public_tree_blobs: Vec::new(),
+            barrier_public_tree_blob_index: HashMap::new(),
             barrier_public_tree_history: BTreeMap::new(),
             barrier_hash_cache: None,
             room_admin_pop_keys: BTreeSet::new(),
@@ -8618,6 +8744,13 @@ struct JoinLeafHistoryRecord {
     leaf_index: u32,
     device_pk: Vec<u8>,
     ek_leaf: Vec<u8>,
+}
+
+type BarrierBlobIndex = u32;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct BarrierPublicTreeSnapshotRef {
+    blob_indices: Vec<BarrierBlobIndex>,
 }
 
 impl GroupState {
@@ -8697,6 +8830,8 @@ struct PersistedKbroadRoomState {
     #[serde(default)]
     barrier_pk_entries: Vec<Vec<u8>>,
     #[serde(default)]
+    barrier_public_tree_blobs: Vec<Vec<u8>>,
+    #[serde(default)]
     barrier_public_tree_history: Vec<PersistedBarrierPublicTreeSnapshot>,
     #[serde(default = "default_barrier_n_max")]
     n_max: u64,
@@ -8729,6 +8864,8 @@ struct PersistedDeviceChainState {
 struct PersistedBarrierPublicTreeSnapshot {
     #[serde(default)]
     kem_tree_hash_after_hex: String,
+    #[serde(default)]
+    blob_indices: Vec<BarrierBlobIndex>,
     #[serde(default)]
     pk_entries: Vec<Vec<u8>>,
 }

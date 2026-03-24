@@ -45,3 +45,17 @@ The transport problem is handled separately by `barrier-sealed-v1`:
 1. the publisher seals the local HP artifact into `header[97]`,
 2. the server validates and relays the opaque blob,
 3. clients re-derive the HP AEAD key from authenticated barrier state and local secret state.
+
+## Pending `join_finalize` State Machine
+
+The implementation-critical part is not the cryptography; it is the pending-state lifecycle around a self-finalizing joiner.
+
+Required operational rules:
+
+- persist the pending join/finalize correlation state before publishing any `join_finalize` candidate,
+- on restart, correlate pending work against authenticated history and merge identity artifacts, not just the latest `barrier_version`,
+- never discard pending state solely because time elapsed, transport failed, or the group advanced through unrelated epochs,
+- only clear pending state after an authenticated success, an authenticated non-acceptance that rules out the candidate, or an explicit local reset/recovery flow,
+- if the local history window is temporarily insufficient to decide, stay pending and retry history recovery rather than guessing.
+
+That is the practical guard against the implementation pitfall where a joiner becomes permanently blind because crash/restart code loses the only linkage needed to recognize its accepted `join_finalize`.

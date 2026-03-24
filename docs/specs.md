@@ -188,6 +188,7 @@ The returned pk_entries MUST hash (per S11.4) to the requested kem_tree_hash_aft
 Historical retention contract (normative):
 * FetchBarrierPublicTree(kem_tree_hash_after) MUST work for any committed historical barrier public tree snapshot addressed by kem_tree_hash_after, not only the current one.
 * The server MUST retain every committed pk_entries snapshot for as long as the corresponding group history/checkpoint history remains fetchable. Implementations MAY garbage-collect only together with retirement of the associated group history.
+* This contract constrains fetch semantics, not internal storage layout. Implementations MAY satisfy it via deltas, structural sharing, compression, or other equivalent internal representations, provided FetchBarrierPublicTree(kem_tree_hash_after) deterministically reconstructs the exact pk_entries array for the requested committed snapshot.
 
 Snapshot-auth failure handling (normative; 960.9 wiring):
 If FetchBarrierPublicTree(kem_tree_hash_after) returns pk_entries with TreeHash(root_node) != kem_tree_hash_after, the caller MUST treat the server as faulty/active, MUST NOT proceed with barrier_update creation/activation/verification that depends on that tree, and MUST surface local diagnostic code 960.9 barrier_tree_snapshot_auth_failure.

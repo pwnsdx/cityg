@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Normalized the multi-head window TTL default to **120 seconds** across orchestrator code, configuration defaults, shipped TOML examples, and protocol docs, including guidance on how the knob impacts DoS posture vs. client jitter tolerance.
 - Restricted `msg_index` generation to randomized 64-bit values in the active profile spec and aligned the `join_leave` harness with that sender behavior.
+- Clarified that historical barrier public-tree retention is a fetch-semantics requirement, allowing servers to use internal structural sharing or delta-like storage instead of full snapshot clones.
 
 ### Documentation
 - Added comprehensive documentation index (`docs/README.md`) for improved navigation
@@ -24,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed broken screenshot reference in GUI user guide
 - Documented the `unsafe-ntt` verification path in `docs/timing-verification.md` and added operational notes about the 120s TTL baseline in the configuration and MHW specs.
 - Marked the strict durable `msg_index` benchmark note as legacy after removing the counter-based option from the profile spec.
+- Added implementation guidance for crash-safe pending `join_finalize` handling during restart and retry flows.
 
 ## [0.1.2] - 2026-02-11
 
