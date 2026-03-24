@@ -96,6 +96,7 @@ mod barrier_core;
 mod barrier_ops;
 mod barrier_runtime;
 mod chat_ui;
+mod clipboard_shortcuts;
 mod epoch_sync;
 mod errors;
 mod fault_injection;
