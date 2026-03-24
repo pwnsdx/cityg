@@ -1,3 +1,6 @@
+use futures::{StreamExt, channel::mpsc as futures_mpsc};
+
+use super::websocket::{WebSocketEvent, run_websocket_worker};
 use super::*;
 
 impl AppModel {

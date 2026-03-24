@@ -31,7 +31,6 @@ use cityg_api_client::{
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
 use cityg_config::CityGConfig;
-use futures::{StreamExt, channel::mpsc as futures_mpsc};
 use gpui::prelude::*;
 #[cfg(not(test))]
 use gpui::{
@@ -72,14 +71,6 @@ use pqcrypto_traits::sign::{
 use rand::{RngExt, rng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::sleep;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{
-        client::IntoClientRequest,
-        http::{HeaderValue, Request},
-        protocol::Message as WsMessage,
-    },
-};
 use tracing::{debug, info, warn};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -132,6 +123,8 @@ mod session_state;
 mod storage;
 #[path = "native/tokio_bridge.rs"]
 mod tokio_bridge;
+#[path = "native/websocket.rs"]
+mod websocket;
 
 use barrier_ops::*;
 use errors::*;
@@ -1688,144 +1681,6 @@ enum RoomAdminStatus {
     Idle,
     Loading(String),
     Error(String),
-}
-
-enum WebSocketEvent {
-    Connected,
-    Disconnected,
-    Message,
-    Membership(MembershipSignal),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MembershipSignalKind {
-    Join,
-    Revoke,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct MembershipSignal {
-    gid: [u8; 32],
-    leaf_id: Option<[u8; 32]>,
-    kind: Option<MembershipSignalKind>,
-    timestamp_ms: Option<u64>,
-}
-
-async fn run_websocket_worker(
-    ws_url: String,
-    message_token: Option<String>,
-    reconnect_delay: Duration,
-    tx: futures_mpsc::UnboundedSender<WebSocketEvent>,
-) -> Result<()> {
-    loop {
-        debug!("Attempting WebSocket connection to {}", ws_url);
-
-        let request = websocket_request(&ws_url, message_token.as_deref())?;
-        match connect_async(request).await {
-            Ok((ws_stream, _)) => {
-                info!("WebSocket connected successfully");
-                if tx.unbounded_send(WebSocketEvent::Connected).is_err() {
-                    return Ok(());
-                }
-
-                let (_write, mut read) = ws_stream.split();
-                while let Some(msg_result) = read.next().await {
-                    match msg_result {
-                        Ok(WsMessage::Text(text)) => {
-                            debug!("WebSocket message received: {}", text);
-                            if let Ok(notification) =
-                                serde_json::from_str::<serde_json::Value>(&text)
-                            {
-                                match notification.get("type").and_then(|t| t.as_str()) {
-                                    Some("message") => {
-                                        if tx.unbounded_send(WebSocketEvent::Message).is_err() {
-                                            return Ok(());
-                                        }
-                                    }
-                                    Some("membership") => {
-                                        if let Some(gid_hex) =
-                                            notification.get("gid").and_then(|v| v.as_str())
-                                            && let Some(gid) = decode_hex_32(gid_hex)
-                                        {
-                                            let signal = MembershipSignal {
-                                                gid,
-                                                leaf_id: notification
-                                                    .get("leaf_id")
-                                                    .and_then(|v| v.as_str())
-                                                    .and_then(decode_hex_32),
-                                                kind: match notification
-                                                    .get("event")
-                                                    .and_then(|v| v.as_str())
-                                                {
-                                                    Some("join") => {
-                                                        Some(MembershipSignalKind::Join)
-                                                    }
-                                                    Some("revoke") => {
-                                                        Some(MembershipSignalKind::Revoke)
-                                                    }
-                                                    _ => None,
-                                                },
-                                                timestamp_ms: notification
-                                                    .get("timestamp_ms")
-                                                    .and_then(|v| v.as_u64()),
-                                            };
-                                            if tx
-                                                .unbounded_send(WebSocketEvent::Membership(signal))
-                                                .is_err()
-                                            {
-                                                return Ok(());
-                                            }
-                                        }
-                                    }
-                                    Some("lag") => {
-                                        warn!("WebSocket lag notification: {}", text);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Ok(WsMessage::Close(_)) => {
-                            info!("WebSocket closed by server");
-                            break;
-                        }
-                        Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) => {
-                            debug!("WebSocket ping/pong");
-                        }
-                        Err(e) => {
-                            warn!("WebSocket error: {}", e);
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                info!(
-                    "WebSocket connection closed, will retry in {:?}",
-                    reconnect_delay
-                );
-            }
-            Err(e) => {
-                warn!("WebSocket connection failed: {}", e);
-            }
-        }
-
-        if tx.unbounded_send(WebSocketEvent::Disconnected).is_err() {
-            return Ok(());
-        }
-
-        sleep(reconnect_delay).await;
-    }
-}
-
-fn websocket_request(ws_url: &str, token: Option<&str>) -> Result<Request<()>> {
-    let mut request = ws_url
-        .into_client_request()
-        .map_err(|err| anyhow!("failed to build websocket handshake request: {err}"))?;
-    if let Some(token) = token {
-        let token =
-            HeaderValue::from_str(token).context("message auth token is not a valid header")?;
-        request.headers_mut().insert("x-cityg-message-token", token);
-    }
-    Ok(request)
 }
 
 #[derive(Clone, PartialEq, Eq)]

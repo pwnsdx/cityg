@@ -1,3 +1,4 @@
+use super::websocket::MembershipSignal;
 use super::*;
 
 impl AppModel {
