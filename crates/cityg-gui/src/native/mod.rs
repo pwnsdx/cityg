@@ -116,6 +116,8 @@ mod render_activity_panel;
 mod render_details;
 mod render_members_panel;
 mod render_message_composer;
+mod render_overview_panel;
+mod render_room_admin_panel;
 mod render_security_panel;
 mod render_session;
 mod render_session_controls;
