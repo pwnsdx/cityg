@@ -1,11 +1,13 @@
 use super::*;
 use futures::SinkExt;
-use gpui::{Modifiers, TestAppContext};
+use gpui::{EmptyView, Modifiers, TestAppContext};
 use msphf_rlwe::CapssBranchWitness;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::sync::{Arc, Once, atomic::AtomicU16};
 use tempfile::TempDir;
 use tokio::{task::JoinHandle, time::sleep};
+
+use crate::native::app_actions::CopyRoomIdAction;
 
 #[path = "client_state_props.rs"]
 mod client_state_props;
@@ -1754,7 +1756,7 @@ fn gpui_render_and_callback_paths_cover_ui_state(cx: &mut TestAppContext) {
 fn global_action_handlers_dispatch_to_main_app_model_from_secondary_window() {
     let mut cx = TestAppContext::single();
     cx.update(tokio_bridge::init);
-    cx.update(|_, app| app_actions::install_action_handlers(app));
+    cx.update(app_actions::install_action_handlers);
 
     let temp_dir = TempDir::new().expect("create temp dir");
     let base = temp_dir.path().join("cityg").join("gui");
@@ -1771,7 +1773,7 @@ fn global_action_handlers_dispatch_to_main_app_model_from_secondary_window() {
     cx.refresh().expect("main window refresh");
     cx.run_until_parked();
 
-    let (_secondary_view, cx) = cx.add_window_view(|_, _| div().size_full());
+    let (_secondary_view, cx) = cx.add_window_view(|_, _| EmptyView);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
 
