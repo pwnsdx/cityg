@@ -77,7 +77,6 @@ impl AppModel {
             .track_scroll(&self.right_sidebar_scroll_handle)
             .overflow_y_scroll()
             .block_mouse_except_scroll()
-            .child(self.render_overview_panel(session, cx))
             .child(self.render_room_admin_panel(session, cx))
             .child(self.render_members_panel(cx))
             .child(self.render_security_panel(cx))

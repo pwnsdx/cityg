@@ -181,6 +181,21 @@ impl AppModel {
         toggle_ciphertext = toggle_ciphertext
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_toggle_ciphertext));
 
+        let overview_button = div()
+            .px(px(12.0))
+            .py(px(7.0))
+            .rounded(px(10.0))
+            .bg(ui_button_fill(self.window_active))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(UI_PANEL_TEXT))
+            .cursor(CursorStyle::PointingHand)
+            .child("Session overview")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::on_show_session_overview_clicked),
+            );
+
         div()
             .flex()
             .items_center()
@@ -210,6 +225,13 @@ impl AppModel {
                             .child(status_text),
                     ),
             )
-            .child(toggle_ciphertext)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(overview_button)
+                    .child(toggle_ciphertext),
+            )
     }
 }

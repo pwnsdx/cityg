@@ -154,6 +154,7 @@ impl AppModel {
             activity_events: Vec::new(),
             chat_scroll_handle: ScrollHandle::new(),
             right_sidebar_scroll_handle: ScrollHandle::new(),
+            session_overview_window: None,
         };
 
         match load_last_session() {
@@ -216,6 +217,7 @@ impl Render for AppModel {
             .on_action(cx.listener(Self::on_focus_room_admin_target_action))
             .on_action(cx.listener(Self::on_copy_room_id_action))
             .on_action(cx.listener(Self::on_copy_room_invite_action))
+            .on_action(cx.listener(Self::on_show_session_overview_action))
             .on_action(cx.listener(Self::on_toggle_ciphertext_action));
 
         if has_session {
