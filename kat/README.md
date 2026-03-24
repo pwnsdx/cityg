@@ -44,6 +44,13 @@ errata that closed spec blockers without changing the advertised wire/API profil
 version. It maps each errata item to deterministic implementation tests so the
 repository can audit those fixes independently of the original S14 set.
 
+# City-G Client-State Manifest
+
+`kat-client-state-manifest-v0.1.4.json` maps crash/restart, `pending join_finalize`,
+and persisted client-state invariants to deterministic tests and property tests.
+It is validated by `client_state_manifest_is_well_formed_and_complete` and is the
+release-facing audit bridge for client recovery hardening.
+
 ## Plan → vectors workflow
 
 1. Edit `plan-rlwe-annex-k.json` if new scenarios are required. The schema matches the

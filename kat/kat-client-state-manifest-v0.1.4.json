@@ -1,0 +1,105 @@
+{
+  "profile_version": "v0.1.4",
+  "requirements": [
+    {
+      "id": "CLIENT_STATE.1",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "tests::client_state_props::client_state_model_never_silently_clears_pending_recovery",
+          "expectation": "Pending recovery state is never cleared without an authenticated resolution path."
+        }
+      ]
+    },
+    {
+      "id": "CLIENT_STATE.2",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "tests::client_state_props::client_state_model_never_activates_same_pending_twice",
+          "expectation": "A given pending recovery state activates at most once."
+        }
+      ]
+    },
+    {
+      "id": "CLIENT_STATE.3",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "tests::client_state_props::client_state_model_join_finalize_does_not_reseed_k_fs",
+          "expectation": "join_finalize does not reseed K_fs."
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "tests::pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs",
+          "expectation": "Concrete activation path preserves K_fs across join_finalize."
+        }
+      ]
+    },
+    {
+      "id": "CLIENT_STATE.4",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "tests::client_state_props::client_state_model_restart_is_pre_or_post_transaction_only",
+          "expectation": "Restart only exposes canonical pre-transaction or post-transaction snapshots."
+        }
+      ]
+    },
+    {
+      "id": "CLIENT_STATE.5",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "tests::client_state_props::client_state_model_insufficient_history_never_marks_ready",
+          "expectation": "Insufficient authenticated history keeps the client pending or recovery_required."
+        },
+        {
+          "crate": "cityg-gui",
+          "test": "tests::pending_join_finalize_history_lookup_discards_after_newer_version_404",
+          "expectation": "Authenticated non-acceptance after a newer version does not mark the session recovered."
+        }
+      ]
+    },
+    {
+      "id": "CLIENT_STATE.6",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "tests::client_state_props::persisted_pending_state_roundtrip_property_preserves_fields",
+          "expectation": "Persisted pending state round-trips without lossy normalization."
+        }
+      ]
+    },
+    {
+      "id": "CLIENT_STATE.7",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "tests::join_finalize_fault_injection_persists_pending_state_before_publish",
+          "expectation": "Crash before join_finalize publish preserves pending state and blocks send."
+        }
+      ]
+    },
+    {
+      "id": "CLIENT_STATE.8",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "tests::join_finalize_fault_injection_after_publish_recovers_via_epoch_sync",
+          "expectation": "Crash after join_finalize publish recovers through restart + epoch sync."
+        }
+      ]
+    },
+    {
+      "id": "CLIENT_STATE.9",
+      "coverage": [
+        {
+          "crate": "cityg-gui",
+          "test": "tests::persisted_pending_state_mismatch_survives_restart_without_normalization",
+          "expectation": "Corrupted persisted pending state is not silently normalized into an activation."
+        }
+      ]
+    }
+  ]
+}
