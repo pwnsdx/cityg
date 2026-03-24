@@ -129,6 +129,9 @@ mod session_types;
 mod shell_ui;
 mod state;
 mod storage;
+mod storage_crypto;
+mod storage_logs;
+mod storage_paths;
 mod tokio_bridge;
 mod websocket;
 
@@ -155,6 +158,9 @@ use session_types::*;
 use shell_ui::*;
 use state::*;
 use storage::*;
+use storage_crypto::*;
+use storage_logs::*;
+use storage_paths::*;
 use tokio_bridge::Tokio;
 #[cfg(test)]
 use websocket::*;
