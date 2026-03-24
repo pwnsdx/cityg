@@ -329,7 +329,7 @@ message BarrierFetchPublicTreeResponse {
 message RoomAdminProof {
   reserved 1000 to 1999;
   bytes pop_public_key = 1;  // ML-DSA-87 public key (Dilithium5)
-  bytes signature = 2;       // Signature over CBOR([op, room_id, kbroad_public])
+  bytes signature = 2;       // Signature over CBOR([op, room_id, payload_bytes])
 }
 
 message BootstrapRoomRequest {
@@ -355,4 +355,28 @@ message RotateRoomKbroadResponse {
   reserved 1000 to 1999;
   string status = 1;
   uint64 kbroad_generation = 2;
+}
+
+message RoomAdminMutationRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  bytes target_pop_public_key = 2;
+  optional RoomAdminProof admin_proof = 3;
+}
+
+message RoomAdminMutationResponse {
+  reserved 1000 to 1999;
+  string status = 1;
+  uint64 admin_count = 2;
+}
+
+message ListRoomAdminsRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  optional RoomAdminProof admin_proof = 2;
+}
+
+message ListRoomAdminsResponse {
+  reserved 1000 to 1999;
+  repeated bytes admin_pop_public_keys = 1;
 }

@@ -45,8 +45,9 @@ use pb::{
     ConfigureWindowRequest, ConfigureWindowResponse, FetchMessagesRequest, FetchMessagesResponse,
     FreezeStat, GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetTelemetryResponse,
     GetWindowRequest, GetWindowResponse, HealthResponse, IdentityBinding, JoinTicketRequest,
-    JoinTicketResponse, Member, MembersRequest, MembersResponse, MergeTicketIntent,
-    MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
+    JoinTicketResponse, ListRoomAdminsRequest, ListRoomAdminsResponse, Member, MembersRequest,
+    MembersResponse, MergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
+    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse,
     RoomAdminProof, RotateRoomKbroadRequest, RotateRoomKbroadResponse, SendMessageRequest,
     SendMessageResponse, TelemetryEntry, WindowEntry, WindowHead,
 };
@@ -1251,11 +1252,11 @@ fn verify_identity_binding(binding: &IdentityBinding) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn verify_room_admin_proof(
+fn verify_room_admin_proof_payload(
     proof: &RoomAdminProof,
     operation: &'static str,
     room_id: &str,
-    kbroad_public: &[u8],
+    payload: &[u8],
 ) -> Result<Vec<u8>, ApiError> {
     use pqcrypto_dilithium::dilithium5;
     use pqcrypto_traits::sign::{
@@ -1275,11 +1276,7 @@ fn verify_room_admin_proof(
     if room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
     }
-    if kbroad_public.is_empty() {
-        return Err(ApiError::InvalidRequest("kbroad_public must be provided"));
-    }
-
-    let message_data = (operation, room_id, ByteBuf::from(kbroad_public.to_vec()));
+    let message_data = (operation, room_id, ByteBuf::from(payload.to_vec()));
     let mut message = Vec::new();
     into_writer(&message_data, &mut message)
         .map_err(|_| ApiError::InvalidRequest("failed to encode room admin proof message"))?;
@@ -1294,6 +1291,18 @@ fn verify_room_admin_proof(
         .map_err(|_| ApiError::InvalidRequest("room admin proof verification failed"))?;
 
     Ok(proof.pop_public_key.clone())
+}
+
+fn verify_room_admin_proof(
+    proof: &RoomAdminProof,
+    operation: &'static str,
+    room_id: &str,
+    kbroad_public: &[u8],
+) -> Result<Vec<u8>, ApiError> {
+    if kbroad_public.is_empty() {
+        return Err(ApiError::InvalidRequest("kbroad_public must be provided"));
+    }
+    verify_room_admin_proof_payload(proof, operation, room_id, kbroad_public)
 }
 
 async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
@@ -1963,6 +1972,137 @@ async fn rotate_room_kbroad(
     let response = RotateRoomKbroadResponse {
         status: "rotated".to_string(),
         kbroad_generation,
+    };
+    Ok(protobuf_response(&response))
+}
+
+async fn grant_room_admin(
+    State(state): State<ApiState>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    use pqcrypto_dilithium::dilithium5;
+
+    let request = RoomAdminMutationRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    if request.target_pop_public_key.len() != dilithium5::public_key_bytes() {
+        return Err(ApiError::InvalidRequest(
+            "target_pop_public_key has unexpected length",
+        ));
+    }
+
+    let gid = parse_gid(&request.room_id)?;
+    let proof = request
+        .admin_proof
+        .as_ref()
+        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
+    let actor_pop_key = verify_room_admin_proof_payload(
+        proof,
+        "grant_room_admin_v1",
+        &request.room_id,
+        &request.target_pop_public_key,
+    )?;
+    let (granted, admin_count) = {
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
+        guard
+            .grant_room_admin(&gid, &actor_pop_key, request.target_pop_public_key)
+            .map_err(|err| match err {
+                ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
+                other => ApiError::from(other),
+            })?
+    };
+
+    let response = RoomAdminMutationResponse {
+        status: if granted {
+            "granted".to_string()
+        } else {
+            "already_granted".to_string()
+        },
+        admin_count,
+    };
+    Ok(protobuf_response(&response))
+}
+
+async fn revoke_room_admin(
+    State(state): State<ApiState>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    use pqcrypto_dilithium::dilithium5;
+
+    let request = RoomAdminMutationRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    if request.target_pop_public_key.len() != dilithium5::public_key_bytes() {
+        return Err(ApiError::InvalidRequest(
+            "target_pop_public_key has unexpected length",
+        ));
+    }
+
+    let gid = parse_gid(&request.room_id)?;
+    let proof = request
+        .admin_proof
+        .as_ref()
+        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
+    let actor_pop_key = verify_room_admin_proof_payload(
+        proof,
+        "revoke_room_admin_v1",
+        &request.room_id,
+        &request.target_pop_public_key,
+    )?;
+    let (revoked, admin_count) = {
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
+        guard
+            .revoke_room_admin(&gid, &actor_pop_key, &request.target_pop_public_key)
+            .map_err(|err| match err {
+                ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
+                other => ApiError::from(other),
+            })?
+    };
+
+    let response = RoomAdminMutationResponse {
+        status: if revoked {
+            "revoked".to_string()
+        } else {
+            "already_revoked".to_string()
+        },
+        admin_count,
+    };
+    Ok(protobuf_response(&response))
+}
+
+async fn list_room_admins(
+    State(state): State<ApiState>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let request = ListRoomAdminsRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+
+    let gid = parse_gid(&request.room_id)?;
+    let proof = request
+        .admin_proof
+        .as_ref()
+        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
+    let actor_pop_key =
+        verify_room_admin_proof_payload(proof, "list_room_admins_v1", &request.room_id, &[])?;
+    let admin_pop_public_keys = {
+        let lane = state.server_for_gid(&gid);
+        let guard = lane.read().await;
+        guard
+            .list_room_admins(&gid, &actor_pop_key)
+            .map_err(|err| match err {
+                ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
+                other => ApiError::from(other),
+            })?
+    };
+
+    let response = ListRoomAdminsResponse {
+        admin_pop_public_keys,
     };
     Ok(protobuf_response(&response))
 }
@@ -3110,6 +3250,9 @@ pub async fn run_with_config(
         .route("/v1/bundle", post(get_bundle))
         .route("/v1/rooms/bootstrap", post(bootstrap_room))
         .route("/v1/rooms/rotate_kbroad", post(rotate_room_kbroad))
+        .route("/v1/rooms/grant_admin", post(grant_room_admin))
+        .route("/v1/rooms/revoke_admin", post(revoke_room_admin))
+        .route("/v1/rooms/list_admins", post(list_room_admins))
         .route("/v1/rooms/join_ticket", post(join_ticket))
         .route("/v1/rooms/merge_ticket", post(merge_ticket))
         .route(
@@ -3332,7 +3475,8 @@ mod tests {
     use axum::body::to_bytes;
     use axum::routing::get;
     use cityg_api_client::{
-        RoomAdminOperation, build_room_admin_proof, generate_room_admin_keypair,
+        RoomAdminOperation, build_room_admin_listing_proof, build_room_admin_proof,
+        build_room_admin_target_proof, generate_room_admin_keypair,
     };
     use cityg_client::demo::{DEMO_GID, demo_bundle};
     use cityg_client::witness::SrxInputsOwned;
@@ -3432,7 +3576,7 @@ mod tests {
             .expect("env lock poisoned")
     }
 
-    fn test_room_admin_proof(
+    fn test_room_admin_kbroad_proof(
         operation: RoomAdminOperation,
         room_id: &str,
         kbroad_public: &[u8],
@@ -3447,6 +3591,40 @@ mod tests {
             pop_secret_key,
         )
         .expect("build room admin proof");
+        RoomAdminProof {
+            pop_public_key: proof.pop_public_key,
+            signature: proof.signature,
+        }
+    }
+
+    fn test_room_admin_target_proof(
+        operation: RoomAdminOperation,
+        room_id: &str,
+        target_pop_public_key: &[u8],
+        pop_public_key: &[u8],
+        pop_secret_key: &[u8],
+    ) -> RoomAdminProof {
+        let proof = build_room_admin_target_proof(
+            operation,
+            room_id,
+            target_pop_public_key,
+            pop_public_key,
+            pop_secret_key,
+        )
+        .expect("build room admin target proof");
+        RoomAdminProof {
+            pop_public_key: proof.pop_public_key,
+            signature: proof.signature,
+        }
+    }
+
+    fn test_room_admin_listing_proof(
+        room_id: &str,
+        pop_public_key: &[u8],
+        pop_secret_key: &[u8],
+    ) -> RoomAdminProof {
+        let proof = build_room_admin_listing_proof(room_id, pop_public_key, pop_secret_key)
+            .expect("build room admin listing proof");
         RoomAdminProof {
             pop_public_key: proof.pop_public_key,
             signature: proof.signature,
@@ -4443,7 +4621,7 @@ mod tests {
             encode(BootstrapRoomRequest {
                 room_id: room_id.clone(),
                 kbroad_public: kbroad_public.clone(),
-                admin_proof: Some(test_room_admin_proof(
+                admin_proof: Some(test_room_admin_kbroad_proof(
                     RoomAdminOperation::Bootstrap,
                     &room_id,
                     &kbroad_public,
@@ -4477,7 +4655,7 @@ mod tests {
             encode(BootstrapRoomRequest {
                 room_id: room_id.clone(),
                 kbroad_public: kbroad_public.clone(),
-                admin_proof: Some(test_room_admin_proof(
+                admin_proof: Some(test_room_admin_kbroad_proof(
                     RoomAdminOperation::Bootstrap,
                     &room_id,
                     &kbroad_public,
@@ -4495,7 +4673,7 @@ mod tests {
             encode(BootstrapRoomRequest {
                 room_id: room_id.clone(),
                 kbroad_public: kbroad_public.clone(),
-                admin_proof: Some(test_room_admin_proof(
+                admin_proof: Some(test_room_admin_kbroad_proof(
                     RoomAdminOperation::Bootstrap,
                     &room_id,
                     &kbroad_public,
@@ -4590,7 +4768,7 @@ mod tests {
             encode(RotateRoomKbroadRequest {
                 room_id: room_id.clone(),
                 kbroad_public: rotated.clone(),
-                admin_proof: Some(test_room_admin_proof(
+                admin_proof: Some(test_room_admin_kbroad_proof(
                     RoomAdminOperation::RotateKbroad,
                     &room_id,
                     &rotated,
@@ -4642,7 +4820,7 @@ mod tests {
             encode(RotateRoomKbroadRequest {
                 room_id: missing_room_id.clone(),
                 kbroad_public: vec![0x22; ml_kem_public_key_bytes()],
-                admin_proof: Some(test_room_admin_proof(
+                admin_proof: Some(test_room_admin_kbroad_proof(
                     RoomAdminOperation::RotateKbroad,
                     &missing_room_id,
                     &vec![0x22; ml_kem_public_key_bytes()],
@@ -4665,7 +4843,7 @@ mod tests {
             encode(RotateRoomKbroadRequest {
                 room_id: demo_room_id.clone(),
                 kbroad_public: cityg_client::demo::kbroad_public().to_vec(),
-                admin_proof: Some(test_room_admin_proof(
+                admin_proof: Some(test_room_admin_kbroad_proof(
                     RoomAdminOperation::RotateKbroad,
                     &demo_room_id,
                     cityg_client::demo::kbroad_public(),
@@ -4700,7 +4878,7 @@ mod tests {
             encode_proto_request(&BootstrapRoomRequest {
                 room_id: room_id.clone(),
                 kbroad_public: initial_kbroad_public.clone(),
-                admin_proof: Some(test_room_admin_proof(
+                admin_proof: Some(test_room_admin_kbroad_proof(
                     RoomAdminOperation::Bootstrap,
                     &room_id,
                     &initial_kbroad_public,
@@ -4719,7 +4897,7 @@ mod tests {
             encode(RotateRoomKbroadRequest {
                 room_id: room_id.clone(),
                 kbroad_public: rotated_kbroad_public.clone(),
-                admin_proof: Some(test_room_admin_proof(
+                admin_proof: Some(test_room_admin_kbroad_proof(
                     RoomAdminOperation::RotateKbroad,
                     &room_id,
                     &rotated_kbroad_public,
@@ -4733,6 +4911,169 @@ mod tests {
         assert!(matches!(
             err,
             ApiError::InvalidRequest("room admin proof is not authorized")
+        ));
+    }
+
+    #[tokio::test]
+    async fn grant_revoke_and_list_room_admins_require_valid_admin_proofs() {
+        let state = test_api_state();
+        let room_id = hex::encode([0xA1u8; 32]);
+        let kbroad_public = vec![0x41; ml_kem_public_key_bytes()];
+        let (creator_pop_public_key, creator_pop_secret_key) = generate_room_admin_keypair();
+        let (delegate_pop_public_key, delegate_pop_secret_key) = generate_room_admin_keypair();
+        let (other_pop_public_key, other_pop_secret_key) = generate_room_admin_keypair();
+
+        bootstrap_room(
+            State(state.clone()),
+            HeaderMap::new(),
+            encode_proto_request(&BootstrapRoomRequest {
+                room_id: room_id.clone(),
+                kbroad_public: kbroad_public.clone(),
+                admin_proof: Some(test_room_admin_kbroad_proof(
+                    RoomAdminOperation::Bootstrap,
+                    &room_id,
+                    &kbroad_public,
+                    &creator_pop_public_key,
+                    &creator_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect("bootstrap should succeed");
+
+        let missing_proof_err = grant_room_admin(
+            State(state.clone()),
+            encode_proto_request(&RoomAdminMutationRequest {
+                room_id: room_id.clone(),
+                target_pop_public_key: delegate_pop_public_key.clone(),
+                admin_proof: None,
+            }),
+        )
+        .await
+        .expect_err("missing proof must fail");
+        assert!(matches!(
+            missing_proof_err,
+            ApiError::Unauthorized("room admin proof is required")
+        ));
+
+        let unauthorized_err = grant_room_admin(
+            State(state.clone()),
+            encode_proto_request(&RoomAdminMutationRequest {
+                room_id: room_id.clone(),
+                target_pop_public_key: delegate_pop_public_key.clone(),
+                admin_proof: Some(test_room_admin_target_proof(
+                    RoomAdminOperation::GrantAdmin,
+                    &room_id,
+                    &delegate_pop_public_key,
+                    &other_pop_public_key,
+                    &other_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect_err("non-admin proof must fail");
+        assert!(matches!(
+            unauthorized_err,
+            ApiError::InvalidRequest("room admin proof is not authorized")
+        ));
+
+        let grant_response = grant_room_admin(
+            State(state.clone()),
+            encode_proto_request(&RoomAdminMutationRequest {
+                room_id: room_id.clone(),
+                target_pop_public_key: delegate_pop_public_key.clone(),
+                admin_proof: Some(test_room_admin_target_proof(
+                    RoomAdminOperation::GrantAdmin,
+                    &room_id,
+                    &delegate_pop_public_key,
+                    &creator_pop_public_key,
+                    &creator_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect("grant should succeed");
+        let granted: RoomAdminMutationResponse = decode_proto_response(grant_response).await;
+        assert_eq!(granted.status, "granted");
+        assert_eq!(granted.admin_count, 2);
+
+        let list_response = list_room_admins(
+            State(state.clone()),
+            encode_proto_request(&ListRoomAdminsRequest {
+                room_id: room_id.clone(),
+                admin_proof: Some(test_room_admin_listing_proof(
+                    &room_id,
+                    &delegate_pop_public_key,
+                    &creator_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect_err("mismatched list proof must fail");
+        assert!(matches!(
+            list_response,
+            ApiError::InvalidRequest("room admin proof verification failed")
+        ));
+
+        let list_response = list_room_admins(
+            State(state.clone()),
+            encode_proto_request(&ListRoomAdminsRequest {
+                room_id: room_id.clone(),
+                admin_proof: Some(test_room_admin_listing_proof(
+                    &room_id,
+                    &delegate_pop_public_key,
+                    &delegate_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect("delegate should be able to list admins");
+        let listed: ListRoomAdminsResponse = decode_proto_response(list_response).await;
+        assert_eq!(listed.admin_pop_public_keys.len(), 2);
+        let listed_admins: std::collections::BTreeSet<Vec<u8>> =
+            listed.admin_pop_public_keys.into_iter().collect();
+        assert!(listed_admins.contains(&creator_pop_public_key));
+        assert!(listed_admins.contains(&delegate_pop_public_key));
+
+        let revoke_response = revoke_room_admin(
+            State(state.clone()),
+            encode_proto_request(&RoomAdminMutationRequest {
+                room_id: room_id.clone(),
+                target_pop_public_key: delegate_pop_public_key.clone(),
+                admin_proof: Some(test_room_admin_target_proof(
+                    RoomAdminOperation::RevokeAdmin,
+                    &room_id,
+                    &delegate_pop_public_key,
+                    &creator_pop_public_key,
+                    &creator_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect("revoke should succeed");
+        let revoked: RoomAdminMutationResponse = decode_proto_response(revoke_response).await;
+        assert_eq!(revoked.status, "revoked");
+        assert_eq!(revoked.admin_count, 1);
+
+        let revoke_last_err = revoke_room_admin(
+            State(state),
+            encode_proto_request(&RoomAdminMutationRequest {
+                room_id,
+                target_pop_public_key: creator_pop_public_key.clone(),
+                admin_proof: Some(test_room_admin_target_proof(
+                    RoomAdminOperation::RevokeAdmin,
+                    &hex::encode([0xA1u8; 32]),
+                    &creator_pop_public_key,
+                    &creator_pop_public_key,
+                    &creator_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect_err("last admin revoke must fail");
+        assert!(matches!(
+            revoke_last_err,
+            ApiError::InvalidRequest("cannot revoke the last room admin")
         ));
     }
 
@@ -5087,7 +5428,7 @@ mod tests {
             let request = BootstrapRoomRequest {
                 room_id: room_id.clone(),
                 kbroad_public: kbroad_public.clone(),
-                admin_proof: Some(test_room_admin_proof(
+                admin_proof: Some(test_room_admin_kbroad_proof(
                     RoomAdminOperation::Bootstrap,
                     &room_id,
                     &kbroad_public,

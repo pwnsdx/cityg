@@ -518,6 +518,123 @@ impl CityGServer {
         self.rotate_group_kbroad(gid, kbroad_public)
     }
 
+    pub fn grant_room_admin(
+        &mut self,
+        gid: &[u8; 32],
+        actor_pop_public_key: &[u8],
+        target_pop_public_key: Vec<u8>,
+    ) -> Result<(bool, u64), CityGError> {
+        if !self.roster.has_explicit_room_admins(gid) {
+            return Err(CityGError::InvalidInput(
+                "room admin proof is not authorized",
+            ));
+        }
+        if !self.roster.is_room_admin(gid, actor_pop_public_key) {
+            return Err(CityGError::InvalidInput(
+                "room admin proof is not authorized",
+            ));
+        }
+        if self
+            .ctx
+            .kbroad_registry()
+            .and_then(|registry| registry.get(gid.as_ref()))
+            .is_none()
+        {
+            return Err(CityGError::InvalidInput("kbroad key missing"));
+        }
+
+        let state = self
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("roster group missing"))?;
+        let granted = state.room_admin_pop_keys.insert(target_pop_public_key);
+        let admin_count = u64::try_from(state.room_admin_pop_keys.len()).unwrap_or(u64::MAX);
+        self.persist_kbroad_state()?;
+        Ok((granted, admin_count))
+    }
+
+    pub fn revoke_room_admin(
+        &mut self,
+        gid: &[u8; 32],
+        actor_pop_public_key: &[u8],
+        target_pop_public_key: &[u8],
+    ) -> Result<(bool, u64), CityGError> {
+        if !self.roster.has_explicit_room_admins(gid) {
+            return Err(CityGError::InvalidInput(
+                "room admin proof is not authorized",
+            ));
+        }
+        if !self.roster.is_room_admin(gid, actor_pop_public_key) {
+            return Err(CityGError::InvalidInput(
+                "room admin proof is not authorized",
+            ));
+        }
+        if self
+            .ctx
+            .kbroad_registry()
+            .and_then(|registry| registry.get(gid.as_ref()))
+            .is_none()
+        {
+            return Err(CityGError::InvalidInput("kbroad key missing"));
+        }
+
+        let state = self
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("roster group missing"))?;
+        if !state.room_admin_pop_keys.contains(target_pop_public_key) {
+            let admin_count = u64::try_from(state.room_admin_pop_keys.len()).unwrap_or(u64::MAX);
+            return Ok((false, admin_count));
+        }
+        if state.room_admin_pop_keys.len() == 1 {
+            return Err(CityGError::InvalidInput(
+                "cannot revoke the last room admin",
+            ));
+        }
+        let revoked = state.room_admin_pop_keys.remove(target_pop_public_key);
+        let admin_count = u64::try_from(state.room_admin_pop_keys.len()).unwrap_or(u64::MAX);
+        self.persist_kbroad_state()?;
+        Ok((revoked, admin_count))
+    }
+
+    pub fn list_room_admins(
+        &self,
+        gid: &[u8; 32],
+        actor_pop_public_key: &[u8],
+    ) -> Result<Vec<Vec<u8>>, CityGError> {
+        if !self.roster.has_explicit_room_admins(gid) {
+            return Err(CityGError::InvalidInput(
+                "room admin proof is not authorized",
+            ));
+        }
+        if !self.roster.is_room_admin(gid, actor_pop_public_key) {
+            return Err(CityGError::InvalidInput(
+                "room admin proof is not authorized",
+            ));
+        }
+        if self
+            .ctx
+            .kbroad_registry()
+            .and_then(|registry| registry.get(gid.as_ref()))
+            .is_none()
+        {
+            return Err(CityGError::InvalidInput("kbroad key missing"));
+        }
+
+        let admins = self
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("roster group missing"))?
+            .room_admin_pop_keys
+            .iter()
+            .cloned()
+            .collect();
+        Ok(admins)
+    }
+
     pub fn kbroad_generation(&self, gid: &[u8; 32]) -> u64 {
         self.roster.kbroad_generation(gid)
     }
@@ -3640,6 +3757,108 @@ mod tests {
         assert_eq!(
             server.build_join_ticket(&gid)?.kbroad_public,
             rotated_kbroad
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn grant_revoke_and_list_room_admins_enforce_authorization() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0xB5; 32];
+        let kbroad_public = vec![0x51; 16];
+        let creator_pop_key = vec![0xA1; 48];
+        let delegate_pop_key = vec![0xB1; 48];
+        let outsider_pop_key = vec![0xC1; 48];
+
+        server.register_group_with_admin(&gid, kbroad_public, creator_pop_key.clone())?;
+
+        let err = server
+            .grant_room_admin(&gid, &outsider_pop_key, delegate_pop_key.clone())
+            .expect_err("non-admin grant must fail");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("room admin proof is not authorized")
+        ));
+
+        let (granted, admin_count) =
+            server.grant_room_admin(&gid, &creator_pop_key, delegate_pop_key.clone())?;
+        assert!(granted);
+        assert_eq!(admin_count, 2);
+        assert_eq!(
+            server.list_room_admins(&gid, &creator_pop_key)?,
+            vec![creator_pop_key.clone(), delegate_pop_key.clone()]
+        );
+
+        let (already_granted, admin_count) =
+            server.grant_room_admin(&gid, &creator_pop_key, delegate_pop_key.clone())?;
+        assert!(!already_granted);
+        assert_eq!(admin_count, 2);
+
+        assert_eq!(
+            server.list_room_admins(&gid, &delegate_pop_key)?,
+            vec![creator_pop_key.clone(), delegate_pop_key.clone()]
+        );
+
+        let err = server
+            .revoke_room_admin(&gid, &outsider_pop_key, &delegate_pop_key)
+            .expect_err("non-admin revoke must fail");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("room admin proof is not authorized")
+        ));
+
+        let (revoked, admin_count) =
+            server.revoke_room_admin(&gid, &creator_pop_key, &delegate_pop_key)?;
+        assert!(revoked);
+        assert_eq!(admin_count, 1);
+        assert_eq!(
+            server.list_room_admins(&gid, &creator_pop_key)?,
+            vec![creator_pop_key.clone()]
+        );
+
+        let (already_revoked, admin_count) =
+            server.revoke_room_admin(&gid, &creator_pop_key, &delegate_pop_key)?;
+        assert!(!already_revoked);
+        assert_eq!(admin_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn revoke_room_admin_rejects_last_admin_and_persists_grants() -> Result<(), CityGError> {
+        let _serial = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("room-admin-grants.journal");
+        let gid = [0xB6; 32];
+        let kbroad_public = vec![0x61; 16];
+        let creator_pop_key = vec![0xD1; 48];
+        let delegate_pop_key = vec![0xE1; 48];
+
+        {
+            let mut config = ServerConfig::new();
+            config.state_path = Some(journal_path.clone());
+            let mut server = CityGServer::new(config);
+            server.register_group_with_admin(&gid, kbroad_public, creator_pop_key.clone())?;
+
+            let err = server
+                .revoke_room_admin(&gid, &creator_pop_key, &creator_pop_key)
+                .expect_err("last admin revoke must fail");
+            assert!(matches!(
+                err,
+                CityGError::InvalidInput("cannot revoke the last room admin")
+            ));
+
+            let (granted, admin_count) =
+                server.grant_room_admin(&gid, &creator_pop_key, delegate_pop_key.clone())?;
+            assert!(granted);
+            assert_eq!(admin_count, 2);
+        }
+
+        let mut config = ServerConfig::new();
+        config.state_path = Some(journal_path);
+        let restarted = CityGServer::new(config);
+        assert_eq!(
+            restarted.list_room_admins(&gid, &creator_pop_key)?,
+            vec![creator_pop_key, delegate_pop_key]
         );
         Ok(())
     }

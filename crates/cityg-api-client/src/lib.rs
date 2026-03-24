@@ -42,7 +42,21 @@
 //! // Generate a broadcast key (implementation not shown)
 //! let kbroad_public = vec![0u8; 32]; // Replace with actual key
 //!
-//! client.bootstrap_room("room-123", &kbroad_public).await?;
+//! # use cityg_api_client::{
+//! #   build_room_admin_proof, generate_room_admin_keypair, RoomAdminOperation,
+//! # };
+//! let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+//! let admin_proof = build_room_admin_proof(
+//!     RoomAdminOperation::Bootstrap,
+//!     "room-123",
+//!     &kbroad_public,
+//!     &pop_public_key,
+//!     &pop_secret_key,
+//! )?;
+//!
+//! client
+//!     .bootstrap_room_as_admin("room-123", &kbroad_public, admin_proof)
+//!     .await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -138,11 +152,12 @@ use pb::{
     BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest, BootstrapRoomResponse,
     ConfigureWindowRequest, ConfigureWindowResponse, FetchMessagesRequest, FetchMessagesResponse,
     GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetTelemetryResponse,
-    GetWindowRequest, GetWindowResponse, JoinTicketRequest, JoinTicketResponse, MembersRequest,
-    MembersResponse, MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest,
-    MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse, RotateRoomKbroadRequest,
-    RotateRoomKbroadResponse, SearchMembersRequest, SearchMembersResponse, SendMessageRequest,
-    SendMessageResponse,
+    GetWindowRequest, GetWindowResponse, JoinTicketRequest, JoinTicketResponse,
+    ListRoomAdminsRequest, ListRoomAdminsResponse, MembersRequest, MembersResponse,
+    MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
+    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse,
+    RotateRoomKbroadRequest, RotateRoomKbroadResponse, SearchMembersRequest, SearchMembersResponse,
+    SendMessageRequest, SendMessageResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -164,6 +179,9 @@ const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
 pub enum RoomAdminOperation {
     Bootstrap,
     RotateKbroad,
+    GrantAdmin,
+    RevokeAdmin,
+    ListAdmins,
 }
 
 impl RoomAdminOperation {
@@ -171,8 +189,31 @@ impl RoomAdminOperation {
         match self {
             Self::Bootstrap => "bootstrap_room_v1",
             Self::RotateKbroad => "rotate_room_kbroad_v1",
+            Self::GrantAdmin => "grant_room_admin_v1",
+            Self::RevokeAdmin => "revoke_room_admin_v1",
+            Self::ListAdmins => "list_room_admins_v1",
         }
     }
+}
+
+fn build_room_admin_proof_payload(
+    operation: RoomAdminOperation,
+    room_id: &str,
+    payload: &[u8],
+    pop_public_key: &[u8],
+    pop_secret_key: &[u8],
+) -> Result<RoomAdminProof, Error> {
+    let secret_key = dilithium5::SecretKey::from_bytes(pop_secret_key)
+        .map_err(|_| Error::Parse("invalid room admin secret key".to_string()))?;
+    let message = (operation.as_str(), room_id, ByteBuf::from(payload.to_vec()));
+    let mut payload_bytes = Vec::new();
+    into_writer(&message, &mut payload_bytes)
+        .map_err(|err| Error::Parse(format!("encode room admin proof payload: {err}")))?;
+    let signature = dilithium5::detached_sign(&payload_bytes, &secret_key);
+    Ok(RoomAdminProof {
+        pop_public_key: pop_public_key.to_vec(),
+        signature: signature.as_bytes().to_vec(),
+    })
 }
 
 pub fn generate_room_admin_keypair() -> (Vec<u8>, Vec<u8>) {
@@ -190,21 +231,43 @@ pub fn build_room_admin_proof(
     pop_public_key: &[u8],
     pop_secret_key: &[u8],
 ) -> Result<RoomAdminProof, Error> {
-    let secret_key = dilithium5::SecretKey::from_bytes(pop_secret_key)
-        .map_err(|_| Error::Parse("invalid room admin secret key".to_string()))?;
-    let message = (
-        operation.as_str(),
+    build_room_admin_proof_payload(
+        operation,
         room_id,
-        ByteBuf::from(kbroad_public.to_vec()),
-    );
-    let mut payload = Vec::new();
-    into_writer(&message, &mut payload)
-        .map_err(|err| Error::Parse(format!("encode room admin proof payload: {err}")))?;
-    let signature = dilithium5::detached_sign(&payload, &secret_key);
-    Ok(RoomAdminProof {
-        pop_public_key: pop_public_key.to_vec(),
-        signature: signature.as_bytes().to_vec(),
-    })
+        kbroad_public,
+        pop_public_key,
+        pop_secret_key,
+    )
+}
+
+pub fn build_room_admin_target_proof(
+    operation: RoomAdminOperation,
+    room_id: &str,
+    target_pop_public_key: &[u8],
+    pop_public_key: &[u8],
+    pop_secret_key: &[u8],
+) -> Result<RoomAdminProof, Error> {
+    build_room_admin_proof_payload(
+        operation,
+        room_id,
+        target_pop_public_key,
+        pop_public_key,
+        pop_secret_key,
+    )
+}
+
+pub fn build_room_admin_listing_proof(
+    room_id: &str,
+    pop_public_key: &[u8],
+    pop_secret_key: &[u8],
+) -> Result<RoomAdminProof, Error> {
+    build_room_admin_proof_payload(
+        RoomAdminOperation::ListAdmins,
+        room_id,
+        &[],
+        pop_public_key,
+        pop_secret_key,
+    )
 }
 const EXPECTED_PROFILE_VERSION: &str = "v0.1.4";
 
@@ -457,10 +520,20 @@ impl CitygApiClient {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = CitygApiClient::new("http://localhost:8080");
     ///
-    /// // Generate a fresh broadcast key (using your preferred crypto library)
+    /// // Generate a fresh broadcast key and room-admin identity.
     /// let kbroad_public = vec![0u8; 32]; // Replace with actual key generation
+    /// let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
+    /// let admin_proof = cityg_api_client::build_room_admin_proof(
+    ///     cityg_api_client::RoomAdminOperation::Bootstrap,
+    ///     "my-secure-room",
+    ///     &kbroad_public,
+    ///     &pop_public_key,
+    ///     &pop_secret_key,
+    /// )?;
     ///
-    /// client.bootstrap_room("my-secure-room", &kbroad_public).await?;
+    /// client
+    ///     .bootstrap_room_as_admin("my-secure-room", &kbroad_public, admin_proof)
+    ///     .await?;
     /// println!("Room bootstrapped successfully!");
     /// # Ok(())
     /// # }
@@ -522,6 +595,49 @@ impl CitygApiClient {
         let response: RotateRoomKbroadResponse =
             self.post_proto("/v1/rooms/rotate_kbroad", request).await?;
         Ok(response.kbroad_generation)
+    }
+
+    /// Grants room-admin authority to another persistent room identity.
+    pub async fn grant_room_admin(
+        &self,
+        room_id: &str,
+        target_pop_public_key: &[u8],
+        admin_proof: RoomAdminProof,
+    ) -> Result<RoomAdminMutationResponse, Error> {
+        let request = RoomAdminMutationRequest {
+            room_id: room_id.to_string(),
+            target_pop_public_key: target_pop_public_key.to_vec(),
+            admin_proof: Some(admin_proof),
+        };
+        self.post_proto("/v1/rooms/grant_admin", request).await
+    }
+
+    /// Revokes room-admin authority from a room identity.
+    pub async fn revoke_room_admin(
+        &self,
+        room_id: &str,
+        target_pop_public_key: &[u8],
+        admin_proof: RoomAdminProof,
+    ) -> Result<RoomAdminMutationResponse, Error> {
+        let request = RoomAdminMutationRequest {
+            room_id: room_id.to_string(),
+            target_pop_public_key: target_pop_public_key.to_vec(),
+            admin_proof: Some(admin_proof),
+        };
+        self.post_proto("/v1/rooms/revoke_admin", request).await
+    }
+
+    /// Lists the persistent room identities that currently hold room-admin authority.
+    pub async fn list_room_admins(
+        &self,
+        room_id: &str,
+        admin_proof: RoomAdminProof,
+    ) -> Result<ListRoomAdminsResponse, Error> {
+        let request = ListRoomAdminsRequest {
+            room_id: room_id.to_string(),
+            admin_proof: Some(admin_proof),
+        };
+        self.post_proto("/v1/rooms/list_admins", request).await
     }
 
     /// Retrieves the member roster for a group.
@@ -1577,6 +1693,17 @@ mod tests {
         let payload = match uri.path() {
             "/v1/rooms/bootstrap" => encode_proto(BootstrapRoomResponse::default()),
             "/v1/rooms/rotate_kbroad" => encode_proto(RotateRoomKbroadResponse::default()),
+            "/v1/rooms/grant_admin" => encode_proto(RoomAdminMutationResponse {
+                status: "granted".to_string(),
+                admin_count: 2,
+            }),
+            "/v1/rooms/revoke_admin" => encode_proto(RoomAdminMutationResponse {
+                status: "revoked".to_string(),
+                admin_count: 1,
+            }),
+            "/v1/rooms/list_admins" => encode_proto(ListRoomAdminsResponse {
+                admin_pop_public_keys: vec![vec![0xA1; 32], vec![0xB2; 32]],
+            }),
             "/v1/members" => encode_proto(MembersResponse::default()),
             "/v1/members/search" => encode_proto(SearchMembersResponse::default()),
             "/v1/rooms/join_ticket" => encode_proto(JoinTicketResponse {
@@ -1821,6 +1948,15 @@ mod tests {
         assert!(!CitygApiClient::requires_admin_token(
             "/v1/rooms/rotate_kbroad"
         ));
+        assert!(!CitygApiClient::requires_admin_token(
+            "/v1/rooms/grant_admin"
+        ));
+        assert!(!CitygApiClient::requires_admin_token(
+            "/v1/rooms/revoke_admin"
+        ));
+        assert!(!CitygApiClient::requires_admin_token(
+            "/v1/rooms/list_admins"
+        ));
         assert!(CitygApiClient::requires_admin_token(
             "/v1/debug/window/seed"
         ));
@@ -1845,6 +1981,15 @@ mod tests {
         assert!(CitygApiClient::requires_message_auth("/v1/window"));
         assert!(CitygApiClient::requires_message_auth("/v1/telemetry"));
         assert!(CitygApiClient::requires_message_auth("/v1/pivot/refresh"));
+        assert!(!CitygApiClient::requires_message_auth(
+            "/v1/rooms/grant_admin"
+        ));
+        assert!(!CitygApiClient::requires_message_auth(
+            "/v1/rooms/revoke_admin"
+        ));
+        assert!(!CitygApiClient::requires_message_auth(
+            "/v1/rooms/list_admins"
+        ));
 
         let client = CitygApiClient::new("http://localhost:8080").with_admin_token("  secret  ");
         assert_eq!(client.admin_token.as_deref(), Some("secret"));
@@ -1891,6 +2036,7 @@ mod tests {
         let client = CitygApiClient::with_http_client(base_url, Client::new());
         let demo_bundle = demo_bundle_alice()?;
         let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+        let target_pop_public_key = vec![0xA1; 32];
 
         client.health().await?;
         client
@@ -1919,6 +2065,46 @@ mod tests {
                 )?,
             )
             .await?;
+        let grant = client
+            .grant_room_admin(
+                "room-1",
+                &target_pop_public_key,
+                build_room_admin_target_proof(
+                    RoomAdminOperation::GrantAdmin,
+                    "room-1",
+                    &target_pop_public_key,
+                    &pop_public_key,
+                    &pop_secret_key,
+                )?,
+            )
+            .await?;
+        assert_eq!(grant.status, "granted");
+        assert_eq!(grant.admin_count, 2);
+        let listed = client
+            .list_room_admins(
+                "room-1",
+                build_room_admin_listing_proof("room-1", &pop_public_key, &pop_secret_key)?,
+            )
+            .await?;
+        assert_eq!(
+            listed.admin_pop_public_keys,
+            vec![vec![0xA1; 32], vec![0xB2; 32]]
+        );
+        let revoked = client
+            .revoke_room_admin(
+                "room-1",
+                &target_pop_public_key,
+                build_room_admin_target_proof(
+                    RoomAdminOperation::RevokeAdmin,
+                    "room-1",
+                    &target_pop_public_key,
+                    &pop_public_key,
+                    &pop_secret_key,
+                )?,
+            )
+            .await?;
+        assert_eq!(revoked.status, "revoked");
+        assert_eq!(revoked.admin_count, 1);
         let _ = client.accept_epoch_bundle(&demo_bundle).await?;
         client.refresh_pivot(&demo_bundle).await?;
         #[cfg(any(debug_assertions, feature = "debug-api"))]
