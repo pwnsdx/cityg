@@ -14,24 +14,23 @@ use anchor_seed::{
     compute_seed_ctx_hash,
 };
 use anyhow::{Context, Result, anyhow};
-use ciborium::value::{Integer, Value};
-use cityg_api_client::{
-    CitygApiClient, Error as ApiClientError, IdentityBinding,
-};
-#[cfg(test)]
-use cityg_api_client::BarrierJoinRecord;
 use barrier_shared::{
-    BARRIER_KEY_INFO, BARRIER_TREE_INFO, DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS,
-    BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage, apply_join_set_to_snapshot,
-    apply_revoked_set_to_snapshot, barrier_path_nodes, blank_leaf_and_path, collect_resolution_targets,
-    compute_barrier_pkhash, compute_barrier_tree_hash,
+    BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
+    DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, apply_join_set_to_snapshot,
+    apply_revoked_set_to_snapshot, barrier_path_nodes, blank_leaf_and_path,
+    collect_resolution_targets, compute_barrier_pkhash, compute_barrier_tree_hash,
     compute_revocation_roots_hash, expected_barrier_tree_nodes, should_retry_ticket_http_error,
     sibling_node, ticket_retry_delay,
 };
 #[cfg(test)]
 use barrier_shared::{
-    TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS, TICKET_RETRY_MAX_DELAY_MS, blank_internal_path_from_leaf,
+    TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS, TICKET_RETRY_MAX_DELAY_MS,
+    blank_internal_path_from_leaf,
 };
+use ciborium::value::{Integer, Value};
+#[cfg(test)]
+use cityg_api_client::BarrierJoinRecord;
+use cityg_api_client::{CitygApiClient, Error as ApiClientError, IdentityBinding};
 #[cfg(test)]
 use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
@@ -681,7 +680,6 @@ struct Session {
     seed_bundle_commit: [u8; 32],
     fs_fingerprint: Option<[u8; 32]>,
     stored_header_map: BTreeMap<u64, Value>,
-    next_msg_index: u64,
     #[cfg(test)]
     msg_replay_state: MsgReplayState,
 }
@@ -1063,7 +1061,6 @@ async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> R
         seed_bundle_commit,
         fs_fingerprint,
         stored_header_map: stored.header_map.clone(),
-        next_msg_index: 0,
         #[cfg(test)]
         msg_replay_state: MsgReplayState::default(),
     };
@@ -2039,6 +2036,7 @@ async fn send_text_message(session: &mut Session, plaintext: &str) -> Result<()>
         &session.msg_sign_public_key,
         &signature,
     );
+    let msg_index: u64 = rng().random();
     let ciphertext = encrypt_message_v2(
         &authenticated,
         &MessageCryptoContext {
@@ -2051,12 +2049,11 @@ async fn send_text_message(session: &mut Session, plaintext: &str) -> Result<()>
             epoch_key: &session.epoch_key,
             k_barrier: &session.k_barrier,
         },
-        session.next_msg_index,
+        msg_index,
     )?;
     client
         .send_message(&session.we_epoch_id, &ciphertext, Some(&session.leaf_id))
         .await?;
-    session.next_msg_index = session.next_msg_index.saturating_add(1);
     Ok(())
 }
 
@@ -2647,7 +2644,6 @@ mod tests {
             seed_bundle_commit: [0xCD; 32],
             fs_fingerprint: None,
             stored_header_map: BTreeMap::new(),
-            next_msg_index: 0,
             #[cfg(test)]
             msg_replay_state: MsgReplayState::default(),
         }
@@ -4305,7 +4301,6 @@ mod tests {
             seed_bundle_commit: [0x99; 32],
             fs_fingerprint: None,
             stored_header_map: BTreeMap::new(),
-            next_msg_index: 0,
             #[cfg(test)]
             msg_replay_state: MsgReplayState::default(),
         };
@@ -4401,7 +4396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_sender_messages_roundtrip_with_monotonic_msg_index() -> Result<()> {
+    async fn repeated_sender_messages_roundtrip_with_randomized_msg_index() -> Result<()> {
         let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
@@ -4413,7 +4408,6 @@ mod tests {
 
         send_text_message(&mut alice, "one").await?;
         send_text_message(&mut alice, "two").await?;
-        assert_eq!(alice.next_msg_index, 2, "msg_index must advance per send");
 
         let fetched = fetch_and_decrypt_messages(&mut alice).await?;
         assert_eq!(fetched, vec!["one".to_string(), "two".to_string()]);

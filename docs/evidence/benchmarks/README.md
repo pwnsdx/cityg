@@ -2,7 +2,7 @@
 
 - **GUI FS-Hybrid + Barrier benchmark note (2026-02-22)**:
   - `docs/evidence/benchmarks/gui-msg-index-and-barrier-2026-02-22.md`
-  - Focus: strict durable `msg_index` persistence throughput impact and large-`N` barrier chain-check timing.
+  - Focus: legacy strict durable `msg_index` persistence throughput impact and large-`N` barrier chain-check timing.
 
 - **Server barrier incremental hash benchmark note (2026-02-24)**:
   - `docs/evidence/benchmarks/server-barrier-incremental-hash-2026-02-24.md`

@@ -1,4 +1,4 @@
-# GUI Benchmarks: `msg_index` Persistence and Barrier Chain-Check
+# GUI Benchmarks: Legacy `msg_index` Persistence and Barrier Chain-Check
 
 Date: 2026-02-22  
 Profile: `cargo test -p cityg-gui --features native-app --release`  
@@ -15,7 +15,7 @@ Harness: manual ignored test benchmarks in `/Users/admin/Desktop/Repositories/ci
 
 ## Results
 
-### 1) Strict durable `msg_index` persistence cost
+### 1) Legacy strict durable `msg_index` persistence cost
 
 From `BENCH[msg_index_persist]`:
 - Iterations: `2000`
@@ -23,7 +23,7 @@ From `BENCH[msg_index_persist]`:
 - Mean per persisted increment: `21.9396 ms/op`
 - Effective persistence rate: `45.6 ops/s`
 
-### 2) Send throughput impact (with vs without per-message persistence)
+### 2) Send throughput impact (with vs without legacy per-message persistence)
 
 From `BENCH[send_throughput]`:
 - No persist path: `1760.5 msg/s` (`68.16 ms` for `120` sends)
@@ -48,6 +48,7 @@ Observations:
 
 ## Conclusion
 
-- The current strict monotonic + durable-per-message `msg_index` persistence is spec-compliant but is a severe throughput bottleneck in GUI send path (measured ~46.7x slowdown vs non-persist send loop).
+- These measurements cover a legacy counter-based `msg_index` design that is no longer in profile.
+- The legacy strict monotonic + durable-per-message `msg_index` persistence path is a severe throughput bottleneck in GUI send path (measured ~46.7x slowdown vs non-persist send loop).
 - Barrier chain-check CPU cost is moderate and `spawn_blocking` is effective for responsiveness.
-- These data support considering the spec-permitted alternative: random 64-bit `msg_index` with anti-replay state to reduce hot-path disk I/O pressure.
+- These data support the current profile choice: random 64-bit `msg_index` with receiver-side anti-replay persistence, which removes hot-path sender disk I/O pressure.

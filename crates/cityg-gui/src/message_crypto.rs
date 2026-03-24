@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 // Receiver-side anti-replay tracks a bounded recent window per sender-scoped tuple tag.
-// S8.2 crash safety is satisfied by persisting this state in the encrypted session file.
+// S8.2 requires crash-safe persistence of accepted (tuple_tag, msg_index) replay state;
+// the GUI satisfies that by persisting this window in the encrypted session file.
 // Replays older than this window can be re-accepted after eviction by design.
 pub(crate) const MSG_INDEX_REPLAY_WINDOW: usize = 4_096;
 
@@ -206,11 +207,7 @@ struct MsgReplayTupleArgs<'a> {
 }
 
 #[derive(Serialize)]
-struct PayloadEnvelopeV2Ref<'a>(
-    &'a str,
-    u64,
-    #[serde(with = "serde_bytes")] &'a [u8],
-);
+struct PayloadEnvelopeV2Ref<'a>(&'a str, u64, #[serde(with = "serde_bytes")] &'a [u8]);
 
 #[derive(Serialize, Deserialize)]
 struct PayloadEnvelopeV2(String, u64, #[serde(with = "serde_bytes")] Vec<u8>);

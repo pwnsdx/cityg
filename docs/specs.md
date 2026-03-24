@@ -1,7 +1,7 @@
 CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER)
 
 Version: v0.1.4
-Date: 2026-03-22
+Date: 2026-03-23
 Status: Active wire/API profile revision
 Profile ID: tswe/msphf-we/fs-hybrid + prs-barrier (native async-first barrier transport)
 
@@ -498,13 +498,17 @@ Wire encoding requirement (normative, MUST):
 * Receivers MUST verify CBOR_det determinism per S1.3 for PayloadEnvelope bytes; if invalid, receivers MUST discard the message as malformed.
 
 S8.2 msg_index uniqueness rule (CRITICAL)
-For any fixed sender-scoped tuple (gid, weid, t, xk_hash, E_k, barrier_version, sender_leaf_id), msg_index MUST be unique for every payload encrypted under that tuple.
-Implementations MUST enforce either:
-* strictly monotone msg_index starting at 0 per tuple, OR
-* globally unique random 64-bit msg_index per tuple with collision resistance, plus anti-replay state.
+For any fixed sender-scoped tuple (gid, weid, t, xk_hash, E_k, barrier_version, sender_leaf_id), implementations MUST keep the probability of `msg_index` reuse negligible across all payloads encrypted under that tuple.
+Implementations MUST enforce:
+* fresh uniformly random uint64 `msg_index` sampled independently per payload from a cryptographically secure random source local to the sender, plus anti-replay state.
+* `msg_index` MUST be obtained at send time from the platform CSPRNG or an equivalent entropy source; it MUST NOT be derived from rollback-prone persisted local state.
+* counter-based, timestamp-based, boot-identifier-based, or otherwise deterministic `msg_index` generation MUST NOT be used in this profile.
+Collision-risk rule (normative):
+* Senders MUST provision tuple rotation so the probability of a same-tuple `msg_index` collision remains negligible for the maximum expected send volume under that tuple.
+* Deployments SHOULD rotate to a fresh tuple well before same-tuple send volume approaches the birthday bound of the 64-bit space. As an operational reference point, keeping same-tuple sends at or below 2^20 yields a random-collision bound below approximately 2^-25.
 Crash-safety requirement (normative, MUST):
-Any state used to enforce uniqueness or anti-replay for msg_index MUST be persisted durably (crash-safe) before allowing encryption under the tuple to proceed. If crash-safe persistence is not available, this profile MUST NOT be used.
-If uniqueness cannot be enforced, this profile MUST NOT be used.
+Receiver-local anti-replay state for accepted `(tuple_tag, msg_index)` pairs MUST be persisted durably (crash-safe) before the accepted payload is released to the application, or as part of the same logical transaction that makes the accepted payload durable to the application. If crash-safe anti-replay persistence is not available, this profile MUST NOT be used.
+If sender-side collision risk cannot be kept negligible, or receiver-side anti-replay cannot be enforced, this profile MUST NOT be used.
 Receiver duplicate-rejection rule (normative, MUST):
 Define `tuple_tag` (normative):
 * `tuple_tag := H_L("fs/msg/replay/tuple", [gid, weid, t, xk_hash, E_k, header[176], sender_leaf_id])`
