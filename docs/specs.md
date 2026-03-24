@@ -23,6 +23,22 @@ This profile specifies:
 * PRS barrier (K_barrier) with cold-path KEM-Tree Cover for post-revocation secrecy,
 * join provisioning requirements required by PRS barrier and FS-hybrid acceptance.
 
+CONTROL-PLANE GOVERNANCE NOTE (informative)
+This unified spec is the normative source for the cryptographic/profile
+behavior above. Room-scoped governance and operator authorization are specified
+separately in [`api-reference.md`](./api-reference.md) and
+[`room-admin-governance-redesign.md`](./room-admin-governance-redesign.md).
+
+Current implementation behavior for the room control plane:
+* room bootstrap/governance uses room-scoped signed admin proofs tied to a
+  persistent room identity,
+* the creator becomes the initial room admin on the first successful room
+  claim/bootstrap,
+* alias text is never an authorization principal,
+* there is no legacy admin-token fallback for room-scoped endpoints,
+* KBROAD maintenance is automatic/server-managed in normal join/merge ticket
+  flows rather than a manual client precondition.
+
 External subsystems assumed to exist with normative interfaces (not re-specified here):
 * membership representation and verification (including cover_leaf_index mapping),
 * MSPHF / ME-OR and its witness/NP language,

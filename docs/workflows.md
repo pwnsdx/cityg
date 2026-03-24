@@ -33,9 +33,11 @@ sequenceDiagram
 
     Note over Client: First member (room creator)
 
-    Client->>Client: Generate broadcast key (kbroad)
-    Client->>API Server: POST /v1/rooms/bootstrap<br/>{room_id, kbroad_public}
+    Client->>Client: Load or create persistent room identity
+    Client->>Client: Generate KBROAD key + RoomAdminProof
+    Client->>API Server: POST /v1/rooms/bootstrap<br/>{room_id, kbroad_public, admin_proof}
     API Server->>Database: Store room metadata
+    API Server->>Database: Register initial room admin identity
     API Server->>Database: Initialize empty member roster
     Database-->>API Server: OK
     API Server-->>Client: 200 OK {room created}
@@ -45,7 +47,9 @@ sequenceDiagram
 
 **Key Points:**
 - Only the first member bootstraps the room
-- Broadcast key must be shared securely with all members
+- The creator becomes the initial room admin
+- Room admin authority is tied to the persisted room identity, not the alias
+- Normal join/leave/refresh flows do not require a manual KBROAD rotation call
 - Room ID becomes the persistent identifier
 
 ---
@@ -505,7 +509,8 @@ sequenceDiagram
 
     Note over Alice: Alice joins room "demo"
 
-    Alice->>Server: Bootstrap room (if first)<br/>POST /v1/rooms/bootstrap
+    Alice->>Alice: Load or create persistent room identity
+    Alice->>Server: Bootstrap room (if first)<br/>POST /v1/rooms/bootstrap {room_id, kbroad_public, admin_proof}
     Server-->>Alice: 200 OK
 
     Alice->>Server: Request join ticket<br/>POST /v1/rooms/join_ticket
@@ -559,9 +564,10 @@ sequenceDiagram
 ```
 
 **Key Points:**
-- First member bootstraps, others join directly
+- First member bootstraps with a room-admin proof, others join directly
 - Each member generates their own epoch bundle
 - Messages are encrypted end-to-end (server cannot read)
+- Normal room flows do not manually call `rotate_kbroad`; KBROAD maintenance is automatic/server-managed
 - WebSocket provides instant delivery
 
 ---

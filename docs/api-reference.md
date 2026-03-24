@@ -75,14 +75,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Authentication
 
-**Current Status:** No authentication required.
+**Current Status:** Authentication and authorization are endpoint-specific.
 
-The City-G API currently operates in a trust-on-first-use (TOFU) model where:
-- Identity binding is optional but recommended (via Ed25519 public keys)
-- Server accepts all valid cryptographic proofs
-- Access control is cryptographic (witness extraction, SPHF proofs)
+City-G currently uses three distinct authorization modes:
 
-**Future:** TLS client certificates or API keys may be added for production deployments.
+- **Protocol/member flows** such as `accept_epoch`, `join_ticket`, `merge_ticket`,
+  roster queries, and messaging do not use a legacy room admin token. These
+  flows are authenticated by protocol proofs and, when supplied, TOFU
+  `IdentityBinding` material.
+- **Room bootstrap and room-governance flows** use a room-scoped signed
+  `RoomAdminProof` bound to a persistent room identity. The first successful
+  bootstrap claims the room and registers that identity as the initial room
+  admin.
+- **Operator/debug endpoints** such as window configuration and debug seeding
+  still use the `x-cityg-admin-token` header.
+
+Important rules:
+
+- There is **no legacy token fallback** for room-scoped endpoints such as
+  `/v1/rooms/bootstrap`.
+- `CITYG_CLIENT_ADMIN_TOKEN` is **not** part of the normal public-room
+  join/leave/refresh flow.
+- Alias text is never an authority principal. Room authority is tied to the
+  persisted room identity that signs `RoomAdminProof`.
+
+See [Room-Scoped Administration Redesign](./room-admin-governance-redesign.md)
+for the accepted governance model.
 
 ---
 
@@ -231,32 +249,90 @@ Initializes a new City-G room (group) on the server.
 
 **Protobuf Request:** `BootstrapRoomRequest`
 ```protobuf
+message RoomAdminProof {
+  bytes pop_public_key = 1;  // Persisted room identity public key
+  bytes signature = 2;       // Signature over CBOR([op, room_id, kbroad_public])
+}
+
 message BootstrapRoomRequest {
   string room_id = 1;         // Unique room identifier
   bytes kbroad_public = 2;    // Broadcast encryption public key
+  optional RoomAdminProof admin_proof = 3;
 }
 ```
 
 **Protobuf Response:** `BootstrapRoomResponse`
 ```protobuf
 message BootstrapRoomResponse {
-  // Empty on success
+  string status = 1;
 }
 ```
 
 **Rust Client Example:**
 ```rust
-// Generate a broadcast key (using your crypto library)
+use cityg_api_client::{
+    RoomAdminOperation, build_room_admin_proof, generate_room_admin_keypair,
+};
+
+// Generate or load the creator's persisted room-scoped admin identity.
+let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+
+// Generate a KBROAD public key (using your crypto library)
 let kbroad_public = generate_broadcast_key(); // Implementation-specific
 
-client.bootstrap_room("my-secure-room", &kbroad_public).await?;
+let admin_proof = build_room_admin_proof(
+    RoomAdminOperation::Bootstrap,
+    "my-secure-room",
+    &kbroad_public,
+    &pop_public_key,
+    &pop_secret_key,
+)?;
+
+client
+    .bootstrap_room_as_admin("my-secure-room", &kbroad_public, admin_proof)
+    .await?;
 println!("Room bootstrapped successfully!");
 ```
 
 **Notes:**
 - Room ID must be unique
-- Broadcast key must remain consistent for all room members
-- Bootstrapping is typically done once when creating a new group
+- The first successful bootstrap claims the room and registers the signing
+  identity as the initial room admin
+- There is no `x-cityg-admin-token` fallback for this endpoint
+- The desktop GUI handles this automatically by persisting a room-scoped
+  identity per `(server_url, room_id)`
+
+#### `POST /v1/rooms/rotate_kbroad`
+
+Rotates the room KBROAD public key.
+
+This endpoint remains available for transitional tooling and test coverage, but
+normal GUI/join/leave/refresh flows should not call it directly. The server
+automatically refreshes KBROAD metadata when ticket issuance detects that a
+rotation is required.
+
+**Protobuf Request:** `RotateRoomKbroadRequest`
+```protobuf
+message RotateRoomKbroadRequest {
+  string room_id = 1;
+  bytes kbroad_public = 2;
+  optional RoomAdminProof admin_proof = 3;
+}
+```
+
+**Protobuf Response:** `RotateRoomKbroadResponse`
+```protobuf
+message RotateRoomKbroadResponse {
+  string status = 1;
+  uint64 kbroad_generation = 2;
+}
+```
+
+**Notes:**
+- This endpoint requires a valid `RoomAdminProof`
+- Normal room operation should rely on automatic/server-managed KBROAD
+  maintenance instead of manual rotation
+- There is no legacy token fallback for this endpoint
 
 #### `POST /v1/rooms/join_ticket`
 
@@ -272,7 +348,7 @@ message JoinTicketRequest {
 
 message IdentityBinding {
   string alias = 1;                      // TOFU display name
-  bytes pop_public_key = 2;              // ML-DSA-65 public key (48 bytes)
+  bytes pop_public_key = 2;              // Persisted member identity public key
   bytes signature = 3;                   // Signature over CBOR([alias, pop_public_key])
 }
 ```
@@ -993,7 +1069,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Complete Workflow: Join and Message
 
 ```rust
-use cityg_api_client::{CitygApiClient, IdentityBinding};
+use cityg_api_client::{
+    CitygApiClient, IdentityBinding, RoomAdminOperation, build_room_admin_proof,
+    generate_room_admin_keypair,
+};
 use cityg_client::{CityGClient, ClientConfig};
 
 #[tokio::main]
@@ -1004,8 +1083,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.health().await?;
 
     // 2. Bootstrap room (first member only)
+    let (admin_public_key, admin_secret_key) = generate_room_admin_keypair();
     let kbroad_public = generate_broadcast_key();
-    client.bootstrap_room("demo-room", &kbroad_public).await?;
+    let admin_proof = build_room_admin_proof(
+        RoomAdminOperation::Bootstrap,
+        "demo-room",
+        &kbroad_public,
+        &admin_public_key,
+        &admin_secret_key,
+    )?;
+    client
+        .bootstrap_room_as_admin("demo-room", &kbroad_public, admin_proof)
+        .await?;
 
     // 3. Request join ticket with identity binding
     let identity = IdentityBinding {

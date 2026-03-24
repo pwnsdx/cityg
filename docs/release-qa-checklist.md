@@ -83,7 +83,6 @@ cargo run -p cityg-stress -- \
 
 ```bash
 export CITYG_SERVER_ADDRESS=127.0.0.1:8080
-export CITYG_SERVER_ROOMS_ADMIN_TOKEN=dev-admin-token
 export CITYG_SERVER_MESSAGE_AUTH_TOKEN=dev-message-token
 cargo run -p cityg-api
 ```
@@ -91,7 +90,6 @@ cargo run -p cityg-api
 - [ ] Launch first GUI instance:
 
 ```bash
-export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
 export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
 export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-1
 cargo run -p cityg-gui --features native-app
@@ -100,12 +98,13 @@ cargo run -p cityg-gui --features native-app
 - [ ] Launch second GUI instance with an isolated config dir:
 
 ```bash
-export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
 export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
 export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-2
 cargo run -p cityg-gui --features native-app
 ```
 
+- [ ] Normal room creation/join/leave/refresh works without
+  `CITYG_CLIENT_ADMIN_TOKEN` or `CITYG_SERVER_ROOMS_ADMIN_TOKEN`.
 - [ ] Second joiner can send immediately after joining the room.
 - [ ] Send/receive works in both directions.
 - [ ] Members panel reflects join/leave updates.

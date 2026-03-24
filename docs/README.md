@@ -19,6 +19,7 @@ Start here if you're new to City-G:
 Building applications with City-G:
 
 - **[API Reference](./api-reference.md)** - REST API and WebSocket documentation
+- **[Room-Scoped Administration Redesign](./room-admin-governance-redesign.md)** - Current room governance and admin model
 - **[Configuration Guide](./configuration.md)** - Configuration options and environment variables
 - **[Observability Guide](./OBSERVABILITY.md)** - Logging, metrics, and monitoring
 
@@ -64,6 +65,7 @@ Deploying and managing City-G in production:
 
 ### Core Concepts
 - [Unified Specification](./specs.md) - Normative protocol behavior
+- [Room-Scoped Administration Redesign](./room-admin-governance-redesign.md) - Room governance and control-plane auth
 - [Protocol Overview](./protocol/01-overview.md) - High-level architecture (legacy companion)
 - [Security Model](./protocol/10-security-model.md) - Threat model and guarantees (legacy companion)
 - [FAQ](./protocol/17-faq.md) - Frequently asked questions

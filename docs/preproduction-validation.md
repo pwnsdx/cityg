@@ -31,11 +31,11 @@ A candidate build is considered pre-production ready only if all of the followin
   - `cargo build -p cityg-gui --features native-app --bin join_leave`
   - `cargo build -p cityg-stress`
 - local secrets/tokens for smoke:
-  - `CITYG_CLIENT_ADMIN_TOKEN`
   - `CITYG_CLIENT_MESSAGE_AUTH_TOKEN`
-  - `CITYG_SERVER_ROOMS_ADMIN_TOKEN`
   - `CITYG_SERVER_WINDOW_ADMIN_TOKEN`
   - `CITYG_SERVER_MESSAGE_AUTH_TOKEN`
+  - normal public-room GUI smoke does **not** require `CITYG_CLIENT_ADMIN_TOKEN`
+    or `CITYG_SERVER_ROOMS_ADMIN_TOKEN`
 - observability endpoints enabled:
   - `/health/detailed`
   - `/metrics`
@@ -49,7 +49,6 @@ Server:
 ```bash
 cd /Users/admin/Desktop/Repositories/cityg
 export CITYG_SERVER_ADDRESS=127.0.0.1:8080
-export CITYG_SERVER_ROOMS_ADMIN_TOKEN=dev-admin-token
 export CITYG_SERVER_MESSAGE_AUTH_TOKEN=dev-message-token
 cargo run -p cityg-api
 ```
@@ -58,7 +57,6 @@ GUI instance 1:
 
 ```bash
 cd /Users/admin/Desktop/Repositories/cityg
-export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
 export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
 export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-1
 cargo run -p cityg-gui --features native-app
@@ -68,7 +66,6 @@ GUI instance 2:
 
 ```bash
 cd /Users/admin/Desktop/Repositories/cityg
-export CITYG_CLIENT_ADMIN_TOKEN=dev-admin-token
 export CITYG_CLIENT_MESSAGE_AUTH_TOKEN=dev-message-token
 export CITYG_GUI_CONFIG_DIR=/tmp/cityg-gui-2
 cargo run -p cityg-gui --features native-app
@@ -79,6 +76,8 @@ Success criteria:
 - the second joiner can send immediately after joining
 - message send/receive works in both directions
 - `PCS Refresh` succeeds without putting the room back into a stuck pending state
+- the first creator can leave/restart/rejoin flows without any room admin token
+  fallback
 
 ## Phase 1: Baseline Smoke
 
