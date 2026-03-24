@@ -77,63 +77,34 @@ use zeroize::{Zeroize, Zeroizing};
 #[cfg(test)]
 use cityg_client::demo;
 
-#[path = "native/app_shell.rs"]
 mod app_shell;
-#[path = "native/barrier_core.rs"]
 mod barrier_core;
-#[path = "native/barrier_ops.rs"]
 mod barrier_ops;
-#[path = "native/barrier_runtime.rs"]
 mod barrier_runtime;
-#[path = "native/chat_ui.rs"]
 mod chat_ui;
-#[path = "native/epoch_sync.rs"]
 mod epoch_sync;
-#[path = "native/errors.rs"]
 mod errors;
-#[path = "native/fault_injection.rs"]
 mod fault_injection;
-#[path = "native/helpers.rs"]
 mod helpers;
-#[path = "native/interactions.rs"]
 mod interactions;
-#[path = "native/join_form.rs"]
 mod join_form;
-#[path = "native/join_ops.rs"]
 mod join_ops;
-#[path = "native/lifecycle.rs"]
 mod lifecycle;
-#[path = "native/member_validation.rs"]
 mod member_validation;
-#[path = "native/members.rs"]
 mod members;
-#[path = "native/message_auth.rs"]
 mod message_auth;
-#[path = "native/network_ops.rs"]
 mod network_ops;
-#[path = "native/params.rs"]
 mod params;
-#[path = "native/persisted.rs"]
 mod persisted;
-#[path = "native/pivot_helpers.rs"]
 mod pivot_helpers;
-#[path = "native/render_panels.rs"]
 mod render_panels;
-#[path = "native/render_session.rs"]
 mod render_session;
-#[path = "native/room_admin.rs"]
 mod room_admin;
-#[path = "native/session_runtime.rs"]
 mod session_runtime;
-#[path = "native/session_state.rs"]
 mod session_state;
-#[path = "native/state.rs"]
 mod state;
-#[path = "native/storage.rs"]
 mod storage;
-#[path = "native/tokio_bridge.rs"]
 mod tokio_bridge;
-#[path = "native/websocket.rs"]
 mod websocket;
 
 use app_shell::*;
@@ -191,5 +162,4 @@ pub fn main() {
     clippy::await_holding_lock,
     clippy::useless_conversion
 )]
-#[path = "native/tests/mod.rs"]
 mod tests;
