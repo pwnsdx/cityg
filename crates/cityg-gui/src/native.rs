@@ -94,6 +94,8 @@ use cityg_client::demo;
 
 #[path = "native/errors.rs"]
 mod errors;
+#[path = "native/fault_injection.rs"]
+mod fault_injection;
 #[path = "native/render_panels.rs"]
 mod render_panels;
 #[path = "native/render_session.rs"]
@@ -104,6 +106,8 @@ mod storage;
 mod tokio_bridge;
 
 use errors::*;
+#[cfg(test)]
+use fault_injection::*;
 use storage::*;
 use tokio_bridge::Tokio;
 
@@ -1215,6 +1219,11 @@ fn apply_pending_barrier_activation(
         } else if let Some(k_fs_after_pcs) = reseeded_k_fs {
             apply_forward_state_k_fs(session, k_fs_after_pcs);
         }
+        #[cfg(test)]
+        fault_injection::trigger_fault(
+            FaultInjectionCutPoint::AfterAuthenticatedAcceptBeforePersist,
+            None,
+        )?;
         session.barrier_state.pending = None;
         session.barrier_state.barrier_recovery_pending = false;
         return Ok(true);
@@ -3218,17 +3227,6 @@ impl AppModel {
         root
     }
 
-
-
-
-
-
-
-
-
-
-
-
     fn render_field(
         &self,
         label: &str,
@@ -4219,11 +4217,6 @@ impl AppModel {
     fn scroll_chat_to_bottom(&self) {
         self.chat_scroll_handle.scroll_to_bottom();
     }
-
-
-
-
-
 
     fn focus_members_search(&mut self, cx: &mut ViewContext<Self>) {
         self.members_search.focus();
@@ -5930,6 +5923,13 @@ fn persist_pending_barrier_state_before_publish(
     Ok(())
 }
 
+fn persist_activated_joined_session(session: &AppSession) -> Result<()> {
+    persist_session(session)?;
+    #[cfg(test)]
+    fault_injection::trigger_fault(FaultInjectionCutPoint::AfterPersistBeforePendingClear, None)?;
+    Ok(())
+}
+
 impl MembersParams {
     fn from_session(session: &AppSession, offset: u64, limit: u32, mode: MembersMode) -> Self {
         Self {
@@ -7208,10 +7208,15 @@ async fn finalize_joined_room(session: AppSession, mode: BarrierMergeMode) -> Re
     }
     .context(mode.publish_context())?;
 
+    #[cfg(test)]
+    if mode == BarrierMergeMode::JoinFinalize {
+        fault_injection::trigger_fault(FaultInjectionCutPoint::AfterPublishBeforeReload, None)?;
+    }
+
     let mut updated = session.clone();
     match apply_local_published_barrier_merge(&mut updated, published) {
         Ok(()) => {
-            persist_session(&updated).context(mode.persist_context())?;
+            persist_activated_joined_session(&updated).context(mode.persist_context())?;
             Ok(updated)
         }
         Err(local_err) => {
@@ -7228,7 +7233,7 @@ async fn finalize_joined_room(session: AppSession, mode: BarrierMergeMode) -> Re
             if sync.session.barrier_state.barrier_recovery_pending {
                 return Err(anyhow!(mode.still_pending_message()));
             }
-            persist_session(&sync.session).context(mode.persist_context())?;
+            persist_activated_joined_session(&sync.session).context(mode.persist_context())?;
             Ok(sync.session)
         }
     }
@@ -8061,6 +8066,11 @@ async fn perform_barrier_merge_inner(
     }
 
     persist_pending_barrier_state_before_publish(&persist_request, pending_barrier_state.clone())?;
+
+    #[cfg(test)]
+    if mode == BarrierMergeMode::JoinFinalize {
+        fault_injection::trigger_fault(FaultInjectionCutPoint::BeforePublishJoinFinalize, None)?;
+    }
 
     match client.refresh_pivot(&bundle).await {
         Ok(_) => {}
@@ -9577,6 +9587,9 @@ mod tests {
     use tempfile::TempDir;
     use tokio::{task::JoinHandle, time::sleep};
 
+    #[path = "client_state_props.rs"]
+    mod client_state_props;
+
     static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18400);
     static ENV_VAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     const TEST_ADMIN_TOKEN: &str = "cityg-test-admin-token";
@@ -9742,6 +9755,27 @@ mod tests {
         session.barrier_state.barrier_roots_hash =
             compute_revocation_roots_hash(&session.revoked_since_root, &session.revoked_root)?;
         Ok(session)
+    }
+
+    fn fault_step(
+        cut_point: FaultInjectionCutPoint,
+        action: FaultInjectionAction,
+    ) -> FaultInjectionStep {
+        FaultInjectionStep { cut_point, action }
+    }
+
+    fn mutate_persisted_session(
+        server_url: &str,
+        room_id: &str,
+        mutate: impl FnOnce(&mut PersistedSession),
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let path = session_file_path(server_url, room_id)?;
+        let data = fs::read(&path)?;
+        let mut persisted = decode_persisted_session(&data, &path)?;
+        mutate(&mut persisted);
+        let encoded = encrypt_persisted_session(&persisted, &path)?;
+        fs::write(&path, encoded)?;
+        Ok(())
     }
 
     #[test]
@@ -11086,6 +11120,26 @@ mod tests {
                 eprintln!("server exited with error: {err}");
             }
         })
+    }
+
+    async fn spawn_ready_test_server() -> Result<(u16, JoinHandle<()>), anyhow::Error> {
+        for _ in 0..16 {
+            let port = next_test_port();
+            let handle = spawn_server_on(port).await;
+            for _ in 0..40 {
+                if handle.is_finished() {
+                    break;
+                }
+                if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    sleep(Duration::from_millis(100)).await;
+                    return Ok((port, handle));
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+            handle.abort();
+            let _ = handle.await;
+        }
+        Err(anyhow!("failed to spawn ready test server"))
     }
 
     async fn spawn_server_on_with_state_path(
@@ -14766,6 +14820,393 @@ mod tests {
 
         // Clean up persisted files to avoid leaking into other tests.
         remove_persisted_session(&session.server_url, &session.room_id)?;
+        Ok(())
+    }
+
+    #[test]
+    fn persist_session_fault_injection_truncates_session_file_after_write()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let session = build_test_session(
+            5151,
+            "https://fault.example.com",
+            "fault-room-truncate",
+            "alice",
+        )?;
+        with_fault_injection(
+            vec![fault_step(
+                FaultInjectionCutPoint::AfterSessionWrite,
+                FaultInjectionAction::TruncatePrimary,
+            )],
+            || persist_session(&session),
+        )?;
+        assert_fault_plan_consumed();
+
+        let err = match load_session_at(&session.server_url, &session.room_id) {
+            Ok(_) => return Err(anyhow!("truncated encrypted session must fail to load").into()),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("invalid")
+                || err.to_string().contains("decrypt")
+                || err.to_string().contains("session"),
+            "unexpected error for truncated session: {err:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn persist_session_fault_injection_rewrites_pointer_to_missing_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base.clone()));
+
+        let session = build_test_session(
+            5252,
+            "https://fault.example.com",
+            "fault-room-pointer",
+            "alice",
+        )?;
+        with_fault_injection(
+            vec![fault_step(
+                FaultInjectionCutPoint::AfterPointerWrite,
+                FaultInjectionAction::RewritePointerToMissing,
+            )],
+            || persist_session(&session),
+        )?;
+        assert_fault_plan_consumed();
+
+        assert!(
+            load_last_session()?.is_none(),
+            "missing pointed session should be ignored instead of restoring stale state"
+        );
+        assert!(
+            read_last_session_pointer()?.is_none(),
+            "missing pointed session should prune the broken pointer"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_pending_state_mismatch_survives_restart_without_normalization()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let mut session = build_test_session(
+            5353,
+            "https://fault.example.com",
+            "fault-room-pending",
+            "alice",
+        )?;
+        session.barrier_state.barrier_recovery_pending = true;
+        session.barrier_state.pending = Some(BarrierPendingState {
+            barrier_version: 8,
+            we_epoch_id: [0x44; 32],
+            fs_ec: 31,
+            next_forward_fs_ec: 0,
+            next_forward_fs_dev_commit: [0u8; 32],
+            next_forward_last_weid: [0u8; 32],
+            revocation_roots_hash: [0x45; 32],
+            kem_tree_hash_after: [0x46; 32],
+            k_barrier_new: Zeroizing::new([0x47; 32]),
+            k_fs_after_pcs: None,
+            barrier_update_reason: Some(2),
+            barrier_update_digest: [0x48; 32],
+            on_path_key_material: BTreeMap::new(),
+        });
+        persist_session(&session)?;
+
+        mutate_persisted_session(&session.server_url, &session.room_id, |persisted| {
+            if let Some(pending) = persisted.barrier_state.pending.as_mut() {
+                pending.barrier_version = 99;
+                pending.we_epoch_id_hex = "aa".repeat(32);
+                pending.barrier_update_digest_hex = "bb".repeat(32);
+            }
+        })?;
+
+        let reloaded = load_session_at(&session.server_url, &session.room_id)?
+            .ok_or_else(|| anyhow!("expected reloaded session"))?;
+        let pending = reloaded
+            .barrier_state
+            .pending
+            .clone()
+            .ok_or_else(|| anyhow!("expected pending state after reload"))?;
+        assert_eq!(pending.barrier_version, 99);
+        assert_eq!(pending.we_epoch_id, [0xAA; 32]);
+        assert_eq!(pending.barrier_update_digest, [0xBB; 32]);
+
+        let changed = apply_pending_barrier_activation(
+            &mut reloaded.clone(),
+            8,
+            Some(31),
+            Some(2),
+            Some([0x48; 32]),
+        )?;
+        assert!(
+            !changed,
+            "mismatched persisted pending fields must not be silently normalized into an activation"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_barrier_activation_fault_injection_preserves_pending_state_on_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session =
+            build_test_session(5454, "http://127.0.0.1:9", "fault-activation-room", "alice")?;
+        session.barrier_state.barrier_recovery_pending = true;
+        session.barrier_state.pending = Some(BarrierPendingState {
+            barrier_version: 10,
+            we_epoch_id: [0x24; 32],
+            fs_ec: 31,
+            next_forward_fs_ec: 77,
+            next_forward_fs_dev_commit: [0x55; 32],
+            next_forward_last_weid: [0x24; 32],
+            revocation_roots_hash: [0x35; 32],
+            kem_tree_hash_after: [0x45; 32],
+            k_barrier_new: Zeroizing::new([0x56; 32]),
+            k_fs_after_pcs: None,
+            barrier_update_reason: Some(2),
+            barrier_update_digest: [0x67; 32],
+            on_path_key_material: BTreeMap::new(),
+        });
+
+        let err = with_fault_injection(
+            vec![fault_step(
+                FaultInjectionCutPoint::AfterAuthenticatedAcceptBeforePersist,
+                FaultInjectionAction::Fail("inject activation failure"),
+            )],
+            || {
+                apply_pending_barrier_activation(
+                    &mut session,
+                    10,
+                    Some(31),
+                    Some(2),
+                    Some([0x67; 32]),
+                )
+            },
+        )
+        .expect_err("fault injection should abort activation before pending clear");
+        assert_fault_plan_consumed();
+        assert!(err.to_string().contains("inject activation failure"));
+        assert!(
+            session.barrier_state.pending.is_some(),
+            "pending state must remain present if activation fails before persistence"
+        );
+        assert!(
+            session.barrier_state.barrier_recovery_pending,
+            "recovery pending must not clear on injected pre-persist failure"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_finalize_fault_injection_persists_pending_state_before_publish()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+
+        let temp_dir = TempDir::new()?;
+        let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+        let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+
+        let (port, handle) = spawn_ready_test_server().await?;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let mut room_id_bytes = [0x92u8; 32];
+        room_id_bytes[..2].copy_from_slice(&port.to_le_bytes());
+        let room_id = hex_encode(room_id_bytes);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+            let mut alice = perform_join(JoinParams {
+                server_url: server_url.clone(),
+                room_id: room_id.clone(),
+                alias: "alice".to_string(),
+            })
+            .await?;
+            alice.barrier_state.barrier_recovery_pending = false;
+            persist_session(&alice)?;
+        }
+
+        let err = {
+            let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+            match with_fault_injection_async(
+                vec![fault_step(
+                    FaultInjectionCutPoint::BeforePublishJoinFinalize,
+                    FaultInjectionAction::Fail("inject join finalize pre-publish failure"),
+                )],
+                || {
+                    perform_join(JoinParams {
+                        server_url: server_url.clone(),
+                        room_id: room_id.clone(),
+                        alias: "bob".to_string(),
+                    })
+                },
+            )
+            .await
+            {
+                Ok(_) => {
+                    return Err(anyhow!(
+                        "fault injection should abort join finalize before publish"
+                    )
+                    .into());
+                }
+                Err(err) => err,
+            }
+        };
+        assert!(
+            format!("{err:#}").contains("inject join finalize pre-publish failure"),
+            "unexpected join finalize error: {err:#}"
+        );
+
+        {
+            let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+            let persisted = load_session_at(&server_url, &room_id)?
+                .ok_or_else(|| anyhow!("expected persisted bob session after injected failure"))?;
+            let pending = persisted
+                .barrier_state
+                .pending
+                .as_ref()
+                .ok_or_else(|| anyhow!("expected persisted pending join_finalize state"))?;
+            assert!(
+                persisted.barrier_state.barrier_recovery_pending,
+                "pre-publish join_finalize failure must keep recovery pending across restart"
+            );
+            assert_eq!(pending.barrier_update_reason, Some(2));
+            assert!(
+                pending.barrier_version > persisted.barrier_state.barrier_version,
+                "pending barrier version should still describe the unpublished join_finalize candidate"
+            );
+
+            let send_err = match SendParams::from_session(
+                &persisted,
+                "blocked while pending".to_string(),
+                1,
+            ) {
+                Ok(params) => match perform_send(params).await {
+                    Ok(_) => {
+                        return Err(anyhow!(
+                            "send must stay blocked while join_finalize recovery is pending"
+                        )
+                        .into());
+                    }
+                    Err(err) => err,
+                },
+                Err(err) => err,
+            };
+            assert!(
+                send_err.to_string().contains("barrier recovery is pending"),
+                "expected recover-before-send error: {send_err:#}"
+            );
+        }
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_finalize_fault_injection_after_publish_recovers_via_epoch_sync()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _env_lock = ENV_VAR_LOCK
+            .lock()
+            .map_err(|_| anyhow!("env var lock poisoned"))?;
+
+        let temp_dir = TempDir::new()?;
+        let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+        let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+
+        let (port, handle) = spawn_ready_test_server().await?;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let mut room_id_bytes = [0x93u8; 32];
+        room_id_bytes[..2].copy_from_slice(&port.to_le_bytes());
+        let room_id = hex_encode(room_id_bytes);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        {
+            let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+            let mut alice = perform_join(JoinParams {
+                server_url: server_url.clone(),
+                room_id: room_id.clone(),
+                alias: "alice".to_string(),
+            })
+            .await?;
+            alice.barrier_state.barrier_recovery_pending = false;
+            persist_session(&alice)?;
+        }
+
+        let err = {
+            let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+            match with_fault_injection_async(
+                vec![fault_step(
+                    FaultInjectionCutPoint::AfterPublishBeforeReload,
+                    FaultInjectionAction::Fail("inject join finalize post-publish failure"),
+                )],
+                || {
+                    perform_join(JoinParams {
+                        server_url: server_url.clone(),
+                        room_id: room_id.clone(),
+                        alias: "bob".to_string(),
+                    })
+                },
+            )
+            .await
+            {
+                Ok(_) => {
+                    return Err(anyhow!(
+                        "fault injection should abort join finalize after publish"
+                    )
+                    .into());
+                }
+                Err(err) => err,
+            }
+        };
+        assert!(
+            format!("{err:#}").contains("inject join finalize post-publish failure"),
+            "unexpected join finalize error: {err:#}"
+        );
+
+        {
+            let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+            let persisted = load_session_at(&server_url, &room_id)?.ok_or_else(|| {
+                anyhow!("expected persisted bob session after post-publish fault")
+            })?;
+            let pending = persisted.barrier_state.pending.clone().ok_or_else(|| {
+                anyhow!("expected pending join_finalize state after post-publish fault")
+            })?;
+            assert!(
+                persisted.barrier_state.barrier_recovery_pending,
+                "post-publish failure must keep restart path in recovery-pending state"
+            );
+            assert_eq!(pending.barrier_update_reason, Some(2));
+
+            let synced = perform_epoch_sync(persisted).await?;
+            assert!(
+                !synced.session.barrier_state.barrier_recovery_pending,
+                "epoch sync should recover a published join_finalize after restart"
+            );
+            assert!(
+                synced.session.barrier_state.pending.is_none(),
+                "published join_finalize must clear pending state after recovery"
+            );
+            assert_eq!(
+                synced.session.barrier_state.barrier_version, pending.barrier_version,
+                "restart recovery must converge to the already-published barrier version"
+            );
+        }
+
+        handle.abort();
+        let _ = handle.await;
         Ok(())
     }
 

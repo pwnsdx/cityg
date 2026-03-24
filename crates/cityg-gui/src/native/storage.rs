@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::fault_injection::{FaultInjectionCutPoint, trigger_fault};
 use super::*;
 #[cfg(test)]
 use std::cell::RefCell;
@@ -47,7 +49,20 @@ pub(super) fn write_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<(
             let _ = fs::remove_file(&temp_path);
             return Err(err);
         }
+
+        #[cfg(test)]
+        trigger_fault(
+            FaultInjectionCutPoint::AfterTempWriteFsync,
+            Some(temp_path.as_path()),
+        )?;
+
         drop(file);
+
+        #[cfg(test)]
+        trigger_fault(
+            FaultInjectionCutPoint::BeforeAtomicRename,
+            Some(temp_path.as_path()),
+        )?;
 
         if let Err(err) = fs::rename(&temp_path, path) {
             let _ = fs::remove_file(&temp_path);
@@ -83,8 +98,22 @@ pub(super) fn persist_session(session: &AppSession) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+
+    #[cfg(test)]
+    trigger_fault(FaultInjectionCutPoint::BeforeSessionEncrypt, None)?;
+
     let data = encrypt_persisted_session(&persisted, &path)?;
+
+    #[cfg(test)]
+    trigger_fault(FaultInjectionCutPoint::AfterSessionEncrypt, None)?;
+
     write_file_atomic(&path, &data)?;
+
+    #[cfg(test)]
+    trigger_fault(
+        FaultInjectionCutPoint::AfterSessionWrite,
+        Some(path.as_path()),
+    )?;
 
     let pointer = LastSessionPointer {
         server_url: session.server_url.clone(),
@@ -96,7 +125,20 @@ pub(super) fn persist_session(session: &AppSession) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let pointer_data = serde_json::to_vec(&pointer).context("failed to encode session pointer")?;
+
+    #[cfg(test)]
+    trigger_fault(
+        FaultInjectionCutPoint::BeforePointerWrite,
+        Some(pointer_path.as_path()),
+    )?;
+
     write_file_atomic(&pointer_path, &pointer_data)?;
+
+    #[cfg(test)]
+    trigger_fault(
+        FaultInjectionCutPoint::AfterPointerWrite,
+        Some(pointer_path.as_path()),
+    )?;
 
     Ok(())
 }

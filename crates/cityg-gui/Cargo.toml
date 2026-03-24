@@ -53,6 +53,7 @@ tempfile = "3"
 cityg-api = { path = "../cityg-api" }
 axum = "0.8"
 prost = "0.14"
+proptest = "1"
 
 [[bin]]
 name = "join_leave"
