@@ -6735,10 +6735,11 @@ async fn epoch_sync_rejects_gid_mismatch_between_session_and_bundle()
 
     let mut mismatched = alice.clone();
     mismatched.gid = [0xEE; 32];
-    let err = match {
+    let sync_result = {
         let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
         perform_epoch_sync(mismatched).await
-    } {
+    };
+    let err = match sync_result {
         Ok(_) => return Err(anyhow!("epoch sync should fail when gid mismatches").into()),
         Err(err) => err,
     };

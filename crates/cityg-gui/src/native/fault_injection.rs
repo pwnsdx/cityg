@@ -4,7 +4,7 @@ use std::{
     fs,
     future::Future,
     path::Path,
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 #[cfg(test)]
@@ -54,8 +54,15 @@ fn plan_cell() -> &'static Mutex<FaultInjectionPlan> {
 }
 
 #[cfg(test)]
+fn execution_cell() -> &'static Mutex<()> {
+    static CELL: OnceLock<Mutex<()>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
 pub(super) struct FaultInjectionGuard {
     previous: FaultInjectionPlan,
+    _exclusive: MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
@@ -70,6 +77,9 @@ impl Drop for FaultInjectionGuard {
 
 #[cfg(test)]
 pub(super) fn set_fault_injection(steps: Vec<FaultInjectionStep>) -> FaultInjectionGuard {
+    let exclusive = execution_cell()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut guard = plan_cell()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -79,7 +89,10 @@ pub(super) fn set_fault_injection(steps: Vec<FaultInjectionStep>) -> FaultInject
             steps: VecDeque::from(steps),
         },
     );
-    FaultInjectionGuard { previous }
+    FaultInjectionGuard {
+        previous,
+        _exclusive: exclusive,
+    }
 }
 
 #[cfg(test)]
@@ -144,7 +157,7 @@ pub(super) fn trigger_fault(
         FaultInjectionAction::Fail(message) => Err(anyhow!(message)),
         FaultInjectionAction::TruncatePrimary => {
             let path = primary_path.ok_or_else(|| anyhow!("missing primary path for truncate"))?;
-            fs::write(path, &[]).map_err(|err| anyhow!("truncate {}: {err}", path.display()))
+            fs::write(path, []).map_err(|err| anyhow!("truncate {}: {err}", path.display()))
         }
         FaultInjectionAction::RewritePointerToMissing => {
             let path =
