@@ -86,6 +86,7 @@ mod epoch_sync;
 mod errors;
 mod fault_injection;
 mod helpers;
+mod input_state;
 mod interactions;
 mod join_form;
 mod join_ops;
@@ -115,6 +116,7 @@ use errors::*;
 #[cfg(test)]
 use fault_injection::*;
 use helpers::*;
+use input_state::*;
 use join_form::*;
 use join_ops::*;
 use member_validation::*;
