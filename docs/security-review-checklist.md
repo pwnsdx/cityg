@@ -8,6 +8,7 @@ Run these commands from the repository root:
 
 ```bash
 ./scripts/security_review.sh
+./scripts/verify_client_state_hardening.sh
 ```
 
 If you want to run steps manually:
@@ -17,6 +18,7 @@ cargo test -p cityg-server
 cargo test -p cityg-api
 cargo test -p cityg-gui --features native-app
 cargo test -p msphf-orchestrator
+./scripts/verify_client_state_hardening.sh
 ./scripts/verify_no_secrets.sh
 ```
 
@@ -37,6 +39,7 @@ cargo test -p msphf-orchestrator
 - [ ] `cargo audit` is clean (or approved exceptions are documented).
 - [ ] `Cargo.lock` changes were reviewed for unexpected cryptography/runtime dependency drift.
 - [ ] CI workflow still runs `verify_no_secrets.sh` and release matrix tests.
+- [ ] CI workflow still runs `verify_client_state_hardening.sh` and validates `kat-client-state-manifest-v0.1.4.json`.
 
 ## 5. Runtime Security Smoke
 
@@ -48,27 +51,33 @@ cargo run -p cityg-stress -- \
   --server-bind 127.0.0.1:18080 \
   --server-url http://127.0.0.1:18080 \
   --workers 1 \
-  --rounds-per-worker 1 \
+  --rounds-per-worker 2 \
   --min-count 2 \
   --max-count 2 \
   --leaves-per-room 2 \
   --watch-percent 100 \
   --jitter-max-secs 0 \
-  --round-delay-secs 0 \
-  --message-burst-count 1 \
-  --message-burst-interval-ms 0 \
-  --final-capacity-check
+  --round-delay-secs 2 \
+  --message-burst-count 2 \
+  --message-burst-interval-ms 25 \
+  --restart-every-secs 45 \
+  --client-restart-every-secs 20 \
+  --capture-client-state-artifacts \
+  --require-metrics
 ```
 
 - [ ] Capacity guard smoke shows a 925 freeze when `h_max` is intentionally exceeded.
+- [ ] Restart-chaos run produces `client-restarts.log` plus per-round client-state artifacts.
 
 ## 6. Evidence Bundle
 
 Capture and store these artifacts with the release tag:
 
 - [ ] Security review command output (`scripts/security_review.sh` output).
+- [ ] Client-state hardening gate output (`scripts/verify_client_state_hardening.sh` output).
 - [ ] CI run URL for the release matrix workflow.
 - [ ] Forward-secrecy policy values shipped in deployment env/config.
+- [ ] Nightly/staging restart-chaos artifact bundle, including client-state snapshots.
 - [ ] Optional: `docs/evidence/` updates for timing or benchmark deltas.
 
 ## Exit Criteria

@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Optional `unsafe-ntt` feature flag in `msphf-core` to re-enable unchecked NTT indexing when benchmarking or running production builds that demand maximum speed.
 - Index-schedule unit tests in `msphf-core::rlwe::ntt` to assert the forward and inverse transforms never walk past buffer bounds.
+- Client-state hardening coverage for `cityg-gui`, including fault-injection cut points, restart/join-finalize crash tests, property/state-machine tests, a versioned client-state manifest, and a dedicated verification script.
+- `cityg-stress` support for `--client-restart-every-secs` and `--capture-client-state-artifacts`, plus anonymized `join_leave` session artifact export.
 
 ### Changed
 - Normalized the multi-head window TTL default to **120 seconds** across orchestrator code, configuration defaults, shipped TOML examples, and protocol docs, including guidance on how the knob impacts DoS posture vs. client jitter tolerance.
@@ -22,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added troubleshooting guide (`docs/TROUBLESHOOTING.md`) covering common issues
 - Added contributing guide (`CONTRIBUTING.md`) with development workflow and standards
 - Added crate READMEs for `cityg-server` and `cityg-client` with usage examples
+- Added a client-state hardening audit pack and updated release/security/preproduction checklists to require restart-chaos evidence.
 - Fixed broken screenshot reference in GUI user guide
 - Documented the `unsafe-ntt` verification path in `docs/timing-verification.md` and added operational notes about the 120s TTL baseline in the configuration and MHW specs.
 - Marked the strict durable `msg_index` benchmark note as legacy after removing the counter-based option from the profile spec.

@@ -1,6 +1,12 @@
 #[cfg(not(test))]
 use std::env;
-use std::{collections::BTreeMap, convert::TryInto, time::Duration};
+use std::{
+    collections::BTreeMap,
+    convert::TryInto,
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[allow(dead_code)]
 #[path = "../barrier_shared.rs"]
@@ -393,6 +399,7 @@ struct CliOptions {
     leave_order: Option<Vec<usize>>,
     message_burst_count: usize,
     message_burst_interval_ms: u64,
+    session_artifact_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -412,6 +419,7 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
     let mut verbose = false;
     let mut message_burst_count = 0usize;
     let mut message_burst_interval_ms = 0u64;
+    let mut session_artifact_dir = None;
 
     for arg in args {
         if let Some(rest) = arg.strip_prefix("--count=") {
@@ -452,13 +460,20 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
                 .map_err(|_| anyhow!("invalid --message-burst-interval-ms value: {rest}"))?;
             continue;
         }
+        if let Some(rest) = arg.strip_prefix("--session-artifact-dir=") {
+            if rest.trim().is_empty() {
+                return Err(anyhow!("--session-artifact-dir requires a non-empty path"));
+            }
+            session_artifact_dir = Some(PathBuf::from(rest));
+            continue;
+        }
         match (&server_url, &room_id, &alias) {
             (None, _, _) => server_url = Some(arg),
             (Some(_), None, _) => room_id = Some(arg),
             (Some(_), Some(_), None) => alias = Some(arg),
             _ => {
                 return Err(anyhow!(
-                    "unexpected extra argument: {arg}. usage: [server] [room] [alias] [--count=N] [--batch|--watch] [--leave-order=...] [--message-burst-count=N] [--message-burst-interval-ms=MS] [--verbose]"
+                    "unexpected extra argument: {arg}. usage: [server] [room] [alias] [--count=N] [--batch|--watch] [--leave-order=...] [--message-burst-count=N] [--message-burst-interval-ms=MS] [--session-artifact-dir=PATH] [--verbose]"
                 ));
             }
         }
@@ -516,6 +531,7 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
         leave_order,
         message_burst_count,
         message_burst_interval_ms,
+        session_artifact_dir,
     })
 }
 
@@ -538,6 +554,7 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
         leave_order,
         message_burst_count,
         message_burst_interval_ms,
+        session_artifact_dir,
     } = options;
 
     if watch_mode {
@@ -553,6 +570,7 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             leave_order.clone(),
             verbose,
             message_burst,
+            session_artifact_dir.as_deref(),
         )
         .await?;
         return Ok(());
@@ -570,6 +588,12 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             let session = perform_join(&server_url, &room_id, &alias).await?;
             println!("join ok: weid={}", hex::encode(session.we_epoch_id));
             log_fingerprints(&session);
+            maybe_write_session_artifact(
+                session_artifact_dir.as_deref(),
+                "joined",
+                &alias,
+                &session,
+            )?;
             sessions.push(session);
         }
 
@@ -590,6 +614,12 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
                 return Err(anyhow!("leave order index {idx} invalid"));
             }
             let session = &sessions[*idx - 1];
+            maybe_write_session_artifact(
+                session_artifact_dir.as_deref(),
+                "pre-leave",
+                &alias_for(&alias_base, count, *idx - 1),
+                session,
+            )?;
             println!(
                 "leaving alias={} weid={}",
                 alias_for(&alias_base, count, *idx - 1),
@@ -610,10 +640,22 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
             let session = perform_join(&server_url, &room_id, &alias).await?;
             println!("join ok: weid={}", hex::encode(session.we_epoch_id));
             log_fingerprints(&session);
+            maybe_write_session_artifact(
+                session_artifact_dir.as_deref(),
+                "joined",
+                &alias,
+                &session,
+            )?;
             sessions.push(session);
         }
 
         for (idx, session) in sessions.iter().enumerate() {
+            maybe_write_session_artifact(
+                session_artifact_dir.as_deref(),
+                "pre-leave",
+                &alias_for(&alias_base, count, idx),
+                session,
+            )?;
             println!(
                 "leaving alias={} weid={}",
                 alias_for(&alias_base, count, idx),
@@ -627,6 +669,18 @@ async fn run_with_options(options: CliOptions) -> Result<()> {
         let session = perform_join(&server_url, &room_id, &alias_base).await?;
         println!("join ok: weid={}", hex::encode(session.we_epoch_id));
         log_fingerprints(&session);
+        maybe_write_session_artifact(
+            session_artifact_dir.as_deref(),
+            "joined",
+            &alias_base,
+            &session,
+        )?;
+        maybe_write_session_artifact(
+            session_artifact_dir.as_deref(),
+            "pre-leave",
+            &alias_base,
+            &session,
+        )?;
         perform_leave(&session, verbose).await?;
         println!("leave ok");
     }
@@ -640,6 +694,75 @@ fn alias_for(base: &str, count: usize, idx: usize) -> String {
     } else {
         format!("{}-{}", base, idx + 1)
     }
+}
+
+#[derive(Serialize)]
+struct SessionArtifact {
+    alias: String,
+    phase: String,
+    room_id: String,
+    barrier_version: u64,
+    fs_ec: u64,
+    gid_tag: String,
+    leaf_tag: String,
+    we_epoch_tag: String,
+    xk_tag: String,
+    epoch_key_tag: String,
+    barrier_key_tag: String,
+    seed_ctx_tag: String,
+    fs_epoch_commit_tag: String,
+    fs_dev_prev_commit_tag: String,
+}
+
+fn artifact_tag(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex()[..16].to_string()
+}
+
+fn artifact_file_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect()
+}
+
+fn maybe_write_session_artifact(
+    artifact_dir: Option<&Path>,
+    phase: &str,
+    alias: &str,
+    session: &Session,
+) -> Result<()> {
+    let Some(artifact_dir) = artifact_dir else {
+        return Ok(());
+    };
+    fs::create_dir_all(artifact_dir)
+        .with_context(|| format!("create {}", artifact_dir.display()))?;
+    let artifact = SessionArtifact {
+        alias: alias.to_string(),
+        phase: phase.to_string(),
+        room_id: session.room_id.clone(),
+        barrier_version: session.barrier_version,
+        fs_ec: session.fs_ec,
+        gid_tag: artifact_tag(&session.gid),
+        leaf_tag: artifact_tag(&session.leaf_id),
+        we_epoch_tag: artifact_tag(&session.we_epoch_id),
+        xk_tag: artifact_tag(&session.xk_hash),
+        epoch_key_tag: artifact_tag(&session.epoch_key),
+        barrier_key_tag: artifact_tag(&session.k_barrier),
+        seed_ctx_tag: artifact_tag(&session.seed_ctx_hash),
+        fs_epoch_commit_tag: artifact_tag(&session.fs_epoch_commit),
+        fs_dev_prev_commit_tag: artifact_tag(&session.fs_dev_prev_commit),
+    };
+    let path = artifact_dir.join(format!(
+        "{}-{}.json",
+        artifact_file_component(phase),
+        artifact_file_component(alias)
+    ));
+    fs::write(&path, serde_json::to_vec_pretty(&artifact)?)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(())
 }
 
 struct Session {
@@ -1894,6 +2017,7 @@ async fn run_watch_mode(
     leave_order: Option<Vec<usize>>,
     verbose: bool,
     message_burst: MessageBurstOptions,
+    session_artifact_dir: Option<&Path>,
 ) -> Result<()> {
     println!(
         "watch mode: server={server_url} room={room_id} alias_base={alias_base} count={count}"
@@ -1905,6 +2029,7 @@ async fn run_watch_mode(
     let first_session = perform_join(server_url, room_id, &first_alias).await?;
     println!("join ok: weid={}", hex::encode(first_session.we_epoch_id));
     log_fingerprints(&first_session);
+    maybe_write_session_artifact(session_artifact_dir, "joined", &first_alias, &first_session)?;
     let message_token = configured_client_message_token()
         .ok_or_else(|| anyhow!("message auth token is not configured"))?;
     let ws_url = websocket_url(server_url, &first_session.gid, &first_session.leaf_id);
@@ -1918,6 +2043,7 @@ async fn run_watch_mode(
         let session = perform_join(server_url, room_id, &alias).await?;
         println!("join ok: weid={}", hex::encode(session.we_epoch_id));
         log_fingerprints(&session);
+        maybe_write_session_artifact(session_artifact_dir, "joined", &alias, &session)?;
         expect_membership_event(
             &mut event_rx,
             &session.gid,
@@ -1937,6 +2063,14 @@ async fn run_watch_mode(
         Some(&mut event_rx),
     )
     .await?;
+    for (idx, session) in sessions.iter().enumerate() {
+        maybe_write_session_artifact(
+            session_artifact_dir,
+            "post-burst",
+            &alias_for(alias_base, sessions.len(), idx),
+            session,
+        )?;
+    }
 
     let default_order: Vec<usize> = (1..=sessions.len()).collect();
     let order = leave_order.as_ref().unwrap_or(&default_order);
@@ -1945,6 +2079,12 @@ async fn run_watch_mode(
             return Err(anyhow!("leave order index {idx} invalid"));
         }
         let session = &sessions[*idx - 1];
+        maybe_write_session_artifact(
+            session_artifact_dir,
+            "pre-leave",
+            &alias_for(alias_base, sessions.len(), *idx - 1),
+            session,
+        )?;
         println!(
             "leaving alias={} weid={}",
             alias_for(alias_base, sessions.len(), *idx - 1),
@@ -3762,6 +3902,7 @@ mod tests {
         assert!(opts.leave_order.is_none());
         assert_eq!(opts.message_burst_count, 0);
         assert_eq!(opts.message_burst_interval_ms, 0);
+        assert!(opts.session_artifact_dir.is_none());
         assert_eq!(opts.alias_base, "cli-joiner");
         assert_eq!(opts.room_id.len(), 64);
 
@@ -3773,6 +3914,7 @@ mod tests {
             "--count=2".to_string(),
             "--message-burst-count=3".to_string(),
             "--message-burst-interval-ms=25".to_string(),
+            "--session-artifact-dir=/tmp/cityg-client-state".to_string(),
             "--verbose".to_string(),
         ])?;
         assert_eq!(opts.server_url, "http://127.0.0.1:19090");
@@ -3784,6 +3926,10 @@ mod tests {
         assert!(opts.verbose);
         assert_eq!(opts.message_burst_count, 3);
         assert_eq!(opts.message_burst_interval_ms, 25);
+        assert_eq!(
+            opts.session_artifact_dir,
+            Some(PathBuf::from("/tmp/cityg-client-state"))
+        );
         Ok(())
     }
 
@@ -3837,6 +3983,13 @@ mod tests {
         ])
         .expect_err("extra positional arg should fail");
         assert!(err.to_string().contains("unexpected extra argument"));
+
+        let err = parse_cli_args(vec!["--session-artifact-dir=".to_string()])
+            .expect_err("empty session artifact dir should fail");
+        assert!(
+            err.to_string()
+                .contains("--session-artifact-dir requires a non-empty path")
+        );
     }
 
     #[test]
@@ -4627,6 +4780,7 @@ mod tests {
             leave_order: None,
             message_burst_count: 0,
             message_burst_interval_ms: 0,
+            session_artifact_dir: None,
         })
         .await?;
 
@@ -4656,6 +4810,7 @@ mod tests {
             leave_order: None,
             message_burst_count: 2,
             message_burst_interval_ms: 0,
+            session_artifact_dir: None,
         })
         .await?;
 
@@ -4685,6 +4840,7 @@ mod tests {
             leave_order: None,
             message_burst_count: 0,
             message_burst_interval_ms: 0,
+            session_artifact_dir: None,
         })
         .await?;
 
@@ -4714,6 +4870,7 @@ mod tests {
             leave_order: None,
             message_burst_count: 1,
             message_burst_interval_ms: 0,
+            session_artifact_dir: None,
         })
         .await?;
 
@@ -4743,6 +4900,7 @@ mod tests {
             leave_order: None,
             message_burst_count: 3,
             message_burst_interval_ms: 0,
+            session_artifact_dir: None,
         })
         .await?;
 
@@ -4772,6 +4930,7 @@ mod tests {
                 count: 0,
                 interval: Duration::from_millis(1),
             },
+            None,
         )
         .await?;
 
@@ -4801,6 +4960,7 @@ mod tests {
             leave_order: Some(vec![2]),
             message_burst_count: 0,
             message_burst_interval_ms: 0,
+            session_artifact_dir: None,
         })
         .await
         .expect_err("invalid leave order should fail at runtime");
@@ -4832,6 +4992,7 @@ mod tests {
                 count: 1,
                 interval: Duration::ZERO,
             },
+            None,
         )
         .await
         .expect_err("invalid watch leave order should fail");
@@ -4865,6 +5026,7 @@ mod tests {
                 count: 3,
                 interval: Duration::ZERO,
             },
+            None,
         )
         .await?;
 

@@ -49,6 +49,7 @@ const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
 const DEFAULT_SERVER_READY_TIMEOUT_SECS: u64 = 180;
 const RESTART_RETRY_ATTEMPTS: usize = 3;
 const RESTART_SETTLE_GRACE: Duration = Duration::from_secs(2);
+const CLIENT_RESTART_INJECTED_ERROR: &str = "managed client restart injected";
 
 #[derive(Debug, Parser)]
 #[command(name = "cityg-stress")]
@@ -92,6 +93,14 @@ struct Cli {
     require_metrics: bool,
     #[arg(long, env = "CITYG_STRESS_RESTART_EVERY_SECS", default_value_t = 0)]
     restart_every_secs: u64,
+    #[arg(
+        long,
+        env = "CITYG_STRESS_CLIENT_RESTART_EVERY_SECS",
+        default_value_t = 0
+    )]
+    client_restart_every_secs: u64,
+    #[arg(long, env = "CITYG_STRESS_CAPTURE_CLIENT_STATE_ARTIFACTS", action = ArgAction::SetTrue)]
+    capture_client_state_artifacts: bool,
     #[arg(long, env = "CITYG_STRESS_WINDOW_TTL_SECS", default_value_t = DEFAULT_WINDOW_TTL_SECS)]
     window_ttl_secs: u64,
     #[arg(long, env = "CITYG_STRESS_MAX_CONCURRENT_HEADS", default_value_t = DEFAULT_MAX_CONCURRENT_HEADS)]
@@ -139,6 +148,8 @@ struct Config {
     final_capacity_check: bool,
     require_metrics: bool,
     restart_every_secs: u64,
+    client_restart_every_secs: u64,
+    capture_client_state_artifacts: bool,
     window_ttl_secs: u64,
     max_concurrent_heads: u64,
     poll_interval: Duration,
@@ -379,6 +390,15 @@ async fn main() -> Result<()> {
         config.final_capacity_check,
     );
     app.push_event(format!("artifact dir: {}", config.artifact_dir.display()));
+    if config.client_restart_every_secs > 0 {
+        app.push_event(format!(
+            "client restart chaos enabled every {}s",
+            config.client_restart_every_secs
+        ));
+    }
+    if config.capture_client_state_artifacts {
+        app.push_event("client state artifacts enabled".to_string());
+    }
     for line in startup_events {
         app.push_event(line);
     }
@@ -536,6 +556,8 @@ impl Config {
             final_capacity_check: cli.final_capacity_check,
             require_metrics: cli.require_metrics,
             restart_every_secs: cli.restart_every_secs,
+            client_restart_every_secs: cli.client_restart_every_secs,
+            capture_client_state_artifacts: cli.capture_client_state_artifacts,
             window_ttl_secs: cli.window_ttl_secs,
             max_concurrent_heads: cli.max_concurrent_heads,
             poll_interval: Duration::from_millis(cli.poll_interval_ms),
@@ -995,7 +1017,9 @@ async fn run_worker(
         let mode = if watch_mode { "watch" } else { "batch" };
         let leave_order = random_leave_order(count, config.leaves_per_room);
 
-        let max_attempts = if config.manage_server && config.restart_every_secs > 0 {
+        let max_attempts = if (config.manage_server && config.restart_every_secs > 0)
+            || config.client_restart_every_secs > 0
+        {
             RESTART_RETRY_ATTEMPTS
         } else {
             1
@@ -1038,6 +1062,8 @@ async fn run_worker(
             match result {
                 Ok(()) => break,
                 Err(err) => {
+                    let client_restart_injected =
+                        err.to_string().contains(CLIENT_RESTART_INJECTED_ERROR);
                     let overlapped_restart = restart_after.restarting
                         || restart_after.generation != restart_before.generation
                         || round_started_at.saturating_duration_since(restart_before.changed_at)
@@ -1045,16 +1071,21 @@ async fn run_worker(
                         || Instant::now().saturating_duration_since(restart_after.changed_at)
                             <= RESTART_SETTLE_GRACE;
                     let retryable = attempt < max_attempts
-                        && config.manage_server
-                        && config.restart_every_secs > 0;
+                        && ((config.manage_server && config.restart_every_secs > 0)
+                            || client_restart_injected);
                     if retryable {
                         let _ = event_tx.send(AppEvent::Info(format!(
-                            "worker {worker_id} round {round} failed{}; retrying on fresh room",
+                            "worker {worker_id} round {round} failed{}{}; retrying on fresh room",
                             if overlapped_restart {
                                 format!(
                                     " near managed restart gen={} -> {}",
                                     restart_before.generation, restart_after.generation
                                 )
+                            } else {
+                                String::new()
+                            },
+                            if client_restart_injected {
+                                " after injected client restart".to_string()
                             } else {
                                 String::new()
                             }
@@ -1251,6 +1282,13 @@ async fn run_worker_round_attempt(
     let log_file = open_append(attempt.worker_log)?;
     let err_file = log_file.try_clone().context("clone worker log file")?;
     let alias_base = format!("stress-w{}-r{}", attempt.worker_id, attempt.round);
+    let session_artifact_dir = config.capture_client_state_artifacts.then(|| {
+        config.artifact_dir.join(format!(
+            "worker-{worker:02}-round-{round:03}-client-state",
+            worker = attempt.worker_id,
+            round = attempt.round
+        ))
+    });
     let mut command = Command::new(&config.join_leave_bin);
     command
         .arg(&config.server_url)
@@ -1271,15 +1309,65 @@ async fn run_worker_round_attempt(
         .env("CITYG_CLIENT_MESSAGE_AUTH_TOKEN", &config.message_token)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(err_file));
+    if let Some(artifact_dir) = session_artifact_dir.as_ref() {
+        command.arg(format!("--session-artifact-dir={}", artifact_dir.display()));
+    }
     if attempt.watch_mode {
         command.arg("--watch");
     } else {
         command.arg("--batch");
     }
-    let status = command
-        .status()
-        .await
+    let mut child = command
+        .spawn()
         .with_context(|| format!("run {}", config.join_leave_bin.display()))?;
+    let status = if config.client_restart_every_secs > 0 {
+        tokio::select! {
+            status = child.wait() => {
+                status.with_context(|| format!("run {}", config.join_leave_bin.display()))?
+            }
+            _ = sleep(Duration::from_secs(config.client_restart_every_secs)) => {
+                let pid = child.id();
+                let _ = child.start_kill();
+                let _ = timeout(Duration::from_secs(15), child.wait()).await;
+                if let Ok(mut file) = open_append(&config.artifact_dir.join("client-restarts.log")) {
+                    let _ = writeln!(
+                        file,
+                        "{} worker={} round={} pid={:?} room={} client-restart-injected",
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        attempt.worker_id,
+                        attempt.round,
+                        pid,
+                        attempt.room_id
+                    );
+                }
+                if config.require_metrics {
+                    let _ = capture_observability_snapshot(
+                        &config.server_url,
+                        &config.artifact_dir,
+                        &format!(
+                            "worker-{worker:02}-round-{round:03}-client-restart",
+                            worker = attempt.worker_id,
+                            round = attempt.round
+                        ),
+                    )
+                    .await;
+                }
+                return Err(anyhow!(
+                    "{CLIENT_RESTART_INJECTED_ERROR} worker={} round={}",
+                    attempt.worker_id,
+                    attempt.round
+                ));
+            }
+        }
+    } else {
+        child
+            .wait()
+            .await
+            .with_context(|| format!("run {}", config.join_leave_bin.display()))?
+    };
     if status.success() {
         Ok(())
     } else {

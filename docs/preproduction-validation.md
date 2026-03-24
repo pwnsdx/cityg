@@ -19,6 +19,7 @@ These checks are not about wire/spec correctness. They are about runtime stabili
 A candidate build is considered pre-production ready only if all of the following are true:
 
 - release QA checklist passes
+- client-state hardening gate passes
 - smoke membership flow passes on current binaries
 - soak run completes without server crash, journal corruption, or stuck pending barrier state
 - load/concurrency run shows bounded latency and no unexpected freeze-code drift
@@ -30,6 +31,7 @@ A candidate build is considered pre-production ready only if all of the followin
   - `cargo build -p cityg-api`
   - `cargo build -p cityg-gui --features native-app --bin join_leave`
   - `cargo build -p cityg-stress`
+  - `./scripts/verify_client_state_hardening.sh`
 - local secrets/tokens for smoke:
   - `CITYG_CLIENT_MESSAGE_AUTH_TOKEN`
   - `CITYG_SERVER_WINDOW_ADMIN_TOKEN`
@@ -88,28 +90,33 @@ cargo run -p cityg-stress -- \
   --server-bind 127.0.0.1:18080 \
   --server-url http://127.0.0.1:18080 \
   --workers 1 \
-  --rounds-per-worker 1 \
+  --rounds-per-worker 2 \
   --min-count 2 \
   --max-count 2 \
   --leaves-per-room 2 \
   --watch-percent 100 \
   --jitter-max-secs 0 \
-  --round-delay-secs 0 \
-  --message-burst-count 1 \
-  --message-burst-interval-ms 0 \
-  --final-capacity-check
+  --round-delay-secs 2 \
+  --message-burst-count 2 \
+  --message-burst-interval-ms 25 \
+  --restart-every-secs 45 \
+  --client-restart-every-secs 20 \
+  --capture-client-state-artifacts \
+  --require-metrics
 ```
 
 Success criteria:
 
 - watch-mode join/leave flow completes successfully
 - message send path emits and receives a notification event
-- capacity test still raises the expected `freeze 925` / `mh_window_full` path
+- restart-chaos run produces `client-restarts.log` plus client-state artifacts
+- capacity test still raises the expected `freeze 925` / `mh_window_full` path when requested separately
 
 Artifacts:
 
 - terminal transcript
 - tail of server log
+- client-state artifact directory
 
 ## Phase 2: Soak
 
@@ -134,6 +141,9 @@ cargo run -p cityg-stress -- \
   --leaves-per-room 2 \
   --watch-percent 100 \
   --round-delay-secs 0 \
+  --restart-every-secs 600 \
+  --client-restart-every-secs 300 \
+  --capture-client-state-artifacts \
   --require-metrics
 ```
 
@@ -152,6 +162,9 @@ cargo run -p cityg-stress -- \
   --leaves-per-room 2 \
   --watch-percent 100 \
   --round-delay-secs 5 \
+  --restart-every-secs 600 \
+  --client-restart-every-secs 300 \
+  --capture-client-state-artifacts \
   --require-metrics \
   --final-capacity-check
 ```
@@ -170,6 +183,9 @@ cargo run -p cityg-stress -- \
   --leaves-per-room 2 \
   --watch-percent 100 \
   --round-delay-secs 5 \
+  --restart-every-secs 600 \
+  --client-restart-every-secs 300 \
+  --capture-client-state-artifacts \
   --require-metrics \
   --final-capacity-check
 ```
@@ -185,6 +201,7 @@ Success criteria:
 - no server crash
 - no stuck WebSocket subsystem
 - no journal replay failure after restart
+- no client-state artifact showing a stuck `barrier_recovery_pending` after authenticated recovery
 - `GET /health/detailed` remains healthy
 - no unbounded growth in memory or restart latency
 
@@ -194,6 +211,7 @@ Collect:
 - periodic `/health/detailed` snapshots
 - periodic `/metrics` snapshots
 - restart timestamps and replay duration
+- `client-restarts.log` and per-round `worker-*-client-state/*.json`
 
 ## Phase 3: Load / Concurrency
 
@@ -219,6 +237,8 @@ Notes:
 - `cityg-stress` manages a local `cityg-api` by default and renders live metrics in a `ratatui` dashboard
 - use `--plain` when running in CI or when stdout is not a real terminal
 - `--message-burst-count` and `--message-burst-interval-ms` turn each room round into a real message storm instead of a single dummy payload
+- `--client-restart-every-secs` injects managed harness restarts so restart handling is exercised during churn campaigns
+- `--capture-client-state-artifacts` exports anonymized per-session state snapshots for audit/review
 - pass `--api-bin` and `--join-leave-bin` when you want to pin the run to explicitly-built candidate binaries
 - with persisted state and restart-chaos, prefer the default `--server-ready-timeout-secs 180` or a larger override; replay on large journals can exceed `120s`
 - the artifact directory is printed at the end of the run and contains `server.log`, worker logs, `summary.txt`, initial/final observability snapshots, and per-round observability snapshots

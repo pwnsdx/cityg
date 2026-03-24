@@ -10,6 +10,7 @@ For longer-running staging validation, see `/Users/admin/Desktop/Repositories/ci
 - [ ] `cargo test -p cityg-api`
 - [ ] `cargo test -p cityg-gui --features native-app`
 - [ ] `cargo test -p msphf-orchestrator`
+- [ ] `./scripts/verify_client_state_hardening.sh`
 - [ ] `./scripts/verify_no_secrets.sh`
 
 ## 2. API Runtime Checks
@@ -45,21 +46,25 @@ cargo run -p cityg-stress -- \
   --server-bind 127.0.0.1:18080 \
   --server-url http://127.0.0.1:18080 \
   --workers 1 \
-  --rounds-per-worker 1 \
+  --rounds-per-worker 2 \
   --min-count 2 \
   --max-count 2 \
   --leaves-per-room 2 \
   --watch-percent 100 \
   --jitter-max-secs 0 \
-  --round-delay-secs 0 \
-  --message-burst-count 1 \
-  --message-burst-interval-ms 0 \
-  --final-capacity-check
+  --round-delay-secs 2 \
+  --message-burst-count 2 \
+  --message-burst-interval-ms 25 \
+  --restart-every-secs 45 \
+  --client-restart-every-secs 20 \
+  --capture-client-state-artifacts \
+  --require-metrics
 ```
 
 Expected result:
 - Join + leave watch flow succeeds.
-- Capacity run fails with `freeze 925`/`mh_window_full` signal.
+- Restart-chaos run succeeds with per-round client-state artifacts.
+- Capacity run still fails with `freeze 925`/`mh_window_full` signal when explicitly requested.
 
 For longer churn validation, run:
 
@@ -74,6 +79,9 @@ cargo run -p cityg-stress -- \
   --leaves-per-room 2 \
   --watch-percent 100 \
   --round-delay-secs 2 \
+  --restart-every-secs 120 \
+  --client-restart-every-secs 60 \
+  --capture-client-state-artifacts \
   --require-metrics
 ```
 
@@ -109,6 +117,7 @@ cargo run -p cityg-gui --features native-app
 - [ ] Send/receive works in both directions.
 - [ ] Members panel reflects join/leave updates.
 - [ ] `PCS Refresh` succeeds without leaving either client stuck in pending barrier recovery.
+- [ ] Crash/restart recovery path remains message-blocked while `barrier_recovery_pending` is true and recovers after epoch sync.
 
 ## 5. Container/Deployment Smoke
 
@@ -126,5 +135,6 @@ docker compose up -d --build
 ## 6. Sign-Off
 
 - [ ] Security checklist completed (`docs/security-review-checklist.md`).
+- [ ] Audit pack reviewed (`docs/client-state-hardening-audit-pack.md`).
 - [ ] Release notes updated.
 - [ ] Rollback plan validated.

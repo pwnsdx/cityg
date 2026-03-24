@@ -4,6 +4,9 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
 
 jobs:
   test:
@@ -67,6 +70,10 @@ jobs:
             command: cargo test -p cityg-gui --features native-app
             needs_ripgrep: false
             needs_native_linux_deps: true
+          - name: client-state-hardening
+            command: ./scripts/verify_client_state_hardening.sh
+            needs_ripgrep: false
+            needs_native_linux_deps: true
           - name: server-blindness
             command: ./scripts/verify_no_secrets.sh
             needs_ripgrep: true
@@ -90,6 +97,57 @@ jobs:
             libxkbcommon-x11-dev
       - name: Run ${{ matrix.name }}
         run: ${{ matrix.command }}
+
+  nightly-chaos:
+    name: Nightly Chaos
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install GUI native deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev
+      - name: Build nightly chaos binaries
+        run: |
+          cargo build -p cityg-api
+          cargo build -p cityg-gui --features native-app --bin join_leave
+          cargo build -p cityg-stress
+      - name: Run nightly chaos campaign
+        run: |
+          artifact_dir="$RUNNER_TEMP/cityg-stress-nightly"
+          cargo run -p cityg-stress -- \
+            --server-bind 127.0.0.1:18080 \
+            --server-url http://127.0.0.1:18080 \
+            --workers 1 \
+            --rounds-per-worker 6 \
+            --min-count 2 \
+            --max-count 2 \
+            --leaves-per-room 2 \
+            --watch-percent 100 \
+            --jitter-max-secs 0 \
+            --round-delay-secs 2 \
+            --message-burst-count 2 \
+            --message-burst-interval-ms 25 \
+            --restart-every-secs 45 \
+            --client-restart-every-secs 20 \
+            --capture-client-state-artifacts \
+            --require-metrics \
+            --artifact-dir "$artifact_dir" \
+            --plain
+      - name: Upload nightly chaos artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cityg-nightly-chaos
+          path: ${{ runner.temp }}/cityg-stress-nightly
 
   artifact-build:
     name: Artifact Build (${{ matrix.name }})
