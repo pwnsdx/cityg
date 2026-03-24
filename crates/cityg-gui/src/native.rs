@@ -1655,6 +1655,7 @@ struct AppModel {
     room_admins_loaded: bool,
     room_admin_status: RoomAdminStatus,
     room_admin_target: RoomAdminTargetState,
+    room_admin_revoke_confirmation: Option<Vec<u8>>,
     epoch_sync_task: Option<Task<()>>, // Background task for membership-driven epoch sync
     ws_task: Option<Task<()>>,         // WebSocket connection task
     ws_connected: bool,                // WebSocket connection status
@@ -2545,6 +2546,7 @@ impl AppModel {
             room_admins_loaded: false,
             room_admin_status: RoomAdminStatus::Idle,
             room_admin_target: RoomAdminTargetState::default(),
+            room_admin_revoke_confirmation: None,
             epoch_sync_task: None,
             ws_task: None,
             ws_connected: false,
@@ -3634,10 +3636,13 @@ impl AppModel {
 
     fn render_room_admin_panel(&self, session: &AppSession, cx: &mut ViewContext<Self>) -> Div {
         let can_list = self.room_admins_loaded;
-        let self_is_admin = self
-            .room_admin_membership(session.pop_public_key.as_slice())
-            .unwrap_or(false);
-        let role_text = match self.room_admin_membership(session.pop_public_key.as_slice()) {
+        let membership = self.room_admin_membership(session.pop_public_key.as_slice());
+        let self_is_admin = membership.unwrap_or(false);
+        let controls_locked = matches!(membership, Some(false));
+        let mutation_busy = matches!(self.room_admin_status, RoomAdminStatus::Loading(_));
+        let target_present = !self.room_admin_target.value().trim().is_empty();
+        let revoke_staged = self.room_admin_revoke_is_staged_for_input();
+        let role_text = match membership {
             Some(true) => "This device currently holds room-admin authority.".to_string(),
             Some(false) => "This device does not currently hold room-admin authority.".to_string(),
             None => "Refresh to load current room-admin state.".to_string(),
@@ -3647,6 +3652,20 @@ impl AppModel {
             RoomAdminStatus::Loading(message) => Some(message.clone()),
             RoomAdminStatus::Error(message) => Some(message.clone()),
         };
+        let access_text = if controls_locked {
+            Some(
+                "Grant and revoke controls are disabled because this device is not a current room admin."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        let revoke_confirmation_text = self.room_admin_revoke_confirmation.as_ref().map(|target| {
+            format!(
+                "Revoke is staged for {}. Click Confirm revoke to submit, or Cancel revoke to back out.",
+                room_admin_identity_preview(target)
+            )
+        });
 
         let target_active = self.room_admin_target.active;
         let target_border = if target_active {
@@ -3717,48 +3736,127 @@ impl AppModel {
             .cursor(CursorStyle::PointingHand)
             .child("Copy my identity")
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_copy_room_identity));
+        let grant_enabled = !controls_locked && !mutation_busy && target_present;
+        let revoke_enabled = !controls_locked && !mutation_busy && target_present;
+        let clear_enabled = !mutation_busy;
         let grant_button = div()
             .px(px(8.0))
             .py(px(6.0))
             .rounded(px(10.0))
             .text_size(px(12.0))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(UI_ACCENT_BUTTON_TEXT))
-            .bg(rgb(UI_ACCENT_TEXT))
-            .cursor(CursorStyle::PointingHand)
-            .child("Grant")
-            .on_mouse_down(
+            .text_color(if grant_enabled {
+                rgb(UI_ACCENT_BUTTON_TEXT)
+            } else {
+                rgb(UI_MUTED_TEXT)
+            })
+            .bg(if grant_enabled {
+                rgb(UI_ACCENT_TEXT)
+            } else {
+                rgb(0x3a3f57)
+            })
+            .cursor(if grant_enabled {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::Arrow
+            })
+            .child("Grant");
+        let grant_button = if grant_enabled {
+            grant_button.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(Self::on_room_admin_grant_clicked),
-            );
+            )
+        } else {
+            grant_button
+        };
         let revoke_button = div()
             .px(px(8.0))
             .py(px(6.0))
             .rounded(px(10.0))
             .text_size(px(12.0))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(UI_PANEL_TEXT))
-            .bg(rgb(0x6a3443))
-            .cursor(CursorStyle::PointingHand)
-            .child("Revoke")
-            .on_mouse_down(
+            .text_color(if revoke_enabled {
+                rgb(UI_PANEL_TEXT)
+            } else {
+                rgb(UI_MUTED_TEXT)
+            })
+            .bg(if revoke_enabled {
+                if revoke_staged {
+                    rgb(0x8a243a)
+                } else {
+                    rgb(0x6a3443)
+                }
+            } else {
+                rgb(0x3a3f57)
+            })
+            .cursor(if revoke_enabled {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::Arrow
+            })
+            .child(if revoke_staged {
+                "Confirm revoke"
+            } else {
+                "Revoke"
+            });
+        let revoke_button = if revoke_enabled {
+            revoke_button.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(Self::on_room_admin_revoke_clicked),
-            );
+            )
+        } else {
+            revoke_button
+        };
         let clear_button = div()
             .px(px(8.0))
             .py(px(6.0))
             .rounded(px(10.0))
             .text_size(px(12.0))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(UI_PANEL_TEXT))
-            .bg(rgb(0x3e4b66))
-            .cursor(CursorStyle::PointingHand)
-            .child("Clear")
-            .on_mouse_down(
+            .text_color(if clear_enabled {
+                rgb(UI_PANEL_TEXT)
+            } else {
+                rgb(UI_MUTED_TEXT)
+            })
+            .bg(if clear_enabled {
+                rgb(0x3e4b66)
+            } else {
+                rgb(0x3a3f57)
+            })
+            .cursor(if clear_enabled {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::Arrow
+            })
+            .child("Clear");
+        let clear_button = if clear_enabled {
+            clear_button.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(Self::on_room_admin_target_clear_clicked),
-            );
+            )
+        } else {
+            clear_button
+        };
+        let cancel_revoke_button = if revoke_staged {
+            Some(
+                div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .rounded(px(10.0))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(UI_PANEL_TEXT))
+                    .bg(rgb(0x4c5369))
+                    .cursor(CursorStyle::PointingHand)
+                    .child("Cancel revoke")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(Self::on_room_admin_revoke_cancel_clicked),
+                    ),
+            )
+        } else {
+            None
+        };
 
         let mut admin_list = div().flex().flex_col().gap(px(6.0));
         if !can_list {
@@ -3842,16 +3940,37 @@ impl AppModel {
                     })
                     .child(role_text),
             )
-            .child(target_field)
-            .child(
+            .child(target_field);
+
+        if let Some(text) = access_text {
+            root = root.child(
                 div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(8.0))
-                    .child(grant_button)
-                    .child(revoke_button)
-                    .child(clear_button),
+                    .text_size(px(12.0))
+                    .text_color(rgb(UI_SUBTLE_TEXT))
+                    .child(text),
             );
+        }
+
+        if let Some(text) = revoke_confirmation_text {
+            root = root.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(UI_WARN_TEXT))
+                    .child(text),
+            );
+        }
+
+        let mut action_row = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.0))
+            .child(grant_button)
+            .child(revoke_button)
+            .child(clear_button);
+        if let Some(button) = cancel_revoke_button {
+            action_row = action_row.child(button);
+        }
+        root = root.child(action_row);
 
         if let Some(text) = status_text {
             root = root.child(
@@ -4197,6 +4316,7 @@ impl AppModel {
             self.room_admin_status = RoomAdminStatus::Idle;
             self.room_admin_target.clear();
             self.room_admin_target.blur();
+            self.clear_room_admin_revoke_confirmation();
             return;
         }
 
@@ -6199,6 +6319,7 @@ impl AppModel {
                 self.room_admin_target.value().to_string(),
             ));
             self.room_admin_target.clear();
+            self.clear_room_admin_revoke_confirmation();
             return KeyOutcome::Updated;
         }
 
@@ -6207,6 +6328,7 @@ impl AppModel {
                 let mut updated = self.room_admin_target.value().to_string();
                 updated.push_str(&sanitize_clipboard_text(&text));
                 self.room_admin_target.set_value(updated);
+                self.clear_room_admin_revoke_confirmation();
             }
             return KeyOutcome::Updated;
         }
@@ -6307,6 +6429,26 @@ impl AppModel {
         )
     }
 
+    fn room_admin_controls_locked(&self, session: &AppSession) -> bool {
+        matches!(
+            self.room_admin_membership(session.pop_public_key.as_slice()),
+            Some(false)
+        )
+    }
+
+    fn room_admin_revoke_is_staged_for_input(&self) -> bool {
+        let Some(staged) = self.room_admin_revoke_confirmation.as_ref() else {
+            return false;
+        };
+        decode_room_admin_target_hex(self.room_admin_target.value())
+            .map(|target| target == *staged)
+            .unwrap_or(false)
+    }
+
+    fn clear_room_admin_revoke_confirmation(&mut self) {
+        self.room_admin_revoke_confirmation = None;
+    }
+
     fn focus_room_admin_target(&mut self, cx: &mut ViewContext<Self>) {
         self.room_admin_target.focus();
         self.members_search.blur();
@@ -6317,6 +6459,7 @@ impl AppModel {
     fn clear_room_admin_target(&mut self, cx: &mut ViewContext<Self>) {
         self.room_admin_target.clear();
         self.room_admin_target.blur();
+        self.clear_room_admin_revoke_confirmation();
         cx.notify();
     }
 
@@ -6327,22 +6470,23 @@ impl AppModel {
     ) {
         self.room_admin_target
             .set_value(hex_encode(target_pop_public_key));
+        self.clear_room_admin_revoke_confirmation();
         self.focus_room_admin_target(cx);
         self.show_info("Loaded member identity into room-admin target", cx);
     }
 
     fn refresh_room_admins(&mut self, cx: &mut ViewContext<Self>) {
-        let Some(session) = &self.session else {
+        let Some(params) = self.session.as_ref().map(RoomAdminQueryParams::from_session) else {
             return;
         };
         if matches!(self.room_admin_status, RoomAdminStatus::Loading(_)) {
             return;
         }
+        self.clear_room_admin_revoke_confirmation();
         self.room_admin_status =
             RoomAdminStatus::Loading("Loading room-admin identities…".to_string());
         cx.notify();
 
-        let params = RoomAdminQueryParams::from_session(session);
         let task = Tokio::spawn_result(cx, async move { perform_fetch_room_admins(params).await });
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
@@ -6364,6 +6508,7 @@ impl AppModel {
                 self.room_admins = admins;
                 self.room_admins_loaded = true;
                 self.room_admin_status = RoomAdminStatus::Idle;
+                self.clear_room_admin_revoke_confirmation();
                 cx.notify();
             }
             Err(err) => {
@@ -6371,6 +6516,7 @@ impl AppModel {
                 self.room_admins_loaded = false;
                 self.room_admin_status =
                     RoomAdminStatus::Error(categorize_error(&err, "room admin").user_message);
+                self.clear_room_admin_revoke_confirmation();
                 warn!("failed to refresh room admins: {err:?}");
                 cx.notify();
             }
@@ -6383,17 +6529,18 @@ impl AppModel {
         target_pop_public_key: Vec<u8>,
         cx: &mut ViewContext<Self>,
     ) {
-        let Some(session) = &self.session else {
+        let Some(query) = self.session.as_ref().map(RoomAdminQueryParams::from_session) else {
             return;
         };
         if matches!(self.room_admin_status, RoomAdminStatus::Loading(_)) {
             return;
         }
+        self.clear_room_admin_revoke_confirmation();
         self.room_admin_status = RoomAdminStatus::Loading(kind.present_progressive().to_string());
         cx.notify();
 
         let params = RoomAdminMutationParams {
-            query: RoomAdminQueryParams::from_session(session),
+            query,
             target_pop_public_key,
             kind,
         };
@@ -6414,9 +6561,22 @@ impl AppModel {
         kind: RoomAdminMutationKind,
         cx: &mut ViewContext<Self>,
     ) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if self.room_admin_controls_locked(session) {
+            let message = "This device does not currently hold room-admin authority for this room."
+                .to_string();
+            self.clear_room_admin_revoke_confirmation();
+            self.room_admin_status = RoomAdminStatus::Error(message.clone());
+            self.show_error_toast(message, cx);
+            cx.notify();
+            return;
+        }
         let target = match decode_room_admin_target_hex(self.room_admin_target.value()) {
             Ok(target) => target,
             Err(err) => {
+                self.clear_room_admin_revoke_confirmation();
                 self.room_admin_status =
                     RoomAdminStatus::Error(categorize_error(&err, "room admin").user_message);
                 self.show_error_toast(err.to_string(), cx);
@@ -6424,6 +6584,19 @@ impl AppModel {
                 return;
             }
         };
+        if matches!(kind, RoomAdminMutationKind::Revoke)
+            && self.room_admin_revoke_confirmation.as_ref() != Some(&target)
+        {
+            self.room_admin_revoke_confirmation = Some(target.clone());
+            self.room_admin_status = RoomAdminStatus::Idle;
+            self.info_message = Some(format!(
+                "Revoke staged for {}. Click Revoke again to confirm.",
+                room_admin_identity_preview(&target)
+            ));
+            self.show_info("Revoke staged; click Revoke again to confirm", cx);
+            cx.notify();
+            return;
+        }
         self.start_room_admin_mutation(kind, target, cx);
     }
 
@@ -6435,6 +6608,7 @@ impl AppModel {
     ) {
         match result {
             Ok(outcome) => {
+                self.clear_room_admin_revoke_confirmation();
                 self.room_admin_status = RoomAdminStatus::Idle;
                 let success_message = match outcome.status.as_str() {
                     "already_granted" => "Room admin was already granted",
@@ -6454,6 +6628,7 @@ impl AppModel {
                 self.refresh_room_admins(cx);
             }
             Err(err) => {
+                self.clear_room_admin_revoke_confirmation();
                 let user_message = categorize_error(&err, "room admin").user_message;
                 self.room_admin_status = RoomAdminStatus::Error(user_message.clone());
                 self.show_error_toast(user_message, cx);
@@ -6585,6 +6760,7 @@ impl AppModel {
                 self.room_admin_status = RoomAdminStatus::Idle;
                 self.room_admin_target.clear();
                 self.room_admin_target.blur();
+                self.clear_room_admin_revoke_confirmation();
                 self.ws_autostart_attempted = false;
                 self.restore_epoch_sync_pending = false;
                 self.reset_fetch_state();
@@ -6760,6 +6936,7 @@ impl AppModel {
                 self.room_admin_status = RoomAdminStatus::Idle;
                 self.room_admin_target.clear();
                 self.room_admin_target.blur();
+                self.clear_room_admin_revoke_confirmation();
                 self.security_events.clear();
                 self.security_unread = 0;
                 self.security_panel_expanded = false;
@@ -7072,6 +7249,17 @@ impl AppModel {
         self.start_room_admin_mutation_from_input(RoomAdminMutationKind::Revoke, cx);
     }
 
+    fn on_room_admin_revoke_cancel_clicked(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.clear_room_admin_revoke_confirmation();
+        self.room_admin_status = RoomAdminStatus::Idle;
+        cx.notify();
+    }
+
     fn on_room_admin_target_clear_clicked(
         &mut self,
         _: &MouseDownEvent,
@@ -7167,6 +7355,7 @@ impl AppModel {
         self.room_admin_status = RoomAdminStatus::Idle;
         self.room_admin_target.clear();
         self.room_admin_target.blur();
+        self.clear_room_admin_revoke_confirmation();
         self.security_events.clear();
         self.security_unread = 0;
         self.security_panel_expanded = false;
@@ -7246,7 +7435,10 @@ impl AppModel {
                 }
                 match self.room_admin_target.handle_keystroke(keystroke) {
                     KeyOutcome::None => {}
-                    KeyOutcome::Updated => cx.notify(),
+                    KeyOutcome::Updated => {
+                        self.clear_room_admin_revoke_confirmation();
+                        cx.notify();
+                    }
                     KeyOutcome::Submit => {
                         self.start_room_admin_mutation_from_input(RoomAdminMutationKind::Grant, cx)
                     }
@@ -14013,13 +14205,18 @@ mod tests {
         view.update(cx, |model, view_cx| {
             model.session = Some(session);
             model.ws_connected = true;
-            model.room_admins = vec![vec![0xAA; dilithium5::public_key_bytes()]];
+            let panel_session = model.session.clone().expect("session available");
+            model.room_admins = vec![panel_session.pop_public_key.clone()];
             model.room_admins_loaded = true;
             model.room_admin_target.focus();
             model
                 .room_admin_target
-                .set_value("abcd".repeat(4).to_string());
-            let panel_session = model.session.clone().expect("session available");
+                .set_value(hex_encode(vec![0xAA; dilithium5::public_key_bytes()]));
+            model.room_admin_revoke_confirmation = Some(vec![0xAA; dilithium5::public_key_bytes()]);
+            let _ = model.render_room_admin_panel(&panel_session, view_cx);
+            let mut other_admin = panel_session.pop_public_key.clone();
+            other_admin[0] ^= 0xFF;
+            model.room_admins = vec![other_admin];
             let _ = model.render_room_admin_panel(&panel_session, view_cx);
             model.members = vec![MemberEntry {
                 leaf_id: [0x11; 32],
@@ -14090,6 +14287,93 @@ mod tests {
                 },
             ];
             let _ = model.render_activity_panel(view_cx);
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_room_admin_controls_block_local_mutation_when_device_is_not_admin(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xC001,
+            "http://127.0.0.1:9",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            "not-admin",
+        )
+        .expect("build session");
+
+        view.update(cx, |model, view_cx| {
+            let mut other_admin = session.pop_public_key.clone();
+            other_admin[0] ^= 0xFF;
+            model.session = Some(session.clone());
+            model.room_admins = vec![other_admin];
+            model.room_admins_loaded = true;
+            model
+                .room_admin_target
+                .set_value(hex_encode(vec![0x33; dilithium5::public_key_bytes()]));
+
+            model.start_room_admin_mutation_from_input(RoomAdminMutationKind::Grant, view_cx);
+
+            assert!(matches!(
+                &model.room_admin_status,
+                RoomAdminStatus::Error(message)
+                    if message.contains("does not currently hold room-admin authority")
+            ));
+            assert!(model.room_admin_revoke_confirmation.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn gpui_room_admin_revoke_requires_confirmation_and_clears_on_target_change(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(tokio_bridge::init);
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let base = temp_dir.path().join("cityg").join("gui");
+        let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+        let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+        let session = build_test_session(
+            0xC002,
+            "http://127.0.0.1:9",
+            "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+            "revoke-stage",
+        )
+        .expect("build session");
+
+        view.update(cx, |model, view_cx| {
+            let first_target = vec![0x44; dilithium5::public_key_bytes()];
+            let second_target = vec![0x55; dilithium5::public_key_bytes()];
+            model.session = Some(session.clone());
+            model.room_admins = vec![session.pop_public_key.clone(), second_target.clone()];
+            model.room_admins_loaded = true;
+            model
+                .room_admin_target
+                .set_value(hex_encode(first_target.clone()));
+
+            model.start_room_admin_mutation_from_input(RoomAdminMutationKind::Revoke, view_cx);
+
+            assert_eq!(
+                model.room_admin_revoke_confirmation.as_ref(),
+                Some(&first_target)
+            );
+            assert!(matches!(model.room_admin_status, RoomAdminStatus::Idle));
+            assert!(
+                model
+                    .info_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("Revoke staged"))
+            );
+
+            model.set_room_admin_target(second_target, view_cx);
+
+            assert!(model.room_admin_revoke_confirmation.is_none());
         });
     }
 
