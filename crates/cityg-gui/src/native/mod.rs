@@ -77,6 +77,7 @@ use zeroize::{Zeroize, Zeroizing};
 #[cfg(test)]
 use cityg_client::demo;
 
+mod activity_state;
 mod app_shell;
 mod barrier_core;
 mod barrier_ops;
@@ -109,6 +110,7 @@ mod storage;
 mod tokio_bridge;
 mod websocket;
 
+use activity_state::*;
 use barrier_core::*;
 use barrier_ops::*;
 use barrier_runtime::*;
