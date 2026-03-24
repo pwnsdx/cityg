@@ -993,6 +993,14 @@ impl AcceptanceContext {
         self.device_chains.clear();
     }
 
+    pub fn clear_device_chains_for_gid(&mut self, gid: &[u8]) {
+        self.device_chains.remove(gid);
+    }
+
+    pub fn clear_pivot_parities_for_gid(&mut self, gid: &[u8]) {
+        self.pivot_store.clear_gid(gid);
+    }
+
     pub fn barrier_group_state(&self, gid: &[u8]) -> Option<&BarrierGroupState> {
         self.barrier_groups.get(gid)
     }

@@ -1842,6 +1842,11 @@ impl PivotParityStore {
             })
             .unwrap_or_default()
     }
+
+    pub fn clear_gid(&mut self, gid: &[u8]) {
+        self.entries
+            .retain(|(entry_gid, _), _| entry_gid.as_slice() != gid);
+    }
 }
 
 #[derive(Debug, Clone)]

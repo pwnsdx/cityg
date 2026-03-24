@@ -453,17 +453,28 @@ impl CityGServer {
         state.leaf_device_pk.clear();
         state.leaf_barrier_public.clear();
         state.barrier_initialized = true;
+        state.barrier_version = 0;
         state.barrier_roots_hash = compute_revocation_roots_hash(&zero, &zero)?;
         state.kem_tree_hash_after = blank_tree_hash;
+        state.last_checkpoint_ec = 0;
+        state.last_accepted_ec = 0;
+        state.srx_root_sw = None;
+        state.last_pcs_refresh_ec = None;
+        state.join_history.clear();
         state.barrier_pk_entries = blank_entries;
         state.barrier_hash_cache = None;
         record_barrier_public_tree_snapshot(state)?;
 
         let ctx_state = self.ctx.barrier_group_state_entry_mut(gid.as_slice());
         ctx_state.barrier_initialized = state.barrier_initialized;
+        ctx_state.barrier_version = state.barrier_version;
         ctx_state.barrier_roots_hash = state.barrier_roots_hash;
         ctx_state.kem_tree_hash_after = state.kem_tree_hash_after;
+        ctx_state.last_checkpoint_ec = state.last_checkpoint_ec;
+        ctx_state.last_accepted_ec = state.last_accepted_ec;
+        ctx_state.srx_root_sw = state.srx_root_sw;
         ctx_state.n_max = state.n_max.max(1);
+        ctx_state.last_pcs_refresh_ec = state.last_pcs_refresh_ec;
         self.ctx.clear_device_chains_for_gid(gid.as_slice());
         self.ctx.clear_pivot_parities_for_gid(gid.as_slice());
 

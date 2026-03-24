@@ -6099,6 +6099,111 @@ async fn sequential_member_leaves_succeed() -> Result<(), Box<dyn std::error::Er
 }
 
 #[tokio::test]
+async fn rejoin_with_same_persisted_identity_succeeds_after_room_becomes_empty()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+
+    let port = next_test_port();
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let mut room_id_bytes = [0x67u8; 32];
+    room_id_bytes[..2].copy_from_slice(&port.to_le_bytes());
+    let room_id = hex_encode(room_id_bytes);
+    let (admin_pop_public_key, admin_pop_secret_key) =
+        bootstrap_test_room_with_admin_identity(&server_url, &room_id).await?;
+
+    let mut alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
+    alice.barrier_state.barrier_recovery_pending = false;
+    let mut bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?
+    };
+    bob.barrier_state.barrier_recovery_pending = false;
+
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        persist_session(&alice)?;
+        perform_leave(LeaveRequest::from_session(&alice)).await?;
+    }
+
+    let (rotated_kbroad_public, _) = generate_kbroad_keypair();
+    let admin_proof = build_room_admin_proof(
+        RoomAdminOperation::RotateKbroad,
+        &room_id,
+        &rotated_kbroad_public,
+        &admin_pop_public_key,
+        &admin_pop_secret_key,
+    )?;
+    new_api_client(&server_url)
+        .rotate_room_kbroad_as_admin(&room_id, &rotated_kbroad_public, admin_proof)
+        .await?;
+
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+        persist_session(&bob)?;
+        perform_leave(LeaveRequest::from_session(&bob)).await?;
+    }
+
+    let client = new_api_client(&server_url);
+    let empty_members = client.members(&alice.gid, None).await?;
+    assert_eq!(empty_members.total_count, 0);
+    assert!(empty_members.members.is_empty());
+
+    let rejoined = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
+
+    assert_eq!(
+        rejoined.pop_public_key, alice.pop_public_key,
+        "rejoin should reuse the persisted room identity"
+    );
+    assert_eq!(
+        rejoined.leaf_id, alice.leaf_id,
+        "same persisted room identity should map to the same leaf id"
+    );
+
+    let after_rejoin = client.members(&alice.gid, None).await?;
+    assert_eq!(after_rejoin.total_count, 1);
+    assert!(
+        after_rejoin
+            .members
+            .iter()
+            .any(|member| member.leaf_id.as_slice() == rejoined.leaf_id.as_slice()),
+        "rejoined member should be visible again"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn send_fetch_and_members_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let _env_lock = ENV_VAR_LOCK
         .lock()

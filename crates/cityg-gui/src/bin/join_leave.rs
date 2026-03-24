@@ -940,11 +940,16 @@ fn verify_message_signature(
     Ok(())
 }
 
-async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
+async fn prepare_join_session_with_identity(
+    server_url: &str,
+    room_id: &str,
+    alias: &str,
+    pop_public_key: Vec<u8>,
+    pop_secret_key: Vec<u8>,
+) -> Result<Session> {
     let client = new_api_client(server_url);
-    let (pop_pk, pop_sk) = dilithium5::keypair();
-    let pop_public_key = DilithiumPublicKeyTrait::as_bytes(&pop_pk).to_vec();
-    let pop_secret = Box::new(pop_sk);
+    let pop_secret =
+        Box::new(MlDsaSecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
 
     let binding_message = (
         ByteBuf::from(alias.as_bytes().to_vec()),
@@ -1177,8 +1182,39 @@ async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> R
     Ok(session)
 }
 
+async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
+    let (pop_pk, pop_sk) = dilithium5::keypair();
+    prepare_join_session_with_identity(
+        server_url,
+        room_id,
+        alias,
+        DilithiumPublicKeyTrait::as_bytes(&pop_pk).to_vec(),
+        DilithiumSecretKeyTrait::as_bytes(&pop_sk).to_vec(),
+    )
+    .await
+}
+
 async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
     let session = prepare_join_session(server_url, room_id, alias).await?;
+    perform_join_finalize(session).await
+}
+
+#[cfg(test)]
+async fn perform_join_with_identity(
+    server_url: &str,
+    room_id: &str,
+    alias: &str,
+    pop_public_key: &[u8],
+    pop_secret_key: &[u8],
+) -> Result<Session> {
+    let session = prepare_join_session_with_identity(
+        server_url,
+        room_id,
+        alias,
+        pop_public_key.to_vec(),
+        pop_secret_key.to_vec(),
+    )
+    .await?;
     perform_join_finalize(session).await
 }
 
@@ -4510,6 +4546,78 @@ mod tests {
         let after_bob_leave = client.members(&alice.gid, None).await?;
         assert_eq!(after_bob_leave.total_count, 0);
         assert!(after_bob_leave.members.is_empty());
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejoin_with_same_identity_succeeds_after_room_becomes_empty() -> Result<()> {
+        let port = next_free_local_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex::encode([0x93u8; 32]);
+        ensure_test_auth_env();
+        let (alice_pop_public_key, alice_pop_secret_key) =
+            cityg_api_client::generate_room_admin_keypair();
+        let admin_proof = build_room_admin_proof(
+            RoomAdminOperation::Bootstrap,
+            &room_id,
+            demo::kbroad_public(),
+            &alice_pop_public_key,
+            &alice_pop_secret_key,
+        )?;
+        new_api_client(&server_url)
+            .bootstrap_room_as_admin(&room_id, demo::kbroad_public(), admin_proof)
+            .await?;
+
+        let alice = perform_join_with_identity(
+            &server_url,
+            &room_id,
+            "alice",
+            &alice_pop_public_key,
+            &alice_pop_secret_key,
+        )
+        .await?;
+        let bob = perform_join(&server_url, &room_id, "bob").await?;
+        let client = new_api_client(&server_url);
+
+        perform_leave(&bob, true).await?;
+        perform_leave(&alice, true).await?;
+
+        let empty_members = client.members(&alice.gid, None).await?;
+        assert_eq!(empty_members.total_count, 0);
+        assert!(empty_members.members.is_empty());
+
+        let rejoined = perform_join_with_identity(
+            &server_url,
+            &room_id,
+            "alice",
+            &alice_pop_public_key,
+            &alice_pop_secret_key,
+        )
+        .await?;
+
+        assert_eq!(
+            rejoined.pop_public_key, alice.pop_public_key,
+            "rejoin should reuse the same persistent room identity"
+        );
+        assert_eq!(
+            rejoined.leaf_id, alice.leaf_id,
+            "rejoining with the same room identity should reuse the same leaf id"
+        );
+
+        let after_rejoin = client.members(&alice.gid, None).await?;
+        assert_eq!(after_rejoin.total_count, 1);
+        assert!(
+            after_rejoin
+                .members
+                .iter()
+                .any(|member| member.leaf_id.as_slice() == rejoined.leaf_id.as_slice())
+        );
 
         handle.abort();
         let _ = handle.await;
