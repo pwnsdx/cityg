@@ -60,11 +60,12 @@ use msphf_orchestrator::{
     OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_proofs_commit_bytes,
     derive_we_epoch_id, hdr,
 };
+#[cfg(test)]
+use pqcrypto_dilithium::dilithium3::{
+    public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
+};
 use pqcrypto_dilithium::{
-    dilithium3::{
-        self, public_key_bytes as ml_dsa_public_key_bytes,
-        signature_bytes as ml_dsa_signature_bytes,
-    },
+    dilithium3::{self},
     dilithium5,
 };
 use pqcrypto_kyber::kyber768;
@@ -111,9 +112,13 @@ mod network_ops;
 mod params;
 mod persisted;
 mod pivot_helpers;
+mod render_activity_panel;
 mod render_details;
-mod render_panels;
+mod render_members_panel;
+mod render_message_composer;
+mod render_security_panel;
 mod render_session;
+mod render_session_controls;
 mod render_workspace;
 mod room_admin;
 mod session_runtime;
@@ -129,6 +134,7 @@ use activity_state::*;
 use barrier_core::*;
 use barrier_ops::*;
 use barrier_runtime::*;
+#[cfg(test)]
 use epoch_sync::*;
 use errors::*;
 #[cfg(test)]
@@ -148,6 +154,7 @@ use shell_ui::*;
 use state::*;
 use storage::*;
 use tokio_bridge::Tokio;
+#[cfg(test)]
 use websocket::*;
 
 fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
