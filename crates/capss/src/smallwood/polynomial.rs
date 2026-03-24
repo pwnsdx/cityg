@@ -142,15 +142,16 @@ mod tests {
     }
 
     #[test]
-    fn restore_only_from_single_points() {
+    fn restore_only_from_single_points() -> Result<(), Box<dyn std::error::Error>> {
         // polynomial P(x) = 2 + 3x + x^2
         let relations = vec![
             (bf(2), vec![bf(0)]),
             (bf(6), vec![bf(1)]),
             (bf(12), vec![bf(2)]),
         ];
-        let coeffs = restore_only_from_relation(&relations, 2).expect("relations restore");
+        let coeffs = restore_only_from_relation(&relations, 2)?;
         assert_eq!(coeffs, vec![bf(2), bf(3), bf(1)]);
+        Ok(())
     }
 
     #[test]
@@ -166,21 +167,22 @@ mod tests {
     }
 
     #[test]
-    fn restore_with_high_coeffs() {
+    fn restore_with_high_coeffs() -> Result<(), Box<dyn std::error::Error>> {
         // polynomial P(x) = 4 + 5x + 7x^2 + 11x^3
         let high_coeffs = vec![bf(7), bf(11)];
         let relations = vec![(bf(4), vec![bf(0)]), (bf(27), vec![bf(1)])];
-        let coeffs = restore_from_relations(&relations, &high_coeffs, 3)
-            .expect("relations restore with high coeffs");
+        let coeffs = restore_from_relations(&relations, &high_coeffs, 3)?;
         assert_eq!(coeffs, vec![bf(4), bf(5), bf(7), bf(11)]);
+        Ok(())
     }
 
     #[test]
-    fn restore_from_relations_without_high_coeffs_roundtrips() {
+    fn restore_from_relations_without_high_coeffs_roundtrips()
+    -> Result<(), Box<dyn std::error::Error>> {
         let relations = vec![(bf(3), vec![bf(0)]), (bf(5), vec![bf(1)])];
-        let coeffs =
-            restore_from_relations(&relations, &[], 1).expect("relations restore without high");
+        let coeffs = restore_from_relations(&relations, &[], 1)?;
         assert_eq!(coeffs, vec![bf(3), bf(2)]);
+        Ok(())
     }
 
     #[test]

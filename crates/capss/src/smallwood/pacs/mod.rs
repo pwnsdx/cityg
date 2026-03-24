@@ -230,31 +230,33 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_parallel_constraints_matches_evaluations() {
+    fn evaluate_parallel_constraints_matches_evaluations() -> Result<(), Box<dyn std::error::Error>>
+    {
         let pacs = OneConstraintPacs;
         let input_polys = vec![vec![bf(1), bf(1)]]; // 1 + x
         let theta_polys = vec![vec![vec![bf(2)]]]; // constant 2
         let constraints =
-            evaluate_parallel_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 2)
-                .expect("parallel constraint interpolation");
+            evaluate_parallel_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 2)?;
         assert_eq!(constraints.len(), 1);
         let coeffs = &constraints[0];
         // Witness eval times theta => (1 + x) * 2 => 2 + 2x
         assert_eq!(coeffs[0], bf(2));
         assert_eq!(coeffs[1], bf(2));
+        Ok(())
     }
 
     #[test]
-    fn evaluate_aggregated_constraints_reconstructs_polynomial() {
+    fn evaluate_aggregated_constraints_reconstructs_polynomial()
+    -> Result<(), Box<dyn std::error::Error>> {
         let pacs = OneConstraintPacs;
         let input_polys = vec![vec![bf(3), bf(0)]]; // constant 3
         let theta_polys = vec![vec![vec![bf(4)]]]; // constant 4
         let constraints =
-            evaluate_aggregated_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 2)
-                .expect("aggregated constraint interpolation");
+            evaluate_aggregated_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 2)?;
         assert_eq!(constraints.len(), 1);
         // witness eval + theta constant -> 3 + 4 = 7 everywhere -> polynomial 7
         assert_eq!(constraints[0][0], bf(7));
         assert!(constraints[0].iter().skip(1).all(|c| c.is_zero()));
+        Ok(())
     }
 }

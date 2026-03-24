@@ -1040,7 +1040,11 @@ mod tests {
         let root = tree.root().to_vec();
         for index in 0..3usize {
             let path = tree.authentication_path(index);
-            let leaf = tree.levels.last().expect("leaf level exists")[index].clone();
+            let leaf_level = tree
+                .levels
+                .last()
+                .ok_or_else(|| std::io::Error::other("leaf level exists"))?;
+            let leaf = leaf_level[index].clone();
             let reconstructed =
                 ShakeMerkleTree::verify_path(&[2, 2], digest_len, index, leaf, &path)?;
             assert_eq!(reconstructed, root);

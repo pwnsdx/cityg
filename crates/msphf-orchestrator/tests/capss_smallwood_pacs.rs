@@ -61,13 +61,13 @@ fn format_theta_applies_callback() {
 }
 
 #[test]
-fn evaluate_parallel_constraints_over_polys_matches_pacs() {
+fn evaluate_parallel_constraints_over_polys_matches_pacs() -> Result<(), Box<dyn std::error::Error>>
+{
     let pacs = TestPacs;
     let input_polys = vec![vec![bf(1), bf(1)]]; // 1 + x
     let theta_polys = pacs.theta();
     let constraints =
-        evaluate_parallel_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 1)
-            .expect("parallel constraint interpolation");
+        evaluate_parallel_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 1)?;
     assert_eq!(constraints.len(), 1);
     let expected_constraints = vec![vec![bf(2)]];
     for x in 0..=1 {
@@ -79,16 +79,17 @@ fn evaluate_parallel_constraints_over_polys_matches_pacs() {
         let expected = pacs.evaluate_parallel_constraints(&witness_evals, &expected_constraints);
         assert_eq!(poly_eval(&constraints[0], point), expected[0]);
     }
+    Ok(())
 }
 
 #[test]
-fn evaluate_aggregated_constraints_over_polys_matches_pacs() {
+fn evaluate_aggregated_constraints_over_polys_matches_pacs()
+-> Result<(), Box<dyn std::error::Error>> {
     let pacs = TestPacs;
     let input_polys = vec![vec![bf(2), bf(0)]]; // constant 2
     let theta_polys = pacs.theta_prime();
     let constraints =
-        evaluate_aggregated_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 1)
-            .expect("aggregated constraint interpolation");
+        evaluate_aggregated_constraints_over_polynomials(&pacs, &input_polys, &theta_polys, 1)?;
     assert_eq!(constraints.len(), 1);
     let expected_constraints = vec![vec![bf(3)]];
     for x in 0..=1 {
@@ -100,6 +101,7 @@ fn evaluate_aggregated_constraints_over_polys_matches_pacs() {
         let expected = pacs.evaluate_aggregated_constraints(&witness_evals, &expected_constraints);
         assert_eq!(poly_eval(&constraints[0], point), expected[0]);
     }
+    Ok(())
 }
 
 #[test]
