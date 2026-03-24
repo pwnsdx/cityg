@@ -150,14 +150,14 @@ use pb::{
     BarrierFetchPublicTreeResponse, BarrierResolveJoinsSinceRequest,
     BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
     BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest, BootstrapRoomResponse,
-    ConfigureWindowRequest, ConfigureWindowResponse, FetchMessagesRequest, FetchMessagesResponse,
-    GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetTelemetryResponse,
-    GetWindowRequest, GetWindowResponse, JoinTicketRequest, JoinTicketResponse,
-    ListRoomAdminsRequest, ListRoomAdminsResponse, MembersRequest, MembersResponse,
-    MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
-    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse,
-    RotateRoomKbroadRequest, RotateRoomKbroadResponse, SearchMembersRequest, SearchMembersResponse,
-    SendMessageRequest, SendMessageResponse,
+    ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
+    FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest, GetBundleResponse,
+    GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse,
+    JoinTicketRequest, JoinTicketResponse, ListRoomAdminsRequest, ListRoomAdminsResponse,
+    MembersRequest, MembersResponse, MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest,
+    MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
+    RoomAdminMutationResponse, RotateRoomKbroadRequest, RotateRoomKbroadResponse,
+    SearchMembersRequest, SearchMembersResponse, SendMessageRequest, SendMessageResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -182,6 +182,7 @@ pub enum RoomAdminOperation {
     GrantAdmin,
     RevokeAdmin,
     ListAdmins,
+    ExpelMember,
 }
 
 impl RoomAdminOperation {
@@ -192,6 +193,7 @@ impl RoomAdminOperation {
             Self::GrantAdmin => "grant_room_admin_v1",
             Self::RevokeAdmin => "revoke_room_admin_v1",
             Self::ListAdmins => "list_room_admins_v1",
+            Self::ExpelMember => "expel_room_member_v1",
         }
     }
 }
@@ -265,6 +267,30 @@ pub fn build_room_admin_listing_proof(
         RoomAdminOperation::ListAdmins,
         room_id,
         &[],
+        pop_public_key,
+        pop_secret_key,
+    )
+}
+
+pub fn build_room_admin_leaf_pair_proof(
+    operation: RoomAdminOperation,
+    room_id: &str,
+    author_leaf_id: &[u8; 32],
+    target_leaf_id: &[u8; 32],
+    pop_public_key: &[u8],
+    pop_secret_key: &[u8],
+) -> Result<RoomAdminProof, Error> {
+    let payload = (
+        ByteBuf::from(author_leaf_id.to_vec()),
+        ByteBuf::from(target_leaf_id.to_vec()),
+    );
+    let mut payload_bytes = Vec::new();
+    into_writer(&payload, &mut payload_bytes)
+        .map_err(|err| Error::Parse(format!("encode room admin leaf-pair payload: {err}")))?;
+    build_room_admin_proof_payload(
+        operation,
+        room_id,
+        &payload_bytes,
         pop_public_key,
         pop_secret_key,
     )
@@ -638,6 +664,68 @@ impl CitygApiClient {
             admin_proof: Some(admin_proof),
         };
         self.post_proto("/v1/rooms/list_admins", request).await
+    }
+
+    /// Requests a room-admin authorized merge ticket that expels another member leaf.
+    pub async fn expel_member_ticket(
+        &self,
+        room_id: &str,
+        author_leaf_id: &[u8; 32],
+        target_leaf_id: &[u8; 32],
+        admin_proof: RoomAdminProof,
+    ) -> Result<MergeTicket, Error> {
+        let request = ExpelMemberTicketRequest {
+            room_id: room_id.to_string(),
+            author_leaf_id: author_leaf_id.to_vec(),
+            target_leaf_id: target_leaf_id.to_vec(),
+            admin_proof: Some(admin_proof),
+        };
+        let response: MergeTicketResponse = self
+            .post_proto("/v1/rooms/expel_member_ticket", request)
+            .await?;
+        ensure_profile_version(&response.profile_version)?;
+
+        let we_epoch_id = array32(&response.we_epoch_id)?;
+        let mut parities = Vec::with_capacity(response.pivot_parity_cbor.len());
+        for entry in &response.pivot_parity_cbor {
+            parities.push(pivot_parity_from_cbor(entry).map_err(Error::from)?);
+        }
+
+        let cat = array32(&response.cat)?;
+        let parent_root = array32(&response.parent_root)?;
+        let join_delta_root = array32(&response.join_delta_root)?;
+        let revoked_since_root = array32(&response.revoked_since_root)?;
+        let revoked_root = array32(&response.revoked_root)?;
+        let tswe_salt_hash = array32(&response.tswe_salt_hash)?;
+        let pox_r_commit = array32(&response.pox_r_commit)?;
+
+        Ok(MergeTicket {
+            we_epoch_id,
+            parities,
+            witness_cbor: response.witness_cbor,
+            srx_cbor: response.srx_cbor,
+            proof_mode: response.proof_mode,
+            vrf_id: response.vrf_id,
+            policy_version: response.policy_version,
+            cat,
+            parent_root,
+            join_delta_root,
+            revoked_since_root,
+            revoked_root,
+            tswe_salt_hash,
+            pox_r_commit,
+            kbroad_public: response.kbroad_public,
+            msphf_crs_id: response.msphf_crs_id,
+            msphf_params_id: response.msphf_params_id,
+            fs_policy_version: response.fs_policy_version,
+            fs_epoch_base_ts: response.fs_epoch_base_ts,
+            kbroad_generation: response.kbroad_generation,
+            barrier_version: response.barrier_version,
+            cover_leaf_index: response.cover_leaf_index,
+            kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
+            n_max: response.n_max,
+            max_barrier_update_bytes: response.max_barrier_update_bytes,
+        })
     }
 
     /// Retrieves the member roster for a group.
@@ -1704,6 +1792,7 @@ mod tests {
             "/v1/rooms/list_admins" => encode_proto(ListRoomAdminsResponse {
                 admin_pop_public_keys: vec![vec![0xA1; 32], vec![0xB2; 32]],
             }),
+            "/v1/rooms/expel_member_ticket" => encode_proto(merge_ticket_ok_payload()),
             "/v1/members" => encode_proto(MembersResponse::default()),
             "/v1/members/search" => encode_proto(SearchMembersResponse::default()),
             "/v1/rooms/join_ticket" => encode_proto(JoinTicketResponse {
@@ -1957,6 +2046,9 @@ mod tests {
         assert!(!CitygApiClient::requires_admin_token(
             "/v1/rooms/list_admins"
         ));
+        assert!(!CitygApiClient::requires_admin_token(
+            "/v1/rooms/expel_member_ticket"
+        ));
         assert!(CitygApiClient::requires_admin_token(
             "/v1/debug/window/seed"
         ));
@@ -1989,6 +2081,9 @@ mod tests {
         ));
         assert!(!CitygApiClient::requires_message_auth(
             "/v1/rooms/list_admins"
+        ));
+        assert!(!CitygApiClient::requires_message_auth(
+            "/v1/rooms/expel_member_ticket"
         ));
 
         let client = CitygApiClient::new("http://localhost:8080").with_admin_token("  secret  ");
@@ -2105,6 +2200,22 @@ mod tests {
             .await?;
         assert_eq!(revoked.status, "revoked");
         assert_eq!(revoked.admin_count, 1);
+        let expelled = client
+            .expel_member_ticket(
+                "room-1",
+                &[0x01; 32],
+                &[0x02; 32],
+                build_room_admin_leaf_pair_proof(
+                    RoomAdminOperation::ExpelMember,
+                    "room-1",
+                    &[0x01; 32],
+                    &[0x02; 32],
+                    &pop_public_key,
+                    &pop_secret_key,
+                )?,
+            )
+            .await?;
+        assert_eq!(expelled.we_epoch_id, [0x01; 32]);
         let _ = client.accept_epoch_bundle(&demo_bundle).await?;
         client.refresh_pivot(&demo_bundle).await?;
         #[cfg(any(debug_assertions, feature = "debug-api"))]

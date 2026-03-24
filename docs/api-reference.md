@@ -366,6 +366,32 @@ message ListRoomAdminsResponse {
 - Returned identities are room-admin principals, not display aliases
 - There is no legacy token fallback for this endpoint
 
+#### `POST /v1/rooms/expel_member_ticket`
+
+Requests a room-admin-authorized merge ticket that revokes another current
+member leaf from the roster.
+
+**Protobuf Request:** `ExpelMemberTicketRequest`
+```protobuf
+message ExpelMemberTicketRequest {
+  string room_id = 1;
+  bytes author_leaf_id = 2;   // 32-byte current leaf of the acting admin device
+  bytes target_leaf_id = 3;   // 32-byte current leaf to revoke
+  optional RoomAdminProof admin_proof = 4;
+}
+```
+
+**Protobuf Response:** `MergeTicketResponse`
+
+**Notes:**
+- Requires a valid room-admin proof from an existing room admin
+- The acting admin proof is bound to both `author_leaf_id` and `target_leaf_id`
+- `author_leaf_id` must belong to the acting admin's current room membership
+- `target_leaf_id` must be a different current member leaf
+- Self-revocation is rejected here; use `merge_ticket` with `LEAVE` for a
+  controlled leave
+- There is no legacy token fallback for this endpoint
+
 #### `POST /v1/rooms/rotate_kbroad`
 
 Rotates the room KBROAD public key.
@@ -482,8 +508,9 @@ let ticket = client.join_ticket("my-room", "alice", Some(identity)).await?;
 
 #### `POST /v1/rooms/merge_ticket`
 
-Requests a merge ticket for an existing member during merge/leave rekey flow.
-Current server behavior includes requester self-revocation in the merge SRX delta.
+Requests a merge ticket for an existing member during self-directed
+merge/leave/refresh flow. Current server behavior includes requester
+self-revocation in the merge SRX delta for `LEAVE`.
 
 **Protobuf Request:** `MergeTicketRequest`
 ```protobuf
@@ -544,6 +571,8 @@ println!("Merge ticket pivots: {}", ticket.pivot_parity_cbor.len());
 **Use Cases:**
 - Controlled leave/rekey transitions
 - Refreshing parity context for merge-era state transitions
+- Admin-driven expulsion uses `POST /v1/rooms/expel_member_ticket`, not this
+  endpoint
 
 ---
 

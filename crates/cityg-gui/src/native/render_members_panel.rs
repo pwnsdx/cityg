@@ -138,6 +138,13 @@ impl AppModel {
         }
 
         let mut list = div().flex().flex_col().gap(px(6.0));
+        let local_session = self.session.as_ref();
+        let local_leaf_id = local_session.map(|session| session.leaf_id);
+        let local_is_room_admin = local_session
+            .and_then(|session| self.room_admin_membership(session.pop_public_key.as_slice()))
+            .unwrap_or(false);
+        let membership_update_busy =
+            !matches!(self.leave_status, LeaveStatus::Idle) || self.barrier_recovery_pending();
 
         if self.members.is_empty() {
             list = list.child(
@@ -238,6 +245,53 @@ impl AppModel {
                     identity_row = identity_row.child(use_identity_button);
 
                     entry = entry.child(identity_row);
+                }
+
+                if local_is_room_admin && local_leaf_id != Some(member.leaf_id) {
+                    let target_leaf_id = member.leaf_id;
+                    let mut expel_button = div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(8.0))
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(UI_PANEL_TEXT))
+                        .bg(if membership_update_busy {
+                            rgb(UI_DANGER_MUTED_FILL)
+                        } else {
+                            rgb(UI_DANGER_FILL)
+                        })
+                        .cursor(if membership_update_busy {
+                            CursorStyle::Arrow
+                        } else {
+                            CursorStyle::PointingHand
+                        })
+                        .child(if matches!(self.leave_status, LeaveStatus::Expelling) {
+                            "Expelling…"
+                        } else {
+                            "Expel"
+                        });
+                    if !membership_update_busy {
+                        expel_button = expel_button.on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.start_member_expulsion(target_leaf_id, cx);
+                            }),
+                        );
+                    }
+                    entry = entry.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(UI_MUTED_TEXT))
+                                    .child("Room-admin action"),
+                            )
+                            .child(expel_button),
+                    );
                 }
 
                 list = list.child(entry);

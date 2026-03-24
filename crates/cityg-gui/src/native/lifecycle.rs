@@ -27,6 +27,53 @@ impl AppModel {
         .detach();
     }
 
+    pub(super) fn start_member_expulsion(
+        &mut self,
+        target_leaf_id: [u8; 32],
+        cx: &mut ViewContext<Self>,
+    ) {
+        if !matches!(self.leave_status, LeaveStatus::Idle) {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if self.room_admin_controls_locked(&session) {
+            let message = "This device does not currently hold room-admin authority for this room."
+                .to_string();
+            self.last_error = Some(message.clone());
+            self.room_admin_status = RoomAdminStatus::Error(message.clone());
+            self.show_error_toast(message, cx);
+            return;
+        }
+        if session.leaf_id == target_leaf_id {
+            let message =
+                "Use Leave room to remove this device instead of expelling the local member."
+                    .to_string();
+            self.last_error = Some(message.clone());
+            self.show_error_toast(message, cx);
+            return;
+        }
+
+        self.leave_status = LeaveStatus::Expelling;
+        self.last_error = None;
+        self.info_message = None;
+        cx.notify();
+
+        let task = Tokio::spawn_result(cx, async move {
+            perform_room_admin_expel(session, target_leaf_id).await
+        });
+
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |model, cx| {
+                model.on_member_expel_finished(outcome, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn on_leave_clicked(
         &mut self,
         _: &MouseDownEvent,
@@ -175,6 +222,29 @@ impl AppModel {
             }
             Err(err) => {
                 self.set_error(&err, "leave", Some(RetryAction::Leave));
+                self.info_message = None;
+            }
+        }
+    }
+
+    pub(super) fn on_member_expel_finished(
+        &mut self,
+        result: anyhow::Result<AppSession>,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.leave_status = LeaveStatus::Idle;
+        match result {
+            Ok(session) => {
+                self.session = Some(session);
+                self.clear_error();
+                self.info_message = Some("Member expelled from the room.".to_string());
+                self.show_success("Member expelled", cx);
+                self.reset_fetch_state();
+                self.bootstrap_session_runtime(cx);
+                self.refresh_members(cx);
+            }
+            Err(err) => {
+                self.set_error(&err, "expel", None);
                 self.info_message = None;
             }
         }

@@ -50,6 +50,7 @@ pub(super) struct AppModel {
     pub(super) activity_events: Vec<ActivityEvent>,
     pub(super) chat_scroll_handle: ScrollHandle,
     pub(super) right_sidebar_scroll_handle: ScrollHandle,
+    pub(super) session_overview_window: Option<AnyWindowHandle>,
 }
 
 pub(super) enum JoinStatus {
@@ -61,6 +62,7 @@ pub(super) enum JoinStatus {
 pub(super) enum LeaveStatus {
     Idle,
     Leaving,
+    Expelling,
     Refreshing,
 }
 

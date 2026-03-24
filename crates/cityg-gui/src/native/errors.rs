@@ -294,6 +294,7 @@ pub(super) fn categorize_error(err: &anyhow::Error, context: &str) -> Categorize
         "join" => "Failed to join room",
         "send" => "Failed to send message",
         "leave" => "Failed to leave room",
+        "expel" => "Failed to expel member",
         "fetch" => "Failed to fetch messages",
         _ => "Operation failed",
     };

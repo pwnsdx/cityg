@@ -3,9 +3,10 @@ use super::*;
 impl AppModel {
     pub(super) fn render_leave_controls(&self, cx: &mut ViewContext<Self>) -> Div {
         let leaving = matches!(self.leave_status, LeaveStatus::Leaving);
+        let expelling = matches!(self.leave_status, LeaveStatus::Expelling);
         let refreshing = matches!(self.leave_status, LeaveStatus::Refreshing);
         let barrier_pending = self.barrier_recovery_pending();
-        let membership_op_busy = leaving || refreshing || barrier_pending;
+        let membership_op_busy = leaving || expelling || refreshing || barrier_pending;
         let mut leave_button = div()
             .px(px(12.0))
             .py(px(8.0))
@@ -25,7 +26,13 @@ impl AppModel {
             } else {
                 CursorStyle::PointingHand
             })
-            .child(if leaving { "Leaving…" } else { "Leave room" });
+            .child(if leaving {
+                "Leaving…"
+            } else if expelling {
+                "Updating roster…"
+            } else {
+                "Leave room"
+            });
 
         if !membership_op_busy {
             leave_button =
@@ -57,6 +64,8 @@ impl AppModel {
             })
             .child(if refreshing {
                 "Refreshing…"
+            } else if expelling {
+                "Updating roster…"
             } else if barrier_pending {
                 "Awaiting recovery"
             } else {

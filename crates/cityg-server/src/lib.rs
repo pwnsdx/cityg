@@ -439,6 +439,37 @@ impl CityGServer {
         Ok(())
     }
 
+    fn reset_empty_room_membership_state(&mut self, gid: &[u8; 32]) -> Result<(), CityGError> {
+        let Some(state) = self.roster.groups.get_mut(gid.as_slice()) else {
+            return Ok(());
+        };
+
+        let zero = [0u8; 32];
+        let n_max = state.n_max.max(1);
+        let blank_entries = build_all_blank_pk_entries(n_max)?;
+        let blank_tree_hash = compute_barrier_tree_hash(n_max, blank_entries.as_slice())?;
+
+        state.revoked.clear();
+        state.leaf_device_pk.clear();
+        state.leaf_barrier_public.clear();
+        state.barrier_initialized = true;
+        state.barrier_roots_hash = compute_revocation_roots_hash(&zero, &zero)?;
+        state.kem_tree_hash_after = blank_tree_hash;
+        state.barrier_pk_entries = blank_entries;
+        state.barrier_hash_cache = None;
+        record_barrier_public_tree_snapshot(state)?;
+
+        let ctx_state = self.ctx.barrier_group_state_entry_mut(gid.as_slice());
+        ctx_state.barrier_initialized = state.barrier_initialized;
+        ctx_state.barrier_roots_hash = state.barrier_roots_hash;
+        ctx_state.kem_tree_hash_after = state.kem_tree_hash_after;
+        ctx_state.n_max = state.n_max.max(1);
+        self.ctx.clear_device_chains_for_gid(gid.as_slice());
+        self.ctx.clear_pivot_parities_for_gid(gid.as_slice());
+
+        Ok(())
+    }
+
     pub fn register_group(
         &mut self,
         gid: &[u8; 32],
@@ -476,6 +507,32 @@ impl CityGServer {
             .or_default()
             .room_admin_pop_keys
             .insert(initial_room_admin_pop_key);
+        self.persist_kbroad_state()?;
+        Ok(())
+    }
+
+    pub fn attach_initial_room_admin(
+        &mut self,
+        gid: &[u8; 32],
+        initial_room_admin_pop_key: Vec<u8>,
+    ) -> Result<(), CityGError> {
+        if self
+            .ctx
+            .kbroad_registry()
+            .and_then(|registry| registry.get(gid.as_ref()))
+            .is_none()
+        {
+            return Err(CityGError::InvalidInput("kbroad key missing"));
+        }
+        let state = self
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("roster group missing"))?;
+        if !state.room_admin_pop_keys.is_empty() {
+            return Err(CityGError::InvalidInput("room admins already configured"));
+        }
+        state.room_admin_pop_keys.insert(initial_room_admin_pop_key);
         self.persist_kbroad_state()?;
         Ok(())
     }
@@ -737,6 +794,14 @@ impl CityGServer {
         let mut revoked_all = self.roster.revoked(gid);
         revoked_all.sort();
         revoked_all.dedup();
+        if parent_leaves.is_empty() {
+            // Once a room has no live members, the next join should behave like a
+            // fresh admission for membership purposes even if the roster still
+            // remembers prior self-revocations. This preserves rejoin-from-same-
+            // identity flows after the room becomes empty while leaving admin ACLs
+            // and other room-scoped state intact.
+            revoked_all.clear();
+        }
         let (revoked_since_root, revoked_root) = if revoked_all.is_empty() {
             ([0u8; 32], [0u8; 32])
         } else {
@@ -803,7 +868,7 @@ impl CityGServer {
         gid: &[u8; 32],
         leaf_id: &[u8; 32],
     ) -> Result<MergeTicketBundle, CityGError> {
-        self.build_merge_ticket_with_intent(gid, leaf_id, MergeTicketIntent::Leave)
+        self.build_merge_ticket_core(gid, leaf_id, Some(*leaf_id))
     }
 
     pub fn build_merge_ticket_for_refresh(
@@ -811,14 +876,60 @@ impl CityGServer {
         gid: &[u8; 32],
         leaf_id: &[u8; 32],
     ) -> Result<MergeTicketBundle, CityGError> {
-        self.build_merge_ticket_with_intent(gid, leaf_id, MergeTicketIntent::Refresh)
+        self.build_merge_ticket_core(gid, leaf_id, None)
     }
 
-    fn build_merge_ticket_with_intent(
+    pub fn build_admin_expel_ticket(
         &mut self,
         gid: &[u8; 32],
-        leaf_id: &[u8; 32],
-        intent: MergeTicketIntent,
+        actor_pop_public_key: &[u8],
+        author_leaf_id: &[u8; 32],
+        target_leaf_id: &[u8; 32],
+    ) -> Result<MergeTicketBundle, CityGError> {
+        if author_leaf_id == target_leaf_id {
+            return Err(CityGError::InvalidInput(
+                "author_leaf_id and target_leaf_id must differ; use controlled leave instead",
+            ));
+        }
+        if !self.roster.has_explicit_room_admins(gid)
+            || !self.roster.is_room_admin(gid, actor_pop_public_key)
+        {
+            return Err(CityGError::InvalidInput(
+                "room admin proof is not authorized",
+            ));
+        }
+        if self
+            .ctx
+            .kbroad_registry()
+            .and_then(|registry| registry.get(gid.as_ref()))
+            .is_none()
+        {
+            return Err(CityGError::InvalidInput("kbroad key missing"));
+        }
+        let Some(group) = self.roster.groups.get(gid.as_slice()) else {
+            return Err(CityGError::InvalidInput(
+                "author leaf not present in roster",
+            ));
+        };
+        let Some(bound_pop_public_key) = group.leaf_device_pk.get(author_leaf_id) else {
+            return Err(CityGError::InvalidInput(
+                "author leaf not present in roster",
+            ));
+        };
+        if bound_pop_public_key.as_slice() != actor_pop_public_key {
+            return Err(CityGError::InvalidInput(
+                "author leaf is not bound to room admin identity",
+            ));
+        }
+
+        self.build_merge_ticket_core(gid, author_leaf_id, Some(*target_leaf_id))
+    }
+
+    fn build_merge_ticket_core(
+        &mut self,
+        gid: &[u8; 32],
+        author_leaf_id: &[u8; 32],
+        revoked_leaf_id: Option<[u8; 32]>,
     ) -> Result<MergeTicketBundle, CityGError> {
         self.ensure_kbroad_ready(gid)?;
         let parent_root = self
@@ -833,42 +944,47 @@ impl CityGServer {
 
         members.sort();
 
-        if !members.iter().any(|member| member == leaf_id) {
+        if !members.iter().any(|member| member == author_leaf_id) {
             return Err(CityGError::InvalidInput("leaf not present in roster"));
         }
-
-        let (revoked_since, revoked_all, srx_cbor): (Vec<[u8; 32]>, Vec<[u8; 32]>, Vec<u8>) =
-            match intent {
-                MergeTicketIntent::Leave => {
-                    let mut revoked_since = vec![*leaf_id];
-                    revoked_since.sort();
-
-                    let mut revoked_all = self.roster.revoked(gid);
-                    if !revoked_all.iter().any(|leaf| leaf == leaf_id) {
-                        revoked_all.push(*leaf_id);
-                    }
-                    revoked_all.sort();
-                    revoked_all.dedup();
-
-                    let revoked_root = canonical_set_root(&revoked_all)?;
-                    let join_leaves: Vec<[u8; 32]> = Vec::new();
-                    let srx_owned = witness::build_merge_srx_inputs(
-                        &members,
-                        &join_leaves,
-                        parent_root,
-                        &revoked_since,
-                        &revoked_all,
-                        revoked_root,
-                    )?;
-                    (revoked_since, revoked_all, srx_owned.to_cbor()?)
-                }
-                MergeTicketIntent::Refresh => {
-                    let mut revoked_all = self.roster.revoked(gid);
-                    revoked_all.sort();
-                    revoked_all.dedup();
-                    (revoked_all.clone(), revoked_all, Vec::new())
-                }
+        if let Some(target_leaf_id) = revoked_leaf_id
+            && !members.iter().any(|member| member == &target_leaf_id)
+        {
+            let message = if target_leaf_id == *author_leaf_id {
+                "leaf not present in roster"
+            } else {
+                "target leaf not present in roster"
             };
+            return Err(CityGError::InvalidInput(message));
+        }
+
+        let mut revoked_all = self.roster.revoked(gid);
+        if let Some(target_leaf_id) = revoked_leaf_id
+            && !revoked_all.iter().any(|leaf| leaf == &target_leaf_id)
+        {
+            revoked_all.push(target_leaf_id);
+        }
+        revoked_all.sort();
+        revoked_all.dedup();
+
+        let (revoked_since, srx_cbor): (Vec<[u8; 32]>, Vec<u8>) = match revoked_leaf_id {
+            Some(target_leaf_id) => {
+                let mut revoked_since = vec![target_leaf_id];
+                revoked_since.sort();
+                let revoked_root = canonical_set_root(&revoked_all)?;
+                let join_leaves: Vec<[u8; 32]> = Vec::new();
+                let srx_owned = witness::build_merge_srx_inputs(
+                    &members,
+                    &join_leaves,
+                    parent_root,
+                    &revoked_since,
+                    &revoked_all,
+                    revoked_root,
+                )?;
+                (revoked_since, srx_owned.to_cbor()?)
+            }
+            None => (revoked_all.clone(), Vec::new()),
+        };
 
         let join_leaves: Vec<[u8; 32]> = Vec::new();
         let join_delta_root = witness::join_delta_root(&join_leaves)?;
@@ -973,7 +1089,10 @@ impl CityGServer {
             .cloned()
             .unwrap_or_default();
         let barrier_version = barrier_state.barrier_version;
-        let cover_leaf_index = u64::from(cover_leaf_index(leaf_id, barrier_state.n_max));
+        let cover_leaf_index = u64::from(cover_leaf_index(
+            revoked_leaf_id.as_ref().unwrap_or(author_leaf_id),
+            barrier_state.n_max,
+        ));
         let max_barrier_update_bytes =
             u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
 
@@ -997,7 +1116,7 @@ impl CityGServer {
             gid: *gid,
             cat: DEFAULT_CAT,
             parent_root,
-            leaf_id: *leaf_id,
+            leaf_id: *author_leaf_id,
             pivot_we_epoch_id,
             parities,
             witness_cbor: Vec::new(),
@@ -1256,6 +1375,29 @@ impl CityGServer {
         self.ctx = staged_ctx;
         self.receiver = staged_receiver;
         self.roster = staged_roster;
+        let empty_gids: Vec<[u8; 32]> = self
+            .roster
+            .groups
+            .iter()
+            .filter_map(|(gid, state)| {
+                let is_empty = state
+                    .latest_snapshot()
+                    .map(|snapshot| snapshot.members().next().is_none())
+                    .unwrap_or(false);
+                if !is_empty {
+                    return None;
+                }
+                gid.as_slice().try_into().ok()
+            })
+            .collect();
+        for gid in empty_gids {
+            if let Err(err) = self.reset_empty_room_membership_state(&gid) {
+                eprintln!(
+                    "cityg-server: failed to reset empty-room membership state for {}: {err:?}",
+                    hex::encode(gid)
+                );
+            }
+        }
     }
 
     fn apply_persisted_kbroad_state(
@@ -3966,6 +4108,102 @@ mod tests {
             restarted.list_room_admins(&gid, &creator_pop_key)?,
             vec![creator_pop_key, delegate_pop_key]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn admin_expel_ticket_requires_authorized_admin_bound_to_author_leaf() -> Result<(), CityGError>
+    {
+        let mut server = super::demo::demo_server();
+        let alice = cityg_client::demo::demo_bundle("alice")?;
+        let bob = cityg_client::demo::demo_bundle("bob")?;
+        server.accept_epoch(&alice)?;
+        server.accept_epoch(&bob)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice_leaf = cityg_client::demo::demo_member_leaf("alice");
+        let bob_leaf = cityg_client::demo::demo_member_leaf("bob");
+        let bound_admin_pop_key = vec![0xD1; 48];
+        let unbound_admin_pop_key = vec![0xE1; 48];
+        let outsider_pop_key = vec![0xF1; 48];
+
+        {
+            let group = server
+                .roster
+                .groups
+                .get_mut(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("missing demo group state"))?;
+            group
+                .room_admin_pop_keys
+                .insert(bound_admin_pop_key.clone());
+            group
+                .room_admin_pop_keys
+                .insert(unbound_admin_pop_key.clone());
+            group
+                .leaf_device_pk
+                .insert(alice_leaf, bound_admin_pop_key.clone());
+        }
+
+        let err = match server.build_admin_expel_ticket(
+            &gid,
+            &outsider_pop_key,
+            &alice_leaf,
+            &bob_leaf,
+        ) {
+            Ok(_) => return Err(CityGError::InvalidInput("outsider expel must fail")),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("room admin proof is not authorized")
+        ));
+
+        let err = match server.build_admin_expel_ticket(
+            &gid,
+            &unbound_admin_pop_key,
+            &alice_leaf,
+            &bob_leaf,
+        ) {
+            Ok(_) => {
+                return Err(CityGError::InvalidInput(
+                    "author leaf must match signer identity",
+                ));
+            }
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("author leaf is not bound to room admin identity")
+        ));
+
+        let err = match server.build_admin_expel_ticket(
+            &gid,
+            &bound_admin_pop_key,
+            &alice_leaf,
+            &alice_leaf,
+        ) {
+            Ok(_) => return Err(CityGError::InvalidInput("self-targeted expel must fail")),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(
+                "author_leaf_id and target_leaf_id must differ; use controlled leave instead"
+            )
+        ));
+
+        let ticket =
+            server.build_admin_expel_ticket(&gid, &bound_admin_pop_key, &alice_leaf, &bob_leaf)?;
+        assert_eq!(ticket.leaf_id, alice_leaf);
+        assert_eq!(
+            ticket.cover_leaf_index,
+            u64::from(super::cover_leaf_index(&bob_leaf, ticket.n_max))
+        );
+        let srx = witness::SrxInputsOwned::from_cbor(&ticket.srx_cbor)?;
+        assert_eq!(srx.since_leaf_ids, vec![bob_leaf]);
+        let expected_revoked_root = msphf_core::merkle::canonical_set_root(&[bob_leaf])?;
+        assert_eq!(ticket.revoked_since_root, expected_revoked_root);
+        assert_eq!(ticket.revoked_root, expected_revoked_root);
         Ok(())
     }
 

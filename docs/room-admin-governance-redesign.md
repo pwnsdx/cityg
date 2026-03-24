@@ -301,6 +301,10 @@ The delegation target should be:
 
 A room admin can revoke another room admin.
 
+A room admin can also expel another current member from the room. That action
+is distinct from admin-role revocation: it authorizes a revocation-style MERGE
+against a target member leaf.
+
 Leaving a room should not implicitly revoke room admin rights by default.
 Governance rights and current membership are separate concepts.
 
@@ -349,6 +353,7 @@ Expected room-governance endpoints:
 - `POST /v1/rooms/grant_admin`
 - `POST /v1/rooms/revoke_admin`
 - `POST /v1/rooms/list_admins`
+- `POST /v1/rooms/expel_member_ticket`
 
 Optional later endpoints:
 

@@ -42,14 +42,15 @@ use pb::{
     BarrierFetchPublicTreeResponse, BarrierJoinLeafRecord, BarrierResolveJoinsSinceRequest,
     BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
     BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest, BootstrapRoomResponse, ChatMessage,
-    ConfigureWindowRequest, ConfigureWindowResponse, FetchMessagesRequest, FetchMessagesResponse,
-    FreezeStat, GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetTelemetryResponse,
-    GetWindowRequest, GetWindowResponse, HealthResponse, IdentityBinding, JoinTicketRequest,
-    JoinTicketResponse, ListRoomAdminsRequest, ListRoomAdminsResponse, Member, MembersRequest,
-    MembersResponse, MergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
-    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse,
-    RoomAdminProof, RotateRoomKbroadRequest, RotateRoomKbroadResponse, SendMessageRequest,
-    SendMessageResponse, TelemetryEntry, WindowEntry, WindowHead,
+    ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
+    FetchMessagesRequest, FetchMessagesResponse, FreezeStat, GetBundleRequest, GetBundleResponse,
+    GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse,
+    IdentityBinding, JoinTicketRequest, JoinTicketResponse, ListRoomAdminsRequest,
+    ListRoomAdminsResponse, Member, MembersRequest, MembersResponse, MergeTicketIntent,
+    MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
+    RoomAdminMutationRequest, RoomAdminMutationResponse, RoomAdminProof, RotateRoomKbroadRequest,
+    RotateRoomKbroadResponse, SendMessageRequest, SendMessageResponse, TelemetryEntry, WindowEntry,
+    WindowHead,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -1305,6 +1306,92 @@ fn verify_room_admin_proof(
     verify_room_admin_proof_payload(proof, operation, room_id, kbroad_public)
 }
 
+fn encode_room_admin_leaf_pair_payload(
+    author_leaf_id: &[u8; 32],
+    target_leaf_id: &[u8; 32],
+) -> Result<Vec<u8>, ApiError> {
+    let payload = (
+        ByteBuf::from(author_leaf_id.to_vec()),
+        ByteBuf::from(target_leaf_id.to_vec()),
+    );
+    let mut payload_bytes = Vec::new();
+    into_writer(&payload, &mut payload_bytes)
+        .map_err(|_| ApiError::InvalidRequest("failed to encode room admin proof payload"))?;
+    Ok(payload_bytes)
+}
+
+fn encode_merge_ticket_response(bundle: MergeTicketBundle) -> Result<Vec<u8>, ApiError> {
+    let MergeTicketBundle {
+        gid: _,
+        cat,
+        parent_root,
+        leaf_id: _,
+        pivot_we_epoch_id,
+        parities,
+        witness_cbor,
+        srx_cbor,
+        join_delta_root,
+        revoked_since_root,
+        revoked_root,
+        tswe_salt_hash,
+        pox_r_commit,
+        proof_mode,
+        vrf_id,
+        policy_version,
+        msphf_crs_id,
+        msphf_params_id,
+        fs_policy_version,
+        fs_epoch_base_ts,
+        kbroad_public,
+        kbroad_generation,
+        barrier_version,
+        cover_leaf_index,
+        kem_tree_hash_after,
+        n_max,
+        max_barrier_update_bytes,
+    } = bundle;
+
+    let pivot_parity_cbor = parities
+        .iter()
+        .map(pivot_parity_to_cbor)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let response = MergeTicketResponse {
+        we_epoch_id: pivot_we_epoch_id.to_vec(),
+        pivot_parity_cbor,
+        witness_cbor,
+        proof_mode,
+        vrf_id,
+        policy_version,
+        kbroad_public,
+        cat: cat.to_vec(),
+        parent_root: parent_root.to_vec(),
+        join_delta_root: join_delta_root.to_vec(),
+        revoked_since_root: revoked_since_root.to_vec(),
+        revoked_root: revoked_root.to_vec(),
+        tswe_salt_hash: tswe_salt_hash.to_vec(),
+        pox_r_commit: pox_r_commit.to_vec(),
+        srx_cbor,
+        msphf_crs_id,
+        msphf_params_id,
+        fs_policy_version,
+        fs_epoch_base_ts,
+        kbroad_generation,
+        barrier_version,
+        profile_version: API_PROFILE_VERSION.to_string(),
+        cover_leaf_index,
+        kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+        n_max,
+        max_barrier_update_bytes,
+    };
+
+    let mut response_bytes = Vec::new();
+    response
+        .encode(&mut response_bytes)
+        .map_err(|err| ApiError::server_message(format!("failed to encode merge ticket: {err}")))?;
+    Ok(response_bytes)
+}
+
 async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
     let _permit = state.accept_epoch_limiter.try_acquire()?;
     let request = AcceptEpochRequest::decode(body)?;
@@ -2107,6 +2194,67 @@ async fn list_room_admins(
     Ok(protobuf_response(&response))
 }
 
+async fn expel_member_ticket(
+    State(state): State<ApiState>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let request = ExpelMemberTicketRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    if request.author_leaf_id.len() != 32 {
+        return Err(ApiError::InvalidRequest("author_leaf_id must be 32 bytes"));
+    }
+    if request.target_leaf_id.len() != 32 {
+        return Err(ApiError::InvalidRequest("target_leaf_id must be 32 bytes"));
+    }
+
+    let gid = parse_gid(&request.room_id)?;
+    let mut author_leaf_id = [0u8; 32];
+    author_leaf_id.copy_from_slice(&request.author_leaf_id);
+    let mut target_leaf_id = [0u8; 32];
+    target_leaf_id.copy_from_slice(&request.target_leaf_id);
+    if author_leaf_id == target_leaf_id {
+        return Err(ApiError::InvalidRequest(
+            "author_leaf_id and target_leaf_id must differ; use controlled leave instead",
+        ));
+    }
+
+    let proof = request
+        .admin_proof
+        .as_ref()
+        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
+    let payload = encode_room_admin_leaf_pair_payload(&author_leaf_id, &target_leaf_id)?;
+    let actor_pop_key =
+        verify_room_admin_proof_payload(proof, "expel_room_member_v1", &request.room_id, &payload)?;
+    enforce_expensive_rate_limit(
+        &state,
+        "expel_member_ticket",
+        fingerprint_rate_limit_parts(&[
+            &gid,
+            &author_leaf_id,
+            &target_leaf_id,
+            actor_pop_key.as_slice(),
+        ]),
+    )
+    .await?;
+
+    let bundle = {
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
+        guard
+            .build_admin_expel_ticket(&gid, &actor_pop_key, &author_leaf_id, &target_leaf_id)
+            .map_err(|err| {
+                maybe_record_client_concurrency_error("expel_member_ticket", &err);
+                ApiError::from(err)
+            })?
+    };
+
+    Ok(protobuf_response_bytes(encode_merge_ticket_response(
+        bundle,
+    )?))
+}
+
 async fn merge_ticket(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -2178,74 +2326,7 @@ async fn merge_ticket(
         }
     };
 
-    let MergeTicketBundle {
-        gid: _,
-        cat,
-        parent_root,
-        leaf_id: _,
-        pivot_we_epoch_id,
-        parities,
-        witness_cbor,
-        srx_cbor,
-        join_delta_root,
-        revoked_since_root,
-        revoked_root,
-        tswe_salt_hash,
-        pox_r_commit,
-        proof_mode,
-        vrf_id,
-        policy_version,
-        msphf_crs_id,
-        msphf_params_id,
-        fs_policy_version,
-        fs_epoch_base_ts,
-        kbroad_public,
-        kbroad_generation,
-        barrier_version,
-        cover_leaf_index,
-        kem_tree_hash_after,
-        n_max,
-        max_barrier_update_bytes,
-    } = bundle;
-
-    let pivot_parity_cbor = parities
-        .iter()
-        .map(pivot_parity_to_cbor)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let response = MergeTicketResponse {
-        we_epoch_id: pivot_we_epoch_id.to_vec(),
-        pivot_parity_cbor,
-        witness_cbor,
-        proof_mode,
-        vrf_id,
-        policy_version,
-        kbroad_public,
-        cat: cat.to_vec(),
-        parent_root: parent_root.to_vec(),
-        join_delta_root: join_delta_root.to_vec(),
-        revoked_since_root: revoked_since_root.to_vec(),
-        revoked_root: revoked_root.to_vec(),
-        tswe_salt_hash: tswe_salt_hash.to_vec(),
-        pox_r_commit: pox_r_commit.to_vec(),
-        srx_cbor,
-        msphf_crs_id,
-        msphf_params_id,
-        fs_policy_version,
-        fs_epoch_base_ts,
-        kbroad_generation,
-        barrier_version,
-        profile_version: API_PROFILE_VERSION.to_string(),
-        cover_leaf_index,
-        kem_tree_hash_after: kem_tree_hash_after.to_vec(),
-        n_max,
-        max_barrier_update_bytes,
-    };
-
-    let mut response_bytes = Vec::new();
-    response
-        .encode(&mut response_bytes)
-        .map_err(|err| ApiError::server_message(format!("failed to encode merge ticket: {err}")))?;
+    let response_bytes = encode_merge_ticket_response(bundle)?;
     if intent == MergeTicketIntent::Leave {
         state
             .coalesced_merge_ticket_store(cache_key, response_bytes.clone(), now_ms)
@@ -3253,6 +3334,7 @@ pub async fn run_with_config(
         .route("/v1/rooms/grant_admin", post(grant_room_admin))
         .route("/v1/rooms/revoke_admin", post(revoke_room_admin))
         .route("/v1/rooms/list_admins", post(list_room_admins))
+        .route("/v1/rooms/expel_member_ticket", post(expel_member_ticket))
         .route("/v1/rooms/join_ticket", post(join_ticket))
         .route("/v1/rooms/merge_ticket", post(merge_ticket))
         .route(
@@ -3475,8 +3557,8 @@ mod tests {
     use axum::body::to_bytes;
     use axum::routing::get;
     use cityg_api_client::{
-        RoomAdminOperation, build_room_admin_listing_proof, build_room_admin_proof,
-        build_room_admin_target_proof, generate_room_admin_keypair,
+        RoomAdminOperation, build_room_admin_leaf_pair_proof, build_room_admin_listing_proof,
+        build_room_admin_proof, build_room_admin_target_proof, generate_room_admin_keypair,
     };
     use cityg_client::demo::{DEMO_GID, demo_bundle};
     use cityg_client::witness::SrxInputsOwned;
@@ -3625,6 +3707,29 @@ mod tests {
     ) -> RoomAdminProof {
         let proof = build_room_admin_listing_proof(room_id, pop_public_key, pop_secret_key)
             .expect("build room admin listing proof");
+        RoomAdminProof {
+            pop_public_key: proof.pop_public_key,
+            signature: proof.signature,
+        }
+    }
+
+    fn test_room_admin_leaf_pair_proof(
+        operation: RoomAdminOperation,
+        room_id: &str,
+        author_leaf_id: &[u8; 32],
+        target_leaf_id: &[u8; 32],
+        pop_public_key: &[u8],
+        pop_secret_key: &[u8],
+    ) -> RoomAdminProof {
+        let proof = build_room_admin_leaf_pair_proof(
+            operation,
+            room_id,
+            author_leaf_id,
+            target_leaf_id,
+            pop_public_key,
+            pop_secret_key,
+        )
+        .expect("build room admin leaf-pair proof");
         RoomAdminProof {
             pop_public_key: proof.pop_public_key,
             signature: proof.signature,
@@ -5074,6 +5179,102 @@ mod tests {
         assert!(matches!(
             revoke_last_err,
             ApiError::InvalidRequest("cannot revoke the last room admin")
+        ));
+    }
+
+    #[tokio::test]
+    async fn expel_member_ticket_validates_request_shape() {
+        let state = test_api_state();
+        let room_id = hex::encode(DEMO_GID);
+        let author_leaf = cityg_client::demo::demo_member_leaf("alice");
+        let target_leaf = cityg_client::demo::demo_member_leaf("bob");
+        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+
+        let missing_proof_err = expel_member_ticket(
+            State(state.clone()),
+            encode_proto_request(&ExpelMemberTicketRequest {
+                room_id: room_id.clone(),
+                author_leaf_id: author_leaf.to_vec(),
+                target_leaf_id: target_leaf.to_vec(),
+                admin_proof: None,
+            }),
+        )
+        .await
+        .expect_err("missing proof must fail");
+        assert!(matches!(
+            missing_proof_err,
+            ApiError::Unauthorized("room admin proof is required")
+        ));
+
+        let bad_author_len_err = expel_member_ticket(
+            State(state.clone()),
+            encode_proto_request(&ExpelMemberTicketRequest {
+                room_id: room_id.clone(),
+                author_leaf_id: vec![0xAA; 31],
+                target_leaf_id: target_leaf.to_vec(),
+                admin_proof: Some(test_room_admin_leaf_pair_proof(
+                    RoomAdminOperation::ExpelMember,
+                    &room_id,
+                    &author_leaf,
+                    &target_leaf,
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect_err("invalid author leaf length must fail");
+        assert!(matches!(
+            bad_author_len_err,
+            ApiError::InvalidRequest("author_leaf_id must be 32 bytes")
+        ));
+
+        let bad_target_len_err = expel_member_ticket(
+            State(state.clone()),
+            encode_proto_request(&ExpelMemberTicketRequest {
+                room_id: room_id.clone(),
+                author_leaf_id: author_leaf.to_vec(),
+                target_leaf_id: vec![0xBB; 31],
+                admin_proof: Some(test_room_admin_leaf_pair_proof(
+                    RoomAdminOperation::ExpelMember,
+                    &room_id,
+                    &author_leaf,
+                    &target_leaf,
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect_err("invalid target leaf length must fail");
+        assert!(matches!(
+            bad_target_len_err,
+            ApiError::InvalidRequest("target_leaf_id must be 32 bytes")
+        ));
+
+        let self_target_err = expel_member_ticket(
+            State(state),
+            encode_proto_request(&ExpelMemberTicketRequest {
+                room_id,
+                author_leaf_id: author_leaf.to_vec(),
+                target_leaf_id: author_leaf.to_vec(),
+                admin_proof: Some(test_room_admin_leaf_pair_proof(
+                    RoomAdminOperation::ExpelMember,
+                    &hex::encode(DEMO_GID),
+                    &author_leaf,
+                    &author_leaf,
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect_err("self-targeted expel request must fail");
+        assert!(matches!(
+            self_target_err,
+            ApiError::InvalidRequest(
+                "author_leaf_id and target_leaf_id must differ; use controlled leave instead"
+            )
         ));
     }
 

@@ -28,21 +28,21 @@ use anyhow::{Context as AnyhowContext, Result, anyhow};
 use ciborium::value::{Integer, Value};
 use cityg_api_client::{
     BarrierJoinRecord, BarrierPublicTree, CitygApiClient, Error as ApiClientError, MergeTicket,
-    RoomAdminOperation, build_room_admin_listing_proof, build_room_admin_proof,
-    build_room_admin_target_proof,
+    RoomAdminOperation, build_room_admin_leaf_pair_proof, build_room_admin_listing_proof,
+    build_room_admin_proof, build_room_admin_target_proof,
 };
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
 use cityg_config::CityGConfig;
-use gpui::prelude::*;
 #[cfg(not(test))]
+use gpui::Application;
+use gpui::prelude::*;
 use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, SystemMenuType, TitlebarOptions,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, size,
-};
-use gpui::{
-    ClipboardItem, Context as ViewContext, CursorStyle, Div, FontWeight, Keystroke, MouseButton,
-    MouseDownEvent, PromptLevel, Render, ScrollHandle, Task, Window, div, point, px, rgb, rgba,
+    AnyWindowHandle, App, Bounds, ClipboardItem, Context as ViewContext, CursorStyle, Div, Entity,
+    FontWeight, KeyBinding, Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, PromptLevel,
+    Render, ScrollHandle, SystemMenuType, Task, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div, point, px,
+    rgb, rgba, size,
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
@@ -117,6 +117,7 @@ mod native_notifications;
 mod network_members;
 mod network_messages;
 mod network_room_admin;
+mod overview_window;
 mod params;
 mod persisted;
 mod pivot_helpers;

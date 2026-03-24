@@ -117,6 +117,15 @@ pub fn demo_member_leaf(label: &str) -> [u8; 32] {
     member_leaf(label)
 }
 
+pub fn demo_member_pop_keypair(label: &str) -> ([u8; 32], Vec<u8>, Vec<u8>) {
+    let identity = member_identity(label);
+    (
+        identity.leaf,
+        identity.pop_public_key,
+        identity.pop_secret_key,
+    )
+}
+
 pub fn demo_bundle(label: &str) -> Result<ClientEpochBundle, CityGError> {
     let base = match label {
         "alice" => Vec::new(),

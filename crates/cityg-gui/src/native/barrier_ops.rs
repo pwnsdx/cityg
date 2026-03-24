@@ -185,7 +185,17 @@ fn apply_local_published_barrier_merge(
     Ok(())
 }
 
-pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
+fn cover_leaf_index_for_n_max(leaf_id: &[u8; 32], n_max: u64) -> u64 {
+    let n_max = n_max.max(1).min(u32::MAX as u64) as u32;
+    let leaf_suffix: [u8; 4] = leaf_id[28..32].try_into().unwrap_or_default();
+    u64::from(u32::from_be_bytes(leaf_suffix) % n_max)
+}
+
+async fn publish_revocation_merge_from_ticket(
+    request: LeaveRequest,
+    ticket: MergeTicket,
+    operation_label: &'static str,
+) -> Result<PublishedBarrierMerge> {
     let persist_request = request.clone();
     let LeaveRequest {
         server_url,
@@ -211,39 +221,6 @@ pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
         ));
     }
 
-    let client = new_api_client(&server_url);
-    let mut retry_attempt = 0u32;
-    let ticket = loop {
-        match client.merge_ticket(&room_id, &leaf_id).await {
-            Ok(ticket) => break ticket,
-            Err(err) => {
-                if let ApiClientError::HttpStatus {
-                    status,
-                    message,
-                    freeze_code,
-                    ..
-                } = &err
-                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                {
-                    let delay = ticket_retry_delay(retry_attempt);
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    warn!(
-                        attempt = retry_attempt,
-                        delay_ms = delay.as_millis() as u64,
-                        status = status.as_u16(),
-                        message = %message,
-                        "merge_ticket race/concurrency rejection; retrying"
-                    );
-                    sleep(delay).await;
-                    continue;
-                }
-
-                return Err(err).context("failed to obtain leave merge ticket");
-            }
-        }
-    };
-
     let MergeTicket {
         we_epoch_id: _,
         parities: raw_parities,
@@ -266,20 +243,23 @@ pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
         fs_epoch_base_ts,
         kbroad_generation: _,
         barrier_version,
-        cover_leaf_index,
+        cover_leaf_index: revoked_cover_leaf_index,
         kem_tree_hash_after,
         n_max,
         max_barrier_update_bytes,
     } = ticket;
 
     let srx_inputs = if srx_cbor.is_empty() {
-        return Err(anyhow!("merge ticket missing SRX payload"));
+        return Err(anyhow!(
+            "{operation_label} merge ticket missing SRX payload"
+        ));
     } else {
         SrxInputsOwned::from_cbor(&srx_cbor)
             .context("unable to decode SRX bundle from server")?
             .into_srx_inputs()
     };
 
+    let client = new_api_client(&server_url);
     let mut header = BTreeMap::new();
     header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
     header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
@@ -297,8 +277,9 @@ pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
     };
 
     let parities = hydrate_parities(&raw_parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit);
-    let pivot = select_pivot_parity(&parities)
-        .ok_or_else(|| anyhow!("merge ticket did not include any pivot parities"))?;
+    let pivot = select_pivot_parity(&parities).ok_or_else(|| {
+        anyhow!("{operation_label} merge ticket did not include any pivot parities")
+    })?;
     let parent_root_arr = bytes32("parent_root", &parent_root)?;
     let join_delta_root_arr = bytes32("join_delta_root", &join_delta_root)?;
     let revoked_since_root_arr = bytes32("revoked_since_root", &revoked_since_root)?;
@@ -318,9 +299,9 @@ pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
     } else {
         n_max
     };
-    if cover_leaf_index >= barrier_n_max {
+    if revoked_cover_leaf_index >= barrier_n_max {
         return Err(anyhow!(
-            "cover_leaf_index out of range for barrier tree: {cover_leaf_index} >= {barrier_n_max}"
+            "cover_leaf_index out of range for barrier tree: {revoked_cover_leaf_index} >= {barrier_n_max}"
         ));
     }
     if barrier_tree_snapshot.n_max != barrier_n_max {
@@ -350,14 +331,14 @@ pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
         committed_revoked_indices.as_slice(),
     )?;
     let leaf_base = barrier_n_max.saturating_sub(1);
-    let revoked_leaf_node = leaf_base.saturating_add(cover_leaf_index);
+    let revoked_leaf_node = leaf_base.saturating_add(revoked_cover_leaf_index);
     blank_leaf_and_path(snapshot_pre.as_mut_slice(), revoked_leaf_node)?;
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let next_barrier_version = barrier_version.saturating_add(1);
     let barrier_update = build_barrier_update_bytes(
         &gid,
         barrier_n_max,
-        cover_leaf_index,
+        cover_leaf_index_for_n_max(&leaf_id, barrier_n_max),
         next_barrier_version,
         barrier_version,
         revocation_roots_hash,
@@ -454,7 +435,7 @@ pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
         None,
         witness_bytes,
     )
-    .context("failed to build merge bundle")?;
+    .with_context(|| format!("failed to build {operation_label} merge bundle"))?;
 
     strip_rollup_metadata(&mut bundle.header_map);
     apply_pivot_alignment(&mut bundle.header_map, pivot);
@@ -488,7 +469,7 @@ pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
     bundle.we_epoch_id = derived_we_epoch_id;
     bundle
         .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
-        .context("rebind merge HP envelope for leave")?;
+        .with_context(|| format!("rebind merge HP envelope for {operation_label}"))?;
     pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
     bundle
         .header_map
@@ -532,9 +513,144 @@ pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
     client
         .accept_epoch_bundle(&bundle)
         .await
-        .context("server rejected merge bundle")?;
+        .with_context(|| format!("server rejected {operation_label} merge bundle"))?;
 
+    Ok(PublishedBarrierMerge {
+        bundle,
+        pending_barrier_state,
+        forward_state_after: forward_state,
+    })
+}
+
+pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
+    let client = new_api_client(&request.server_url);
+    let room_id = request.room_id.clone();
+    let leaf_id = request.leaf_id;
+    let mut retry_attempt = 0u32;
+    let ticket = loop {
+        match client.merge_ticket(&room_id, &leaf_id).await {
+            Ok(ticket) => break ticket,
+            Err(err) => {
+                if let ApiClientError::HttpStatus {
+                    status,
+                    message,
+                    freeze_code,
+                    ..
+                } = &err
+                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
+                {
+                    let delay = ticket_retry_delay(retry_attempt);
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    warn!(
+                        attempt = retry_attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        status = status.as_u16(),
+                        message = %message,
+                        "merge_ticket race/concurrency rejection; retrying"
+                    );
+                    sleep(delay).await;
+                    continue;
+                }
+
+                return Err(err).context("failed to obtain leave merge ticket");
+            }
+        }
+    };
+
+    publish_revocation_merge_from_ticket(request, ticket, "leave").await?;
     Ok(())
+}
+
+pub(super) async fn perform_room_admin_expel(
+    session: AppSession,
+    target_leaf_id: [u8; 32],
+) -> Result<AppSession> {
+    if session.leaf_id == target_leaf_id {
+        return Err(anyhow!(
+            "cannot expel the local device; use Leave room for controlled self-revocation"
+        ));
+    }
+
+    let request = LeaveRequest::from_session(&session);
+    let client = new_api_client(&request.server_url);
+    let room_id = request.room_id.clone();
+    let author_leaf_id = request.leaf_id;
+    let admin_proof = build_room_admin_leaf_pair_proof(
+        RoomAdminOperation::ExpelMember,
+        &room_id,
+        &author_leaf_id,
+        &target_leaf_id,
+        &request.pop_public_key,
+        &request.pop_secret_key,
+    )
+    .context("build expel member room admin proof")?;
+
+    let mut retry_attempt = 0u32;
+    let ticket = loop {
+        match client
+            .expel_member_ticket(
+                &room_id,
+                &author_leaf_id,
+                &target_leaf_id,
+                admin_proof.clone(),
+            )
+            .await
+        {
+            Ok(ticket) => break ticket,
+            Err(err) => {
+                if let ApiClientError::HttpStatus {
+                    status,
+                    message,
+                    freeze_code,
+                    ..
+                } = &err
+                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
+                {
+                    let delay = ticket_retry_delay(retry_attempt);
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    warn!(
+                        attempt = retry_attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        status = status.as_u16(),
+                        message = %message,
+                        "expel_member_ticket race/concurrency rejection; retrying"
+                    );
+                    sleep(delay).await;
+                    continue;
+                }
+
+                return Err(err).context("failed to obtain expel merge ticket");
+            }
+        }
+    };
+
+    let published = publish_revocation_merge_from_ticket(request, ticket, "expel").await?;
+    let mut updated = session.clone();
+    match apply_local_published_barrier_merge(&mut updated, published) {
+        Ok(()) => {
+            persist_activated_joined_session(&updated)
+                .context("persist room session after expel")?;
+            Ok(updated)
+        }
+        Err(local_err) => {
+            warn!(
+                "local activation of expel merge failed; falling back to epoch sync: {local_err:#}"
+            );
+            let persisted = load_session_at(&session.server_url, &session.room_id)?
+                .ok_or_else(|| anyhow!("persisted session missing after expel merge publish"))?;
+            let sync = perform_epoch_sync(persisted)
+                .await
+                .context("sync room after expel merge")?;
+            if sync.session.barrier_state.barrier_recovery_pending {
+                return Err(anyhow!("barrier recovery still pending after expel merge"));
+            }
+            persist_activated_joined_session(&sync.session)
+                .context("persist room session after expel merge sync")?;
+            Ok(sync.session)
+        }
+    }
 }
 
 pub(super) async fn perform_pcs_refresh(request: LeaveRequest) -> Result<()> {

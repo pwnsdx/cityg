@@ -237,6 +237,8 @@ sequenceDiagram
 - Fresh pivot parities ensure forward secrecy
 - Current merge tickets encode requester self-revocation in `revoked_since`
 - Accepted merge bundles therefore apply a leave/rekey-style roster delta
+- Admin-driven member expulsion uses `POST /v1/rooms/expel_member_ticket`,
+  which authorizes a revocation MERGE on behalf of another target leaf
 
 ---
 
