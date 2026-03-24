@@ -47,10 +47,7 @@ struct BarrierTreeNodeHashPreimage<'a> {
 pub struct BarrierTreePathSaltPreimage(pub u64);
 
 #[derive(Serialize)]
-pub struct BarrierDeriveSaltPreimage<'a>(
-    pub u64,
-    #[serde(with = "serde_bytes")] pub &'a [u8; 32],
-);
+pub struct BarrierDeriveSaltPreimage<'a>(pub u64, #[serde(with = "serde_bytes")] pub &'a [u8; 32]);
 
 pub fn should_retry_ticket_http_error(
     status_code: u16,

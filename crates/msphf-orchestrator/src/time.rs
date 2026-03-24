@@ -61,7 +61,9 @@ mod tests {
         assert_eq!(second, AcceptInstant::from_ticks(u64::MAX));
         assert_eq!(clock.now(), AcceptInstant::from_ticks(u64::MAX));
         assert_eq!(
-            clock.now().duration_since(AcceptInstant::from_ticks(u64::MAX - 1)),
+            clock
+                .now()
+                .duration_since(AcceptInstant::from_ticks(u64::MAX - 1)),
             Duration::from_secs(1)
         );
     }

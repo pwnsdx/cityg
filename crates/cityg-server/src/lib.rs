@@ -3302,9 +3302,9 @@ mod tests {
             .iter()
             .map(|record| record.leaf_index)
             .collect();
-        let barrier_update_reason = if unresolved_join_leaf_indices.contains(
-            &super::cover_leaf_index(&generated.leaf_id, ticket.n_max),
-        ) {
+        let barrier_update_reason = if unresolved_join_leaf_indices
+            .contains(&super::cover_leaf_index(&generated.leaf_id, ticket.n_max))
+        {
             2u64
         } else {
             1u64

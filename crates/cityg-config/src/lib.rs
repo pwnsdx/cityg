@@ -406,48 +406,188 @@ impl CityGConfig {
         if let Ok(val) = get_var("CITYG_SERVER_STATE_PATH") {
             self.server.state_path = Some(PathBuf::from(val));
         }
-        env_parse!(get_var, "CITYG_SERVER_WEBSOCKET_CAPACITY", self.server.websocket_capacity, "websocket_capacity");
-        env_parse!(get_var, "CITYG_SERVER_WINDOW_TTL_SECS", self.server.window_ttl_secs, "window_ttl_secs");
-        env_parse!(get_var, "CITYG_SERVER_SEED_DEMO_ROOM", self.server.seed_demo_room, "seed_demo_room flag");
+        env_parse!(
+            get_var,
+            "CITYG_SERVER_WEBSOCKET_CAPACITY",
+            self.server.websocket_capacity,
+            "websocket_capacity"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_SERVER_WINDOW_TTL_SECS",
+            self.server.window_ttl_secs,
+            "window_ttl_secs"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_SERVER_SEED_DEMO_ROOM",
+            self.server.seed_demo_room,
+            "seed_demo_room flag"
+        );
 
         // Client
         if let Ok(val) = get_var("CITYG_CLIENT_DEFAULT_SERVER_URL") {
             self.client.default_server_url = val;
         }
-        env_parse!(get_var, "CITYG_CLIENT_FETCH_POLL_INTERVAL_SECS", self.client.fetch_poll_interval_secs, "fetch_poll_interval_secs");
-        env_parse!(get_var, "CITYG_CLIENT_FETCH_RETRY_INTERVAL_SECS", self.client.fetch_retry_interval_secs, "fetch_retry_interval_secs");
-        env_parse!(get_var, "CITYG_CLIENT_WEBSOCKET_RECONNECT_DELAY_SECS", self.client.websocket_reconnect_delay_secs, "websocket_reconnect_delay_secs");
-        env_parse!(get_var, "CITYG_CLIENT_API_TIMEOUT_SECS", self.client.api_timeout_secs, "api_timeout_secs");
+        env_parse!(
+            get_var,
+            "CITYG_CLIENT_FETCH_POLL_INTERVAL_SECS",
+            self.client.fetch_poll_interval_secs,
+            "fetch_poll_interval_secs"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_CLIENT_FETCH_RETRY_INTERVAL_SECS",
+            self.client.fetch_retry_interval_secs,
+            "fetch_retry_interval_secs"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_CLIENT_WEBSOCKET_RECONNECT_DELAY_SECS",
+            self.client.websocket_reconnect_delay_secs,
+            "websocket_reconnect_delay_secs"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_CLIENT_API_TIMEOUT_SECS",
+            self.client.api_timeout_secs,
+            "api_timeout_secs"
+        );
 
         // Protocol
-        env_parse!(get_var, "CITYG_PROTOCOL_WINDOW_DURATION_SECS", self.protocol.window_duration_secs, "window_duration_secs");
-        env_parse!(get_var, "CITYG_PROTOCOL_MAX_CONCURRENT_HEADS", self.protocol.max_concurrent_heads, "max_concurrent_heads");
-        env_parse!(get_var, "CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS", self.protocol.epoch_rotation_interval_secs, "epoch_rotation_interval_secs");
-        env_parse!(get_var, "CITYG_PROTOCOL_DEFAULT_SRX_MAX_BYTES", self.protocol.default_srx_max_bytes, "default_srx_max_bytes");
-        env_parse!(get_var, "CITYG_PROTOCOL_MAX_HP_PROOF_BYTES", self.protocol.max_hp_proof_bytes, "max_hp_proof_bytes");
-        env_parse!(get_var, "CITYG_PROTOCOL_MAX_VRF_PROOF_BYTES", self.protocol.max_vrf_proof_bytes, "max_vrf_proof_bytes");
-        env_parse!(get_var, "CITYG_PROTOCOL_FS_CAPSS_MAX_BYTES", self.protocol.fs_capss_max_bytes, "fs_capss_max_bytes");
-        env_parse!(get_var, "CITYG_PROTOCOL_SRX_SMALLWOOD_MAX_BYTES", self.protocol.srx_smallwood_max_bytes, "srx_smallwood_max_bytes");
-        env_parse!(get_var, "CITYG_PROTOCOL_MAX_HP_ENVELOPE_BYTES", self.protocol.max_hp_envelope_bytes, "max_hp_envelope_bytes");
-        env_parse!(get_var, "CITYG_PROTOCOL_MIN_SRX_MAX_BYTES", self.protocol.min_srx_max_bytes, "min_srx_max_bytes");
-        env_parse!(get_var, "CITYG_PROTOCOL_RECEIVER_CACHE_TTL_SECS", self.protocol.receiver_cache_ttl_secs, "receiver_cache_ttl_secs");
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_WINDOW_DURATION_SECS",
+            self.protocol.window_duration_secs,
+            "window_duration_secs"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_MAX_CONCURRENT_HEADS",
+            self.protocol.max_concurrent_heads,
+            "max_concurrent_heads"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_EPOCH_ROTATION_INTERVAL_SECS",
+            self.protocol.epoch_rotation_interval_secs,
+            "epoch_rotation_interval_secs"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_DEFAULT_SRX_MAX_BYTES",
+            self.protocol.default_srx_max_bytes,
+            "default_srx_max_bytes"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_MAX_HP_PROOF_BYTES",
+            self.protocol.max_hp_proof_bytes,
+            "max_hp_proof_bytes"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_MAX_VRF_PROOF_BYTES",
+            self.protocol.max_vrf_proof_bytes,
+            "max_vrf_proof_bytes"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_FS_CAPSS_MAX_BYTES",
+            self.protocol.fs_capss_max_bytes,
+            "fs_capss_max_bytes"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_SRX_SMALLWOOD_MAX_BYTES",
+            self.protocol.srx_smallwood_max_bytes,
+            "srx_smallwood_max_bytes"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_MAX_HP_ENVELOPE_BYTES",
+            self.protocol.max_hp_envelope_bytes,
+            "max_hp_envelope_bytes"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_MIN_SRX_MAX_BYTES",
+            self.protocol.min_srx_max_bytes,
+            "min_srx_max_bytes"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_RECEIVER_CACHE_TTL_SECS",
+            self.protocol.receiver_cache_ttl_secs,
+            "receiver_cache_ttl_secs"
+        );
         if let Ok(val) = get_var("CITYG_PROTOCOL_FS_POLICY_VERSION") {
             self.protocol.fs_policy_version = val;
         }
 
         // FS policy
-        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_H_SECONDS", self.protocol.fs_policy.h_seconds, "fs_policy.h_seconds");
-        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_CHECKPOINT_INTERVAL_SECS", self.protocol.fs_policy.checkpoint_interval_seconds, "fs_policy.checkpoint_interval_seconds");
-        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_CHECKPOINT_HEAD_THRESHOLD", self.protocol.fs_policy.checkpoint_head_threshold, "fs_policy.checkpoint_head_threshold");
-        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_SLACK_ANCHOR", self.protocol.fs_policy.slack_anchor, "fs_policy.slack_anchor");
-        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_SLACK_FIRST_DEVICE", self.protocol.fs_policy.slack_first_device, "fs_policy.slack_first_device");
-        env_parse!(get_var, "CITYG_PROTOCOL_FS_POLICY_SLACK_DEVICE", self.protocol.fs_policy.slack_device, "fs_policy.slack_device");
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_FS_POLICY_H_SECONDS",
+            self.protocol.fs_policy.h_seconds,
+            "fs_policy.h_seconds"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_FS_POLICY_CHECKPOINT_INTERVAL_SECS",
+            self.protocol.fs_policy.checkpoint_interval_seconds,
+            "fs_policy.checkpoint_interval_seconds"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_FS_POLICY_CHECKPOINT_HEAD_THRESHOLD",
+            self.protocol.fs_policy.checkpoint_head_threshold,
+            "fs_policy.checkpoint_head_threshold"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_FS_POLICY_SLACK_ANCHOR",
+            self.protocol.fs_policy.slack_anchor,
+            "fs_policy.slack_anchor"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_FS_POLICY_SLACK_FIRST_DEVICE",
+            self.protocol.fs_policy.slack_first_device,
+            "fs_policy.slack_first_device"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_PROTOCOL_FS_POLICY_SLACK_DEVICE",
+            self.protocol.fs_policy.slack_device,
+            "fs_policy.slack_device"
+        );
 
         // GUI
-        env_parse!(get_var, "CITYG_GUI_DEFAULT_WINDOW_WIDTH", self.gui.default_window_width, "default_window_width");
-        env_parse!(get_var, "CITYG_GUI_DEFAULT_WINDOW_HEIGHT", self.gui.default_window_height, "default_window_height");
-        env_parse!(get_var, "CITYG_GUI_MEMBERS_PAGE_LIMIT", self.gui.members_page_limit, "members_page_limit");
-        env_parse!(get_var, "CITYG_GUI_MEMBERS_REFRESH_INTERVAL_SECS", self.gui.members_refresh_interval_secs, "members_refresh_interval_secs");
+        env_parse!(
+            get_var,
+            "CITYG_GUI_DEFAULT_WINDOW_WIDTH",
+            self.gui.default_window_width,
+            "default_window_width"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_GUI_DEFAULT_WINDOW_HEIGHT",
+            self.gui.default_window_height,
+            "default_window_height"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_GUI_MEMBERS_PAGE_LIMIT",
+            self.gui.members_page_limit,
+            "members_page_limit"
+        );
+        env_parse!(
+            get_var,
+            "CITYG_GUI_MEMBERS_REFRESH_INTERVAL_SECS",
+            self.gui.members_refresh_interval_secs,
+            "members_refresh_interval_secs"
+        );
 
         Ok(self)
     }
