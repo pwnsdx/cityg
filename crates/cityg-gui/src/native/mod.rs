@@ -99,6 +99,7 @@ mod network_ops;
 mod params;
 mod persisted;
 mod pivot_helpers;
+mod render_details;
 mod render_panels;
 mod render_session;
 mod render_workspace;
