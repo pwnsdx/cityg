@@ -261,27 +261,25 @@ fn build_srx_inputs_owned(
         let left_key = left_anchor.map(|anchor_leaf| (parent_root, anchor_leaf));
         let right_key = right_anchor.map(|anchor_leaf| (parent_root, anchor_leaf));
 
-        if let Some((root, leaf_id)) = left_key {
-            if let std::collections::btree_map::Entry::Vacant(entry) =
+        if let Some((root, leaf_id)) = left_key
+            && let std::collections::btree_map::Entry::Vacant(entry) =
                 anchor_map.entry((root, leaf_id))
-            {
-                entry.insert(RawMembershipWitness {
-                    leaf_id: leaf_id.to_vec(),
-                    root: root.to_vec(),
-                    path: canonical_membership_path(&parent_sorted, &leaf_id)?,
-                });
-            }
+        {
+            entry.insert(RawMembershipWitness {
+                leaf_id: leaf_id.to_vec(),
+                root: root.to_vec(),
+                path: canonical_membership_path(&parent_sorted, &leaf_id)?,
+            });
         }
-        if let Some((root, leaf_id)) = right_key {
-            if let std::collections::btree_map::Entry::Vacant(entry) =
+        if let Some((root, leaf_id)) = right_key
+            && let std::collections::btree_map::Entry::Vacant(entry) =
                 anchor_map.entry((root, leaf_id))
-            {
-                entry.insert(RawMembershipWitness {
-                    leaf_id: leaf_id.to_vec(),
-                    root: root.to_vec(),
-                    path: canonical_membership_path(&parent_sorted, &leaf_id)?,
-                });
-            }
+        {
+            entry.insert(RawMembershipWitness {
+                leaf_id: leaf_id.to_vec(),
+                root: root.to_vec(),
+                path: canonical_membership_path(&parent_sorted, &leaf_id)?,
+            });
         }
 
         join_nonmem_parent_temp.push((witness, left_key, right_key));

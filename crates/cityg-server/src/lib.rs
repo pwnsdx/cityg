@@ -684,10 +684,10 @@ impl CityGServer {
                 eprintln!("cityg-server: state recovery failed: {err:?}");
             }
         }
-        if let Some(state) = persisted_kbroad_state {
-            if let Err(err) = server.apply_persisted_kbroad_state(&state) {
-                eprintln!("cityg-server: kbroad state apply failed: {err:?}");
-            }
+        if let Some(state) = persisted_kbroad_state
+            && let Err(err) = server.apply_persisted_kbroad_state(&state)
+        {
+            eprintln!("cityg-server: kbroad state apply failed: {err:?}");
         }
         if let Err(err) = server.initialize_registered_groups_barrier_state() {
             eprintln!("cityg-server: barrier bootstrap initialization failed: {err:?}");
