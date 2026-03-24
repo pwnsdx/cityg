@@ -4557,8 +4557,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn perform_join_finalize_defaults_zero_nmax_without_manual_kbroad_rotation()
-    -> Result<()> {
+    async fn perform_join_finalize_defaults_zero_nmax_without_manual_kbroad_rotation() -> Result<()>
+    {
         let fixture = capture_join_finalize_fixture().await?;
         let mut ticket = fixture.ticket.clone();
         ticket.n_max = 0;

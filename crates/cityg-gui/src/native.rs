@@ -6476,7 +6476,11 @@ impl AppModel {
     }
 
     fn refresh_room_admins(&mut self, cx: &mut ViewContext<Self>) {
-        let Some(params) = self.session.as_ref().map(RoomAdminQueryParams::from_session) else {
+        let Some(params) = self
+            .session
+            .as_ref()
+            .map(RoomAdminQueryParams::from_session)
+        else {
             return;
         };
         if matches!(self.room_admin_status, RoomAdminStatus::Loading(_)) {
@@ -6529,7 +6533,11 @@ impl AppModel {
         target_pop_public_key: Vec<u8>,
         cx: &mut ViewContext<Self>,
     ) {
-        let Some(query) = self.session.as_ref().map(RoomAdminQueryParams::from_session) else {
+        let Some(query) = self
+            .session
+            .as_ref()
+            .map(RoomAdminQueryParams::from_session)
+        else {
             return;
         };
         if matches!(self.room_admin_status, RoomAdminStatus::Loading(_)) {
