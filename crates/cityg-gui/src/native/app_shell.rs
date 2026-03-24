@@ -63,7 +63,9 @@ pub(super) fn run_native_app() {
             })
             .detach();
 
-            let _ = entity.update(cx, |_, cx| {
+            let _ = entity.update(cx, |model, cx| {
+                model.window_active = window.is_window_active();
+                model.bootstrap_session_runtime(cx);
                 cx.observe_window_activation(window, |model, window, cx| {
                     model.window_active = window.is_window_active();
                     cx.notify();
@@ -188,12 +190,6 @@ impl AppModel {
 
 impl Render for AppModel {
     fn render(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
-        self.ensure_fetch_loop(cx);
-        self.ensure_websocket_task(cx);
-        self.ensure_epoch_sync_task(cx);
-        self.ensure_members_refresh_task(cx);
-        self.ensure_room_admins_loaded(cx);
-
         let background = ui_canvas_fill(self.window_active);
         let has_session = self.session.is_some();
         let body: Div = if let Some(session) = &self.session {

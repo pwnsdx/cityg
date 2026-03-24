@@ -140,12 +140,8 @@ impl AppModel {
                 self.ws_autostart_attempted = false;
                 self.restore_epoch_sync_pending = false;
                 self.reset_fetch_state();
-                if !barrier_pending {
-                    self.schedule_fetch(cx, Duration::from_millis(0));
-                }
+                self.bootstrap_session_runtime(cx);
                 self.refresh_members(cx);
-                self.refresh_room_admins(cx);
-                self.start_websocket(cx);
                 self.schedule_epoch_sync(cx, "Syncing latest epoch after join…");
             }
             Err(err) => {

@@ -83,6 +83,7 @@ impl AppModel {
                     match load_session_at(&session.server_url, &session.room_id) {
                         Ok(Some(persisted)) => {
                             self.session = Some(persisted);
+                            self.bootstrap_session_runtime(cx);
                         }
                         Ok(None) => {
                             warn!("persisted session missing after PCS refresh");

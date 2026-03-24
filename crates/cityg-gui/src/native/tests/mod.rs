@@ -1819,7 +1819,7 @@ fn gpui_missing_message_token_only_schedules_restore_sync_once(cx: &mut TestAppC
         model.session = Some(session.clone());
         model.restore_epoch_sync_pending = true;
 
-        model.ensure_websocket_task(view_cx);
+        model.bootstrap_session_runtime(view_cx);
         assert!(
             model.ws_task.is_none(),
             "ws task must stay absent without token"
@@ -1838,10 +1838,66 @@ fn gpui_missing_message_token_only_schedules_restore_sync_once(cx: &mut TestAppC
         );
 
         model.stop_epoch_sync_task();
-        model.ensure_websocket_task(view_cx);
+        model.bootstrap_session_runtime(view_cx);
         assert!(
             model.epoch_sync_task.is_none(),
             "missing token should not reschedule restore sync on later renders"
+        );
+    });
+}
+
+#[gpui::test]
+fn gpui_root_render_does_not_bootstrap_runtime_tasks(cx: &mut TestAppContext) {
+    cx.update(tokio_bridge::init);
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+    let session = build_test_session(
+        0xCAFE,
+        "http://127.0.0.1:9",
+        "8899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677",
+        "pure-render",
+    )
+    .expect("build session");
+
+    cx.update_window_entity(&view, |model, window, view_cx| {
+        model.session = Some(session);
+        model.restore_epoch_sync_pending = true;
+        model.fetch_task = None;
+        model.fetch_in_flight = false;
+        model.ws_task = None;
+        model.ws_autostart_attempted = false;
+        model.epoch_sync_task = None;
+        model.members_refresh_task = None;
+        model.room_admins_loaded = false;
+        model.room_admin_status = RoomAdminStatus::Idle;
+
+        let _ = model.render(window, view_cx);
+
+        assert!(!model.fetch_in_flight, "render must not start fetch work");
+        assert!(model.fetch_task.is_none(), "render must not spawn fetch task");
+        assert!(model.ws_task.is_none(), "render must not start websocket task");
+        assert!(
+            !model.ws_autostart_attempted,
+            "render must not toggle websocket autostart"
+        );
+        assert!(
+            model.epoch_sync_task.is_none(),
+            "render must not schedule epoch sync"
+        );
+        assert!(
+            model.members_refresh_task.is_none(),
+            "render must not start members refresh loop"
+        );
+        assert!(
+            matches!(model.room_admin_status, RoomAdminStatus::Idle),
+            "render must not kick off room-admin loading"
+        );
+        assert!(
+            model.restore_epoch_sync_pending,
+            "render must leave deferred restore sync untouched"
         );
     });
 }

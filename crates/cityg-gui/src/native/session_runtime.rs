@@ -1,6 +1,18 @@
 use super::*;
 
 impl AppModel {
+    pub(super) fn bootstrap_session_runtime(&mut self, cx: &mut ViewContext<Self>) {
+        if self.barrier_recovery_pending() {
+            self.reset_fetch_state();
+        } else {
+            self.ensure_fetch_loop(cx);
+        }
+        self.ensure_websocket_task(cx);
+        self.ensure_epoch_sync_task(cx);
+        self.ensure_members_refresh_task(cx);
+        self.ensure_room_admins_loaded(cx);
+    }
+
     pub(super) fn ensure_members_refresh_task(&mut self, cx: &mut ViewContext<Self>) {
         if self.session.is_none() {
             self.stop_members_refresh_task();
