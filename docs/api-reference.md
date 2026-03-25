@@ -1086,9 +1086,8 @@ Establishes a WebSocket connection for real-time roster/message notifications.
 
 **Authentication:**
 - New clients MUST send the room/message auth token in the `x-cityg-message-token` header.
-- The server still accepts `?token=` as a legacy compatibility fallback for WebSocket upgrades, but
-  new clients SHOULD NOT use query-string tokens because they are easier to leak via logs and
-  intermediaries.
+- WebSocket upgrades without the header are rejected. Query-string token compatibility has been
+  removed.
 
 **Upgrade Request:**
 ```http

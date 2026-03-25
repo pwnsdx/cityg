@@ -318,7 +318,6 @@ struct EpochScope {
 struct WebSocketSubscriptionQuery {
     gid: String,
     leaf_id: String,
-    token: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -994,23 +993,14 @@ fn enforce_message_auth_query(
     }
 }
 
-fn websocket_message_auth_token<'a>(
-    headers: &'a HeaderMap,
-    query_token: Option<&'a str>,
-) -> Option<&'a str> {
-    headers
-        .get(MESSAGE_AUTH_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .or(query_token)
-}
-
 fn enforce_message_auth_websocket(
     headers: &HeaderMap,
-    query_token: Option<&str>,
     expected_token: Option<&str>,
 ) -> Result<(), ApiError> {
     enforce_message_auth_query(
-        websocket_message_auth_token(headers, query_token),
+        headers
+            .get(MESSAGE_AUTH_HEADER)
+            .and_then(|value| value.to_str().ok()),
         expected_token,
     )
 }
@@ -2562,11 +2552,7 @@ async fn websocket_handler(
     headers: HeaderMap,
     Query(query): Query<WebSocketSubscriptionQuery>,
 ) -> Result<Response, ApiError> {
-    enforce_message_auth_websocket(
-        &headers,
-        query.token.as_deref(),
-        configured_message_auth_token().as_deref(),
-    )?;
+    enforce_message_auth_websocket(&headers, configured_message_auth_token().as_deref())?;
     let gid = parse_gid(&query.gid)?;
     let leaf_id = parse_hex_32("leaf_id must be 64 hex characters", &query.leaf_id)?;
     ensure_leaf_member_for_room(&state, &gid, leaf_id).await?;
@@ -4037,21 +4023,20 @@ mod tests {
     }
 
     #[test]
-    fn websocket_message_auth_prefers_header_and_falls_back_to_query() {
+    fn websocket_message_auth_requires_header() {
         let mut headers = HeaderMap::new();
         headers.insert(
             MESSAGE_AUTH_HEADER,
             HeaderValue::from_static("header-token"),
         );
-        assert_eq!(
-            websocket_message_auth_token(&headers, Some("query-token")),
-            Some("header-token")
-        );
+        assert!(enforce_message_auth_websocket(&headers, Some("header-token")).is_ok());
         let empty_headers = HeaderMap::new();
-        assert_eq!(
-            websocket_message_auth_token(&empty_headers, Some("query-token")),
-            Some("query-token")
-        );
+        assert!(matches!(
+            enforce_message_auth_websocket(&empty_headers, Some("header-token")),
+            Err(ApiError::Unauthorized(
+                "missing or invalid message auth token"
+            ))
+        ));
     }
 
     #[tokio::test]
@@ -6748,12 +6733,19 @@ mod tests {
         });
 
         let url = format!(
-            "ws://{addr}/v1/ws?gid={}&leaf_id={}&token={}",
+            "ws://{addr}/v1/ws?gid={}&leaf_id={}",
             hex::encode(DEMO_GID),
-            hex::encode(leaf),
-            token
+            hex::encode(leaf)
         );
-        let (mut socket, _) = tokio_tungstenite::connect_async(url)
+        let mut request =
+            tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
+                .expect("websocket auth request");
+        request.headers_mut().insert(
+            MESSAGE_AUTH_HEADER,
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&token)
+                .expect("valid websocket auth header"),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request)
             .await
             .expect("connect websocket");
 
@@ -6787,6 +6779,41 @@ mod tests {
             .await
             .expect("send close");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), socket.next()).await;
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_handler_rejects_query_token_compat() {
+        ensure_test_admin_tokens();
+        let state = test_api_state();
+        let bundle = demo_bundle("alice").expect("alice bundle");
+        apply_bundle(&state, &bundle)
+            .await
+            .expect("accept bundle for websocket membership auth");
+        let leaf = cityg_client::demo::demo_member_leaf("alice");
+        let token = configured_message_auth_token().expect("message auth token configured");
+        let app = Router::new()
+            .route("/v1/ws", get(websocket_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let url = format!(
+            "ws://{addr}/v1/ws?gid={}&leaf_id={}&token={}",
+            hex::encode(DEMO_GID),
+            hex::encode(leaf),
+            token
+        );
+        assert!(
+            tokio_tungstenite::connect_async(url).await.is_err(),
+            "query token compat must be rejected"
+        );
 
         server.abort();
     }
