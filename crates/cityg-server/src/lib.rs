@@ -343,6 +343,9 @@ pub struct BarrierPublicTreeSnapshot {
     pub pk_entries: Vec<Vec<u8>>,
 }
 
+const DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR: &str = "duplicate active cover leaf allocation";
+const COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR: &str = "cover leaf index already allocated";
+
 impl CityGServer {
     fn initialize_group_barrier_bootstrap_state(
         &mut self,
@@ -794,6 +797,7 @@ impl CityGServer {
                 let index = state.allocate_leaf();
                 witness::sequential_leaf(index)
             };
+            ensure_join_cover_leaf_indices_available(state, std::slice::from_ref(&leaf_id))?;
 
             let parent_root = if parent_leaves.is_empty() {
                 [0u8; 32]
@@ -943,6 +947,13 @@ impl CityGServer {
         revoked_leaf_id: Option<[u8; 32]>,
     ) -> Result<MergeTicketBundle, CityGError> {
         self.ensure_kbroad_ready(gid)?;
+        let default_state = GroupState::default();
+        ensure_distinct_active_cover_leaf_indices(
+            self.roster
+                .groups
+                .get(gid.as_slice())
+                .unwrap_or(&default_state),
+        )?;
         let parent_root = self
             .roster
             .latest_root(gid)
@@ -1208,11 +1219,12 @@ impl CityGServer {
         roster: &mut GroupRoster,
         bundle: &ClientEpochBundle,
     ) -> Result<ServerOutcome, CityGError> {
-        let default_state = GroupState::default();
-        let state_before = roster.groups.get(bundle.gid()).unwrap_or(&default_state);
+        let state_before = roster.groups.get(bundle.gid()).cloned().unwrap_or_default();
         let delta = bundle.membership_delta()?;
+        ensure_distinct_active_cover_leaf_indices(&state_before)?;
+        ensure_join_cover_leaf_indices_available(&state_before, delta.joined.as_slice())?;
         let barrier_validation =
-            validate_barrier_update_against_roster(state_before, &bundle.header_map, &delta)?;
+            validate_barrier_update_against_roster(&state_before, &bundle.header_map, &delta)?;
 
         // Keep barrier acceptance/state logic on a single deterministic path:
         // groups without explicit prior state are treated as default-initialized.
@@ -1800,12 +1812,14 @@ impl CityGServer {
             .groups
             .get(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
+        ensure_distinct_active_cover_leaf_indices(state)?;
         let mut by_leaf: BTreeMap<u32, BarrierJoinLeafRecord> = BTreeMap::new();
         if prev_barrier_version == 0 && state.barrier_version == 0 {
             if let Some(snapshot) = state.latest_snapshot() {
                 for leaf in snapshot.members() {
                     let leaf_index = cover_leaf_index(leaf, state.n_max);
-                    by_leaf.insert(
+                    checked_insert_unique(
+                        &mut by_leaf,
                         leaf_index,
                         BarrierJoinLeafRecord {
                             device_pk: state
@@ -1820,21 +1834,24 @@ impl CityGServer {
                                 .cloned()
                                 .unwrap_or_default(),
                         },
-                    );
+                        DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
+                    )?;
                 }
             }
             return Ok(by_leaf.into_values().collect());
         }
         for record in &state.join_history {
             if record.barrier_version > prev_barrier_version {
-                by_leaf.insert(
+                checked_insert_unique(
+                    &mut by_leaf,
                     record.leaf_index,
                     BarrierJoinLeafRecord {
                         device_pk: record.device_pk.clone(),
                         leaf_index: record.leaf_index,
                         ek_leaf: record.ek_leaf.clone(),
                     },
-                );
+                    DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
+                )?;
             }
         }
         Ok(by_leaf.into_values().collect())
@@ -2146,6 +2163,7 @@ fn parse_barrier_update(
 }
 
 fn build_pk_entries_view<'a>(state: &'a GroupState) -> Result<Cow<'a, [Vec<u8>]>, CityGError> {
+    ensure_distinct_active_cover_leaf_indices(state)?;
     let (_, expected_len, _) = barrier_pk_entry_layout(state.n_max)?;
     if state.barrier_pk_entries.len() == expected_len {
         return Ok(Cow::Borrowed(state.barrier_pk_entries.as_slice()));
@@ -2625,6 +2643,68 @@ fn barrier_pk_entry_layout(n_max: u64) -> Result<(usize, usize, usize), CityGErr
     Ok((n_max_usize, expected_len, leaf_base))
 }
 
+fn checked_insert_unique<K, V>(
+    map: &mut BTreeMap<K, V>,
+    key: K,
+    value: V,
+    error: &'static str,
+) -> Result<(), CityGError>
+where
+    K: Ord + Copy,
+    V: PartialEq,
+{
+    if let Some(existing) = map.get(&key) {
+        if existing != &value {
+            return Err(CityGError::InvalidInput(error));
+        }
+        return Ok(());
+    }
+    map.insert(key, value);
+    Ok(())
+}
+
+fn active_cover_leaf_allocations(
+    state: &GroupState,
+) -> Result<BTreeMap<u32, [u8; 32]>, CityGError> {
+    let mut by_index = BTreeMap::new();
+    if let Some(snapshot) = state.latest_snapshot() {
+        for leaf in snapshot.members() {
+            let leaf_index = cover_leaf_index(leaf, state.n_max);
+            checked_insert_unique(
+                &mut by_index,
+                leaf_index,
+                *leaf,
+                DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
+            )?;
+        }
+    }
+    Ok(by_index)
+}
+
+fn ensure_distinct_active_cover_leaf_indices(state: &GroupState) -> Result<(), CityGError> {
+    let _ = active_cover_leaf_allocations(state)?;
+    Ok(())
+}
+
+fn ensure_join_cover_leaf_indices_available(
+    state: &GroupState,
+    joined: &[[u8; 32]],
+) -> Result<(), CityGError> {
+    let mut reserved: BTreeSet<u32> = active_cover_leaf_allocations(state)?.into_keys().collect();
+    for leaf in &state.revoked {
+        reserved.insert(cover_leaf_index(leaf, state.n_max));
+    }
+    for leaf in joined {
+        let leaf_index = cover_leaf_index(leaf, state.n_max);
+        if !reserved.insert(leaf_index) {
+            return Err(CityGError::InvalidInput(
+                COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn build_fallback_pk_entries<'a, T, F>(
     state: &'a GroupState,
     empty: T,
@@ -2634,6 +2714,7 @@ where
     T: Clone,
     F: Fn(&'a Vec<u8>) -> T,
 {
+    ensure_distinct_active_cover_leaf_indices(state)?;
     let (n_max, expected_len, leaf_base) = barrier_pk_entry_layout(state.n_max)?;
     let mut pk_entries = vec![empty; expected_len];
     if let Some(snapshot) = state.latest_snapshot() {
@@ -2772,6 +2853,7 @@ fn build_all_blank_pk_entries_cow(n_max: u64) -> Result<Vec<Cow<'static, [u8]>>,
 }
 
 fn build_pk_entries_cow<'a>(state: &'a GroupState) -> Result<Vec<Cow<'a, [u8]>>, CityGError> {
+    ensure_distinct_active_cover_leaf_indices(state)?;
     let (_, expected_len, _) = barrier_pk_entry_layout(state.n_max)?;
     if state.barrier_pk_entries.len() == expected_len {
         return Ok(state
@@ -2838,6 +2920,8 @@ fn validate_barrier_update_against_roster(
         let Some(parsed) = parse_barrier_update(header, state_before.n_max)? else {
             return Ok(None);
         };
+        ensure_distinct_active_cover_leaf_indices(state_before)?;
+        ensure_join_cover_leaf_indices_available(state_before, delta.joined.as_slice())?;
 
         let tree_n_max = state_before.n_max.max(1);
         let leaf_base = usize::try_from(tree_n_max.saturating_sub(1))
@@ -2854,13 +2938,23 @@ fn validate_barrier_update_against_roster(
                         .get(leaf)
                         .cloned()
                         .unwrap_or_default();
-                    by_leaf.insert(leaf_index, ek_leaf);
+                    checked_insert_unique(
+                        &mut by_leaf,
+                        leaf_index,
+                        ek_leaf,
+                        DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
+                    )?;
                 }
             }
         } else {
             for record in &state_before.join_history {
                 if record.barrier_version > parsed.prev_barrier_version {
-                    by_leaf.insert(record.leaf_index, record.ek_leaf.clone());
+                    checked_insert_unique(
+                        &mut by_leaf,
+                        record.leaf_index,
+                        record.ek_leaf.clone(),
+                        DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
+                    )?;
                 }
             }
         }
@@ -2871,7 +2965,12 @@ fn validate_barrier_update_against_roster(
             .unwrap_or_default();
         for leaf in &delta.joined {
             let leaf_index = cover_leaf_index(leaf, tree_n_max);
-            by_leaf.insert(leaf_index, join_ek.clone());
+            checked_insert_unique(
+                &mut by_leaf,
+                leaf_index,
+                join_ek.clone(),
+                DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
+            )?;
         }
 
         // RevokedLeafSet for snapshot construction: committed revoked set plus current delta.
@@ -3426,6 +3525,12 @@ mod tests {
             vrf_secret_key,
             vrf_public_key,
         })
+    }
+
+    fn colliding_cover_leaf(leaf_suffix: u32) -> [u8; 32] {
+        let mut leaf = [0u8; 32];
+        leaf[28..32].copy_from_slice(&leaf_suffix.to_be_bytes());
+        leaf
     }
 
     fn build_join_bundle_from_server_ticket(
@@ -5142,6 +5247,34 @@ mod tests {
     }
 
     #[test]
+    fn build_join_ticket_with_leaf_rejects_cover_index_collisions() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let gid = cityg_client::demo::DEMO_GID;
+        let active_leaf = colliding_cover_leaf(5);
+        let colliding_leaf = colliding_cover_leaf(1029);
+
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![active_leaf],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[active_leaf])?;
+        let mut state = super::GroupState::default();
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        server.roster.groups.insert(gid.to_vec(), state);
+
+        let err = server
+            .build_join_ticket_with_leaf(&gid, Some(colliding_leaf))
+            .expect_err("colliding cover index must be rejected");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(super::COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn stale_group_second_join_accepts_without_autonomic_evolve() -> Result<(), CityGError> {
         let mut server = super::demo::demo_server();
         let gid = cityg_client::demo::DEMO_GID;
@@ -5153,8 +5286,7 @@ mod tests {
         // client's autonomic catch-up overshoots the group's time-blind cap.
         server.context_mut().set_fs_base_ts(Some(1));
 
-        let forward_jumping =
-            build_join_bundle_from_server_ticket(&mut server, &gid, 0x76, false)?;
+        let forward_jumping = build_join_bundle_from_server_ticket(&mut server, &gid, 0x76, false)?;
         let err = server
             .accept_epoch(&forward_jumping)
             .expect_err("autonomic-evolved second join should exceed the stale group cap");
@@ -5163,16 +5295,23 @@ mod tests {
                 assert_eq!(freeze.code, 9476);
                 assert_eq!(freeze.reason, "fs_forward_jump_group");
             }
-            _ => return Err(CityGError::InvalidInput("unexpected stale-group join error")),
+            _ => {
+                return Err(CityGError::InvalidInput(
+                    "unexpected stale-group join error",
+                ));
+            }
         }
 
         let recovered = build_join_bundle_from_server_ticket(&mut server, &gid, 0x77, true)?;
         assert_eq!(u64_from_header(&recovered.header_map, hdr::HDR_FS_EC)?, 0);
         server.accept_epoch(&recovered)?;
 
-        let latest_root = server
-            .latest_parent_root(gid.as_slice())
-            .ok_or(CityGError::InvalidInput("latest root missing after stale-group retry"))?;
+        let latest_root =
+            server
+                .latest_parent_root(gid.as_slice())
+                .ok_or(CityGError::InvalidInput(
+                    "latest root missing after stale-group retry",
+                ))?;
         let members = server
             .members_for_root(gid.as_slice(), &latest_root)
             .ok_or(CityGError::InvalidInput(
@@ -8425,7 +8564,7 @@ mod tests {
             },
             super::JoinLeafHistoryRecord {
                 barrier_version: 3,
-                leaf_index: 8,
+                leaf_index: 10,
                 device_pk: vec![0x13; 4],
                 ek_leaf: vec![0x23; 1184],
             },
@@ -8438,11 +8577,38 @@ mod tests {
         ];
 
         let records = server.resolve_joins_since(&gid, 1)?;
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
         assert_eq!(records[0].leaf_index, 8);
-        assert_eq!(records[0].device_pk, vec![0x13; 4]);
-        assert_eq!(records[0].ek_leaf, vec![0x23; 1184]);
+        assert_eq!(records[0].device_pk, vec![0x12; 4]);
+        assert_eq!(records[0].ek_leaf, vec![0x22; 1184]);
         assert_eq!(records[1].leaf_index, 9);
+        assert_eq!(records[2].leaf_index, 10);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_joins_since_rejects_duplicate_active_cover_allocations() -> Result<(), CityGError> {
+        let gid = [0x84; 32];
+        let mut server = CityGServer::new(ServerConfig::new());
+        let leaf_a = colliding_cover_leaf(5);
+        let leaf_b = colliding_cover_leaf(1029);
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![leaf_a, leaf_b],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[leaf_a, leaf_b])?;
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+
+        let err = server
+            .resolve_joins_since(&gid, 0)
+            .expect_err("duplicate active cover allocations must fail closed");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(super::DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR)
+        ));
         Ok(())
     }
 
@@ -8481,6 +8647,31 @@ mod tests {
                     CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(code))
                         if code.code == 9071
                 ),
+            "unexpected error: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn join_cover_leaf_index_guard_rejects_colliding_cover_index() -> Result<(), CityGError> {
+        let active_leaf = colliding_cover_leaf(5);
+        let colliding_leaf = colliding_cover_leaf(1029);
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![active_leaf],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[active_leaf])?;
+        let mut state = super::GroupState::default();
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        let err = super::ensure_join_cover_leaf_indices_available(&state, &[colliding_leaf])
+            .expect_err("colliding join must be rejected");
+        assert!(
+            matches!(
+                err,
+                CityGError::InvalidInput(super::COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR)
+            ),
             "unexpected error: {err:?}"
         );
         Ok(())
@@ -8555,6 +8746,35 @@ mod tests {
                 if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.code
                     && freeze.reason
                         == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.reason
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_barrier_public_tree_rejects_duplicate_active_cover_allocations()
+    -> Result<(), CityGError> {
+        let gid = [0x85; 32];
+        let mut server = CityGServer::new(ServerConfig::new());
+        let leaf_a = colliding_cover_leaf(5);
+        let leaf_b = colliding_cover_leaf(1029);
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![leaf_a, leaf_b],
+            revoked: Vec::new(),
+        });
+        let root = msphf_core::merkle::canonical_set_root(&[leaf_a, leaf_b])?;
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.snapshots.insert(root, membership);
+        state.latest_root = Some(root);
+        state.leaf_barrier_public.insert(leaf_a, vec![0x11; 1184]);
+        state.leaf_barrier_public.insert(leaf_b, vec![0x22; 1184]);
+
+        let err = server
+            .fetch_barrier_public_tree(&gid, &[0u8; 32])
+            .expect_err("duplicate active cover allocations must fail closed");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(super::DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR)
         ));
         Ok(())
     }
