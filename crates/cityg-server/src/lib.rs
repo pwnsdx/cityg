@@ -345,6 +345,24 @@ pub struct BarrierPublicTreeSnapshot {
 
 const DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR: &str = "duplicate active cover leaf allocation";
 const COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR: &str = "cover leaf index already allocated";
+const GENESIS_PROVISIONING_ARTIFACT_MISSING_ERR: &str = "genesis provisioning artifact missing";
+
+fn genesis_provisioning_artifact_missing_error() -> CityGError {
+    CityGError::InvalidInput(GENESIS_PROVISIONING_ARTIFACT_MISSING_ERR)
+}
+
+fn barrier_genesis_required_freeze_error() -> CityGError {
+    CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(
+        msphf_orchestrator::FREEZE_BARRIER_GENESIS_REQUIRED,
+    ))
+}
+
+fn require_genesis_provisioning_snapshot<'a>(
+    state: &'a GroupState,
+    missing_err: impl FnOnce() -> CityGError,
+) -> Result<&'a GroupMembership, CityGError> {
+    state.latest_snapshot().ok_or_else(missing_err)
+}
 
 impl CityGServer {
     fn initialize_group_barrier_bootstrap_state(
@@ -1897,28 +1915,30 @@ impl CityGServer {
         ensure_distinct_active_cover_leaf_indices(state)?;
         let mut by_leaf: BTreeMap<u32, BarrierJoinLeafRecord> = BTreeMap::new();
         if prev_barrier_version == 0 && state.barrier_version == 0 {
-            if let Some(snapshot) = state.latest_snapshot() {
-                for leaf in snapshot.members() {
-                    let leaf_index = cover_leaf_index(leaf, state.n_max);
-                    checked_insert_unique(
-                        &mut by_leaf,
+            let snapshot = require_genesis_provisioning_snapshot(
+                state,
+                genesis_provisioning_artifact_missing_error,
+            )?;
+            for leaf in snapshot.members() {
+                let leaf_index = cover_leaf_index(leaf, state.n_max);
+                checked_insert_unique(
+                    &mut by_leaf,
+                    leaf_index,
+                    BarrierJoinLeafRecord {
+                        device_pk: state
+                            .leaf_device_pk
+                            .get(leaf)
+                            .cloned()
+                            .unwrap_or_else(|| leaf.to_vec()),
                         leaf_index,
-                        BarrierJoinLeafRecord {
-                            device_pk: state
-                                .leaf_device_pk
-                                .get(leaf)
-                                .cloned()
-                                .unwrap_or_else(|| leaf.to_vec()),
-                            leaf_index,
-                            ek_leaf: state
-                                .leaf_barrier_public
-                                .get(leaf)
-                                .cloned()
-                                .unwrap_or_default(),
-                        },
-                        DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
-                    )?;
-                }
+                        ek_leaf: state
+                            .leaf_barrier_public
+                            .get(leaf)
+                            .cloned()
+                            .unwrap_or_default(),
+                    },
+                    DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
+                )?;
             }
             return Ok(by_leaf.into_values().collect());
         }
@@ -3021,21 +3041,23 @@ fn validate_barrier_update_against_roster(
         // JoinSet: all joins activated after prev_barrier_version plus joins in current delta.
         let mut by_leaf: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
         if parsed.prev_barrier_version == 0 && state_before.barrier_version == 0 {
-            if let Some(snapshot) = state_before.latest_snapshot() {
-                for leaf in snapshot.members() {
-                    let leaf_index = cover_leaf_index(leaf, tree_n_max);
-                    let ek_leaf = state_before
-                        .leaf_barrier_public
-                        .get(leaf)
-                        .cloned()
-                        .unwrap_or_default();
-                    checked_insert_unique(
-                        &mut by_leaf,
-                        leaf_index,
-                        ek_leaf,
-                        DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
-                    )?;
-                }
+            let snapshot = require_genesis_provisioning_snapshot(
+                state_before,
+                barrier_genesis_required_freeze_error,
+            )?;
+            for leaf in snapshot.members() {
+                let leaf_index = cover_leaf_index(leaf, tree_n_max);
+                let ek_leaf = state_before
+                    .leaf_barrier_public
+                    .get(leaf)
+                    .cloned()
+                    .unwrap_or_default();
+                checked_insert_unique(
+                    &mut by_leaf,
+                    leaf_index,
+                    ek_leaf,
+                    DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
+                )?;
             }
         } else {
             for record in &state_before.join_history {
@@ -8417,6 +8439,29 @@ mod tests {
     }
 
     #[test]
+    fn crash_recovery_without_membership_artifact_rejects_genesis_joinset_resolution()
+    -> Result<(), CityGError> {
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("cityg-server-genesis-artifact.journal");
+
+        {
+            let mut server = demo_server_with_journal(&journal_path);
+            server.persist_kbroad_state()?;
+        }
+
+        let reloaded = demo_server_with_journal(&journal_path);
+        let err = reloaded
+            .resolve_joins_since(&cityg_client::demo::DEMO_GID, 0)
+            .expect_err("restart without membership artifact must fail closed");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(super::GENESIS_PROVISIONING_ARTIFACT_MISSING_ERR)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn recovery_error_does_not_leave_server_replaying_or_disable_journaling()
     -> Result<(), CityGError> {
         let _guard = super::journal_serial_guard();
@@ -8742,15 +8787,80 @@ mod tests {
     }
 
     #[test]
-    fn resolve_joins_since_genesis_without_snapshot_returns_empty() -> Result<(), CityGError> {
+    fn resolve_joins_since_genesis_without_snapshot_rejects_missing_artifact()
+    -> Result<(), CityGError> {
         let gid = [0x81; 32];
         let mut server = CityGServer::new(ServerConfig::new());
         server
             .roster
             .groups
             .insert(gid.to_vec(), super::GroupState::default());
-        let joins = server.resolve_joins_since(&gid, 0)?;
-        assert!(joins.is_empty());
+        let err = server
+            .resolve_joins_since(&gid, 0)
+            .expect_err("missing genesis provisioning artifact must fail closed");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(super::GENESIS_PROVISIONING_ARTIFACT_MISSING_ERR)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn validate_barrier_update_rejects_genesis_update_without_snapshot_artifact()
+    -> Result<(), CityGError> {
+        let mut state = super::GroupState {
+            n_max: 1,
+            barrier_initialized: true,
+            barrier_version: 0,
+            ..super::GroupState::default()
+        };
+        state.barrier_pk_entries = super::build_all_blank_pk_entries(state.n_max)?;
+        state.kem_tree_hash_after =
+            super::compute_barrier_tree_hash(state.n_max, state.barrier_pk_entries.as_slice())?;
+        state.barrier_roots_hash = super::compute_revocation_roots_hash(&[0u8; 32], &[0u8; 32])?;
+
+        let barrier_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            0,
+            0,
+            state.n_max,
+            state.barrier_roots_hash.to_vec(),
+            state.kem_tree_hash_after.to_vec(),
+            state.kem_tree_hash_after.to_vec(),
+            super::to_cbor_vec(&super::KemTreeCoverPayloadWire(
+                0,
+                vec![0],
+                None,
+                Vec::new(),
+                Vec::new(),
+            ))?,
+        );
+
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
+        );
+        header.insert(112, Value::Bytes(vec![0u8; 32]));
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(vec![0u8; 32]));
+
+        let err = super::validate_barrier_update_against_roster(
+            &state,
+            &header,
+            &cityg_client::MembershipDelta::default(),
+        )
+        .expect_err("genesis barrier update without snapshot artifact must freeze");
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_GENESIS_REQUIRED.code
+                    && freeze.reason
+                        == msphf_orchestrator::FREEZE_BARRIER_GENESIS_REQUIRED.reason
+        ));
         Ok(())
     }
 
