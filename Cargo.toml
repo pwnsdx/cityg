@@ -18,6 +18,10 @@ resolver = "2"
 
 [patch.crates-io]
 pqcrypto-kyber = { path = "crates/pqcrypto-kyber" }
+# Vendored GPUI 0.2.2 with targeted macOS backports from March 2026 upstream
+# fixes, because `zed` mainline is no longer a drop-in replacement for the
+# published gpui/gpui-macros crates.
+gpui = { path = "vendor/gpui-0.2.2" }
 
 [workspace.package]
 edition = "2024"
