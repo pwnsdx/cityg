@@ -1,7 +1,11 @@
 use super::*;
 
 impl AppModel {
-    pub(super) fn render_members_panel(&self, window: &Window, cx: &mut ViewContext<Self>) -> Div {
+    pub(super) fn render_members_panel(
+        &self,
+        window: &Window,
+        cx: &mut ViewContext<Self>,
+    ) -> impl IntoElement {
         let count = self.members.len();
         let total = self.members_total.max(count as u64);
         let title_text = match &self.members_mode {

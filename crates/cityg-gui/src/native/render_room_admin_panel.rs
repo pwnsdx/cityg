@@ -6,7 +6,7 @@ impl AppModel {
         window: &Window,
         session: &AppSession,
         cx: &mut ViewContext<Self>,
-    ) -> Div {
+    ) -> impl IntoElement {
         let can_list = self.room_admins_loaded;
         let membership = self.room_admin_membership(session.pop_public_key.as_slice());
         let self_is_admin = membership.unwrap_or(false);

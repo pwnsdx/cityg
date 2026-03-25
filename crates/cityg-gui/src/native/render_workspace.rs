@@ -6,7 +6,7 @@ impl AppModel {
         session: &AppSession,
         window: &Window,
         cx: &mut ViewContext<Self>,
-    ) -> Div {
+    ) -> impl IntoElement {
         let members_total = self.members_total.max(self.members.len() as u64);
         let room_preview = if session.room_id.len() > 20 {
             format!(
@@ -261,7 +261,7 @@ impl AppModel {
         window: &Window,
         window_width: f32,
         cx: &mut ViewContext<Self>,
-    ) -> Div {
+    ) -> impl IntoElement {
         let room_label = if session.room_id.len() > 28 {
             format!(
                 "{}…{}",

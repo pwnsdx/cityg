@@ -1,7 +1,11 @@
 use super::*;
 
 impl AppModel {
-    pub(super) fn render_security_panel(&self, window: &Window, cx: &mut ViewContext<Self>) -> Div {
+    pub(super) fn render_security_panel(
+        &self,
+        window: &Window,
+        cx: &mut ViewContext<Self>,
+    ) -> impl IntoElement {
         let count = self.security_events.len();
         let title = div()
             .text_size(px(15.0))

@@ -1,7 +1,11 @@
 use super::*;
 
 impl AppModel {
-    pub(super) fn render_leave_controls(&self, window: &Window, cx: &mut ViewContext<Self>) -> Div {
+    pub(super) fn render_leave_controls(
+        &self,
+        window: &Window,
+        cx: &mut ViewContext<Self>,
+    ) -> impl IntoElement {
         let leaving = matches!(self.leave_status, LeaveStatus::Leaving);
         let expelling = matches!(self.leave_status, LeaveStatus::Expelling);
         let refreshing = matches!(self.leave_status, LeaveStatus::Refreshing);

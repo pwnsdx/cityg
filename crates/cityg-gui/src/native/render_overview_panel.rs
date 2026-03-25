@@ -6,7 +6,7 @@ impl AppModel {
         window: &Window,
         session: &AppSession,
         cx: &mut ViewContext<Self>,
-    ) -> Div {
+    ) -> impl IntoElement {
         material_surface(
             window,
             MaterialStyle::inspector().emphasis(MaterialEmphasis::Medium),
