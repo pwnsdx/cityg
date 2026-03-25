@@ -750,13 +750,23 @@ impl CityGServer {
             replaying: false,
         };
         #[allow(clippy::collapsible_if)]
+        let journal_has_entries = config
+            .state_path
+            .as_ref()
+            .and_then(|path| ServerJournal::load_entries(path).ok())
+            .map(|entries| !entries.is_empty())
+            .unwrap_or(false);
         if let Some(path) = config.state_path {
             if let Err(err) = server.recover_from_state(&path, persisted_kbroad_state.as_ref()) {
                 eprintln!("cityg-server: state recovery failed: {err:?}");
             }
         }
         if let Some(state) = persisted_kbroad_state
-            && let Err(err) = server.apply_persisted_kbroad_state(&state)
+            && let Err(err) = if journal_has_entries {
+                server.overlay_persisted_runtime_metadata_after_replay(&state)
+            } else {
+                server.apply_persisted_kbroad_state(&state)
+            }
         {
             eprintln!("cityg-server: kbroad state apply failed: {err:?}");
         }
@@ -1528,6 +1538,78 @@ impl CityGServer {
                         last_ec: device_state.last_ec,
                         last_pcs_refresh_ec: device_state.last_pcs_refresh_ec,
                     },
+                );
+            }
+        }
+        self.ctx.set_kbroad_registry(Some(registry));
+        Ok(())
+    }
+
+    fn overlay_persisted_runtime_metadata_after_replay(
+        &mut self,
+        state: &PersistedKbroadState,
+    ) -> Result<(), CityGError> {
+        let mut registry = self.ctx.kbroad_registry().cloned().unwrap_or_default();
+        for (gid, room_state) in state {
+            registry.insert(gid.clone(), room_state.kbroad_public.clone());
+            let group = self.roster.groups.entry(gid.clone()).or_default();
+            group.kbroad_generation = room_state.kbroad_generation;
+            group.rotation_required = room_state.rotation_required;
+            group.room_admin_pop_keys = room_state.room_admin_pop_keys.iter().cloned().collect();
+            group.last_pcs_refresh_ec =
+                merge_optional_u64_max(group.last_pcs_refresh_ec, room_state.last_pcs_refresh_ec);
+            group.pcs_refresh_min_delta_device_ec =
+                room_state.pcs_refresh_min_delta_device_ec.max(1);
+            group.pcs_refresh_min_delta_group_ec = room_state.pcs_refresh_min_delta_group_ec.max(1);
+            group.pcs_refresh_slot_width_ec = room_state.pcs_refresh_slot_width_ec.max(1);
+            group.max_barrier_update_bytes = usize::try_from(room_state.max_barrier_update_bytes)
+                .unwrap_or(
+                    msphf_orchestrator::BarrierGroupState::default().max_barrier_update_bytes,
+                )
+                .max(1);
+
+            let ctx_state = self.ctx.barrier_group_state_entry_mut(gid.as_slice());
+            ctx_state.last_pcs_refresh_ec = merge_optional_u64_max(
+                ctx_state.last_pcs_refresh_ec,
+                room_state.last_pcs_refresh_ec,
+            );
+            ctx_state.pcs_refresh_min_delta_device_ec =
+                room_state.pcs_refresh_min_delta_device_ec.max(1);
+            ctx_state.pcs_refresh_min_delta_group_ec =
+                room_state.pcs_refresh_min_delta_group_ec.max(1);
+            ctx_state.pcs_refresh_slot_width_ec = room_state.pcs_refresh_slot_width_ec.max(1);
+            ctx_state.max_barrier_update_bytes =
+                usize::try_from(room_state.max_barrier_update_bytes)
+                    .unwrap_or(
+                        msphf_orchestrator::BarrierGroupState::default().max_barrier_update_bytes,
+                    )
+                    .max(1);
+
+            for device_state in &room_state.device_chain_states {
+                let merged = if let Some(existing) = self
+                    .ctx
+                    .device_chain_get(gid.as_slice(), device_state.device_pk.as_slice())
+                    .cloned()
+                {
+                    msphf_orchestrator::DeviceChainState {
+                        last_commit: existing.last_commit,
+                        last_ec: existing.last_ec,
+                        last_pcs_refresh_ec: merge_optional_u64_max(
+                            existing.last_pcs_refresh_ec,
+                            device_state.last_pcs_refresh_ec,
+                        ),
+                    }
+                } else {
+                    msphf_orchestrator::DeviceChainState {
+                        last_commit: device_state.last_commit,
+                        last_ec: device_state.last_ec,
+                        last_pcs_refresh_ec: device_state.last_pcs_refresh_ec,
+                    }
+                };
+                self.ctx.insert_device_chain_state(
+                    gid.as_slice(),
+                    device_state.device_pk.as_slice(),
+                    merged,
                 );
             }
         }
@@ -2813,6 +2895,15 @@ fn persisted_kbroad_room_state(
             u64::try_from(state.max_barrier_update_bytes).unwrap_or(u64::MAX);
     }
     room
+}
+
+fn merge_optional_u64_max(current: Option<u64>, persisted: Option<u64>) -> Option<u64> {
+    match (current, persisted) {
+        (Some(lhs), Some(rhs)) => Some(lhs.max(rhs)),
+        (Some(lhs), None) => Some(lhs),
+        (None, Some(rhs)) => Some(rhs),
+        (None, None) => None,
+    }
 }
 
 fn fresh_kbroad_public() -> Vec<u8> {
@@ -8195,6 +8286,44 @@ mod tests {
         );
         assert_eq!(expected_alice_device_state.last_pcs_refresh_ec, None);
         assert_eq!(expected_bob_device_state.last_pcs_refresh_ec, None);
+        Ok(())
+    }
+
+    #[test]
+    fn crash_recovery_does_not_rollback_barrier_state_from_stale_kbroad_snapshot()
+    -> Result<(), CityGError> {
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("cityg-server-stale-kbroad.journal");
+        let gid = cityg_client::demo::DEMO_GID.to_vec();
+        let expected_barrier_state: msphf_orchestrator::BarrierGroupState;
+
+        {
+            let mut server = demo_server_with_journal(&journal_path);
+            server.persist_kbroad_state()?;
+            let bundle_alice = cityg_client::demo::demo_bundle("alice")?;
+            let bundle_bob = cityg_client::demo::demo_bundle("bob")?;
+            server.accept_epoch(&bundle_alice)?;
+            server.accept_epoch(&bundle_bob)?;
+            expected_barrier_state = server
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .cloned()
+                .ok_or(CityGError::InvalidInput(
+                    "missing barrier state after accepts",
+                ))?;
+            assert_eq!(server.members(gid.as_slice()).len(), 2);
+        }
+
+        let reloaded = demo_server_with_journal(&journal_path);
+        assert_eq!(reloaded.members(gid.as_slice()).len(), 2);
+        assert_eq!(
+            reloaded
+                .ctx
+                .barrier_group_state(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("missing recovered barrier state"))?,
+            &expected_barrier_state
+        );
         Ok(())
     }
 
