@@ -406,10 +406,10 @@ impl CitygApiClient {
 
     /// Configures an admin token for protected control-plane endpoints.
     ///
-    /// The token is sent in the `x-cityg-admin-token` header for:
-    /// - `/v1/config/window`
-    /// - `/v1/rooms/bootstrap`
-    /// - `/v1/rooms/rotate_kbroad`
+    /// The token is sent in the `x-cityg-admin-token` header for `/v1/config/window`.
+    ///
+    /// Room governance endpoints no longer use the server-global admin token and require
+    /// room-scoped [`RoomAdminProof`] instead.
     pub fn with_admin_token(mut self, token: impl Into<String>) -> Self {
         let token = token.into().trim().to_string();
         self.admin_token = if token.is_empty() { None } else { Some(token) };
@@ -564,14 +564,15 @@ impl CitygApiClient {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// This legacy helper no longer submits a request. Use [`Self::bootstrap_room_as_admin`]
+    /// with a room-scoped [`RoomAdminProof`] instead.
     pub async fn bootstrap_room(&self, room_id: &str, kbroad_public: &[u8]) -> Result<(), Error> {
-        let request = BootstrapRoomRequest {
-            room_id: room_id.to_string(),
-            kbroad_public: kbroad_public.to_vec(),
-            admin_proof: None,
-        };
-        let _: BootstrapRoomResponse = self.post_proto("/v1/rooms/bootstrap", request).await?;
-        Ok(())
+        let _ = (room_id, kbroad_public);
+        Err(Error::Parse(
+            "bootstrap_room without RoomAdminProof has been removed; use bootstrap_room_as_admin"
+                .to_string(),
+        ))
     }
 
     /// Bootstraps a room using room-scoped admin proof instead of a server-global token.
@@ -591,19 +592,19 @@ impl CitygApiClient {
     }
 
     /// Rotates the room KBROAD public key and returns the new generation.
+    ///
+    /// This legacy helper no longer submits a request. Use [`Self::rotate_room_kbroad_as_admin`]
+    /// with a room-scoped [`RoomAdminProof`] instead.
     pub async fn rotate_room_kbroad(
         &self,
         room_id: &str,
         kbroad_public: &[u8],
     ) -> Result<u64, Error> {
-        let request = RotateRoomKbroadRequest {
-            room_id: room_id.to_string(),
-            kbroad_public: kbroad_public.to_vec(),
-            admin_proof: None,
-        };
-        let response: RotateRoomKbroadResponse =
-            self.post_proto("/v1/rooms/rotate_kbroad", request).await?;
-        Ok(response.kbroad_generation)
+        let _ = (room_id, kbroad_public);
+        Err(Error::Parse(
+            "rotate_room_kbroad without RoomAdminProof has been removed; use rotate_room_kbroad_as_admin"
+                .to_string(),
+        ))
     }
 
     /// Rotates KBROAD using room-scoped admin proof instead of a server-global token.
@@ -2457,6 +2458,31 @@ mod tests {
             }
         ));
         handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_room_bootstrap_helpers_fail_closed_locally() -> Result<(), Box<dyn StdError>> {
+        let client = CitygApiClient::new("http://localhost:8080");
+        let bootstrap_err = client
+            .bootstrap_room("room-1", &[0xAA; 32])
+            .await
+            .expect_err("legacy bootstrap helper must fail closed");
+        assert!(matches!(
+            bootstrap_err,
+            Error::Parse(message)
+                if message.contains("bootstrap_room_as_admin")
+        ));
+
+        let rotate_err = client
+            .rotate_room_kbroad("room-1", &[0xBB; 32])
+            .await
+            .expect_err("legacy rotate helper must fail closed");
+        assert!(matches!(
+            rotate_err,
+            Error::Parse(message)
+                if message.contains("rotate_room_kbroad_as_admin")
+        ));
         Ok(())
     }
 
