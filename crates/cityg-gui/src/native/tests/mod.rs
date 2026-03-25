@@ -2072,91 +2072,93 @@ fn gpui_render_panels_cover_conditional_branches(cx: &mut TestAppContext) {
     )
     .expect("build session");
 
-    view.update(cx, |model, view_cx| {
-        model.session = Some(session);
-        model.ws_connected = true;
-        let panel_session = model.session.clone().expect("session available");
-        model.room_admins = vec![panel_session.pop_public_key.clone()];
-        model.room_admins_loaded = true;
-        model.room_admin_target.focus();
-        model
-            .room_admin_target
-            .set_value(hex_encode(vec![0xAA; dilithium5::public_key_bytes()]));
-        model.room_admin_revoke_confirmation = Some(vec![0xAA; dilithium5::public_key_bytes()]);
-        let _ = model.render_room_admin_panel(&panel_session, view_cx);
-        let mut other_admin = panel_session.pop_public_key.clone();
-        other_admin[0] ^= 0xFF;
-        model.room_admins = vec![other_admin];
-        let _ = model.render_room_admin_panel(&panel_session, view_cx);
-        model.members = vec![MemberEntry {
-            leaf_id: [0x11; 32],
-            alias: Some("alice".to_string()),
-            pop_public_key: Some(vec![0xAA; dilithium5::public_key_bytes()]),
-            join_timestamp_ms: Some(1),
-            last_seen_timestamp_ms: Some(2),
-        }];
-        model.members_total = 3;
-        model.members_next_offset = Some(1);
-        model.members_mode = MembersMode::Search {
-            query: "ali".to_string(),
-        };
-        model.members_search.focus();
-        model.members_search.set_query("ali".to_string());
-        let _ = model.render_members_panel(view_cx);
+    cx.update(|window, app| {
+        view.update(app, |model, view_cx| {
+            model.session = Some(session);
+            model.ws_connected = true;
+            let panel_session = model.session.clone().expect("session available");
+            model.room_admins = vec![panel_session.pop_public_key.clone()];
+            model.room_admins_loaded = true;
+            model.room_admin_target.focus();
+            model
+                .room_admin_target
+                .set_value(hex_encode(vec![0xAA; dilithium5::public_key_bytes()]));
+            model.room_admin_revoke_confirmation = Some(vec![0xAA; dilithium5::public_key_bytes()]);
+            let _ = model.render_room_admin_panel(window, &panel_session, view_cx);
+            let mut other_admin = panel_session.pop_public_key.clone();
+            other_admin[0] ^= 0xFF;
+            model.room_admins = vec![other_admin];
+            let _ = model.render_room_admin_panel(window, &panel_session, view_cx);
+            model.members = vec![MemberEntry {
+                leaf_id: [0x11; 32],
+                alias: Some("alice".to_string()),
+                pop_public_key: Some(vec![0xAA; dilithium5::public_key_bytes()]),
+                join_timestamp_ms: Some(1),
+                last_seen_timestamp_ms: Some(2),
+            }];
+            model.members_total = 3;
+            model.members_next_offset = Some(1);
+            model.members_mode = MembersMode::Search {
+                query: "ali".to_string(),
+            };
+            model.members_search.focus();
+            model.members_search.set_query("ali".to_string());
+            let _ = model.render_members_panel(window, view_cx);
 
-        model.security_events = vec![SecurityEvent {
-            alias: "alice".to_string(),
-            description: "joined".to_string(),
-            timestamp_ms: 7,
-        }];
-        model.security_unread = 1;
-        model.security_panel_expanded = true;
-        let _ = model.render_security_panel(view_cx);
+            model.security_events = vec![SecurityEvent {
+                alias: "alice".to_string(),
+                description: "joined".to_string(),
+                timestamp_ms: 7,
+            }];
+            model.security_unread = 1;
+            model.security_panel_expanded = true;
+            let _ = model.render_security_panel(window, view_cx);
 
-        model.security_events.clear();
-        let _ = model.render_security_panel(view_cx);
+            model.security_events.clear();
+            let _ = model.render_security_panel(window, view_cx);
 
-        model.security_events = vec![SecurityEvent {
-            alias: "bob".to_string(),
-            description: "revoked".to_string(),
-            timestamp_ms: 9,
-        }];
-        model.security_panel_expanded = false;
-        let _ = model.render_security_panel(view_cx);
+            model.security_events = vec![SecurityEvent {
+                alias: "bob".to_string(),
+                description: "revoked".to_string(),
+                timestamp_ms: 9,
+            }];
+            model.security_panel_expanded = false;
+            let _ = model.render_security_panel(window, view_cx);
 
-        model.activity_events = vec![
-            ActivityEvent {
-                timestamp_ms: 1,
-                kind: ActivityKind::Connection,
-                summary: "connected".to_string(),
-                detail: Some("ws".to_string()),
-            },
-            ActivityEvent {
-                timestamp_ms: 2,
-                kind: ActivityKind::Roster,
-                summary: "roster".to_string(),
-                detail: None,
-            },
-            ActivityEvent {
-                timestamp_ms: 3,
-                kind: ActivityKind::Message,
-                summary: "message".to_string(),
-                detail: Some("cipher".to_string()),
-            },
-            ActivityEvent {
-                timestamp_ms: 4,
-                kind: ActivityKind::Sync,
-                summary: "sync".to_string(),
-                detail: None,
-            },
-            ActivityEvent {
-                timestamp_ms: 5,
-                kind: ActivityKind::System,
-                summary: "system".to_string(),
-                detail: Some("ok".to_string()),
-            },
-        ];
-        let _ = model.render_activity_panel(view_cx);
+            model.activity_events = vec![
+                ActivityEvent {
+                    timestamp_ms: 1,
+                    kind: ActivityKind::Connection,
+                    summary: "connected".to_string(),
+                    detail: Some("ws".to_string()),
+                },
+                ActivityEvent {
+                    timestamp_ms: 2,
+                    kind: ActivityKind::Roster,
+                    summary: "roster".to_string(),
+                    detail: None,
+                },
+                ActivityEvent {
+                    timestamp_ms: 3,
+                    kind: ActivityKind::Message,
+                    summary: "message".to_string(),
+                    detail: Some("cipher".to_string()),
+                },
+                ActivityEvent {
+                    timestamp_ms: 4,
+                    kind: ActivityKind::Sync,
+                    summary: "sync".to_string(),
+                    detail: None,
+                },
+                ActivityEvent {
+                    timestamp_ms: 5,
+                    kind: ActivityKind::System,
+                    summary: "system".to_string(),
+                    detail: Some("ok".to_string()),
+                },
+            ];
+            let _ = model.render_activity_panel(window, view_cx);
+        });
     });
 }
 
@@ -2374,7 +2376,7 @@ fn gpui_callback_and_shortcut_branches_cover_edge_paths(cx: &mut TestAppContext)
             model.last_error = Some("join-fallback".to_string());
             model.categorized_error = None;
             model.info_message = Some("join-info".to_string());
-            let _ = model.render_join(view_cx);
+            let _ = model.render_join(window, view_cx);
 
             let mut session_for_render = session.clone();
             session_for_render.regular_fingerprint = None;

@@ -1,7 +1,7 @@
 use super::*;
 
 impl AppModel {
-    pub(super) fn render_security_panel(&self, cx: &mut ViewContext<Self>) -> Div {
+    pub(super) fn render_security_panel(&self, window: &Window, cx: &mut ViewContext<Self>) -> Div {
         let count = self.security_events.len();
         let title = div()
             .text_size(px(15.0))
@@ -147,18 +147,16 @@ impl AppModel {
             }
         }
 
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(14.0))
-            .py(px(14.0))
-            .rounded(px(18.0))
-            .border(px(1.0))
-            .border_color(rgb(UI_PANEL_BORDER))
-            .bg(ui_panel_fill(self.window_active))
-            .shadow_sm()
-            .child(header)
-            .child(list)
+        material_surface(
+            window,
+            MaterialStyle::inspector().emphasis(MaterialEmphasis::Medium),
+        )
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .px(px(14.0))
+        .py(px(14.0))
+        .child(header)
+        .child(list)
     }
 }

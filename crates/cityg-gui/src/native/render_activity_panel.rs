@@ -1,7 +1,7 @@
 use super::*;
 
 impl AppModel {
-    pub(super) fn render_activity_panel(&self, cx: &mut ViewContext<Self>) -> Div {
+    pub(super) fn render_activity_panel(&self, window: &Window, cx: &mut ViewContext<Self>) -> Div {
         let count = self.activity_events.len();
         let title = div()
             .text_size(px(15.0))
@@ -40,40 +40,45 @@ impl AppModel {
             "Polling"
         };
         let total_members = self.members_total.max(self.members.len() as u64);
-        let metrics = div()
-            .flex()
-            .flex_wrap()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(999.0))
-                    .bg(rgb(0x2a2f38))
-                    .text_size(px(11.0))
-                    .text_color(rgb(UI_INFO_TEXT))
-                    .child(ws_status),
-            )
-            .child(
-                div()
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(999.0))
-                    .bg(rgb(0x223128))
-                    .text_size(px(11.0))
-                    .text_color(rgb(UI_SUCCESS_TEXT))
-                    .child(format!("messages {}", self.messages.len())),
-            )
-            .child(
-                div()
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(999.0))
-                    .bg(rgb(0x352723))
-                    .text_size(px(11.0))
-                    .text_color(rgb(UI_WARN_TEXT))
-                    .child(format!("members {}/{}", self.members.len(), total_members)),
-            );
+        let metrics = material_surface(
+            window,
+            MaterialStyle::grouped_controls().emphasis(MaterialEmphasis::Low),
+        )
+        .flex()
+        .flex_wrap()
+        .gap(px(8.0))
+        .px(px(10.0))
+        .py(px(10.0))
+        .child(
+            div()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(999.0))
+                .bg(rgb(0x2a2f38))
+                .text_size(px(11.0))
+                .text_color(rgb(UI_INFO_TEXT))
+                .child(ws_status),
+        )
+        .child(
+            div()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(999.0))
+                .bg(rgb(0x223128))
+                .text_size(px(11.0))
+                .text_color(rgb(UI_SUCCESS_TEXT))
+                .child(format!("messages {}", self.messages.len())),
+        )
+        .child(
+            div()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(999.0))
+                .bg(rgb(0x352723))
+                .text_size(px(11.0))
+                .text_color(rgb(UI_WARN_TEXT))
+                .child(format!("members {}/{}", self.members.len(), total_members)),
+        );
 
         let mut list = div().flex().flex_col().gap(px(6.0));
 
@@ -157,19 +162,17 @@ impl AppModel {
             }
         }
 
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(14.0))
-            .py(px(14.0))
-            .rounded(px(18.0))
-            .border(px(1.0))
-            .border_color(rgb(UI_PANEL_BORDER))
-            .bg(ui_panel_fill(self.window_active))
-            .shadow_sm()
-            .child(header)
-            .child(metrics)
-            .child(list)
+        material_surface(
+            window,
+            MaterialStyle::inspector().emphasis(MaterialEmphasis::Medium),
+        )
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .px(px(14.0))
+        .py(px(14.0))
+        .child(header)
+        .child(metrics)
+        .child(list)
     }
 }

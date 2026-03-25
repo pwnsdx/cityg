@@ -217,7 +217,7 @@ impl Render for AppModel {
         let body: Div = if let Some(session) = self.session.clone() {
             self.render_session(window, &session, cx)
         } else {
-            self.render_join(cx)
+            self.render_join(window, cx)
         };
 
         let mut root = div()

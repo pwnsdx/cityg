@@ -175,6 +175,7 @@ impl AppModel {
 
     pub(super) fn render_session_inspector(
         &self,
+        window: &Window,
         session: &AppSession,
         inspector_width: f32,
         cx: &mut ViewContext<Self>,
@@ -210,11 +211,11 @@ impl AppModel {
             .track_scroll(&self.right_sidebar_scroll_handle)
             .overflow_y_scroll()
             .block_mouse_except_scroll()
-            .child(self.render_overview_panel(session, cx))
-            .child(self.render_room_admin_panel(session, cx))
-            .child(self.render_members_panel(cx))
-            .child(self.render_security_panel(cx))
-            .child(self.render_activity_panel(cx));
+            .child(self.render_overview_panel(window, session, cx))
+            .child(self.render_room_admin_panel(window, session, cx))
+            .child(self.render_members_panel(window, cx))
+            .child(self.render_security_panel(window, cx))
+            .child(self.render_activity_panel(window, cx));
 
         div()
             .flex()
@@ -225,40 +226,35 @@ impl AppModel {
             .h_full()
             .gap(px(10.0))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(14.0))
-                    .py(px(12.0))
-                    .rounded(px(16.0))
-                    .border(px(1.0))
-                    .border_color(rgb(UI_PANEL_BORDER))
-                    .bg(ui_toolbar_fill(self.window_active))
-                    .shadow_sm()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(UI_PANEL_TEXT))
-                                    .child("Inspector"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(UI_SUBTLE_TEXT))
-                                    .child(format!(
-                                        "{} · {} members",
-                                        session.alias, members_total
-                                    )),
-                            ),
-                    )
-                    .child(hide_button),
+                material_surface(
+                    window,
+                    MaterialStyle::toolbar().emphasis(MaterialEmphasis::Medium),
+                )
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(14.0))
+                .py(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(UI_PANEL_TEXT))
+                                .child("Inspector"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(UI_SUBTLE_TEXT))
+                                .child(format!("{} · {} members", session.alias, members_total)),
+                        ),
+                )
+                .child(hide_button),
             )
             .child(details_scroll)
     }

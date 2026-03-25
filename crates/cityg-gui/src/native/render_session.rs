@@ -60,7 +60,7 @@ impl AppModel {
         if let Some(inspector_width) = inspector_width {
             main_columns = main_columns
                 .child(self.render_inspector_divider(inspector_width, cx))
-                .child(self.render_session_inspector(session, inspector_width, cx));
+                .child(self.render_session_inspector(window, session, inspector_width, cx));
         }
 
         let mut workspace = div()

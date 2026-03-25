@@ -754,6 +754,11 @@ As of 2026-03-25:
   `pwnsdx/gpui` on branch `codex/material-system-foundation`
 - that branch is currently published at commit
   `bd892c36d9e10e44df18d14467c7cf242d00d0c7`
+- the pure-GPUI fallback backend is now being expanded in that branch with
+  role-aware fallback rendering, inactive-window fallback rules, and
+  reduced-transparency resolution at the framework layer
+- City-G has started the app-side adoption pass for that API across the native
+  sidebar/header shell, join shell, inspector cards, and grouped control rows
 - City-G now consumes GPUI from that fork revision via a git patch instead of
   the vendored path dependency
 - the stale vendored GPUI tree in `cityg/vendor/gpui-0.2.2` was retired after

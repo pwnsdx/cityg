@@ -1,7 +1,7 @@
 use super::*;
 
 impl AppModel {
-    pub(super) fn render_members_panel(&self, cx: &mut ViewContext<Self>) -> Div {
+    pub(super) fn render_members_panel(&self, window: &Window, cx: &mut ViewContext<Self>) -> Div {
         let count = self.members.len();
         let total = self.members_total.max(count as u64);
         let title_text = match &self.members_mode {
@@ -134,8 +134,19 @@ impl AppModel {
                 cx.listener(Self::on_members_search_button_clicked),
             );
 
-        let mut search_row = div().flex().items_center().gap(px(10.0));
-        search_row = search_row.child(search_field).child(search_button);
+        let mut search_row = material_surface(
+            window,
+            MaterialStyle::grouped_controls()
+                .emphasis(MaterialEmphasis::Low)
+                .interactive(true),
+        )
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(10.0))
+        .py(px(10.0))
+        .child(search_field)
+        .child(search_button);
 
         let has_query = !self.members_search.query.trim().is_empty();
         if has_query || matches!(self.members_mode, MembersMode::Search { .. }) {
@@ -335,18 +346,16 @@ impl AppModel {
             MembersStatus::Error(message) => Some(message.clone()),
         };
 
-        let mut root = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(14.0))
-            .py(px(14.0))
-            .rounded(px(18.0))
-            .border(px(1.0))
-            .border_color(rgb(UI_PANEL_BORDER))
-            .bg(ui_panel_fill(self.window_active))
-            .shadow_sm()
-            .child(header);
+        let mut root = material_surface(
+            window,
+            MaterialStyle::inspector().emphasis(MaterialEmphasis::Medium),
+        )
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .px(px(14.0))
+        .py(px(14.0))
+        .child(header);
         root = root.child(search_row);
         if let Some(text) = status_text {
             root = root.child(

@@ -3,6 +3,7 @@ use super::*;
 impl AppModel {
     pub(super) fn render_room_admin_panel(
         &self,
+        window: &Window,
         session: &AppSession,
         cx: &mut ViewContext<Self>,
     ) -> Div {
@@ -283,49 +284,47 @@ impl AppModel {
             }
         }
 
-        let mut root = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(14.0))
-            .py(px(14.0))
-            .rounded(px(18.0))
-            .border(px(1.0))
-            .border_color(rgb(UI_PANEL_BORDER))
-            .bg(ui_panel_fill(self.window_active))
-            .shadow_sm()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(15.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(UI_PANEL_TEXT))
-                            .child("Room admins"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(refresh_button)
-                            .child(copy_button),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(if self_is_admin {
-                        rgb(UI_ACCENT_TEXT)
-                    } else {
-                        rgb(UI_SUBTLE_TEXT)
-                    })
-                    .child(role_text),
-            )
-            .child(target_field);
+        let mut root = material_surface(
+            window,
+            MaterialStyle::inspector().emphasis(MaterialEmphasis::Medium),
+        )
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .px(px(14.0))
+        .py(px(14.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(UI_PANEL_TEXT))
+                        .child("Room admins"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(refresh_button)
+                        .child(copy_button),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(if self_is_admin {
+                    rgb(UI_ACCENT_TEXT)
+                } else {
+                    rgb(UI_SUBTLE_TEXT)
+                })
+                .child(role_text),
+        )
+        .child(target_field);
 
         if let Some(text) = access_text {
             root = root.child(
@@ -345,13 +344,20 @@ impl AppModel {
             );
         }
 
-        let mut action_row = div()
-            .flex()
-            .flex_wrap()
-            .gap(px(8.0))
-            .child(grant_button)
-            .child(revoke_button)
-            .child(clear_button);
+        let mut action_row = material_surface(
+            window,
+            MaterialStyle::grouped_controls()
+                .emphasis(MaterialEmphasis::Low)
+                .interactive(true),
+        )
+        .flex()
+        .flex_wrap()
+        .gap(px(8.0))
+        .px(px(10.0))
+        .py(px(10.0))
+        .child(grant_button)
+        .child(revoke_button)
+        .child(clear_button);
         if let Some(button) = cancel_revoke_button {
             action_row = action_row.child(button);
         }
