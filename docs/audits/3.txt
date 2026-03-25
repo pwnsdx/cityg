@@ -1,0 +1,183 @@
+3. State Machine / Replay / Recovery / Finality (COMPLETED)
+
+Tu es un auditeur spécialisé en protocol state machines, replay safety, restart recovery, finality semantics et split-brain analysis.
+
+Tu n’as accès qu’à:
+- `docs/specs.md`
+
+Mission:
+Auditer uniquement la machine d’état implicite du protocole et chercher les failles de conception autour de:
+- pending state
+- replay
+- recovery
+- restart
+- supersession
+- finality
+- stale history
+- rollback
+- fork
+- authenticated history delay
+- activation prématurée
+
+Priorités:
+- transitions JOIN / MERGE / refresh / barrier update
+- pending barrier activation
+- restart correlation
+- discard rules
+- finality vs timeout
+- supersession vs authenticated finality
+- historical snapshot dependencies
+- ce qu’un client doit faire si le serveur retarde ou réordonne des artefacts
+- ce qu’un client doit faire si plusieurs signaux se contredisent
+- toute zone où la spec n’impose pas un fail-closed clair
+
+Question centrale:
+“Un serveur byzantin ou un réseau adversarial peut-il exploiter l’ordre, le délai ou la persistance des événements pour pousser un client dans un mauvais état tout en restant dans les marges du texte ?”
+
+Format:
+- Findings confirmés, triés par sévérité
+- Pour chaque finding:
+  - Titre
+  - Sévérité
+  - Section(s)
+  - Invariant de state machine violé ou insuffisamment spécifié
+  - Scénario adversarial
+  - Impact concret
+  - Correction normative minimale
+- Puis:
+  - Transitions insuffisamment définies
+  - États implicites non spécifiés
+  - Endroits où un diagramme d’état normatif serait nécessaire
+
+Tu ne fais pas une revue crypto générale. Tu fais une revue de machine d’état hostile.
+
+--
+
+Oui.
+
+Pris strictement comme une revue de machine d’état hostile, le texte ferme déjà plusieurs vecteurs locaux évidents, mais il laisse encore des ouvertures structurantes dès qu’on combine `JOIN` / `MERGE` / `barrier_update` avec ordre adversarial, délai d’artefacts, redémarrage, supersession et finalité. Le défaut directeur est que la spec décrit bien des validations locales, mais ne ferme pas normativement la transition globale entre **vu**, **accepté**, **committed**, **final**, **superseded** et **forked**. C’est suffisant pour qu’un serveur byzantin pousse des clients honnêtes dans un mauvais état tout en restant dans les marges du texte. 
+
+## Findings confirmés
+
+1. **Activation prématurée sur simple “acceptance”**
+
+   * **Sévérité :** Critique
+   * **Section(s) :** S11.13.7, S11.14.2, S11.14.3-S11.14.4, S12.3
+   * **Invariant de state machine violé / insuffisamment spécifié :** un client ne doit faire basculer l’état actif `(barrier_version, barrier_roots_hash, K_barrier, K_fs)` que sur un événement d’ordre authentifié **non réversible**. Ici, le texte exige une finalité/authenticated history forte pour **jeter** un `pending_*`, mais pas pour **activer** un nouveau state.
+   * **Scénario adversarial :** le serveur montre à un sous-ensemble de clients qu’un `MERGE` avec `header[175]` est “accepted”. Les non-updaters activent via S11.13.7 ; l’updater active via S11.14.2 “upon observing acceptance”. Ensuite, le serveur retarde ou réordonne l’histoire et présente un autre successeur, ou une histoire commit/final différente.
+   * **Impact concret :** split-brain immédiat sur `K_barrier`; si `header[178] == 1`, split-brain aussi sur `K_fs`; un joiner peut sortir trop tôt de `pending_barrier_recovery`; des clients peuvent commencer à chiffrer/déchiffrer sur une branche non finalisée.
+   * **Correction normative minimale :** introduire explicitement des niveaux d’état `observed`, `authenticated-committed`, `authenticated-final`; interdire tout switch de `K_barrier`/`K_fs` et tout clear de `pending_barrier_recovery` sur simple observation d’acceptance. L’activation ne doit être permise qu’après preuve d’ordre authentifiée et non rollbackable ; sinon, rester dans un état tentatif non actif. 
+
+2. **Supersession et fork ne sont pas définis comme une relation d’ascendance authentifiée**
+
+   * **Sévérité :** Critique
+   * **Section(s) :** S11.14.3-S11.14.4, S12.2, S11.11.1-S11.11.2, S10.6
+   * **Invariant de state machine violé / insuffisamment spécifié :** pour un même prédécesseur `(barrier_version, kem_tree_hash_after, revocation_roots_hash)`, un client doit pouvoir déterminer **un unique successeur actif**, ou entrer fail-closed en cas de contradiction. Le texte parle de merge “accepted”, “superseded”, “different committed update”, “authenticated finality”, sans définir l’objet normatif qui porte l’ascendance, l’unicité et la contradiction.
+   * **Scénario adversarial :** un joiner reçoit via provisioning un “current committed state” `(v, H_v, BU_v)`. Plus tard, le même serveur lui montre une autre histoire authentifiée ou un autre snapshot menant à un autre `(v, H'_v, BU'_v)`, ou deux `MERGE` différents au même `v+1` depuis le même `H_prev`. Chaque artefact peut passer ses vérifications locales propres, mais le texte n’impose pas quoi faire si ces signaux se contredisent.
+   * **Impact concret :** split-brain durable, calculs de `JoinSet`/`RRH` à partir de baselines incompatibles, nettoyage `pending_*` incohérent, activation de branches concurrentes selon l’ordre d’arrivée des artefacts.
+   * **Correction normative minimale :** définir un identifiant de commit / parent-commit authentifié et monotone, lié à tous les artefacts “accepted current state”, snapshots et history handles. Toute contradiction authentifiée sur ce lineage doit forcer un état explicite `fork_suspected/history_inconsistent` qui suspend en fail-closed envoi, déchiffrement applicatif et origine de nouveaux `MERGE`. 
+
+3. **La corrélation d’acceptation après restart peut provoquer un rollback local**
+
+   * **Sévérité :** Critique
+   * **Section(s) :** S11.14.2, S11.14.4
+   * **Invariant de state machine violé / insuffisamment spécifié :** résoudre un `pending_*` après redémarrage doit être **monotone** ; apprendre tardivement qu’un ancien merge a été accepté ne doit jamais réécrire un state actif plus récent.
+   * **Scénario adversarial :** un updater publie un `barrier_update` en version `v+1`, persiste `pending_*`, puis — via reprovisioning, récupération d’histoire ou simple consommation d’autres artefacts — atteint déjà un state courant `> v+1`. S11.14.4 dit pourtant d’“apply acceptance correlation, even if the current group barrier_version is already greater than pending_barrier_version”. Pris littéralement, S11.14.2 réécrit alors `barrier_version`, `K_barrier`, `barrier_roots_hash`, et possiblement `K_fs` avec les valeurs pending plus anciennes.
+   * **Impact concret :** rollback de clés, réouverture d’un ancien domaine de payload, double-application ou désapplication d’un `pcs_refresh`, corruption de la monotonicité locale.
+   * **Correction normative minimale :** scinder explicitement trois cas au restart :
+
+     1. **current == pre-pending** : activation normale ;
+     2. **current est un descendant authentifié du pending accepté** : clear `pending_*` uniquement, sans réécriture de l’état actif ;
+     3. **conflit ou ascendance indémontrable** : `recovery_required/fork_suspected`.
+        Il faut interdire normativement toute écriture qui ferait décroître `barrier_version` ou rejouer `K_fs`. 
+
+4. **Le mode recover-only autorise une activation active sur un état public non vérifié**
+
+   * **Sévérité :** Élevée
+   * **Section(s) :** S3.3, S11.11.3, S11.13.7, S12.3
+   * **Invariant de state machine violé / insuffisamment spécifié :** la perte de vérification FULL sur l’historique public (`FetchBarrierPublicTree` / chain-check) ne doit pas dégrader silencieusement vers une participation active sur un état dont la correction publique n’est pas authentifiée.
+   * **Scénario adversarial :** le serveur retarde ou refuse les snapshots / history handles nécessaires au FULL chain-check. Le client reste recover-only, mais il peut quand même faire un unique match, dériver `K_barrier_new`, exécuter S11.13.7, clear `pending_barrier_recovery`, puis reprendre le send/decrypt payload normal. Le serveur a donc un levier de downgrade : il choisit quels clients restent sur une branche non publiquement vérifiée.
+   * **Impact concret :** split entre clients FULL et recover-only ; sortie prématurée du pending joiner ; envoi/déchiffrement sur une branche spéculative ou forkée ; surface d’attaque accrue par withholding sélectif de snapshots historiques.
+   * **Correction normative minimale :** faire du recover-only un état `tentative_recovered`, non actif pour le plan de données : le client peut éventuellement mémoriser un `K_barrier_candidate`, mais ne doit ni clear `pending_barrier_recovery`, ni activer le payload send/decrypt, ni considérer la branche comme active avant FULL chain-check ou preuve de head finalisée. 
+
+5. **L’obligation “le client MUST ensure que l’état courant est couvert” est inapplicable sans head authentifié**
+
+   * **Sévérité :** Élevée
+   * **Section(s) :** S10.4A (note client), S11.11.1, S12.2-S12.3, S5.2
+   * **Invariant de state machine violé / insuffisamment spécifié :** toute transition dont la légalité dépend de “l’état courant” (`JOIN`, `REGULAR`, `pcs_refresh`, `join_finalize`) doit être gardée par une **preuve de fraîcheur d’histoire** ; l’absence d’un artefact plus récent n’est pas une preuve qu’il n’existe pas.
+   * **Scénario adversarial :** le serveur retarde un `MERGE` qui change `revocation_roots_hash` ou résout un `JoinSet`. Le client reste localement à l’ancien `barrier_version/RRH/JoinSet`. Le texte dit qu’il “MUST ensure” que les revocations ont été barrier-covered avant d’émettre `JOIN`/`REGULAR`, mais il ne lui donne ni head monotone authentifié, ni watermark de finalité, ni règle de refresh avant authoring.
+   * **Impact concret :** authoring sur état stale après révocation, retries `join_finalize` sur mauvais baseline, extension d’une branche périmée chez un serveur byzantin, comportements divergents selon l’implémentation.
+   * **Correction normative minimale :** ajouter au state client un `auth_history_head` / `finalized_head` monotone et authentifié. Avant tout `JOIN`, `REGULAR`, `reason 1` ou `reason 2`, le client doit prouver que son état local est au dernier head committed/final pertinent ; si cette fraîcheur ne peut pas être prouvée, il doit fail-closed et ne rien émettre. 
+
+6. **Le texte traite le crash, pas le rollback de stockage**
+
+   * **Sévérité :** Moyenne
+   * **Section(s) :** S8.2, S5.2, S11.13.7, S11.14.1-S11.14.2
+   * **Invariant de state machine violé / insuffisamment spécifié :** la sûreté replay / activation doit survivre à un rollback de persistance, pas seulement à un crash atomique.
+   * **Scénario adversarial :** après snapshot restore ou rollback local, le client revient à un ancien `barrier_version`, à une ancienne table anti-replay `(tuple_tag, msg_index)`, et à d’anciens `pending_*`. Le serveur peut alors rejouer d’anciens payloads ou d’anciens `barrier_update` qui redeviennent localement “nouveaux”. La spec interdit explicitement l’usage d’un état rollback-prone pour le `msg_index` sender, mais n’impose pas l’équivalent côté receiver/barrier state.
+   * **Impact concret :** duplicate delivery applicatif, résurrection de branches périmées, réouverture de fenêtres de replay au restart.
+   * **Correction normative minimale :** exiger soit un stockage rollback-resistant / compteur monotone scellé, soit un détecteur de régression d’état persistant lié au head authentifié. En cas de régression détectée, entrée obligatoire dans `recovery_required` et interdiction de traiter payloads / barrier_updates tant qu’une reprovisioning authentifiée n’a pas resynchronisé l’état. 
+
+7. **La machine client FS/PCS autour du refresh est sous-spécifiée en présence de réordonnancement**
+
+   * **Sévérité :** Moyenne
+   * **Section(s) :** S5.2, S6.2-S6.6, S10.3, S11.13.7, S11.14.2
+   * **Invariant de state machine violé / insuffisamment spécifié :** l’évolution de `(fs_ec, K_fs)` doit suivre un ordre d’acceptation unique, avec règles explicites pour stale / duplicate / future / gap, surtout au voisinage d’un `pcs_refresh`.
+   * **Scénario adversarial :** le serveur livre un anchor accepté à `t+1` alors que le client n’a pas encore un chemin authentifié à travers le `pcs_refresh` accepté à `t` qui doit reseed `K_fs`. La spec interdit côté serveur les anchors au même `fs_ec` qu’un refresh déjà accepté, mais elle ne dit pas côté client s’il faut bufferiser, rejeter, entrer en recovery ou reconstruire l’ordre avant de stepper `K_fs`.
+   * **Impact concret :** divergences d’implémentation sur `K_fs`, preuves futures invalides, authoring depuis un mauvais côté de la frontière pre/post-refresh, restart recovery ambigu.
+   * **Correction normative minimale :** définir une machine d’application client des anchors acceptés : progression monotone stricte de `fs_ec`, interdiction de franchir une frontière de `pcs_refresh` non authentifiée, `future/gap anchors => buffer ou recovery_required`, et reconstruction canonique de `K_fs` au restart à partir d’un lineage authentifié. 
+
+## Transitions insuffisamment définies
+
+Les transitions qui manquent le plus de définition normative sont :
+
+* `pending_published -> observed_acceptance -> active`
+* `active(v) + accepted(v+1a)` vs `active(v) + accepted(v+1b)`
+* `pending_published + current_head_advanced`
+* `recover_only -> active`
+* `history_freshness_unknown -> JOIN/REGULAR/reason1/reason2 authoring`
+* `pre-refresh K_fs -> post-refresh K_fs` sous livraison désordonnée des anchors. 
+
+## États implicites non spécifiés
+
+Il manque, au minimum, les états implicites suivants :
+
+* `observed_acceptance_not_final`
+* `authenticated_committed_not_final`
+* `fork_suspected / contradictory_authenticated_history`
+* `tentative_recovered_unverified`
+* `recovery_required_due_to_unresolved_pending`
+* `history_freshness_unknown`
+* `rollback_detected`
+* `pending_accepted_but_already_ancestor_of_current` (cas restart). 
+
+## Endroits où un diagramme d’état normatif est nécessaire
+
+Il faut un diagramme normatif, pas seulement du texte, au moins pour :
+
+* le lifecycle `barrier_update` : `published -> observed -> committed -> final -> superseded/forked`
+* le lifecycle updater : `no pending -> pending persisted -> accepted correlated -> descendant confirmed -> superseded -> fork suspected -> cleanup`
+* le lifecycle joiner : `provisioned pending -> recover-only tentative -> FULL-verified current -> reason2-eligible -> active`
+* le lifecycle FS/PCS : `pre-refresh -> refresh accepted -> reseeded -> post-refresh`, avec règles de reorder / gap / duplicate / replay. 
+
+Le verdict central est donc oui : **un serveur byzantin peut exploiter l’ordre, le délai et le withholding des artefacts pour pousser un client dans un mauvais état sans casser les vérifications locales**, parce que la couche “machine d’état globale” — finalité, supersession, fork, fraîcheur d’histoire, restart correlation — n’est pas normativement fermée. 
+
+--
+
+## Commentaires Codex (2026-03-25)
+
+Verdict après vérification contre la spec et l’implémentation:
+
+- **Retenu** : le cœur du signal est juste. La machine d’état globale autour de `accepted` / `superseded` / `final_rejected` / restart correlation n’est pas encore fermée end-to-end.
+- **Traité partiellement** : la spec a été durcie sur le locator de merge (`LookupMergeAcceptance`), la provenance FULL/recover-only du state, et le bootstrap `join_finalize` depuis un prédécesseur authentifié plutôt que depuis un `H_prev` circulaire.
+- **Encore ouvert côté implémentation** : il n’existe pas encore d’API complète d’acceptance-history/finality conforme à ce que la spec demande désormais. C’est le vrai gap restant pour cet audit.
+- **Reclassé** : la formulation la plus agressive sur “activation prématurée sur simple acceptance” reste partiellement spéculative tant que l’objet normatif de finalité n’est pas implémenté. Le risque est réel, mais la fermeture demande d’abord le support history/finality.
+
+État d’implémentation:
+
+- Le code client persiste déjà un marqueur de vérification (`current_barrier_full_verified`) et ne confond plus implicitement `pending_barrier_recovery == false` avec FULL.
+- La corrélation/history complète des merges pending reste à faire.
+
+Conclusion:
+
+Audit **complété** pour la phase de triage. Les conclusions utiles sont intégrées dans la spec, mais la remédiation complète dépend d’une seconde passe d’implémentation sur l’historique accepté et la finalité authentifiée.

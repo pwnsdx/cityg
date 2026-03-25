@@ -1,0 +1,172 @@
+6. DoS / Resource Exhaustion / Complexity Attacker (COMPLETED)
+
+Tu es un red teamer spécialisé en attaques de complexité, amplification CPU/mémoire/disque et obligations normatives qui rendent une implémentation vulnérable au DoS.
+
+Tu n’as accès qu’à:
+- `docs/specs.md`
+
+Mission:
+Auditer la spec uniquement sous l’angle resource exhaustion.
+
+Tu dois chercher:
+- tailles insuffisamment bornées
+- cardinalités insuffisamment bornées
+- historiques à rétention obligatoire
+- recomputations obligatoires coûteuses
+- reconstructions d’arbres ou scans historiques potentiellement amplifiables
+- parsing/verifying paths sur données attacker-controlled
+- exigences de deterministic re-encoding pouvant coûter trop cher sur gros objets
+- obligations de retention historique qui ouvrent un coût disque ou RAM non borné
+- séquences d’appels in-profile qui forcent du travail disproportionné
+- cas où “MUST verify” ou “MUST reconstruct” est posé sans garde-fous de coût
+
+Question centrale:
+“Comment un attaquant peut-il rester dans le profil tout en forçant une implémentation conforme à brûler CPU, RAM, disque ou I/O ?”
+
+Format:
+- Findings confirmés, triés par sévérité
+- Pour chaque finding:
+  - Titre
+  - Sévérité
+  - Section(s)
+  - Mécanisme d’amplification
+  - Ressource impactée
+  - Pourquoi la spec l’autorise ou ne le borne pas assez
+  - Correction normative minimale
+- Puis:
+  - Bornes à ajouter
+  - Endroits à profiler/fuzzer
+  - Clauses de coût qui devraient devenir normatives
+
+Ne fais pas une revue de perf générale. Fais une revue DoS offensive.
+
+--
+
+Voici les findings confirmés, triés par sévérité. Je ne retiens que ce que la spec impose ou autorise explicitement sous l’angle DoS par exhaustion CPU/RAM/disque/I/O. La réponse centrale est oui: un attaquant peut rester in-profile en jouant sur `N_max`, l’historique obligatoire, les merges `barrier_update`, et les payloads/messages valides mais coûteux à parser, re-encoder, reconstruire et persister. 
+
+## 1) `N_max` non borné = multiplicateur universel de RAM/CPU/I/O
+
+* **Sévérité :** Critique
+* **Section(s) :** S5.1, S11.2, S3.3.B, S3.3.C, S11.4, S12.2
+* **Mécanisme d’amplification :** la spec n’impose aucun plafond à `N_max`; or toute la mécanique barrière scale dessus: `pk_entries` a une longueur fixe `2*N_max-1`, `TreeHash` couvre tout l’arbre, les indices valides vont jusqu’à `2*N_max-2`, et les snapshots/hashes/checks s’expriment tous en fonction de cette taille. Un attaquant qui force un groupe “énorme” ou fait rejoindre un client à un tel groupe peut imposer des tableaux, des hashes et des reconstructions massifs tout en restant conforme.
+* **Ressource impactée :** RAM, CPU, disque, I/O réseau.
+* **Pourquoi la spec l’autorise ou ne le borne pas assez :** `N_max` doit seulement être une puissance de deux, fixe pour la vie du groupe. Il n’existe ni `N_max_max`, ni classes de profil, ni règle de rejet au-delà d’une taille sûre.
+* **Correction normative minimale :** définir un `N_max_max` de profil; tout groupe avec `N_max > N_max_max` doit être out-of-profile et rejeté au provisioning/acceptance. 
+
+## 2) Rétention obligatoire de tous les snapshots publics historiques
+
+* **Sévérité :** Critique
+* **Section(s) :** S3.3.C, S5.1, S11.11.1, S11.11.2
+* **Mécanisme d’amplification :** chaque `barrier_update` accepté crée un nouveau snapshot public engagé que le serveur **MUST retain** tant que l’historique du groupe reste fetchable. Un attaquant peut faire monter `barrier_version` indéfiniment via des updates valides, puis forcer le stockage et le service d’un historique croissant. Si l’implémentation choisit deltas/structural sharing/compression, la spec continue d’exiger la reconstruction exacte du tableau `pk_entries`, donc le coût CPU/I/O de reconstruction peut lui aussi croître avec l’âge de l’historique.
+* **Ressource impactée :** disque en croissance non bornée, CPU/I/O de reconstruction, bande passante de fetch.
+* **Pourquoi la spec l’autorise ou ne le borne pas assez :** la seule soupape est “tant que l’historique reste fetchable”, mais cette durée n’est pas bornée dans la spec. Aucune borne sur le nombre de versions retenues, le nombre d’octets par groupe, ni sur la profondeur de replay de deltas.
+* **Correction normative minimale :** ajouter `MAX_HISTORY_BYTES_PER_GROUP` ou `MAX_RETAINED_BARRIER_VERSIONS`, plus `MAX_SNAPSHOT_RECONSTRUCTION_DEPTH`; au-delà, le groupe doit être compacté de façon authentifiée ou retiré/roté. 
+
+## 3) `PayloadEnvelope.ct_payload` n’a aucun plafond
+
+* **Sévérité :** Critique
+* **Section(s) :** S8.1, S1.3, S8.2, S8.4
+* **Mécanisme d’amplification :** un membre malveillant peut envoyer un `PayloadEnvelope` valide avec un `ct_payload` arbitrairement gros. Le receiver doit vérifier le CBOR déterministe du wrapper, dériver les clés, exécuter l’AEAD sur tout le ciphertext, puis persister l’anti-replay avant release. C’est du travail proportionnel à une taille non bornée, parfaitement in-profile.
+* **Ressource impactée :** CPU, RAM, I/O disque, I/O réseau.
+* **Pourquoi la spec l’autorise ou ne le borne pas assez :** `ct_payload` est typé `bstr`, sans `MAX_CT_PAYLOAD_BYTES`, sans limite de frame/envelope, et sans rejet précoce sur taille avant canonicality/AEAD.
+* **Correction normative minimale :** définir `MAX_PAYLOAD_ENVELOPE_BYTES` et `MAX_CT_PAYLOAD_BYTES`; tout dépassement doit être rejeté avant validation CBOR_det et avant AEAD. 
+
+## 4) Le FULL chain-check impose du travail “whole tree” à chaque `barrier_update`
+
+* **Sévérité :** Haute
+* **Section(s) :** S11.11.1, S11.11.2, S11.12.1.G, S11.12.1.H, S11.6, S11.8, S11.9
+* **Mécanisme d’amplification :** pour chaque `barrier_update`, le serveur et les FULL clients doivent charger/fetcher `snapshot_base`, construire `snapshot_pre`, recalculer `kem_tree_hash_before`, appliquer `new_public_keys`, recalculer `kem_tree_hash_after`, puis reconstruire `ExpectedPairs` via `resolution(sibling(...))` et vérifier l’exactitude des `node_ciphertexts`. Même une petite mutation logique déclenche une vérification qui reste au moins linéaire dans l’état public pertinent.
+* **Ressource impactée :** CPU, RAM, I/O.
+* **Pourquoi la spec l’autorise ou ne le borne pas assez :** la forme FULL impose explicitement `FetchBarrierPublicTree(H_prev)` et la reconstruction/hash exacts; aucun chemin normatif équivalent plus borné n’est reconnu quand l’état local courant est déjà authentifié/caché.
+* **Correction normative minimale :** standardiser un chemin de conformité équivalent fondé sur snapshot authentifié local + preuves bornées de sous-arbres; ne plus exiger le fetch complet de `pk_entries_prev` quand `H_prev` correspond à un état local déjà FULL-vérifié. 
+
+## 5) Les interfaces A/B/C offrent à tout membre authentifié des requêtes à réponse coûteuse
+
+* **Sévérité :** Haute
+* **Section(s) :** S3.3.A, S3.3.B, S3.3.C
+* **Mécanisme d’amplification :** tout membre authentifié obtient `ResolveRevokedLeaves(revocation_roots_hash)`, `ResolveJoinsSince(prev_barrier_version)` et `FetchBarrierPublicTree(kem_tree_hash_after)`. Un attaquant peut rester in-profile et bombarder ces interfaces avec des requêtes “légitimes” sur de vieux états, provoquant tri/énumération/reconstruction et grosses réponses.
+* **Ressource impactée :** CPU serveur, disque, I/O réseau, mémoire transitoire.
+* **Pourquoi la spec l’autorise ou ne le borne pas assez :** aucune pagination, aucune borne de cardinalité/réponse, aucune contrainte de coût par appel, aucune fenêtre historique obligatoire limitée.
+* **Correction normative minimale :** rendre A/B/C paginées et bornées (`max_entries_per_page`, `max_bytes_per_response`) avec continuation tokens authentifiés; autoriser le refus normatif des fetchs historiques trop anciens ou trop coûteux. 
+
+## 6) Le `JoinSet` peut être accumulé puis “détoné” par un seul merge
+
+* **Sévérité :** Haute
+* **Section(s) :** S10.4C, S11.6, S11.12.1.F, S11.12.1.G, S12.3
+* **Mécanisme d’amplification :** tant que `RRH` ne change pas, les JOINs peuvent s’accumuler au `barrier_version` courant. Le prochain `barrier_update` doit alors faire `ResolveJoinsSince(prev_barrier_version)`, appliquer tout le `JoinSet`, recalculer l’arbre, puis valider les couples attendus. En plus, `join_finalize` est exempt des rate-limits PCS, donc plusieurs joiners en attente peuvent lancer des tentatives reason=2 concurrentes et faire exécuter la validation coûteuse plusieurs fois avant qu’un seul merge gagne.
+* **Ressource impactée :** CPU, RAM, I/O.
+* **Pourquoi la spec l’autorise ou ne le borne pas assez :** aucun plafond sur le nombre de JOIN non finalisés par `barrier_version`, aucune obligation de “flush” rapide du `JoinSet`, aucun rate-limit explicite pour reason=2 au niveau groupe/version.
+* **Correction normative minimale :** définir `MAX_UNRESOLVED_JOINS_PER_BARRIER_VERSION`; au-delà, le serveur MUST refuser de nouveaux JOIN jusqu’à commit d’un `barrier_update`. Ajouter aussi un plafonnement des tentatives reason=2 par groupe/version. 
+
+## 7) L’anti-replay crash-safe transforme un flood valide en write amplification synchrone
+
+* **Sévérité :** Moyenne
+* **Section(s) :** S8.2
+* **Mécanisme d’amplification :** pour chaque payload accepté, le receiver doit persister crash-safe la paire `(tuple_tag, msg_index)` avant release à l’application ou dans la même transaction. Un membre malveillant peut envoyer beaucoup de messages valides, tous uniques, et forcer au moins une écriture durable par message.
+* **Ressource impactée :** I/O disque, latence, croissance d’état durable.
+* **Pourquoi la spec l’autorise ou ne le borne pas assez :** elle impose la durabilité avant release, mais ne fixe ni `MAX_MSGS_PER_TUPLE`, ni horizon normatif de GC des tuples périmés, ni mode de batching explicitement admis. La référence “2^20” n’est qu’opérationnelle, pas une borne dure.
+* **Correction normative minimale :** définir `MAX_MSGS_PER_TUPLE`, un point de GC normatif des tuples obsolètes, et autoriser explicitement une journalisation batchée crash-safe bornée. 
+
+## 8) La vérification CBOR_det est imposée comme algorithme coûteux, pas comme propriété
+
+* **Sévérité :** Moyenne
+* **Section(s) :** S1.3, S8.1, S11.5.1, S11.12.1.B, S11.11.2
+* **Mécanisme d’amplification :** pour les objets CBOR_det, le vérificateur doit parser, re-encoder, puis comparer byte-for-byte. Sur de gros blobs attacker-controlled mais in-profile, cela impose au moins deux passes complètes et souvent une seconde copie complète en mémoire.
+* **Ressource impactée :** CPU, RAM.
+* **Pourquoi la spec l’autorise ou ne le borne pas assez :** S1.3 présente cette méthode comme “the conforming verification method”, au lieu d’autoriser des validateurs single-pass ou parser-level qui prouvent la canonicalité sans seconde matérialisation.
+* **Correction normative minimale :** reformuler l’exigence en propriété: “MUST reject non-deterministic CBOR”, mais “MAY use any equivalent verification method”, y compris un validateur canonique streaming/single-pass. 
+
+## Bornes à ajouter
+
+* `N_max_max` de profil, dur et uniforme.
+* `MAX_HISTORY_BYTES_PER_GROUP` ou `MAX_RETAINED_BARRIER_VERSIONS`.
+* `MAX_SNAPSHOT_RECONSTRUCTION_DEPTH` pour `FetchBarrierPublicTree`.
+* `MAX_PAYLOAD_ENVELOPE_BYTES` et `MAX_CT_PAYLOAD_BYTES`.
+* `MAX_UNRESOLVED_JOINS_PER_BARRIER_VERSION`.
+* `MAX_JOIN_FINALIZE_ATTEMPTS_PER_GROUP_VERSION`.
+* `MAX_MSGS_PER_TUPLE` + règle de GC des tuples obsolètes.
+* Pagination obligatoire et bornée pour `ResolveRevokedLeaves`, `ResolveJoinsSince`, `FetchBarrierPublicTree`.
+* `max_barrier_update_bytes` relié normativement à `N_max` et à un `MAX_NODE_CIPHERTEXTS`, pas seulement laissé au déploiement.
+
+## Endroits à profiler / fuzzer
+
+* `FetchBarrierPublicTree` sur historiques longs, sparse/dense, avec et sans deltas.
+* Le chemin serveur S11.12.1.G/H avec gros `JoinSet`, gros `RevokedLeafSet`, et `node_ciphertexts` maximaux.
+* Le chemin FULL client S11.11.2 sur suites de petits `barrier_update` fréquents.
+* Le parser CBOR_det sur `PayloadEnvelope` avec `ct_payload` géant.
+* Le store anti-replay sous flood de `msg_index` uniques et durables.
+* Les courses de `join_finalize` reason=2 venant de nombreux joiners en attente.
+* Les cas “historical query spam” sur A/B/C avec vieux `prev_barrier_version` et vieux `kem_tree_hash_after`.
+
+## Clauses de coût qui devraient devenir normatives
+
+* Toute interface externe MUST être paginée et bornée en octets et en cardinalité.
+* Tout historique MUST être borné soit en versions, soit en bytes, soit en âge; sinon le groupe MUST être retiré/roté.
+* La reconstruction d’un snapshot historique MUST être bornée par une profondeur maximale de replay/deltas.
+* La FULL verification MUST admettre un chemin de conformité à coût borné fondé sur cache authentifié + preuves bornées.
+* Les payloads MUST avoir des plafonds de taille absolus au niveau wire.
+* Les JOIN non finalisés MUST être bornés par version de barrière.
+* Les tuples anti-replay périmés MUST devenir collectables à un point normatif explicite.
+* Les obligations de canonicalité MUST être formulées comme propriété de rejet, pas comme obligation de parse+re-encode.
+
+Le pattern dominant ici n’est pas “crypto chère”; c’est “histoire exacte + reconstruction exacte + persistance crash-safe + absence de bornes globales”. C’est exactement le genre de spec qui permet à un attaquant conforme de convertir du trafic/appels légitimes en combustion prévisible de CPU, RAM, disque et I/O. 
+
+--
+
+## Commentaires Codex (2026-03-25)
+
+Verdict après vérification contre la spec et l’implémentation:
+
+- **Retenu et traité** : l’absence de plafond explicite sur `PayloadEnvelope.ct_payload`. La spec impose maintenant `MAX_CT_PAYLOAD_BYTES` / `MAX_PAYLOAD_ENVELOPE_BYTES`, et le code rejette explicitement les payloads trop gros côté client et côté API.
+- **Retenu et traité dans la spec** : l’exigence CBOR_det comme propriété de rejet, et non comme unique algorithme parse+re-encode.
+- **Retenu partiellement** : la spec exige maintenant un `N_max_max` fini. L’implémentation n’est pas encore complètement harmonisée sur un rejet uniforme de tous les `N_max` hors borne.
+- **Encore ouvert** : rétention historique bornée, pagination/coût borné des interfaces A/B/C, cap global sur `JoinSet` unresolved, et stratégie normée pour éviter le fetch/reconstruct complet quand un snapshot local authentifié existe déjà.
+
+État d’implémentation:
+
+- Les budgets applicatifs existaient déjà sur plusieurs endpoints coûteux; cette passe ferme surtout le trou le plus concret et universel: les payload envelopes sans plafond explicite.
+- La partie “historique coûteux / snapshots publics illimités” reste surtout un sujet de spec et d’architecture serveur.
+
+Conclusion:
+
+Audit **complété** pour la phase triage/remédiation. Le finding le plus immédiat et exploitable a été corrigé en spec et en code. Le reste constitue une seconde tranche de hardening DoS, plus structurelle.

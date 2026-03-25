@@ -81,7 +81,7 @@ MUST use deterministic CBOR per RFC 8949 S4.2:
 
 Deterministic-encoding verification rule (normative, MUST):
 For any object that MUST be encoded as CBOR_det, verifiers MUST check that the received bytes are deterministic.
-The conforming verification method is:
+The reference conforming verification method is:
 1. Parse the received CBOR bytes using a parser that:
    * rejects floats,
    * rejects indefinite-length items,
@@ -89,6 +89,7 @@ The conforming verification method is:
    * rejects malformed CBOR.
 2. Re-encode the parsed data model using CBOR_det rules.
 3. Require the re-encoded bytes to be byte-for-byte identical to the original received bytes.
+Implementations MAY use any equivalent verification method (including parser-level or single-pass canonicality validation) provided it rejects exactly the same non-deterministic inputs as the reference method above.
 
 If the check fails:
 * for anchor headers or other profile-global CBOR_det items: reject with 907.1
@@ -257,6 +258,7 @@ Publication contexts (normative):
   * `barrier-recovery form`: the form carried by a MERGE publication intended for cross-client recovery from serialized wire state.
 * The initial JOIN anchor published by a pending joiner MUST use the `author-local form`; the joiner does not yet know `K_barrier`, and no server-side provisioning of `K_barrier` is permitted.
 * Cross-client recovery from serialized wire state is defined only for the `barrier-recovery form`. A JOIN anchor by itself is not a peer-recoverable HP transport artifact.
+* Any MERGE publication that is intended to remain peer-recoverable after acceptance/persistence MUST carry the `barrier-recovery form`. `author-local form` is ephemeral local construction state only and MUST NOT be treated as satisfying cross-client recovery from accepted wire state.
 
 Author-local sealing algorithm (normative):
 * Let `xk_hash` be the transcript hash / handshake binding for the published anchor.
@@ -293,6 +295,7 @@ Semantics / security properties (normative):
 * In `barrier-recovery form`, the confidentiality/binding tuple is `(barrier_key, barrier_version, xk_hash, hp_commit)`.
 * A cut-and-paste of `hp_ciphertext` into another anchor with a different `barrier_version`, `xk_hash`, `hp_commit`, or barrier key MUST fail client recovery.
 * `BarrierHpPlaintext` length MUST be in `[1, MAX_HP_BYTES]` both before encryption and after decryption.
+* Any implementation that successfully decrypts `header[97]` MUST recompute `H_L("msphf/hp/commit", [BarrierHpPlaintext])` from the recovered plaintext and MUST require exact equality with `header[99]` before parsing or using `HpArtifact`.
 
 Validation / rejection rules (normative):
 * Server-side acceptance MUST validate `header[97]` during S10.1 pre-filters before JOIN/MERGE-specific acceptance logic continues.
@@ -301,7 +304,8 @@ Validation / rejection rules (normative):
 * A client recovery path that expects `barrier-recovery form` MUST derive `hp_key` exactly as above and MUST reject/ignore the envelope for recovery if:
   * `header[176]` is missing or malformed,
   * AEAD open fails,
-  * the recovered plaintext length is zero or exceeds `MAX_HP_BYTES`.
+  * the recovered plaintext length is zero or exceeds `MAX_HP_BYTES`,
+  * recomputed `H_L("msphf/hp/commit", [BarrierHpPlaintext]) != header[99]`.
 * A client MUST NOT silently substitute another transport mode or fall back to a legacy room-secret transport when `header[97]` validation fails.
 
 Out-of-profile rule (normative):
@@ -416,7 +420,7 @@ Barrier public state:
 * barrier_version : uint
 * barrier_roots_hash : bstr32
 * kem_tree_hash_after : bstr32
-* N_max : uint (power of two; fixed group lifetime)
+* N_max : uint (power of two; fixed group lifetime; deployment/profile MUST define and enforce a finite `N_max_max`, and groups with `N_max > N_max_max` are out of profile)
 * Server MUST store pk_entries matching kem_tree_hash_after and a historical map from each committed kem_tree_hash_after to its corresponding pk_entries, and MUST serve both current and historical committed snapshots via FetchBarrierPublicTree.
 
 S5.2 Client persistent secret state
@@ -431,11 +435,14 @@ Barrier secret state:
 * barrier_roots_hash : bstr32 -- covered revocation-roots baseline for the client's current authenticated barrier state
 * K_barrier : bstr32
 * kem_tree_hash_after : bstr32
+* current_barrier_full_verified : bool -- true iff the client's currently stored `(barrier_version, barrier_roots_hash, kem_tree_hash_after)` has been FULL-verified per S11.11.2 for that same stored state; false if the state was learned or advanced only via recover-only processing
 * dk_leaf for the client's barrier leaf (join-generated)
 * pkhash_leaf := H_pk(ek_leaf) for the client's barrier leaf (bstr32)
 * dk_n keys for internal nodes on the client's SelfPath (derived per S11.13.5)
 * pkhash_n := H_pk(ek_n) for each stored dk_n (bstr32)
 * pending_barrier_recovery : bool -- true for a newly joined client until it has successfully derived `K_barrier` via S11.13/S12.3
+Normative note:
+* `pending_barrier_recovery == false` by itself MUST NOT be interpreted as FULL verification. Clients MUST persist `current_barrier_full_verified` (or an equivalent crash-safe marker) across restart.
 
 Updater-local pending activation state:
 * If the client has published a local barrier_update that is not yet correlated/activated, it MUST persist the pending_* fields required by S11.14.1, including pending_barrier_version, pending_we_epoch_id (or equivalent stable merge identifier), pending_fs_ec, pending_revocation_roots_hash, pending_kem_tree_hash_after, pending_K_barrier_new, pending_barrier_update_reason, pending_K_fs_after_pcs (if any), pending_barrier_update_digest, and pending_on_path_key_material.
@@ -533,16 +540,23 @@ PayloadEnvelope = [
   msg_index : uint,
   ct_payload : bstr
 ]
+Normative constants:
+* `MAX_CT_PAYLOAD_BYTES := 1048576`
+* `MAX_PAYLOAD_ENVELOPE_BYTES := 1048640`  /* total serialized PayloadEnvelope size, including CBOR wrapper */
 Define sender_leaf_id (normative):
 * sender_leaf_id is the authenticated 32-byte current membership `leaf_id` of the sending device for this group, supplied by the outer message transport / authenticated sender context for this payload. It is NOT `cover_leaf_index(device_pk)`.
 * Every in-profile payload transport MUST carry an authenticated sender device identifier (for example `author_device_pk`) and an authenticated membership view sufficient to derive that device's current `leaf_id` for this group. A transport that omits authenticated sender device identity is out of profile for S8.
 * The same sender_leaf_id MUST be supplied to both the encrypt and decrypt paths for S8.3/S8.4 derivations.
 * If sender_leaf_id is missing, malformed, or not exactly 32 bytes, the implementation MUST fail closed and MUST NOT attempt payload decryption.
 * Implementations MUST verify that `sender_leaf_id` corresponds to the authenticated sender device's current membership `leaf_id` in the authenticated membership view for this payload; mismatch -> drop payload.
+* The membership subsystem MUST ensure `leaf_id(device_pk)` is injective within a `gid` across simultaneously active devices. Reassignment of a historical `leaf_id` to a different active device within the same `gid` is out of profile.
 Wire encoding requirement (normative, MUST):
 * PayloadEnvelope MUST be encoded as CBOR_det array of length exactly 3.
-* The first element MUST be the CBOR text string exactly equal to "fs-hybrid-msg-v2".
-* msg_index MUST be cleartext (element 2).
+* `PayloadEnvelope[0]` MUST be the CBOR text string exactly equal to `"fs-hybrid-msg-v2"`.
+* `PayloadEnvelope[1]` MUST be the cleartext `msg_index:uint`.
+* `PayloadEnvelope[2]` MUST be `ct_payload:bstr`.
+* `ct_payload` length MUST be in `[1, MAX_CT_PAYLOAD_BYTES]`.
+* The total serialized `PayloadEnvelope` length MUST be in `[1, MAX_PAYLOAD_ENVELOPE_BYTES]`.
 * Receivers MUST verify CBOR_det determinism per S1.3 for PayloadEnvelope bytes; if invalid, receivers MUST discard the message as malformed.
 
 S8.2 msg_index uniqueness rule (CRITICAL)
@@ -717,7 +731,8 @@ If GroupState.barrier_initialized == true AND RRH != GroupState.barrier_roots_ha
 * header[175] MUST be present (barrier_update required).
 * header[178] MUST equal 0 (revocation_or_bootstrap).
 * header[176] MUST equal BV + 1.
-* If any of the above is violated, the server MUST reject with 960.11 barrier_update_required_on_revocation_change.
+* If the anchor is not a MERGE, OR header[175] is absent, OR header[176] != BV + 1, the server MUST reject with 960.11 barrier_update_required_on_revocation_change.
+* If header[175] is present but header[178] != 0, the server MUST reject with 960.13.
 
 Clarification (normative):
 * Since JOIN and REGULAR anchors MUST NOT carry header[175] by S4.3, any JOIN or REGULAR anchor for which RRH != GroupState.barrier_roots_hash MUST be rejected with 960.11.
@@ -870,6 +885,7 @@ BarrierUpdate = [
   kem_tree_hash_after    : bstr32,
   cover_payload          : bstr
 ]
+`BarrierUpdate` MUST be a CBOR array of length exactly 8.
 KemTreeCoverPayload (CBOR bytes inside cover_payload):
 KemTreeCoverPayload = [
   updater_leaf               : uint,
@@ -878,6 +894,7 @@ KemTreeCoverPayload = [
   node_ciphertexts           : [* NodeCiphertext],
   new_public_keys            : [* [uint, bstr]]
 ]
+`KemTreeCoverPayload` MUST be a CBOR array of length exactly 5.
 NodeCiphertext:
 NodeCiphertext = [
   source_node      : uint,
@@ -886,6 +903,8 @@ NodeCiphertext = [
   kem_ct           : bstr,       1088 bytes
   wrapped_ps       : bstr        48 bytes (32 secret + 16 tag)
 ]
+`NodeCiphertext` MUST be a CBOR array of length exactly 5.
+Each `new_public_keys` entry MUST be a CBOR array of length exactly 2.
 SRX privacy default:
 * revoked_leaf_indices_hint MUST be null unless deployment explicitly allows it.
 * Security MUST NOT depend on it.
@@ -1066,8 +1085,14 @@ Join-finalize bootstrap exception (normative):
 * A newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if, it has:
   * the S12.2 provisioned current barrier metadata for the current committed state,
   * authenticated access to S3.3.A/B/C at that same current committed state, with all such responses validating to the provisioned `current_history_view_id`,
-  * the authenticated accepted current `barrier_update` bytes for that same current committed state, together with authenticated history material sufficient to execute the S11.11.2 chain-checks literally against the provisioned `H_prev` and `current_history_view_id`,
+  * the authenticated accepted current `barrier_update` bytes for that same current committed state, together with authenticated history material sufficient to authenticate the predecessor snapshot named by that accepted update,
+  * and has executed the bootstrap verification context below for that accepted current committed state,
   * successfully performed the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 for that current committed state.
+Bootstrap verification context (normative):
+* For this exception only, the `H_prev` used by the S11.11.2-style checks is NOT the joiner's locally stored current `kem_tree_hash_after`.
+* Instead, define `BU_current :=` the authenticated accepted current `barrier_update` bytes provisioned for the current committed state, and define `H_prev_bootstrap := BU_current.kem_tree_hash_before`.
+* The joiner MUST fetch/authenticate `snapshot_base := FetchBarrierPublicTree(H_prev_bootstrap)` and MUST execute the S11.11.2 chain-checks against `BU_current`, `H_prev_bootstrap`, `current_history_view_id`, and the corresponding authenticated A/B/C responses for that same view.
+* A joiner MUST NOT treat its provisioned current `kem_tree_hash_after` alone as a sufficient trust root for this bootstrap check.
 * Satisfying the bullets above establishes FULL public-state verification sufficient for join_finalize eligibility even though the client has not yet derived the current `K_barrier`.
 * A pending joiner admitted under this exception MUST still NOT originate reason 0 or reason 1 while `pending_barrier_recovery == true`.
 If this check fails, the updater MUST abort barrier_update creation, MUST NOT sign/emit an anchor containing barrier_update, and MUST surface 960.9.
@@ -1291,6 +1316,7 @@ On successful processing:
 * K_barrier           := K_barrier_new
 * kem_tree_hash_after := BU.kem_tree_hash_after
 * pending_barrier_recovery := false
+* `current_barrier_full_verified := false`, unless the same logical activation path already completed S11.11.2 FULL verification for this exact stored post-state as part of the same crash-safe decision.
 * If header[178] == 1 (pcs_refresh), apply FS reseed per S6.6 using K_barrier_new at the same atomic activation point.
 * If header[178] == 2 (join_finalize), `K_fs` MUST remain unchanged by this activation.
 Atomicity requirement (normative, MUST):
@@ -1401,7 +1427,7 @@ Barrier required fields:
 * pcs_refresh_min_delta_device_ec (uint; >=1)
 * pcs_refresh_min_delta_group_ec (uint; >=1)
 * pcs_refresh_slot_width_ec (uint; >=1)
-* authenticated accepted current `barrier_update` bytes for the current committed state, together with authenticated history material sufficient to execute the S11.11.2 chain-checks for `join_finalize` bootstrap eligibility against that current `history_view_id`
+* authenticated accepted current `barrier_update` bytes for the current committed state, together with authenticated history material sufficient to authenticate the predecessor snapshot named by that update (`BU_current.kem_tree_hash_before`) and to execute the S11.11.2 chain-checks for `join_finalize` bootstrap eligibility against that current `history_view_id`
 FS-hybrid required fields:
 * initial K_fs (bstr32) and initial fs_ec (uint) -- or a derivation seed sufficient to deterministically compute the same initial `K_fs` and `fs_ec`
 * Joiners MUST NOT locally sample an unrelated fresh `K_fs` for an already-existing group, because PCS reseed in S6.6 requires all honest clients to evolve from the same pre-refresh `K_fs`.
@@ -1570,6 +1596,7 @@ The test suite MUST include:
   * any legacy/unknown transport mode in `header[97]` -> reject as malformed,
   * empty ciphertext, ciphertext shorter than `AEAD_TAG_LEN`, or ciphertext longer than `MAX_HP_ENVELOPE_BYTES` -> reject as malformed,
   * successful AEAD open to an empty `BarrierHpPlaintext` -> reject as malformed,
+  * successful AEAD open where recomputed `H_L("msphf/hp/commit", [BarrierHpPlaintext]) != header[99]` -> reject as malformed,
   * wrong AEAD suite or malformed UTF-8/text shape -> reject as malformed,
   * replay / cut-and-paste of a valid `hp_ciphertext` into a different `(barrier_version, xk_hash, hp_commit)` context -> recovery MUST fail,
   * recovery attempted under the wrong barrier key -> recovery MUST fail.

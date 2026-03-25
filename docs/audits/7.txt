@@ -1,0 +1,160 @@
+7. Adversarial Server / Trust Boundary Specialist (COMPLETED)
+
+Tu es un reviewer focalisé sur le modèle de menace “serveur malveillant ou byzantin” et les erreurs de boundary entre validation crypto, gouvernance, metadata visible et secret material.
+
+Tu n’as accès qu’à:
+- `docs/specs.md`
+
+Mission:
+Auditer la spec en supposant que le serveur est actif, malveillant, réordonne, retarde, remplace, omet, ment sur l’historique, et essaie de pousser des clients vers des états dangereux.
+
+Tu dois chercher:
+- endroits où la spec fait trop confiance au serveur
+- endroits où la blindness est affirmée sans fail-closed opérationnel suffisant
+- historique/fetch/snapshot où le serveur peut orienter un client
+- confusion entre “le serveur ne connaît pas le secret” et “le serveur ne peut pas nuire”
+- erreurs de boundary entre policy, governance, protocol maintenance et authorization
+- zones où un admin malveillant ou un serveur malveillant peut dégrader liveness ou sécurité sans sortir du texte
+- obligations client insuffisantes face à un serveur qui ment par omission
+- interfaces fetch/history/snapshot où la détection d’un serveur fautif n’est pas suffisamment actionnable
+
+Question centrale:
+“Le texte protège-t-il seulement contre un serveur passif, ou réellement contre un serveur actif et byzantin là où il le prétend ?”
+
+Format:
+- Findings confirmés par sévérité
+- Pour chaque finding:
+  - Titre
+  - Sévérité
+  - Section(s)
+  - Boundary/trust assumption en cause
+  - Scénario serveur malveillant
+  - Impact concret
+  - Renforcement normatif minimal
+- Puis:
+  - Hypothèses de confiance implicites
+  - Claims de sécurité insuffisamment soutenus
+  - Clarifications de modèle de menace à ajouter
+
+Tu dois attaquer le texte comme si le serveur cherchait activement à exploiter chaque latitude.
+
+--
+
+Audit basé uniquement sur `docs/specs.md`. Je n’accorde donc aucun crédit à des garanties qui vivent “dans un autre doc” tant qu’elles ne sont pas rendues normatives ici.
+
+## Verdict
+
+Le texte fait **mieux qu’un modèle purement passif** sur quelques chemins précis: hash-auth des snapshots d’arbre, `no-fallback` sur `K_barrier`, `unique-match` fail-closed, persistance crash-safe côté updater, et vérification `ek_n` par les clients FULL là où ils peuvent la faire. **Mais il ne ferme pas réellement le modèle “serveur actif/byzantin” de bout en bout**. Là où il le suggère, la résistance est surtout **locale** (tamper d’un blob, substitution d’un snapshot déjà hashé, cut-and-paste d’enveloppe), pas **globale** contre l’équivoque d’historique, l’omission, la dérive de policy, ou le steering via metadata/gouvernance/provisioning. 
+
+# Findings confirmés
+
+## Critique
+
+**1. Le hash de snapshot authentifie un état, pas la canonité de l’historique accepté**
+
+* **Sévérité:** Critique
+* **Sections:** S3.3.C, S11.11.1, S11.11.2, S11.14.2–S11.14.4, S12.2
+* **Boundary / trust assumption en cause:** le texte traite `kem_tree_hash_after` + `FetchBarrierPublicTree(H_prev)` + des “authenticated history handle(s)” non spécifiés comme suffisants pour ancrer la *bonne* lignée acceptée.
+* **Scénario serveur malveillant:** le serveur présente à deux clients deux MERGE concurrents valides depuis le même `prev_barrier_version`, chacun signé, chacun cohérent avec sa propre chaîne de `kem_tree_hash_after`. Chaque client FULL revalide sa branche locale, fetch le snapshot par hash, retrouve le bon `TreeHash`, puis continue. Rien, dans ce texte, n’impose une preuve d’unicité/canonicité globale de la branche “acceptée”.
+* **Impact concret:** split-brain durable de `barrier_version` / `K_barrier`, recovery croisé impossible, joiners et updaters corrélés à la mauvaise branche, et aucune détection globale tant que chaque branche reste localement cohérente.
+* **Renforcement normatif minimal:** exiger un engagement d’historique **append-only et globalement canonique** (checkpoint signé, hash de chaîne, log transparency, ou équivalent) et lier provisioning, `FetchBarrierPublicTree`, acceptance-correlation et history lookup à cet engagement, pas seulement à un hash de snapshot. 
+
+## Élevée
+
+**2. Les invariants de sûreté critiques vivent encore côté serveur, pas côté client**
+
+* **Sévérité:** Élevée
+* **Sections:** S10.3, S10.4A, S10.4B, S10.4C, S10.5, S11.13.3, S11.13.7, S11.14.2
+* **Boundary / trust assumption en cause:** le texte suppose qu’un serveur honnête applique les garde-fous d’acceptation (FLG, boundary PCS, rate-limit PCS, revocation gating, join-finalize gating) et ne force pas les clients à revalider le sous-ensemble critique avant d’avancer leurs secrets.
+* **Scénario serveur malveillant:** un membre/admin buggy ou malveillant émet une ancre signée mais hors-policy; un serveur byzantin la “proclame acceptée” et la distribue. Côté réception, le client revalide l’adjacence locale de version et le `barrier_update_reason` miroir, puis applique quand même `K_barrier_new` et éventuellement le reseed `K_fs`, sans rejouer les garde-fous S10.3/S10.4B/S10.4C qui étaient censés empêcher cet état.
+* **Impact concret:** le serveur devient oracle de policy. Des états que le protocole dit “inacceptables” côté serveur deviennent tout de même atteignables côté clients.
+* **Renforcement normatif minimal:** définir une **revalidation client obligatoire** du sous-ensemble sécurité de S10 avant toute activation locale (`K_barrier`, `K_fs`, barrier version). Si les données nécessaires manquent, le client ne doit pas avancer. 
+
+**3. `ResolveJoinsSince(prev_barrier_version)` n’est pas lié à un état-cible authentifié**
+
+* **Sévérité:** Élevée
+* **Sections:** S3.3.B, S10.4C, S11.6, S11.11.2, S11.13.3, S12.2
+* **Boundary / trust assumption en cause:** l’API suppose que “since `prev_barrier_version`” suffit à identifier le bon `JoinSet`.
+* **Scénario serveur malveillant:** le client veut vérifier un `barrier_update` précis, mais le serveur répond avec les joins “depuis `prev_barrier_version`” vus depuis un état plus tardif, ou avec un sous-ensemble opportuniste. Comme l’API n’a **pas d’upper bound authentifié** (checkpoint root, anchor digest, history commitment, etc.), le serveur choisit implicitement la fenêtre temporelle effective.
+* **Impact concret:** reconstruction historique ambiguë, `snapshot_pre` biaisé, éligibilité `join_finalize` pilotable, et impossibilité de savoir si le `JoinSet` correspond bien à la transition vérifiée.
+* **Renforcement normatif minimal:** remplacer l’API par quelque chose comme `ResolveJoinsBetween(prev_barrier_version, target_history_commitment)` ou `ResolveJoinsForBarrierTransition(bu_digest/checkpoint)` et exiger une preuve de complétude pour **cet état-cible exact**. 
+
+**4. L’omission sur joins/revocations est “intégrity-protected” en théorie, mais pas fail-closed en pratique**
+
+* **Sévérité:** Élevée
+* **Sections:** S3.3.A, S3.3.B, S11.6, S11.11.2, S11.13.3, S12.2, S12.3
+* **Boundary / trust assumption en cause:** le texte dit que `ResolveRevokedLeaves` et `ResolveJoinsSince` sont “integrity-protected”, mais il ne définit pas ici la forme des preuves d’**inclusion + complétude**, ni l’obligation client si le serveur répond par omission.
+* **Scénario serveur malveillant:** le serveur omet une leaf de join pour une cible donnée. Tous les clients qui dépendent de ce même serveur reconstruisent un `snapshot_pre` cohérent avec cette omission, et le joiner omis ne recevra jamais de `NodeCiphertext` matchant sa `SelfPath`; il reste `pending_barrier_recovery` indéfiniment. Même logique pour des revocations si la complétude de l’énumération n’est pas démontrée.
+* **Impact concret:** exclusion ciblée et starvation par omission, sans casser les secrets ni modifier les blobs signés.
+* **Renforcement normatif minimal:** exiger des **preuves explicites de complétude/absence** liées au root de membership/revocation pertinent; l’absence de telles preuves doit être une erreur de sécurité dure, pas une simple incapacité locale. 
+
+**5. Le mode “recover-only” est un downgrade de sécurité que le serveur peut imposer**
+
+* **Sévérité:** Élevée
+* **Sections:** S3.3 “Verification levels”, S11.11.3, S11.13.7, S12.3
+* **Boundary / trust assumption en cause:** le texte accepte qu’un client sans `C` (pas de `FetchBarrierPublicTree` vérifiable) continue malgré tout à avancer son état via recovery local.
+* **Scénario serveur malveillant:** il cesse de servir les snapshots historiques/authentifiés à une cible, mais continue de lui livrer des `barrier_update` recoverables. Le client n’est plus FULL, ne fait plus les chain-checks complets, mais il avance quand même `barrier_version`, `K_barrier`, puis reprend ses envois/réceptions normaux après recovery.
+* **Impact concret:** perte silencieuse d’une partie précisément des défenses “serveur actif”, imposée par le serveur lui-même.
+* **Renforcement normatif minimal:** faire de `recover-only` un **mode dégradé explicite**, visible et borné; imposer une revalidation FULL du state courant avant retour à un mode “normal”, ou au moins avant de continuer à accepter indéfiniment de nouveaux sauts de `barrier_version`. 
+
+**6. Policy, governance et provisioning sont hors de la lignée authentifiée qui protège le crypto-state**
+
+* **Sévérité:** Élevée
+* **Sections:** note “CONTROL-PLANE GOVERNANCE”, S4.4, S10.3, S10.4B, S11.6 (leaf exhaustion note), S12.2, S12.3
+* **Boundary / trust assumption en cause:** le texte sépare le crypto-core de la gouvernance, de la policy et du provisioning, mais les décisions de ces plans contrôlent directement qui peut avancer, avec quels paramètres, et sur quelle base.
+* **Scénario serveur/admin malveillant:** il fournit à des clients différents des valeurs différentes pour `max_barrier_update_bytes` ou les paramètres PCS, ou bien il pousse/churne la revocation state de façon agressive. Résultat: certains clients rejettent, d’autres acceptent; les joiners restent pending; la churn consomme un `N_max` fixe et pousse vers l’épuisement des leaves sans mécanisme de migration in-protocol. Tout cela sans jamais apprendre `K_barrier`.
+* **Impact concret:** partition et effondrement de liveness pilotés par metadata/gouvernance, pas par compromission crypto.
+* **Renforcement normatif minimal:** lier un **hash de policy/governance/provisioning state** à l’historique authentifié; spécifier les autorisations/rate-limits des actions admin qui modifient membership/revocation/policy; lier le provisioning d’un joiner à un commit d’historique précis. 
+
+## Moyenne
+
+**7. Les diagnostics de faute existent, mais ils ne sont pas vraiment actionnables contre un serveur byzantin**
+
+* **Sévérité:** Moyenne
+* **Sections:** S3.3.C, S11.14.2–S11.14.4, S12.3, S13
+* **Boundary / trust assumption en cause:** le texte suppose qu’un `960.9` ou un `960.6` local suffit comme réponse opérationnelle à un serveur menteur/par omission.
+* **Scénario serveur malveillant:** il provoque des `snapshot_auth_failure`, maintient un updater dans un pending-state non résolu, ou laisse un joiner en `no_match` permanent. Le texte demande de ne pas avancer, de retenir le pending state, ou de marquer un diag local, mais ne définit ni safe-mode global, ni quarantaine du serveur, ni source alternative obligatoire.
+* **Impact concret:** la détection existe, mais reste ambiguë et facilement normalisable comme “race/loss scenario”; la faute active du serveur n’est pas transformée en décision sûre et homogène côté clients.
+* **Renforcement normatif minimal:** définir une **machine d’état de faute**: après échecs répétés/non résolus, bloquer les opérations risquées, exiger une comparaison hors bande ou une autre source d’historique, et exposer un état “serveur fautif” explicite. 
+
+# Hypothèses de confiance implicites
+
+Le texte présuppose au moins ceci, sans le rendre autosuffisant dans `docs/specs.md` :
+
+1. un substrat d’historique/checkpoint **append-only, globalement cohérent et prouvable**;
+2. des APIs membership/revocation qui prouvent la **complétude**, pas seulement une forme vague d’intégrité;
+3. un canal de provisioning/policy cohérent entre clients et lié au même état committé;
+4. un plan de gouvernance/autorisation externe qui ne peut pas être utilisé pour churer la sécurité ou la liveness “légitimement”;
+5. une réponse opérationnelle externe quand le serveur refuse snapshots/history. Sans ces hypothèses, la résistance byzantine annoncée est partielle. 
+
+# Claims de sécurité insuffisamment soutenus
+
+Le claim “active-server resistance” est trop large si on le lit comme une garantie globale. Dans ce texte, il est mieux soutenu pour **la substitution locale de snapshot/tree material** chez un client FULL déjà sur une lignée locale de confiance. Il n’est pas suffisamment soutenu pour **l’équivoque d’historique**, **l’omission**, **le steering du `JoinSet`**, **la dérive de policy/provisioning**, ni pour la séparation “serveur ne connaît pas `K_barrier`” vs “serveur ne peut pas nuire”. La phrase “server-side checks alone do not protect against an actively malicious server” est juste, mais les remèdes client exigés ici ne couvrent pas tout ce que le serveur actif peut encore manipuler. 
+
+# Clarifications de modèle de menace à ajouter
+
+Le texte devrait ajouter explicitement :
+
+* ce qui prouve la **branche canonique** de l’historique accepté;
+* quelle est la sémantique exacte et le binding d’état de `ResolveJoinsSince`;
+* quels checks S10 les clients **doivent** rejouer avant d’avancer `K_barrier`/`K_fs`;
+* quels objets de policy/governance/provisioning sont authentifiés, autorisés, et **liés** à l’historique;
+* si un admin malveillant fait partie du modèle de menace, quel dommage est considéré “acceptable”;
+* quelle action obligatoire suit des `960.9`, `960.6`, ou d’un `pending_barrier_recovery` prolongé. 
+
+En réponse à la question centrale: **non, le texte ne protège pas seulement contre un serveur passif, mais il ne protège pas non plus pleinement contre un serveur actif et byzantin là où il le laisse entendre**. Il fournit de vraies défenses actives locales, mais pas un modèle byzantin fermé sur l’historique, l’omission, la gouvernance et la metadata. 
+
+--
+
+## Commentaires Codex (2026-03-25)
+
+Verdict après vérification contre la spec et l’implémentation:
+
+- **Retenu** : le point le plus solide reste l’absence de canonité/finalité/history object vraiment global et authentifié. L’audit 5 puis cette tranche ont renforcé la cohérence de vue (`history_view_id`), mais cela ne prouve toujours pas une branche canonique append-only globale.
+- **Retenu partiellement** : la frontière recover-only/FULL et la provenance du state sont mieux spécifiées, mais le protocole ne fournit toujours pas d’attestation serveur-checkable de FULL verification.
+- **Reclassé** : plusieurs points de l’audit 7 recoupent en pratique les trous déjà triés par les audits 3/4/5. Je les garde comme symptômes d’un même problème de trust boundary autour de l’historique accepté et de la finalité.
+- **Encore ouvert** : omission proofs/completeness des réponses membership, API d’acceptance-history/finality, binding normatif plus fort entre policy/provisioning et historique accepté.
+
+Conclusion:
+
+Audit **complété** pour la phase triage. Le diagnostic reste valable: la résistance au serveur actif est locale mais pas globalement fermée. Cette tranche améliore la fail-closed behavior, mais la fermeture byzantine complète demandera encore une passe dédiée sur history/finality/proof of completeness.

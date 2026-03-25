@@ -1,0 +1,359 @@
+1. Contradictions / Ambiguïtés (COMPLETED)
+
+Tu es un auditeur sécurité senior spécialisé en revues offensives de spécifications protocolaires.
+
+Tu n’as accès qu’à un seul fichier:
+- `docs/specs.md`
+
+Tu n’as PAS accès au code, aux tests, ni aux autres docs. Tu dois faire une revue strictement spec-level.
+
+Mission:
+Trouver les contradictions internes, ambiguïtés exploitables, formulations insuffisamment normatives, et cas où deux implémentations honnêtes pourraient diverger tout en se croyant conformes.
+
+Ce que tu dois chercher en priorité:
+- MUST/SHOULD incompatibles
+- termes non définis ou définis de manière instable
+- artefacts qui changent de sens selon les sections
+- règles informatives qui contredisent les règles normatives
+- flows autorisés dans une section et implicitement interdits dans une autre
+- conditions de rejet insuffisamment précises
+- champs dont la validation attendue n’est pas testable exactement
+- ambiguïtés sur canonical CBOR, ordering, uniqueness, version binding, parent selection, replay scope, state transitions
+
+Question centrale:
+“Si deux équipes implémentent exactement ce texte, où peuvent-elles produire des systèmes incompatibles ou vulnérables sans violer explicitement la spec ?”
+
+Format de sortie:
+- Findings confirmés, triés par sévérité
+- Pour chaque finding:
+  - Titre
+  - Sévérité
+  - Section(s) concernée(s)
+  - Texte/règle en cause
+  - Pourquoi c’est ambigu ou contradictoire
+  - Comment cela peut créer une divergence ou une faille
+  - Correction normative minimale proposée
+- Puis:
+  - Ambiguïtés à clarifier
+  - Invariants manquants
+  - Questions ouvertes aux auteurs
+
+Ne paraphrase pas la spec. Fais une revue offensive.
+
+--
+
+Voici la revue offensive, strictement **spec-level**, de `docs/specs.md` 
+
+Je ne retiens ici que les points où **deux implémentations honnêtes peuvent diverger**, ou où le texte permet une **faille de validation / recovery / interop** sans violer explicitement la spec.
+
+## Findings confirmés
+
+### 1) Le bootstrap `join_finalize` est internement incohérent / quasi inimplémentable tel qu’écrit
+
+**Sévérité**: Critique
+**Section(s) concernée(s)**: S11.11.1, S11.11.2, S12.2, S12.3 (l. 1025-1059, 1356-1398)
+
+**Texte/règle en cause**
+
+* S11.11.1 autorise un joiner pending à émettre `reason=2` s’il a les `current barrier_update bytes for the current committed state` et peut exécuter les checks de S11.11.2 “**literally against the provisioned H_prev**”.
+* S11.11.2 définit `H_prev := client's locally stored kem_tree_hash_after` et l’utilise comme **snapshot_base avant** de vérifier `BU.kem_tree_hash_before`.
+
+**Pourquoi c’est ambigu / contradictoire**
+S11.11.2 est un vérificateur de **mise à jour suivante**: il part de l’état local courant et vérifie qu’un `barrier_update` transforme cet état courant en état nouveau.
+Mais S12.2/S11.11.1 demandent au joiner de vérifier **l’update qui a produit l’état courant** à partir de `H_prev` qui est précisément **le hash de l’état courant**. Pour cet update-là, le bon “before” n’est pas l’état courant, mais son **prédécesseur**.
+
+Autrement dit, la spec demande de prouver l’état courant avec un algorithme qui suppose que l’état courant est l’état précédent.
+
+**Comment cela peut créer une divergence ou une faille**
+
+* Une équipe suivra le texte littéralement et conclura que l’exception `join_finalize` n’est jamais satisfiable.
+* Une autre réécrira implicitement la procédure pour “rejouer” depuis l’état précédent.
+* Résultat: divergence sur l’éligibilité `reason=2`, et donc sur la capacité des joiners à sortir de `pending_barrier_recovery`.
+* En pratique, ça ouvre un gros risque de **join deadlock** ou de **contournement ad hoc** des garanties FULL-verifying.
+
+**Correction normative minimale proposée**
+Ajouter une procédure distincte, par exemple `BootstrapVerifyCurrentCommittedBarrierState`, avec des entrées explicites:
+
+* `H_before_current`
+* `BU_current`
+* `H_after_current`
+* handles d’historique authentifiés requis
+
+Ou, à défaut, réécrire S11.11.1/S12.2 pour dire explicitement que, pour ce bootstrap, `H_prev` désigne **le snapshot précédent l’état courant**, pas `kem_tree_hash_after` courant.
+
+---
+
+### 2) `header[97]` n’a pas de discriminateur wire entre `author-local form` et `barrier-recovery form`
+
+**Sévérité**: Critique
+**Section(s) concernée(s)**: S3.4, S10.1, S12.1, S12.3, S14.9 (l. 202-283, 628-634, 1351-1354, 1380-1398, 1526-1540)
+
+**Texte/règle en cause**
+
+* S3.4 dit que `header[97]` a “**the same wire shape in two publication contexts**”.
+* Les deux formes partagent exactement le même `BarrierHpEnvelope`.
+* S12.1 impose `author-local form` pour le JOIN initial.
+* S12.3 dit que le transport peer-recoverable commence “**once a barrier-recovery form envelope is published on an accepted MERGE**”.
+* S10.1 ne valide que la forme/mode/taille, pas le contexte de publication.
+
+**Pourquoi c’est ambigu / contradictoire**
+Le wire ne contient **aucun bit, mode ou champ** qui distingue:
+
+* une enveloppe localement scellée non récupérable,
+* d’une enveloppe MERGE réellement peer-recoverable.
+
+La spec suggère qu’un MERGE local est d’abord `author-local`, puis “rebound/sealed”, mais **n’écrit jamais** que le MERGE accepté/persisté **doit** être en `barrier-recovery form`.
+
+**Comment cela peut créer une divergence ou une faille**
+
+* Implémentation A: accepte/persiste un MERGE avec `header[97]` encore en `author-local form`, car rien ne l’interdit explicitement.
+* Implémentation B: suppose que tout MERGE accepté est peer-recoverable et essaie d’en tirer le HP recovery.
+* Résultat: **MERGE accepté mais non récupérable**, joiners bloqués, recovery cassé, divergence inter-client sur l’état sérialisé.
+
+**Correction normative minimale proposée**
+Écrire explicitement:
+
+* **tout MERGE accepté/persisté MUST carry `barrier-recovery form`**;
+* `author-local form` **MUST NOT** apparaître dans l’état wire/authentifié après acceptation;
+* idéalement, utiliser **deux modes wire distincts** au lieu de deux “contexts” partageant la même forme.
+
+---
+
+### 3) Les formes CBOR de `BarrierUpdate` / `KemTreeCoverPayload` / `NodeCiphertext` ne sont pas closes de façon testable
+
+**Sévérité**: Haute
+**Section(s) concernée(s)**: S11.5, S11.5.1, S11.12.1.B-C, S11.13.3 (l. 835-886, 1086-1103, 1184-1203)
+
+**Texte/règle en cause**
+La spec définit ces objets comme des arrays structurés, mais n’écrit jamais explicitement:
+
+* `BarrierUpdate` longueur exacte = 8
+* `KemTreeCoverPayload` longueur exacte = 5
+* `NodeCiphertext` longueur exacte = 5
+* `new_public_keys` entry longueur exacte = 2
+
+Elle dit seulement “parse”, “CBOR_det”, puis quelques contraintes internes.
+
+**Pourquoi c’est ambigu / contradictoire**
+CBOR_det garantit une sérialisation déterministe du **modèle de données accepté par le parseur**.
+Il ne dit rien sur le fait qu’un parseur:
+
+* rejette des éléments en trop,
+* ignore des trailing fields,
+* accepte des variantes “future-compatible”.
+
+Donc deux parseurs honnêtes peuvent tous deux valider le même CBOR déterministe de manière différente.
+
+**Comment cela peut créer une divergence ou une faille**
+Un attaquant peut fabriquer un `barrier_update` avec:
+
+* un élément trailing dans `BarrierUpdate`,
+* un champ additionnel dans `NodeCiphertext`,
+* une entrée `new_public_keys` de longueur > 2,
+
+et provoquer:
+
+* acceptation par une implémentation “tolérante”,
+* rejet par une implémentation “stricte”.
+
+Comme les **raw bytes** sont ensuite digérés dans `barrier_update_digest`, on obtient un vrai **split de validation**, pas juste une différence cosmétique.
+
+**Correction normative minimale proposée**
+Ajouter des MUST explicites:
+
+* `BarrierUpdate` MUST be an array of length exactly 8
+* `KemTreeCoverPayload` MUST be an array of length exactly 5
+* `NodeCiphertext` MUST be an array of length exactly 5
+* chaque entrée `[uint, bstr]` de `new_public_keys` MUST be length exactly 2
+* tout élément supplémentaire ou manquant MUST be rejected
+
+---
+
+### 4) `ResolveJoinsSince()` et `unresolved JoinSet` sont sous-définis alors qu’ils pilotent à la fois la gating et les hashes
+
+**Sévérité**: Haute
+**Section(s) concernée(s)**: S3.3.B, S10.4C, S11.6, S11.12.1.F-G, S11.13.3, S12.3, S14.7-S14.8 (l. 176-185, 734-748, 888-914, 1110-1131, 1184-1203, 1380-1398, 1501-1524)
+
+**Texte/règle en cause**
+
+* L’API renvoie les joins “**that became active since prev_barrier_version**”.
+* Plus loin, la spec parle d’“**unresolved JoinSet**”.
+* Cette notion décide:
+
+  * `header[178] == 1` ou `2`,
+  * si un author peut faire `join_finalize`,
+  * le contenu de `snapshot_pre`,
+  * la logique de retry après race.
+
+**Pourquoi c’est ambigu / contradictoire**
+La spec ne fixe pas exactement:
+
+* si “since” est strict (`> v`) ou inclusif,
+* si un join sort du JoinSet à l’acceptation d’un `reason=2`,
+* ce qui se passe après une tentative `reason=2` perdue,
+* si “unresolved” signifie “accepted but not barrier-covered” ou autre chose.
+
+**Comment cela peut créer une divergence ou une faille**
+Deux implémentations honnêtes peuvent calculer des JoinSet différents à historique égal.
+Conséquences directes:
+
+* l’une attend `header[178]=2`, l’autre `header[178]=1`;
+* l’une construit un `snapshot_pre` différent, donc `kem_tree_hash_before` différent;
+* l’une autorise un retry `join_finalize`, l’autre le refuse.
+
+C’est un point de divergence **consensus-critical** pour les `barrier_update`.
+
+**Correction normative minimale proposée**
+Définir `JoinSet(prev_barrier_version)` mathématiquement, par exemple:
+
+> “ensemble des feuilles dont le JOIN a été accepté après le commit ayant fixé `barrier_version = prev_barrier_version` et qui n’ont pas encore été couvertes par un `barrier_update` accepté de version strictement supérieure”.
+
+Et définir explicitement “unresolved JoinSet” comme ce même ensemble.
+
+---
+
+### 5) La “closed-world registry” n’est pas réellement close; le “merge profile” requis n’est pas défini dans ce document
+
+**Sévérité**: Haute
+**Section(s) concernée(s)**: S4.2.1-S4.3, avec effets en S7/S9/S10 (l. 303-353)
+
+**Texte/règle en cause**
+
+* La registry liste plein de clés “core” uniquement par numéro.
+* Seules certaines familles reçoivent des types/noms explicites.
+* S4.3 dit qu’un MERGE “**MUST include merge/checkpoint keys as required by merge profile**”.
+* Or ce “merge profile” n’est pas défini dans `docs/specs.md`.
+
+**Pourquoi c’est ambigu / contradictoire**
+Une registry “closed-world” doit permettre une validation exacte. Ici, ce n’est pas le cas:
+
+* plusieurs clés enregistrées n’ont pas de type normatif centralisé,
+* les clés merge/checkpoint sont listées mais leur présence exacte n’est pas définie ici.
+
+**Comment cela peut créer une divergence ou une faille**
+Deux équipes peuvent toutes deux se croire conformes tout en:
+
+* imposant des sous-ensembles différents de clés MERGE,
+* acceptant des types différents pour une même clé,
+* construisant des bind tuples / commits sur des valeurs interprétées différemment.
+
+Le résultat est un profil wire qui n’est pas réellement fermé.
+
+**Correction normative minimale proposée**
+Soit:
+
+* compléter **dans ce document** la registry avec `key -> name -> type -> exact presence semantics`,
+  soit:
+* importer **normativement** un document versionné externe, identifié par version/profile ID, qui fixe ce merge profile.
+
+---
+
+### 6) Conflit normatif sur le code d’erreur: `960.11` vs `960.13`
+
+**Sévérité**: Moyenne
+**Section(s) concernée(s)**: S10.4A, S11.12.1.A-B, S14.5 (l. 686-698, 1077-1096, 1483-1493)
+
+**Texte/règle en cause**
+
+* S10.4A: si `RRH != GroupState.barrier_roots_hash` et qu’une des conditions échoue, le serveur **MUST reject with 960.11**.
+* S11.12.1.A/B: si revocations pending et `header[178] != 0`, le serveur **MUST reject 960.13**.
+* S14.5 négatif exige explicitement: `RRH changed` avec `header[178]=1` -> **960.13**.
+
+**Pourquoi c’est ambigu / contradictoire**
+Même entrée, deux codes MUST différents.
+
+**Comment cela peut créer une divergence ou une faille**
+
+* Implémentation A suit S10.4A -> 960.11.
+* Implémentation B suit S11.12.1 / KAT -> 960.13.
+
+Même si l’ancre est rejetée dans les deux cas, la conformance et la logique client côté retry / télémétrie / classement d’erreurs divergeront.
+
+**Correction normative minimale proposée**
+Choisir une partition unique:
+
+* `960.11` uniquement pour “revocation change requires a barrier_update/MERGE and it is absent or wrong anchor type”,
+* `960.13` uniquement pour “barrier_update présent mais reason non-revocation alors que revocations pending”.
+
+---
+
+### 7) `PayloadEnvelope`: la position de `msg_index` est ambiguë
+
+**Sévérité**: Moyenne
+**Section(s) concernée(s)**: S8.1, avec contraste S3.4 (l. 505-520, 223-227)
+
+**Texte/règle en cause**
+
+* `PayloadEnvelope = ["fs-hybrid-msg-v2", msg_index : uint, ct_payload : bstr]`
+* puis: `msg_index MUST be cleartext (element 2)`
+
+**Pourquoi c’est ambigu / contradictoire**
+Le tuple écrit place `msg_index` en **deuxième** position.
+Mais le document emploie ailleurs un style **0-based** explicite (`element 0`, `element 1`, `element 2`) pour `BarrierHpEnvelope`.
+Ici, “element 2” peut être lu:
+
+* comme “deuxième élément”,
+* ou comme “index 2”, donc troisième élément.
+
+**Comment cela peut créer une divergence ou une faille**
+Un parseur peut attendre:
+
+* `[tag, msg_index, ct]`
+* ou `[tag, ct, msg_index]`
+
+C’est un pur bug d’interop wire.
+
+**Correction normative minimale proposée**
+Réécrire en indices explicites:
+
+* `PayloadEnvelope[0] MUST equal "fs-hybrid-msg-v2"`
+* `PayloadEnvelope[1] MUST be msg_index:uint`
+* `PayloadEnvelope[2] MUST be ct_payload:bstr`
+
+---
+
+## Ambiguïtés à clarifier
+
+* `S12.3` renvoie “process any observed barrier_update messages (**S11.13.4**)”. Cette référence pointe seulement sur la **dérivation**, pas sur tout le pipeline de validation/recovery. Il faut dire `S11.13` ou lister explicitement les sous-sections obligatoires.
+* Le statut d’un **pending joiner** après un `barrier_update` accepté mais localement `960.6` n’est pas défini: avance-t-il quand même son **état public** (`barrier_version`, `kem_tree_hash_after`, `barrier_roots_hash`) sans `K_barrier`, ou reste-t-il entièrement au versionnement précédent ?
+* `HpArtifact` n’a pas de validation normative exacte après déchiffrement: exact field-set, types, unknown keys, missing keys.
+* Les `REGULAR` anchors ont `header[97]` obligatoire, mais aucun consommateur/recovery normatif n’est défini pour eux.
+* `equivalent stable merge identifier` est mentionné comme critique pour la corrélation pending, mais n’est jamais normativement défini.
+
+## Invariants manquants
+
+* Longueur exacte et fermeture stricte de **toutes** les structures CBOR imbriquées.
+* Type/longueur exacts de **chaque** header enregistré dans S4.2.
+* Invariant explicite séparant **état barrière public** et **état barrière secret** pour les joiners pending.
+* Règle explicite: un MERGE accepté/persisté est-il toujours **peer-recoverable** ?
+* Définition mathématique de l’entrée/sortie d’un join dans `JoinSet`.
+* Borne inférieure explicite pour `N_max` (le texte dit power-of-two, mais pas clairement `>= 2`).
+
+## Questions ouvertes aux auteurs
+
+1. Quelle est la procédure normative exacte qui permet à un joiner pending de prouver **l’état courant** pour `reason=2` sans déjà posséder `K_barrier` ?
+2. Un MERGE accepté peut-il légalement porter `header[97]` en `author-local form`, ou est-ce strictement interdit sur l’état wire persistant ?
+3. Quel événement authentifié retire exactement une feuille du `JoinSet` / `unresolved JoinSet` ?
+4. Où est défini le **merge profile** qui rend testable la présence des clés 130/131/132/133/134/135/136/138/144/145/148 ?
+5. Voulez-vous une politique **closed-world stricte** pour `HpArtifact`, `BarrierUpdate`, `KemTreeCoverPayload`, etc., ou autoriser des champs futurs inconnus ?
+6. Entre `960.11` et `960.13`, quel code est contractuel pour `RRH changed + header[175] present + header[178] != 0` ?
+
+--
+
+## Commentaires Codex (2026-03-25)
+
+Verdict après vérification contre la spec et le code:
+
+- **Retenu et traité dans la spec** : l’incohérence du bootstrap `join_finalize` autour de `H_prev`, la fermeture exacte des formes CBOR `BarrierUpdate` / `KemTreeCoverPayload` / `NodeCiphertext`, l’ambiguïté de position de `msg_index`, et le conflit `960.11` vs `960.13`.
+- **Retenu mais déjà traité dans la tranche audit 5** : la sous-définition de `ResolveJoinsSince()` / `JoinSet`.
+- **Retenu comme risque de spec, non fermé dans cette tranche** : la confusion `author-local form` vs `barrier-recovery form` de `header[97]`. La spec est clarifiée, mais le wire reste identique; une vraie fermeture demanderait un discriminateur wire ou une attestation supplémentaire.
+- **Reclassé en dette documentaire** : la “closed-world registry” incomplète et le `merge profile` non autoporté dans `docs/specs.md` restent un problème de packaging normatif, mais pas un bug d’implémentation corrigible localement dans cette passe.
+
+État d’implémentation:
+
+- Les parseurs serveur/client étaient déjà stricts sur les longueurs de tableaux CBOR pertinentes; la correction utile ici était surtout de rendre cette exigence explicite dans la spec.
+- Le bootstrap `join_finalize` côté code suit déjà une logique plus proche du prédécesseur authentifié que du texte initial; la spec est maintenant alignée avec cette lecture.
+
+Conclusion:
+
+Audit **complété** pour la phase triage/remédiation. Les contradictions les plus dangereuses ont été clarifiées dans la spec. Les écarts restants relèvent surtout d’une refonte plus large du wire profile `header[97]` et de la modularisation des docs normatives.

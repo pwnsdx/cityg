@@ -1,0 +1,185 @@
+2. Crypto Binding / Downgrade / Cut-and-Paste (COMPLETED)
+
+Tu es un cryptographic protocol reviewer focalisé sur les binding gaps, downgrade paths, replay cross-context et substitution d’artefacts.
+
+Tu n’as accès qu’à:
+- `docs/specs.md`
+
+Tu n’as pas accès au code.
+
+Mission:
+Auditer la spec uniquement sous l’angle suivant:
+- tout ce qui devrait être bindé cryptographiquement ou contextuellement
+- tout ce qui pourrait être rejoué, recollé, substitué ou downgradé
+- tout ce qui pourrait mélanger versions, labels, epochs, rooms, roles, barrier states, roots ou payloads
+
+Priorités absolues:
+- version binding et “no mixing”
+- labels H_L / HKDF info strings
+- `barrier-sealed-v1`
+- AAD / nonce / transcript hash / commit binding
+- binding entre room/gid, epoch, barrier_version, roots, update digest, sender identity, admin identity, leaf identity
+- cross-context replay
+- substitution de payload signé
+- artefacts valides dans un contexte mais réutilisables dans un autre
+- downgrade implicite vers comportements legacy
+- distinction author-local vs barrier-recovery forms
+- tout ce qui laisse une latitude dangereuse à un implémenteur
+
+Question centrale:
+“Quels éléments critiques ne sont pas explicitement et suffisamment bindés pour empêcher replay, substitution, mix-and-match ou downgrade ?”
+
+Format:
+- Findings confirmés par sévérité
+- Pour chaque finding:
+  - Titre
+  - Sévérité
+  - Section(s)
+  - Élément non ou mal bindé
+  - Scénario d’attaque
+  - Impact concret
+  - MUST manquant ou texte à renforcer
+- Puis:
+  - Binding gaps secondaires
+  - Downgrade hazards
+  - Tests normatifs/KAT qu’il faudrait exiger
+
+Tu dois raisonner comme un attaquant qui fait du cut-and-paste d’artefacts.
+
+--
+
+Audit basé uniquement sur `docs/specs.md` / fichier fourni. 
+
+Verdict central: la spec ferme déjà plusieurs portes évidentes — `header[175]` est digest-bindé dans `fs_dev_commit`, les payloads bindent `gid/weid/t/xk_hash/E_k/barrier_version/sender_leaf_id/msg_index`, les clients FULL font un chain-check du tree state, et `barrier-sealed-v1` interdit le fallback legacy silencieux.
+Mais il reste des gaps critiques et élevés là où le texte ne bind pas *explicitement* ce qu’il faudrait pour résister au cut-and-paste, au replay inter-contexte, au mix-and-match et au downgrade.
+
+## Findings confirmés
+
+### Critique — `header[99]` n’est pas explicitement revalidé après déchiffrement de `header[97]`
+
+* **Sévérité**: Critique
+* **Sections**: S3.4, S14.9
+* **Élément non ou mal bindé**: la spec dit que `header[99]` est le commit de `BarrierHpPlaintext`, mais le chemin de recovery ne dit jamais explicitement: “après `AEAD_Open`, recompute `H_L("msphf/hp/commit", [plaintext])` et compare à `header[99]`”.
+* **Scénario d’attaque**: un auteur/updater malveillant signe une ancre avec un `header[99]` authentique, mais chiffre dans `header[97]` un autre `HpArtifact` que celui auquel `header[99]` est censé committer. Le déchiffrement réussira quand même, car la clé, le nonce et l’AAD dépendent de `hp_commit`, pas du contenu déchiffré.
+* **Impact concret**: substitution de payload signé dans `barrier-sealed-v1`. Le receiver peut consommer `hp_a/hp_b/m_a/m_b/params_id/hp_version` qui ne sont pas réellement ceux committés par `header[99]`.
+* **MUST manquant / texte à renforcer**:
+  `After any successful AEAD_Open of header[97], the receiver MUST recompute H_L("msphf/hp/commit", [BarrierHpPlaintext]) from the recovered plaintext and MUST require exact equality with header[99] before parsing or using HpArtifact.`
+  Il faut aussi un KAT négatif: *AEAD open succeeds but recomputed hp_commit != header[99] => reject*.
+
+### Élevée — le “no mixing” de version/labels n’est pas lui-même cryptographiquement bindé à l’ancre
+
+* **Sévérité**: Élevée
+* **Sections**: Intro, S4.2.1, S10.1
+* **Élément non ou mal bindé**: la spec exige “MUST NOT mix label sets across versions”, et dit que le `profile_version` exposé est `v0.1.4`, mais la registry d’en-tête obligatoire ne porte aucun champ `profile_version`/`profile_id` authentifié dans l’ancre; seul `fs_policy_version` apparaît explicitement dans les headers obligatoires.
+* **Scénario d’attaque**: dans un déploiement mixte, une implémentation peut interpréter une même ancre sous le mauvais jeu de labels / mauvaises `info strings`, ou laisser survivre un vieux comportement `v0.1.3` côté parsing/transport. Le “no mixing” devient une convention opérationnelle, pas une propriété auto-identifiante de l’artefact.
+* **Impact concret**: surface de downgrade implicite et de mix-and-match inter-version, exactement sur la priorité “version binding / no mixing”.
+* **MUST manquant / texte à renforcer**:
+  soit ajouter un `profile_id/profile_version` obligatoire dans l’ancre et le binder dans les tuples/KDF/AAD pertinents;
+  soit définir normativement un mécanisme externe *authentifié et cryptographiquement couplé* à l’acceptation de l’ancre.
+  Aujourd’hui, ce couplage n’est pas explicite dans cette spec. 
+
+### Élevée — `bind_fs` n’inclut pas explicitement `gid` ni `weid`
+
+* **Sévérité**: Élevée
+* **Sections**: S3.1, S9.2
+* **Élément non ou mal bindé**: `gid` et `weid` sont des identifiants de contexte centraux, mais `bind_fs` n’inclut explicitement ni l’un ni l’autre; il s’appuie sur un `xk_hash` déclaré “opaque here”.
+* **Scénario d’attaque**: si une implémentation calcule `xk_hash` sans y enfermer strictement `gid/weid`, un artefact de preuve/VRF acceptable dans un contexte peut être recollé dans un autre room/window où le reste des champs colle.
+* **Impact concret**: replay cross-context de preuve, ou au minimum latitude dangereuse laissée au vérifieur pour définir trop faiblement `xk_hash`.
+* **MUST manquant / texte à renforcer**:
+  `bind_fs MUST include gid and weid directly`, ou bien la spec doit imposer noir sur blanc que l’API de vérification prouve que `xk_hash` commit déjà exactement `gid`, `weid`, le profil, et le type d’ancre. En l’état, ce n’est pas suffisamment explicite. 
+
+### Élevée — les secrets barrier/HP internes ne sont pas directement room-bindés par `gid`
+
+* **Sévérité**: Élevée
+* **Sections**: S3.4, S11.9.1, S11.10, S11.13.4
+* **Élément non ou mal bindé**:
+  `K_barrier_new` dépend de `[v_new, RRH]`,
+  `d_n/z_n` dépendent de `[v, RRH, N_max, n]`,
+  `hp/barrier/salt` dépend de `[barrier_version, xk_hash]`.
+  `gid` n’est pas dans ces dérivations.
+* **Scénario d’attaque**: un updater buggy/malveillant réutilise le même `ps_leaf32` sur deux rooms ayant même `RRH / v / N_max / path`. Les dérivations barrier et les clés d’internal nodes peuvent alors coïncider inter-room; si `xk_hash` se répète aussi, le HP recovery key material s’aligne également.
+* **Impact concret**: l’isolation inter-room repose trop sur la fraîcheur/honnêteté des secrets et sur des identifiants opaques externes, au lieu d’être portée par la domain separation elle-même. C’est un vrai gap par rapport à la priorité “binding room/gid”.
+* **MUST manquant / texte à renforcer**: inclure `gid` (et idéalement le `profile_id`) dans `barrier/derive/salt`, `barrier/keygen/d_salt`, `barrier/keygen/z_salt`, et `hp/barrier/salt`. Je renforcerais aussi `fs/msg/epoch_salt` avec `gid` pour cohérence. 
+
+### Élevée — les clients recover-only peuvent activer un état non cryptographiquement lié au tree metadata complet
+
+* **Sévérité**: Élevée
+* **Sections**: S11.11.3, S11.13.3–S11.13.7, S11.12 note
+* **Élément non ou mal bindé**: pour le recovery, l’AAD ne couvre que `[gid, v_new, RRH, updater_leaf, s, t, pkhash_t]`. Elle ne couvre pas `BU.prev_barrier_version`, `BU.kem_tree_hash_before`, `BU.kem_tree_hash_after`, `BU.tree_size`, ni un digest de `path_nodes/new_public_keys`.
+* **Scénario d’attaque**: serveur actif ou updater malveillant reprend un `NodeCiphertext` valide et le recolle dans un autre `BarrierUpdate` avec tree metadata altéré mais même contexte `(gid, v_new, RRH, u, s, t, pkhash_t)`. Un client non-FULL peut dériver `K_barrier_new`, puis persister `barrier_version`/`kem_tree_hash_after` issus d’un wrapper non chain-checké.
+* **Impact concret**: fork/désalignement d’état sur les clients recover-only, future incapacité à re-vérifier proprement, dead-end de recovery, ou acceptation d’un état public incohérent.
+* **MUST manquant / texte à renforcer**:
+  soit `recover-only clients MUST NOT persist/advance public barrier state until FULL chain-check succeeds`;
+  soit l’AAD/KDF de recovery doit binder aussi `prev_barrier_version`, `kem_tree_hash_before`, `kem_tree_hash_after`, `tree_size`, et un digest du `cover_payload` structurel. 
+
+### Moyenne — `sender_leaf_id` est utilisé comme identité payload sans règle explicite de non-réutilisation sur la durée de vie du `gid`
+
+* **Sévérité**: Moyenne
+* **Sections**: S3.2, S8.1–S8.4, S11.6
+* **Élément non ou mal bindé**: la spec impose que `cover_leaf_index` soit single-assignment à vie, mais ne dit pas la même chose pour `leaf_id(device_pk)`. Or `sender_leaf_id` entre dans la replay tuple, la KDF payload, le nonce et l’AAD.
+* **Scénario d’attaque**: si la couche membership recycle un `leaf_id` pour un autre device, d’anciens payloads, ou l’état anti-replay `(tuple_tag, msg_index)`, peuvent collisionner avec ceux d’un nouvel auteur logique.
+* **Impact concret**: confusion d’identité d’émetteur, faux rejets de doublon, ou replay croisé entre deux auteurs distincts quand l’identité device externe n’est pas toujours présente.
+* **MUST manquant / texte à renforcer**:
+  `leaf_id(device_pk) MUST be unique for the lifetime of gid and MUST NOT be reassigned after leave/revocation`,
+  ou alors il faut binder `author_device_pk` directement dans le payload tuple/KDF/AAD et exiger une identité sender externe toujours présente. 
+
+## Binding gaps secondaires
+
+* `proofs_commit` et `srx_bridge_ctx` ne bindent pas explicitement `gid/profile_version/barrier_version`; ils s’appuient sur des racines et sur des APIs de preuve externes. C’est défendable, mais ça laisse encore de la latitude dangereuse au vérifieur. 
+* `K_msg_epoch` n’inclut pas `gid`; `gid` n’entre qu’au niveau `nonce_msg/aad_msg`. Ce n’est pas un break direct, mais c’est une séparation de contexte incomplète au niveau du key schedule. 
+* `author-local form` vs `barrier-recovery form` ont exactement la même wire shape; la distinction est procédurale, pas auto-descriptive dans l’artefact lui-même. C’est une vraie source de confusion d’implémentation. 
+* La jointure / provisioning est seulement “authenticated, confidential as per base provisioning rules”; cette spec ne définit pas un artefact de provisioning avec un tuple signé canonique liant `gid`, `barrier_version`, `barrier_roots_hash`, `cover_leaf_index`, `fs_epoch_base_ts`, `fs_policy_version` et le profil. 
+* L’identité admin et la gouvernance room sont explicitement hors de portée cryptographique de ce document; donc, depuis cette spec seule, on ne peut pas conclure que `admin identity -> room/gid -> barrier_update` soit suffisamment bindé. C’est une zone aveugle importante pour l’audit demandé. 
+
+## Downgrade hazards
+
+* Le plus gros hazard de downgrade est l’absence de couplage cryptographique explicite entre l’ancre et le `profile_version`, alors même que `v0.1.4` supprime le transport HP legacy et impose le “no mixing”. 
+* Le même wire format `["barrier-sealed-v1", ..., "chacha20-poly1305"]` sert à deux sémantiques différentes (`author-local` et `barrier-recovery`). Si une implémentation garde de vieux chemins ou essaye “plusieurs façons” de recover, le downgrade logique est facile. 
+* Le texte interdit le fallback legacy sur `header[97]`, ce qui est bien, mais il faut aussi exiger l’absence totale de code-path de compatibilité implicite côté client/serveur, pas juste “ne pas substituer silencieusement”. 
+* Le provisioning et la room governance étant externalisés, un comportement legacy réintroduit là peut annuler les garanties du plan crypto sans violer textuellement cette spec. 
+
+## Tests normatifs / KAT à exiger
+
+En plus des KAT déjà présents, j’exigerais:
+
+1. **HP plaintext-commit mismatch**
+   Construire un `header[97]` qui se déchiffre correctement, mais dont le plaintext reconstitué ne redonne pas `header[99]`. Résultat attendu: rejet dur.
+
+2. **Mixed-profile / mixed-label-set negative KAT**
+   Le même artefact ne doit jamais être accepté sous `v0.1.4` et sous un autre jeu de labels / un autre profile mapping.
+
+3. **`bind_fs` room/window negative KAT**
+   Garder toutes les bytes de preuve identiques, ne changer que `gid` ou `weid`: la vérification doit échouer.
+
+4. **Cross-room derivation separation KAT**
+   Forcer le même `ps_leaf32`, le même `RRH`, `v`, `N_max` et le même path dans deux `gid` différents; exiger que `K_barrier_new`, `d_n/z_n`, `hp_key` et `K_msg_epoch` diffèrent.
+
+5. **Recover-only anti-splice KAT**
+   Réutiliser un `NodeCiphertext` valide mais modifier `BU.prev_barrier_version`, `kem_tree_hash_before/after`, ou un digest structurel de `cover_payload`; un client recover-only ne doit pas activer/persister l’état.
+
+6. **`leaf_id` non-reuse KAT**
+   Toute tentative de réassigner un ancien `leaf_id` à un autre device doit être impossible ou explicitement rejetée; le tuple anti-replay doit rester disjoint entre auteurs successifs.
+
+7. **Author-local vs barrier-recovery discriminator KAT**
+   Un artefact author-local ne doit jamais être accepté comme artefact peer-recoverable, même si un code-path local a encore accès à une clé ou à un cache.
+
+8. **Join provisioning binding KAT**
+   Copier le bundle de provisioning vers un autre `gid`, un autre `barrier_version`, ou un autre `cover_leaf_index` doit casser l’authentification. Les champs critiques ne doivent pas être “juste livrés”, ils doivent être liés. 
+
+Réponse courte à la question centrale: les manques les plus dangereux sont le **non-recheck explicite de `header[99]` après déchiffrement HP**, l’**absence de binding cryptographique explicite du profil/version**, l’**absence de `gid/weid` directs dans `bind_fs`**, le **manque de room-binding explicite dans plusieurs KDF barrier/HP**, et le fait que les **clients recover-only peuvent encore activer un état pas totalement lié au tree metadata complet**. Ce sont les points où un attaquant “cut-and-paste d’artefacts” a encore de la marge.
+
+--
+
+## Commentaires Codex (2026-03-25)
+
+Verdict après vérification contre la spec et l’implémentation:
+
+- **Retenu et traité** : le point le plus solide était l’absence de revalidation explicite de `header[99]` après déchiffrement de `header[97]`. La spec l’impose maintenant explicitement et le code `msphf-orchestrator` le vérifiait déjà.
+- **Retenu partiellement** : la spec durcit aussi le contexte sender payload (`sender_leaf_id`) et explicite que le transport doit fournir une identité d’émetteur authentifiée.
+- **Reclassé / non retenu comme finding principal** : le point “`bind_fs` n’inclut pas `gid/weid`” n’est pas gardé tel quel, car `xk_hash` commit déjà l’instance `X_k` incluant `gid` et `we_epoch_id`. Le vrai risque est plutôt documentaire: rendre cette dépendance plus explicite pour éviter une implémentation externe affaiblie.
+- **Encore ouvert** : le binding cryptographique explicite du `profile_version` dans l’ancre, le room-binding supplémentaire dans certaines KDF barrier, et la distinction wire auto-descriptive entre `author-local` et `barrier-recovery form`.
+- **Non retenu tel quel** : la non-réutilisation absolue de `leaf_id` sur toute la vie d’un `gid` est trop forte pour être imposée telle quelle sans clarifier le cas du même device; la spec a seulement été resserrée sur l’injectivité entre devices actifs.
+
+Conclusion:
+
+Audit **complété** pour la phase triage/remédiation. Le finding critique concret a été fermé, plusieurs points ont été reclassés car sur-vendus, et les gaps vraiment restants sont maintenant identifiés comme des évolutions de profil/wire plus larges.

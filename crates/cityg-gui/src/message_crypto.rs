@@ -13,6 +13,9 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 pub(crate) const MSG_INDEX_REPLAY_WINDOW: usize = 4_096;
 
 const PAYLOAD_ENVELOPE_V2_MODE: &str = "fs-hybrid-msg-v2";
+const PAYLOAD_AEAD_TAG_LEN: usize = 16;
+const MAX_CT_PAYLOAD_BYTES: usize = 1_048_576;
+const MAX_PAYLOAD_ENVELOPE_BYTES: usize = 1_048_640;
 const PAYLOAD_MSG_EPOCH_INFO: &[u8] = b"city-g|fs/msg/epoch|v2";
 const PAYLOAD_MSG_KEY_INFO: &[u8] = b"city-g|fs/msg/key|v2";
 
@@ -306,6 +309,14 @@ pub(crate) fn encrypt_message_v2(
         aead::{Aead, KeyInit, Payload},
     };
 
+    if plaintext.len().saturating_add(PAYLOAD_AEAD_TAG_LEN) > MAX_CT_PAYLOAD_BYTES {
+        return Err(anyhow!(
+            "payload plaintext would exceed MAX_CT_PAYLOAD_BYTES: {} > {}",
+            plaintext.len().saturating_add(PAYLOAD_AEAD_TAG_LEN),
+            MAX_CT_PAYLOAD_BYTES
+        ));
+    }
+
     let key = derive_msg_key_material(context, msg_index)?;
     let nonce = derive_msg_nonce(context, msg_index)?;
     let aad = message_aad(context, msg_index)?;
@@ -319,13 +330,27 @@ pub(crate) fn encrypt_message_v2(
             },
         )
         .map_err(|e| anyhow!("encryption failed: {}", e))?;
+    if ct_payload.is_empty() || ct_payload.len() > MAX_CT_PAYLOAD_BYTES {
+        return Err(anyhow!(
+            "payload ciphertext length is out of bounds: {}",
+            ct_payload.len()
+        ));
+    }
 
-    to_cbor_vec(&PayloadEnvelopeV2Ref(
+    let encoded = to_cbor_vec(&PayloadEnvelopeV2Ref(
         PAYLOAD_ENVELOPE_V2_MODE,
         msg_index,
         &ct_payload,
     ))
-    .context("encode payload envelope v2")
+    .context("encode payload envelope v2")?;
+    if encoded.len() > MAX_PAYLOAD_ENVELOPE_BYTES {
+        return Err(anyhow!(
+            "payload envelope exceeds MAX_PAYLOAD_ENVELOPE_BYTES: {} > {}",
+            encoded.len(),
+            MAX_PAYLOAD_ENVELOPE_BYTES
+        ));
+    }
+    Ok(encoded)
 }
 
 pub(crate) fn decrypt_message_v2_with_index(
@@ -336,6 +361,13 @@ pub(crate) fn decrypt_message_v2_with_index(
         ChaCha20Poly1305,
         aead::{Aead, KeyInit, Payload},
     };
+
+    if data.is_empty() || data.len() > MAX_PAYLOAD_ENVELOPE_BYTES {
+        return Err(anyhow!(
+            "payload envelope length is out of bounds: {}",
+            data.len()
+        ));
+    }
 
     let envelope: PayloadEnvelopeV2 =
         ciborium::de::from_reader(data).context("decode payload envelope v2")?;
@@ -348,6 +380,12 @@ pub(crate) fn decrypt_message_v2_with_index(
     }
     let msg_index = envelope.1;
     let ct_payload = envelope.2;
+    if ct_payload.is_empty() || ct_payload.len() > MAX_CT_PAYLOAD_BYTES {
+        return Err(anyhow!(
+            "payload ciphertext length is out of bounds: {}",
+            ct_payload.len()
+        ));
+    }
     let key = derive_msg_key_material(context, msg_index)?;
     let nonce = derive_msg_nonce(context, msg_index)?;
     let aad = message_aad(context, msg_index)?;
@@ -754,6 +792,58 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("unexpected payload envelope mode"));
+        Ok(())
+    }
+
+    #[test]
+    fn encrypt_message_v2_rejects_oversized_plaintext() {
+        let gid = [0x91u8; 32];
+        let we_epoch_id = [0x92u8; 32];
+        let xk_hash = [0x93u8; 32];
+        let epoch_key = [0x94u8; 32];
+        let k_barrier = [0x95u8; 32];
+        let sender_leaf = [0x96u8; 32];
+        let context = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec: 19,
+            barrier_version: 8,
+            sender_leaf: &sender_leaf,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let err = encrypt_message_v2(&vec![0xAA; MAX_CT_PAYLOAD_BYTES], &context, 1)
+            .expect_err("oversized plaintext must fail");
+        assert!(err.to_string().contains("MAX_CT_PAYLOAD_BYTES"));
+    }
+
+    #[test]
+    fn decrypt_message_v2_rejects_oversized_ciphertext() -> Result<()> {
+        let gid = [0xA1u8; 32];
+        let we_epoch_id = [0xA2u8; 32];
+        let xk_hash = [0xA3u8; 32];
+        let epoch_key = [0xA4u8; 32];
+        let k_barrier = [0xA5u8; 32];
+        let sender_leaf = [0xA6u8; 32];
+        let context = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec: 20,
+            barrier_version: 9,
+            sender_leaf: &sender_leaf,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let oversized = to_cbor_vec(&PayloadEnvelopeV2(
+            PAYLOAD_ENVELOPE_V2_MODE.to_string(),
+            7,
+            vec![0xBB; MAX_CT_PAYLOAD_BYTES + 1],
+        ))?;
+        let err = decrypt_message_v2(&oversized, &context)
+            .expect_err("oversized ciphertext must fail before decryption");
+        assert!(err.to_string().contains("payload ciphertext length is out of bounds"));
         Ok(())
     }
 }

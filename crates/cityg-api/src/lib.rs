@@ -176,6 +176,7 @@ const DEFAULT_EXPENSIVE_RATE_LIMIT_BURST: u32 = 120;
 const DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const DEFAULT_EXPENSIVE_RATE_LIMIT_MAX_KEYS: usize = 100_000;
 const API_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_MESSAGE_CIPHERTEXT_BYTES: usize = 1_048_640;
 const WINDOW_CONFIG_ADMIN_HEADER: &str = "x-cityg-admin-token";
 const WINDOW_CONFIG_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_WINDOW_ADMIN_TOKEN";
 const ROOMS_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_ROOMS_ADMIN_TOKEN";
@@ -2523,6 +2524,11 @@ async fn send_message(
     let ciphertext = request.ciphertext;
     if ciphertext.is_empty() {
         return Err(ApiError::InvalidRequest("ciphertext must be provided"));
+    }
+    if ciphertext.len() > MAX_MESSAGE_CIPHERTEXT_BYTES {
+        return Err(ApiError::InvalidRequest(
+            "ciphertext exceeds MAX_PAYLOAD_ENVELOPE_BYTES",
+        ));
     }
 
     let sender = request.sender;
@@ -6407,6 +6413,22 @@ mod tests {
         assert!(matches!(
             err,
             ApiError::InvalidRequest("ciphertext must be provided")
+        ));
+
+        let err = send_message(
+            State(state.clone()),
+            headers.clone(),
+            encode_proto_request(&SendMessageRequest {
+                we_epoch_id: weid.to_vec(),
+                ciphertext: vec![0xAA; MAX_MESSAGE_CIPHERTEXT_BYTES + 1],
+                sender: leaf.to_vec(),
+            }),
+        )
+        .await
+        .expect_err("oversized ciphertext should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("ciphertext exceeds MAX_PAYLOAD_ENVELOPE_BYTES")
         ));
 
         let response = send_message(

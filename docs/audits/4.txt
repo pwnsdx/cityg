@@ -1,0 +1,185 @@
+4. FULL vs Recover-Only Specialist (COMPLETED)
+
+Tu es un reviewer spécialisé sur les garanties de vérification partielle vs complète dans les protocoles de recovery.
+
+Tu n’as accès qu’à:
+- `docs/specs.md`
+
+Mission:
+Auditer exclusivement la frontière entre clients FULL et clients recover-only.
+
+Objectif:
+Déterminer si la spec empêche réellement un client recover-only de:
+- agir comme updater
+- produire des barrier updates
+- initier pcs_refresh merges
+- prétendre avoir une vue authentifiée suffisante
+- adopter un état qui lui permet ensuite des actions interdites
+
+Tu dois chercher:
+- exceptions implicites
+- wording ambigu
+- conditions de promotion vers FULL insuffisamment précises
+- dépendances externes non assez contraintes
+- cas où la FULL verification est “assumée” sans critère testable
+- scénarios où un serveur malveillant peut nourrir un recover-only avec assez d’artefacts pour lui faire franchir une frontière interdite
+- ambiguïtés sur current version / current tree / current barrier_version
+- interaction entre join-finalize exception et règles recover-only
+
+Question centrale:
+“La spec interdit-elle réellement toutes les actions dangereuses aux recover-only clients, ou laisse-t-elle des trous textuels exploitables ?”
+
+Format:
+- Findings confirmés par sévérité
+- Pour chaque finding:
+  - Titre
+  - Sévérité
+  - Section(s)
+  - Règle recover-only/FULL en cause
+  - Bypass ou ambiguïté
+  - Impact concret
+  - Renforcement normatif requis
+- Puis:
+  - Conditions de promotion à FULL à clarifier
+  - MUST manquants
+  - Attaques serveur malveillant à modéliser explicitement
+
+Tu dois être extrêmement agressif sur les exceptions et les formulations vagues.
+
+--
+
+J’ai audité uniquement `docs/specs.md` / **CITY-G Unified Spec v0.1.4** datée du **2026-03-23**. Verdict central: **non, la spec ne ferme pas complètement la frontière recover-only vs FULL**. Elle contient des interdictions locales assez nettes pour un client honnête, mais elle laisse encore des **trous textuels et protocolaires** dès qu’on demande une garantie réelle, testable, contre un client recover-only bugué/malveillant ou contre un serveur malveillant qui orchestre les artefacts de bootstrap/promotion. La faiblesse principale est simple: **FULL est surtout un état local du client, pas une propriété wire-visible et vérifiable par le serveur**.   
+
+## Findings confirmés par sévérité
+
+### 1. L’interdiction recover-only -> updater/pcs_refresh n’est pas enforceable au niveau protocole
+
+* **Sévérité**: Critique
+* **Section(s)**: S11.11.1, S11.11.3, S10.4B, S10.4C, S11.12.1.F-I
+* **Règle recover-only/FULL en cause**: un recover-only **MUST NOT** originer `barrier_update`, agir comme updater, ni lancer `pcs_refresh` avant FULL.
+* **Bypass ou ambiguïté**: cette interdiction n’existe que comme obligation locale du client. Côté serveur, l’acceptation d’un `barrier_update` vérifie surtout `updater_leaf`, `JoinSet`, `reason`, `ExpectedPairs`, et les hash chains. **Aucune preuve de FULL verification, aucune provenance recover-only/FULL, aucun reçu de chain-check** n’est exigé sur le wire.
+* **Impact concret**: un recover-only disposant de la clé auteur peut tout de même soumettre un `barrier_update` reason 0/1/2 et, si le contenu est cohérent, le serveur n’a **aucun moyen protocolaire** de savoir qu’il n’aurait pas dû le faire. Donc la spec empêche cela **pour les clients honnêtes**, pas comme propriété d’acceptation.
+* **Renforcement normatif requis**: soit introduire une **preuve/attestation wire-visible** d’éligibilité updater liée à `(current barrier_version, H_prev, kem_tree_hash_after, history digest)`, soit dire explicitement que cette barrière n’est garantie **que** contre des implémentations honnêtes, pas au niveau protocolaire.   
+
+### 2. L’exception `join_finalize` est localement vérifiée, mais jamais vérifiée côté serveur
+
+* **Sévérité**: Critique
+* **Section(s)**: S11.11.1, S11.11.3, S12.2, S12.3, S10.4C, S11.12.1.F
+* **Règle recover-only/FULL en cause**: seul un **newly joined client** encore en `pending_barrier_recovery` peut faire reason 2, et seulement après le bootstrap exception.
+* **Bypass ou ambiguïté**: le serveur ne vérifie **ni** `pending_barrier_recovery`, **ni** le fait d’être “newly joined”, **ni** la possession des artefacts S12.2, **ni** l’exécution effective du bootstrap chain-check S11.11.1. Il vérifie seulement que l’auteur est dans `JoinSet` au `prev_barrier_version` pertinent.
+* **Impact concret**: un serveur malveillant peut nourrir un joiner recover-only avec des artefacts “plausibles” et l’amener à signer un reason 2; côté acceptation, cela passera si `JoinSet` et le reste sont cohérents. Donc l’exception `join_finalize` devient une **exception non testable**, donc exploitable.
+* **Renforcement normatif requis**: `reason 2` doit devenir **server-checkable**: par exemple via un reçu de provisioning/baseline lié à la leaf et au `current barrier_version`, ou via un état serveur “pending join unresolved at version v” que l’acceptation **MUST** vérifier.   
+
+### 3. La spec ne persiste pas la provenance “recover-only-derived” du state courant
+
+* **Sévérité**: Haute
+* **Section(s)**: S5.2, S11.13.7, S11.11.1, S12.3
+* **Règle recover-only/FULL en cause**: si le `kem_tree_hash_after` courant a été appris seulement par recover-only, le client reste interdit de reason 0/1, updater général, et `pcs_refresh`.
+* **Bypass ou ambiguïté**: S11.13.7 fait adopter `barrier_version`, `K_barrier`, `kem_tree_hash_after` et met `pending_barrier_recovery := false`, mais S5.2 **ne définit aucun champ persistant obligatoire** du type `verification_level`, `state_origin`, `full_verified_at_version`, etc. La spec parle d’un état “learned only via recover-only processing”, sans imposer de **mémoriser** cette provenance.
+* **Impact concret**: après redémarrage, migration de stockage, import/export, ou simple refactor, une implémentation peut perdre la distinction recover-only/FULL et se croire promue. C’est exactement le cas “adopter un état qui lui permet ensuite des actions interdites”.
+* **Renforcement normatif requis**: ajouter un champ persistant obligatoire par version, par exemple `barrier_state_verification = {recover_only, full_public_state_only, full_current_state}`, et dériver toutes les actions autorisées de ce champ. `pending_barrier_recovery = false` ne doit **jamais** impliquer FULL à lui seul.   
+
+### 4. La promotion recover-only -> FULL est sous-spécifiée et circulaire autour de `H_prev`
+
+* **Sévérité**: Haute
+* **Section(s)**: S11.11.1, S11.11.2, S3.3, S12.2
+* **Règle recover-only/FULL en cause**: avant d’originer reason 0/1 ou agir comme updater, il faut avoir obtenu FULL verification du current public tree au current barrier_version.
+* **Bypass ou ambiguïté**: S11.11.2 part du `H_prev := client's locally stored kem_tree_hash_after`. Si ce `H_prev` vient lui-même d’un état adopté via recover-only, alors re-faire une chain-check “depuis `H_prev`” ne ré-authentifie pas réellement la version courante: **le trust root est déjà contaminé**. Or, hors chemin spécial S12.2 pour le joiner, la spec ne donne **aucune procédure normative générale** de “re-establish FULL” depuis un current state appris en recover-only.
+* **Impact concret**: soit une implémentation se promeut à tort en réutilisant un `H_prev` non authentifié, soit elle reste bloquée sans procédure normative de sortie. Dans les deux cas, la frontière FULL/recover-only n’est pas verrouillée proprement.
+* **Renforcement normatif requis**: définir un algorithme dédié de re-promotion: départ obligatoire depuis un **dernier état FULL-verified** ou depuis un **bootstrap bundle authentifié**, puis vérification d’un historique authentifié jusqu’au `current barrier_version`. La spec doit dire explicitement qu’un `H_prev` appris par recover-only ne peut pas servir de seule racine de confiance.   
+
+### 5. “FULL” désigne trois choses différentes, ce qui ouvre une promotion sémantique abusive
+
+* **Sévérité**: Haute
+* **Section(s)**: S3.3, S11.11.1, S11.11.2, S12.2
+* **Règle recover-only/FULL en cause**: prétendre avoir une vue authentifiée suffisante.
+* **Bypass ou ambiguïté**: la spec emploie au moins trois notions:
+
+  1. `FULL barrier chain-check` en S3.3,
+  2. `FULL-verified current barrier state` en S11.11.1,
+  3. `deemed FULL-verifying for current public state` en S12.2, avant même d’avoir `K_barrier`.
+     Ce n’est **pas** un seul état normatif unifié.
+* **Impact concret**: une implémentation peut sur-promouvoir un joiner depuis “public-state only, suffisant pour reason 2” vers “FULL tout court”, donc lui ouvrir des actions interdites ou des claims trop forts vis-à-vis des couches hautes/API.
+* **Renforcement normatif requis**: introduire un vrai **state machine** normatif, par exemple:
+
+  * `RECOVER_ONLY`
+  * `FULL_PUBLIC_STATE_ONLY` (reason 2 uniquement)
+  * `FULL_CURRENT_STATE` (updater général autorisé)
+    et ajouter un `MUST NOT claim FULL` hors du libellé exact de l’état.   
+
+### 6. Le bootstrap `join_finalize` peut se réduire à une `ek_n verification` vacuement vraie
+
+* **Sévérité**: Haute
+* **Section(s)**: S11.11.1, S12.2, S11.13.6
+* **Règle recover-only/FULL en cause**: le joiner pending peut faire reason 2 après FULL public-tree checks + applicable `ek_n` verification.
+* **Bypass ou ambiguïté**: le mot **“applicable”** n’est pas défini. Or S11.13.6 n’impose la vérification que sur `SuffixNodes INTERSECT ExpectedNodeSet`, ensemble qui dépend d’un `path_secret` dérivé par Recover. Un joiner qui n’a pas encore dérivé le current `K_barrier` peut très bien n’avoir **aucun nœud dérivable** pour l’état courant; dans ce cas l’exigence devient potentiellement vide.
+* **Impact concret**: un serveur malveillant peut pousser un joiner à considérer le bootstrap satisfait avec seulement des vérifications publiques, sans aucun check secret-correlated sur l’état courant, puis le faire émettre reason 2.
+* **Renforcement normatif requis**: définir explicitement l’ensemble minimal de nœuds qui **MUST** être vérifié pour le bootstrap, ou dire que si cet ensemble est vide, le bootstrap reason 2 **n’est pas** disponible.  
+
+### 7. `current version` / `current tree` / `unresolved JoinSet` restent trop flous sous course
+
+* **Sévérité**: Moyenne
+* **Section(s)**: S10.4C, S12.3, S14.8, S11.14.3-S11.14.4
+* **Règle recover-only/FULL en cause**: interaction entre join-finalize exception et recover-only rules.
+* **Bypass ou ambiguïté**: le serveur raisonne via `ResolveJoinsSince(prev_barrier_version)` de la BU; le client textuel raisonne via “its own leaf is still present in the unresolved JoinSet for the current barrier_version”, sans définition formelle de `unresolved JoinSet` ni de ce que veut dire `current` pendant une course.
+* **Impact concret**: deux implémentations peuvent calculer différemment l’éligibilité reason 2 pendant une compétition d’updates; un serveur malveillant peut accentuer cela par withholding sélectif d’historique/authenticated observations.
+* **Renforcement normatif requis**: définir `current_committed_barrier_version` comme plus haute version **authentiquement observée** par le client, définir `unresolved JoinSet(v)` formellement, et dire qu’une observation authentifiée de `v+1` invalide immédiatement toute éligibilité calculée sur `v`.   
+
+### 8. Les dépendances externes “authenticated history/provisioning” ne sont pas assez contraintes pour le modèle serveur malveillant
+
+* **Sévérité**: Moyenne
+* **Section(s)**: Scope / external subsystems, S3.3, S11.11.1, S12.2, S11.14.4
+* **Règle recover-only/FULL en cause**: promotion vers FULL et prétention à une vue authentifiée suffisante.
+* **Bypass ou ambiguïté**: la spec suppose des sous-systèmes externes avec interfaces normatives, et parle d’“authenticated access” à A/B/C, ainsi que d’“authenticated prior-committed history handle(s) sufficient…”, mais **sans définir dans ce document** la contrainte de cross-binding, de fraîcheur, ni la complétude minimale du bundle d’historique.
+* **Impact concret**: un serveur malveillant peut tenter de composer des artefacts individuellement authentiques mais de versions différentes: métadonnées “courantes”, `barrier_update` accepté d’une autre version, handles d’historique d’un autre horizon, etc. L’intention de rejet est claire, mais le critère normatif testable n’est pas assez fermé ici.
+* **Renforcement normatif requis**: définir un **bootstrap/re-establishment bundle** unique, authentifié, liant au minimum `{barrier_version, barrier_roots_hash, kem_tree_hash_after, accepted barrier_update digest, checkpoint/history digest chain}` avec un `MUST reject` sur toute incohérence croisée.   
+
+## Conditions de promotion à FULL à clarifier
+
+1. La racine de confiance admissible pour devenir FULL: dernier état déjà FULL-verified, ou bundle de provisioning/checkpoint explicitement authentifié; **jamais** le seul `kem_tree_hash_after` appris via recover-only.
+2. La distinction exacte entre `FULL_PUBLIC_STATE_ONLY` et `FULL_CURRENT_STATE`, surtout pour un joiner qui n’a pas encore le current `K_barrier`.
+3. Le contenu minimal des preuves/historique requis pour la promotion: `barrier_version`, `revocation_roots_hash`, `kem_tree_hash_after`, digest du `current barrier_update`, lien vers l’historique authentifié.
+4. Le sens précis de `applicable ek_n verification`, et si un ensemble vide est autorisé ou non.
+5. La persistance crash-safe de la provenance recover-only/FULL, pour qu’un redémarrage n’efface pas la frontière.
+6. La règle exacte à appliquer quand le “current” change pendant une race reason 2.   
+
+## MUST manquants
+
+* **Client MUST persist** un niveau/provenance de vérification par `barrier_version`.
+* **Client MUST NOT** traiter `pending_barrier_recovery == false` comme équivalent à FULL.
+* **Client MUST NOT** utiliser un `H_prev` appris en recover-only comme unique trust root pour S11.11.2.
+* **Server MUST** vérifier un état/receipt d’éligibilité spécifique pour `reason 2`, pas seulement `JoinSet`.
+* **Server MUST** rejeter un `barrier_update` si l’auteur n’apporte pas une preuve wire-visible d’éligibilité updater, ou la spec doit dire clairement que cette barrière est seulement “honest-client enforced”.
+* **Bootstrap MUST** définir si `applicable ek_n verification` peut être vide; à défaut, le vide doit être interdit.
+* **Spec MUST** définir formellement `current_committed_barrier_version` et `unresolved JoinSet(v)`.
+* **Provisioning/history MUST** être transporté dans un bundle authentifié cross-bound, pas comme artefacts indépendants “sufficient” au sens vague.    
+
+## Attaques serveur malveillant à modéliser explicitement
+
+* **Tainted-state escalation**: le serveur donne un `barrier_update` recover-only qui matche de façon unique; le client adopte `K_barrier` et `kem_tree_hash_after`, perd la provenance au reboot, puis émet un `pcs_refresh` comme s’il était FULL.
+* **Bootstrap stitching attack**: le serveur fournit des métadonnées “current”, des bytes de `current barrier_update`, et des handles d’historique provenant de versions différentes mais chacune authentique isolément.
+* **Vacuous-ek_n bootstrap**: le serveur choisit un état où l’ensemble “applicable” pour `ek_n verification` est vide, et pousse quand même le joiner à se considérer reason-2-eligible.
+* **JoinSet race steering**: le serveur retarde l’observation authentifiée d’un competing update pour maintenir artificiellement la leaf “unresolved” côté joiner et provoquer un reason 2 obsolète.
+* **Non-checkable FULL claim**: le serveur accepte une merge reason 0/1 d’un recover-only parce qu’aucune propriété FULL n’est vérifiable sur le wire.     
+
+**Conclusion**: la spec **interdit bien** les actions dangereuses aux recover-only **au niveau des obligations d’implémentation du client honnête**. Mais elle **ne les interdit pas réellement comme frontière protocolaire fermée**. Les trous majeurs sont: absence de preuve wire-visible de FULL, exception `join_finalize` non testable côté serveur, promotion recover-only -> FULL sous-spécifiée, et absence de provenance persistante du state adopté. Donc, à ta question centrale, la réponse est: **elle laisse encore des trous textuels exploitables**.
+
+--
+
+## Commentaires Codex (2026-03-25)
+
+Verdict après vérification contre la spec et l’implémentation:
+
+- **Retenu et traité partiellement** : la provenance FULL/recover-only du state courant est maintenant explicitée dans la spec et déjà persistée dans l’implémentation via `current_barrier_full_verified`.
+- **Retenu et traité partiellement** : la promotion `join_finalize` / re-establish FULL a été clarifiée dans la spec en imposant un bootstrap depuis le prédécesseur authentifié de l’update courant, pas depuis un `H_prev` local circulaire.
+- **Reclassé** : l’absence de preuve wire-visible de FULL côté serveur est réelle, mais ce n’est pas un bug d’implémentation local; c’est une limite de modèle de sécurité du protocole actuel. Je ne l’ai pas transformée en patch ad hoc.
+- **Reclassé** : le point “server never checks pending_barrier_recovery” est partiellement sur-vendu. Le serveur vérifie déjà la présence de l’auteur dans le `JoinSet`; en revanche il ne peut pas attester une FULL verification locale du client, et cela reste ouvert.
+
+État d’implémentation:
+
+- Les chemins GUI/natifs bloquent déjà l’origination de refresh/update depuis un state recover-only.
+- La persistance de la provenance FULL existe déjà et a été alignée explicitement avec la spec dans cette passe.
+
+Conclusion:
+
+Audit **complété** pour la phase triage/remédiation. Le protocole reste honnête-client-enforced sur la frontière FULL/recover-only; la fermeture complète demanderait une attestation wire-visible d’éligibilité, ce qui dépasse cette tranche.
