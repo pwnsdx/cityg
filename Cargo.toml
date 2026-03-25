@@ -18,10 +18,10 @@ resolver = "2"
 
 [patch.crates-io]
 pqcrypto-kyber = { path = "crates/pqcrypto-kyber" }
-# Vendored GPUI 0.2.2 with targeted macOS backports from March 2026 upstream
-# fixes, because `zed` mainline is no longer a drop-in replacement for the
-# published gpui/gpui-macros crates.
-gpui = { path = "vendor/gpui-0.2.2" }
+# GPUI is now consumed from the maintained pwnsdx fork rather than the vendored
+# snapshot. This revision includes the initial semantic material surface layer
+# on top of the March 2026 macOS backports.
+gpui = { git = "https://github.com/pwnsdx/gpui.git", rev = "bd892c36d9e10e44df18d14467c7cf242d00d0c7" }
 
 [workspace.package]
 edition = "2024"

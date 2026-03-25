@@ -18,6 +18,7 @@ Start here if you're new to City-G:
 ### For Developers & Integrators
 Building applications with City-G:
 
+- **[GUI Material System Roadmap](./gui-material-system-roadmap.md)** - Accepted UI architecture direction for GPUI materials and cross-platform shell design
 - **[API Reference](./api-reference.md)** - REST API and WebSocket documentation
 - **[Room-Scoped Administration Redesign](./room-admin-governance-redesign.md)** - Current room governance and admin model
 - **[Configuration Guide](./configuration.md)** - Configuration options and environment variables
@@ -60,6 +61,7 @@ Deploying and managing City-G in production:
 
 ### Getting Started
 - [GUI User Guide](./gui-user-guide.md) - Desktop application walkthrough
+- [GUI Material System Roadmap](./gui-material-system-roadmap.md) - Semantic material system and cross-platform GUI direction
 - [API Reference](./api-reference.md) - REST API quick start
 - [Workflows](./workflows.md) - Common operation flows
 
