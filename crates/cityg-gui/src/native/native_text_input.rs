@@ -35,12 +35,13 @@ struct NativeTextContextMenuAvailability {
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
+#[allow(unexpected_cfgs)]
 mod mac_text_context_menu {
     use super::{NativeTextContextMenuAction, NativeTextContextMenuAvailability};
     use cocoa::{
         appkit::{NSMenu, NSMenuItem},
         base::{NO, YES, id, nil},
-        foundation::{NSPoint, NSRect, NSString},
+        foundation::{NSAutoreleasePool, NSPoint, NSRect, NSString},
     };
     use objc::{
         class,
@@ -50,7 +51,7 @@ mod mac_text_context_menu {
         sel, sel_impl,
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use std::{cell::Cell, ffi::c_void, ptr, sync::OnceLock};
+    use std::{cell::Cell, ffi::c_void, sync::Once};
 
     use super::*;
 
@@ -108,7 +109,7 @@ mod mac_text_context_menu {
     }
 
     unsafe fn native_view_for_window(window: &Window) -> Option<id> {
-        let handle = window.window_handle().ok()?;
+        let handle = HasWindowHandle::window_handle(window).ok()?;
         match handle.as_raw() {
             RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr().cast()),
             _ => None,
@@ -124,22 +125,30 @@ mod mac_text_context_menu {
     }
 
     unsafe fn add_menu_item(menu: id, title: &str, action: Sel, enabled: bool, target: id) {
-        let item = NSMenuItem::alloc(nil)
-            .initWithTitle_action_keyEquivalent_(ns_string(title), action, ns_string(""))
-            .autorelease();
+        let item = unsafe {
+            NSMenuItem::alloc(nil)
+                .initWithTitle_action_keyEquivalent_(ns_string(title), action, ns_string(""))
+                .autorelease()
+        };
         let _: () = msg_send![item, setTarget: target];
         let _: () = msg_send![item, setEnabled: if enabled { YES } else { NO }];
         let _: () = msg_send![menu, addItem: item];
     }
 
     unsafe fn ns_string(text: &str) -> id {
-        NSString::alloc(nil).init_str(text).autorelease()
+        unsafe { NSString::alloc(nil).init_str(text).autorelease() }
     }
 
-    fn context_menu_target_class() -> *const Class {
-        static CLASS: OnceLock<usize> = OnceLock::new();
-        *CLASS.get_or_init(|| unsafe {
-            let mut decl = ClassDecl::new("CityGTextContextMenuTarget", class!(NSObject)).unwrap();
+    fn context_menu_target_class() -> &'static Class {
+        const CLASS_NAME: &str = "CityGTextContextMenuTarget";
+        static REGISTER: Once = Once::new();
+
+        if let Some(class) = Class::get(CLASS_NAME) {
+            return class;
+        }
+
+        REGISTER.call_once(|| unsafe {
+            let mut decl = ClassDecl::new(CLASS_NAME, class!(NSObject)).unwrap();
             decl.add_ivar::<*mut c_void>(TEXT_CONTEXT_MENU_TARGET_IVAR);
             decl.add_method(
                 sel!(performCut:),
@@ -157,13 +166,15 @@ mod mac_text_context_menu {
                 sel!(performSelectAll:),
                 perform_select_all as extern "C" fn(&mut Object, Sel, id),
             );
-            decl.register() as usize
-        }) as *const Class
+            decl.register();
+        });
+
+        Class::get(CLASS_NAME).expect("CityGTextContextMenuTarget should be registered")
     }
 
     unsafe fn selection(this: &Object) -> &TextContextMenuSelection {
-        let raw: *mut c_void = *this.get_ivar(TEXT_CONTEXT_MENU_TARGET_IVAR);
-        &*(raw.cast::<TextContextMenuSelection>())
+        let raw: *mut c_void = unsafe { *this.get_ivar(TEXT_CONTEXT_MENU_TARGET_IVAR) };
+        unsafe { &*(raw.cast::<TextContextMenuSelection>()) }
     }
 
     extern "C" fn perform_cut(this: &mut Object, _: Sel, _: id) {
