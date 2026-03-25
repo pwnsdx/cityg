@@ -413,7 +413,7 @@ sequenceDiagram
 
     Note over Client: After joining, establish WebSocket
 
-    Client->>WS Server: WebSocket handshake<br/>GET /v1/ws
+    Client->>WS Server: WebSocket handshake<br/>GET /v1/ws?gid=...&leaf_id=...<br/>x-cityg-message-token: ...
     WS Server-->>Client: 101 Switching Protocols
 
     Note over Client,WS Server: WebSocket connection established
@@ -524,7 +524,7 @@ sequenceDiagram
     Alice->>Server: Submit epoch<br/>POST /v1/accept_epoch
     Server-->>Alice: 200 OK {accepted: true}
 
-    Alice->>Server: Establish WebSocket<br/>GET /v1/ws
+    Alice->>Server: Establish WebSocket<br/>GET /v1/ws?gid=...&leaf_id=...<br/>x-cityg-message-token: ...
     Server-->>Alice: 101 Switching Protocols
 
     Note over Alice: Alice is now joined!

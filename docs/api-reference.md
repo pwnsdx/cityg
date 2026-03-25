@@ -499,8 +499,9 @@ let ticket = client.join_ticket("my-room", "alice", Some(identity)).await?;
 
 **Identity Binding (TOFU):**
 
-- The server recomputes `leaf_id = H(gid || alias || pop_public_key)` in "PerGroup" mode using the
-  ML-DSA-65 public key bytes.
+- The server recomputes `leaf_id` in "PerGroup" mode from `(gid, "ML-DSA-65", pop_public_key)`.
+  The alias is authenticated separately by the TOFU identity binding, but does not participate in
+  leaf derivation.
 - Signatures are Dilithium (ML-DSA-65) over the CBOR tuple `[alias, pop_public_key]`. Any change in
   alias or key invalidates the signature.
 - On first use the alias is registered; later requests must reuse the same keypair or they are
@@ -1079,14 +1080,25 @@ See [`docs/protocol/12-error-reference.md`](./protocol/12-error-reference.md) fo
 
 Establishes a WebSocket connection for real-time roster/message notifications.
 
+**Required Query Parameters:**
+- `gid` - 32-byte group identifier encoded as lowercase hex
+- `leaf_id` - 32-byte member leaf identifier encoded as lowercase hex
+
+**Authentication:**
+- New clients MUST send the room/message auth token in the `x-cityg-message-token` header.
+- The server still accepts `?token=` as a legacy compatibility fallback for WebSocket upgrades, but
+  new clients SHOULD NOT use query-string tokens because they are easier to leak via logs and
+  intermediaries.
+
 **Upgrade Request:**
 ```http
-GET /v1/ws HTTP/1.1
+GET /v1/ws?gid=<gid-hex>&leaf_id=<leaf-id-hex> HTTP/1.1
 Host: localhost:8080
 Upgrade: websocket
 Connection: Upgrade
 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
 Sec-WebSocket-Version: 13
+x-cityg-message-token: <message-auth-token>
 ```
 
 **Notification Types (JSON):**
@@ -1124,12 +1136,18 @@ in sync without waiting for the periodic polling loop.
 
 **Rust WebSocket Example:**
 ```rust
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 use futures_util::StreamExt;
+use http::Request;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (ws_stream, _) = connect_async("ws://localhost:8080/v1/ws").await?;
+    let request = Request::builder()
+        .uri("ws://localhost:8080/v1/ws?gid=<gid-hex>&leaf_id=<leaf-id-hex>")
+        .header("x-cityg-message-token", "<message-auth-token>")
+        .body(())?;
+
+    let (ws_stream, _) = connect_async(request).await?;
 
     let (_, mut read) = ws_stream.split();
 
