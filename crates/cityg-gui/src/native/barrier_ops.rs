@@ -198,6 +198,23 @@ fn cover_leaf_index_for_n_max(leaf_id: &[u8; 32], n_max: u64) -> u64 {
     u64::from(u32::from_be_bytes(leaf_suffix) % n_max)
 }
 
+fn ensure_full_barrier_verification_for_origin(
+    barrier_recovery_pending: bool,
+    current_barrier_full_verified: bool,
+) -> Result<()> {
+    if barrier_recovery_pending {
+        return Err(anyhow!(
+            "cannot originate barrier updates while barrier recovery is pending; complete FULL barrier recovery first"
+        ));
+    }
+    if !current_barrier_full_verified {
+        return Err(anyhow!(
+            "cannot originate barrier updates from recover-only barrier state; re-establish FULL barrier verification first"
+        ));
+    }
+    Ok(())
+}
+
 async fn publish_revocation_merge_from_ticket(
     request: LeaveRequest,
     ticket: MergeTicket,
@@ -219,14 +236,14 @@ async fn publish_revocation_merge_from_ticket(
         fs_dev_prev_commit,
         max_barrier_update_bytes: stored_max_barrier_update_bytes,
         barrier_recovery_pending,
+        current_barrier_full_verified,
         ..
     } = request;
 
-    if barrier_recovery_pending {
-        return Err(anyhow!(
-            "cannot originate barrier updates while barrier recovery is pending; complete FULL barrier recovery first"
-        ));
-    }
+    ensure_full_barrier_verification_for_origin(
+        barrier_recovery_pending,
+        current_barrier_full_verified,
+    )?;
 
     let MergeTicket {
         we_epoch_id: _,
@@ -530,11 +547,10 @@ async fn publish_revocation_merge_from_ticket(
 }
 
 pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
-    if request.barrier_recovery_pending {
-        return Err(anyhow!(
-            "cannot originate barrier updates while barrier recovery is pending; complete FULL barrier recovery first"
-        ));
-    }
+    ensure_full_barrier_verification_for_origin(
+        request.barrier_recovery_pending,
+        request.current_barrier_full_verified,
+    )?;
 
     let client = new_api_client(&request.server_url);
     let room_id = request.room_id.clone();
@@ -586,6 +602,10 @@ pub(super) async fn perform_room_admin_expel(
     }
 
     let request = LeaveRequest::from_session(&session);
+    ensure_full_barrier_verification_for_origin(
+        request.barrier_recovery_pending,
+        request.current_barrier_full_verified,
+    )?;
     let client = new_api_client(&request.server_url);
     let room_id = request.room_id.clone();
     let author_leaf_id = request.leaf_id;
@@ -710,10 +730,16 @@ async fn perform_barrier_merge_inner(
         k_fs_current,
         max_barrier_update_bytes: stored_max_barrier_update_bytes,
         barrier_recovery_pending,
+        current_barrier_full_verified,
     } = request;
 
     if barrier_recovery_pending && !allow_pending_recovery {
         return Err(anyhow!(mode.pending_guard_message()));
+    }
+    if !current_barrier_full_verified && !(allow_pending_recovery && barrier_recovery_pending) {
+        return Err(anyhow!(
+            "cannot originate barrier updates from recover-only barrier state; re-establish FULL barrier verification first"
+        ));
     }
 
     let client = new_api_client(&server_url);

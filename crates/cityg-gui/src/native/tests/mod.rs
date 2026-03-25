@@ -7539,8 +7539,12 @@ async fn perform_leave_rejects_while_barrier_recovery_is_pending()
 #[tokio::test]
 async fn perform_leave_rejects_without_full_barrier_verification()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut session =
-        build_test_session(0xC33, "http://127.0.0.1:9", "room-leave-recover-only", "alice")?;
+    let mut session = build_test_session(
+        0xC33,
+        "http://127.0.0.1:9",
+        "room-leave-recover-only",
+        "alice",
+    )?;
     session.barrier_state.barrier_recovery_pending = false;
     session.barrier_state.current_barrier_full_verified = false;
 
@@ -7548,8 +7552,7 @@ async fn perform_leave_rejects_without_full_barrier_verification()
         .await
         .expect_err("leave should be blocked while barrier state is recover-only");
     assert!(
-        err.to_string()
-            .contains("recover-only barrier state"),
+        err.to_string().contains("recover-only barrier state"),
         "expected explicit FULL-verification guidance: {err}"
     );
     Ok(())
@@ -7589,8 +7592,7 @@ async fn perform_pcs_refresh_rejects_without_full_barrier_verification()
         .await
         .expect_err("pcs refresh should be blocked while barrier state is recover-only");
     assert!(
-        err.to_string()
-            .contains("recover-only barrier state"),
+        err.to_string().contains("recover-only barrier state"),
         "expected explicit FULL-verification guidance: {err}"
     );
     Ok(())

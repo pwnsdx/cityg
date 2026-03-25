@@ -44,6 +44,7 @@ pub(super) fn try_recover_barrier_best_effort(
 pub(super) fn apply_recovered_barrier_state(
     session: &mut AppSession,
     recovered: BarrierRecoverResult,
+    current_barrier_full_verified: bool,
 ) -> Result<()> {
     let BarrierRecoverResult {
         k_barrier_new,
@@ -62,6 +63,7 @@ pub(super) fn apply_recovered_barrier_state(
         apply_forward_state_k_fs(session, *k_fs_after_pcs);
     }
     session.barrier_state.barrier_recovery_pending = false;
+    session.barrier_state.current_barrier_full_verified = current_barrier_full_verified;
     Ok(())
 }
 
@@ -70,6 +72,7 @@ pub(super) fn enter_barrier_recovery_pending(session: &mut AppSession) -> Result
     session.barrier_state.barrier_roots_hash =
         compute_revocation_roots_hash(&session.revoked_since_root, &session.revoked_root)?;
     session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.current_barrier_full_verified = false;
     Ok(())
 }
 
@@ -531,6 +534,7 @@ pub(super) fn apply_pending_barrier_activation(
         )?;
         session.barrier_state.pending = None;
         session.barrier_state.barrier_recovery_pending = false;
+        session.barrier_state.current_barrier_full_verified = true;
         return Ok(true);
     }
 

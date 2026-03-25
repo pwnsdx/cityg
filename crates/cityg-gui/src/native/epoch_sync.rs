@@ -259,7 +259,7 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
                         "best-effort barrier recovery succeeded; caught up to barrier version {}",
                         ticket.barrier_version
                     );
-                    apply_recovered_barrier_state(&mut session, recovered)?;
+                    apply_recovered_barrier_state(&mut session, recovered, false)?;
                 }
                 Ok(None) => {
                     // Cannot decrypt the current barrier update (our path was
@@ -309,7 +309,7 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
                             "barrier recover hash-chain mismatch: recovered hash does not match merge ticket"
                         ));
                     }
-                    apply_recovered_barrier_state(&mut session, recovered)?;
+                    apply_recovered_barrier_state(&mut session, recovered, true)?;
                 }
                 Ok(None) => {
                     return Err(anyhow!(

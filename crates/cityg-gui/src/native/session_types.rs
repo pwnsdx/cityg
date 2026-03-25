@@ -61,6 +61,7 @@ pub(super) struct BarrierSecretState {
     pub(super) dk_nodes: BTreeMap<u32, BarrierNodeKeyMaterial>,
     pub(super) pending: Option<BarrierPendingState>,
     pub(super) barrier_recovery_pending: bool,
+    pub(super) current_barrier_full_verified: bool,
 }
 
 impl Default for BarrierSecretState {
@@ -79,6 +80,7 @@ impl Default for BarrierSecretState {
             dk_nodes: BTreeMap::new(),
             pending: None,
             barrier_recovery_pending: false,
+            current_barrier_full_verified: false,
         }
     }
 }

@@ -37,6 +37,8 @@ pub(in crate::native) struct PersistedBarrierState {
     pub(in crate::native) pending: Option<PersistedBarrierPendingState>,
     #[serde(default = "super::default_barrier_recovery_pending")]
     pub(in crate::native) barrier_recovery_pending: bool,
+    #[serde(default = "super::default_current_barrier_full_verified")]
+    pub(in crate::native) current_barrier_full_verified: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -218,6 +220,7 @@ impl PersistedBarrierState {
                 .as_ref()
                 .map(PersistedBarrierPendingState::from_runtime),
             barrier_recovery_pending: state.barrier_recovery_pending,
+            current_barrier_full_verified: state.current_barrier_full_verified,
         }
     }
 
@@ -261,6 +264,7 @@ impl PersistedBarrierState {
                 .map(PersistedBarrierPendingState::into_runtime)
                 .transpose()?,
             barrier_recovery_pending: self.barrier_recovery_pending,
+            current_barrier_full_verified: self.current_barrier_full_verified,
         })
     }
 }

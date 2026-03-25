@@ -59,3 +59,7 @@ fn default_max_barrier_update_bytes() -> u64 {
 fn default_barrier_recovery_pending() -> bool {
     false
 }
+
+fn default_current_barrier_full_verified() -> bool {
+    false
+}

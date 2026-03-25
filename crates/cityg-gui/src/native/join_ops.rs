@@ -394,6 +394,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             dk_leaf: Zeroizing::new(barrier_leaf_dk_bytes),
             pkhash_leaf: barrier_pkhash_leaf,
             barrier_recovery_pending: true,
+            current_barrier_full_verified: false,
             ..BarrierSecretState::default()
         },
     };

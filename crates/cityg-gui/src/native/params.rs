@@ -23,6 +23,7 @@ pub(super) struct LeaveRequest {
     pub(super) k_fs_current: [u8; 32],
     pub(super) max_barrier_update_bytes: u64,
     pub(super) barrier_recovery_pending: bool,
+    pub(super) current_barrier_full_verified: bool,
 }
 
 #[derive(Clone)]
@@ -110,6 +111,7 @@ impl LeaveRequest {
             k_fs_current: session.forward_state.snapshot().k_fs,
             max_barrier_update_bytes: session.barrier_state.max_barrier_update_bytes,
             barrier_recovery_pending: session.barrier_state.barrier_recovery_pending,
+            current_barrier_full_verified: session.barrier_state.current_barrier_full_verified,
         }
     }
 }
