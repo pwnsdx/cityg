@@ -178,6 +178,7 @@ fn build_test_session(
     session.barrier_state.barrier_initialized = true;
     session.barrier_state.barrier_roots_hash =
         compute_revocation_roots_hash(&session.revoked_since_root, &session.revoked_root)?;
+    session.barrier_state.current_barrier_full_verified = true;
     Ok(session)
 }
 
@@ -1408,6 +1409,9 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
         recovered.k_fs_after_pcs.as_deref().copied(),
         Some(expected_k_fs_after_pcs)
     );
+    apply_recovered_barrier_state(&mut session, recovered, false)?;
+    assert!(!session.barrier_state.barrier_recovery_pending);
+    assert!(!session.barrier_state.current_barrier_full_verified);
     Ok(())
 }
 
@@ -2157,6 +2161,67 @@ fn gpui_render_panels_cover_conditional_branches(cx: &mut TestAppContext) {
                     detail: Some("ok".to_string()),
                 },
             ];
+            let _ = model.render_activity_panel(window, view_cx);
+        });
+    });
+}
+
+#[gpui::test]
+fn gpui_render_material_shells_with_inactive_window(cx: &mut TestAppContext) {
+    cx.update(tokio_bridge::init);
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+    let session = build_test_session(
+        0xBEE0,
+        "http://127.0.0.1:9",
+        "22334455667788990011aabbccddeeff22334455667788990011aabbccddeeff",
+        "inactive-materials",
+    )
+    .expect("build session");
+
+    cx.deactivate_window();
+    cx.update(|window, app| {
+        assert!(!window.is_window_active());
+        view.update(app, |model, view_cx| {
+            model.session = Some(session.clone());
+            model.ws_connected = true;
+            model.inspector_visible = true;
+
+            let panel_session = model.session.clone().expect("session available");
+            model.room_admins = vec![panel_session.pop_public_key.clone()];
+            model.room_admins_loaded = true;
+            model.members = vec![MemberEntry {
+                leaf_id: [0x22; 32],
+                alias: Some("inactive".to_string()),
+                pop_public_key: Some(vec![0xBB; dilithium5::public_key_bytes()]),
+                join_timestamp_ms: Some(10),
+                last_seen_timestamp_ms: Some(11),
+            }];
+            model.members_total = 1;
+            model.members_search.set_query("inactive".to_string());
+            model.members_mode = MembersMode::Search {
+                query: "inactive".to_string(),
+            };
+            model.security_events = vec![SecurityEvent {
+                alias: "inactive".to_string(),
+                description: "security".to_string(),
+                timestamp_ms: 12,
+            }];
+            model.activity_events = vec![ActivityEvent {
+                timestamp_ms: 13,
+                kind: ActivityKind::System,
+                summary: "inactive".to_string(),
+                detail: Some("window".to_string()),
+            }];
+
+            let _ = model.render_join(window, view_cx);
+            let _ = model.render_session(window, &panel_session, view_cx);
+            let _ = model.render_members_panel(window, view_cx);
+            let _ = model.render_room_admin_panel(window, &panel_session, view_cx);
+            let _ = model.render_security_panel(window, view_cx);
             let _ = model.render_activity_panel(window, view_cx);
         });
     });
@@ -5480,6 +5545,7 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             on_path_key_material: pending_on_path,
         }),
         barrier_recovery_pending: true,
+        current_barrier_full_verified: false,
     };
     let tuple_tag = array(0x30);
     let mut replay_state = MsgReplayState::default();
@@ -5608,6 +5674,10 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         loaded.barrier_state.barrier_recovery_pending,
         session.barrier_state.barrier_recovery_pending
+    );
+    assert_eq!(
+        loaded.barrier_state.current_barrier_full_verified,
+        session.barrier_state.current_barrier_full_verified
     );
     assert_eq!(loaded.barrier_state.dk_leaf, session.barrier_state.dk_leaf);
     assert_eq!(
@@ -7467,6 +7537,25 @@ async fn perform_leave_rejects_while_barrier_recovery_is_pending()
 }
 
 #[tokio::test]
+async fn perform_leave_rejects_without_full_barrier_verification()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session =
+        build_test_session(0xC33, "http://127.0.0.1:9", "room-leave-recover-only", "alice")?;
+    session.barrier_state.barrier_recovery_pending = false;
+    session.barrier_state.current_barrier_full_verified = false;
+
+    let err = perform_leave(LeaveRequest::from_session(&session))
+        .await
+        .expect_err("leave should be blocked while barrier state is recover-only");
+    assert!(
+        err.to_string()
+            .contains("recover-only barrier state"),
+        "expected explicit FULL-verification guidance: {err}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn perform_pcs_refresh_rejects_while_barrier_recovery_is_pending()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session =
@@ -7480,6 +7569,29 @@ async fn perform_pcs_refresh_rejects_while_barrier_recovery_is_pending()
         err.to_string()
             .contains("complete FULL barrier recovery first"),
         "expected explicit recover-before-update guidance: {err}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn perform_pcs_refresh_rejects_without_full_barrier_verification()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(
+        0xC34,
+        "http://127.0.0.1:9",
+        "room-refresh-recover-only",
+        "alice",
+    )?;
+    session.barrier_state.barrier_recovery_pending = false;
+    session.barrier_state.current_barrier_full_verified = false;
+
+    let err = perform_pcs_refresh(LeaveRequest::from_session(&session))
+        .await
+        .expect_err("pcs refresh should be blocked while barrier state is recover-only");
+    assert!(
+        err.to_string()
+            .contains("recover-only barrier state"),
+        "expected explicit FULL-verification guidance: {err}"
     );
     Ok(())
 }
