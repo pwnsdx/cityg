@@ -2126,12 +2126,8 @@ pub(crate) fn validate_barrier_hp_envelope_bytes(bytes: &[u8]) -> Result<(), Acc
     }
     let mode = match &items[0] {
         Value::Text(text) => text.as_str(),
-        Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
-            debug!("barrier hp envelope: mode invalid utf8");
-            AcceptanceError::Freeze(FREEZE_HASH_CBOR)
-        })?,
         _ => {
-            debug!("barrier hp envelope: mode not text/bytes");
+            debug!("barrier hp envelope: mode not text");
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     };
@@ -2152,12 +2148,8 @@ pub(crate) fn validate_barrier_hp_envelope_bytes(bytes: &[u8]) -> Result<(), Acc
     }
     let aead = match &items[2] {
         Value::Text(text) => text.as_str(),
-        Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
-            debug!("barrier hp envelope: aead invalid utf8");
-            AcceptanceError::Freeze(FREEZE_HASH_CBOR)
-        })?,
         _ => {
-            debug!("barrier hp envelope: aead not text/bytes");
+            debug!("barrier hp envelope: aead not text");
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     };
@@ -3530,6 +3522,22 @@ mod tests {
                     Value::Text("barrier-sealed-v1".to_string()),
                     Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
                     Value::Text("aes-gcm".to_string()),
+                ]),
+                FREEZE_HASH_CBOR,
+            ),
+            (
+                Value::Array(vec![
+                    Value::Bytes(BARRIER_HP_MODE.as_bytes().to_vec()),
+                    Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
+                    Value::Text("chacha20-poly1305".to_string()),
+                ]),
+                FREEZE_HASH_CBOR,
+            ),
+            (
+                Value::Array(vec![
+                    Value::Text("barrier-sealed-v1".to_string()),
+                    Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
+                    Value::Bytes(HP_AEAD_SUITE.as_bytes().to_vec()),
                 ]),
                 FREEZE_HASH_CBOR,
             ),

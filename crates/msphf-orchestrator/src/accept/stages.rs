@@ -195,12 +195,8 @@ pub(super) fn verify_join_payload_hp_envelope(
 
     let mode = match &items[0] {
         Value::Text(text) => text.as_str(),
-        Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
-            debug!("verify_join_payload_hp_envelope: mode bytes invalid utf8");
-            AcceptanceError::Freeze(FREEZE_HASH_CBOR)
-        })?,
         _ => {
-            debug!("verify_join_payload_hp_envelope: mode not bytes/text");
+            debug!("verify_join_payload_hp_envelope: mode not text");
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     };
@@ -234,12 +230,8 @@ pub(super) fn verify_join_payload_hp_envelope(
     }
     let aead = match &items[2] {
         Value::Text(text) => text.as_str(),
-        Value::Bytes(bytes) => std::str::from_utf8(bytes).map_err(|_| {
-            debug!("verify_join_payload_hp_envelope: item[2] invalid utf8");
-            AcceptanceError::Freeze(FREEZE_HASH_CBOR)
-        })?,
         _ => {
-            debug!("verify_join_payload_hp_envelope: item[2] not bytes/text");
+            debug!("verify_join_payload_hp_envelope: item[2] not text");
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     };
@@ -1154,6 +1146,22 @@ mod tests {
         .expect_err("invalid mode utf8 must freeze");
         expect_freeze(err, FREEZE_HASH_CBOR);
 
+        let bytes_mode = Value::Array(vec![
+            Value::Bytes(BARRIER_HP_MODE.as_bytes().to_vec()),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
+            Value::Text("chacha20-poly1305".to_string()),
+        ]);
+        header.insert(super::HDR_HP_BYTES, bytes_mode);
+        let err = verify_join_payload_hp_envelope(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("mode encoded as bytes must freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+
         let wrong_mode_type = Value::Array(vec![
             Value::Integer(Integer::from(7u64)),
             Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
@@ -1200,6 +1208,22 @@ mod tests {
             &[0u8; 32],
         )
         .expect_err("invalid aead utf8 must freeze");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+
+        let bytes_aead = Value::Array(vec![
+            Value::Text(BARRIER_HP_MODE.to_string()),
+            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
+            Value::Bytes(HP_AEAD_SUITE.as_bytes().to_vec()),
+        ]);
+        header.insert(super::HDR_HP_BYTES, bytes_aead);
+        let err = verify_join_payload_hp_envelope(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("aead encoded as bytes must freeze");
         expect_freeze(err, FREEZE_HASH_CBOR);
 
         let wrong_aead_type = Value::Array(vec![

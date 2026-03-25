@@ -792,8 +792,6 @@ fn recover_barrier_hp_material_from_value(
 
     let mode = match &items[0] {
         Value::Text(text) => text.as_str(),
-        Value::Bytes(bytes) => std::str::from_utf8(bytes)
-            .map_err(|_| MsphfError::invalid_input("barrier hp mode invalid utf8"))?,
         _ => return Err(MsphfError::invalid_input("barrier hp mode malformed")),
     };
     if mode != BARRIER_HP_MODE {
@@ -813,8 +811,6 @@ fn recover_barrier_hp_material_from_value(
     }
     let aead = match &items[2] {
         Value::Text(text) => text.as_str(),
-        Value::Bytes(bytes) => std::str::from_utf8(bytes)
-            .map_err(|_| MsphfError::invalid_input("barrier hp aead invalid utf8"))?,
         _ => return Err(MsphfError::invalid_input("barrier hp aead malformed")),
     };
     if aead != HP_AEAD_SUITE {
@@ -3936,6 +3932,10 @@ mod tests {
         wrong_mode[0] = Value::Text("mode-x".to_string());
         assert!(run_recover_case(wrong_mode));
 
+        let mut bytes_mode = base_items.clone();
+        bytes_mode[0] = Value::Bytes(BARRIER_HP_MODE.as_bytes().to_vec());
+        assert!(run_recover_case(bytes_mode));
+
         let mut bad_ct_type = base_items.clone();
         bad_ct_type[1] = Value::Integer(Integer::from(1u64));
         assert!(run_recover_case(bad_ct_type));
@@ -3965,6 +3965,10 @@ mod tests {
         let mut bad_aead = base_items.clone();
         bad_aead[2] = Value::Text("aes-gcm".to_string());
         assert!(run_recover_case(bad_aead));
+
+        let mut bytes_aead = base_items.clone();
+        bytes_aead[2] = Value::Bytes(HP_AEAD_SUITE.as_bytes().to_vec());
+        assert!(run_recover_case(bytes_aead));
 
         let (wrong_key_ciphertext, wrong_key_material) =
             recover_barrier_hp_material_from_header(&base, &xk_hash, &hp_commit, &[0u8; 32])?;
