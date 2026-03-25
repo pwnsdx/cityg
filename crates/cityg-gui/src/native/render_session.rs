@@ -25,7 +25,7 @@ impl AppModel {
             .min_h(px(0.0))
             .h_full()
             .gap(px(12.0))
-            .child(self.render_chat_header(session, window_width, cx))
+            .child(self.render_chat_header(session, window, window_width, cx))
             .child(self.render_message_panel(session, cx));
 
         if let Some(info) = &self.info_message {
@@ -82,8 +82,8 @@ impl AppModel {
                         .min_h(px(0.0))
                         .h_full()
                         .gap(px(10.0))
-                        .child(self.render_workspace_sidebar(session, cx))
-                        .child(self.render_leave_controls(cx)),
+                        .child(self.render_workspace_sidebar(session, window, cx))
+                        .child(self.render_leave_controls(window, cx)),
                 )
                 .child(self.render_sidebar_divider(sidebar_width, cx));
         }

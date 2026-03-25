@@ -1,7 +1,7 @@
 use super::*;
 
 impl AppModel {
-    pub(super) fn render_leave_controls(&self, cx: &mut ViewContext<Self>) -> Div {
+    pub(super) fn render_leave_controls(&self, window: &Window, cx: &mut ViewContext<Self>) -> Div {
         let leaving = matches!(self.leave_status, LeaveStatus::Leaving);
         let expelling = matches!(self.leave_status, LeaveStatus::Expelling);
         let refreshing = matches!(self.leave_status, LeaveStatus::Refreshing);
@@ -109,38 +109,36 @@ impl AppModel {
             .child("Reset session")
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_reset_clicked));
 
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(14.0))
-            .py(px(14.0))
-            .rounded(px(18.0))
-            .border(px(1.0))
-            .border_color(rgb(UI_PANEL_BORDER))
-            .bg(ui_sidebar_fill(self.window_active))
-            .shadow_sm()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(UI_MUTED_TEXT))
-                            .child("Room actions"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(UI_SUBTLE_TEXT))
-                            .child("Leave, refresh forward secrecy, or clear local state."),
-                    ),
-            )
-            .child(leave_button)
-            .child(refresh_button)
-            .child(reset_button)
+        material_surface(
+            window,
+            MaterialStyle::sidebar().emphasis(MaterialEmphasis::Medium),
+        )
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .px(px(14.0))
+        .py(px(14.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(UI_MUTED_TEXT))
+                        .child("Room actions"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(UI_SUBTLE_TEXT))
+                        .child("Leave, refresh forward secrecy, or clear local state."),
+                ),
+        )
+        .child(leave_button)
+        .child(refresh_button)
+        .child(reset_button)
     }
 }

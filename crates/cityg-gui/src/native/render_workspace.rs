@@ -4,6 +4,7 @@ impl AppModel {
     pub(super) fn render_workspace_sidebar(
         &self,
         session: &AppSession,
+        window: &Window,
         cx: &mut ViewContext<Self>,
     ) -> Div {
         let members_total = self.members_total.max(self.members.len() as u64);
@@ -90,175 +91,174 @@ impl AppModel {
                 .child(label.to_string())
         };
 
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(14.0))
-            .px(px(10.0))
-            .py(px(12.0))
-            .rounded(px(18.0))
-            .border(px(1.0))
-            .border_color(rgb(UI_PANEL_BORDER))
-            .bg(ui_sidebar_fill(self.window_active))
-            .shadow_sm()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(10.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.0))
-                            .child(
-                                div()
-                                    .text_size(px(17.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(UI_PANEL_TEXT))
-                                    .child("City-G"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(UI_SUBTLE_TEXT))
-                                    .child("Secure room workspace"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .px(px(9.0))
-                            .py(px(4.0))
-                            .rounded(px(999.0))
-                            .bg(transport_fill)
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(transport_text)
-                            .child(transport_label),
-                    ),
-            )
-            .child(section_header("ROOM"))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .px(px(10.0))
-                    .py(px(10.0))
-                    .rounded(px(14.0))
-                    .bg(ui_sidebar_selected_fill(self.window_active))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(UI_PANEL_TEXT))
-                            .child(format!("# {}", room_preview)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(UI_SUBTLE_TEXT))
-                            .truncate()
-                            .child(session.server_url.clone()),
-                    ),
-            )
-            .child(section_header("SESSION"))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .px(px(10.0))
-                            .py(px(8.0))
-                            .rounded(px(11.0))
-                            .bg(section_fill)
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(UI_MUTED_TEXT))
-                                    .child("Alias"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(UI_PANEL_TEXT))
-                                    .child(session.alias.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .px(px(10.0))
-                            .py(px(8.0))
-                            .rounded(px(11.0))
-                            .bg(section_fill)
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(UI_MUTED_TEXT))
-                                    .child("Members"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(UI_PANEL_TEXT))
-                                    .child(format!("{}/{}", self.members.len(), members_total)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .px(px(10.0))
-                            .py(px(8.0))
-                            .rounded(px(11.0))
-                            .bg(section_fill)
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(UI_MUTED_TEXT))
-                                    .child("Messages"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(UI_PANEL_TEXT))
-                                    .child(if self.show_ciphertext {
-                                        "Ciphertext"
-                                    } else {
-                                        "Plaintext"
-                                    }),
-                            ),
-                    ),
-            )
-            .child(section_header("SHARE"))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .rounded(px(14.0))
-                    .bg(section_fill)
-                    .child(copy_room_button)
-                    .child(copy_invite_button),
-            )
+        material_surface(
+            window,
+            MaterialStyle::sidebar().emphasis(MaterialEmphasis::High),
+        )
+        .flex()
+        .flex_col()
+        .gap(px(14.0))
+        .px(px(10.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(10.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_size(px(17.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(UI_PANEL_TEXT))
+                                .child("City-G"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(UI_SUBTLE_TEXT))
+                                .child("Secure room workspace"),
+                        ),
+                )
+                .child(
+                    div()
+                        .px(px(9.0))
+                        .py(px(4.0))
+                        .rounded(px(999.0))
+                        .bg(transport_fill)
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(transport_text)
+                        .child(transport_label),
+                ),
+        )
+        .child(section_header("ROOM"))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(10.0))
+                .py(px(10.0))
+                .rounded(px(14.0))
+                .bg(ui_sidebar_selected_fill(self.window_active))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(UI_PANEL_TEXT))
+                        .child(format!("# {}", room_preview)),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(UI_SUBTLE_TEXT))
+                        .truncate()
+                        .child(session.server_url.clone()),
+                ),
+        )
+        .child(section_header("SESSION"))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .rounded(px(11.0))
+                        .bg(section_fill)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(UI_MUTED_TEXT))
+                                .child("Alias"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(UI_PANEL_TEXT))
+                                .child(session.alias.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .rounded(px(11.0))
+                        .bg(section_fill)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(UI_MUTED_TEXT))
+                                .child("Members"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(UI_PANEL_TEXT))
+                                .child(format!("{}/{}", self.members.len(), members_total)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .rounded(px(11.0))
+                        .bg(section_fill)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(UI_MUTED_TEXT))
+                                .child("Messages"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(UI_PANEL_TEXT))
+                                .child(if self.show_ciphertext {
+                                    "Ciphertext"
+                                } else {
+                                    "Plaintext"
+                                }),
+                        ),
+                ),
+        )
+        .child(section_header("SHARE"))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .rounded(px(14.0))
+                .bg(section_fill)
+                .child(copy_room_button)
+                .child(copy_invite_button),
+        )
     }
 
     pub(super) fn render_chat_header(
         &self,
         session: &AppSession,
+        window: &Window,
         window_width: f32,
         cx: &mut ViewContext<Self>,
     ) -> Div {
@@ -408,87 +408,85 @@ impl AppModel {
         ciphertext_button = ciphertext_button
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_toggle_ciphertext));
 
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px(px(16.0))
-            .py(px(12.0))
-            .rounded(px(18.0))
-            .border(px(1.0))
-            .border_color(rgb(UI_PANEL_BORDER))
-            .bg(ui_toolbar_fill(self.window_active))
-            .shadow_sm()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(5.0))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(UI_MUTED_TEXT))
-                            .child("Messages"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(20.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(UI_PANEL_TEXT))
-                            .child(format!("# {}", room_label)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap(px(8.0))
-                            .child(status_chip(
-                                ws_state,
-                                if self.ws_connected {
-                                    0x20372a
-                                } else {
-                                    0x2b3038
-                                },
-                                if self.ws_connected {
-                                    UI_SUCCESS_TEXT
-                                } else {
-                                    UI_INFO_TEXT
-                                },
-                            ))
-                            .child(status_chip(
-                                fetch_state,
-                                if matches!(self.fetch_status, FetchStatus::Refreshing) {
-                                    UI_ACCENT_SOFT_FILL
-                                } else {
-                                    UI_NEUTRAL_ELEVATED_FILL
-                                },
-                                if matches!(self.fetch_status, FetchStatus::Refreshing) {
-                                    UI_ACCENT_TEXT
-                                } else {
-                                    UI_SUBTLE_TEXT
-                                },
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .px(px(4.0))
-                            .py(px(4.0))
-                            .rounded(px(14.0))
-                            .bg(ui_row_fill(self.window_active))
-                            .child(sidebar_button)
-                            .child(inspector_button),
-                    )
-                    .child(ciphertext_button),
-            )
+        material_surface(
+            window,
+            MaterialStyle::toolbar().emphasis(MaterialEmphasis::High),
+        )
+        .flex()
+        .items_center()
+        .justify_between()
+        .px(px(16.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(UI_MUTED_TEXT))
+                        .child("Messages"),
+                )
+                .child(
+                    div()
+                        .text_size(px(20.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(UI_PANEL_TEXT))
+                        .child(format!("# {}", room_label)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(8.0))
+                        .child(status_chip(
+                            ws_state,
+                            if self.ws_connected {
+                                0x20372a
+                            } else {
+                                0x2b3038
+                            },
+                            if self.ws_connected {
+                                UI_SUCCESS_TEXT
+                            } else {
+                                UI_INFO_TEXT
+                            },
+                        ))
+                        .child(status_chip(
+                            fetch_state,
+                            if matches!(self.fetch_status, FetchStatus::Refreshing) {
+                                UI_ACCENT_SOFT_FILL
+                            } else {
+                                UI_NEUTRAL_ELEVATED_FILL
+                            },
+                            if matches!(self.fetch_status, FetchStatus::Refreshing) {
+                                UI_ACCENT_TEXT
+                            } else {
+                                UI_SUBTLE_TEXT
+                            },
+                        )),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(4.0))
+                        .py(px(4.0))
+                        .rounded(px(14.0))
+                        .bg(ui_row_fill(self.window_active))
+                        .child(sidebar_button)
+                        .child(inspector_button),
+                )
+                .child(ciphertext_button),
+        )
     }
 }

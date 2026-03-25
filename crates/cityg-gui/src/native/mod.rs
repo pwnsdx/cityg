@@ -40,10 +40,10 @@ use gpui::prelude::*;
 use gpui::{
     App, Bounds, ClipboardItem, Context as ViewContext, CursorStyle, Div, DragMoveEvent, Element,
     ElementId, ElementInputHandler, EmptyView, Entity, EntityInputHandler, FocusHandle, FontWeight,
-    GlobalElementId, Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, PromptLevel, Render, ScrollHandle, ShapedLine, SharedString,
-    Style, Task, TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, point, px, relative,
-    rgb, rgba, size,
+    GlobalElementId, Keystroke, LayoutId, MaterialEmphasis, MaterialStyle, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, PromptLevel, Render,
+    ScrollHandle, ShapedLine, SharedString, Style, Task, TextRun, UTF16Selection, UnderlineStyle,
+    Window, div, fill, material_surface, point, px, relative, rgb, rgba, size,
 };
 #[cfg(not(test))]
 use gpui::{
