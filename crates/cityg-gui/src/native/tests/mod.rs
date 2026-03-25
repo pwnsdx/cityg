@@ -7,7 +7,9 @@ use std::sync::{Arc, Once, atomic::AtomicU16};
 use tempfile::TempDir;
 use tokio::{task::JoinHandle, time::sleep};
 
-use crate::native::app_actions::CopyRoomIdAction;
+use crate::native::app_actions::{
+    CopyRoomIdAction, ShowSessionOverviewAction, ToggleSidebarAction,
+};
 
 #[path = "client_state_props.rs"]
 mod client_state_props;
@@ -2863,6 +2865,147 @@ fn gpui_async_handler_paths_cover_state_machine(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn gpui_session_overview_action_toggles_inline_inspector(cx: &mut TestAppContext) {
+    cx.update(tokio_bridge::init);
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let session = build_test_session(
+        0x1234,
+        "http://127.0.0.1:9",
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "alice",
+    )
+    .expect("build test session");
+
+    let (view, cx) = cx.add_window_view(move |window, _| {
+        window.resize(size(px(1280.0), px(760.0)));
+        let mut model = AppModel::new(CityGConfig::default());
+        model.session = Some(session);
+        model
+    });
+
+    cx.update(|window, app| {
+        view.update(app, |model, view_cx| {
+            let window_width = f32::from(window.bounds().size.width);
+            assert!(model.resolved_inspector_width(window_width).is_some());
+
+            model.on_show_session_overview_action(&ShowSessionOverviewAction, window, view_cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        view.update(app, |model, _| {
+            let window_width = f32::from(window.bounds().size.width);
+            assert!(model.resolved_inspector_width(window_width).is_none());
+        });
+    });
+    cx.update(|window, app| {
+        view.update(app, |model, view_cx| {
+            model.on_show_session_overview_action(&ShowSessionOverviewAction, window, view_cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        view.update(app, |model, _| {
+            let window_width = f32::from(window.bounds().size.width);
+            assert!(model.resolved_inspector_width(window_width).is_some());
+        });
+    });
+}
+
+#[gpui::test]
+fn gpui_toggle_sidebar_action_toggles_inline_sidebar(cx: &mut TestAppContext) {
+    cx.update(tokio_bridge::init);
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let session = build_test_session(
+        0x2233,
+        "http://127.0.0.1:9",
+        "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+        "sidebar",
+    )
+    .expect("build test session");
+
+    let (view, cx) = cx.add_window_view(move |window, _| {
+        window.resize(size(px(1280.0), px(760.0)));
+        let mut model = AppModel::new(CityGConfig::default());
+        model.session = Some(session);
+        model
+    });
+
+    cx.update(|window, app| {
+        view.update(app, |model, view_cx| {
+            let window_width = f32::from(window.bounds().size.width);
+            assert!(model.resolved_sidebar_width(window_width).is_some());
+
+            model.on_toggle_sidebar_action(&ToggleSidebarAction, window, view_cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        view.update(app, |model, _| {
+            let window_width = f32::from(window.bounds().size.width);
+            assert!(model.resolved_sidebar_width(window_width).is_none());
+        });
+    });
+    cx.update(|window, app| {
+        view.update(app, |model, view_cx| {
+            model.on_toggle_sidebar_action(&ToggleSidebarAction, window, view_cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        view.update(app, |model, _| {
+            let window_width = f32::from(window.bounds().size.width);
+            assert!(model.resolved_sidebar_width(window_width).is_some());
+        });
+    });
+}
+
+#[gpui::test]
+fn gpui_dispatch_toggle_inspector_action_from_focused_search_field(cx: &mut TestAppContext) {
+    cx.update(tokio_bridge::init);
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let session = build_test_session(
+        0x7788,
+        "http://127.0.0.1:9",
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "focus",
+    )
+    .expect("build test session");
+
+    let (view, cx) = cx.add_window_view(move |window, _| {
+        window.resize(size(px(1280.0), px(760.0)));
+        let mut model = AppModel::new(CityGConfig::default());
+        model.session = Some(session);
+        model
+    });
+
+    cx.update(|window, app| {
+        view.update(app, |model, view_cx| {
+            model.focus_members_search(window, view_cx);
+        });
+    });
+    cx.run_until_parked();
+
+    cx.dispatch_action(ShowSessionOverviewAction);
+
+    cx.update(|window, app| {
+        view.update(app, |model, _| {
+            let window_width = f32::from(window.bounds().size.width);
+            assert!(model.resolved_inspector_width(window_width).is_none());
+        });
+    });
+}
+
+#[gpui::test]
 fn gpui_pending_barrier_recovery_surfaces_guidance_instead_of_errors(cx: &mut TestAppContext) {
     cx.update(tokio_bridge::init);
     let temp_dir = TempDir::new().expect("create temp dir");
@@ -4227,6 +4370,38 @@ fn primary_shortcut_detection_accepts_cmd_and_ctrl() -> Result<(), Box<dyn std::
     assert!(is_primary_shortcut(&ctrl_c, "c"));
     assert!(!is_primary_shortcut(&alt_v, "v"));
     Ok(())
+}
+
+#[test]
+fn sidebar_width_rules_hide_when_narrow_and_clamp_when_wide() {
+    assert!(
+        AppModel::available_sidebar_width_for_window(520.0).is_none(),
+        "narrow windows should collapse the sidebar"
+    );
+
+    let compact = AppModel::available_sidebar_width_for_window(620.0)
+        .expect("compact-width sidebar should fit");
+    assert!((compact - 248.0).abs() < 0.5);
+
+    let wide = AppModel::available_sidebar_width_for_window(1440.0)
+        .expect("wide-window sidebar should fit");
+    assert!((wide - 300.0).abs() < 0.5);
+}
+
+#[test]
+fn inspector_width_rules_hide_when_narrow_and_clamp_when_wide() {
+    assert!(
+        AppModel::available_inspector_width_for_window(720.0, Some(228.0)).is_none(),
+        "narrow windows should collapse the inspector"
+    );
+
+    let medium = AppModel::available_inspector_width_for_window(1000.0, Some(228.0))
+        .expect("medium-width inspector should fit");
+    assert!((medium - 332.0).abs() < 0.5);
+
+    let wide = AppModel::available_inspector_width_for_window(1440.0, Some(228.0))
+        .expect("wide-window inspector should fit");
+    assert!((wide - 460.0).abs() < 0.5);
 }
 
 #[test]

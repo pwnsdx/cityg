@@ -155,7 +155,12 @@ impl AppModel {
             activity_events: Vec::new(),
             chat_scroll_handle: ScrollHandle::new(),
             right_sidebar_scroll_handle: ScrollHandle::new(),
-            session_overview_window: None,
+            sidebar_visible: true,
+            sidebar_width: 228.0,
+            sidebar_resize: None,
+            inspector_visible: true,
+            inspector_width: 360.0,
+            inspector_resize: None,
             root_focus_handle: None,
             native_text_inputs_bound: false,
         };
@@ -209,8 +214,8 @@ impl Render for AppModel {
         self.ensure_native_text_input_setup(window, cx);
         let background = ui_canvas_fill(self.window_active);
         let has_session = self.session.is_some();
-        let body: Div = if let Some(session) = &self.session {
-            self.render_session(window, session, cx)
+        let body: Div = if let Some(session) = self.session.clone() {
+            self.render_session(window, &session, cx)
         } else {
             self.render_join(cx)
         };
@@ -233,6 +238,7 @@ impl Render for AppModel {
             .on_action(cx.listener(Self::on_focus_room_admin_target_action))
             .on_action(cx.listener(Self::on_copy_room_id_action))
             .on_action(cx.listener(Self::on_copy_room_invite_action))
+            .on_action(cx.listener(Self::on_toggle_sidebar_action))
             .on_action(cx.listener(Self::on_show_session_overview_action))
             .on_action(cx.listener(Self::on_toggle_ciphertext_action))
             .on_action(cx.listener(Self::on_copy_selection_action))

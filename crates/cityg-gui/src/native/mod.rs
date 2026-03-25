@@ -38,13 +38,16 @@ use cityg_config::CityGConfig;
 use gpui::Application;
 use gpui::prelude::*;
 use gpui::{
-    AnyWindowHandle, App, Bounds, ClipboardItem, Context as ViewContext, CursorStyle, Div, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight,
+    App, Bounds, ClipboardItem, Context as ViewContext, CursorStyle, Div, DragMoveEvent, Element,
+    ElementId, ElementInputHandler, EmptyView, Entity, EntityInputHandler, FocusHandle, FontWeight,
     GlobalElementId, Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, PromptLevel, Render, ScrollHandle, ShapedLine, SharedString,
-    Style, Task, TextRun, TitlebarOptions, UTF16Selection, UnderlineStyle, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div, fill, point,
-    px, relative, rgb, rgba, size,
+    Style, Task, TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, point, px, relative,
+    rgb, rgba, size,
+};
+#[cfg(not(test))]
+use gpui::{
+    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions,
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;

@@ -2,32 +2,30 @@ use super::*;
 
 impl AppModel {
     pub(super) fn render_session(
-        &self,
+        &mut self,
         window: &mut Window,
         session: &AppSession,
         cx: &mut ViewContext<Self>,
     ) -> Div {
         let window_size = window.bounds().size;
         let window_width = f32::from(window_size.width);
-        let show_details = window_width >= 1220.0;
-        let sidebar_width = if window_width >= 1440.0 {
-            258.0
-        } else if window_width >= 1160.0 {
-            228.0
+        let sidebar_width = self.resolved_sidebar_width(window_width);
+        let inspector_width = self.resolved_inspector_width(window_width);
+        let center_min_width = if inspector_width.is_some() {
+            360.0
         } else {
-            204.0
+            320.0
         };
-        let details_width = if window_width >= 1560.0 { 376.0 } else { 334.0 };
 
         let mut center_column = div()
             .flex()
             .flex_col()
             .flex_grow()
-            .min_w(px(280.0))
+            .min_w(px(center_min_width))
             .min_h(px(0.0))
             .h_full()
             .gap(px(12.0))
-            .child(self.render_chat_header(session, cx))
+            .child(self.render_chat_header(session, window_width, cx))
             .child(self.render_message_panel(session, cx));
 
         if let Some(info) = &self.info_message {
@@ -50,34 +48,49 @@ impl AppModel {
             );
         }
 
-        let left_column = div()
+        let mut main_columns = div()
             .flex()
-            .flex_col()
-            .min_w(px(sidebar_width))
-            .max_w(px(sidebar_width))
+            .flex_grow()
+            .min_w(px(0.0))
             .min_h(px(0.0))
             .h_full()
             .gap(px(10.0))
-            .child(self.render_workspace_sidebar(session, cx))
-            .child(self.render_leave_controls(cx));
+            .child(center_column);
 
-        let details_scroll = div()
+        if let Some(inspector_width) = inspector_width {
+            main_columns = main_columns
+                .child(self.render_inspector_divider(inspector_width, cx))
+                .child(self.render_session_inspector(session, inspector_width, cx));
+        }
+
+        let mut workspace = div()
             .flex()
-            .flex_col()
             .flex_grow()
+            .min_w(px(0.0))
             .min_h(px(0.0))
             .h_full()
-            .gap(px(12.0))
-            .id("session-details-scroll")
-            .track_scroll(&self.right_sidebar_scroll_handle)
-            .overflow_y_scroll()
-            .block_mouse_except_scroll()
-            .child(self.render_room_admin_panel(session, cx))
-            .child(self.render_members_panel(cx))
-            .child(self.render_security_panel(cx))
-            .child(self.render_activity_panel(cx));
+            .gap(px(10.0));
 
-        let mut root = div()
+        if let Some(sidebar_width) = sidebar_width {
+            workspace = workspace
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w(px(sidebar_width))
+                        .max_w(px(sidebar_width))
+                        .min_h(px(0.0))
+                        .h_full()
+                        .gap(px(10.0))
+                        .child(self.render_workspace_sidebar(session, cx))
+                        .child(self.render_leave_controls(cx)),
+                )
+                .child(self.render_sidebar_divider(sidebar_width, cx));
+        }
+
+        workspace = workspace.child(main_columns);
+
+        let root = div()
             .flex()
             .w_full()
             .h_full()
@@ -85,22 +98,8 @@ impl AppModel {
             .min_h(px(420.0))
             .px(px(12.0))
             .py(px(12.0))
-            .gap(px(12.0))
             .bg(ui_canvas_fill(self.window_active))
-            .child(left_column)
-            .child(center_column);
-
-        if show_details {
-            let right_column = div()
-                .flex()
-                .flex_col()
-                .min_w(px(details_width))
-                .max_w(px(details_width))
-                .min_h(px(0.0))
-                .h_full()
-                .child(details_scroll);
-            root = root.child(right_column);
-        }
+            .child(workspace);
 
         root
     }

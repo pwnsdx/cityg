@@ -16,6 +16,7 @@ gpui::actions!(
         FocusRoomAdminTargetAction,
         CopyRoomIdAction,
         CopyRoomInviteAction,
+        ToggleSidebarAction,
         ShowSessionOverviewAction,
         ToggleCiphertextAction,
         CopySelectionAction,
@@ -54,6 +55,7 @@ pub(super) fn install_action_handlers(app: &mut App) {
     app.on_action(|_: &FocusRoomAdminTargetAction, _| {});
     app.on_action(|_: &CopyRoomIdAction, _| {});
     app.on_action(|_: &CopyRoomInviteAction, _| {});
+    app.on_action(|_: &ToggleSidebarAction, _| {});
     app.on_action(|_: &ShowSessionOverviewAction, _| {});
     app.on_action(|_: &ToggleCiphertextAction, _| {});
     app.on_action(|_: &CopySelectionAction, _| {});
@@ -81,6 +83,7 @@ pub(super) fn install_native_app_shell(app: &mut App) {
         KeyBinding::new("cmd-q", QuitAppAction, None),
         KeyBinding::new("cmd-h", HideAppAction, None),
         KeyBinding::new("alt-cmd-h", HideOtherAppsAction, None),
+        KeyBinding::new("alt-cmd-s", ToggleSidebarAction, None),
         KeyBinding::new("shift-cmd-o", ShowSessionOverviewAction, None),
         KeyBinding::new("cmd-,", RevealConfigDirectory, Some("cityg-root")),
         KeyBinding::new("cmd-j", JoinRoomAction, Some("cityg-root")),
@@ -156,7 +159,8 @@ pub(super) fn install_native_app_shell(app: &mut App) {
                 MenuItem::action("Focus Member Search", FocusMembersSearchAction),
                 MenuItem::action("Focus Room Admin Target", FocusRoomAdminTargetAction),
                 MenuItem::separator(),
-                MenuItem::action("Show Session Overview", ShowSessionOverviewAction),
+                MenuItem::action("Toggle Sidebar", ToggleSidebarAction),
+                MenuItem::action("Toggle Inspector", ShowSessionOverviewAction),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Ciphertext", ToggleCiphertextAction),
             ],
@@ -167,14 +171,16 @@ pub(super) fn install_native_app_shell(app: &mut App) {
                 MenuItem::action("Minimize", MinimizeWindowAction),
                 MenuItem::action("Zoom", ZoomWindowAction),
                 MenuItem::separator(),
-                MenuItem::action("Show Session Overview", ShowSessionOverviewAction),
+                MenuItem::action("Toggle Sidebar", ToggleSidebarAction),
+                MenuItem::action("Toggle Inspector", ShowSessionOverviewAction),
             ],
         },
     ]);
 
     app.set_dock_menu(vec![
         MenuItem::action("Join Room", JoinRoomAction),
-        MenuItem::action("Show Session Overview", ShowSessionOverviewAction),
+        MenuItem::action("Toggle Sidebar", ToggleSidebarAction),
+        MenuItem::action("Toggle Inspector", ShowSessionOverviewAction),
         MenuItem::action("PCS Refresh", RefreshRoomAction),
         MenuItem::separator(),
         MenuItem::action("Show Config Folder", RevealConfigDirectory),
@@ -192,7 +198,7 @@ impl AppModel {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "Unavailable".to_string());
         let detail = format!(
-            "Version {}\nNative shell with blurred materials, split-view workspace, Dock actions, and background notifications.\nConfig folder: {}",
+            "Version {}\nNative shell with blurred materials, a resizable split-view workspace, Dock actions, and background notifications.\nConfig folder: {}",
             env!("CARGO_PKG_VERSION"),
             config_path
         );

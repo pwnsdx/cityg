@@ -50,9 +50,26 @@ pub(super) struct AppModel {
     pub(super) activity_events: Vec<ActivityEvent>,
     pub(super) chat_scroll_handle: ScrollHandle,
     pub(super) right_sidebar_scroll_handle: ScrollHandle,
-    pub(super) session_overview_window: Option<AnyWindowHandle>,
+    pub(super) sidebar_visible: bool,
+    pub(super) sidebar_width: f32,
+    pub(super) sidebar_resize: Option<SidebarResizeState>,
+    pub(super) inspector_visible: bool,
+    pub(super) inspector_width: f32,
+    pub(super) inspector_resize: Option<InspectorResizeState>,
     pub(super) root_focus_handle: Option<FocusHandle>,
     pub(super) native_text_inputs_bound: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct SidebarResizeState {
+    pub(super) start_mouse_x: f32,
+    pub(super) start_width: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct InspectorResizeState {
+    pub(super) start_mouse_x: f32,
+    pub(super) start_width: f32,
 }
 
 pub(super) enum JoinStatus {
