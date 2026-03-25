@@ -19,10 +19,10 @@ resolver = "2"
 [patch.crates-io]
 pqcrypto-kyber = { path = "crates/pqcrypto-kyber" }
 # GPUI is now consumed from the maintained pwnsdx fork rather than the vendored
-# snapshot. This revision includes the semantic material surface layer plus the
-# refined cross-platform fallback backend on top of the March 2026 macOS
-# backports.
-gpui = { git = "https://github.com/pwnsdx/gpui.git", rev = "b10064823ca23971f4dc45cb7b152780dacb1394" }
+# snapshot. This revision includes the semantic material surface layer, the
+# refined cross-platform fallback backend, and the first native macOS material
+# surface plumbing on top of the March 2026 backports.
+gpui = { git = "https://github.com/pwnsdx/gpui.git", rev = "1c3bf16a45aa62988aa3b184f0ca7cefef584120" }
 
 [workspace.package]
 edition = "2024"

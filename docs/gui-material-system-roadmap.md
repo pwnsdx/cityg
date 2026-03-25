@@ -758,10 +758,14 @@ As of 2026-03-25:
   commit `b10064823ca23971f4dc45cb7b152780dacb1394` with role-aware fallback
   rendering, inactive-window fallback rules, and reduced-transparency
   resolution at the framework layer
+- the first native macOS material-surface backend slice was then published on
+  that same branch at commit `1c3bf16a45aa62988aa3b184f0ca7cefef584120`,
+  adding GPUI-managed native `NSGlassEffectView` lifecycle hooks behind the
+  semantic material API
 - City-G has started the app-side adoption pass for that API across the native
   sidebar/header shell, join shell, inspector cards, and grouped control rows
-- City-G now consumes GPUI from that fork revision via a git patch instead of
-  the vendored path dependency
+- City-G now consumes GPUI from that fork branch via a git patch instead of the
+  vendored path dependency
 - the stale vendored GPUI tree in `cityg/vendor/gpui-0.2.2` was retired after
   the fork switch and local validation
 
@@ -778,8 +782,10 @@ Known provenance notes:
 ### Next Operational Steps
 
 1. Define a repeatable sync workflow from upstream Zed to `pwnsdx/gpui`.
-2. Continue moving framework-generic material work into `pwnsdx/gpui` while
-   keeping product-specific shell composition in `cityg`.
+2. Finish visual validation and refinement of the first native macOS material
+   backend slice in `pwnsdx/gpui`.
+3. Add scroll-edge and background-extension semantics in `pwnsdx/gpui`, then
+   adopt them in the City-G shell.
 
 ### Timing
 

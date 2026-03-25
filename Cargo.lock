@@ -3192,7 +3192,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/pwnsdx/gpui.git?rev=b10064823ca23971f4dc45cb7b152780dacb1394#b10064823ca23971f4dc45cb7b152780dacb1394"
+source = "git+https://github.com/pwnsdx/gpui.git?rev=1c3bf16a45aa62988aa3b184f0ca7cefef584120#1c3bf16a45aa62988aa3b184f0ca7cefef584120"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
