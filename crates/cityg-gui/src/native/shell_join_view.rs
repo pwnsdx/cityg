@@ -12,19 +12,35 @@ impl AppModel {
         let form = div()
             .flex()
             .flex_col()
+            .w(px(520.0))
+            .max_w_full()
             .px(px(40.0))
             .py(px(36.0))
-            .gap(px(16.0))
-            .rounded(px(18.0))
+            .gap(px(18.0))
+            .rounded(px(24.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
             .bg(ui_sheet_fill(self.window_active))
+            .shadow_lg()
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
+                    .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(28.0))
+                            .px(px(10.0))
+                            .py(px(4.0))
+                            .rounded(px(999.0))
+                            .bg(rgb(UI_ACCENT_SOFT_FILL))
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(UI_ACCENT_TEXT))
+                            .child("Native desktop shell"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(30.0))
                             .font_weight(FontWeight::BOLD)
                             .text_color(heading_color)
                             .child("Join a City-G Room"),
@@ -58,12 +74,19 @@ impl AppModel {
                     .child(
                         div()
                             .px(px(12.0))
-                            .py(px(6.0))
-                            .rounded(px(10.0))
+                            .py(px(7.0))
+                            .rounded(px(11.0))
+                            .border(px(1.0))
+                            .border_color(rgb(UI_PANEL_BORDER))
                             .bg(ui_button_fill(self.window_active))
                             .text_color(rgb(UI_PANEL_TEXT))
                             .cursor(CursorStyle::PointingHand)
                             .text_size(px(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .hover({
+                                let hover_fill = ui_hover_fill(self.window_active);
+                                move |style| style.bg(hover_fill)
+                            })
                             .child("Generate new ID")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -97,13 +120,23 @@ impl AppModel {
             .child({
                 let mut button = div()
                     .px(px(18.0))
-                    .py(px(10.0))
-                    .rounded(px(12.0))
+                    .py(px(12.0))
+                    .rounded(px(14.0))
+                    .border(px(1.0))
+                    .border_color(if join_disabled {
+                        rgb(UI_PANEL_BORDER)
+                    } else {
+                        rgb(UI_ACCENT_TEXT)
+                    })
                     .text_size(px(16.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(UI_ACCENT_BUTTON_TEXT))
+                    .text_color(if join_disabled {
+                        rgb(UI_MUTED_TEXT)
+                    } else {
+                        rgb(UI_ACCENT_BUTTON_TEXT)
+                    })
                     .bg(if join_disabled {
-                        rgb(UI_DISABLED_FILL)
+                        ui_button_fill(self.window_active)
                     } else {
                         rgb(UI_ACCENT_TEXT)
                     })
@@ -119,8 +152,9 @@ impl AppModel {
                     });
 
                 if !join_disabled {
-                    button =
-                        button.on_mouse_down(MouseButton::Left, cx.listener(Self::on_join_clicked));
+                    button = button
+                        .hover(|style| style.bg(rgb(0x79bdff)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_join_clicked));
                 }
                 button
             });
@@ -199,8 +233,8 @@ impl AppModel {
                 let handler_field = field;
                 div()
                     .px(px(14.0))
-                    .py(px(10.0))
-                    .rounded(px(12.0))
+                    .py(px(12.0))
+                    .rounded(px(14.0))
                     .border(px(1.0))
                     .border_color(border)
                     .bg(background)

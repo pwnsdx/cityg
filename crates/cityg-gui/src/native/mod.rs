@@ -39,10 +39,9 @@ use gpui::Application;
 use gpui::prelude::*;
 use gpui::{
     AnyWindowHandle, App, Bounds, ClipboardItem, Context as ViewContext, CursorStyle, Div, Entity,
-    FontWeight, KeyBinding, Keystroke, Menu, MenuItem, MouseButton, MouseDownEvent, PromptLevel,
-    Render, ScrollHandle, SystemMenuType, Task, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div, point, px,
-    rgb, rgba, size,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, PromptLevel, Render, ScrollHandle, Task,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowOptions, div, point, px, rgb, rgba, size,
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;

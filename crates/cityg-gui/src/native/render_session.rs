@@ -9,20 +9,15 @@ impl AppModel {
     ) -> Div {
         let window_size = window.bounds().size;
         let window_width = f32::from(window_size.width);
-        let sidebar_width = if window_width >= 1360.0 {
-            248.0
-        } else if window_width >= 1100.0 {
-            214.0
+        let show_details = window_width >= 1220.0;
+        let sidebar_width = if window_width >= 1440.0 {
+            258.0
+        } else if window_width >= 1160.0 {
+            228.0
         } else {
-            176.0
+            204.0
         };
-        let details_width = if window_width >= 1460.0 {
-            392.0
-        } else if window_width >= 1180.0 {
-            332.0
-        } else {
-            284.0
-        };
+        let details_width = if window_width >= 1560.0 { 376.0 } else { 334.0 };
 
         let mut center_column = div()
             .flex()
@@ -62,7 +57,7 @@ impl AppModel {
             .max_w(px(sidebar_width))
             .min_h(px(0.0))
             .h_full()
-            .gap(px(12.0))
+            .gap(px(10.0))
             .child(self.render_workspace_sidebar(session, cx))
             .child(self.render_leave_controls(cx));
 
@@ -82,27 +77,31 @@ impl AppModel {
             .child(self.render_security_panel(cx))
             .child(self.render_activity_panel(cx));
 
-        let right_column = div()
-            .flex()
-            .flex_col()
-            .min_w(px(details_width))
-            .max_w(px(details_width))
-            .min_h(px(0.0))
-            .h_full()
-            .child(details_scroll);
-
-        div()
+        let mut root = div()
             .flex()
             .w_full()
             .h_full()
             .min_w(px(0.0))
             .min_h(px(420.0))
-            .px(px(16.0))
-            .py(px(16.0))
-            .gap(px(14.0))
+            .px(px(12.0))
+            .py(px(12.0))
+            .gap(px(12.0))
             .bg(ui_canvas_fill(self.window_active))
             .child(left_column)
-            .child(center_column)
-            .child(right_column)
+            .child(center_column);
+
+        if show_details {
+            let right_column = div()
+                .flex()
+                .flex_col()
+                .min_w(px(details_width))
+                .max_w(px(details_width))
+                .min_h(px(0.0))
+                .h_full()
+                .child(details_scroll);
+            root = root.child(right_column);
+        }
+
+        root
     }
 }

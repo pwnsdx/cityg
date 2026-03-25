@@ -218,7 +218,13 @@ impl Render for AppModel {
             .on_action(cx.listener(Self::on_copy_room_id_action))
             .on_action(cx.listener(Self::on_copy_room_invite_action))
             .on_action(cx.listener(Self::on_show_session_overview_action))
-            .on_action(cx.listener(Self::on_toggle_ciphertext_action));
+            .on_action(cx.listener(Self::on_toggle_ciphertext_action))
+            .on_action(cx.listener(Self::on_copy_selection_action))
+            .on_action(cx.listener(Self::on_cut_selection_action))
+            .on_action(cx.listener(Self::on_paste_selection_action))
+            .on_action(cx.listener(Self::on_show_emoji_palette_action))
+            .on_action(cx.listener(Self::on_minimize_window_action))
+            .on_action(cx.listener(Self::on_zoom_window_action));
 
         if has_session {
             root = root.child(body);

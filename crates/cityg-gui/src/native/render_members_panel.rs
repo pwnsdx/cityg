@@ -20,13 +20,19 @@ impl AppModel {
 
         let refresh_button = div()
             .px(px(8.0))
-            .py(px(5.0))
+            .py(px(6.0))
             .rounded(px(10.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
             .text_size(px(12.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(UI_PANEL_TEXT))
             .bg(ui_button_fill(self.window_active))
             .cursor(CursorStyle::PointingHand)
+            .hover({
+                let hover_fill = ui_hover_fill(self.window_active);
+                move |style| style.bg(hover_fill)
+            })
             .child("Refresh")
             .on_mouse_down(
                 MouseButton::Left,
@@ -40,13 +46,19 @@ impl AppModel {
         {
             let load_more = div()
                 .px(px(8.0))
-                .py(px(5.0))
+                .py(px(6.0))
                 .rounded(px(10.0))
+                .border(px(1.0))
+                .border_color(rgb(UI_PANEL_BORDER))
                 .text_size(px(12.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(UI_PANEL_TEXT))
                 .bg(rgb(UI_NEUTRAL_ELEVATED_FILL))
                 .cursor(CursorStyle::PointingHand)
+                .hover({
+                    let hover_fill = ui_hover_fill(self.window_active);
+                    move |style| style.bg(hover_fill)
+                })
                 .child("Load more")
                 .on_mouse_down(
                     MouseButton::Left,
@@ -104,11 +116,17 @@ impl AppModel {
             .px(px(8.0))
             .py(px(6.0))
             .rounded(px(10.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
             .text_size(px(12.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(UI_PANEL_TEXT))
             .bg(ui_button_fill(self.window_active))
             .cursor(CursorStyle::PointingHand)
+            .hover({
+                let hover_fill = ui_hover_fill(self.window_active);
+                move |style| style.bg(hover_fill)
+            })
             .child("Search")
             .on_mouse_down(
                 MouseButton::Left,
@@ -124,11 +142,17 @@ impl AppModel {
                 .px(px(8.0))
                 .py(px(6.0))
                 .rounded(px(10.0))
+                .border(px(1.0))
+                .border_color(rgb(UI_PANEL_BORDER))
                 .text_size(px(12.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(UI_PANEL_TEXT))
                 .bg(rgb(UI_NEUTRAL_ELEVATED_FILL))
                 .cursor(CursorStyle::PointingHand)
+                .hover({
+                    let hover_fill = ui_hover_fill(self.window_active);
+                    move |style| style.bg(hover_fill)
+                })
                 .child("Clear")
                 .on_mouse_down(
                     MouseButton::Left,
@@ -314,12 +338,13 @@ impl AppModel {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .px(px(12.0))
-            .py(px(12.0))
-            .rounded(px(14.0))
+            .px(px(14.0))
+            .py(px(14.0))
+            .rounded(px(18.0))
             .border(px(1.0))
             .border_color(rgb(UI_PANEL_BORDER))
             .bg(ui_panel_fill(self.window_active))
+            .shadow_sm()
             .child(header);
         root = root.child(search_row);
         if let Some(text) = status_text {

@@ -77,23 +77,23 @@ impl AppModel {
         div()
             .flex()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(3.0))
             .child(
                 div()
-                    .text_size(px(16.0))
+                    .text_size(px(14.0))
+                    .text_color(rgb(UI_INFO_TEXT))
+                    .child("●"),
+            )
+            .child(
+                div()
+                    .text_size(px(14.0))
                     .text_color(rgb(UI_ACCENT_TEXT))
                     .child("●"),
             )
             .child(
                 div()
-                    .text_size(px(16.0))
-                    .text_color(rgb(0x62d792))
-                    .child("●"),
-            )
-            .child(
-                div()
-                    .text_size(px(16.0))
-                    .text_color(rgb(0x4eb277))
+                    .text_size(px(14.0))
+                    .text_color(rgb(UI_SUCCESS_TEXT))
                     .child("●"),
             )
     }
@@ -113,13 +113,14 @@ impl AppModel {
             .flex()
             .flex_col()
             .gap(px(12.0))
-            .px(px(16.0))
-            .py(px(14.0))
-            .rounded(px(12.0))
-            .bg(rgba(0x111214ef))
+            .px(px(18.0))
+            .py(px(16.0))
+            .rounded(px(16.0))
+            .bg(ui_toolbar_fill(self.window_active))
             .border_1()
             .border_color(color)
             .max_w(px(640.0))
+            .shadow_md()
             .child(
                 div()
                     .flex()
@@ -208,7 +209,7 @@ impl AppModel {
 
         let mut container = div()
             .absolute()
-            .top(px(20.0))
+            .bottom(px(20.0))
             .right(px(20.0))
             .flex()
             .flex_col()
@@ -217,9 +218,9 @@ impl AppModel {
         for toast in &self.toasts {
             if !toast.is_expired() {
                 let (icon, bg_color) = match toast.kind {
-                    ToastKind::Success => ("✓", rgba(0x1f3427ee)),
-                    ToastKind::Error => ("✗", rgba(0x4a252cee)),
-                    ToastKind::Info => ("ℹ", rgba(0x22262eee)),
+                    ToastKind::Success => ("✓", rgba(0x20372bed)),
+                    ToastKind::Error => ("!", rgba(0x43262def)),
+                    ToastKind::Info => ("i", rgba(0x223040ef)),
                 };
 
                 container = container.child(
@@ -229,10 +230,11 @@ impl AppModel {
                         .items_center()
                         .px(px(16.0))
                         .py(px(12.0))
-                        .rounded(px(10.0))
+                        .rounded(px(14.0))
                         .bg(bg_color)
                         .border_1()
                         .border_color(rgb(UI_PANEL_BORDER))
+                        .shadow_md()
                         .child(
                             div()
                                 .text_size(px(16.0))

@@ -27,20 +27,41 @@ impl AppModel {
         } else {
             "Click to start typing…"
         };
+        let button_fill = ui_button_fill(self.window_active);
+        let button_hover_fill = ui_hover_fill(self.window_active);
 
-        let mut row = div().flex().items_center().gap(px(12.0));
+        let mut row = div()
+            .flex()
+            .items_end()
+            .gap(px(12.0))
+            .px(px(14.0))
+            .py(px(14.0))
+            .rounded(px(16.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
+            .bg(ui_toolbar_fill(self.window_active));
 
         row = row.child(
             div()
                 .flex_grow()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
                 .px(px(14.0))
-                .py(px(10.0))
-                .rounded(px(12.0))
+                .py(px(12.0))
+                .rounded(px(14.0))
                 .border(px(1.0))
                 .border_color(border_color)
                 .bg(background)
                 .cursor(CursorStyle::IBeam)
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_composer_clicked))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(UI_MUTED_TEXT))
+                        .child("Message"),
+                )
                 .child(div().text_size(px(15.0)).text_color(text_color).child(
                     if self.composer.text.is_empty() {
                         placeholder.to_string()
@@ -63,13 +84,23 @@ impl AppModel {
 
         let mut button = div()
             .px(px(16.0))
-            .py(px(10.0))
-            .rounded(px(10.0))
-            .text_size(px(15.0))
+            .py(px(12.0))
+            .rounded(px(13.0))
+            .border(px(1.0))
+            .border_color(if send_disabled {
+                rgb(UI_PANEL_BORDER)
+            } else {
+                rgb(UI_ACCENT_TEXT)
+            })
+            .text_size(px(14.0))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(UI_ACCENT_BUTTON_TEXT))
+            .text_color(if send_disabled {
+                rgb(UI_MUTED_TEXT)
+            } else {
+                rgb(UI_ACCENT_BUTTON_TEXT)
+            })
             .bg(if send_disabled {
-                rgb(UI_DISABLED_FILL)
+                button_fill
             } else {
                 rgb(UI_ACCENT_TEXT)
             })
@@ -81,7 +112,11 @@ impl AppModel {
             .child(label);
 
         if !send_disabled {
-            button = button.on_mouse_down(MouseButton::Left, cx.listener(Self::on_send_clicked));
+            button = button
+                .hover(move |style| style.bg(rgb(0x78bcff)))
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_send_clicked));
+        } else {
+            button = button.hover(move |style| style.bg(button_hover_fill));
         }
 
         row.child(button)

@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(not(test))]
+use gpui::{KeyBinding, Menu, MenuItem, OsAction, SystemMenuType};
 
 gpui::actions!(
     cityg_gui_native,
@@ -16,6 +18,12 @@ gpui::actions!(
         CopyRoomInviteAction,
         ShowSessionOverviewAction,
         ToggleCiphertextAction,
+        CopySelectionAction,
+        CutSelectionAction,
+        PasteSelectionAction,
+        ShowEmojiPaletteAction,
+        MinimizeWindowAction,
+        ZoomWindowAction,
         QuitAppAction,
         HideAppAction,
         HideOtherAppsAction
@@ -39,6 +47,12 @@ pub(super) fn install_action_handlers(app: &mut App) {
     app.on_action(|_: &CopyRoomInviteAction, _| {});
     app.on_action(|_: &ShowSessionOverviewAction, _| {});
     app.on_action(|_: &ToggleCiphertextAction, _| {});
+    app.on_action(|_: &CopySelectionAction, _| {});
+    app.on_action(|_: &CutSelectionAction, _| {});
+    app.on_action(|_: &PasteSelectionAction, _| {});
+    app.on_action(|_: &ShowEmojiPaletteAction, _| {});
+    app.on_action(|_: &MinimizeWindowAction, _| {});
+    app.on_action(|_: &ZoomWindowAction, _| {});
 }
 
 #[cfg(not(test))]
@@ -63,6 +77,8 @@ pub(super) fn install_native_app_shell(app: &mut App) {
             Some("cityg-root"),
         ),
         KeyBinding::new("shift-cmd-y", ToggleCiphertextAction, Some("cityg-root")),
+        KeyBinding::new("ctrl-cmd-space", ShowEmojiPaletteAction, Some("cityg-root")),
+        KeyBinding::new("cmd-m", MinimizeWindowAction, Some("cityg-root")),
     ]);
 
     app.set_menus(vec![
@@ -78,6 +94,16 @@ pub(super) fn install_native_app_shell(app: &mut App) {
                 MenuItem::action("Hide Others", HideOtherAppsAction),
                 MenuItem::separator(),
                 MenuItem::action("Quit City-G", QuitAppAction),
+            ],
+        },
+        Menu {
+            name: "Edit".into(),
+            items: vec![
+                MenuItem::os_action("Cut", CutSelectionAction, OsAction::Cut),
+                MenuItem::os_action("Copy", CopySelectionAction, OsAction::Copy),
+                MenuItem::os_action("Paste", PasteSelectionAction, OsAction::Paste),
+                MenuItem::separator(),
+                MenuItem::action("Emoji & Symbols", ShowEmojiPaletteAction),
             ],
         },
         Menu {
@@ -104,6 +130,23 @@ pub(super) fn install_native_app_shell(app: &mut App) {
                 MenuItem::action("Toggle Ciphertext", ToggleCiphertextAction),
             ],
         },
+        Menu {
+            name: "Window".into(),
+            items: vec![
+                MenuItem::action("Minimize", MinimizeWindowAction),
+                MenuItem::action("Zoom", ZoomWindowAction),
+                MenuItem::separator(),
+                MenuItem::action("Show Session Overview", ShowSessionOverviewAction),
+            ],
+        },
+    ]);
+
+    app.set_dock_menu(vec![
+        MenuItem::action("Join Room", JoinRoomAction),
+        MenuItem::action("Show Session Overview", ShowSessionOverviewAction),
+        MenuItem::action("PCS Refresh", RefreshRoomAction),
+        MenuItem::separator(),
+        MenuItem::action("Show Config Folder", RevealConfigDirectory),
     ]);
 }
 
@@ -118,7 +161,7 @@ impl AppModel {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "Unavailable".to_string());
         let detail = format!(
-            "Version {}\nGPUI shell with native menus, shortcuts, blur, and background notifications.\nConfig folder: {}",
+            "Version {}\nNative shell with blurred materials, split-view workspace, Dock actions, and background notifications.\nConfig folder: {}",
             env!("CARGO_PKG_VERSION"),
             config_path
         );
@@ -262,6 +305,60 @@ impl AppModel {
         if self.session.is_some() {
             self.toggle_ciphertext(cx);
         }
+    }
+
+    pub(super) fn on_copy_selection_action(
+        &mut self,
+        _: &CopySelectionAction,
+        _window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let _ = self.copy_focused_text(cx);
+    }
+
+    pub(super) fn on_cut_selection_action(
+        &mut self,
+        _: &CutSelectionAction,
+        _window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let _ = self.cut_focused_text(cx);
+    }
+
+    pub(super) fn on_paste_selection_action(
+        &mut self,
+        _: &PasteSelectionAction,
+        _window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let _ = self.paste_focused_text(cx);
+    }
+
+    pub(super) fn on_show_emoji_palette_action(
+        &mut self,
+        _: &ShowEmojiPaletteAction,
+        window: &mut Window,
+        _cx: &mut ViewContext<Self>,
+    ) {
+        window.show_character_palette();
+    }
+
+    pub(super) fn on_minimize_window_action(
+        &mut self,
+        _: &MinimizeWindowAction,
+        window: &mut Window,
+        _cx: &mut ViewContext<Self>,
+    ) {
+        window.minimize_window();
+    }
+
+    pub(super) fn on_zoom_window_action(
+        &mut self,
+        _: &ZoomWindowAction,
+        window: &mut Window,
+        _cx: &mut ViewContext<Self>,
+    ) {
+        window.zoom_window();
     }
 }
 

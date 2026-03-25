@@ -7,10 +7,19 @@ impl AppModel {
         let refreshing = matches!(self.leave_status, LeaveStatus::Refreshing);
         let barrier_pending = self.barrier_recovery_pending();
         let membership_op_busy = leaving || expelling || refreshing || barrier_pending;
+        let button_fill = ui_button_fill(self.window_active);
+        let refresh_hover_fill = ui_hover_fill(self.window_active);
+        let reset_hover_fill = ui_hover_fill(self.window_active);
         let mut leave_button = div()
             .px(px(12.0))
-            .py(px(8.0))
+            .py(px(9.0))
             .rounded(px(12.0))
+            .border(px(1.0))
+            .border_color(if membership_op_busy {
+                rgb(UI_DANGER_MUTED_FILL)
+            } else {
+                rgb(UI_DANGER_FILL)
+            })
             .text_size(px(14.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(UI_PANEL_TEXT))
@@ -35,14 +44,21 @@ impl AppModel {
             });
 
         if !membership_op_busy {
-            leave_button =
-                leave_button.on_mouse_down(MouseButton::Left, cx.listener(Self::on_leave_clicked));
+            leave_button = leave_button
+                .hover(move |style| style.bg(rgb(0xd06c7b)))
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_leave_clicked));
         }
 
         let mut refresh_button = div()
             .px(px(12.0))
-            .py(px(8.0))
+            .py(px(9.0))
             .rounded(px(12.0))
+            .border(px(1.0))
+            .border_color(if membership_op_busy {
+                rgb(UI_PANEL_BORDER)
+            } else {
+                rgb(UI_ACCENT_SOFT_FILL)
+            })
             .text_size(px(14.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(if membership_op_busy {
@@ -74,18 +90,22 @@ impl AppModel {
 
         if !membership_op_busy {
             refresh_button = refresh_button
+                .hover(move |style| style.bg(refresh_hover_fill))
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_refresh_clicked));
         }
 
         let reset_button = div()
             .px(px(12.0))
-            .py(px(8.0))
+            .py(px(9.0))
             .rounded(px(12.0))
+            .border(px(1.0))
+            .border_color(rgb(UI_PANEL_BORDER))
             .text_size(px(14.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(UI_PANEL_TEXT))
-            .bg(ui_button_fill(self.window_active))
+            .bg(button_fill)
             .cursor(CursorStyle::PointingHand)
+            .hover(move |style| style.bg(reset_hover_fill))
             .child("Reset session")
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_reset_clicked));
 
@@ -93,17 +113,31 @@ impl AppModel {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .px(px(12.0))
-            .py(px(12.0))
-            .rounded(px(14.0))
+            .px(px(14.0))
+            .py(px(14.0))
+            .rounded(px(18.0))
             .border(px(1.0))
             .border_color(rgb(UI_PANEL_BORDER))
             .bg(ui_sidebar_fill(self.window_active))
+            .shadow_sm()
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(UI_MUTED_TEXT))
-                    .child("Session controls"),
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(UI_MUTED_TEXT))
+                            .child("Room actions"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(UI_SUBTLE_TEXT))
+                            .child("Leave, refresh forward secrecy, or clear local state."),
+                    ),
             )
             .child(leave_button)
             .child(refresh_button)
