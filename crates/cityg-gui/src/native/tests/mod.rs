@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use tokio::{task::JoinHandle, time::sleep};
 
 use crate::native::app_actions::{
-    CopyRoomIdAction, ShowSessionOverviewAction, ToggleSidebarAction,
+    CopyRoomIdAction, ShowSessionOverviewAction, TextSelectAllAction, ToggleSidebarAction,
 };
 
 #[path = "client_state_props.rs"]
@@ -3095,6 +3095,42 @@ fn gpui_secondary_click_members_search_preserves_selection_and_focuses(cx: &mut 
             assert_eq!(model.members_search.editor.selected_range, 0..6);
             assert!(model.members_search.active);
             assert!(!model.members_search.editor.is_selecting);
+        });
+    });
+}
+
+#[gpui::test]
+fn gpui_text_select_all_action_selects_focused_members_search_text(cx: &mut TestAppContext) {
+    cx.update(tokio_bridge::init);
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let session = build_test_session(
+        0x5566,
+        "http://127.0.0.1:9",
+        "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+        "search-select-all",
+    )
+    .expect("build test session");
+
+    let (view, cx) = cx.add_window_view(move |window, _| {
+        window.resize(size(px(1280.0), px(760.0)));
+        let mut model = AppModel::new(CityGConfig::default());
+        model.session = Some(session);
+        model.members_search.set_query("member-lookup".to_string());
+        model.members_search.editor.selected_range = 3..3;
+        model
+    });
+
+    cx.update(|window, app| {
+        view.update(app, |model, view_cx| {
+            model.focus_text_field(NativeTextFieldKind::MembersSearch, window, view_cx);
+            model.on_text_select_all_action(&TextSelectAllAction, window, view_cx);
+
+            let query = model.members_search.query().to_string();
+            assert_eq!(model.members_search.editor.selected_range, 0..query.len());
+            assert!(model.members_search.active);
         });
     });
 }

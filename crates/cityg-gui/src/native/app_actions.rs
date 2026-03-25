@@ -110,6 +110,7 @@ pub(super) fn install_native_app_shell(app: &mut App) {
             TextSelectRightAction,
             Some("cityg-text-input"),
         ),
+        KeyBinding::new("cmd-a", TextSelectAllAction, Some("cityg-text-input")),
         KeyBinding::new("cmd-left", TextHomeAction, Some("cityg-text-input")),
         KeyBinding::new("cmd-right", TextEndAction, Some("cityg-text-input")),
     ]);

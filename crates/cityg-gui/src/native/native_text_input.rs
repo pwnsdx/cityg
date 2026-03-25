@@ -1,3 +1,5 @@
+#[cfg(all(target_os = "macos", not(test)))]
+use std::ffi::c_void;
 use std::ops::Range;
 
 use super::*;
@@ -35,6 +37,12 @@ struct NativeTextContextMenuAvailability {
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
+type NativeTextContextMenuHost = *mut c_void;
+
+#[cfg(any(test, not(target_os = "macos")))]
+type NativeTextContextMenuHost = ();
+
+#[cfg(all(target_os = "macos", not(test)))]
 #[allow(unexpected_cfgs)]
 mod mac_text_context_menu {
     use super::{NativeTextContextMenuAction, NativeTextContextMenuAvailability};
@@ -62,12 +70,12 @@ mod mac_text_context_menu {
     }
 
     pub(super) fn show(
-        window: &Window,
+        native_view: NativeTextContextMenuHost,
         position: Point<Pixels>,
         availability: NativeTextContextMenuAvailability,
     ) -> Option<NativeTextContextMenuAction> {
         unsafe {
-            let native_view = native_view_for_window(window)?;
+            let native_view: id = native_view.cast();
             let selection = Box::into_raw(Box::new(TextContextMenuSelection {
                 selected_action: Cell::new(None),
             }));
@@ -106,6 +114,10 @@ mod mac_text_context_menu {
             let _: () = msg_send![target, release];
             selected
         }
+    }
+
+    pub(super) fn host_for_window(window: &Window) -> Option<NativeTextContextMenuHost> {
+        unsafe { native_view_for_window(window).map(|native_view| native_view.cast()) }
     }
 
     unsafe fn native_view_for_window(window: &Window) -> Option<id> {
@@ -212,19 +224,29 @@ mod mac_text_context_menu {
 
 #[cfg(all(target_os = "macos", not(test)))]
 fn show_native_text_context_menu(
-    window: &Window,
+    host: NativeTextContextMenuHost,
     position: Point<Pixels>,
     availability: NativeTextContextMenuAvailability,
 ) -> Option<NativeTextContextMenuAction> {
-    mac_text_context_menu::show(window, position, availability)
+    mac_text_context_menu::show(host, position, availability)
 }
 
 #[cfg(any(test, not(target_os = "macos")))]
 fn show_native_text_context_menu(
-    _window: &Window,
+    _host: NativeTextContextMenuHost,
     _position: Point<Pixels>,
     _availability: NativeTextContextMenuAvailability,
 ) -> Option<NativeTextContextMenuAction> {
+    None
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn native_text_context_menu_host(window: &Window) -> Option<NativeTextContextMenuHost> {
+    mac_text_context_menu::host_for_window(window)
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
+fn native_text_context_menu_host(_window: &Window) -> Option<NativeTextContextMenuHost> {
     None
 }
 
@@ -1194,17 +1216,23 @@ impl AppModel {
             cx.notify();
         }
 
+        let menu_host = native_text_context_menu_host(window);
         let view = cx.entity();
         let position = event.position;
-        window.defer(cx, move |window, cx| {
-            let Some(action) = show_native_text_context_menu(window, position, availability) else {
+        cx.spawn(async move |_, cx| {
+            let Some(menu_host) = menu_host else {
+                return;
+            };
+            let Some(action) = show_native_text_context_menu(menu_host, position, availability)
+            else {
                 return;
             };
             let _ = view.update(cx, |model, cx| {
                 model.activate_text_field(field);
                 model.perform_text_context_menu_action(action, cx);
             });
-        });
+        })
+        .detach();
     }
 
     pub(super) fn on_text_field_mouse_move(
