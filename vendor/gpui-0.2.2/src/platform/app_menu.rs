@@ -231,14 +231,14 @@ pub(crate) fn init_app_menus(platform: &dyn Platform, cx: &App) {
     platform.on_will_open_app_menu(Box::new({
         let cx = cx.to_async();
         move || {
-            cx.update(|cx| cx.clear_pending_keystrokes()).ok();
+            cx.try_update(|cx| cx.clear_pending_keystrokes()).ok();
         }
     }));
 
     platform.on_validate_app_menu_command(Box::new({
         let cx = cx.to_async();
         move |action| {
-            cx.update(|cx| cx.is_action_available(action))
+            cx.try_update(|cx| cx.is_action_available(action))
                 .unwrap_or(false)
         }
     }));
@@ -246,7 +246,7 @@ pub(crate) fn init_app_menus(platform: &dyn Platform, cx: &App) {
     platform.on_app_menu_action(Box::new({
         let cx = cx.to_async();
         move |action| {
-            cx.update(|cx| cx.dispatch_action(action)).log_err();
+            cx.try_update(|cx| cx.dispatch_action(action)).ok();
         }
     }));
 }

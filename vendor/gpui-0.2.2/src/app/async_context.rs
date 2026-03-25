@@ -145,6 +145,14 @@ impl AsyncApp {
         Ok(lock.update(f))
     }
 
+    /// Similar to [`AsyncApp::update`], but returns an error instead of panicking
+    /// if the app is already mutably borrowed.
+    pub fn try_update<R>(&self, f: impl FnOnce(&mut App) -> R) -> Result<R> {
+        let app = self.app.upgrade().context("app was released")?;
+        let mut lock = app.try_borrow_mut()?;
+        Ok(lock.update(f))
+    }
+
     /// Arrange for the given callback to be invoked whenever the given entity emits an event of a given type.
     /// The callback is provided a handle to the emitting entity and a reference to the emitted event.
     pub fn subscribe<T, Event>(

@@ -110,7 +110,6 @@ pub(super) fn install_native_app_shell(app: &mut App) {
             TextSelectRightAction,
             Some("cityg-text-input"),
         ),
-        KeyBinding::new("cmd-a", TextSelectAllAction, Some("cityg-text-input")),
         KeyBinding::new("cmd-left", TextHomeAction, Some("cityg-text-input")),
         KeyBinding::new("cmd-right", TextEndAction, Some("cityg-text-input")),
     ]);
@@ -136,6 +135,7 @@ pub(super) fn install_native_app_shell(app: &mut App) {
                 MenuItem::os_action("Cut", CutSelectionAction, OsAction::Cut),
                 MenuItem::os_action("Copy", CopySelectionAction, OsAction::Copy),
                 MenuItem::os_action("Paste", PasteSelectionAction, OsAction::Paste),
+                MenuItem::os_action("Select All", TextSelectAllAction, OsAction::SelectAll),
                 MenuItem::separator(),
                 MenuItem::action("Emoji & Symbols", ShowEmojiPaletteAction),
             ],
