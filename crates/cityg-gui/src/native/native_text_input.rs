@@ -18,6 +18,205 @@ pub(super) enum NativeTextFieldKind {
     RoomAdminTarget,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeTextContextMenuAction {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct NativeTextContextMenuAvailability {
+    cut: bool,
+    copy: bool,
+    paste: bool,
+    select_all: bool,
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+mod mac_text_context_menu {
+    use super::{NativeTextContextMenuAction, NativeTextContextMenuAvailability};
+    use cocoa::{
+        appkit::{NSMenu, NSMenuItem},
+        base::{NO, YES, id, nil},
+        foundation::{NSPoint, NSRect, NSString},
+    };
+    use objc::{
+        class,
+        declare::ClassDecl,
+        msg_send,
+        runtime::{Class, Object, Sel},
+        sel, sel_impl,
+    };
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::{cell::Cell, ffi::c_void, ptr, sync::OnceLock};
+
+    use super::*;
+
+    const TEXT_CONTEXT_MENU_TARGET_IVAR: &str = "textContextMenuTarget";
+
+    struct TextContextMenuSelection {
+        selected_action: Cell<Option<NativeTextContextMenuAction>>,
+    }
+
+    pub(super) fn show(
+        window: &Window,
+        position: Point<Pixels>,
+        availability: NativeTextContextMenuAvailability,
+    ) -> Option<NativeTextContextMenuAction> {
+        unsafe {
+            let native_view = native_view_for_window(window)?;
+            let selection = Box::into_raw(Box::new(TextContextMenuSelection {
+                selected_action: Cell::new(None),
+            }));
+            let target: id = msg_send![context_menu_target_class(), new];
+            (*target).set_ivar(TEXT_CONTEXT_MENU_TARGET_IVAR, selection.cast::<c_void>());
+
+            let menu = NSMenu::new(nil).autorelease();
+            let _: () = msg_send![menu, setAutoenablesItems: NO];
+
+            add_menu_item(menu, "Cut", sel!(performCut:), availability.cut, target);
+            add_menu_item(menu, "Copy", sel!(performCopy:), availability.copy, target);
+            add_menu_item(
+                menu,
+                "Paste",
+                sel!(performPaste:),
+                availability.paste,
+                target,
+            );
+
+            let separator = NSMenuItem::separatorItem(nil);
+            let _: () = msg_send![menu, addItem: separator];
+
+            add_menu_item(
+                menu,
+                "Select All",
+                sel!(performSelectAll:),
+                availability.select_all,
+                target,
+            );
+
+            let location = ns_view_point(native_view, position);
+            let _: bool = msg_send![menu, popUpMenuPositioningItem: nil atLocation: location inView: native_view];
+
+            let selected = (*selection).selected_action.get();
+            drop(Box::from_raw(selection));
+            let _: () = msg_send![target, release];
+            selected
+        }
+    }
+
+    unsafe fn native_view_for_window(window: &Window) -> Option<id> {
+        let handle = window.window_handle().ok()?;
+        match handle.as_raw() {
+            RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr().cast()),
+            _ => None,
+        }
+    }
+
+    unsafe fn ns_view_point(native_view: id, position: Point<Pixels>) -> NSPoint {
+        let bounds: NSRect = msg_send![native_view, bounds];
+        NSPoint::new(
+            f64::from(position.x),
+            bounds.size.height - f64::from(position.y),
+        )
+    }
+
+    unsafe fn add_menu_item(menu: id, title: &str, action: Sel, enabled: bool, target: id) {
+        let item = NSMenuItem::alloc(nil)
+            .initWithTitle_action_keyEquivalent_(ns_string(title), action, ns_string(""))
+            .autorelease();
+        let _: () = msg_send![item, setTarget: target];
+        let _: () = msg_send![item, setEnabled: if enabled { YES } else { NO }];
+        let _: () = msg_send![menu, addItem: item];
+    }
+
+    unsafe fn ns_string(text: &str) -> id {
+        NSString::alloc(nil).init_str(text).autorelease()
+    }
+
+    fn context_menu_target_class() -> *const Class {
+        static CLASS: OnceLock<usize> = OnceLock::new();
+        *CLASS.get_or_init(|| unsafe {
+            let mut decl = ClassDecl::new("CityGTextContextMenuTarget", class!(NSObject)).unwrap();
+            decl.add_ivar::<*mut c_void>(TEXT_CONTEXT_MENU_TARGET_IVAR);
+            decl.add_method(
+                sel!(performCut:),
+                perform_cut as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(performCopy:),
+                perform_copy as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(performPaste:),
+                perform_paste as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(performSelectAll:),
+                perform_select_all as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.register() as usize
+        }) as *const Class
+    }
+
+    unsafe fn selection(this: &Object) -> &TextContextMenuSelection {
+        let raw: *mut c_void = *this.get_ivar(TEXT_CONTEXT_MENU_TARGET_IVAR);
+        &*(raw.cast::<TextContextMenuSelection>())
+    }
+
+    extern "C" fn perform_cut(this: &mut Object, _: Sel, _: id) {
+        unsafe {
+            selection(this)
+                .selected_action
+                .set(Some(NativeTextContextMenuAction::Cut));
+        }
+    }
+
+    extern "C" fn perform_copy(this: &mut Object, _: Sel, _: id) {
+        unsafe {
+            selection(this)
+                .selected_action
+                .set(Some(NativeTextContextMenuAction::Copy));
+        }
+    }
+
+    extern "C" fn perform_paste(this: &mut Object, _: Sel, _: id) {
+        unsafe {
+            selection(this)
+                .selected_action
+                .set(Some(NativeTextContextMenuAction::Paste));
+        }
+    }
+
+    extern "C" fn perform_select_all(this: &mut Object, _: Sel, _: id) {
+        unsafe {
+            selection(this)
+                .selected_action
+                .set(Some(NativeTextContextMenuAction::SelectAll));
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn show_native_text_context_menu(
+    window: &Window,
+    position: Point<Pixels>,
+    availability: NativeTextContextMenuAvailability,
+) -> Option<NativeTextContextMenuAction> {
+    mac_text_context_menu::show(window, position, availability)
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
+fn show_native_text_context_menu(
+    _window: &Window,
+    _position: Point<Pixels>,
+    _availability: NativeTextContextMenuAvailability,
+) -> Option<NativeTextContextMenuAction> {
+    None
+}
+
 #[derive(Clone)]
 pub(super) struct TextInputEditorState {
     pub(super) focus_handle: Option<FocusHandle>,
@@ -268,6 +467,11 @@ impl TextInputEditorState {
         }
     }
 
+    pub(super) fn has_selection(&mut self, text: &str) -> bool {
+        self.clamp_to_text(text);
+        !self.selected_range.is_empty()
+    }
+
     pub(super) fn replace_all(&mut self, text: &mut String, new_text: &str) {
         *text = new_text.to_string();
         self.reset_for_text(text);
@@ -349,12 +553,32 @@ impl TextInputEditorState {
 
     pub(super) fn on_mouse_down(&mut self, text: &str, event: &MouseDownEvent) -> bool {
         self.clamp_to_text(text);
+        if event.click_count >= 2 {
+            self.is_selecting = false;
+            return self.select_all(text);
+        }
+
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(text, event.position), text)
         } else {
             self.move_to(self.index_for_mouse_position(text, event.position), text)
         }
+    }
+
+    pub(super) fn on_secondary_mouse_down(&mut self, text: &str, event: &MouseDownEvent) -> bool {
+        self.clamp_to_text(text);
+        self.is_selecting = false;
+
+        let index = self.index_for_mouse_position(text, event.position);
+        if !self.selected_range.is_empty()
+            && index >= self.selected_range.start
+            && index <= self.selected_range.end
+        {
+            return false;
+        }
+
+        self.move_to(index, text)
     }
 
     pub(super) fn on_mouse_move(&mut self, text: &str, event: &MouseMoveEvent) -> bool {
@@ -892,6 +1116,12 @@ impl AppModel {
                     this.on_text_field_mouse_down(field, event, window, cx);
                 })
             })
+            .on_mouse_down(MouseButton::Right, {
+                let field = field;
+                cx.listener(move |this, event, window, cx| {
+                    this.on_text_field_secondary_mouse_down(field, event, window, cx);
+                })
+            })
             .on_mouse_move({
                 let field = field;
                 cx.listener(move |this, event, window, cx| {
@@ -935,6 +1165,35 @@ impl AppModel {
             editor.on_mouse_down(text, event);
         });
         cx.notify();
+    }
+
+    pub(super) fn on_text_field_secondary_mouse_down(
+        &mut self,
+        field: NativeTextFieldKind,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.focus_text_field(field, window, cx);
+        let updated = self.with_text_field_mut(field, |text, editor| {
+            editor.on_secondary_mouse_down(text, event)
+        });
+        let availability = self.text_context_menu_availability_for_field(field, cx);
+        if updated {
+            cx.notify();
+        }
+
+        let view = cx.entity();
+        let position = event.position;
+        window.defer(cx, move |window, cx| {
+            let Some(action) = show_native_text_context_menu(window, position, availability) else {
+                return;
+            };
+            let _ = view.update(cx, |model, cx| {
+                model.activate_text_field(field);
+                model.perform_text_context_menu_action(action, cx);
+            });
+        });
     }
 
     pub(super) fn on_text_field_mouse_move(
@@ -982,6 +1241,46 @@ impl AppModel {
             cx.notify();
         }
         updated
+    }
+
+    fn text_context_menu_availability_for_field(
+        &mut self,
+        field: NativeTextFieldKind,
+        cx: &mut ViewContext<Self>,
+    ) -> NativeTextContextMenuAvailability {
+        let (has_selection, has_text) = self.with_text_field_mut(field, |text, editor| {
+            (editor.has_selection(text), !text.is_empty())
+        });
+        NativeTextContextMenuAvailability {
+            cut: has_selection,
+            copy: has_selection,
+            paste: cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some(),
+            select_all: has_text,
+        }
+    }
+
+    fn perform_text_context_menu_action(
+        &mut self,
+        action: NativeTextContextMenuAction,
+        cx: &mut ViewContext<Self>,
+    ) {
+        match action {
+            NativeTextContextMenuAction::Cut => {
+                let _ = self.cut_focused_text(cx);
+            }
+            NativeTextContextMenuAction::Copy => {
+                let _ = self.copy_focused_text(cx);
+            }
+            NativeTextContextMenuAction::Paste => {
+                let _ = self.paste_focused_text(cx);
+            }
+            NativeTextContextMenuAction::SelectAll => {
+                let _ = self.edit_focused_text(cx, |text, editor| editor.select_all(text), false);
+            }
+        }
     }
 
     pub(super) fn on_text_backspace_action(

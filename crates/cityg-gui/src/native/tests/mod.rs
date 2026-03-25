@@ -1611,11 +1611,26 @@ async fn bootstrap_test_room(server_url: &str, room_id: &str) -> Result<(), anyh
 }
 
 fn test_mouse_down_event() -> MouseDownEvent {
+    test_mouse_down_event_with_button_and_click_count(MouseButton::Left, 1)
+}
+
+fn test_mouse_down_event_with_click_count(click_count: usize) -> MouseDownEvent {
+    test_mouse_down_event_with_button_and_click_count(MouseButton::Left, click_count)
+}
+
+fn test_mouse_down_event_with_button(button: MouseButton) -> MouseDownEvent {
+    test_mouse_down_event_with_button_and_click_count(button, 1)
+}
+
+fn test_mouse_down_event_with_button_and_click_count(
+    button: MouseButton,
+    click_count: usize,
+) -> MouseDownEvent {
     MouseDownEvent {
         position: point(px(0.0), px(0.0)),
         modifiers: Modifiers::none(),
-        button: MouseButton::Left,
-        click_count: 1,
+        button,
+        click_count,
         first_mouse: false,
     }
 }
@@ -3006,6 +3021,85 @@ fn gpui_dispatch_toggle_inspector_action_from_focused_search_field(cx: &mut Test
 }
 
 #[gpui::test]
+fn gpui_double_click_members_search_selects_all_text(cx: &mut TestAppContext) {
+    cx.update(tokio_bridge::init);
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let session = build_test_session(
+        0x3344,
+        "http://127.0.0.1:9",
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        "search",
+    )
+    .expect("build test session");
+
+    let (view, cx) = cx.add_window_view(move |window, _| {
+        window.resize(size(px(1280.0), px(760.0)));
+        let mut model = AppModel::new(CityGConfig::default());
+        model.session = Some(session);
+        model.members_search.set_query("member-lookup".to_string());
+        model
+    });
+
+    cx.update(|window, app| {
+        view.update(app, |model, view_cx| {
+            model.on_text_field_mouse_down(
+                NativeTextFieldKind::MembersSearch,
+                &test_mouse_down_event_with_click_count(2),
+                window,
+                view_cx,
+            );
+
+            let query = model.members_search.query().to_string();
+            assert_eq!(model.members_search.editor.selected_range, 0..query.len());
+            assert!(model.members_search.active);
+        });
+    });
+}
+
+#[gpui::test]
+fn gpui_secondary_click_members_search_preserves_selection_and_focuses(cx: &mut TestAppContext) {
+    cx.update(tokio_bridge::init);
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let session = build_test_session(
+        0x4455,
+        "http://127.0.0.1:9",
+        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "search-secondary",
+    )
+    .expect("build test session");
+
+    let (view, cx) = cx.add_window_view(move |window, _| {
+        window.resize(size(px(1280.0), px(760.0)));
+        let mut model = AppModel::new(CityGConfig::default());
+        model.session = Some(session);
+        model.members_search.set_query("member-lookup".to_string());
+        model.members_search.editor.selected_range = 0..6;
+        model
+    });
+
+    cx.update(|window, app| {
+        view.update(app, |model, view_cx| {
+            model.on_text_field_secondary_mouse_down(
+                NativeTextFieldKind::MembersSearch,
+                &test_mouse_down_event_with_button(MouseButton::Right),
+                window,
+                view_cx,
+            );
+
+            assert_eq!(model.members_search.editor.selected_range, 0..6);
+            assert!(model.members_search.active);
+            assert!(!model.members_search.editor.is_selecting);
+        });
+    });
+}
+
+#[gpui::test]
 fn gpui_pending_barrier_recovery_surfaces_guidance_instead_of_errors(cx: &mut TestAppContext) {
     cx.update(tokio_bridge::init);
     let temp_dir = TempDir::new().expect("create temp dir");
@@ -4370,6 +4464,48 @@ fn primary_shortcut_detection_accepts_cmd_and_ctrl() -> Result<(), Box<dyn std::
     assert!(is_primary_shortcut(&ctrl_c, "c"));
     assert!(!is_primary_shortcut(&alt_v, "v"));
     Ok(())
+}
+
+#[test]
+fn text_input_editor_double_click_selects_all_text() {
+    let mut editor = TextInputEditorState::default();
+    let text = "double click";
+    editor.selected_range = 3..3;
+
+    let updated = editor.on_mouse_down(text, &test_mouse_down_event_with_click_count(2));
+
+    assert!(updated);
+    assert_eq!(editor.selected_range, 0..text.len());
+    assert!(!editor.selection_reversed);
+    assert!(!editor.is_selecting);
+}
+
+#[test]
+fn text_input_editor_secondary_click_preserves_existing_selection() {
+    let mut editor = TextInputEditorState::default();
+    let text = "member lookup";
+    editor.selected_range = 0..6;
+
+    let updated = editor
+        .on_secondary_mouse_down(text, &test_mouse_down_event_with_button(MouseButton::Right));
+
+    assert!(!updated);
+    assert_eq!(editor.selected_range, 0..6);
+    assert!(!editor.is_selecting);
+}
+
+#[test]
+fn text_input_editor_secondary_click_moves_caret_when_outside_selection() {
+    let mut editor = TextInputEditorState::default();
+    let text = "member lookup";
+    editor.selected_range = 4..8;
+
+    let updated = editor
+        .on_secondary_mouse_down(text, &test_mouse_down_event_with_button(MouseButton::Right));
+
+    assert!(updated);
+    assert_eq!(editor.selected_range, 0..0);
+    assert!(!editor.is_selecting);
 }
 
 #[test]
