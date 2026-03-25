@@ -221,6 +221,19 @@ impl From<std::io::Error> for CityGError {
 pub struct CityGClient;
 
 impl CityGClient {
+    fn prepare_forward_state(
+        fs_state: Option<&mut ForwardSecrecyState>,
+        fs_epoch_base_ts: u64,
+        evolve: bool,
+    ) {
+        if let Some(state) = fs_state {
+            state.set_epoch_base_ts(fs_epoch_base_ts);
+            if evolve {
+                state.autonomic_evolve();
+            }
+        }
+    }
+
     /// Generate a full epoch bundle ready to be submitted to a City-G server.
     ///
     /// This method performs the complete client-side epoch generation pipeline:
@@ -293,12 +306,32 @@ impl CityGClient {
         fs_state: &mut ForwardSecrecyState,
         witness: Option<&'a [u8]>,
     ) -> Result<ClientEpochBundle, CityGError> {
+        Self::generate_epoch_inner(header, parts, params, fs_state, witness, true)
+    }
+
+    pub fn generate_epoch_without_evolve<'a>(
+        header: BTreeMap<u64, Value>,
+        parts: AnchorInstanceParts<'a>,
+        params: OrchestrationParams<'a>,
+        fs_state: &mut ForwardSecrecyState,
+        witness: Option<&'a [u8]>,
+    ) -> Result<ClientEpochBundle, CityGError> {
+        Self::generate_epoch_inner(header, parts, params, fs_state, witness, false)
+    }
+
+    fn generate_epoch_inner<'a>(
+        header: BTreeMap<u64, Value>,
+        parts: AnchorInstanceParts<'a>,
+        params: OrchestrationParams<'a>,
+        fs_state: &mut ForwardSecrecyState,
+        witness: Option<&'a [u8]>,
+        evolve: bool,
+    ) -> Result<ClientEpochBundle, CityGError> {
         let anchor_bundle = AnchorBundle::try_from_parts(&parts)?;
         let params_snapshot = ParamsSnapshot::from(&params);
         let witness_bytes = witness.map(|bytes| bytes.to_vec());
 
-        fs_state.set_epoch_base_ts(params.fs_epoch_base_ts);
-        fs_state.autonomic_evolve();
+        Self::prepare_forward_state(Some(fs_state), params.fs_epoch_base_ts, evolve);
 
         let result = joiner_kgen_or(header, parts, params, Some(fs_state), witness)?;
         if let Some(tau) = result.fs_tau
@@ -364,7 +397,35 @@ impl CityGClient {
         )
     }
 
+    pub fn generate_merge_with_forward_state_without_evolve<'a>(
+        header: BTreeMap<u64, Value>,
+        parts: AnchorInstanceParts<'a>,
+        params: OrchestrationParams<'a>,
+        fs_state: Option<&mut ForwardSecrecyState>,
+        parities: &[PivotParity],
+        note: Option<&'a str>,
+        witness: Option<&'a [u8]>,
+    ) -> Result<ClientEpochBundle, CityGError> {
+        Self::generate_merge_with_forward_state_inner(
+            header, parts, params, fs_state, parities, note, witness, false,
+        )
+    }
+
     pub fn generate_merge_with_forward_state<'a>(
+        header: BTreeMap<u64, Value>,
+        parts: AnchorInstanceParts<'a>,
+        params: OrchestrationParams<'a>,
+        fs_state: Option<&mut ForwardSecrecyState>,
+        parities: &[PivotParity],
+        note: Option<&'a str>,
+        witness: Option<&'a [u8]>,
+    ) -> Result<ClientEpochBundle, CityGError> {
+        Self::generate_merge_with_forward_state_inner(
+            header, parts, params, fs_state, parities, note, witness, true,
+        )
+    }
+
+    fn generate_merge_with_forward_state_inner<'a>(
         header: BTreeMap<u64, Value>,
         parts: AnchorInstanceParts<'a>,
         params: OrchestrationParams<'a>,
@@ -372,15 +433,13 @@ impl CityGClient {
         parities: &[PivotParity],
         note: Option<&'a str>,
         witness: Option<&'a [u8]>,
+        evolve: bool,
     ) -> Result<ClientEpochBundle, CityGError> {
         let anchor_bundle = AnchorBundle::try_from_parts(&parts)?;
         let params_snapshot = ParamsSnapshot::from(&params);
         let witness_bytes = witness.map(|bytes| bytes.to_vec());
 
-        if let Some(state) = fs_state.as_deref_mut() {
-            state.set_epoch_base_ts(params.fs_epoch_base_ts);
-            state.autonomic_evolve();
-        }
+        Self::prepare_forward_state(fs_state.as_deref_mut(), params.fs_epoch_base_ts, evolve);
 
         let result = joiner_kgen_merge_or_with_state(
             header, parities, note, parts, params, fs_state, witness,

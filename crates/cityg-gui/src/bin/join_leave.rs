@@ -1096,8 +1096,31 @@ async fn prepare_join_session_with_identity(
         Some(ticket.witness_cbor.as_slice())
     };
 
-    let bundle = CityGClient::generate_epoch(header, parts, params, &mut fs_state, witness_bytes)
-        .context("generate join bundle")?;
+    let build_join_bundle = |fs_state: &mut ForwardSecrecyState,
+                             disable_autonomic_evolve: bool|
+     -> Result<ClientEpochBundle> {
+        if disable_autonomic_evolve {
+            CityGClient::generate_epoch_without_evolve(
+                header.clone(),
+                parts.clone(),
+                params.clone(),
+                fs_state,
+                witness_bytes,
+            )
+        } else {
+            CityGClient::generate_epoch(
+                header.clone(),
+                parts.clone(),
+                params.clone(),
+                fs_state,
+                witness_bytes,
+            )
+        }
+        .context("generate join bundle")
+    };
+
+    let pristine_fs_state = fs_state.clone();
+    let mut bundle = build_join_bundle(&mut fs_state, false)?;
 
     if parent_root == [0u8; 32] && !ticket.bootstrap_public.is_empty() {
         return Err(anyhow!(
@@ -1105,10 +1128,22 @@ async fn prepare_join_session_with_identity(
         ));
     }
 
-    client
-        .accept_epoch_bundle(&bundle)
-        .await
-        .context("server rejected join bundle")?;
+    match client.accept_epoch_bundle(&bundle).await {
+        Ok(_) => {}
+        Err(ApiClientError::HttpStatus {
+            freeze_code,
+            freeze_reason,
+            ..
+        }) if is_fs_forward_jump_group_http_error(freeze_code, freeze_reason.as_deref()) => {
+            fs_state = pristine_fs_state;
+            bundle = build_join_bundle(&mut fs_state, true)?;
+            client
+                .accept_epoch_bundle(&bundle)
+                .await
+                .context("server rejected join bundle after stale-group retry")?;
+        }
+        Err(err) => return Err(err).context("server rejected join bundle"),
+    }
 
     let stored = client
         .get_bundle(&bundle.we_epoch_id)
@@ -1395,78 +1430,100 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         fs_merge: FsMergeInputs::default(),
     };
 
-    let mut bundle = CityGClient::generate_merge_with_forward_state(
-        header,
-        parts,
-        params,
-        Some(&mut forward_state),
-        &parities,
-        None,
-        witness_bytes,
-    )
-    .context("generate join finalize bundle")?;
-    let pristine_bundle = bundle.clone();
-    strip_srx_and_rollup(&mut bundle.header_map);
-    apply_pivot_alignment(&mut bundle.header_map, pivot);
-    let computed_anchor_ctx =
-        build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
-    let seed_ctx_hash =
-        compute_seed_ctx_hash(&computed_anchor_ctx).context("compute_seed_ctx_hash")?;
-    let seed_commit = compute_seed_commit(
-        &computed_anchor_ctx,
-        &SeedCommitFields {
-            gid: &session.gid,
-            cat: cat.as_slice(),
-            we_epoch_id: bundle.we_epoch_id,
-        },
-    )
-    .context("compute_seed_commit")?;
-    let seed_bundle_commit = compute_seed_bundle_commit(
-        &computed_anchor_ctx,
-        &bundle.hp_binding.rho_commit,
-        &session.gid,
-        cat.as_slice(),
-        &parent_root_arr,
-    )
-    .context("compute_seed_bundle_commit")?;
-    let derived_we_epoch_id = derive_we_epoch_id(&session.gid, &parent_root_arr, &seed_ctx_hash)
-        .context("derive we_epoch_id")?;
+    let build_join_finalize_bundle = |forward_state: &mut ForwardSecrecyState,
+                                      disable_autonomic_evolve: bool|
+     -> Result<(ClientEpochBundle, ClientEpochBundle)> {
+        let mut bundle = if disable_autonomic_evolve {
+            CityGClient::generate_merge_with_forward_state_without_evolve(
+                header.clone(),
+                parts.clone(),
+                params.clone(),
+                Some(forward_state),
+                &parities,
+                None,
+                witness_bytes,
+            )
+        } else {
+            CityGClient::generate_merge_with_forward_state(
+                header.clone(),
+                parts.clone(),
+                params.clone(),
+                Some(forward_state),
+                &parities,
+                None,
+                witness_bytes,
+            )
+        }
+        .context("generate join finalize bundle")?;
+        let pristine_bundle = bundle.clone();
+        strip_srx_and_rollup(&mut bundle.header_map);
+        apply_pivot_alignment(&mut bundle.header_map, pivot);
+        let computed_anchor_ctx =
+            build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
+        let seed_ctx_hash =
+            compute_seed_ctx_hash(&computed_anchor_ctx).context("compute_seed_ctx_hash")?;
+        let seed_commit = compute_seed_commit(
+            &computed_anchor_ctx,
+            &SeedCommitFields {
+                gid: &session.gid,
+                cat: cat.as_slice(),
+                we_epoch_id: bundle.we_epoch_id,
+            },
+        )
+        .context("compute_seed_commit")?;
+        let seed_bundle_commit = compute_seed_bundle_commit(
+            &computed_anchor_ctx,
+            &bundle.hp_binding.rho_commit,
+            &session.gid,
+            cat.as_slice(),
+            &parent_root_arr,
+        )
+        .context("compute_seed_bundle_commit")?;
+        let derived_we_epoch_id =
+            derive_we_epoch_id(&session.gid, &parent_root_arr, &seed_ctx_hash)
+                .context("derive we_epoch_id")?;
 
-    bundle.anchor.anchor_hdr_ctx = computed_anchor_ctx;
-    bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
-    bundle.hp_binding.seed_commit = seed_commit;
-    bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
-    bundle.we_epoch_id = derived_we_epoch_id;
-    bundle
-        .seal_local_hp_header_with_barrier_key(&barrier_update.k_barrier_new)
-        .context("seal merge HP envelope for join finalize")?;
-    bundle
-        .header_map
-        .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
-    bundle.header_map.insert(
-        hdr::HDR_RHO_COMMIT,
-        Value::Bytes(bundle.hp_binding.rho_commit.to_vec()),
-    );
-    bundle.header_map.insert(
-        hdr::HDR_SEED_BUNDLE_COMMIT,
-        Value::Bytes(seed_bundle_commit.to_vec()),
-    );
-
-    if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
+        bundle.anchor.anchor_hdr_ctx = computed_anchor_ctx;
+        bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
+        bundle.hp_binding.seed_commit = seed_commit;
+        bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
+        bundle.we_epoch_id = derived_we_epoch_id;
+        bundle
+            .seal_local_hp_header_with_barrier_key(&barrier_update.k_barrier_new)
+            .context("seal merge HP envelope for join finalize")?;
         bundle
             .header_map
-            .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
-    }
-    let stored_commit = extract_bytes(&bundle.header_map, hdr::HDR_PROOFS_COMMIT)
-        .context("join finalize bundle missing proofs_commit")?;
-    let recomputed_commit =
-        recompute_proofs_commit(&bundle.header_map).context("recompute proofs commit")?;
-    if stored_commit.as_slice() != recomputed_commit {
+            .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
         bundle.header_map.insert(
-            hdr::HDR_PROOFS_COMMIT,
-            Value::Bytes(recomputed_commit.to_vec()),
+            hdr::HDR_RHO_COMMIT,
+            Value::Bytes(bundle.hp_binding.rho_commit.to_vec()),
         );
-    }
+        bundle.header_map.insert(
+            hdr::HDR_SEED_BUNDLE_COMMIT,
+            Value::Bytes(seed_bundle_commit.to_vec()),
+        );
+
+        if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
+            bundle
+                .header_map
+                .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
+        }
+        let stored_commit = extract_bytes(&bundle.header_map, hdr::HDR_PROOFS_COMMIT)
+            .context("join finalize bundle missing proofs_commit")?;
+        let recomputed_commit =
+            recompute_proofs_commit(&bundle.header_map).context("recompute proofs commit")?;
+        if stored_commit.as_slice() != recomputed_commit {
+            bundle.header_map.insert(
+                hdr::HDR_PROOFS_COMMIT,
+                Value::Bytes(recomputed_commit.to_vec()),
+            );
+        }
+
+        Ok((bundle, pristine_bundle))
+    };
+
+    let pristine_forward_state = forward_state.clone();
+    let (mut bundle, pristine_bundle) = build_join_finalize_bundle(&mut forward_state, false)?;
 
     match client.refresh_pivot(&bundle).await {
         Ok(_) => {}
@@ -1478,6 +1535,28 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
 
     match client.accept_epoch_bundle(&bundle).await {
         Ok(_) => {}
+        Err(ApiClientError::HttpStatus {
+            freeze_code,
+            freeze_reason,
+            ..
+        }) if is_fs_forward_jump_group_http_error(freeze_code, freeze_reason.as_deref()) => {
+            forward_state = pristine_forward_state;
+            let rebuilt = build_join_finalize_bundle(&mut forward_state, true)?;
+            bundle = rebuilt.0;
+            match client.refresh_pivot(&bundle).await {
+                Ok(_) => {}
+                Err(ApiClientError::HttpStatus { message, .. })
+                    if message.contains("pivot head missing")
+                        || message.contains("refresh payload diverges from stored parity") => {}
+                Err(err) => {
+                    return Err(err).context("refresh pivot parity for join finalize retry");
+                }
+            }
+            client
+                .accept_epoch_bundle(&bundle)
+                .await
+                .context("server rejected join finalize bundle after stale-group retry")?;
+        }
         Err(ApiClientError::HttpStatus {
             message,
             freeze_reason,
@@ -2526,6 +2605,13 @@ fn describe_http_failure(
         }
     }
     detail
+}
+
+fn is_fs_forward_jump_group_http_error(
+    freeze_code: Option<u32>,
+    freeze_reason: Option<&str>,
+) -> bool {
+    freeze_code == Some(9476) || freeze_reason == Some("fs_forward_jump_group")
 }
 
 fn recompute_proofs_commit(header: &BTreeMap<u64, Value>) -> Result<[u8; 32]> {

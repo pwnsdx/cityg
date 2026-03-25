@@ -1,5 +1,12 @@
 use super::*;
 
+fn is_fs_forward_jump_group_http_error(
+    freeze_code: Option<u32>,
+    freeze_reason: Option<&str>,
+) -> bool {
+    freeze_code == Some(9476) || freeze_reason == Some("fs_forward_jump_group")
+}
+
 pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let JoinParams {
         server_url,
@@ -248,14 +255,31 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         pox_r_commit: Some(&pox_r_commit),
     };
 
-    let bundle = CityGClient::generate_epoch(
-        header_map,
-        parts,
-        params,
-        &mut fs_state,
-        Some(&witness_bytes),
-    )
-    .context("failed to build join anchor")?;
+    let build_join_bundle = |fs_state: &mut ForwardSecrecyState,
+                             disable_autonomic_evolve: bool|
+     -> Result<ClientEpochBundle> {
+        if disable_autonomic_evolve {
+            CityGClient::generate_epoch_without_evolve(
+                header_map.clone(),
+                parts.clone(),
+                params.clone(),
+                fs_state,
+                Some(&witness_bytes),
+            )
+        } else {
+            CityGClient::generate_epoch(
+                header_map.clone(),
+                parts.clone(),
+                params.clone(),
+                fs_state,
+                Some(&witness_bytes),
+            )
+        }
+        .context("failed to build join anchor")
+    };
+
+    let mut pristine_fs_state = fs_state.clone();
+    let mut bundle = build_join_bundle(&mut fs_state, false)?;
 
     let capss_witness_bytes = encode_capss_witness(&bundle.capss_witness)?;
 
@@ -265,10 +289,22 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         ));
     }
 
-    client
-        .accept_epoch_bundle(&bundle)
-        .await
-        .context("server rejected join bundle")?;
+    match client.accept_epoch_bundle(&bundle).await {
+        Ok(_) => {}
+        Err(ApiClientError::HttpStatus {
+            freeze_code,
+            freeze_reason,
+            ..
+        }) if is_fs_forward_jump_group_http_error(freeze_code, freeze_reason.as_deref()) => {
+            fs_state = pristine_fs_state;
+            bundle = build_join_bundle(&mut fs_state, true)?;
+            client
+                .accept_epoch_bundle(&bundle)
+                .await
+                .context("server rejected join bundle after stale-group retry")?;
+        }
+        Err(err) => return Err(err).context("server rejected join bundle"),
+    }
 
     let forward_state = fs_state;
     let fs_ec: u64 = bundle

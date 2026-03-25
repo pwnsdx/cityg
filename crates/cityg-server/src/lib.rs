@@ -3428,6 +3428,103 @@ mod tests {
         })
     }
 
+    fn build_join_bundle_from_server_ticket(
+        server: &mut CityGServer,
+        gid: &[u8; 32],
+        label_seed: u8,
+        disable_autonomic_evolve: bool,
+    ) -> Result<ClientEpochBundle, CityGError> {
+        let (pop_pk, pop_sk) = ml_dsa_keypair();
+        let pop_public_key = pop_pk.as_bytes().to_vec();
+        let pop_secret_key = pop_sk;
+        let leaf_id = compute_leaf_id(
+            LeafIdMode::PerGroup,
+            gid,
+            "ML-DSA-65",
+            pop_public_key.as_slice(),
+        )
+        .map_err(|_| CityGError::InvalidInput("leaf id derivation"))?;
+        let ticket = server.build_join_ticket_with_leaf(gid, Some(leaf_id))?;
+        let srx_inputs = witness::SrxInputsOwned::from_cbor(&ticket.srx_cbor)
+            .map_err(|_| CityGError::InvalidInput("decode SRX inputs"))?
+            .into_srx_inputs();
+        let (vrf_secret_key, vrf_public_key) = demo_vrf_keys()?;
+        let mut fs_state =
+            msphf_orchestrator::ForwardSecrecyState::new([label_seed.wrapping_add(1); 32]);
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+        header.insert(
+            hdr::HDR_KBROAD_PUB,
+            Value::Bytes(ticket.kbroad_public.clone()),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_VERSION,
+            Value::Integer(Integer::from(ticket.barrier_version)),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_LEAF_PK,
+            Value::Bytes(barrier_leaf_public_key()),
+        );
+
+        let parts = AnchorInstanceParts {
+            gid,
+            cat: &ticket.cat,
+            tswe_salt_hash: &ticket.tswe_salt_hash,
+            parent_root: &ticket.parent_root,
+            join_delta_root: &ticket.join_delta_root,
+            revoked_since_prev_root: &ticket.revoked_since_root,
+            revoked_root: &ticket.revoked_root,
+            pox_r_commit: Some(&ticket.pox_r_commit),
+        };
+
+        let params = OrchestrationParams {
+            msphf_crs_id: msphf_core::params::RLWE_CRS_ID_DEFAULT,
+            params_id: msphf_core::params::RLWE_PARAMS_ID_MOCK,
+            srx: Some(srx_inputs),
+            srx_mode: SrxMode::Complete,
+            pop_keys: Some(PopKeypair {
+                algorithm: "ML-DSA-65",
+                public_key: pop_public_key.as_slice(),
+                secret_key: &pop_secret_key,
+            }),
+            leaf_id_mode: LeafIdMode::PerGroup,
+            proof_mode: DEFAULT_PROOF_MODE,
+            vrf_id: DEFAULT_VRF_ID,
+            policy_version: DEFAULT_POLICY_VERSION,
+            vrf_secret_key: Some(vrf_secret_key.as_slice()),
+            vrf_public_key: Some(vrf_public_key.as_slice()),
+            fs_policy_version: "7",
+            fs_epoch_base_ts: server.context().fs_base_ts().unwrap_or(0),
+            barrier_version: ticket.barrier_version,
+            fs_join: FsJoinInputs::default(),
+            fs_merge: FsMergeInputs::default(),
+        };
+
+        let witness_bytes = if ticket.witness_cbor.is_empty() {
+            None
+        } else {
+            Some(ticket.witness_cbor.as_slice())
+        };
+
+        if disable_autonomic_evolve {
+            CityGClient::generate_epoch_without_evolve(
+                header,
+                parts,
+                params,
+                &mut fs_state,
+                witness_bytes,
+            )
+        } else {
+            CityGClient::generate_epoch(header, parts, params, &mut fs_state, witness_bytes)
+        }
+        .map_err(|err| match err {
+            cityg_client::CityGError::Acceptance(err) => CityGError::Acceptance(err),
+            cityg_client::CityGError::InvalidInput(message) => CityGError::InvalidInput(message),
+            _ => CityGError::InvalidInput("client generation failed"),
+        })
+    }
+
     fn hydrate_parities(
         parities: &[PivotParity],
         fs_ec: u64,
@@ -5041,6 +5138,47 @@ mod tests {
             err,
             CityGError::InvalidInput("leaf already present in roster")
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn stale_group_second_join_accepts_without_autonomic_evolve() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let gid = cityg_client::demo::DEMO_GID;
+
+        let first_member = build_genesis_member_bundle(0x75)?;
+        server.accept_epoch(&first_member.bundle)?;
+
+        // Force the canonical FS base far enough behind wall clock that a fresh
+        // client's autonomic catch-up overshoots the group's time-blind cap.
+        server.context_mut().set_fs_base_ts(Some(1));
+
+        let forward_jumping =
+            build_join_bundle_from_server_ticket(&mut server, &gid, 0x76, false)?;
+        let err = server
+            .accept_epoch(&forward_jumping)
+            .expect_err("autonomic-evolved second join should exceed the stale group cap");
+        match err {
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze)) => {
+                assert_eq!(freeze.code, 9476);
+                assert_eq!(freeze.reason, "fs_forward_jump_group");
+            }
+            _ => return Err(CityGError::InvalidInput("unexpected stale-group join error")),
+        }
+
+        let recovered = build_join_bundle_from_server_ticket(&mut server, &gid, 0x77, true)?;
+        assert_eq!(u64_from_header(&recovered.header_map, hdr::HDR_FS_EC)?, 0);
+        server.accept_epoch(&recovered)?;
+
+        let latest_root = server
+            .latest_parent_root(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("latest root missing after stale-group retry"))?;
+        let members = server
+            .members_for_root(gid.as_slice(), &latest_root)
+            .ok_or(CityGError::InvalidInput(
+                "members missing after stale-group retry",
+            ))?;
+        assert_eq!(members.len(), 2);
         Ok(())
     }
 
