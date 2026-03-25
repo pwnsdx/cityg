@@ -160,6 +160,7 @@ S3.1 Core identifiers (inputs)
 * weid : bstr32 "window id" (FS context id)
 * xk_hash : bstr32 transcript hash / handshake binding (opaque here)
 * E_k : bstr    ME-OR derived value / binding (opaque here)
+* history_view_id : bstr32 exact committed membership/checkpoint/barrier history view identifier
 
 S3.2 Membership/SRX anchor roots (inputs)
 * header[110], header[111], header[112], header[113] : bstr32 roots (membership and revocation)
@@ -169,14 +170,27 @@ S3.2 Membership/SRX anchor roots (inputs)
 S3.3 Interfaces REQUIRED by this profile (implementability requirement)
 The membership/SRX/barrier subsystems MUST provide to any authenticated group member:
 
+Shared authenticated-view rule (normative):
+* Every successful response from A), B), C), and D) MUST be bound to a `history_view_id` naming the exact committed history/checkpoint view under which the response was computed.
+* The proof/object format is deployment-defined, but it MUST cryptographically bind `(gid, history_view_id, request selector(s), response payload)` to committed history/checkpoint state.
+* Later sections may write `Resolve...(...)` / `Lookup...(...)` as shorthand for the payload component only; callers MUST also validate the accompanying `history_view_id` and authenticated proof/object per this section.
+* Any procedure that composes outputs from more than one of A)/B)/C)/D) for a single validation, activation, provisioning, or recovery decision MUST require all referenced authenticated responses/objects to validate to the same `history_view_id`, unless that procedure explicitly defines a safe cross-view comparison. Missing or mismatched authenticated view binding MUST fail closed. In the FULL/updater chain-check and acceptance-correlation contexts, this failure MUST surface 960.9.
+
 A) ResolveRevokedLeaves(revocation_roots_hash) -> sorted unique list<uint>
 Returns revoked cover leaf indices corresponding to revocation_roots_hash.
 This enumeration MUST be integrity-protected by membership/SRX state referenced by header[112]/[113].
+The authenticated response MUST carry `history_view_id`.
 
 B) ResolveJoinsSince(prev_barrier_version) -> list of JoinLeafRecord
 JoinLeafRecord = [device_pk:bstr, leaf_index:uint, ek_leaf:bstr]
-Returns join leaf allocations and leaf public keys that became active since prev_barrier_version.
+Returns exactly the join leaf allocations and leaf public keys that:
+* were committed after prev_barrier_version,
+* remain active at the selected `history_view_id`,
+* and therefore MUST be applied by S11.6 before revocation blanking for that same `history_view_id`.
+Activations that were never committed, were superseded before commitment, or are no longer active at the selected `history_view_id` MUST NOT be returned.
 This enumeration MUST be integrity-protected by checkpoint history / membership state.
+The authenticated response MUST carry `history_view_id`.
+When later sections refer to `JoinSet` or `unresolved JoinSet`, they mean exactly this authenticated payload for the selected `history_view_id`.
 Output constraints (normative):
 * entries MUST be strictly sorted by increasing `leaf_index`,
 * `leaf_index` values MUST be unique,
@@ -187,10 +201,21 @@ Output constraints (normative):
 C) FetchBarrierPublicTree(kem_tree_hash_after) -> pk_entries
 pk_entries is an array of length (2*N_max-1) of bstr, where each entry is either empty bstr (BOTTOM) or ML-KEM ek (1184 bytes).
 The returned pk_entries MUST hash (per S11.4) to the requested kem_tree_hash_after.
+The authenticated response MUST carry `history_view_id`.
 Historical retention contract (normative):
 * FetchBarrierPublicTree(kem_tree_hash_after) MUST work for any committed historical barrier public tree snapshot addressed by kem_tree_hash_after, not only the current one.
 * The server MUST retain every committed pk_entries snapshot for as long as the corresponding group history/checkpoint history remains fetchable. Implementations MAY garbage-collect only together with retirement of the associated group history.
 * This contract constrains fetch semantics, not internal storage layout. Implementations MAY satisfy it via deltas, structural sharing, compression, or other equivalent internal representations, provided FetchBarrierPublicTree(kem_tree_hash_after) deterministically reconstructs the exact pk_entries array for the requested committed snapshot.
+
+D) LookupMergeAcceptance(merge_locator) -> MergeAcceptanceRecord
+`merge_locator := [pending_barrier_version:uint, pending_barrier_update_digest:bstr32, pending_we_epoch_id:bstr32]`
+`MergeAcceptanceRecord := [status, history_view_id, accepted_barrier_version?, accepted_fs_ec?, accepted_reason?, accepted_digest?]`
+where:
+* `status` is one of `{accepted, superseded, pending, final_rejected}`,
+* `accepted_*` fields MUST be present iff `status == accepted`,
+* `final_rejected` means authenticated finality establishes that the specific merge identified by `merge_locator` can no longer become accepted.
+The authenticated response MUST bind `merge_locator`, `status`, and any populated `accepted_*` fields to the returned `history_view_id`.
+Implementations MAY store additional stable identifiers, but any such identifier MUST be injectively bound to `merge_locator` within `gid`; it MUST NOT identify two distinct merge attempts.
 
 Snapshot-auth failure handling (normative; 960.9 wiring):
 If FetchBarrierPublicTree(kem_tree_hash_after) returns pk_entries with TreeHash(root_node) != kem_tree_hash_after, the caller MUST treat the server as faulty/active, MUST NOT proceed with barrier_update creation/activation/verification that depends on that tree, and MUST surface local diagnostic code 960.9 barrier_tree_snapshot_auth_failure.
@@ -510,9 +535,10 @@ PayloadEnvelope = [
 ]
 Define sender_leaf_id (normative):
 * sender_leaf_id is the authenticated 32-byte current membership `leaf_id` of the sending device for this group, supplied by the outer message transport / authenticated sender context for this payload. It is NOT `cover_leaf_index(device_pk)`.
+* Every in-profile payload transport MUST carry an authenticated sender device identifier (for example `author_device_pk`) and an authenticated membership view sufficient to derive that device's current `leaf_id` for this group. A transport that omits authenticated sender device identity is out of profile for S8.
 * The same sender_leaf_id MUST be supplied to both the encrypt and decrypt paths for S8.3/S8.4 derivations.
 * If sender_leaf_id is missing, malformed, or not exactly 32 bytes, the implementation MUST fail closed and MUST NOT attempt payload decryption.
-* If the surrounding transport/authenticated context also identifies the sender device (for example via `author_device_pk` or an equivalent membership record), implementations MUST verify that `sender_leaf_id` corresponds to that device's current membership `leaf_id`; mismatch -> drop payload.
+* Implementations MUST verify that `sender_leaf_id` corresponds to the authenticated sender device's current membership `leaf_id` in the authenticated membership view for this payload; mismatch -> drop payload.
 Wire encoding requirement (normative, MUST):
 * PayloadEnvelope MUST be encoded as CBOR_det array of length exactly 3.
 * The first element MUST be the CBOR text string exactly equal to "fs-hybrid-msg-v2".
@@ -892,6 +918,8 @@ Source of prev_barrier_version (normative):
 
 RevokedLeafSet := ResolveRevokedLeaves(revocation_roots_hash)
 JoinSet        := ResolveJoinsSince(prev_barrier_version)
+Canonical-view requirement (normative):
+* When S11.6 is executed for FULL client chain-check, updater chain-check, join-finalize eligibility, or server acceptance, `RevokedLeafSet`, `JoinSet`, and the non-genesis `snapshot_base` MUST all be authenticated under the same `history_view_id`.
 Genesis convention:
 When barrier_initialized == false, prev_barrier_version MUST be treated as 0 for JoinSet enumeration, and ResolveJoinsSince(0) MUST return the complete active leaf set for genesis.
 Leaf-allocation invariant (normative):
@@ -1037,8 +1065,8 @@ Before constructing any barrier_update, the updater MUST:
 Join-finalize bootstrap exception (normative):
 * A newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if, it has:
   * the S12.2 provisioned current barrier metadata for the current committed state,
-  * authenticated access to S3.3.A/B/C at that same current `barrier_version`,
-  * the authenticated accepted current `barrier_update` bytes and authenticated prior-committed history handle(s) for that same current committed state, sufficient to execute the S11.11.2 chain-checks literally against the provisioned `H_prev`,
+  * authenticated access to S3.3.A/B/C at that same current committed state, with all such responses validating to the provisioned `current_history_view_id`,
+  * the authenticated accepted current `barrier_update` bytes for that same current committed state, together with authenticated history material sufficient to execute the S11.11.2 chain-checks literally against the provisioned `H_prev` and `current_history_view_id`,
   * successfully performed the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 for that current committed state.
 * Satisfying the bullets above establishes FULL public-state verification sufficient for join_finalize eligibility even though the client has not yet derived the current `K_barrier`.
 * A pending joiner admitted under this exception MUST still NOT originate reason 0 or reason 1 while `pending_barrier_recovery == true`.
@@ -1047,8 +1075,10 @@ If this check fails, the updater MUST abort barrier_update creation, MUST NOT si
 S11.11.2 FULL clients MUST chain-check (CRITICAL)
 A FULL-verifying client processing a barrier_update MUST:
 * Let H_prev := client's locally stored kem_tree_hash_after.
-* Fetch pk_entries_prev := FetchBarrierPublicTree(H_prev) and verify it hashes to H_prev per S11.4; failure -> 960.9.
+* Fetch pk_entries_prev := FetchBarrierPublicTree(H_prev), record its authenticated `history_view_id := hv_tree`, and verify it hashes to H_prev per S11.4; failure -> 960.9.
 * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
+* Obtain `RevokedLeafSet := ResolveRevokedLeaves(revocation_roots_hash)` and `JoinSet := ResolveJoinsSince(BU.prev_barrier_version)` and record their authenticated view identifiers `hv_revoked` and `hv_join`.
+* Require `hv_tree == hv_revoked == hv_join`; mismatch or missing authenticated view binding -> 960.9.
 * Using pk_entries_prev as snapshot_base, construct snapshot_pre using S11.6 (with verifiable JoinSet and RevokedLeafSet).
 * Verify BU.kem_tree_hash_before equals hash(snapshot_pre).
 * Parse CP := KemTreeCoverPayload from BU.cover_payload bytes and enforce CBOR_det determinism per S1.3; parse or determinism failure -> 960.7.
@@ -1113,6 +1143,7 @@ F) Updater identity binding + updater-not-revoked
 * Require updater_leaf NOT in RevokedLeafSet for this update; else reject 960.1.
 * Let JoinSet := ResolveJoinsSince(BU.prev_barrier_version).
 * Let JoinLeafSet := the set of `leaf_index` values carried by JoinSet.
+* The server MUST evaluate `RevokedLeafSet`, `JoinSet`, and the `snapshot_base` used below against one common authenticated `history_view_id`; inability to establish a single common view -> reject 960.9.
 * If header[178] == 1:
   * Require updater_leaf NOT IN JoinLeafSet, else reject 960.5.
   * Server MUST enforce S10.4B policy checks; on failure reject 960.12.
@@ -1272,7 +1303,7 @@ This section specifies how the updater activates its own barrier_update locally.
 S11.14.1 Persist-before-publish (MUST)
 Before publishing/submitting any merge carrying header[175], the updater MUST persist durably (crash-safe):
 * pending_barrier_version = v_new
-* pending_we_epoch_id = the to-be-published `bundle.we_epoch_id`, or an equivalent stable identifier sufficient for authenticated acceptance-history lookup of this specific merge
+* pending_we_epoch_id = the to-be-published `bundle.we_epoch_id`
 * pending_fs_ec = header[141]
 * pending_revocation_roots_hash = revocation_roots_hash
 * pending_kem_tree_hash_after = kem_tree_hash_after /* BU.kem_tree_hash_after for the to-be-published barrier_update */
@@ -1294,12 +1325,13 @@ Where:
 * ExpectedNodeSet is computed from the to-be-published CP.path_nodes per S11.9.
 * pkhash_n MUST equal H_pk(ek_n), where ek_n is derived from S11.10 for node n.
 * Nodes in pending_on_path_key_material MUST be exactly ExpectedNodeSet, sorted strictly increasing by n, and contain no duplicates.
+* Define `pending_merge_locator := [pending_barrier_version, pending_barrier_update_digest, pending_we_epoch_id]`.
 Persistence ordering:
 * MUST complete persistence BEFORE making the merge eligible for acceptance.
 * If persistence fails, updater MUST abort emission of the barrier_update.
 
 S11.14.2 Acceptance correlation + activation (MUST)
-Upon observing acceptance of the merge carrying this barrier_update:
+Upon observing acceptance of the merge carrying this barrier_update, or after `LookupMergeAcceptance(pending_merge_locator)` returns `status == accepted`:
 * Compute accepted_digest := H_L("barrier/update/digest", [accepted raw header[175] bytes]).
 * Require accepted_digest == pending_barrier_update_digest.
 * Require the observed accepted `barrier_version` to equal `pending_barrier_version`.
@@ -1323,17 +1355,18 @@ Upon observing acceptance of the merge carrying this barrier_update:
 S11.14.3 Pending state cleanup (MUST)
 * After successful acceptance correlation and activation, updater MUST delete/clear all pending_* state.
 * The updater MUST NOT infer "lost race" solely from `current barrier_version > pending_barrier_version`.
-* The updater MUST discard pending_* state only when authenticated evidence is sufficient to determine either:
-  * (a) that the specific pending merge identified by `(pending_barrier_version, pending_barrier_update_digest, pending_we_epoch_id or equivalent stable merge identifier)` was not accepted and has been superseded by a different committed update, or
-  * (b) that authenticated finality guarantees the specific pending merge can no longer become accepted.
-* If acceptance status remains unknown and authenticated evidence is insufficient to establish either (a) or (b), the updater MUST retain pending_* state or enter an explicit recovery-required state; it MUST NOT silently discard pending_* state and continue as though the pending merge had lost.
+* The updater MUST determine non-acceptance status using `LookupMergeAcceptance(pending_merge_locator)`.
+* The updater MUST discard pending_* state only when `LookupMergeAcceptance(pending_merge_locator)` authenticatedly returns either:
+  * `status == superseded`, meaning the specific pending merge was not accepted and has been superseded by a different committed update, or
+  * `status == final_rejected`, meaning authenticated finality guarantees the specific pending merge can no longer become accepted.
+* If `LookupMergeAcceptance(pending_merge_locator)` returns `status == pending`, or authenticated history is otherwise insufficient to establish acceptance or non-acceptance, the updater MUST retain pending_* state or enter an explicit recovery-required state; it MUST NOT silently discard pending_* state and continue as though the pending merge had lost.
 
 S11.14.4 Crash restart (normative)
 On restart, the updater MUST check for pending_* state:
-* The updater MUST determine acceptance status by consulting authenticated anchor/checkpoint history sufficient to identify the specific pending merge, not merely by comparing against the current `GroupState.barrier_version`.
-* If pending_barrier_update_digest is present and authenticated history shows that the corresponding merge has been accepted, the updater MUST obtain the accepted fields required by S11.14.2 and apply acceptance correlation, even if the current group `barrier_version` is already greater than `pending_barrier_version`.
-* If pending_barrier_update_digest is present and authenticated history shows either that the specific pending merge was not accepted and has been superseded by another committed update, or that authenticated finality guarantees it can no longer become accepted, the updater MUST discard pending_* state.
-* If pending_barrier_update_digest is present but authenticated history is still insufficient to establish acceptance or non-acceptance under the rule above, the updater MUST retain pending_* state or transition to an explicit recovery-required state until authenticated history resolves acceptance or non-acceptance.
+* The updater MUST determine acceptance status by consulting `LookupMergeAcceptance(pending_merge_locator)`, not merely by comparing against the current `GroupState.barrier_version`.
+* If `LookupMergeAcceptance(pending_merge_locator)` returns `status == accepted`, the updater MUST obtain the accepted fields required by S11.14.2 and apply acceptance correlation, even if the current group `barrier_version` is already greater than `pending_barrier_version`.
+* If `LookupMergeAcceptance(pending_merge_locator)` returns `status == superseded` or `status == final_rejected`, the updater MUST discard pending_* state.
+* If `LookupMergeAcceptance(pending_merge_locator)` returns `status == pending`, or authenticated history is still insufficient to establish acceptance or non-acceptance under the rule above, the updater MUST retain pending_* state or transition to an explicit recovery-required state until authenticated history resolves acceptance or non-acceptance.
 
 S12. JOIN PROVISIONING REQUIREMENTS (NORMATIVE)
 
@@ -1354,11 +1387,13 @@ Joiner MUST store dk_leaf locally and MUST also store pkhash_leaf := H_pk(ek_lea
 The initial JOIN anchor published by the joiner MUST carry `header[97]` in the S3.4 `author-local form`, not the `barrier-recovery form`; no knowledge of the current `K_barrier` is required or permitted for this initial JOIN publication.
 
 S12.2 Provisioning to joiner
-Join provisioning MUST deliver to the joiner (authenticated, confidential as per base provisioning rules):
+Join provisioning MUST deliver to the joiner as a signed and confidential provisioning artifact bound, at minimum, to `(gid, profile_version, current_history_view_id, current barrier_version, current kem_tree_hash_after, cover_leaf_index, N_max, max_barrier_update_bytes)`, and carrying a unique nonce, issuance time, and expiry. Joiners MUST reject artifacts that are stale, expired, replayed for the same join attempt, or not bound to the current `(gid, profile_version)`.
+Join provisioning MUST deliver to the joiner:
 Barrier required fields:
 * current barrier_initialized (bool) -- for joins into an already-existing group under this profile, this MUST be true
 * cover_leaf_index (uint)
 * current barrier_version (uint)
+* current_history_view_id (bstr32)
 * current barrier_roots_hash (bstr32), OR authenticated current revocation-root material sufficient to deterministically compute the same barrier_roots_hash before any local S11.13.3 checks are applied
 * current kem_tree_hash_after (bstr32)
 * N_max (uint)
@@ -1366,7 +1401,7 @@ Barrier required fields:
 * pcs_refresh_min_delta_device_ec (uint; >=1)
 * pcs_refresh_min_delta_group_ec (uint; >=1)
 * pcs_refresh_slot_width_ec (uint; >=1)
-* authenticated accepted current `barrier_update` bytes for the current committed state, together with authenticated prior-committed history handle(s) sufficient to execute the S11.11.2 chain-checks for `join_finalize` bootstrap eligibility against that current state
+* authenticated accepted current `barrier_update` bytes for the current committed state, together with authenticated history material sufficient to execute the S11.11.2 chain-checks for `join_finalize` bootstrap eligibility against that current `history_view_id`
 FS-hybrid required fields:
 * initial K_fs (bstr32) and initial fs_ec (uint) -- or a derivation seed sufficient to deterministically compute the same initial `K_fs` and `fs_ec`
 * Joiners MUST NOT locally sample an unrelated fresh `K_fs` for an already-existing group, because PCS reseed in S6.6 requires all honest clients to evolve from the same pre-refresh `K_fs`.
@@ -1374,7 +1409,7 @@ FS-hybrid required fields:
 * fs_policy_version (uint)
 * any suite identifiers required to verify proofs (Smallwood/VRF/SRX profiles)
 Eligibility note (normative):
-* A just-provisioned joiner into an already-existing group MUST be able to invoke S3.3.A/B/C for the provisioned current committed barrier state immediately after provisioning.
+* A just-provisioned joiner into an already-existing group MUST be able to invoke S3.3.A/B/C for the provisioned current committed barrier state immediately after provisioning, and those responses MUST validate to the provisioned `current_history_view_id`.
 * For reason 2 (`join_finalize`) eligibility only, a joiner that has the S12.2 current barrier metadata and successfully performs the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 against that provisioned current state is deemed FULL-verifying for current public state, even before it has derived the current `K_barrier`.
 
 S12.3 Pending barrier recovery (normative)

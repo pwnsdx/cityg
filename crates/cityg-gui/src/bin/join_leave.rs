@@ -366,6 +366,31 @@ fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
     )
 }
 
+fn ensure_matching_history_views(
+    context: &str,
+    expected: Option<&[u8; 32]>,
+    tree_history_view_id: &[u8; 32],
+    joins_history_view_id: &[u8; 32],
+    revoked_history_view_id: &[u8; 32],
+) -> Result<()> {
+    if *tree_history_view_id == [0u8; 32]
+        || tree_history_view_id != joins_history_view_id
+        || tree_history_view_id != revoked_history_view_id
+    {
+        return Err(anyhow!(
+            "{context}: public tree / joins / revoked leaves do not share one authenticated history view (960.9)"
+        ));
+    }
+    if let Some(expected_history_view_id) = expected
+        && tree_history_view_id != expected_history_view_id
+    {
+        return Err(anyhow!(
+            "{context}: authenticated history view does not match provisioning state (960.9)"
+        ));
+    }
+    Ok(())
+}
+
 fn log_fingerprints(session: &Session) {
     let regular_preview = fingerprint_preview_hex(&session.seed_ctx_hash);
     let regular_full = fingerprint_full_hex(&session.seed_ctx_hash);
@@ -784,6 +809,7 @@ struct Session {
     xk_hash: [u8; 32],
     epoch_key: [u8; 32],
     barrier_version: u64,
+    current_history_view_id: [u8; 32],
     k_barrier: [u8; 32],
     pop_public_key: Vec<u8>,
     pop_secret: Box<MlDsaSecretKey>,
@@ -1193,6 +1219,10 @@ async fn prepare_join_session_with_identity(
         xk_hash: bundle.hp_binding.xk_hash,
         epoch_key: bundle.epoch_key,
         barrier_version: ticket.barrier_version,
+        current_history_view_id: bytes32(
+            "current_history_view_id",
+            &ticket.current_history_view_id,
+        )?,
         k_barrier: [0u8; 32],
         pop_public_key,
         pop_secret,
@@ -1337,34 +1367,42 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
     let committed_revocation_roots_hash =
         compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
-    let barrier_tree_snapshot = client
+    let barrier_tree_response = client
         .barrier_fetch_public_tree(&session.room_id, &snapshot_hash)
         .await
         .context("fetch barrier public tree snapshot for join finalize")?;
+    let barrier_tree_snapshot = barrier_tree_response.tree;
     if barrier_tree_snapshot.n_max != barrier_n_max {
         return Err(anyhow!(
             "barrier tree snapshot n_max mismatch: expected {barrier_n_max}, got {}",
             barrier_tree_snapshot.n_max
         ));
     }
-    let join_records = client
+    let join_resolution = client
         .barrier_resolve_joins_since(&session.room_id, ticket.barrier_version)
         .await
         .context("resolve barrier joins since previous version for join finalize")?;
-    let committed_revoked_indices = client
+    let revoked_resolution = client
         .barrier_resolve_revoked_leaves(&session.room_id, &committed_revocation_roots_hash)
         .await
         .context("resolve committed barrier revoked leaves for join finalize")?;
+    ensure_matching_history_views(
+        "join finalize",
+        Some(&session.current_history_view_id),
+        &barrier_tree_response.history_view_id,
+        &join_resolution.history_view_id,
+        &revoked_resolution.history_view_id,
+    )?;
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     apply_join_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        join_records.as_slice(),
+        join_resolution.records.as_slice(),
     )?;
     apply_revoked_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        committed_revoked_indices.as_slice(),
+        revoked_resolution.leaf_indices.as_slice(),
     )?;
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let next_barrier_version = ticket.barrier_version.saturating_add(1);
@@ -1750,10 +1788,11 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
     let committed_revocation_roots_hash =
         compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
-    let barrier_tree_snapshot = client
+    let barrier_tree_response = client
         .barrier_fetch_public_tree(&session.room_id, &snapshot_hash)
         .await
         .context("fetch barrier public tree snapshot")?;
+    let barrier_tree_snapshot = barrier_tree_response.tree;
     let barrier_n_max = if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
@@ -1772,24 +1811,31 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             barrier_tree_snapshot.n_max
         ));
     }
-    let join_records = client
+    let join_resolution = client
         .barrier_resolve_joins_since(&session.room_id, ticket.barrier_version)
         .await
         .context("resolve barrier joins since previous version")?;
-    let committed_revoked_indices = client
+    let revoked_resolution = client
         .barrier_resolve_revoked_leaves(&session.room_id, &committed_revocation_roots_hash)
         .await
         .context("resolve committed barrier revoked leaf indices")?;
+    ensure_matching_history_views(
+        "join finalize",
+        Some(&session.current_history_view_id),
+        &barrier_tree_response.history_view_id,
+        &join_resolution.history_view_id,
+        &revoked_resolution.history_view_id,
+    )?;
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     apply_join_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        join_records.as_slice(),
+        join_resolution.records.as_slice(),
     )?;
     apply_revoked_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        committed_revoked_indices.as_slice(),
+        revoked_resolution.leaf_indices.as_slice(),
     )?;
     let leaf_base = barrier_n_max.saturating_sub(1);
     let revoked_leaf_node = leaf_base.saturating_add(ticket.cover_leaf_index);
@@ -2848,6 +2894,7 @@ mod tests {
             xk_hash: [0x23; 32],
             epoch_key: [0x24; 32],
             barrier_version: 1,
+            current_history_view_id: [0x2A; 32],
             k_barrier: [0x25; 32],
             pop_public_key: vec![0x33; 32],
             pop_secret: Box::new(pop_sk),
@@ -2996,6 +3043,8 @@ mod tests {
         n_max: u64,
         #[prost(uint64, tag = "27")]
         max_barrier_update_bytes: u64,
+        #[prost(bytes = "vec", tag = "30")]
+        current_history_view_id: Vec<u8>,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3012,12 +3061,16 @@ mod tests {
     struct BarrierResolveJoinsSinceResponsePb {
         #[prost(message, repeated, tag = "1")]
         records: Vec<BarrierJoinLeafRecordPb>,
+        #[prost(bytes = "vec", tag = "2")]
+        history_view_id: Vec<u8>,
     }
 
     #[derive(Clone, PartialEq, Message)]
     struct BarrierResolveRevokedLeavesResponsePb {
         #[prost(uint32, repeated, tag = "1")]
         leaf_indices: Vec<u32>,
+        #[prost(bytes = "vec", tag = "2")]
+        history_view_id: Vec<u8>,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3028,6 +3081,8 @@ mod tests {
         kem_tree_hash_after: Vec<u8>,
         #[prost(bytes = "vec", repeated, tag = "3")]
         pk_entries: Vec<Vec<u8>>,
+        #[prost(bytes = "vec", tag = "4")]
+        history_view_id: Vec<u8>,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3245,13 +3300,16 @@ mod tests {
             compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
         let barrier_tree_snapshot = client
             .barrier_fetch_public_tree(&room_id, &ticket.kem_tree_hash_after)
-            .await?;
+            .await?
+            .tree;
         let join_records = client
             .barrier_resolve_joins_since(&room_id, ticket.barrier_version)
-            .await?;
+            .await?
+            .records;
         let revoked_leaf_indices = client
             .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
-            .await?;
+            .await?
+            .leaf_indices;
 
         handle.abort();
         let _ = handle.await;
@@ -3285,13 +3343,16 @@ mod tests {
             compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
         let barrier_tree_snapshot = client
             .barrier_fetch_public_tree(&room_id, &ticket.kem_tree_hash_after)
-            .await?;
+            .await?
+            .tree;
         let join_records = client
             .barrier_resolve_joins_since(&room_id, ticket.barrier_version)
-            .await?;
+            .await?
+            .records;
         let revoked_leaf_indices = client
             .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
-            .await?;
+            .await?
+            .leaf_indices;
 
         handle.abort();
         let _ = handle.await;
@@ -3379,6 +3440,7 @@ mod tests {
             kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
             n_max: ticket.n_max,
             max_barrier_update_bytes: ticket.max_barrier_update_bytes,
+            current_history_view_id: vec![0xD1; 32],
         }
         .encode_to_vec())
     }
@@ -3388,6 +3450,7 @@ mod tests {
             n_max: tree.n_max,
             kem_tree_hash_after: tree.kem_tree_hash_after.to_vec(),
             pk_entries: tree.pk_entries.clone(),
+            history_view_id: vec![0xD1; 32],
         }
         .encode_to_vec()
     }
@@ -3402,6 +3465,7 @@ mod tests {
                     ek_leaf: record.ek_leaf.clone(),
                 })
                 .collect(),
+            history_view_id: vec![0xD1; 32],
         }
         .encode_to_vec()
     }
@@ -3409,6 +3473,7 @@ mod tests {
     fn encode_revoked_leaf_indices(indices: &[u32]) -> Vec<u8> {
         BarrierResolveRevokedLeavesResponsePb {
             leaf_indices: indices.to_vec(),
+            history_view_id: vec![0xD1; 32],
         }
         .encode_to_vec()
     }
@@ -4526,6 +4591,7 @@ mod tests {
             xk_hash: [0x03; 32],
             epoch_key: [0x04; 32],
             barrier_version: 1,
+            current_history_view_id: [0x0A; 32],
             k_barrier: [0x05; 32],
             pop_public_key: vec![0x11],
             pop_secret: Box::new(sk),

@@ -314,10 +314,11 @@ async fn publish_revocation_merge_from_ticket(
     let committed_revocation_roots_hash =
         compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
     let snapshot_hash = bytes32("kem_tree_hash_after", &kem_tree_hash_after)?;
-    let barrier_tree_snapshot = client
+    let barrier_tree_response = client
         .barrier_fetch_public_tree(&room_id, &snapshot_hash)
         .await
         .context("fetch barrier public tree snapshot")?;
+    let barrier_tree_snapshot = barrier_tree_response.tree;
     let barrier_n_max = if n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
@@ -335,24 +336,32 @@ async fn publish_revocation_merge_from_ticket(
         ));
     }
     validate_barrier_tree_snapshot_auth(&snapshot_hash, barrier_n_max, &barrier_tree_snapshot)?;
-    let join_records = client
+    let join_resolution = client
         .barrier_resolve_joins_since(&room_id, barrier_version)
         .await
         .context("resolve barrier joins since previous version")?;
-    let committed_revoked_indices = client
+    let revoked_resolution = client
         .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
         .await
         .context("resolve committed barrier revoked leaf indices")?;
+    if barrier_tree_response.history_view_id == [0u8; 32]
+        || barrier_tree_response.history_view_id != join_resolution.history_view_id
+        || barrier_tree_response.history_view_id != revoked_resolution.history_view_id
+    {
+        return Err(anyhow!(
+            "barrier snapshot-auth history view mismatch (960.9): public tree / joins / revoked leaves do not share one authenticated view"
+        ));
+    }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     apply_join_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        join_records.as_slice(),
+        join_resolution.records.as_slice(),
     )?;
     apply_revoked_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        committed_revoked_indices.as_slice(),
+        revoked_resolution.leaf_indices.as_slice(),
     )?;
     let leaf_base = barrier_n_max.saturating_sub(1);
     let revoked_leaf_node = leaf_base.saturating_add(revoked_cover_leaf_index);
@@ -840,10 +849,11 @@ async fn perform_barrier_merge_inner(
     let committed_revocation_roots_hash =
         compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
     let snapshot_hash = bytes32("kem_tree_hash_after", &kem_tree_hash_after)?;
-    let barrier_tree_snapshot = client
+    let barrier_tree_response = client
         .barrier_fetch_public_tree(&room_id, &snapshot_hash)
         .await
         .context("fetch barrier public tree snapshot")?;
+    let barrier_tree_snapshot = barrier_tree_response.tree;
     let barrier_n_max = if n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
@@ -861,24 +871,32 @@ async fn perform_barrier_merge_inner(
         ));
     }
     validate_barrier_tree_snapshot_auth(&snapshot_hash, barrier_n_max, &barrier_tree_snapshot)?;
-    let join_records = client
+    let join_resolution = client
         .barrier_resolve_joins_since(&room_id, barrier_version)
         .await
         .context("resolve barrier joins since previous version")?;
-    let committed_revoked_indices = client
+    let revoked_resolution = client
         .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
         .await
         .context("resolve committed barrier revoked leaf indices")?;
+    if barrier_tree_response.history_view_id == [0u8; 32]
+        || barrier_tree_response.history_view_id != join_resolution.history_view_id
+        || barrier_tree_response.history_view_id != revoked_resolution.history_view_id
+    {
+        return Err(anyhow!(
+            "barrier snapshot-auth history view mismatch (960.9): public tree / joins / revoked leaves do not share one authenticated view"
+        ));
+    }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     apply_join_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        join_records.as_slice(),
+        join_resolution.records.as_slice(),
     )?;
     apply_revoked_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        committed_revoked_indices.as_slice(),
+        revoked_resolution.leaf_indices.as_slice(),
     )?;
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let next_barrier_version = barrier_version.saturating_add(1);

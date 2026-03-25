@@ -239,6 +239,7 @@ message JoinTicketResponse {
   bytes kem_tree_hash_after = 27;
   uint64 n_max = 28;
   uint64 max_barrier_update_bytes = 29;
+  bytes current_history_view_id = 30;
 }
 
 message MergeTicketRequest {
@@ -293,6 +294,7 @@ message BarrierResolveRevokedLeavesRequest {
 message BarrierResolveRevokedLeavesResponse {
   reserved 1000 to 1999;
   repeated uint32 leaf_indices = 1;
+  bytes history_view_id = 2;
 }
 
 message BarrierJoinLeafRecord {
@@ -311,6 +313,7 @@ message BarrierResolveJoinsSinceRequest {
 message BarrierResolveJoinsSinceResponse {
   reserved 1000 to 1999;
   repeated BarrierJoinLeafRecord records = 1;
+  bytes history_view_id = 2;
 }
 
 message BarrierFetchPublicTreeRequest {
@@ -324,6 +327,7 @@ message BarrierFetchPublicTreeResponse {
   uint64 n_max = 1;
   bytes kem_tree_hash_after = 2;
   repeated bytes pk_entries = 3;
+  bytes history_view_id = 4;
 }
 
 message RoomAdminProof {

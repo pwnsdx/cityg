@@ -386,6 +386,10 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             barrier_initialized: true,
             barrier_version: ticket.barrier_version,
             barrier_roots_hash: compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?,
+            current_history_view_id: bytes32(
+                "current_history_view_id",
+                &ticket.current_history_view_id,
+            )?,
             k_barrier: Zeroizing::new([0u8; 32]),
             kem_tree_hash_after,
             max_barrier_update_bytes: ticket.max_barrier_update_bytes.max(1),

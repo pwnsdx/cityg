@@ -1081,7 +1081,7 @@ impl CitygApiClient {
         &self,
         room_id: &str,
         revocation_roots_hash: &[u8; 32],
-    ) -> Result<Vec<u32>, Error> {
+    ) -> Result<BarrierResolvedRevokedLeaves, Error> {
         let request = BarrierResolveRevokedLeavesRequest {
             room_id: room_id.to_string(),
             revocation_roots_hash: revocation_roots_hash.to_vec(),
@@ -1089,7 +1089,10 @@ impl CitygApiClient {
         let response: BarrierResolveRevokedLeavesResponse = self
             .post_proto("/v1/barrier/resolve_revoked_leaves", request)
             .await?;
-        Ok(response.leaf_indices)
+        Ok(BarrierResolvedRevokedLeaves {
+            history_view_id: array32(&response.history_view_id)?,
+            leaf_indices: response.leaf_indices,
+        })
     }
 
     /// Resolves join records that became active after `prev_barrier_version`.
@@ -1097,7 +1100,7 @@ impl CitygApiClient {
         &self,
         room_id: &str,
         prev_barrier_version: u64,
-    ) -> Result<Vec<BarrierJoinRecord>, Error> {
+    ) -> Result<BarrierResolvedJoins, Error> {
         let request = BarrierResolveJoinsSinceRequest {
             room_id: room_id.to_string(),
             prev_barrier_version,
@@ -1105,15 +1108,18 @@ impl CitygApiClient {
         let response: BarrierResolveJoinsSinceResponse = self
             .post_proto("/v1/barrier/resolve_joins_since", request)
             .await?;
-        Ok(response
-            .records
-            .into_iter()
-            .map(|record| BarrierJoinRecord {
-                device_pk: record.device_pk,
-                leaf_index: record.leaf_index,
-                ek_leaf: record.ek_leaf,
-            })
-            .collect())
+        Ok(BarrierResolvedJoins {
+            history_view_id: array32(&response.history_view_id)?,
+            records: response
+                .records
+                .into_iter()
+                .map(|record| BarrierJoinRecord {
+                    device_pk: record.device_pk,
+                    leaf_index: record.leaf_index,
+                    ek_leaf: record.ek_leaf,
+                })
+                .collect(),
+        })
     }
 
     /// Fetches a barrier public-tree snapshot for a committed tree hash.
@@ -1121,7 +1127,7 @@ impl CitygApiClient {
         &self,
         room_id: &str,
         kem_tree_hash_after: &[u8; 32],
-    ) -> Result<BarrierPublicTree, Error> {
+    ) -> Result<BarrierFetchedPublicTree, Error> {
         let request = BarrierFetchPublicTreeRequest {
             room_id: room_id.to_string(),
             kem_tree_hash_after: kem_tree_hash_after.to_vec(),
@@ -1129,10 +1135,13 @@ impl CitygApiClient {
         let response: BarrierFetchPublicTreeResponse = self
             .post_proto("/v1/barrier/fetch_public_tree", request)
             .await?;
-        Ok(BarrierPublicTree {
-            n_max: response.n_max,
-            kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
-            pk_entries: response.pk_entries,
+        Ok(BarrierFetchedPublicTree {
+            history_view_id: array32(&response.history_view_id)?,
+            tree: BarrierPublicTree {
+                n_max: response.n_max,
+                kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
+                pk_entries: response.pk_entries,
+            },
         })
     }
 
@@ -1571,12 +1580,33 @@ pub struct BarrierJoinRecord {
     pub ek_leaf: Vec<u8>,
 }
 
+/// Revoked-leaf response bound to a specific authenticated history view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BarrierResolvedRevokedLeaves {
+    pub history_view_id: [u8; 32],
+    pub leaf_indices: Vec<u32>,
+}
+
+/// Join enumeration response bound to a specific authenticated history view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BarrierResolvedJoins {
+    pub history_view_id: [u8; 32],
+    pub records: Vec<BarrierJoinRecord>,
+}
+
 /// Barrier public-tree snapshot returned by snapshot fetch endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarrierPublicTree {
     pub n_max: u64,
     pub kem_tree_hash_after: [u8; 32],
     pub pk_entries: Vec<Vec<u8>>,
+}
+
+/// Public-tree snapshot bound to a specific authenticated history view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BarrierFetchedPublicTree {
+    pub history_view_id: [u8; 32],
+    pub tree: BarrierPublicTree,
 }
 
 /// Merge ticket containing all data needed to create a new epoch.
@@ -1798,6 +1828,7 @@ mod tests {
             "/v1/members/search" => encode_proto(SearchMembersResponse::default()),
             "/v1/rooms/join_ticket" => encode_proto(JoinTicketResponse {
                 profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                current_history_view_id: vec![0xD0; 32],
                 ..JoinTicketResponse::default()
             }),
             "/v1/rooms/merge_ticket" => encode_proto(merge_ticket_ok_payload()),
@@ -1805,6 +1836,7 @@ mod tests {
             "/v1/barrier/resolve_revoked_leaves" => {
                 encode_proto(BarrierResolveRevokedLeavesResponse {
                     leaf_indices: vec![1, 7],
+                    history_view_id: vec![0xD1; 32],
                 })
             }
             "/v1/barrier/resolve_joins_since" => encode_proto(BarrierResolveJoinsSinceResponse {
@@ -1813,11 +1845,13 @@ mod tests {
                     leaf_index: 9,
                     ek_leaf: vec![0xBB; 1184],
                 }],
+                history_view_id: vec![0xD1; 32],
             }),
             "/v1/barrier/fetch_public_tree" => encode_proto(BarrierFetchPublicTreeResponse {
                 n_max: 8,
                 kem_tree_hash_after: vec![0xCC; 32],
                 pk_entries: vec![Vec::new(); 15],
+                history_view_id: vec![0xD1; 32],
             }),
             "/v1/send_message" => encode_proto(SendMessageResponse::default()),
             "/v1/messages" => encode_proto(FetchMessagesResponse::default()),
@@ -2250,17 +2284,20 @@ mod tests {
         let revoked = client
             .barrier_resolve_revoked_leaves("room-1", &[0xCC; 32])
             .await?;
-        assert_eq!(revoked, vec![1, 7]);
+        assert_eq!(revoked.history_view_id, [0xD1; 32]);
+        assert_eq!(revoked.leaf_indices, vec![1, 7]);
         let joins = client.barrier_resolve_joins_since("room-1", 3).await?;
-        assert_eq!(joins.len(), 1);
-        assert_eq!(joins[0].leaf_index, 9);
-        assert_eq!(joins[0].ek_leaf.len(), 1184);
+        assert_eq!(joins.history_view_id, [0xD1; 32]);
+        assert_eq!(joins.records.len(), 1);
+        assert_eq!(joins.records[0].leaf_index, 9);
+        assert_eq!(joins.records[0].ek_leaf.len(), 1184);
         let tree = client
             .barrier_fetch_public_tree("room-1", &[0xCC; 32])
             .await?;
-        assert_eq!(tree.n_max, 8);
-        assert_eq!(tree.kem_tree_hash_after, [0xCC; 32]);
-        assert_eq!(tree.pk_entries.len(), 15);
+        assert_eq!(tree.history_view_id, [0xD1; 32]);
+        assert_eq!(tree.tree.n_max, 8);
+        assert_eq!(tree.tree.kem_tree_hash_after, [0xCC; 32]);
+        assert_eq!(tree.tree.pk_entries.len(), 15);
 
         let _ = client
             .send_message(&[0x22; 32], b"ciphertext", Some(&[0xAA; 32]))

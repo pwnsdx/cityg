@@ -18,6 +18,8 @@ pub(in crate::native) struct PersistedBarrierState {
     #[serde(default)]
     pub(in crate::native) barrier_roots_hash_hex: String,
     #[serde(default)]
+    pub(in crate::native) current_history_view_id_hex: String,
+    #[serde(default)]
     pub(in crate::native) k_barrier_hex: String,
     #[serde(default)]
     pub(in crate::native) kem_tree_hash_after_hex: String,
@@ -207,6 +209,7 @@ impl PersistedBarrierState {
             barrier_initialized: state.barrier_initialized,
             barrier_version: state.barrier_version,
             barrier_roots_hash_hex: hex_encode(state.barrier_roots_hash),
+            current_history_view_id_hex: hex_encode(state.current_history_view_id),
             k_barrier_hex: hex_encode(*state.k_barrier),
             kem_tree_hash_after_hex: hex_encode(state.kem_tree_hash_after),
             max_barrier_update_bytes: state.max_barrier_update_bytes,
@@ -238,6 +241,10 @@ impl PersistedBarrierState {
             barrier_roots_hash: decode_hex32_or_zero(
                 "barrier_state.barrier_roots_hash_hex",
                 &self.barrier_roots_hash_hex,
+            )?,
+            current_history_view_id: decode_hex32_or_zero(
+                "barrier_state.current_history_view_id_hex",
+                &self.current_history_view_id_hex,
             )?,
             k_barrier: Zeroizing::new(decode_hex32_or_zero(
                 "barrier_state.k_barrier_hex",

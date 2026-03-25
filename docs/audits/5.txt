@@ -1,0 +1,182 @@
+5. Interfaces Externes / Implementability / Hidden Assumptions (COMPLETED)
+
+Tu es un auditeur de spécification focalisé sur l’implémentabilité, les hypothèses cachées, les interfaces externes et les propriétés de sécurité impossibles à garantir avec le texte actuel.
+
+Tu n’as accès qu’à:
+- `docs/specs.md`
+
+Mission:
+Identifier tout endroit où la spec dépend d’un “external subsystem”, d’un oracle, d’une interface implicite, d’une représentation membership/barrier externe, ou d’une hypothèse cachée qui n’est pas suffisamment contrainte pour préserver la sécurité.
+
+Cherche en priorité:
+- interfaces externes dont la sécurité n’est pas assez spécifiée
+- propriétés de sécurité qui reposent sur des composants “assumed to exist”
+- obligations impossibles à vérifier exactement
+- comportements “deterministic” ou “authenticated” sans procédure normative suffisante
+- exigences de retention/historical fetch qui laissent plusieurs implémentations incompatibles
+- dépendances à la sémantique du storage, du checkpointing, de l’historique, de la représentation de membership, des proofs APIs
+- parties où un implémenteur peut choisir une option dangereuse tout en restant techniquement conforme
+
+Question centrale:
+“Quelles propriétés critiques semblent garanties par la spec alors qu’elles dépendent en réalité d’interfaces externes insuffisamment normées ?”
+
+Format:
+- Findings confirmés, triés par sévérité
+- Pour chaque finding:
+  - Titre
+  - Sévérité
+  - Section(s)
+  - Interface ou hypothèse externe en cause
+  - Pourquoi la propriété n’est pas réellement garantie
+  - Impact concret sur une implémentation conforme mais faible
+  - Texte normatif minimal à ajouter
+- Puis:
+  - Hypothèses cachées
+  - Exigences non testables
+  - Sous-spécifications les plus dangereuses
+
+Tu raisonnes comme un implémenteur honnête mais littéral.
+
+--
+
+Source auditée : 
+
+En lecture littérale d’implémenteur, la spec donne l’impression de garantir un **FULL chain-check**, une **résistance au serveur actif**, une **gouvernance room-admin**, une **liaison sûre du sender**, et une **reprise crash-safe**. En réalité, ces propriétés reposent largement sur des interfaces externes explicitement “assumed to exist” ou sur des canaux/authentifications non re-spécifiés ici.
+
+## Findings confirmés
+
+### 1) Le “FULL chain-check” n’est pas réellement garanti, faute d’une vue historique/authentifiée commune pour A/B/C
+
+* **Sévérité** : Critique
+* **Section(s)** : S3.3, S11.11.2, S11.12.1
+* **Interface ou hypothèse externe en cause** : `ResolveRevokedLeaves`, `ResolveJoinsSince`, `FetchBarrierPublicTree`, plus la “membership/checkpoint history” qui les alimente.
+* **Pourquoi la propriété n’est pas réellement garantie** : la spec exige que ces réponses soient “integrity-protected”, mais elle ne leur impose **aucun handle commun de vue**, **aucune preuve de cohérence mutuelle**, et **aucune branche/checkpoint commun**. `ResolveJoinsSince` ne prend qu’un `prev_barrier_version`; `ResolveRevokedLeaves` ne prend qu’un `revocation_roots_hash`; `FetchBarrierPublicTree` ne prend qu’un `kem_tree_hash_after`. Pourtant S11.11.2 reconstruit `snapshot_pre` comme si A/B/C décrivaient nécessairement la même histoire authentifiée.
+* **Impact concret sur une implémentation conforme mais faible** : un serveur actif ou un backend incohérent peut servir un `JoinSet`, un `RevokedLeafSet` et un `pk_entries_prev` provenant de vues différentes tout en restant “conforme au texte”. Le client peut alors se croire “FULL-verifying” alors qu’il vérifie un état synthétique, ce qui affaiblit précisément la propriété annoncée d’active-server resistance.
+* **Texte normatif minimal à ajouter** :
+  “`ResolveRevokedLeaves`, `ResolveJoinsSince`, and `FetchBarrierPublicTree` MUST all accept and return the same authenticated `history_view_id` (or checkpoint root). Each response MUST carry a proof against that exact committed history view. FULL chain-check MUST reject if the three proofs do not validate to the same `history_view_id`.”
+
+### 2) La sémantique exacte de `JoinSet` est sous-spécifiée alors qu’elle pilote la sécurité de `join_finalize`
+
+* **Sévérité** : Critique
+* **Section(s)** : S3.3.B, S10.4C, S11.12.1.F, S12.3
+* **Interface ou hypothèse externe en cause** : `ResolveJoinsSince(prev_barrier_version)` et la notion d’“unresolved JoinSet”.
+* **Pourquoi la propriété n’est pas réellement garantie** : “became active since prev_barrier_version” n’est pas une procédure normative suffisante. Le texte ne dit pas exactement si `JoinSet` inclut ou exclut les joins ensuite révoqués, supersédés, déjà finalisés, en course, ou rejetés. Pourtant cette sémantique décide si `header[178]` vaut 1 ou 2, si l’auteur a droit à `join_finalize`, et s’il est exempt des rate limits PCS.
+* **Impact concret sur une implémentation conforme mais faible** : deux implémentations honnêtes peuvent calculer des `JoinSet` différents tout en lisant le même texte. L’une peut autoriser un `join_finalize` dangereux, l’autre peut refuser un `join_finalize` légitime; la divergence touche directement l’évolution de `K_barrier`.
+* **Texte normatif minimal à ajouter** :
+  “`ResolveJoinsSince(prev_barrier_version, history_view_id)` MUST return exactly the set of JOIN activations that were committed after `prev_barrier_version` and that remain active and unresolved at the selected committed barrier state. The spec MUST define when a join becomes ‘resolved’ and whether revocation, supersession, or acceptance failure removes it from the set.”
+
+### 3) La reprise après crash dépend d’une API d’historique/finalité inexistante dans le texte
+
+* **Sévérité** : Critique
+* **Section(s)** : S5.2, S11.14.1, S11.14.2, S11.14.3, S11.14.4, S12.2
+* **Interface ou hypothèse externe en cause** : “authenticated acceptance-history lookup”, “authenticated finality”, `pending_we_epoch_id or equivalent stable identifier`, et les “prior-committed history handle(s)”.
+* **Pourquoi la propriété n’est pas réellement garantie** : la spec exige de corréler un pending merge à l’historique accepté, d’établir s’il a gagné/perdu une race, et de savoir quand la finalité interdit qu’il soit encore accepté. Mais elle ne définit ni l’objet d’historique, ni son authentification, ni l’unicité du merge identifier, ni la sémantique de finalité.
+* **Impact concret sur une implémentation conforme mais faible** : elle peut activer le mauvais `barrier_update`, jeter un pending state trop tôt, ne jamais savoir quand il est sûr de réessayer, ou diverger après reboot tout en restant “textuellement conforme”.
+* **Texte normatif minimal à ajouter** :
+  “The deployment MUST provide an authenticated acceptance-history API returning, for a unique merge identifier, the accepted anchor hash, `header[175]` digest, committed barrier version, and finality status under a signed history root. `Equivalent stable identifier` MUST be globally unique within `(gid, barrier_version)`.”
+
+### 4) L’autorisation des transitions sensibles est hors-spec/informative, donc non garantie par ce texte
+
+* **Sévérité** : Critique
+* **Section(s)** : Control-plane governance note, external subsystems list, S11.12.1
+* **Interface ou hypothèse externe en cause** : room-admin proofs, room governance docs externes, anchor authentication “per deployment”.
+* **Pourquoi la propriété n’est pas réellement garantie** : le document dit que la gouvernance room-scoped et l’operator authorization sont spécifiées ailleurs, et ne donne ici qu’un “Current implementation behavior” informatif. En plus, l’authentification d’ancre est explicitement externalisée “per deployment”. Or les transitions les plus sensibles — claim/bootstrap, admin lifecycle, member expulsion, MERGE/revocation authorization — en dépendent.
+* **Impact concret sur une implémentation conforme mais faible** : une implémentation peut passer toutes les vérifications de profil/barrier tout en acceptant des MERGE émis par un principal non autorisé, ou en utilisant une suite de signature faible/non interopérable.
+* **Texte normatif minimal à ajouter** :
+  “Server acceptance MUST invoke a normative `AuthorizeTransition` procedure before S11.12.1 state advancement. `AuthorizeTransition` MUST verify room identity, signer identity, operation kind, freshness, and admin entitlement under a profile-defined signature suite. No legacy authorization fallback is permitted.”
+
+### 5) Le binding `sender_leaf_id` dépend d’un transport externe dont l’identité d’émetteur n’est même pas obligatoire
+
+* **Sévérité** : Élevée
+* **Section(s)** : S3.2, S8.1, S8.2, S8.5
+* **Interface ou hypothèse externe en cause** : outer message transport / authenticated sender context, sémantique externe de `leaf_id(device_pk)`.
+* **Pourquoi la propriété n’est pas réellement garantie** : `sender_leaf_id` est “supplied by the outer message transport / authenticated sender context”, et la vérification device→leaf n’est requise que **si** ce contexte identifie aussi le device. Cette condition laisse une option dangereuse : un transport conforme au profil mais sans identité d’émetteur normativement authentifiée.
+* **Impact concret sur une implémentation conforme mais faible** : le partitionnement des tuples de replay, la dérivation de `K_msg_epoch`, le nonce et l’AAD peuvent dépendre d’un `sender_leaf_id` mal lié ou instable. Cela peut produire des collisions logiques, des rejets divergents, ou une substitution d’identité côté transport tout en respectant le texte.
+* **Texte normatif minimal à ajouter** :
+  “Every payload transport MUST carry an authenticated sender device identifier and a membership-view identifier. Receivers MUST verify `sender_leaf_id == leaf_id(sender_device_pk, membership_view_id)` before replay checking or decryption. A transport that omits authenticated sender device identity is out of profile.”
+
+### 6) Les garanties de preuve et de confidentialité reposent sur des oracles opaques (`ME-OR`, `xk_hash`, `E_k`, Smallwood, ZK-VRF)
+
+* **Sévérité** : Élevée
+* **Section(s)** : external subsystems list, S3.1, S8.3–S8.5, S9.1–S9.3, S12.2
+* **Interface ou hypothèse externe en cause** : MSPHF / ME-OR, witness/NP language, Smallwood, SRX/Smallwood-v1, ZK-VRF verification API, dérivation de `xk_hash` et `E_k`.
+* **Pourquoi la propriété n’est pas réellement garantie** : `xk_hash` et `E_k` sont explicitement “opaque here”. Le texte dit que `K_msg_epoch` dépend de `E_k`, et que VRF/Smallwood/SRX doivent être vérifiés, mais ne normalise pas ici les suites, la transcript serialization, l’API exacte, ni les conditions de rejet. Une implémentation peut donc choisir une sémantique externe faible tout en restant compatible au niveau wire.
+* **Impact concret sur une implémentation conforme mais faible** : dérivation incorrecte ou faible de `E_k`, vérification laxiste de VRF/Smallwood, divergence de transcript binding, donc perte de soundness ou de confidentialité réelle malgré une conformité apparente à la partie visible du profil.
+* **Texte normatif minimal à ajouter** :
+  “The profile MUST define a registry of proof/KDF suite identifiers and, for each suite, the exact transcript bytes, input/output formats, domain separation, and verification failure conditions. `xk_hash` and `E_k` MUST be derived by profile-defined procedures, not by deployment-local convention.”
+
+### 7) Le provisioning de join est critique pour la sécurité, mais son enveloppe de confiance est complètement externe
+
+* **Sévérité** : Élevée
+* **Section(s)** : S12.2, S12.3
+* **Interface ou hypothèse externe en cause** : “authenticated, confidential as per base provisioning rules”.
+* **Pourquoi la propriété n’est pas réellement garantie** : le joiner reçoit ici des valeurs hautement sensibles ou structurantes : `K_fs` (ou seed), `barrier_version`, `barrier_roots_hash` material, `kem_tree_hash_after`, `N_max`, `max_barrier_update_bytes`, les paramètres PCS, les bytes du `current barrier_update`, et des history handles. Pourtant la spec ne définit ni l’objet provisionné, ni sa fraîcheur, ni son anti-replay, ni son binding à `gid/profile_version`.
+* **Impact concret sur une implémentation conforme mais faible** : un provisioning stale, rejoué ou mal authentifié peut imposer un mauvais `K_fs`, un faux état courant, une mauvaise politique de taille, ou des handles d’historique incohérents, et laisser le joiner bloqué ou divergent.
+* **Texte normatif minimal à ajouter** :
+  “Join provisioning MUST use a profile-defined signed and confidential provisioning artifact bound to `(gid, room_identity, profile_version, current_history_view_id)` and carrying nonce, issuance time, and expiry. Joiners MUST reject stale, replayed, or unbound artifacts before consuming any provisioned field.”
+
+### 8) Les contrats de rétention/fetch et de configuration laissent des implémentations incompatibles ou dangereuses tout en restant conformes
+
+* **Sévérité** : Moyenne
+* **Section(s)** : S3.3.C, S4.4, S5.1, S11.11.2
+* **Interface ou hypothèse externe en cause** : politique de fetch d’historique/checkpoints, distribution des paramètres de déploiement (`max_barrier_update_bytes`, etc.).
+* **Pourquoi la propriété n’est pas réellement garantie** : `FetchBarrierPublicTree` n’est garanti que tant que l’historique associé “remains fetchable”, mais la fetchability et la politique de retirement ne sont pas définies ici. De même, `max_barrier_update_bytes` “MUST be consistent across the server and all clients”, mais la détection repose sur une “provisioning metadata or policy channel” non normative.
+* **Impact concret sur une implémentation conforme mais faible** : un déploiement peut compacter l’historique de façon à rendre impossible le FULL verification ou le bootstrap `join_finalize`, ou distribuer des limites de taille divergentes qui partitionnent les clients sur `barrier_update`.
+* **Texte normatif minimal à ajouter** :
+  “The profile MUST define a minimum historical retention horizon and precise retirement/fetch error semantics for all artifacts required by FULL verification. Deployment parameters affecting acceptance or parsing (`N_max`, `max_barrier_update_bytes`, PCS policy values) MUST be carried in a single signed profile manifest shared identically by all clients and the server.”
+
+## Hypothèses cachées
+
+* Il existe une **histoire globale unique, totalement ordonnée et sans ambiguïté de branche**, alors que le texte ne la définit pas comme objet normatif.
+* Les réponses des APIs membership/barrier/history décrivent toutes la **même vue authentifiée**.
+* `leaf_id(device_pk)` a une **sémantique stable, unique et non réutilisable** suffisante pour la dérivation de clés et l’anti-replay.
+* Le service de provisioning peut être **pleinement trusted pour la fraîcheur** de `K_fs`, des policy values et des history handles.
+* Il existe une notion exploitable de **finalité authentifiée** permettant de savoir qu’un pending merge ne pourra plus être accepté.
+* Les paramètres de déploiement critiques sont en pratique **distribués de façon uniforme** à tous les clients, même si le mécanisme n’est pas normé ici.
+
+## Exigences non testables
+
+* “integrity-protected” pour `ResolveRevokedLeaves` et `ResolveJoinsSince` sans format de preuve.
+* “authenticated accepted current barrier_update bytes” et “prior-committed history handle(s)” sans objet ni schéma.
+* “authenticated evidence is sufficient” et “authenticated finality guarantees” sans procédure de décision.
+* “equivalent stable identifier” sans règle d’unicité ni de collision.
+* “server-observable JoinSet predicate” sans définition algorithmique.
+* “authenticated, confidential as per base provisioning rules” sans enveloppe normative.
+
+## Sous-spécifications les plus dangereuses
+
+* **L’absence d’un handle commun de vue historique** pour A/B/C : c’est la faille la plus structurante, car elle sape la promesse de FULL verification.
+* **L’absence d’API normative d’acceptance/finality/history** : elle rend la reprise crash-safe impossible à garantir exactement.
+* **Le provisioning de join non normé** : il porte `K_fs` et l’état courant, donc un faux pas ici casse la sécurité avant même la recovery barrier.
+* **Le binding conditionnel de `sender_leaf_id`** : la sécurité de replay et d’identité dépend d’un contexte externe optionnel.
+* **La gouvernance/autorisation hors de ce texte** : la spec semble promettre des opérations “room-admin-authorized”, mais ce document seul ne les garantit pas.
+
+--
+
+## Commentaires Codex (2026-03-25)
+
+Verdict après vérification contre la spec actuelle et l’implémentation:
+
+- **Retenu et traité dans la spec** : le manque d’un `history_view_id` commun pour `ResolveRevokedLeaves` / `ResolveJoinsSince` / `FetchBarrierPublicTree`, la sémantique trop vague de `JoinSet`, l’absence d’un locator normatif pour la corrélation de pending merge, et le durcissement du provisioning join.
+- **Retenu mais partiellement seulement** : le binding `sender_leaf_id` a été durci côté spec, mais la passe d’implémentation transport/message-plane n’est pas terminée.
+- **Reclassé hors finding principal** : le point “gouvernance room-admin hors de ce texte” relève surtout du périmètre documentaire. `docs/specs.md` référence explicitement une spec externe pour cette partie; cela reste une frontière normative à surveiller, mais pas un bug autonome de même rang que les trous de vue historique.
+- **Reclassé en remarque de structuration** : le point sur les oracles / suites opaques (`ME-OR`, `xk_hash`, `E_k`, Smallwood, ZK-VRF) est réel au niveau architecture documentaire, mais trop diffus en l’état pour être gardé comme finding central sans audit complémentaire des specs externes associées.
+
+Tranche d’implémentation réalisée pour aligner le repo sur les findings retenus:
+
+- `history_view_id` exposé par l’API, transporté dans le proto, persisté côté serveur, et vérifié fail-closed côté clients/barrier recovery.
+- `ResolveJoinsSince` resserré pour ne retourner que les joins encore actifs dans la vue courante.
+- `JoinTicketResponse` enrichi avec `current_history_view_id` afin de lier le provisioning join à la vue historique attendue.
+- Les chemins client natif (`barrier_core`, `barrier_ops`, `join_leave`) rejettent désormais toute composition silencieuse de vues historiques incohérentes.
+
+État de conformité après cette tranche:
+
+- **Fermé partiellement** : “FULL chain-check sans vue commune” n’est plus accepté silencieusement dans l’implémentation courante.
+- **Fermé partiellement** : `JoinSet` est mieux borné dans la spec et côté serveur, mais il reste encore des surfaces de recovery/history à compléter.
+- **Encore ouvert** : l’API normative d’acceptance-history / finality (`LookupMergeAcceptance` ou équivalent) n’est pas encore implémentée de bout en bout.
+- **Encore ouvert** : l’artefact de provisioning join n’embarque pas encore toute l’enveloppe normative durcie décrite par la spec.
+- **Encore ouvert** : la liaison normative transport `sender device identity` -> `sender_leaf_id` n’a pas encore reçu sa passe d’implémentation complète.
+
+Conclusion:
+
+Cet audit est considéré **complété** pour la phase de triage et de première remédiation. Les findings les plus structurants ont été intégrés dans la spec et partiellement dans le code. Les écarts résiduels relèvent maintenant d’une seconde passe d’implémentation conformance, pas d’un manque de triage sur l’audit lui-même.

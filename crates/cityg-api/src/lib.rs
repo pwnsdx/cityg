@@ -1971,6 +1971,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
         n_max: ticket.n_max,
         max_barrier_update_bytes: ticket.max_barrier_update_bytes,
+        current_history_view_id: ticket.current_history_view_id.to_vec(),
     };
 
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);
@@ -2399,7 +2400,16 @@ async fn barrier_resolve_revoked_leaves(
             .map_err(ApiError::from)?
     };
 
-    let response = BarrierResolveRevokedLeavesResponse { leaf_indices };
+    let history_view_id = {
+        let lane = state.server_for_gid(&gid);
+        let guard = lane.read().await;
+        guard.current_history_view_id(&gid).map_err(ApiError::from)?
+    };
+
+    let response = BarrierResolveRevokedLeavesResponse {
+        leaf_indices,
+        history_view_id: history_view_id.to_vec(),
+    };
     Ok(protobuf_response(&response))
 }
 
@@ -2429,6 +2439,12 @@ async fn barrier_resolve_joins_since(
             .map_err(ApiError::from)?
     };
 
+    let history_view_id = {
+        let lane = state.server_for_gid(&gid);
+        let guard = lane.read().await;
+        guard.current_history_view_id(&gid).map_err(ApiError::from)?
+    };
+
     let response = BarrierResolveJoinsSinceResponse {
         records: records
             .into_iter()
@@ -2444,6 +2460,7 @@ async fn barrier_resolve_joins_since(
                 },
             )
             .collect(),
+        history_view_id: history_view_id.to_vec(),
     };
     Ok(protobuf_response(&response))
 }
@@ -2485,6 +2502,7 @@ async fn barrier_fetch_public_tree(
         n_max: snapshot.n_max,
         kem_tree_hash_after: snapshot.kem_tree_hash_after.to_vec(),
         pk_entries: snapshot.pk_entries,
+        history_view_id: snapshot.history_view_id.to_vec(),
     };
     Ok(protobuf_response(&response))
 }

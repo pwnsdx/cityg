@@ -5521,6 +5521,7 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         barrier_initialized: true,
         barrier_version: 5,
         barrier_roots_hash: array(0x20),
+        current_history_view_id: array(0x24),
         k_barrier: Zeroizing::new(array(0x21)),
         kem_tree_hash_after: array(0x22),
         max_barrier_update_bytes: DEFAULT_MAX_BARRIER_UPDATE_BYTES,

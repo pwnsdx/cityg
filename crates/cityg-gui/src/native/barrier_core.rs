@@ -390,10 +390,11 @@ pub(super) async fn full_chain_check_barrier_update(
     }
 
     let h_prev = session.barrier_state.kem_tree_hash_after;
-    let snapshot_prev = client
+    let snapshot_prev_response = client
         .barrier_fetch_public_tree(room_id, &h_prev)
         .await
         .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
+    let snapshot_prev = snapshot_prev_response.tree;
     if snapshot_prev.n_max != n_max {
         return Err(anyhow!(
             "barrier tree snapshot auth failure (960.9): n_max mismatch (expected {n_max}, got {})",
@@ -417,19 +418,30 @@ pub(super) async fn full_chain_check_barrier_update(
             "barrier full chain-check prevalidation failed (960.7): revocation_roots_hash mismatch"
         ));
     }
-    let join_records = client
+    let join_resolution = client
         .barrier_resolve_joins_since(room_id, parsed.prev_barrier_version)
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
-    let revoked_indices = client
+    let revoked_resolution = client
         .barrier_resolve_revoked_leaves(room_id, &revocation_roots_hash)
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
+    if snapshot_prev_response.history_view_id == [0u8; 32]
+        || snapshot_prev_response.history_view_id != join_resolution.history_view_id
+        || snapshot_prev_response.history_view_id != revoked_resolution.history_view_id
+    {
+        return Err(anyhow!(
+            "barrier full chain-check prevalidation failed (960.9): public tree / joins / revoked leaves do not share one authenticated history view"
+        ));
+    }
 
     if !genesis_local_case {
         if session.barrier_state.barrier_roots_hash == parsed.revocation_roots_hash {
             let expected_reason =
-                expected_same_rrh_barrier_reason(join_records.as_slice(), parsed.updater_leaf);
+                expected_same_rrh_barrier_reason(
+                    join_resolution.records.as_slice(),
+                    parsed.updater_leaf,
+                );
             if barrier_reason != expected_reason {
                 return Err(anyhow!(
                     "barrier full chain-check prevalidation failed (960.7): local barrier_roots_hash unchanged but barrier_update_reason != {expected_reason}"
@@ -450,12 +462,12 @@ pub(super) async fn full_chain_check_barrier_update(
             apply_join_set_to_snapshot(
                 snapshot_pre.as_mut_slice(),
                 n_max,
-                join_records.as_slice(),
+                join_resolution.records.as_slice(),
             )?;
             apply_revoked_set_to_snapshot(
                 snapshot_pre.as_mut_slice(),
                 n_max,
-                revoked_indices.as_slice(),
+                revoked_resolution.leaf_indices.as_slice(),
             )?;
             let expected_before = compute_barrier_tree_hash(n_max, snapshot_pre.as_slice())?;
 

@@ -260,6 +260,8 @@ pub struct JoinTicketBundle {
     pub cover_leaf_index: u64,
     /// Current committed barrier tree hash.
     pub kem_tree_hash_after: [u8; 32],
+    /// Current authenticated history view for barrier membership and checkpoints.
+    pub current_history_view_id: [u8; 32],
     /// Fixed barrier tree capacity.
     pub n_max: u64,
     /// Deployment-wide barrier update size limit.
@@ -339,6 +341,8 @@ pub struct BarrierPublicTreeSnapshot {
     pub n_max: u64,
     /// Requested tree commitment after barrier activation.
     pub kem_tree_hash_after: [u8; 32],
+    /// Authenticated history view under which this snapshot was committed.
+    pub history_view_id: [u8; 32],
     /// Heap-indexed public key entries (`2*n_max-1` length).
     pub pk_entries: Vec<Vec<u8>>,
 }
@@ -409,7 +413,7 @@ impl CityGServer {
                 state.kem_tree_hash_after = kem_tree_hash_after;
                 state.n_max = n_max;
                 state.barrier_pk_entries = blank_entries;
-                record_barrier_public_tree_snapshot(state)?;
+                record_barrier_public_tree_snapshot(gid.as_slice(), state)?;
             }
             (
                 state.barrier_initialized,
@@ -495,7 +499,7 @@ impl CityGServer {
         state.join_history.clear();
         state.barrier_pk_entries = blank_entries;
         state.barrier_hash_cache = None;
-        record_barrier_public_tree_snapshot(state)?;
+        record_barrier_public_tree_snapshot(gid.as_slice(), state)?;
 
         let ctx_state = self.ctx.barrier_group_state_entry_mut(gid.as_slice());
         ctx_state.barrier_initialized = state.barrier_initialized;
@@ -932,6 +936,7 @@ impl CityGServer {
             .barrier_group_state(gid)
             .cloned()
             .unwrap_or_default();
+        let current_history_view_id = self.current_history_view_id(gid)?;
         let barrier_version = barrier_state.barrier_version;
         let cover_leaf_index = u64::from(cover_leaf_index(&leaf_id, barrier_state.n_max));
         let max_barrier_update_bytes =
@@ -954,6 +959,7 @@ impl CityGServer {
             barrier_version,
             cover_leaf_index,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
+            current_history_view_id,
             n_max: barrier_state.n_max.max(1),
             max_barrier_update_bytes,
         })
@@ -1400,6 +1406,7 @@ impl CityGServer {
                             "barrier_leaf_pk (header[177]) is required on join",
                         ))?;
                 state.join_history.push(JoinLeafHistoryRecord {
+                    leaf_id: *leaf,
                     barrier_version: barrier_version.saturating_add(1),
                     leaf_index,
                     device_pk: device_pk.clone(),
@@ -1421,7 +1428,7 @@ impl CityGServer {
             state.kem_tree_hash_after = validation.parsed.kem_tree_hash_after;
             state.n_max = validation.parsed.tree_size.max(1);
             state.barrier_hash_cache = validation.hash_cache_post.clone();
-            record_barrier_public_tree_snapshot(state)?;
+            record_barrier_public_tree_snapshot(bundle.gid(), state)?;
         }
         if let Some(state) = roster.groups.get(bundle.gid()) {
             let ctx_state = ctx.barrier_group_state_entry_mut(bundle.gid());
@@ -1555,12 +1562,22 @@ impl CityGServer {
                         group,
                         snapshot.pk_entries.as_slice(),
                     ) {
-                        Ok(snapshot_ref) => snapshot_ref,
+                        Ok(mut snapshot_ref) => {
+                            snapshot_ref.history_view_id = hex::decode(&snapshot.history_view_id_hex)
+                                .ok()
+                                .and_then(|bytes| bytes.try_into().ok())
+                                .unwrap_or([0u8; 32]);
+                            snapshot_ref
+                        }
                         Err(_) => continue,
                     }
                 } else {
                     let snapshot_ref = BarrierPublicTreeSnapshotRef {
                         blob_indices: snapshot.blob_indices.clone(),
+                        history_view_id: hex::decode(&snapshot.history_view_id_hex)
+                            .ok()
+                            .and_then(|bytes| bytes.try_into().ok())
+                            .unwrap_or([0u8; 32]),
                     };
                     if decode_barrier_public_tree_snapshot_ref(group, &snapshot_ref).is_err() {
                         continue;
@@ -1571,7 +1588,7 @@ impl CityGServer {
             }
             if group.barrier_public_tree_history.is_empty() && !group.barrier_pk_entries.is_empty()
             {
-                record_barrier_public_tree_snapshot(group)?;
+                record_barrier_public_tree_snapshot(gid.as_slice(), group)?;
             } else if !group.barrier_pk_entries.is_empty() {
                 let current_hash = group.kem_tree_hash_after;
                 if !group
@@ -1579,11 +1596,28 @@ impl CityGServer {
                     .contains_key(&current_hash)
                 {
                     let current_entries = group.barrier_pk_entries.clone();
-                    let snapshot_ref =
+                    let mut snapshot_ref =
                         encode_barrier_public_tree_snapshot_ref(group, current_entries.as_slice())?;
+                    snapshot_ref.history_view_id =
+                        compute_history_view_id(gid.as_slice(), group)?;
                     group
                         .barrier_public_tree_history
                         .insert(current_hash, snapshot_ref);
+                } else {
+                    let needs_history_view_id = group
+                        .barrier_public_tree_history
+                        .get(&current_hash)
+                        .map(|snapshot_ref| snapshot_ref.history_view_id == [0u8; 32])
+                        .unwrap_or(false);
+                    if needs_history_view_id {
+                        let current_history_view_id =
+                            compute_history_view_id(gid.as_slice(), group)?;
+                        if let Some(snapshot_ref) =
+                            group.barrier_public_tree_history.get_mut(&current_hash)
+                        {
+                            snapshot_ref.history_view_id = current_history_view_id;
+                        }
+                    }
                 }
             }
             group.barrier_hash_cache = None;
@@ -1991,6 +2025,10 @@ impl CityGServer {
             .get(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
         ensure_distinct_active_cover_leaf_indices(state)?;
+        let active_leaves: BTreeSet<[u8; 32]> = state
+            .latest_snapshot()
+            .map(|snapshot| snapshot.members().copied().collect())
+            .unwrap_or_default();
         let mut by_leaf: BTreeMap<u32, BarrierJoinLeafRecord> = BTreeMap::new();
         if prev_barrier_version == 0 && state.barrier_version == 0 {
             let snapshot = require_genesis_provisioning_snapshot(
@@ -2021,7 +2059,9 @@ impl CityGServer {
             return Ok(by_leaf.into_values().collect());
         }
         for record in &state.join_history {
-            if record.barrier_version > prev_barrier_version {
+            if record.barrier_version > prev_barrier_version
+                && active_leaves.contains(&record.leaf_id)
+            {
                 checked_insert_unique(
                     &mut by_leaf,
                     record.leaf_index,
@@ -2047,10 +2087,13 @@ impl CityGServer {
             .groups
             .get(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
-        let pk_entries = if let Some(snapshot) =
+        let (pk_entries, history_view_id) = if let Some(snapshot) =
             state.barrier_public_tree_history.get(kem_tree_hash_after)
         {
-            decode_barrier_public_tree_snapshot_ref(state, snapshot)?
+            (
+                decode_barrier_public_tree_snapshot_ref(state, snapshot)?,
+                snapshot.history_view_id,
+            )
         } else {
             let pk_entries_view = build_pk_entries_view(state)?;
             let computed_hash = compute_barrier_tree_hash(state.n_max, pk_entries_view.as_ref())?;
@@ -2061,10 +2104,14 @@ impl CityGServer {
                     ),
                 ));
             }
-            match pk_entries_view {
+            let pk_entries = match pk_entries_view {
                 Cow::Borrowed(entries) => entries.to_vec(),
                 Cow::Owned(entries) => entries,
-            }
+            };
+            (
+                pk_entries,
+                compute_history_view_id(gid, state)?,
+            )
         };
         let computed_hash = compute_barrier_tree_hash(state.n_max, pk_entries.as_slice())?;
         if computed_hash != *kem_tree_hash_after {
@@ -2077,8 +2124,18 @@ impl CityGServer {
         Ok(BarrierPublicTreeSnapshot {
             n_max: state.n_max,
             kem_tree_hash_after: computed_hash,
+            history_view_id,
             pk_entries,
         })
+    }
+
+    pub fn current_history_view_id(&self, gid: &[u8; 32]) -> Result<[u8; 32], CityGError> {
+        let state = self
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        compute_history_view_id(gid.as_slice(), state)
     }
 }
 
@@ -2100,6 +2157,42 @@ struct BarrierTreeNodeHashArgs<'a> {
     left_hash: &'a [u8; 32],
     #[serde(with = "serde_bytes")]
     right_hash: &'a [u8; 32],
+}
+
+#[derive(Serialize)]
+struct HistoryViewIdArgs<'a> {
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8],
+    barrier_initialized: bool,
+    barrier_version: u64,
+    #[serde(with = "serde_bytes")]
+    barrier_roots_hash: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    latest_root: &'a [u8; 32],
+    last_checkpoint_ec: u64,
+    last_accepted_ec: u64,
+    n_max: u64,
+}
+
+fn compute_history_view_id(gid: &[u8], state: &GroupState) -> Result<[u8; 32], CityGError> {
+    let latest_root = state.latest_root.as_ref().unwrap_or(&[0u8; 32]);
+    h_l(
+        "barrier/history-view",
+        &HistoryViewIdArgs {
+            gid,
+            barrier_initialized: state.barrier_initialized,
+            barrier_version: state.barrier_version,
+            barrier_roots_hash: &state.barrier_roots_hash,
+            kem_tree_hash_after: &state.kem_tree_hash_after,
+            latest_root,
+            last_checkpoint_ec: state.last_checkpoint_ec,
+            last_accepted_ec: state.last_accepted_ec,
+            n_max: state.n_max.max(1),
+        },
+    )
+    .map_err(CityGError::from)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2398,7 +2491,10 @@ fn encode_barrier_public_tree_snapshot_ref(
     for entry in pk_entries {
         blob_indices.push(intern_barrier_public_tree_blob(state, entry.as_slice())?);
     }
-    Ok(BarrierPublicTreeSnapshotRef { blob_indices })
+    Ok(BarrierPublicTreeSnapshotRef {
+        blob_indices,
+        history_view_id: [0u8; 32],
+    })
 }
 
 fn decode_barrier_public_tree_snapshot_ref(
@@ -2431,12 +2527,13 @@ fn history_barrier_public_tree_entries(
         .and_then(|snapshot| decode_barrier_public_tree_snapshot_ref(state, snapshot).ok())
 }
 
-fn record_barrier_public_tree_snapshot(state: &mut GroupState) -> Result<(), CityGError> {
+fn record_barrier_public_tree_snapshot(gid: &[u8], state: &mut GroupState) -> Result<(), CityGError> {
     if state.barrier_pk_entries.is_empty() {
         return Ok(());
     }
     let current_entries = state.barrier_pk_entries.clone();
-    let snapshot = encode_barrier_public_tree_snapshot_ref(state, current_entries.as_slice())?;
+    let mut snapshot = encode_barrier_public_tree_snapshot_ref(state, current_entries.as_slice())?;
+    snapshot.history_view_id = compute_history_view_id(gid, state)?;
     state
         .barrier_public_tree_history
         .insert(state.kem_tree_hash_after, snapshot);
@@ -2946,6 +3043,7 @@ fn persisted_barrier_public_tree_history(
         .iter()
         .map(|(hash, snapshot)| PersistedBarrierPublicTreeSnapshot {
             kem_tree_hash_after_hex: hex::encode(hash),
+            history_view_id_hex: hex::encode(snapshot.history_view_id),
             blob_indices: snapshot.blob_indices.clone(),
             pk_entries: Vec::new(),
         })
@@ -3114,6 +3212,10 @@ fn validate_barrier_update_against_roster(
         };
         ensure_distinct_active_cover_leaf_indices(state_before)?;
         ensure_join_cover_leaf_indices_available(state_before, delta.joined.as_slice())?;
+        let active_leaves: BTreeSet<[u8; 32]> = state_before
+            .latest_snapshot()
+            .map(|snapshot| snapshot.members().copied().collect())
+            .unwrap_or_default();
 
         let tree_n_max = state_before.n_max.max(1);
         let leaf_base = usize::try_from(tree_n_max.saturating_sub(1))
@@ -3142,7 +3244,9 @@ fn validate_barrier_update_against_roster(
             }
         } else {
             for record in &state_before.join_history {
-                if record.barrier_version > parsed.prev_barrier_version {
+                if record.barrier_version > parsed.prev_barrier_version
+                    && active_leaves.contains(&record.leaf_id)
+                {
                     checked_insert_unique(
                         &mut by_leaf,
                         record.leaf_index,
@@ -5299,6 +5403,7 @@ mod tests {
                 barrier_public_tree_blobs: Vec::new(),
                 barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
                     kem_tree_hash_after_hex: "not-hex".to_string(),
+                    history_view_id_hex: String::new(),
                     blob_indices: Vec::new(),
                     pk_entries: vec![vec![0x99; 3]],
                 }],
@@ -5368,6 +5473,7 @@ mod tests {
                 barrier_public_tree_blobs: Vec::new(),
                 barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
                     kem_tree_hash_after_hex: hex::encode(historical_hash),
+                    history_view_id_hex: String::new(),
                     blob_indices: Vec::new(),
                     pk_entries: historical_entries.clone(),
                 }],
@@ -5443,7 +5549,7 @@ mod tests {
         group.kem_tree_hash_after = tree_hash;
         group.srx_root_sw = Some([0xF4; 32]);
         group.barrier_pk_entries = tree_entries.clone();
-        super::record_barrier_public_tree_snapshot(group)?;
+        super::record_barrier_public_tree_snapshot(&gid_with_group, group)?;
         group.n_max = 0;
         group.last_pcs_refresh_ec = Some(11);
         group.pcs_refresh_min_delta_device_ec = 0;
@@ -6354,7 +6460,7 @@ mod tests {
             n_max: 4,
             ..super::GroupState::default()
         };
-        super::record_barrier_public_tree_snapshot(&mut state)?;
+        super::record_barrier_public_tree_snapshot(&[0u8; 32], &mut state)?;
         assert!(state.barrier_public_tree_history.is_empty());
 
         let leaf = cityg_client::demo::demo_member_leaf("fallback-owned");
@@ -8833,6 +8939,10 @@ mod tests {
         let mut sorted = parent_leaves.to_vec();
         sorted.sort();
         sorted.dedup();
+        let reserved_cover_indices: BTreeSet<u32> = sorted
+            .iter()
+            .map(|leaf| super::cover_leaf_index(leaf, super::DEFAULT_BARRIER_N_MAX))
+            .collect();
 
         let pool = chaos_leaf_pool();
         let mut index = *next_label as usize;
@@ -8840,6 +8950,10 @@ mod tests {
             let leaf = pool[index];
             index += 1;
             if sorted.binary_search(&leaf).is_ok() {
+                continue;
+            }
+            let cover_index = super::cover_leaf_index(&leaf, super::DEFAULT_BARRIER_N_MAX);
+            if reserved_cover_indices.contains(&cover_index) {
                 continue;
             }
             *next_label = index as u32;
@@ -8941,26 +9055,41 @@ mod tests {
         let mut server = CityGServer::new(ServerConfig::new());
         let state = server.roster.groups.entry(gid.to_vec()).or_default();
         state.barrier_version = 3;
+        let leaf_v2 = colliding_cover_leaf(8);
+        let leaf_v3a = colliding_cover_leaf(10);
+        let leaf_v3b = colliding_cover_leaf(9);
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![leaf_v2, leaf_v3a, leaf_v3b],
+            revoked: Vec::new(),
+        });
+        let latest_root = [0xA1; 32];
+        state.latest_root = Some(latest_root);
+        state.snapshots.insert(latest_root, membership);
         state.join_history = vec![
             super::JoinLeafHistoryRecord {
+                leaf_id: colliding_cover_leaf(7),
                 barrier_version: 1,
                 leaf_index: 7,
                 device_pk: vec![0x11; 4],
                 ek_leaf: vec![0x21; 1184],
             },
             super::JoinLeafHistoryRecord {
+                leaf_id: leaf_v2,
                 barrier_version: 2,
                 leaf_index: 8,
                 device_pk: vec![0x12; 4],
                 ek_leaf: vec![0x22; 1184],
             },
             super::JoinLeafHistoryRecord {
+                leaf_id: leaf_v3a,
                 barrier_version: 3,
                 leaf_index: 10,
                 device_pk: vec![0x13; 4],
                 ek_leaf: vec![0x23; 1184],
             },
             super::JoinLeafHistoryRecord {
+                leaf_id: leaf_v3b,
                 barrier_version: 3,
                 leaf_index: 9,
                 device_pk: vec![0x14; 4],
@@ -9812,6 +9941,7 @@ impl Default for GroupState {
 
 #[derive(Clone, Debug)]
 struct JoinLeafHistoryRecord {
+    leaf_id: [u8; 32],
     barrier_version: u64,
     leaf_index: u32,
     device_pk: Vec<u8>,
@@ -9823,6 +9953,7 @@ type BarrierBlobIndex = u32;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct BarrierPublicTreeSnapshotRef {
     blob_indices: Vec<BarrierBlobIndex>,
+    history_view_id: [u8; 32],
 }
 
 impl GroupState {
@@ -9938,6 +10069,8 @@ struct PersistedDeviceChainState {
 struct PersistedBarrierPublicTreeSnapshot {
     #[serde(default)]
     kem_tree_hash_after_hex: String,
+    #[serde(default)]
+    history_view_id_hex: String,
     #[serde(default)]
     blob_indices: Vec<BarrierBlobIndex>,
     #[serde(default)]
