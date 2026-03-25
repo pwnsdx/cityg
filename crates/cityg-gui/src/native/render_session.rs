@@ -1,4 +1,5 @@
 use super::*;
+use gpui::MaterialVariant;
 
 impl AppModel {
     pub(super) fn render_session(
@@ -74,7 +75,12 @@ impl AppModel {
         if let Some(sidebar_width) = sidebar_width {
             workspace = workspace
                 .child(
-                    div()
+                    material_surface(
+                        window,
+                        MaterialStyle::background_extension()
+                            .variant(MaterialVariant::Clear)
+                            .emphasis(MaterialEmphasis::Low),
+                    )
                         .flex()
                         .flex_col()
                         .min_w(px(sidebar_width))
@@ -82,6 +88,8 @@ impl AppModel {
                         .min_h(px(0.0))
                         .h_full()
                         .gap(px(10.0))
+                        .px(px(6.0))
+                        .py(px(6.0))
                         .child(self.render_workspace_sidebar(session, window, cx))
                         .child(self.render_leave_controls(window, cx)),
                 )

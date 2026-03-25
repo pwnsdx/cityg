@@ -1,6 +1,7 @@
 use super::app_actions::{ShowSessionOverviewAction, ToggleSidebarAction};
 use super::*;
 use gpui::StatefulInteractiveElement;
+use gpui::MaterialVariant;
 
 const SESSION_HORIZONTAL_PADDING: f32 = 24.0;
 pub(super) const SESSION_SPLIT_GAP: f32 = 10.0;
@@ -179,7 +180,7 @@ impl AppModel {
         session: &AppSession,
         inspector_width: f32,
         cx: &mut ViewContext<Self>,
-    ) -> Div {
+    ) -> impl IntoElement {
         let members_total = self.members_total.max(self.members.len() as u64);
         let hide_hover_fill = ui_hover_fill(self.window_active);
         let hide_button = div()
@@ -200,31 +201,10 @@ impl AppModel {
                 cx.listener(Self::on_show_session_overview_clicked),
             );
 
-        let details_scroll = div()
+        let header = div()
             .flex()
             .flex_col()
-            .flex_grow()
-            .min_h(px(0.0))
-            .h_full()
-            .gap(px(12.0))
-            .id("session-details-scroll")
-            .track_scroll(&self.right_sidebar_scroll_handle)
-            .overflow_y_scroll()
-            .block_mouse_except_scroll()
-            .child(self.render_overview_panel(window, session, cx))
-            .child(self.render_room_admin_panel(window, session, cx))
-            .child(self.render_members_panel(window, cx))
-            .child(self.render_security_panel(window, cx))
-            .child(self.render_activity_panel(window, cx));
-
-        div()
-            .flex()
-            .flex_col()
-            .min_w(px(inspector_width))
-            .max_w(px(inspector_width))
-            .min_h(px(0.0))
-            .h_full()
-            .gap(px(10.0))
+            .gap(px(6.0))
             .child(
                 material_surface(
                     window,
@@ -256,6 +236,52 @@ impl AppModel {
                 )
                 .child(hide_button),
             )
+            .child(
+                material_surface(
+                    window,
+                    MaterialStyle::scroll_edge()
+                        .variant(MaterialVariant::Clear)
+                        .emphasis(MaterialEmphasis::Low),
+                )
+                .w_full()
+                .h(px(12.0))
+                .border(px(0.0)),
+            );
+
+        let details_scroll = div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_h(px(0.0))
+            .h_full()
+            .gap(px(12.0))
+            .pt(px(2.0))
+            .id("session-details-scroll")
+            .track_scroll(&self.right_sidebar_scroll_handle)
+            .overflow_y_scroll()
+            .block_mouse_except_scroll()
+            .child(self.render_overview_panel(window, session, cx))
+            .child(self.render_room_admin_panel(window, session, cx))
+            .child(self.render_members_panel(window, cx))
+            .child(self.render_security_panel(window, cx))
+            .child(self.render_activity_panel(window, cx));
+
+        material_surface(
+            window,
+            MaterialStyle::background_extension()
+                .variant(MaterialVariant::Clear)
+                .emphasis(MaterialEmphasis::Low),
+        )
+            .flex()
+            .flex_col()
+            .min_w(px(inspector_width))
+            .max_w(px(inspector_width))
+            .min_h(px(0.0))
+            .h_full()
+            .gap(px(10.0))
+            .px(px(6.0))
+            .py(px(6.0))
+            .child(header)
             .child(details_scroll)
     }
 

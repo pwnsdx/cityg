@@ -1,4 +1,5 @@
 use super::*;
+use gpui::MaterialVariant;
 
 impl AppModel {
     pub(super) fn render_workspace_sidebar(
@@ -408,7 +409,7 @@ impl AppModel {
         ciphertext_button = ciphertext_button
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_toggle_ciphertext));
 
-        material_surface(
+        let toolbar = material_surface(
             window,
             MaterialStyle::toolbar().emphasis(MaterialEmphasis::High),
         )
@@ -487,6 +488,23 @@ impl AppModel {
                         .child(inspector_button),
                 )
                 .child(ciphertext_button),
-        )
+        );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(toolbar)
+            .child(
+                material_surface(
+                    window,
+                    MaterialStyle::scroll_edge()
+                        .variant(MaterialVariant::Clear)
+                        .emphasis(MaterialEmphasis::Low),
+                )
+                .w_full()
+                .h(px(12.0))
+                .border(px(0.0)),
+            )
     }
 }
