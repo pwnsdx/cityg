@@ -38,10 +38,13 @@ use cityg_config::CityGConfig;
 use gpui::Application;
 use gpui::prelude::*;
 use gpui::{
-    AnyWindowHandle, App, Bounds, ClipboardItem, Context as ViewContext, CursorStyle, Div, Entity,
-    FontWeight, Keystroke, MouseButton, MouseDownEvent, PromptLevel, Render, ScrollHandle, Task,
-    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowOptions, div, point, px, rgb, rgba, size,
+    AnyWindowHandle, App, Bounds, ClipboardItem, Context as ViewContext, CursorStyle, Div, Element,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, FontWeight,
+    GlobalElementId, Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, PromptLevel, Render, ScrollHandle, ShapedLine, SharedString,
+    Style, Task, TextRun, TitlebarOptions, UTF16Selection, UnderlineStyle, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div, fill, point,
+    px, relative, rgb, rgba, size,
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
@@ -113,6 +116,7 @@ mod member_validation;
 mod members;
 mod message_auth;
 mod native_notifications;
+mod native_text_input;
 mod network_members;
 mod network_messages;
 mod network_room_admin;
@@ -163,6 +167,7 @@ use join_form::*;
 use join_ops::*;
 use member_validation::*;
 use message_auth::*;
+use native_text_input::*;
 use network_members::*;
 use network_messages::*;
 use network_room_admin::*;

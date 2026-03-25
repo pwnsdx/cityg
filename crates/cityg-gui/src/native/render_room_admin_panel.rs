@@ -71,15 +71,16 @@ impl AppModel {
             .border_color(target_border)
             .bg(target_background)
             .cursor(CursorStyle::IBeam)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(Self::on_room_admin_target_field_clicked),
-            )
             .child(
                 div()
                     .text_size(px(12.0))
+                    .line_height(px(18.0))
                     .text_color(target_text_color)
-                    .child(target_display),
+                    .child(self.render_native_text_field(
+                        cx,
+                        NativeTextFieldKind::RoomAdminTarget,
+                        target_display,
+                    )),
             );
 
         let refresh_button = div()

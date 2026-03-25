@@ -238,19 +238,24 @@ impl AppModel {
                     .border(px(1.0))
                     .border_color(border)
                     .bg(background)
-                    .cursor(CursorStyle::IBeam)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.focus_field(handler_field, cx);
-                        }),
-                    )
-                    .child(
+                    .text_size(px(16.0))
+                    .line_height(px(22.0))
+                    .on_mouse_down(MouseButton::Left, {
+                        cx.listener(move |this, _, window, cx| {
+                            this.focus_field_in_window(handler_field, window, cx);
+                        })
+                    })
+                    .child({
+                        let placeholder = display;
+                        let field = match handler_field {
+                            ActiveField::Server => NativeTextFieldKind::JoinServer,
+                            ActiveField::Room => NativeTextFieldKind::JoinRoom,
+                            ActiveField::Alias => NativeTextFieldKind::JoinAlias,
+                        };
                         div()
-                            .text_size(px(16.0))
                             .text_color(text_color)
-                            .child(display),
-                    )
+                            .child(self.render_native_text_field(cx, field, placeholder))
+                    })
             })
     }
 }

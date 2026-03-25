@@ -54,7 +54,6 @@ impl AppModel {
                 .border_color(border_color)
                 .bg(background)
                 .cursor(CursorStyle::IBeam)
-                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_composer_clicked))
                 .child(
                     div()
                         .text_size(px(11.0))
@@ -62,13 +61,17 @@ impl AppModel {
                         .text_color(rgb(UI_MUTED_TEXT))
                         .child("Message"),
                 )
-                .child(div().text_size(px(15.0)).text_color(text_color).child(
-                    if self.composer.text.is_empty() {
-                        placeholder.to_string()
-                    } else {
-                        self.composer.text.clone()
-                    },
-                )),
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .line_height(px(20.0))
+                        .text_color(text_color)
+                        .child(self.render_native_text_field(
+                            cx,
+                            NativeTextFieldKind::Composer,
+                            placeholder,
+                        )),
+                ),
         );
 
         let send_disabled = barrier_pending

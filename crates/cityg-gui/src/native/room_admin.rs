@@ -32,11 +32,12 @@ impl AppModel {
         self.room_admin_revoke_confirmation = None;
     }
 
-    pub(super) fn focus_room_admin_target(&mut self, cx: &mut ViewContext<Self>) {
-        self.room_admin_target.focus();
-        self.members_search.blur();
-        self.composer.blur();
-        cx.notify();
+    pub(super) fn focus_room_admin_target(
+        &mut self,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.focus_text_field(NativeTextFieldKind::RoomAdminTarget, window, cx);
     }
 
     pub(super) fn clear_room_admin_target(&mut self, cx: &mut ViewContext<Self>) {
@@ -54,7 +55,9 @@ impl AppModel {
         self.room_admin_target
             .set_value(hex_encode(target_pop_public_key));
         self.clear_room_admin_revoke_confirmation();
-        self.focus_room_admin_target(cx);
+        self.room_admin_target.focus();
+        self.members_search.blur();
+        self.composer.blur();
         self.show_info("Loaded member identity into room-admin target", cx);
     }
 

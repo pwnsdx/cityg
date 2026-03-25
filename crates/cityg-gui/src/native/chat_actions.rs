@@ -1,13 +1,9 @@
 use super::*;
 
 impl AppModel {
-    pub(super) fn focus_composer(&mut self, cx: &mut ViewContext<Self>) {
-        self.join_form.active = None;
-        self.members_search.blur();
-        self.room_admin_target.blur();
-        self.composer.focus();
+    pub(super) fn focus_composer(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        self.focus_text_field(NativeTextFieldKind::Composer, window, cx);
         self.last_error = None;
-        cx.notify();
     }
 
     pub(super) fn toggle_ciphertext(&mut self, cx: &mut ViewContext<Self>) {
@@ -52,10 +48,10 @@ impl AppModel {
     pub(super) fn on_composer_clicked(
         &mut self,
         _: &MouseDownEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut ViewContext<Self>,
     ) {
-        self.focus_composer(cx);
+        self.focus_composer(window, cx);
     }
 
     pub(super) fn on_send_clicked(
@@ -80,6 +76,20 @@ impl AppModel {
         self.join_form.active = Some(field);
         self.composer.blur();
         cx.notify();
+    }
+
+    pub(super) fn focus_field_in_window(
+        &mut self,
+        field: ActiveField,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let field = match field {
+            ActiveField::Server => NativeTextFieldKind::JoinServer,
+            ActiveField::Room => NativeTextFieldKind::JoinRoom,
+            ActiveField::Alias => NativeTextFieldKind::JoinAlias,
+        };
+        self.focus_text_field(field, window, cx);
     }
 
     pub(super) fn on_join_clicked(

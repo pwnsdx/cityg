@@ -1,11 +1,14 @@
 use super::*;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(super) struct JoinFormState {
     pub(super) server: String,
     pub(super) room_id: String,
     pub(super) alias: String,
     pub(super) active: Option<ActiveField>,
+    pub(super) server_editor: TextInputEditorState,
+    pub(super) room_editor: TextInputEditorState,
+    pub(super) alias_editor: TextInputEditorState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +101,8 @@ impl JoinFormState {
     pub(super) fn apply_invite(&mut self, invite: JoinInvitePayload) -> Result<()> {
         self.server = invite.server_url;
         self.room_id = invite.room_id;
+        self.server_editor.reset_for_text(&self.server);
+        self.room_editor.reset_for_text(&self.room_id);
         Ok(())
     }
 
@@ -192,6 +197,10 @@ impl JoinFormState {
             return KeyOutcome::None;
         }
 
+        if self.editor_for(active).has_native_input() {
+            return KeyOutcome::None;
+        }
+
         if ks.key == "space" {
             let field = self.field_mut(active);
             field.push(' ');
@@ -224,6 +233,14 @@ impl JoinFormState {
             server_url: self.server.trim().to_string(),
             room_id: self.room_id.trim().to_string(),
             alias: self.alias.trim().to_string(),
+        }
+    }
+
+    pub(super) fn editor_for(&self, field: ActiveField) -> &TextInputEditorState {
+        match field {
+            ActiveField::Server => &self.server_editor,
+            ActiveField::Room => &self.room_editor,
+            ActiveField::Alias => &self.alias_editor,
         }
     }
 }

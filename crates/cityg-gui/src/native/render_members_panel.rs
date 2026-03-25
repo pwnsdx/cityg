@@ -101,15 +101,16 @@ impl AppModel {
             .border_color(search_border)
             .bg(search_background)
             .cursor(CursorStyle::IBeam)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(Self::on_members_search_field_clicked),
-            )
             .child(
                 div()
                     .text_size(px(12.0))
+                    .line_height(px(18.0))
                     .text_color(search_text_color)
-                    .child(search_display),
+                    .child(self.render_native_text_field(
+                        cx,
+                        NativeTextFieldKind::MembersSearch,
+                        search_display,
+                    )),
             );
 
         let search_button = div()

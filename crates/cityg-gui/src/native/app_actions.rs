@@ -21,6 +21,15 @@ gpui::actions!(
         CopySelectionAction,
         CutSelectionAction,
         PasteSelectionAction,
+        TextBackspaceAction,
+        TextDeleteAction,
+        TextMoveLeftAction,
+        TextMoveRightAction,
+        TextSelectLeftAction,
+        TextSelectRightAction,
+        TextSelectAllAction,
+        TextHomeAction,
+        TextEndAction,
         ShowEmojiPaletteAction,
         MinimizeWindowAction,
         ZoomWindowAction,
@@ -50,6 +59,15 @@ pub(super) fn install_action_handlers(app: &mut App) {
     app.on_action(|_: &CopySelectionAction, _| {});
     app.on_action(|_: &CutSelectionAction, _| {});
     app.on_action(|_: &PasteSelectionAction, _| {});
+    app.on_action(|_: &TextBackspaceAction, _| {});
+    app.on_action(|_: &TextDeleteAction, _| {});
+    app.on_action(|_: &TextMoveLeftAction, _| {});
+    app.on_action(|_: &TextMoveRightAction, _| {});
+    app.on_action(|_: &TextSelectLeftAction, _| {});
+    app.on_action(|_: &TextSelectRightAction, _| {});
+    app.on_action(|_: &TextSelectAllAction, _| {});
+    app.on_action(|_: &TextHomeAction, _| {});
+    app.on_action(|_: &TextEndAction, _| {});
     app.on_action(|_: &ShowEmojiPaletteAction, _| {});
     app.on_action(|_: &MinimizeWindowAction, _| {});
     app.on_action(|_: &ZoomWindowAction, _| {});
@@ -79,6 +97,19 @@ pub(super) fn install_native_app_shell(app: &mut App) {
         KeyBinding::new("shift-cmd-y", ToggleCiphertextAction, Some("cityg-root")),
         KeyBinding::new("ctrl-cmd-space", ShowEmojiPaletteAction, Some("cityg-root")),
         KeyBinding::new("cmd-m", MinimizeWindowAction, Some("cityg-root")),
+        KeyBinding::new("backspace", TextBackspaceAction, Some("cityg-text-input")),
+        KeyBinding::new("delete", TextDeleteAction, Some("cityg-text-input")),
+        KeyBinding::new("left", TextMoveLeftAction, Some("cityg-text-input")),
+        KeyBinding::new("right", TextMoveRightAction, Some("cityg-text-input")),
+        KeyBinding::new("shift-left", TextSelectLeftAction, Some("cityg-text-input")),
+        KeyBinding::new(
+            "shift-right",
+            TextSelectRightAction,
+            Some("cityg-text-input"),
+        ),
+        KeyBinding::new("cmd-a", TextSelectAllAction, Some("cityg-text-input")),
+        KeyBinding::new("cmd-left", TextHomeAction, Some("cityg-text-input")),
+        KeyBinding::new("cmd-right", TextEndAction, Some("cityg-text-input")),
     ]);
 
     app.set_menus(vec![
@@ -248,33 +279,33 @@ impl AppModel {
     pub(super) fn on_focus_composer_action(
         &mut self,
         _: &FocusComposerAction,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut ViewContext<Self>,
     ) {
         if self.session.is_some() {
-            self.focus_composer(cx);
+            self.focus_composer(window, cx);
         }
     }
 
     pub(super) fn on_focus_members_search_action(
         &mut self,
         _: &FocusMembersSearchAction,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut ViewContext<Self>,
     ) {
         if self.session.is_some() {
-            self.focus_members_search(cx);
+            self.focus_members_search(window, cx);
         }
     }
 
     pub(super) fn on_focus_room_admin_target_action(
         &mut self,
         _: &FocusRoomAdminTargetAction,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut ViewContext<Self>,
     ) {
         if self.session.is_some() {
-            self.focus_room_admin_target(cx);
+            self.focus_room_admin_target(window, cx);
         }
     }
 

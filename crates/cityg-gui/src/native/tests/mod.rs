@@ -1917,8 +1917,14 @@ fn gpui_root_render_does_not_bootstrap_runtime_tasks(cx: &mut TestAppContext) {
         let _ = model.render(window, view_cx);
 
         assert!(!model.fetch_in_flight, "render must not start fetch work");
-        assert!(model.fetch_task.is_none(), "render must not spawn fetch task");
-        assert!(model.ws_task.is_none(), "render must not start websocket task");
+        assert!(
+            model.fetch_task.is_none(),
+            "render must not spawn fetch task"
+        );
+        assert!(
+            model.ws_task.is_none(),
+            "render must not start websocket task"
+        );
         assert!(
             !model.ws_autostart_attempted,
             "render must not toggle websocket autostart"
@@ -2390,6 +2396,7 @@ fn gpui_callback_and_shortcut_branches_cover_edge_paths(cx: &mut TestAppContext)
                 KeyOutcome::Updated
             ));
 
+            model.join_form.active = None;
             model.composer.focus();
             model.composer.set_text("pre".to_string());
             view_cx.write_to_clipboard(ClipboardItem::new_string("\npost".to_string()));
@@ -2399,8 +2406,11 @@ fn gpui_callback_and_shortcut_branches_cover_edge_paths(cx: &mut TestAppContext)
             ));
             assert_eq!(model.composer.text(), "pre post");
 
+            model.composer.blur();
             model.members_search.focus();
             model.members_search.set_query("xy".to_string());
+            let members_query = model.members_search.query().to_string();
+            model.members_search.editor.select_all(&members_query);
             let copy = Keystroke::parse("cmd-c").expect("parse cmd-c");
             let cut = Keystroke::parse("cmd-x").expect("parse cmd-x");
             assert!(matches!(
@@ -2616,6 +2626,8 @@ fn gpui_keystroke_routing_covers_clipboard_shortcuts(cx: &mut TestAppContext) {
         model.on_keystroke(&Keystroke::parse("cmd-v").expect("parse cmd-v"), view_cx);
         assert_eq!(model.join_form.server, "http://demo");
 
+        let server_text = model.join_form.server.clone();
+        model.join_form.server_editor.select_all(&server_text);
         model.on_keystroke(&Keystroke::parse("cmd-c").expect("parse cmd-c"), view_cx);
         let copied = view_cx
             .read_from_clipboard()
@@ -2646,6 +2658,7 @@ fn gpui_keystroke_routing_covers_clipboard_shortcuts(cx: &mut TestAppContext) {
     cx.write_to_clipboard(ClipboardItem::new_string("\nxyz".to_string()));
     view.update(cx, |model, view_cx| {
         model.session = Some(session);
+        model.join_form.active = None;
 
         model.members_search.focus();
         model.members_search.set_query("ab".to_string());
@@ -2655,6 +2668,8 @@ fn gpui_keystroke_routing_covers_clipboard_shortcuts(cx: &mut TestAppContext) {
         model.on_keystroke(&Keystroke::parse("ctrl-a").expect("parse ctrl-a"), view_cx);
         model.on_keystroke(&Keystroke::parse("enter").expect("parse enter"), view_cx);
 
+        let members_query = model.members_search.query().to_string();
+        model.members_search.editor.select_all(&members_query);
         model.on_keystroke(&Keystroke::parse("cmd-x").expect("parse cmd-x"), view_cx);
         assert!(model.members_search.query().is_empty());
 
@@ -2662,13 +2677,15 @@ fn gpui_keystroke_routing_covers_clipboard_shortcuts(cx: &mut TestAppContext) {
         model.composer.focus();
         model.composer.set_text("hello".to_string());
         model.on_keystroke(&Keystroke::parse("x->r").expect("parse x->r"), view_cx);
-        model.on_keystroke(&Keystroke::parse("ctrl-a").expect("parse ctrl-a"), view_cx);
+        assert_eq!(model.composer.text(), "hello");
+        let composer_text = model.composer.text().to_string();
+        model.composer.editor.select_all(&composer_text);
         model.on_keystroke(&Keystroke::parse("cmd-c").expect("parse cmd-c"), view_cx);
         let copied = view_cx
             .read_from_clipboard()
             .and_then(|item| item.text())
             .expect("clipboard composer");
-        assert_eq!(copied, "hellor");
+        assert_eq!(copied, "hello");
 
         model.on_keystroke(&Keystroke::parse("cmd-x").expect("parse cmd-x"), view_cx);
         assert!(model.composer.text().is_empty());
@@ -4245,6 +4262,7 @@ fn join_invite_roundtrip_and_form_import() -> Result<(), Box<dyn std::error::Err
         room_id: String::new(),
         alias: "bob".to_string(),
         active: Some(ActiveField::Room),
+        ..Default::default()
     };
     form.apply_invite(parsed)?;
     assert_eq!(form.server, session.server_url);
@@ -4344,6 +4362,7 @@ fn join_form_keystroke_paths() -> Result<(), Box<dyn std::error::Error>> {
         room_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
         alias: "alice".to_string(),
         active: Some(ActiveField::Server),
+        ..Default::default()
     };
 
     assert!(JoinFormState::next_field(ActiveField::Server) == ActiveField::Room);
@@ -4532,6 +4551,7 @@ fn join_form_and_shortcut_edge_paths() -> Result<(), Box<dyn std::error::Error>>
         room_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
         alias: " alice ".to_string(),
         active: None,
+        ..Default::default()
     };
     let tab = Keystroke::parse("tab")?;
     assert!(matches!(form.handle_keystroke(&tab), KeyOutcome::None));

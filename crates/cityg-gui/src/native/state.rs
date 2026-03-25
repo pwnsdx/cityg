@@ -51,6 +51,8 @@ pub(super) struct AppModel {
     pub(super) chat_scroll_handle: ScrollHandle,
     pub(super) right_sidebar_scroll_handle: ScrollHandle,
     pub(super) session_overview_window: Option<AnyWindowHandle>,
+    pub(super) root_focus_handle: Option<FocusHandle>,
+    pub(super) native_text_inputs_bound: bool,
 }
 
 pub(super) enum JoinStatus {

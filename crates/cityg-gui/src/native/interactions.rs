@@ -55,6 +55,9 @@ impl AppModel {
         cx: &mut ViewContext<Self>,
     ) {
         self.join_form.room_id = AppModel::random_room_id();
+        self.join_form
+            .room_editor
+            .reset_for_text(&self.join_form.room_id);
         self.join_form.clear_invite_material();
         self.join_form.active = Some(ActiveField::Room);
         self.last_error = None;
@@ -93,15 +96,6 @@ impl AppModel {
         );
         self.show_error_toast("Session expired on server. Join room again.", cx);
         cx.notify();
-    }
-
-    pub(super) fn on_room_admin_target_field_clicked(
-        &mut self,
-        _: &MouseDownEvent,
-        _: &mut Window,
-        cx: &mut ViewContext<Self>,
-    ) {
-        self.focus_room_admin_target(cx);
     }
 
     pub(super) fn on_room_admins_refresh_clicked(
@@ -198,6 +192,25 @@ impl AppModel {
     }
 
     pub(super) fn on_keystroke(&mut self, keystroke: &Keystroke, cx: &mut ViewContext<Self>) {
+        self.on_keystroke_inner(keystroke, None, cx);
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn on_window_keystroke(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut ViewContext<Self>,
+    ) {
+        self.on_keystroke_inner(keystroke, Some(window), cx);
+    }
+
+    fn on_keystroke_inner(
+        &mut self,
+        keystroke: &Keystroke,
+        mut window: Option<&mut Window>,
+        cx: &mut ViewContext<Self>,
+    ) {
         if self.session.is_some() {
             if self.room_admin_target.active {
                 match self.handle_room_admin_target_clipboard_shortcuts(keystroke, cx) {
@@ -212,7 +225,13 @@ impl AppModel {
                     KeyOutcome::None => {}
                     KeyOutcome::Updated => {
                         self.clear_room_admin_revoke_confirmation();
-                        cx.notify();
+                        if self.room_admin_target.active {
+                            cx.notify();
+                        } else if let Some(window) = window.as_deref_mut() {
+                            self.blur_native_text_input(window, cx);
+                        } else {
+                            cx.notify();
+                        }
                     }
                     KeyOutcome::Submit => {
                         self.start_room_admin_mutation_from_input(RoomAdminMutationKind::Grant, cx)
@@ -231,7 +250,15 @@ impl AppModel {
                 }
                 match self.members_search.handle_keystroke(keystroke) {
                     KeyOutcome::None => {}
-                    KeyOutcome::Updated => cx.notify(),
+                    KeyOutcome::Updated => {
+                        if self.members_search.active {
+                            cx.notify();
+                        } else if let Some(window) = window.as_deref_mut() {
+                            self.blur_native_text_input(window, cx);
+                        } else {
+                            cx.notify();
+                        }
+                    }
                     KeyOutcome::Submit => self.submit_members_search(cx),
                 }
                 return;
@@ -246,7 +273,15 @@ impl AppModel {
             }
             match self.composer.handle_keystroke(keystroke) {
                 KeyOutcome::None => {}
-                KeyOutcome::Updated => cx.notify(),
+                KeyOutcome::Updated => {
+                    if self.composer.active {
+                        cx.notify();
+                    } else if let Some(window) = window.as_deref_mut() {
+                        self.blur_native_text_input(window, cx);
+                    } else {
+                        cx.notify();
+                    }
+                }
                 KeyOutcome::Submit => self.start_send(cx),
             }
             return;
@@ -266,7 +301,17 @@ impl AppModel {
 
         match self.join_form.handle_keystroke(keystroke) {
             KeyOutcome::None => {}
-            KeyOutcome::Updated => cx.notify(),
+            KeyOutcome::Updated => {
+                if let Some(window) = window.as_deref_mut() {
+                    if let Some(active) = self.join_form.active {
+                        self.focus_field_in_window(active, window, cx);
+                    } else {
+                        self.blur_native_text_input(window, cx);
+                    }
+                } else {
+                    cx.notify();
+                }
+            }
             KeyOutcome::Submit => self.start_join(cx),
         }
     }

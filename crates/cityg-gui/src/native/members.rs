@@ -2,11 +2,8 @@ use super::websocket::MembershipSignal;
 use super::*;
 
 impl AppModel {
-    pub(super) fn focus_members_search(&mut self, cx: &mut ViewContext<Self>) {
-        self.members_search.focus();
-        self.room_admin_target.blur();
-        self.composer.blur();
-        cx.notify();
+    pub(super) fn focus_members_search(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        self.focus_text_field(NativeTextFieldKind::MembersSearch, window, cx);
     }
 
     pub(super) fn submit_members_search(&mut self, cx: &mut ViewContext<Self>) {
@@ -281,10 +278,10 @@ impl AppModel {
     pub(super) fn on_members_search_field_clicked(
         &mut self,
         _: &MouseDownEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut ViewContext<Self>,
     ) {
-        self.focus_members_search(cx);
+        self.focus_members_search(window, cx);
     }
 
     pub(super) fn on_members_search_button_clicked(

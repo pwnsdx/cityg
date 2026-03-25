@@ -54,10 +54,10 @@ pub(super) fn run_native_app() {
             let entity = cx.new(|_| AppModel::new(config_clone));
             let weak = entity.downgrade();
 
-            cx.observe_keystrokes(move |event, _, cx| {
+            cx.observe_keystrokes(move |event, window, cx| {
                 if let Some(view) = weak.upgrade() {
                     view.update(cx, |model, cx| {
-                        model.on_keystroke(&event.keystroke, cx);
+                        model.on_window_keystroke(&event.keystroke, window, cx);
                     });
                 }
             })
@@ -106,6 +106,7 @@ impl AppModel {
                 room_id: AppModel::random_room_id(),
                 alias: String::new(),
                 active: Some(ActiveField::Alias),
+                ..Default::default()
             },
             join_status: JoinStatus::Idle,
             leave_status: LeaveStatus::Idle,
@@ -155,6 +156,8 @@ impl AppModel {
             chat_scroll_handle: ScrollHandle::new(),
             right_sidebar_scroll_handle: ScrollHandle::new(),
             session_overview_window: None,
+            root_focus_handle: None,
+            native_text_inputs_bound: false,
         };
 
         match load_last_session() {
@@ -162,6 +165,18 @@ impl AppModel {
                 model.join_form.server = saved.server_url.clone();
                 model.join_form.room_id = saved.room_id.clone();
                 model.join_form.alias = saved.alias.clone();
+                model
+                    .join_form
+                    .server_editor
+                    .reset_for_text(&model.join_form.server);
+                model
+                    .join_form
+                    .room_editor
+                    .reset_for_text(&model.join_form.room_id);
+                model
+                    .join_form
+                    .alias_editor
+                    .reset_for_text(&model.join_form.alias);
                 model.join_form.active = None;
                 model.session = Some(saved);
                 model.hydrate_alias_bindings_from_disk();
@@ -191,6 +206,7 @@ impl AppModel {
 
 impl Render for AppModel {
     fn render(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        self.ensure_native_text_input_setup(window, cx);
         let background = ui_canvas_fill(self.window_active);
         let has_session = self.session.is_some();
         let body: Div = if let Some(session) = &self.session {
@@ -222,9 +238,22 @@ impl Render for AppModel {
             .on_action(cx.listener(Self::on_copy_selection_action))
             .on_action(cx.listener(Self::on_cut_selection_action))
             .on_action(cx.listener(Self::on_paste_selection_action))
+            .on_action(cx.listener(Self::on_text_backspace_action))
+            .on_action(cx.listener(Self::on_text_delete_action))
+            .on_action(cx.listener(Self::on_text_move_left_action))
+            .on_action(cx.listener(Self::on_text_move_right_action))
+            .on_action(cx.listener(Self::on_text_select_left_action))
+            .on_action(cx.listener(Self::on_text_select_right_action))
+            .on_action(cx.listener(Self::on_text_select_all_action))
+            .on_action(cx.listener(Self::on_text_home_action))
+            .on_action(cx.listener(Self::on_text_end_action))
             .on_action(cx.listener(Self::on_show_emoji_palette_action))
             .on_action(cx.listener(Self::on_minimize_window_action))
             .on_action(cx.listener(Self::on_zoom_window_action));
+
+        if let Some(root_focus_handle) = self.root_focus_handle.as_ref() {
+            root = root.track_focus(root_focus_handle);
+        }
 
         if has_session {
             root = root.child(body);

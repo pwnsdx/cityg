@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct MessageComposer {
     pub(super) text: String,
     pub(super) active: bool,
+    pub(super) editor: TextInputEditorState,
 }
 
 // Configuration constants have been moved to cityg_config
@@ -12,6 +13,7 @@ pub(super) struct MessageComposer {
 impl MessageComposer {
     pub(super) fn clear(&mut self) {
         self.text.clear();
+        self.editor.reset();
     }
 
     pub(super) fn is_ready(&self) -> bool {
@@ -28,6 +30,7 @@ impl MessageComposer {
 
     pub(super) fn set_text(&mut self, text: String) {
         self.text = text;
+        self.editor.reset_for_text(&self.text);
     }
 
     pub(super) fn text(&self) -> &str {
@@ -48,6 +51,10 @@ impl MessageComposer {
             if self.is_ready() {
                 return KeyOutcome::Submit;
             }
+            return KeyOutcome::None;
+        }
+
+        if self.editor.has_native_input() {
             return KeyOutcome::None;
         }
 
@@ -95,6 +102,7 @@ impl MessageComposer {
 pub(super) struct MembersSearchState {
     pub(super) query: String,
     pub(super) active: bool,
+    pub(super) editor: TextInputEditorState,
 }
 
 impl MembersSearchState {
@@ -108,10 +116,12 @@ impl MembersSearchState {
 
     pub(super) fn clear(&mut self) {
         self.query.clear();
+        self.editor.reset();
     }
 
     pub(super) fn set_query(&mut self, query: String) {
         self.query = query;
+        self.editor.reset_for_text(&self.query);
     }
 
     pub(super) fn query(&self) -> &str {
@@ -135,6 +145,10 @@ impl MembersSearchState {
 
         if ks.key == "return" || ks.key == "enter" {
             return KeyOutcome::Submit;
+        }
+
+        if self.editor.has_native_input() {
+            return KeyOutcome::None;
         }
 
         if ks.key == "backspace" {
@@ -183,6 +197,7 @@ impl MembersSearchState {
 pub(super) struct RoomAdminTargetState {
     pub(super) value: String,
     pub(super) active: bool,
+    pub(super) editor: TextInputEditorState,
 }
 
 impl RoomAdminTargetState {
@@ -196,10 +211,12 @@ impl RoomAdminTargetState {
 
     pub(super) fn clear(&mut self) {
         self.value.clear();
+        self.editor.reset();
     }
 
     pub(super) fn set_value(&mut self, value: String) {
         self.value = value;
+        self.editor.reset_for_text(&self.value);
     }
 
     pub(super) fn value(&self) -> &str {
@@ -223,6 +240,10 @@ impl RoomAdminTargetState {
 
         if ks.key == "return" || ks.key == "enter" {
             return KeyOutcome::Submit;
+        }
+
+        if self.editor.has_native_input() {
+            return KeyOutcome::None;
         }
 
         if ks.key == "backspace" {

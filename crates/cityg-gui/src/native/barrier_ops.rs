@@ -523,6 +523,12 @@ async fn publish_revocation_merge_from_ticket(
 }
 
 pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
+    if request.barrier_recovery_pending {
+        return Err(anyhow!(
+            "cannot originate barrier updates while barrier recovery is pending; complete FULL barrier recovery first"
+        ));
+    }
+
     let client = new_api_client(&request.server_url);
     let room_id = request.room_id.clone();
     let leaf_id = request.leaf_id;

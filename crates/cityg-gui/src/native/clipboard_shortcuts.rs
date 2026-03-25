@@ -6,56 +6,29 @@ impl AppModel {
         keystroke: &Keystroke,
         cx: &mut ViewContext<Self>,
     ) -> KeyOutcome {
-        let Some(active) = self.join_form.active else {
+        if self.join_form.active.is_none() {
             return KeyOutcome::None;
-        };
+        }
 
         if is_primary_shortcut(keystroke, "c") {
-            let text = self.join_form.field(active).to_string();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            return KeyOutcome::Updated;
+            return self
+                .copy_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         if is_primary_shortcut(keystroke, "x") {
-            let text = self.join_form.field(active).to_string();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.join_form.field_mut(active).clear();
-            return KeyOutcome::Updated;
+            return self
+                .cut_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         if is_primary_shortcut(keystroke, "v") {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                if active == ActiveField::Room {
-                    match parse_join_invite(&text) {
-                        Ok(Some(invite)) => match self.join_form.apply_invite(invite) {
-                            Ok(()) => {
-                                self.clear_error();
-                                self.info_message = Some(
-                                    "Invite imported. Choose your alias and join.".to_string(),
-                                );
-                                return KeyOutcome::Updated;
-                            }
-                            Err(err) => {
-                                self.set_error(&err, "join", Some(RetryAction::Join));
-                                return KeyOutcome::Updated;
-                            }
-                        },
-                        Ok(None) => {}
-                        Err(err) => {
-                            self.set_error(&err, "join", Some(RetryAction::Join));
-                            return KeyOutcome::Updated;
-                        }
-                    }
-                }
-
-                let existing = self.join_form.field(active).to_string();
-                let updated = apply_join_field_paste(active, &existing, &text);
-                if matches!(active, ActiveField::Server | ActiveField::Room) {
-                    self.join_form.clear_invite_material();
-                }
-                *self.join_form.field_mut(active) = updated;
-            }
-            return KeyOutcome::Updated;
+            return self
+                .paste_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         KeyOutcome::None
@@ -71,23 +44,24 @@ impl AppModel {
         }
 
         if is_primary_shortcut(keystroke, "c") {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.composer.text().to_string()));
-            return KeyOutcome::Updated;
+            return self
+                .copy_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         if is_primary_shortcut(keystroke, "x") {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.composer.text().to_string()));
-            self.composer.clear();
-            return KeyOutcome::Updated;
+            return self
+                .cut_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         if is_primary_shortcut(keystroke, "v") {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                let mut updated = self.composer.text().to_string();
-                updated.push_str(&sanitize_clipboard_text(&text));
-                self.composer.set_text(updated);
-            }
-            return KeyOutcome::Updated;
+            return self
+                .paste_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         KeyOutcome::None
@@ -103,27 +77,24 @@ impl AppModel {
         }
 
         if is_primary_shortcut(keystroke, "c") {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.members_search.query().to_string(),
-            ));
-            return KeyOutcome::Updated;
+            return self
+                .copy_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         if is_primary_shortcut(keystroke, "x") {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.members_search.query().to_string(),
-            ));
-            self.members_search.clear();
-            return KeyOutcome::Updated;
+            return self
+                .cut_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         if is_primary_shortcut(keystroke, "v") {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                let mut updated = self.members_search.query().to_string();
-                updated.push_str(&sanitize_clipboard_text(&text));
-                self.members_search.set_query(updated);
-            }
-            return KeyOutcome::Updated;
+            return self
+                .paste_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         KeyOutcome::None
@@ -139,99 +110,57 @@ impl AppModel {
         }
 
         if is_primary_shortcut(keystroke, "c") {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.room_admin_target.value().to_string(),
-            ));
-            return KeyOutcome::Updated;
+            return self
+                .copy_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         if is_primary_shortcut(keystroke, "x") {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.room_admin_target.value().to_string(),
-            ));
-            self.room_admin_target.clear();
-            self.clear_room_admin_revoke_confirmation();
-            return KeyOutcome::Updated;
+            return self
+                .cut_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         if is_primary_shortcut(keystroke, "v") {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                let mut updated = self.room_admin_target.value().to_string();
-                updated.push_str(&sanitize_clipboard_text(&text));
-                self.room_admin_target.set_value(updated);
-                self.clear_room_admin_revoke_confirmation();
-            }
-            return KeyOutcome::Updated;
+            return self
+                .paste_focused_text(cx)
+                .then_some(KeyOutcome::Updated)
+                .unwrap_or(KeyOutcome::None);
         }
 
         KeyOutcome::None
     }
 
     pub(super) fn copy_focused_text(&mut self, cx: &mut ViewContext<Self>) -> bool {
-        if self.room_admin_target.active {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.room_admin_target.value().to_string(),
-            ));
-            return true;
-        }
-
-        if self.members_search.active {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.members_search.query().to_string(),
-            ));
-            return true;
-        }
-
-        if self.composer.active {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.composer.text().to_string()));
-            return true;
-        }
-
-        if let Some(active) = self.join_form.active {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.join_form.field(active).to_string(),
-            ));
-            return true;
+        if let Some(field) = self.focused_text_field() {
+            let selected =
+                self.with_text_field_mut(field, |text, editor| editor.selected_text(text));
+            if let Some(text) = selected {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                return true;
+            }
         }
 
         false
     }
 
     pub(super) fn cut_focused_text(&mut self, cx: &mut ViewContext<Self>) -> bool {
-        if self.room_admin_target.active {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.room_admin_target.value().to_string(),
-            ));
-            self.room_admin_target.clear();
-            self.clear_room_admin_revoke_confirmation();
-            cx.notify();
-            return true;
-        }
+        let Some(field) = self.focused_text_field() else {
+            return false;
+        };
+        let selected = self.with_text_field_mut(field, |text, editor| editor.selected_text(text));
+        let Some(text) = selected else {
+            return false;
+        };
 
-        if self.members_search.active {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.members_search.query().to_string(),
-            ));
-            self.members_search.clear();
-            cx.notify();
-            return true;
-        }
-
-        if self.composer.active {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.composer.text().to_string()));
-            self.composer.clear();
-            cx.notify();
-            return true;
-        }
-
-        if let Some(active) = self.join_form.active {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.join_form.field(active).to_string(),
-            ));
-            self.join_form.field_mut(active).clear();
-            if matches!(active, ActiveField::Server | ActiveField::Room) {
-                self.join_form.clear_invite_material();
-            }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let updated = self.with_text_field_mut(field, |text, editor| {
+            editor.replace_text_in_range(text, None, "")
+        });
+        if updated {
+            self.after_text_field_edit(field);
             cx.notify();
             return true;
         }
@@ -244,36 +173,11 @@ impl AppModel {
             return false;
         };
 
-        if self.room_admin_target.active {
-            let mut updated = self.room_admin_target.value().to_string();
-            updated.push_str(&sanitize_clipboard_text(&text));
-            self.room_admin_target.set_value(updated);
-            self.clear_room_admin_revoke_confirmation();
-            cx.notify();
-            return true;
-        }
-
-        if self.members_search.active {
-            let mut updated = self.members_search.query().to_string();
-            updated.push_str(&sanitize_clipboard_text(&text));
-            self.members_search.set_query(updated);
-            cx.notify();
-            return true;
-        }
-
-        if self.composer.active {
-            let mut updated = self.composer.text().to_string();
-            updated.push_str(&sanitize_clipboard_text(&text));
-            self.composer.set_text(updated);
-            cx.notify();
-            return true;
-        }
-
-        let Some(active) = self.join_form.active else {
+        let Some(field) = self.focused_text_field() else {
             return false;
         };
 
-        if active == ActiveField::Room {
+        if field == NativeTextFieldKind::JoinRoom {
             match parse_join_invite(&text) {
                 Ok(Some(invite)) => match self.join_form.apply_invite(invite) {
                     Ok(()) => {
@@ -298,13 +202,22 @@ impl AppModel {
             }
         }
 
-        let existing = self.join_form.field(active).to_string();
-        let updated = apply_join_field_paste(active, &existing, &text);
-        if matches!(active, ActiveField::Server | ActiveField::Room) {
-            self.join_form.clear_invite_material();
+        let sanitized = sanitize_clipboard_text(&text);
+        let updated = match field {
+            NativeTextFieldKind::JoinRoom if JoinFormState::is_valid_room_id(sanitized.trim()) => {
+                self.with_text_field_mut(field, |text, editor| {
+                    editor.replace_all(text, sanitized.trim());
+                    true
+                })
+            }
+            _ => self.with_text_field_mut(field, |text, editor| {
+                editor.replace_text_in_range(text, None, &sanitized)
+            }),
+        };
+        if updated {
+            self.after_text_field_edit(field);
+            cx.notify();
         }
-        *self.join_form.field_mut(active) = updated;
-        cx.notify();
-        true
+        updated
     }
 }
