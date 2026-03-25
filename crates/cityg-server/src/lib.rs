@@ -346,6 +346,7 @@ pub struct BarrierPublicTreeSnapshot {
 const DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR: &str = "duplicate active cover leaf allocation";
 const COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR: &str = "cover leaf index already allocated";
 const GENESIS_PROVISIONING_ARTIFACT_MISSING_ERR: &str = "genesis provisioning artifact missing";
+const ROOM_ADMIN_PROOF_REPLAYED_ERR: &str = "room admin proof replayed";
 
 fn genesis_provisioning_artifact_missing_error() -> CityGError {
     CityGError::InvalidInput(GENESIS_PROVISIONING_ARTIFACT_MISSING_ERR)
@@ -362,6 +363,16 @@ fn require_genesis_provisioning_snapshot<'a>(
     missing_err: impl FnOnce() -> CityGError,
 ) -> Result<&'a GroupMembership, CityGError> {
     state.latest_snapshot().ok_or_else(missing_err)
+}
+
+fn ensure_unused_room_admin_proof_replay_key(
+    state: &GroupState,
+    replay_key: &[u8; 32],
+) -> Result<(), CityGError> {
+    if state.room_admin_proof_replay_keys.contains(replay_key) {
+        return Err(CityGError::InvalidInput(ROOM_ADMIN_PROOF_REPLAYED_ERR));
+    }
+    Ok(())
 }
 
 impl CityGServer {
@@ -569,7 +580,7 @@ impl CityGServer {
         Ok(())
     }
 
-    pub fn rotate_group_kbroad(
+    fn rotate_group_kbroad_in_place(
         &mut self,
         gid: &[u8; 32],
         kbroad_public: Vec<u8>,
@@ -585,6 +596,15 @@ impl CityGServer {
         self.ctx.set_kbroad_registry(Some(registry));
         let generation = self.roster.increment_kbroad_generation(gid);
         self.roster.clear_kbroad_rotation_required(gid);
+        Ok(generation)
+    }
+
+    pub fn rotate_group_kbroad(
+        &mut self,
+        gid: &[u8; 32],
+        kbroad_public: Vec<u8>,
+    ) -> Result<u64, CityGError> {
+        let generation = self.rotate_group_kbroad_in_place(gid, kbroad_public)?;
         self.persist_kbroad_state()?;
         Ok(generation)
     }
@@ -594,15 +614,40 @@ impl CityGServer {
         gid: &[u8; 32],
         kbroad_public: Vec<u8>,
         actor_pop_public_key: &[u8],
+        replay_key: [u8; 32],
     ) -> Result<u64, CityGError> {
-        if self.roster.has_explicit_room_admins(gid)
-            && !self.roster.is_room_admin(gid, actor_pop_public_key)
+        if self
+            .ctx
+            .kbroad_registry()
+            .and_then(|registry| registry.get(gid.as_ref()))
+            .is_none()
+        {
+            return Err(CityGError::InvalidInput("kbroad key missing"));
+        }
+        if !self.roster.has_explicit_room_admins(gid)
+            || !self.roster.is_room_admin(gid, actor_pop_public_key)
         {
             return Err(CityGError::InvalidInput(
                 "room admin proof is not authorized",
             ));
         }
-        self.rotate_group_kbroad(gid, kbroad_public)
+        {
+            let state = self
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("roster group missing"))?;
+            ensure_unused_room_admin_proof_replay_key(state, &replay_key)?;
+        }
+        let generation = self.rotate_group_kbroad_in_place(gid, kbroad_public)?;
+        self.roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("roster group missing"))?
+            .room_admin_proof_replay_keys
+            .insert(replay_key);
+        self.persist_kbroad_state()?;
+        Ok(generation)
     }
 
     pub fn grant_room_admin(
@@ -610,6 +655,7 @@ impl CityGServer {
         gid: &[u8; 32],
         actor_pop_public_key: &[u8],
         target_pop_public_key: Vec<u8>,
+        replay_key: [u8; 32],
     ) -> Result<(bool, u64), CityGError> {
         if !self.roster.has_explicit_room_admins(gid) {
             return Err(CityGError::InvalidInput(
@@ -635,7 +681,9 @@ impl CityGServer {
             .groups
             .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("roster group missing"))?;
+        ensure_unused_room_admin_proof_replay_key(state, &replay_key)?;
         let granted = state.room_admin_pop_keys.insert(target_pop_public_key);
+        state.room_admin_proof_replay_keys.insert(replay_key);
         let admin_count = u64::try_from(state.room_admin_pop_keys.len()).unwrap_or(u64::MAX);
         self.persist_kbroad_state()?;
         Ok((granted, admin_count))
@@ -646,6 +694,7 @@ impl CityGServer {
         gid: &[u8; 32],
         actor_pop_public_key: &[u8],
         target_pop_public_key: &[u8],
+        replay_key: [u8; 32],
     ) -> Result<(bool, u64), CityGError> {
         if !self.roster.has_explicit_room_admins(gid) {
             return Err(CityGError::InvalidInput(
@@ -671,8 +720,11 @@ impl CityGServer {
             .groups
             .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("roster group missing"))?;
+        ensure_unused_room_admin_proof_replay_key(state, &replay_key)?;
         if !state.room_admin_pop_keys.contains(target_pop_public_key) {
+            state.room_admin_proof_replay_keys.insert(replay_key);
             let admin_count = u64::try_from(state.room_admin_pop_keys.len()).unwrap_or(u64::MAX);
+            self.persist_kbroad_state()?;
             return Ok((false, admin_count));
         }
         if state.room_admin_pop_keys.len() == 1 {
@@ -681,6 +733,7 @@ impl CityGServer {
             ));
         }
         let revoked = state.room_admin_pop_keys.remove(target_pop_public_key);
+        state.room_admin_proof_replay_keys.insert(replay_key);
         let admin_count = u64::try_from(state.room_admin_pop_keys.len()).unwrap_or(u64::MAX);
         self.persist_kbroad_state()?;
         Ok((revoked, admin_count))
@@ -928,6 +981,7 @@ impl CityGServer {
         actor_pop_public_key: &[u8],
         author_leaf_id: &[u8; 32],
         target_leaf_id: &[u8; 32],
+        replay_key: [u8; 32],
     ) -> Result<MergeTicketBundle, CityGError> {
         if author_leaf_id == target_leaf_id {
             return Err(CityGError::InvalidInput(
@@ -954,6 +1008,7 @@ impl CityGServer {
                 "author leaf not present in roster",
             ));
         };
+        ensure_unused_room_admin_proof_replay_key(group, &replay_key)?;
         let Some(bound_pop_public_key) = group.leaf_device_pk.get(author_leaf_id) else {
             return Err(CityGError::InvalidInput(
                 "author leaf not present in roster",
@@ -965,7 +1020,15 @@ impl CityGServer {
             ));
         }
 
-        self.build_merge_ticket_core(gid, author_leaf_id, Some(*target_leaf_id))
+        let bundle = self.build_merge_ticket_core(gid, author_leaf_id, Some(*target_leaf_id))?;
+        self.roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("roster group missing"))?
+            .room_admin_proof_replay_keys
+            .insert(replay_key);
+        self.persist_kbroad_state()?;
+        Ok(bundle)
     }
 
     fn build_merge_ticket_core(
@@ -1462,6 +1525,11 @@ impl CityGServer {
             group.kbroad_generation = room_state.kbroad_generation;
             group.rotation_required = room_state.rotation_required;
             group.room_admin_pop_keys = room_state.room_admin_pop_keys.iter().cloned().collect();
+            group.room_admin_proof_replay_keys = room_state
+                .room_admin_proof_replay_keys
+                .iter()
+                .copied()
+                .collect();
             group.barrier_initialized = room_state.barrier_initialized;
             group.barrier_version = room_state.barrier_version;
             group.barrier_roots_hash = room_state.barrier_roots_hash;
@@ -1574,6 +1642,11 @@ impl CityGServer {
             group.kbroad_generation = room_state.kbroad_generation;
             group.rotation_required = room_state.rotation_required;
             group.room_admin_pop_keys = room_state.room_admin_pop_keys.iter().cloned().collect();
+            group.room_admin_proof_replay_keys = room_state
+                .room_admin_proof_replay_keys
+                .iter()
+                .copied()
+                .collect();
             group.last_pcs_refresh_ec =
                 merge_optional_u64_max(group.last_pcs_refresh_ec, room_state.last_pcs_refresh_ec);
             group.pcs_refresh_min_delta_device_ec =
@@ -1695,6 +1768,11 @@ impl CityGServer {
             group.kbroad_generation = room_state.kbroad_generation;
             group.rotation_required = room_state.rotation_required;
             group.room_admin_pop_keys = room_state.room_admin_pop_keys.iter().cloned().collect();
+            group.room_admin_proof_replay_keys = room_state
+                .room_admin_proof_replay_keys
+                .iter()
+                .copied()
+                .collect();
             group.n_max = room_state.n_max.max(1);
             group.max_barrier_update_bytes = usize::try_from(room_state.max_barrier_update_bytes)
                 .unwrap_or(
@@ -2886,6 +2964,7 @@ fn persisted_kbroad_room_state(
         kbroad_generation,
         rotation_required,
         room_admin_pop_keys: Vec::new(),
+        room_admin_proof_replay_keys: Vec::new(),
         n_max: DEFAULT_BARRIER_N_MAX,
         pcs_refresh_min_delta_device_ec: default_pcs_refresh_min_delta_device_ec(),
         pcs_refresh_min_delta_group_ec: default_pcs_refresh_min_delta_group_ec(),
@@ -2896,6 +2975,8 @@ fn persisted_kbroad_room_state(
     };
     if let Some(state) = state {
         room.room_admin_pop_keys = state.room_admin_pop_keys.iter().cloned().collect();
+        room.room_admin_proof_replay_keys =
+            state.room_admin_proof_replay_keys.iter().copied().collect();
         room.barrier_initialized = state.barrier_initialized;
         room.barrier_version = state.barrier_version;
         room.barrier_roots_hash = state.barrier_roots_hash;
@@ -3467,6 +3548,10 @@ mod tests {
         time::Duration,
     };
     use tempfile::tempdir;
+
+    fn test_room_admin_replay_key(tag: u8) -> [u8; 32] {
+        [tag; 32]
+    }
 
     fn demo_server_with_journal(path: impl AsRef<Path>) -> CityGServer {
         let mut config = demo_acceptance_config();
@@ -4317,7 +4402,12 @@ mod tests {
         server.register_group_with_admin(&gid, initial_kbroad, admin_pop_key.clone())?;
 
         let err = server
-            .rotate_group_kbroad_with_actor(&gid, rotated_kbroad.clone(), &other_pop_key)
+            .rotate_group_kbroad_with_actor(
+                &gid,
+                rotated_kbroad.clone(),
+                &other_pop_key,
+                test_room_admin_replay_key(1),
+            )
             .expect_err("non-admin identity must be rejected");
         assert!(matches!(
             err,
@@ -4325,13 +4415,39 @@ mod tests {
         ));
 
         assert_eq!(
-            server.rotate_group_kbroad_with_actor(&gid, rotated_kbroad.clone(), &admin_pop_key)?,
+            server.rotate_group_kbroad_with_actor(
+                &gid,
+                rotated_kbroad.clone(),
+                &admin_pop_key,
+                test_room_admin_replay_key(2),
+            )?,
             1
         );
         assert_eq!(
             server.build_join_ticket(&gid)?.kbroad_public,
             rotated_kbroad
         );
+        Ok(())
+    }
+
+    #[test]
+    fn room_admin_rotation_requires_explicit_admin_acl() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0xB4; 32];
+        server.register_group(&gid, vec![0x41; 16])?;
+
+        let err = server
+            .rotate_group_kbroad_with_actor(
+                &gid,
+                vec![0x42; 16],
+                &[0xAB; 48],
+                test_room_admin_replay_key(3),
+            )
+            .expect_err("legacy room without explicit admins must fail closed");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("room admin proof is not authorized")
+        ));
         Ok(())
     }
 
@@ -4347,15 +4463,24 @@ mod tests {
         server.register_group_with_admin(&gid, kbroad_public, creator_pop_key.clone())?;
 
         let err = server
-            .grant_room_admin(&gid, &outsider_pop_key, delegate_pop_key.clone())
+            .grant_room_admin(
+                &gid,
+                &outsider_pop_key,
+                delegate_pop_key.clone(),
+                test_room_admin_replay_key(4),
+            )
             .expect_err("non-admin grant must fail");
         assert!(matches!(
             err,
             CityGError::InvalidInput("room admin proof is not authorized")
         ));
 
-        let (granted, admin_count) =
-            server.grant_room_admin(&gid, &creator_pop_key, delegate_pop_key.clone())?;
+        let (granted, admin_count) = server.grant_room_admin(
+            &gid,
+            &creator_pop_key,
+            delegate_pop_key.clone(),
+            test_room_admin_replay_key(5),
+        )?;
         assert!(granted);
         assert_eq!(admin_count, 2);
         assert_eq!(
@@ -4363,8 +4488,25 @@ mod tests {
             vec![creator_pop_key.clone(), delegate_pop_key.clone()]
         );
 
-        let (already_granted, admin_count) =
-            server.grant_room_admin(&gid, &creator_pop_key, delegate_pop_key.clone())?;
+        let replay_err = server
+            .grant_room_admin(
+                &gid,
+                &creator_pop_key,
+                delegate_pop_key.clone(),
+                test_room_admin_replay_key(5),
+            )
+            .expect_err("replayed grant proof must fail");
+        assert!(matches!(
+            replay_err,
+            CityGError::InvalidInput(super::ROOM_ADMIN_PROOF_REPLAYED_ERR)
+        ));
+
+        let (already_granted, admin_count) = server.grant_room_admin(
+            &gid,
+            &creator_pop_key,
+            delegate_pop_key.clone(),
+            test_room_admin_replay_key(6),
+        )?;
         assert!(!already_granted);
         assert_eq!(admin_count, 2);
 
@@ -4374,15 +4516,24 @@ mod tests {
         );
 
         let err = server
-            .revoke_room_admin(&gid, &outsider_pop_key, &delegate_pop_key)
+            .revoke_room_admin(
+                &gid,
+                &outsider_pop_key,
+                &delegate_pop_key,
+                test_room_admin_replay_key(7),
+            )
             .expect_err("non-admin revoke must fail");
         assert!(matches!(
             err,
             CityGError::InvalidInput("room admin proof is not authorized")
         ));
 
-        let (revoked, admin_count) =
-            server.revoke_room_admin(&gid, &creator_pop_key, &delegate_pop_key)?;
+        let (revoked, admin_count) = server.revoke_room_admin(
+            &gid,
+            &creator_pop_key,
+            &delegate_pop_key,
+            test_room_admin_replay_key(8),
+        )?;
         assert!(revoked);
         assert_eq!(admin_count, 1);
         assert_eq!(
@@ -4390,8 +4541,12 @@ mod tests {
             vec![creator_pop_key.clone()]
         );
 
-        let (already_revoked, admin_count) =
-            server.revoke_room_admin(&gid, &creator_pop_key, &delegate_pop_key)?;
+        let (already_revoked, admin_count) = server.revoke_room_admin(
+            &gid,
+            &creator_pop_key,
+            &delegate_pop_key,
+            test_room_admin_replay_key(9),
+        )?;
         assert!(!already_revoked);
         assert_eq!(admin_count, 1);
         Ok(())
@@ -4414,15 +4569,24 @@ mod tests {
             server.register_group_with_admin(&gid, kbroad_public, creator_pop_key.clone())?;
 
             let err = server
-                .revoke_room_admin(&gid, &creator_pop_key, &creator_pop_key)
+                .revoke_room_admin(
+                    &gid,
+                    &creator_pop_key,
+                    &creator_pop_key,
+                    test_room_admin_replay_key(10),
+                )
                 .expect_err("last admin revoke must fail");
             assert!(matches!(
                 err,
                 CityGError::InvalidInput("cannot revoke the last room admin")
             ));
 
-            let (granted, admin_count) =
-                server.grant_room_admin(&gid, &creator_pop_key, delegate_pop_key.clone())?;
+            let (granted, admin_count) = server.grant_room_admin(
+                &gid,
+                &creator_pop_key,
+                delegate_pop_key.clone(),
+                test_room_admin_replay_key(11),
+            )?;
             assert!(granted);
             assert_eq!(admin_count, 2);
         }
@@ -4475,6 +4639,7 @@ mod tests {
             &outsider_pop_key,
             &alice_leaf,
             &bob_leaf,
+            test_room_admin_replay_key(12),
         ) {
             Ok(_) => return Err(CityGError::InvalidInput("outsider expel must fail")),
             Err(err) => err,
@@ -4489,6 +4654,7 @@ mod tests {
             &unbound_admin_pop_key,
             &alice_leaf,
             &bob_leaf,
+            test_room_admin_replay_key(13),
         ) {
             Ok(_) => {
                 return Err(CityGError::InvalidInput(
@@ -4507,6 +4673,7 @@ mod tests {
             &bound_admin_pop_key,
             &alice_leaf,
             &alice_leaf,
+            test_room_admin_replay_key(14),
         ) {
             Ok(_) => return Err(CityGError::InvalidInput("self-targeted expel must fail")),
             Err(err) => err,
@@ -4518,8 +4685,13 @@ mod tests {
             )
         ));
 
-        let ticket =
-            server.build_admin_expel_ticket(&gid, &bound_admin_pop_key, &alice_leaf, &bob_leaf)?;
+        let ticket = server.build_admin_expel_ticket(
+            &gid,
+            &bound_admin_pop_key,
+            &alice_leaf,
+            &bob_leaf,
+            test_room_admin_replay_key(15),
+        )?;
         assert_eq!(ticket.leaf_id, alice_leaf);
         assert_eq!(
             ticket.cover_leaf_index,
@@ -4615,9 +4787,53 @@ mod tests {
         let mut restarted = CityGServer::new(config);
         let rotated_kbroad = vec![0x55; 16];
         assert_eq!(
-            restarted.rotate_group_kbroad_with_actor(&gid, rotated_kbroad, &admin_pop_key)?,
+            restarted.rotate_group_kbroad_with_actor(
+                &gid,
+                rotated_kbroad,
+                &admin_pop_key,
+                test_room_admin_replay_key(16),
+            )?,
             1
         );
+        Ok(())
+    }
+
+    #[test]
+    fn room_admin_proof_replay_keys_persist_across_restart() -> Result<(), CityGError> {
+        let _serial = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("room-admin-proof-replay.journal");
+        let gid = [0xB7; 32];
+        let kbroad_public = vec![0x61; 16];
+        let creator_pop_key = vec![0xD1; 48];
+        let delegate_pop_key = vec![0xE1; 48];
+        let replay_key = test_room_admin_replay_key(17);
+
+        {
+            let mut config = ServerConfig::new();
+            config.state_path = Some(journal_path.clone());
+            let mut server = CityGServer::new(config);
+            server.register_group_with_admin(&gid, kbroad_public, creator_pop_key.clone())?;
+            let (granted, admin_count) = server.grant_room_admin(
+                &gid,
+                &creator_pop_key,
+                delegate_pop_key.clone(),
+                replay_key,
+            )?;
+            assert!(granted);
+            assert_eq!(admin_count, 2);
+        }
+
+        let mut config = ServerConfig::new();
+        config.state_path = Some(journal_path);
+        let mut restarted = CityGServer::new(config);
+        let err = restarted
+            .grant_room_admin(&gid, &creator_pop_key, delegate_pop_key, replay_key)
+            .expect_err("replayed room-admin proof must remain rejected after restart");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(super::ROOM_ADMIN_PROOF_REPLAYED_ERR)
+        ));
         Ok(())
     }
 
@@ -5071,6 +5287,7 @@ mod tests {
                 kbroad_generation: 7,
                 rotation_required: true,
                 room_admin_pop_keys: Vec::new(),
+                room_admin_proof_replay_keys: Vec::new(),
                 barrier_initialized: true,
                 barrier_version: 5,
                 barrier_roots_hash: [0x55; 32],
@@ -5139,6 +5356,7 @@ mod tests {
                 kbroad_generation: 2,
                 rotation_required: false,
                 room_admin_pop_keys: Vec::new(),
+                room_admin_proof_replay_keys: Vec::new(),
                 barrier_initialized: true,
                 barrier_version: 8,
                 barrier_roots_hash: [0x88; 32],
@@ -8848,12 +9066,18 @@ mod tests {
         header.insert(112, Value::Bytes(vec![0u8; 32]));
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(vec![0u8; 32]));
 
-        let err = super::validate_barrier_update_against_roster(
+        let err = match super::validate_barrier_update_against_roster(
             &state,
             &header,
             &cityg_client::MembershipDelta::default(),
-        )
-        .expect_err("genesis barrier update without snapshot artifact must freeze");
+        ) {
+            Ok(_) => {
+                return Err(CityGError::InvalidInput(
+                    "genesis barrier update without snapshot artifact must freeze",
+                ));
+            }
+            Err(err) => err,
+        };
         assert!(matches!(
             err,
             CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
@@ -9546,6 +9770,7 @@ struct GroupState {
     barrier_public_tree_history: BTreeMap<[u8; 32], BarrierPublicTreeSnapshotRef>,
     barrier_hash_cache: Option<Arc<HashMap<usize, [u8; 32]>>>,
     room_admin_pop_keys: BTreeSet<Vec<u8>>,
+    room_admin_proof_replay_keys: BTreeSet<[u8; 32]>,
 }
 
 impl Default for GroupState {
@@ -9580,6 +9805,7 @@ impl Default for GroupState {
             barrier_public_tree_history: BTreeMap::new(),
             barrier_hash_cache: None,
             room_admin_pop_keys: BTreeSet::new(),
+            room_admin_proof_replay_keys: BTreeSet::new(),
         }
     }
 }
@@ -9659,6 +9885,8 @@ struct PersistedKbroadRoomState {
     rotation_required: bool,
     #[serde(default)]
     room_admin_pop_keys: Vec<Vec<u8>>,
+    #[serde(default)]
+    room_admin_proof_replay_keys: Vec<[u8; 32]>,
     #[serde(default)]
     barrier_initialized: bool,
     #[serde(default)]

@@ -68,6 +68,7 @@ use cityg_server::{
 };
 use msphf_core::{
     MsphfError,
+    hash::h_l,
     params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK},
 };
 use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
@@ -1296,6 +1297,25 @@ fn verify_room_admin_proof(
     verify_room_admin_proof_payload(proof, operation, room_id, kbroad_public)
 }
 
+#[derive(Serialize)]
+struct RoomAdminProofReplayKeyInput<'a> {
+    #[serde(with = "serde_bytes")]
+    pop_public_key: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    signature: &'a [u8],
+}
+
+fn room_admin_proof_replay_key(proof: &RoomAdminProof) -> Result<[u8; 32], ApiError> {
+    h_l(
+        "room-admin/replay-key",
+        &RoomAdminProofReplayKeyInput {
+            pop_public_key: &proof.pop_public_key,
+            signature: &proof.signature,
+        },
+    )
+    .map_err(|err| ApiError::server_message(err.to_string()))
+}
+
 fn encode_room_admin_leaf_pair_payload(
     author_leaf_id: &[u8; 32],
     target_leaf_id: &[u8; 32],
@@ -2029,6 +2049,7 @@ async fn rotate_room_kbroad(
         .admin_proof
         .as_ref()
         .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
+    let replay_key = room_admin_proof_replay_key(proof)?;
     let kbroad_generation = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
@@ -2039,7 +2060,7 @@ async fn rotate_room_kbroad(
             &request.kbroad_public,
         )?;
         guard
-            .rotate_group_kbroad_with_actor(&gid, request.kbroad_public, &actor_pop_key)
+            .rotate_group_kbroad_with_actor(&gid, request.kbroad_public, &actor_pop_key, replay_key)
             .map_err(|err| match err {
                 ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
                 other => ApiError::from(other),
@@ -2074,6 +2095,7 @@ async fn grant_room_admin(
         .admin_proof
         .as_ref()
         .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
+    let replay_key = room_admin_proof_replay_key(proof)?;
     let actor_pop_key = verify_room_admin_proof_payload(
         proof,
         "grant_room_admin_v1",
@@ -2084,7 +2106,12 @@ async fn grant_room_admin(
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         guard
-            .grant_room_admin(&gid, &actor_pop_key, request.target_pop_public_key)
+            .grant_room_admin(
+                &gid,
+                &actor_pop_key,
+                request.target_pop_public_key,
+                replay_key,
+            )
             .map_err(|err| match err {
                 ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
                 other => ApiError::from(other),
@@ -2123,6 +2150,7 @@ async fn revoke_room_admin(
         .admin_proof
         .as_ref()
         .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
+    let replay_key = room_admin_proof_replay_key(proof)?;
     let actor_pop_key = verify_room_admin_proof_payload(
         proof,
         "revoke_room_admin_v1",
@@ -2133,7 +2161,12 @@ async fn revoke_room_admin(
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         guard
-            .revoke_room_admin(&gid, &actor_pop_key, &request.target_pop_public_key)
+            .revoke_room_admin(
+                &gid,
+                &actor_pop_key,
+                &request.target_pop_public_key,
+                replay_key,
+            )
             .map_err(|err| match err {
                 ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
                 other => ApiError::from(other),
@@ -2215,6 +2248,7 @@ async fn expel_member_ticket(
         .as_ref()
         .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
     let payload = encode_room_admin_leaf_pair_payload(&author_leaf_id, &target_leaf_id)?;
+    let replay_key = room_admin_proof_replay_key(proof)?;
     let actor_pop_key =
         verify_room_admin_proof_payload(proof, "expel_room_member_v1", &request.room_id, &payload)?;
     enforce_expensive_rate_limit(
@@ -2233,7 +2267,13 @@ async fn expel_member_ticket(
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         guard
-            .build_admin_expel_ticket(&gid, &actor_pop_key, &author_leaf_id, &target_leaf_id)
+            .build_admin_expel_ticket(
+                &gid,
+                &actor_pop_key,
+                &author_leaf_id,
+                &target_leaf_id,
+                replay_key,
+            )
             .map_err(|err| {
                 maybe_record_client_concurrency_error("expel_member_ticket", &err);
                 ApiError::from(err)
@@ -4849,9 +4889,28 @@ mod tests {
             ApiError::InvalidRequest("kbroad_public has unexpected length")
         ));
 
-        let mut rotated = cityg_client::demo::kbroad_public().to_vec();
+        let room_id = hex::encode([0x97u8; 32]);
+        let initial_kbroad = vec![0x31; ml_kem_public_key_bytes()];
+        bootstrap_room(
+            State(state.clone()),
+            HeaderMap::new(),
+            encode_proto_request(&BootstrapRoomRequest {
+                room_id: room_id.clone(),
+                kbroad_public: initial_kbroad.clone(),
+                admin_proof: Some(test_room_admin_kbroad_proof(
+                    RoomAdminOperation::Bootstrap,
+                    &room_id,
+                    &initial_kbroad,
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect("bootstrap should succeed");
+
+        let mut rotated = initial_kbroad.clone();
         rotated[0] ^= 0x3C;
-        let room_id = hex::encode(DEMO_GID);
         let response = rotate_room_kbroad(
             State(state.clone()),
             headers.clone(),
@@ -4876,7 +4935,7 @@ mod tests {
         let response = join_ticket(
             State(state),
             encode_proto_request(&JoinTicketRequest {
-                room_id: hex::encode(DEMO_GID),
+                room_id: room_id.clone(),
                 alias: "post-rotate".to_string(),
                 identity_binding: None,
             }),
@@ -4889,6 +4948,38 @@ mod tests {
         assert_eq!(decoded.kem_tree_hash_after.len(), 32);
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn rotate_room_kbroad_rejects_rooms_without_explicit_admin_acl() {
+        let state = test_api_state();
+        let headers = room_admin_headers();
+        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+        let room_id = hex::encode(DEMO_GID);
+        let mut rotated = cityg_client::demo::kbroad_public().to_vec();
+        rotated[0] ^= 0x22;
+
+        let err = rotate_room_kbroad(
+            State(state),
+            headers,
+            encode_proto_request(&RotateRoomKbroadRequest {
+                room_id: room_id.clone(),
+                kbroad_public: rotated.clone(),
+                admin_proof: Some(test_room_admin_kbroad_proof(
+                    RoomAdminOperation::RotateKbroad,
+                    &room_id,
+                    &rotated,
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect_err("registry-only room must reject manual room-admin rotation");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("room admin proof is not authorized")
+        ));
     }
 
     #[tokio::test]
@@ -4926,17 +5017,36 @@ mod tests {
             ApiError::InvalidRequest("kbroad key missing")
         ));
 
-        let demo_room_id = hex::encode(DEMO_GID);
+        let room_id = hex::encode([0x98u8; 32]);
+        let initial_kbroad = vec![0x51; ml_kem_public_key_bytes()];
+        bootstrap_room(
+            State(state.clone()),
+            HeaderMap::new(),
+            encode_proto_request(&BootstrapRoomRequest {
+                room_id: room_id.clone(),
+                kbroad_public: initial_kbroad.clone(),
+                admin_proof: Some(test_room_admin_kbroad_proof(
+                    RoomAdminOperation::Bootstrap,
+                    &room_id,
+                    &initial_kbroad,
+                    &admin_pop_public_key,
+                    &admin_pop_secret_key,
+                )),
+            }),
+        )
+        .await
+        .expect("bootstrap should succeed");
+
         let unchanged_err = rotate_room_kbroad(
             State(state),
             headers,
             encode(RotateRoomKbroadRequest {
-                room_id: demo_room_id.clone(),
-                kbroad_public: cityg_client::demo::kbroad_public().to_vec(),
+                room_id: room_id.clone(),
+                kbroad_public: initial_kbroad.clone(),
                 admin_proof: Some(test_room_admin_kbroad_proof(
                     RoomAdminOperation::RotateKbroad,
-                    &demo_room_id,
-                    cityg_client::demo::kbroad_public(),
+                    &room_id,
+                    &initial_kbroad,
                     &admin_pop_public_key,
                     &admin_pop_secret_key,
                 )),
@@ -5067,19 +5177,20 @@ mod tests {
             ApiError::InvalidRequest("room admin proof is not authorized")
         ));
 
+        let initial_grant_request = RoomAdminMutationRequest {
+            room_id: room_id.clone(),
+            target_pop_public_key: delegate_pop_public_key.clone(),
+            admin_proof: Some(test_room_admin_target_proof(
+                RoomAdminOperation::GrantAdmin,
+                &room_id,
+                &delegate_pop_public_key,
+                &creator_pop_public_key,
+                &creator_pop_secret_key,
+            )),
+        };
         let grant_response = grant_room_admin(
             State(state.clone()),
-            encode_proto_request(&RoomAdminMutationRequest {
-                room_id: room_id.clone(),
-                target_pop_public_key: delegate_pop_public_key.clone(),
-                admin_proof: Some(test_room_admin_target_proof(
-                    RoomAdminOperation::GrantAdmin,
-                    &room_id,
-                    &delegate_pop_public_key,
-                    &creator_pop_public_key,
-                    &creator_pop_secret_key,
-                )),
-            }),
+            encode_proto_request(&initial_grant_request),
         )
         .await
         .expect("grant should succeed");
@@ -5144,6 +5255,17 @@ mod tests {
         let revoked: RoomAdminMutationResponse = decode_proto_response(revoke_response).await;
         assert_eq!(revoked.status, "revoked");
         assert_eq!(revoked.admin_count, 1);
+
+        let replay_grant_err = grant_room_admin(
+            State(state.clone()),
+            encode_proto_request(&initial_grant_request),
+        )
+        .await
+        .expect_err("replayed grant proof must stay rejected after revocation");
+        assert!(matches!(
+            replay_grant_err,
+            ApiError::InvalidRequest("room admin proof replayed")
+        ));
 
         let revoke_last_err = revoke_room_admin(
             State(state),
