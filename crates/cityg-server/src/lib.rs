@@ -1453,7 +1453,13 @@ impl CityGServer {
         roster: &mut GroupRoster,
         bundle: &ClientEpochBundle,
     ) -> Result<ServerOutcome, CityGError> {
-        let state_before = roster.groups.get(bundle.gid()).cloned().unwrap_or_default();
+        let state_before = {
+            let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
+            if bundle.header_map.contains_key(&hdr::HDR_BARRIER_UPDATE) {
+                let _ = ensure_current_history_commitment(bundle.gid(), state)?;
+            }
+            state.clone()
+        };
         let delta = bundle.membership_delta()?;
         ensure_distinct_active_cover_leaf_indices(&state_before)?;
         ensure_join_cover_leaf_indices_available(&state_before, delta.joined.as_slice())?;
@@ -2772,6 +2778,49 @@ fn parse_join_finalize_auth_token(
         .transpose()
 }
 
+#[derive(Serialize, Deserialize)]
+struct BarrierHistoryCommitmentHeaderWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    u64,
+);
+
+fn encode_barrier_history_commitment_header(
+    commitment: HistoryCommitment,
+) -> Result<Vec<u8>, CityGError> {
+    to_cbor_vec(&BarrierHistoryCommitmentHeaderWire(
+        commitment.history_view_id.to_vec(),
+        commitment.history_commitment_id.to_vec(),
+        commitment.prev_history_commitment_id.to_vec(),
+        commitment.history_seq,
+    ))
+}
+
+fn parse_barrier_history_commitment(
+    header: &BTreeMap<u64, Value>,
+) -> Result<Option<HistoryCommitment>, CityGError> {
+    header_optional_bytes(header, hdr::HDR_BARRIER_HISTORY_COMMITMENT)?
+        .map(parse_deterministic_cbor::<BarrierHistoryCommitmentHeaderWire>)
+        .transpose()?
+        .map(
+            |BarrierHistoryCommitmentHeaderWire(
+                history_view_id,
+                history_commitment_id,
+                prev_history_commitment_id,
+                history_seq,
+            )| {
+                Ok(HistoryCommitment {
+                    history_view_id: vec_to_32(history_view_id)?,
+                    history_commitment_id: vec_to_32(history_commitment_id)?,
+                    prev_history_commitment_id: vec_to_32(prev_history_commitment_id)?,
+                    history_seq,
+                })
+            },
+        )
+        .transpose()
+}
+
 fn parse_barrier_update(
     header: &BTreeMap<u64, Value>,
     expected_n_max: u64,
@@ -3769,9 +3818,31 @@ fn validate_barrier_update_against_roster(
         }
 
         let barrier_update_reason = parse_barrier_update_reason(header)?;
+        let history_commitment_present = header.contains_key(&hdr::HDR_BARRIER_HISTORY_COMMITMENT);
+        let supplied_history_commitment = parse_barrier_history_commitment(header)?;
+        if barrier_update_reason.is_none() {
+            if history_commitment_present {
+                return Err(CityGError::InvalidInput("barrier_update malformed"));
+            }
+            return Ok(None);
+        }
         let Some(parsed) = parse_barrier_update(header, state_before.n_max)? else {
             return Ok(None);
         };
+        let expected_history_commitment = state_before.current_history_commitment;
+        let require_history_commitment = expected_history_commitment.history_view_id != [0u8; 32]
+            && expected_history_commitment.history_commitment_id != [0u8; 32];
+        if require_history_commitment {
+            let supplied = supplied_history_commitment
+                .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+            if supplied != expected_history_commitment {
+                return Err(CityGError::Acceptance(
+                    msphf_orchestrator::AcceptanceError::Freeze(
+                        msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE,
+                    ),
+                ));
+            }
+        }
         ensure_distinct_active_cover_leaf_indices(state_before)?;
         ensure_join_cover_leaf_indices_available(state_before, delta.joined.as_slice())?;
         let active_leaves: BTreeSet<[u8; 32]> = state_before
@@ -4334,6 +4405,17 @@ mod tests {
         token
     }
 
+    fn install_current_history_commitment_header(
+        header: &mut BTreeMap<u64, Value>,
+        commitment: super::HistoryCommitment,
+    ) -> Result<(), CityGError> {
+        header.insert(
+            hdr::HDR_BARRIER_HISTORY_COMMITMENT,
+            Value::Bytes(super::encode_barrier_history_commitment_header(commitment)?),
+        );
+        Ok(())
+    }
+
     struct GeneratedMemberBundle {
         bundle: ClientEpochBundle,
         leaf_id: [u8; 32],
@@ -4886,6 +4968,12 @@ mod tests {
         header.insert(
             hdr::HDR_BARRIER_UPDATE_REASON,
             Value::Integer(Integer::from(barrier_update_reason)),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_HISTORY_COMMITMENT,
+            Value::Bytes(encode_barrier_history_commitment_header(
+                server.current_history_commitment(&gid)?,
+            )?),
         );
 
         let parts = AnchorInstanceParts {
@@ -5801,6 +5889,60 @@ mod tests {
             header_hp_commit, bundle.hp_binding.hp_commit,
             "join_finalize bundle must remain self-consistent on hp_commit before acceptance"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn accept_epoch_rejects_barrier_update_missing_history_commitment_header()
+    -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x75)?;
+        let mut server = super::demo::demo_server();
+        server.accept_epoch(&generated.bundle)?;
+
+        let (mut bundle, _pristine_bundle) =
+            build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+        bundle
+            .header_map
+            .remove(&hdr::HDR_BARRIER_HISTORY_COMMITMENT);
+
+        let err = server
+            .accept_epoch(&bundle)
+            .expect_err("missing barrier history commitment header must fail closed");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("barrier_update malformed")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn accept_epoch_rejects_barrier_update_mismatched_history_commitment_header()
+    -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x76)?;
+        let mut server = super::demo::demo_server();
+        server.accept_epoch(&generated.bundle)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let current = server.current_history_commitment(&gid)?;
+        let mut wrong = current;
+        wrong.history_commitment_id = [0xA5; 32];
+        wrong.prev_history_commitment_id = current.history_commitment_id;
+        wrong.history_seq = current.history_seq.saturating_add(1);
+
+        let (mut bundle, _pristine_bundle) =
+            build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+        install_current_history_commitment_header(&mut bundle.header_map, wrong)?;
+
+        let err = server
+            .accept_epoch(&bundle)
+            .expect_err("mismatched barrier history commitment header must fail auth");
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.code
+                    && freeze.reason
+                        == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.reason
+        ));
         Ok(())
     }
 

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use cityg_api_client::{BarrierJoinRecord, HistoryCommitment};
-use msphf_core::hash::h_l;
+use msphf_core::{hash::h_l, serde_utils::to_cbor_vec};
 use rand::{RngExt, rng};
 use serde::Serialize;
 
@@ -107,6 +107,24 @@ pub fn require_current_state_history_commitment(
     require_same_history_commitment(snapshot, joins)?;
     require_same_history_commitment(snapshot, revoked)?;
     Ok(())
+}
+
+#[derive(Serialize)]
+struct BarrierHistoryCommitmentHeader<'a>(
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    u64,
+);
+
+pub fn encode_history_commitment_header(commitment: &HistoryCommitment) -> Result<Vec<u8>> {
+    to_cbor_vec(&BarrierHistoryCommitmentHeader(
+        &commitment.history_view_id,
+        &commitment.history_commitment_id,
+        &commitment.prev_history_commitment_id,
+        commitment.history_seq,
+    ))
+    .map_err(|err| anyhow!("encode barrier history commitment header: {err}"))
 }
 
 pub fn validate_barrier_n_max(n_max: u64) -> Result<u64> {
@@ -364,5 +382,24 @@ mod tests {
 
         require_current_state_history_commitment(&current, &current, &current)
             .expect("one authenticated current-state commitment must pass");
+    }
+
+    #[test]
+    fn encode_history_commitment_header_roundtrips_expected_tuple_shape() {
+        let current = HistoryCommitment {
+            history_view_id: [0xC1; 32],
+            history_commitment_id: [0xD1; 32],
+            prev_history_commitment_id: [0xE1; 32],
+            history_seq: 11,
+        };
+
+        let encoded = encode_history_commitment_header(&current)
+            .expect("history commitment header must encode deterministically");
+        let decoded: (Vec<u8>, Vec<u8>, Vec<u8>, u64) =
+            ciborium::from_reader(encoded.as_slice()).expect("header must decode");
+        assert_eq!(decoded.0, current.history_view_id);
+        assert_eq!(decoded.1, current.history_commitment_id);
+        assert_eq!(decoded.2, current.prev_history_commitment_id);
+        assert_eq!(decoded.3, current.history_seq);
     }
 }

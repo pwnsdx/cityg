@@ -246,3 +246,15 @@ Nouvelle passe spec + implémentation:
 - **Toujours ouvert**: cette passe ferme une faiblesse locale de composition côté client, mais ne donne toujours pas de preuve de complétude forte ni de canonité globale byzantine.
 
 Statut audit: **COMPLETED**, avec remédiation implémentation supplémentaire sur la cohérence `snapshot / joins / revoked`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 10)
+
+Nouvelle passe spec + implémentation:
+
+- **Binding history explicite sur le wire**: les merges portant `barrier_update` incluent maintenant un header dédié qui sérialise le `HistoryCommitment` courant utilisé lors de la composition `snapshot / JoinSet / RevokedLeafSet`.
+- **Vérification croisée côté serveur**: le serveur ne se contente plus de vérifier la cohérence locale de `snapshot_pre`; il exige aussi que le client déclare le même commitment courant que celui du serveur avant d’accepter la merge.
+- **Toujours ouvert**: ce renfort reste local à un serveur/API donné; il ne donne ni complétude forte, ni canonité append-only globale inter-serveurs.
+
+Statut audit: **COMPLETED**, avec renforcement supplémentaire du binding history wire-visible.

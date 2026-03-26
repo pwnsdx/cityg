@@ -375,6 +375,7 @@ S4.2.3 Keys PERMITTED only on MERGE anchors and FORBIDDEN on JOIN/REGULAR (merge
 Key 175: barrier_update (bstr; optional; only when permitted by S10.4, S10.4A, S10.4B, S10.4C, and S11)
 Key 178: barrier_update_reason (uint; required iff key 175 is present)
 Key 179: join_finalize_auth (bstr32; required iff key 178 == 2; opaque server-issued capability for reason-2 join_finalize)
+Key 180: barrier_history_commitment (bstr; required iff key 175 is present; CBOR_det(HistoryCommitment) for the authenticated current-state snapshot_base/A/B view used to construct the barrier_update)
 
 S4.2.4 Merge/checkpoint keys (merge-only set)
 130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148
@@ -397,6 +398,7 @@ S4.3 Presence matrix summary (normative)
 Additional presence rule (normative):
 * key 178 MUST be present if and only if key 175 is present.
 * key 179 MUST be present if and only if key 178 == 2; it MUST be absent for merge reasons 0/1 and on all non-MERGE anchors.
+* key 180 MUST be present if and only if key 175 is present; it MUST be absent on anchors without barrier_update.
 
 S4.4 Size limits (normative; deployments MAY tighten)
 Max bytes per header field (unless otherwise specified by type):
@@ -1100,6 +1102,7 @@ Before constructing any barrier_update, the updater MUST:
   * fetch pk_entries_prev := FetchBarrierPublicTree(H_prev).
   * Compute TreeHash(root_node) over pk_entries_prev per S11.4 and require it equals H_prev.
   * Because this updater flow uses the locally stored current committed tree as `snapshot_base`, the authenticated `HistoryCommitment` returned with `pk_entries_prev` MUST equal the authenticated current-state `HistoryCommitment` used for `ResolveJoinsSince(...)` and `ResolveRevokedLeaves(...)`; mismatch -> 960.9.
+  * The emitted MERGE anchor MUST carry that exact current-state `HistoryCommitment` as `header[180]`.
   * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
 Join-finalize bootstrap exception (normative):
 * A newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if, it has:
@@ -1150,6 +1153,7 @@ Additional restriction (normative):
 * A recover-only client MUST NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges until it has obtained FULL verification of the current public tree at the current `barrier_version`.
 * Exception: a newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, after satisfying the S11.11.1 join_finalize bootstrap exception. Until then, and for all other reasons, the restriction above remains absolute.
 * A client originating reason 2 MUST carry the exact provisioned `header[179] join_finalize_auth` value from S12.2. Clients MUST NOT reuse a cleared or zero value.
+* Any client originating a `barrier_update`, including reason 2 under the bootstrap exception, MUST carry `header[180]` equal to the authenticated current-state `HistoryCommitment` used for the A/B/current-snapshot checks that justified origination.
 
 S11.12 Server-side validation of barrier_update (normative; MUST)
 
@@ -1161,6 +1165,7 @@ A) Gating
 * If header[178] is present and header[178] is not in {0,1,2}: reject 960.7.
 * If header[178] == 2 and header[179] is absent or not exactly 32 bytes: reject 960.1.
 * If header[178] != 2 and header[179] is present: reject 960.7.
+* If header[180] is absent, not a bstr, or not valid CBOR_det(HistoryCommitment): reject 960.7.
 * If barrier_initialized == true and pending_revocations == false and header[178] == 0: reject 960.5 barrier_proactive_forbidden.
 * If barrier_initialized == true and pending_revocations == true and header[178] != 0: reject 960.13.
 * If header[178] == 1, later steps MUST enforce S10.4B.
@@ -1198,6 +1203,7 @@ F) Updater identity binding + updater-not-revoked
 * Let JoinSet := ResolveJoinsSince(BU.prev_barrier_version).
 * Let JoinLeafSet := the set of `leaf_index` values carried by JoinSet.
 * The server MUST evaluate `RevokedLeafSet`, `JoinSet`, and the `snapshot_base` used below against one common authenticated `HistoryCommitment`; inability to establish a single common commitment -> reject 960.9.
+* The server MUST require `header[180]` to equal that same authenticated current-state `HistoryCommitment`; mismatch -> reject 960.9.
 * If header[178] == 1:
   * Require updater_leaf NOT IN JoinLeafSet, else reject 960.5.
   * Server MUST enforce S10.4B policy checks; on failure reject 960.12.

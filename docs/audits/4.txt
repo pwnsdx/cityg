@@ -266,3 +266,17 @@ Nouvelle passe spec + implémentation:
 Conclusion:
 
 Le cœur protocolaire de l’audit 4 reste **ouvert**, mais l’implémentation et la spec sont maintenant plus cohérentes sur ce qu’un client FULL doit réellement comparer avant d’émettre ou d’accepter un `barrier_update`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 10)
+
+Nouvelle passe spec + implémentation:
+
+- **Contrainte wire-visible supplémentaire**: tout `barrier_update` transporte maintenant un `header[180]` qui encode le `HistoryCommitment` courant utilisé côté client pour construire `snapshot_base` et composer A/B.
+- **Vérification serveur locale**: sur le live path d’acceptation, le serveur force désormais l’existence d’un `HistoryCommitment` courant local avant validation et rejette tout `barrier_update` dont `header[180]` manque ou ne correspond pas exactement à cet état courant.
+- **Portée réelle**: cela ne prouve toujours pas qu’un client a exécuté toute la FULL verification, mais cela transforme une partie de ce contexte en assertion wire-visible et server-checkable au lieu de rester purement implicite côté client.
+
+Conclusion:
+
+L’audit 4 est **encore partiellement ouvert**, mais la frontière `reason 0/1` n’est plus totalement honnête-client-only: le serveur exige maintenant au moins le binding explicite au `HistoryCommitment` courant.

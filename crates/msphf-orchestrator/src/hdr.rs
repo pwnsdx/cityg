@@ -42,6 +42,7 @@ pub const HDR_BARRIER_VERSION: u64 = 176;
 pub const HDR_BARRIER_LEAF_PK: u64 = 177;
 pub const HDR_BARRIER_UPDATE_REASON: u64 = 178;
 pub const HDR_JOIN_FINALIZE_AUTH: u64 = 179;
+pub const HDR_BARRIER_HISTORY_COMMITMENT: u64 = 180;
 pub const HDR_POLICY_VERSION: u64 = 140; // legacy policy version field (pre-FS profiles)
 pub const HDR_FS_POLICY_VERSION: u64 = 139;
 pub const HDR_FS_EC: u64 = 141;
@@ -110,6 +111,7 @@ mod tests {
             HDR_BARRIER_LEAF_PK,
             HDR_BARRIER_UPDATE_REASON,
             HDR_JOIN_FINALIZE_AUTH,
+            HDR_BARRIER_HISTORY_COMMITMENT,
             HDR_POLICY_VERSION,
             HDR_FS_POLICY_VERSION,
             HDR_FS_EC,

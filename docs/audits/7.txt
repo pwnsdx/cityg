@@ -253,3 +253,15 @@ Nouvelle passe spec + implémentation:
 - **Toujours ouvert**: on reste sur une garantie locale à une vue/API donnée; cette tranche n’apporte pas encore de canonité append-only globale ni de preuve de complétude forte inter-serveurs.
 
 Statut audit: **COMPLETED**, avec durcissement supplémentaire tangible sur la boundary “current snapshot vs membership/history”.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 10)
+
+Nouvelle passe spec + implémentation:
+
+- **Moins de latitude pour un serveur actif local**: un serveur ne peut plus recevoir un `barrier_update` fabriqué sur une vue history implicite non déclarée; le client doit maintenant annoncer explicitement le `HistoryCommitment` courant qu’il prétend avoir utilisé.
+- **Effet pratique**: cela réduit un cran de plus le steering local, car le serveur force désormais l’égalité entre la vue courante qu’il publie et celle que le client déclare avoir utilisée pour le check `snapshot_base`.
+- **Limite inchangée**: cette passe ne crée pas de canonité append-only globale ni de preuve de complétude forte contre un ensemble de serveurs byzantins.
+
+Statut audit: **COMPLETED**, avec durcissement supplémentaire de la boundary “client-declared history context”.

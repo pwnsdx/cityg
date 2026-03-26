@@ -1,6 +1,8 @@
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
-use crate::barrier_shared::require_current_state_history_commitment;
+use crate::barrier_shared::{
+    encode_history_commitment_header, require_current_state_history_commitment,
+};
 
 fn is_fs_forward_jump_group_http_error(
     freeze_code: Option<u32>,
@@ -373,6 +375,12 @@ async fn publish_revocation_merge_from_ticket(
         ));
     }
     validate_barrier_tree_snapshot_auth(&snapshot_hash, barrier_n_max, &barrier_tree_snapshot)?;
+    header.insert(
+        hdr::HDR_BARRIER_HISTORY_COMMITMENT,
+        Value::Bytes(encode_history_commitment_header(
+            &barrier_tree_response.history_commitment,
+        )?),
+    );
     let join_resolution = client
         .barrier_resolve_joins_since(&room_id, barrier_version)
         .await
@@ -933,6 +941,12 @@ async fn perform_barrier_merge_inner(
         ));
     }
     validate_barrier_tree_snapshot_auth(&snapshot_hash, barrier_n_max, &barrier_tree_snapshot)?;
+    header.insert(
+        hdr::HDR_BARRIER_HISTORY_COMMITMENT,
+        Value::Bytes(encode_history_commitment_header(
+            &barrier_tree_response.history_commitment,
+        )?),
+    );
     let join_resolution = client
         .barrier_resolve_joins_since(&room_id, barrier_version)
         .await
