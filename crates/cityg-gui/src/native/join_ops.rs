@@ -208,6 +208,45 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     };
     let fs_epoch_base_ts = ticket.fs_epoch_base_ts;
     let kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
+    let current_predecessor_kem_tree_hash_after = if ticket
+        .current_predecessor_kem_tree_hash_after
+        .is_empty()
+    {
+        [0u8; 32]
+    } else {
+        bytes32(
+            "current_predecessor_kem_tree_hash_after",
+            &ticket.current_predecessor_kem_tree_hash_after,
+        )?
+    };
+    let current_history_commitment = ticket
+        .current_history_commitment
+        .clone()
+        .map(|commitment| -> Result<HistoryCommitment> {
+            let history_view_id = bytes32("current_history_view_id", &commitment.history_view_id)?;
+            let expected_view_id = bytes32(
+                "current_history_view_id",
+                &ticket.current_history_view_id,
+            )?;
+            if history_view_id != expected_view_id {
+                return Err(anyhow!(
+                    "join ticket current_history_commitment.history_view_id mismatch"
+                ));
+            }
+            Ok(HistoryCommitment {
+                history_view_id,
+                history_commitment_id: bytes32(
+                    "current_history_commitment_id",
+                    &commitment.history_commitment_id,
+                )?,
+                prev_history_commitment_id: bytes32(
+                    "current_history_commitment.prev_history_commitment_id",
+                    &commitment.prev_history_commitment_id,
+                )?,
+                history_seq: commitment.history_seq,
+            })
+        })
+        .transpose()?;
     let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
@@ -278,7 +317,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         .context("failed to build join anchor")
     };
 
-    let mut pristine_fs_state = fs_state.clone();
+    let pristine_fs_state = fs_state.clone();
     let mut bundle = build_join_bundle(&mut fs_state, false)?;
 
     let capss_witness_bytes = encode_capss_witness(&bundle.capss_witness)?;
@@ -390,8 +429,21 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 "current_history_view_id",
                 &ticket.current_history_view_id,
             )?,
+            bootstrap_history_commitment: current_history_commitment,
+            bootstrap_predecessor_kem_tree_hash_after: current_predecessor_kem_tree_hash_after,
+            bootstrap_join_records: ticket
+                .current_join_records
+                .iter()
+                .map(|record| BarrierJoinRecord {
+                    device_pk: record.device_pk.clone(),
+                    leaf_index: record.leaf_index,
+                    ek_leaf: record.ek_leaf.clone(),
+                })
+                .collect(),
+            bootstrap_revoked_leaf_indices: ticket.current_revoked_leaf_indices.clone(),
             k_barrier: Zeroizing::new([0u8; 32]),
             kem_tree_hash_after,
+            bootstrap_current_barrier_update: ticket.current_barrier_update.clone(),
             max_barrier_update_bytes: ticket.max_barrier_update_bytes.max(1),
             n_max: barrier_n_max,
             cover_leaf_index: ticket.cover_leaf_index,

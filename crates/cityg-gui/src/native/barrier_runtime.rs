@@ -1,5 +1,13 @@
 use super::*;
 
+pub(super) fn clear_join_finalize_bootstrap_artifact(state: &mut BarrierSecretState) {
+    state.bootstrap_history_commitment = None;
+    state.bootstrap_predecessor_kem_tree_hash_after = [0u8; 32];
+    state.bootstrap_join_records.clear();
+    state.bootstrap_revoked_leaf_indices.clear();
+    state.bootstrap_current_barrier_update.clear();
+}
+
 pub(super) fn try_recover_barrier_from_header_with_expected_before(
     session: &AppSession,
     header_map: &BTreeMap<u64, Value>,
@@ -65,6 +73,7 @@ pub(super) fn apply_recovered_barrier_state(
     session.barrier_state.barrier_recovery_pending = false;
     session.barrier_state.barrier_recovery_issue = None;
     session.barrier_state.current_barrier_full_verified = current_barrier_full_verified;
+    clear_join_finalize_bootstrap_artifact(&mut session.barrier_state);
     Ok(())
 }
 
@@ -549,6 +558,7 @@ pub(super) fn apply_pending_barrier_activation(
         session.barrier_state.barrier_recovery_pending = false;
         session.barrier_state.barrier_recovery_issue = None;
         session.barrier_state.current_barrier_full_verified = true;
+        clear_join_finalize_bootstrap_artifact(&mut session.barrier_state);
         return Ok(true);
     }
 

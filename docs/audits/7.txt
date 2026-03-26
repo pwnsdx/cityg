@@ -214,3 +214,15 @@ Nouvelle passe spec + implémentation:
 - **Toujours ouvert**: ce durcissement améliore le boundary contre un serveur actif unique, mais ne constitue toujours pas une preuve de canonité append-only globale ni de complétude forte inter-serveurs.
 
 Statut audit: **COMPLETED**, avec remédiation supplémentaire concrète sur la boundary history locale.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 6)
+
+Nouvelle passe implémentation:
+
+- **Boundary serveur actif / provisioning renforcée**: le bootstrap `join_finalize` n’utilise plus les endpoints A/B “courants” après l’acceptation du JOIN local pour ré-authentifier un état provisionné plus ancien; il s’appuie sur un artefact provisionné explicite et persistant.
+- **Moins de latitude au serveur**: un serveur ne peut plus faire dériver silencieusement le joiner vers une vue join/revoked plus récente et invalider le bootstrap de l’état provisionné sans que le client détecte l’absence de l’artefact requis.
+- **Toujours ouvert**: on reste sur une boundary locale à un serveur/API donné; la canonité append-only globale et la complétude forte inter-serveurs ne sont toujours pas closes.
+
+Statut audit: **COMPLETED**, avec durcissement supplémentaire du boundary “join provisioning / bootstrap history”.

@@ -966,6 +966,45 @@ impl CitygApiClient {
             self.post_proto("/v1/rooms/join_ticket", request).await?;
         ensure_profile_version(&response.profile_version)?;
         let n_max = validate_barrier_n_max(response.n_max)?;
+        let current_history_view_id = array32(&response.current_history_view_id)?;
+        let parent_root = if response.parent_root.is_empty() {
+            [0u8; 32]
+        } else {
+            array32(&response.parent_root)?
+        };
+        let current_history_commitment = response
+            .current_history_commitment
+            .clone()
+            .map(|commitment| parse_history_commitment(current_history_view_id, Some(commitment)))
+            .transpose()?;
+        let current_predecessor_kem_tree_hash_after = if response
+            .current_predecessor_kem_tree_hash_after
+            .is_empty()
+        {
+            [0u8; 32]
+        } else {
+            array32(&response.current_predecessor_kem_tree_hash_after)?
+        };
+        let requires_bootstrap_artifact = response.barrier_version > 0 || parent_root != [0u8; 32];
+        if requires_bootstrap_artifact {
+            if current_history_commitment.is_none() {
+                return Err(Error::Parse(
+                    "join ticket missing current_history_commitment for existing group"
+                        .to_string(),
+                ));
+            }
+            if response.current_barrier_update.is_empty() {
+                return Err(Error::Parse(
+                    "join ticket missing current_barrier_update for existing group".to_string(),
+                ));
+            }
+            if current_predecessor_kem_tree_hash_after == [0u8; 32] {
+                return Err(Error::Parse(
+                    "join ticket missing current_predecessor_kem_tree_hash_after for existing group"
+                        .to_string(),
+                ));
+            }
+        }
         if response.cover_leaf_index >= n_max {
             return Err(Error::Parse(format!(
                 "join ticket cover_leaf_index out of range: {} >= {}",
@@ -1950,6 +1989,7 @@ mod tests {
         JoinTicketResponse {
             profile_version: EXPECTED_PROFILE_VERSION.to_string(),
             current_history_view_id: vec![0xD0; 32],
+            current_history_commitment: Some(history_commitment_ok_payload(0xD0, 0xD1, 0x00, 1)),
             cover_leaf_index: 0,
             n_max: 1024,
             max_barrier_update_bytes: 1_048_576,
@@ -2529,6 +2569,133 @@ mod tests {
         let _ = client.telemetry().await?;
         let _ = client.configure_window(Some(8), Some(120_000)).await?;
 
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_existing_group_without_current_barrier_update()
+    -> Result<(), Box<dyn StdError>> {
+        async fn mock_existing_group_without_barrier_update() -> impl IntoResponse {
+            encode_proto(JoinTicketResponse {
+                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                parent_root: vec![0x11; 32],
+                barrier_version: 2,
+                current_history_view_id: vec![0xD0; 32],
+                current_history_commitment: Some(history_commitment_ok_payload(0xD0, 0xD1, 0x00, 1)),
+                cover_leaf_index: 0,
+                n_max: 1024,
+                max_barrier_update_bytes: 1_048_576,
+                ..JoinTicketResponse::default()
+            })
+        }
+
+        let app = Router::new()
+            .route("/health", get(mock_health))
+            .route(
+                "/v1/rooms/join_ticket",
+                post(mock_existing_group_without_barrier_update),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("missing current barrier update must fail closed for existing group");
+        assert!(
+            err.to_string()
+                .contains("join ticket missing current_barrier_update"),
+            "unexpected error: {err}"
+        );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_existing_group_without_current_history_commitment()
+    -> Result<(), Box<dyn StdError>> {
+        async fn mock_existing_group_without_commitment() -> impl IntoResponse {
+            encode_proto(JoinTicketResponse {
+                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                parent_root: vec![0x11; 32],
+                barrier_version: 2,
+                current_history_view_id: vec![0xD0; 32],
+                cover_leaf_index: 0,
+                n_max: 1024,
+                max_barrier_update_bytes: 1_048_576,
+                current_barrier_update: vec![0xAA],
+                ..JoinTicketResponse::default()
+            })
+        }
+
+        let app = Router::new()
+            .route("/health", get(mock_health))
+            .route("/v1/rooms/join_ticket", post(mock_existing_group_without_commitment));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("missing current history commitment must fail closed");
+        assert!(
+            err.to_string()
+                .contains("join ticket missing current_history_commitment"),
+            "unexpected error: {err}"
+        );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_existing_group_without_predecessor_hash()
+    -> Result<(), Box<dyn StdError>> {
+        async fn mock_existing_group_without_predecessor_hash() -> impl IntoResponse {
+            encode_proto(JoinTicketResponse {
+                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                parent_root: vec![0x11; 32],
+                barrier_version: 2,
+                current_history_view_id: vec![0xD0; 32],
+                current_history_commitment: Some(history_commitment_ok_payload(0xD0, 0xD1, 0x00, 1)),
+                cover_leaf_index: 0,
+                n_max: 1024,
+                max_barrier_update_bytes: 1_048_576,
+                current_barrier_update: vec![0xAA],
+                ..JoinTicketResponse::default()
+            })
+        }
+
+        let app = Router::new()
+            .route("/health", get(mock_health))
+            .route(
+                "/v1/rooms/join_ticket",
+                post(mock_existing_group_without_predecessor_hash),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("missing predecessor hash must fail closed");
+        assert!(
+            err.to_string()
+                .contains("join ticket missing current_predecessor_kem_tree_hash_after"),
+            "unexpected error: {err}"
+        );
         handle.abort();
         Ok(())
     }

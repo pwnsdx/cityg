@@ -5522,8 +5522,22 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         barrier_version: 5,
         barrier_roots_hash: array(0x20),
         current_history_view_id: array(0x24),
+        bootstrap_history_commitment: Some(HistoryCommitment {
+            history_view_id: array(0x24),
+            history_commitment_id: array(0x31),
+            prev_history_commitment_id: array(0x32),
+            history_seq: 5,
+        }),
+        bootstrap_predecessor_kem_tree_hash_after: array(0x33),
+        bootstrap_join_records: vec![BarrierJoinRecord {
+            device_pk: vec![0x41; 32],
+            leaf_index: 3,
+            ek_leaf: vec![0x42; kyber768::public_key_bytes()],
+        }],
+        bootstrap_revoked_leaf_indices: vec![1, 2],
         k_barrier: Zeroizing::new(array(0x21)),
         kem_tree_hash_after: array(0x22),
+        bootstrap_current_barrier_update: vec![0xAB, 0xCD],
         max_barrier_update_bytes: DEFAULT_MAX_BARRIER_UPDATE_BYTES,
         n_max: 8,
         cover_leaf_index: 3,
@@ -5684,6 +5698,26 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         loaded.barrier_state.current_barrier_full_verified,
         session.barrier_state.current_barrier_full_verified
+    );
+    assert_eq!(
+        loaded.barrier_state.bootstrap_history_commitment,
+        session.barrier_state.bootstrap_history_commitment
+    );
+    assert_eq!(
+        loaded.barrier_state.bootstrap_predecessor_kem_tree_hash_after,
+        session.barrier_state.bootstrap_predecessor_kem_tree_hash_after
+    );
+    assert_eq!(
+        loaded.barrier_state.bootstrap_current_barrier_update,
+        session.barrier_state.bootstrap_current_barrier_update
+    );
+    assert_eq!(
+        loaded.barrier_state.bootstrap_join_records,
+        session.barrier_state.bootstrap_join_records
+    );
+    assert_eq!(
+        loaded.barrier_state.bootstrap_revoked_leaf_indices,
+        session.barrier_state.bootstrap_revoked_leaf_indices
     );
     assert_eq!(loaded.barrier_state.dk_leaf, session.barrier_state.dk_leaf);
     assert_eq!(
@@ -8078,6 +8112,38 @@ async fn perform_pcs_refresh_rejects_without_full_barrier_verification()
 }
 
 #[tokio::test]
+async fn perform_join_finalize_rejects_pending_session_without_bootstrap_artifact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let _override_guard = set_config_dir_override_for_tests(Some(temp_dir.path().to_path_buf()));
+    let mut session = build_test_session(
+        0xC35,
+        "http://127.0.0.1:9",
+        "room-join-finalize-bootstrap-guard",
+        "alice",
+    )?;
+    session.parent_root = [0x44; 32];
+    session.barrier_state.barrier_version = 3;
+    session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.current_barrier_full_verified = false;
+    session.barrier_state.bootstrap_history_commitment = None;
+    session.barrier_state.bootstrap_current_barrier_update.clear();
+    persist_session(&session)?;
+
+    let err = match perform_join_finalize_inner(LeaveRequest::from_session(&session)).await {
+        Ok(_) => {
+            return Err("pending join_finalize must fail closed without bootstrap artifact".into())
+        }
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("bootstrap missing"),
+        "expected explicit bootstrap-artifact guidance: {err}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn perform_join_bootstraps_unprovisioned_room() -> Result<(), Box<dyn std::error::Error>> {
     let _env_lock = ENV_VAR_LOCK
         .lock()
@@ -8276,6 +8342,15 @@ async fn perform_join_second_member_can_send_immediately() -> Result<(), Box<dyn
     assert!(
         !bob.barrier_state.barrier_recovery_pending,
         "second join should self-finalize without waiting for another client"
+    );
+    assert!(
+        bob.barrier_state.current_barrier_full_verified,
+        "second join should bootstrap FULL public-state verification before join_finalize"
+    );
+    assert!(
+        bob.barrier_state.bootstrap_current_barrier_update.is_empty()
+            && bob.barrier_state.bootstrap_history_commitment.is_none(),
+        "post-finalize session should clear bootstrap provisioning artifact"
     );
     assert!(
         bob.barrier_state.barrier_version >= alice.barrier_state.barrier_version,
@@ -8666,6 +8741,18 @@ async fn perform_join_existing_room_can_self_finalize_without_room_secret()
     assert!(
         !bob.barrier_state.barrier_recovery_pending,
         "second join should self-finalize without a shared room secret"
+    );
+    assert!(
+        bob.barrier_state.current_barrier_full_verified,
+        "existing-room join should bootstrap FULL public-state verification before join_finalize"
+    );
+    assert!(
+        bob.barrier_state.bootstrap_current_barrier_update.is_empty()
+            && bob.barrier_state.bootstrap_history_commitment.is_none()
+            && bob.barrier_state.bootstrap_predecessor_kem_tree_hash_after == [0u8; 32]
+            && bob.barrier_state.bootstrap_join_records.is_empty()
+            && bob.barrier_state.bootstrap_revoked_leaf_indices.is_empty(),
+        "post-finalize session should clear bootstrap provisioning artifacts"
     );
     assert!(
         bob.barrier_state.barrier_version >= alice.barrier_state.barrier_version,

@@ -20,9 +20,20 @@ pub(in crate::native) struct PersistedBarrierState {
     #[serde(default)]
     pub(in crate::native) current_history_view_id_hex: String,
     #[serde(default)]
+    pub(in crate::native) bootstrap_history_commitment:
+        Option<PersistedBarrierHistoryCommitment>,
+    #[serde(default)]
+    pub(in crate::native) bootstrap_predecessor_kem_tree_hash_after_hex: String,
+    #[serde(default)]
+    pub(in crate::native) bootstrap_join_records: Vec<PersistedBarrierJoinRecord>,
+    #[serde(default)]
+    pub(in crate::native) bootstrap_revoked_leaf_indices: Vec<u32>,
+    #[serde(default)]
     pub(in crate::native) k_barrier_hex: String,
     #[serde(default)]
     pub(in crate::native) kem_tree_hash_after_hex: String,
+    #[serde(default)]
+    pub(in crate::native) bootstrap_current_barrier_update_hex: String,
     #[serde(default = "super::default_max_barrier_update_bytes")]
     pub(in crate::native) max_barrier_update_bytes: u64,
     #[serde(default = "super::default_barrier_n_max")]
@@ -51,6 +62,28 @@ pub(in crate::native) struct PersistedBarrierNodeKeyMaterial {
     pub(in crate::native) dk_hex: String,
     #[serde(default)]
     pub(in crate::native) pkhash_hex: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub(in crate::native) struct PersistedBarrierHistoryCommitment {
+    #[serde(default)]
+    pub(in crate::native) history_view_id_hex: String,
+    #[serde(default)]
+    pub(in crate::native) history_commitment_id_hex: String,
+    #[serde(default)]
+    pub(in crate::native) prev_history_commitment_id_hex: String,
+    #[serde(default)]
+    pub(in crate::native) history_seq: u64,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub(in crate::native) struct PersistedBarrierJoinRecord {
+    #[serde(default)]
+    pub(in crate::native) device_pk_hex: String,
+    #[serde(default)]
+    pub(in crate::native) leaf_index: u32,
+    #[serde(default)]
+    pub(in crate::native) ek_leaf_hex: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -100,6 +133,59 @@ impl PersistedBarrierNodeKeyMaterial {
         Ok(BarrierNodeKeyMaterial {
             dk: Zeroizing::new(dk),
             pkhash,
+        })
+    }
+}
+
+impl PersistedBarrierHistoryCommitment {
+    pub(in crate::native) fn from_runtime(commitment: HistoryCommitment) -> Self {
+        Self {
+            history_view_id_hex: hex_encode(commitment.history_view_id),
+            history_commitment_id_hex: hex_encode(commitment.history_commitment_id),
+            prev_history_commitment_id_hex: hex_encode(commitment.prev_history_commitment_id),
+            history_seq: commitment.history_seq,
+        }
+    }
+
+    pub(in crate::native) fn into_runtime(self) -> Result<HistoryCommitment> {
+        Ok(HistoryCommitment {
+            history_view_id: decode_hex32_or_zero(
+                "barrier_state.bootstrap_history_commitment.history_view_id_hex",
+                &self.history_view_id_hex,
+            )?,
+            history_commitment_id: decode_hex32_or_zero(
+                "barrier_state.bootstrap_history_commitment.history_commitment_id_hex",
+                &self.history_commitment_id_hex,
+            )?,
+            prev_history_commitment_id: decode_hex32_or_zero(
+                "barrier_state.bootstrap_history_commitment.prev_history_commitment_id_hex",
+                &self.prev_history_commitment_id_hex,
+            )?,
+            history_seq: self.history_seq,
+        })
+    }
+}
+
+impl PersistedBarrierJoinRecord {
+    pub(in crate::native) fn from_runtime(record: &BarrierJoinRecord) -> Self {
+        Self {
+            device_pk_hex: hex_encode(record.device_pk.as_slice()),
+            leaf_index: record.leaf_index,
+            ek_leaf_hex: hex_encode(record.ek_leaf.as_slice()),
+        }
+    }
+
+    pub(in crate::native) fn into_runtime(self) -> Result<BarrierJoinRecord> {
+        Ok(BarrierJoinRecord {
+            device_pk: decode_hex_vec(
+                "barrier_state.bootstrap_join_records[].device_pk_hex",
+                &self.device_pk_hex,
+            )?,
+            leaf_index: self.leaf_index,
+            ek_leaf: decode_hex_vec(
+                "barrier_state.bootstrap_join_records[].ek_leaf_hex",
+                &self.ek_leaf_hex,
+            )?,
         })
     }
 }
@@ -212,8 +298,23 @@ impl PersistedBarrierState {
             barrier_version: state.barrier_version,
             barrier_roots_hash_hex: hex_encode(state.barrier_roots_hash),
             current_history_view_id_hex: hex_encode(state.current_history_view_id),
+            bootstrap_history_commitment: state
+                .bootstrap_history_commitment
+                .map(PersistedBarrierHistoryCommitment::from_runtime),
+            bootstrap_predecessor_kem_tree_hash_after_hex: hex_encode(
+                state.bootstrap_predecessor_kem_tree_hash_after,
+            ),
+            bootstrap_join_records: state
+                .bootstrap_join_records
+                .iter()
+                .map(PersistedBarrierJoinRecord::from_runtime)
+                .collect(),
+            bootstrap_revoked_leaf_indices: state.bootstrap_revoked_leaf_indices.clone(),
             k_barrier_hex: hex_encode(*state.k_barrier),
             kem_tree_hash_after_hex: hex_encode(state.kem_tree_hash_after),
+            bootstrap_current_barrier_update_hex: hex_encode(
+                state.bootstrap_current_barrier_update.as_slice(),
+            ),
             max_barrier_update_bytes: state.max_barrier_update_bytes,
             n_max: state.n_max.max(1),
             cover_leaf_index: state.cover_leaf_index,
@@ -249,6 +350,20 @@ impl PersistedBarrierState {
                 "barrier_state.current_history_view_id_hex",
                 &self.current_history_view_id_hex,
             )?,
+            bootstrap_history_commitment: self
+                .bootstrap_history_commitment
+                .map(PersistedBarrierHistoryCommitment::into_runtime)
+                .transpose()?,
+            bootstrap_predecessor_kem_tree_hash_after: decode_hex32_or_zero(
+                "barrier_state.bootstrap_predecessor_kem_tree_hash_after_hex",
+                &self.bootstrap_predecessor_kem_tree_hash_after_hex,
+            )?,
+            bootstrap_join_records: self
+                .bootstrap_join_records
+                .into_iter()
+                .map(PersistedBarrierJoinRecord::into_runtime)
+                .collect::<Result<Vec<_>>>()?,
+            bootstrap_revoked_leaf_indices: self.bootstrap_revoked_leaf_indices,
             k_barrier: Zeroizing::new(decode_hex32_or_zero(
                 "barrier_state.k_barrier_hex",
                 &self.k_barrier_hex,
@@ -256,6 +371,10 @@ impl PersistedBarrierState {
             kem_tree_hash_after: decode_hex32_or_zero(
                 "barrier_state.kem_tree_hash_after_hex",
                 &self.kem_tree_hash_after_hex,
+            )?,
+            bootstrap_current_barrier_update: decode_hex_vec(
+                "barrier_state.bootstrap_current_barrier_update_hex",
+                &self.bootstrap_current_barrier_update_hex,
             )?,
             max_barrier_update_bytes: self.max_barrier_update_bytes,
             n_max: self.n_max.max(1),

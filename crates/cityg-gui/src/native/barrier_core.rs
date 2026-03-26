@@ -426,18 +426,13 @@ pub(super) async fn full_chain_check_barrier_update(
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
     if require_same_history_commitment(
-        &snapshot_prev_response.history_commitment,
         &join_resolution.history_commitment,
+        &revoked_resolution.history_commitment,
     )
     .is_err()
-        || require_same_history_commitment(
-            &snapshot_prev_response.history_commitment,
-            &revoked_resolution.history_commitment,
-        )
-        .is_err()
     {
         return Err(anyhow!(
-            "barrier full chain-check prevalidation failed (960.9): public tree / joins / revoked leaves do not share one authenticated history commitment"
+            "barrier full chain-check prevalidation failed (960.9): joins / revoked leaves do not share one authenticated current-state history commitment"
         ));
     }
 
@@ -504,6 +499,152 @@ pub(super) async fn full_chain_check_barrier_update(
     }
 
     Ok(expected_before)
+}
+
+pub(super) async fn verify_join_finalize_bootstrap_current_state(
+    client: &CitygApiClient,
+    room_id: &str,
+    session: &AppSession,
+) -> Result<()> {
+    let expected_commitment = session
+        .barrier_state
+        .bootstrap_history_commitment
+        .ok_or_else(|| anyhow!("join_finalize bootstrap missing current_history_commitment"))?;
+    let predecessor_hash = session
+        .barrier_state
+        .bootstrap_predecessor_kem_tree_hash_after;
+    if expected_commitment.history_view_id != session.barrier_state.current_history_view_id {
+        return Err(anyhow!(
+            "join_finalize bootstrap current_history_view_id mismatch"
+        ));
+    }
+    if predecessor_hash == [0u8; 32] {
+        return Err(anyhow!(
+            "join_finalize bootstrap missing predecessor committed kem_tree_hash_after"
+        ));
+    }
+    if session
+        .barrier_state
+        .bootstrap_current_barrier_update
+        .is_empty()
+    {
+        return Err(anyhow!(
+            "join_finalize bootstrap missing current barrier_update bytes"
+        ));
+    }
+
+    let n_max = session.barrier_state.n_max.max(1);
+    let max_barrier_update_bytes =
+        normalize_max_barrier_update_bytes(session.barrier_state.max_barrier_update_bytes.max(1))?;
+    let parsed = parse_barrier_update_for_recover(
+        session.barrier_state.bootstrap_current_barrier_update.as_slice(),
+        n_max,
+        max_barrier_update_bytes,
+    )
+    .map_err(|err| anyhow!("join_finalize bootstrap verification failed (960.7): {err}"))?;
+
+    if parsed.barrier_version != session.barrier_state.barrier_version {
+        return Err(anyhow!(
+            "join_finalize bootstrap verification failed (960.7): current barrier_version mismatch"
+        ));
+    }
+    if parsed.kem_tree_hash_after != session.barrier_state.kem_tree_hash_after {
+        return Err(anyhow!(
+            "join_finalize bootstrap verification failed (960.7): current kem_tree_hash_after mismatch"
+        ));
+    }
+
+    let current_snapshot_response = client
+        .barrier_fetch_public_tree(room_id, &session.barrier_state.kem_tree_hash_after)
+        .await
+        .map_err(|err| anyhow!("join_finalize bootstrap snapshot auth failure (960.9): {err}"))?;
+    if current_snapshot_response.tree.n_max != n_max {
+        return Err(anyhow!(
+            "join_finalize bootstrap snapshot auth failure (960.9): current n_max mismatch"
+        ));
+    }
+    validate_barrier_tree_snapshot_auth(
+        &session.barrier_state.kem_tree_hash_after,
+        n_max,
+        &current_snapshot_response.tree,
+    )?;
+    if current_snapshot_response.history_commitment != expected_commitment {
+        return Err(anyhow!(
+            "join_finalize bootstrap snapshot auth failure (960.9): current public tree did not validate to provisioned current HistoryCommitment"
+        ));
+    }
+
+    let snapshot_base_response = client
+        .barrier_fetch_public_tree(room_id, &predecessor_hash)
+        .await
+        .map_err(|err| anyhow!("join_finalize bootstrap snapshot auth failure (960.9): {err}"))?;
+    if snapshot_base_response.tree.n_max != n_max {
+        return Err(anyhow!(
+            "join_finalize bootstrap snapshot auth failure (960.9): predecessor n_max mismatch"
+        ));
+    }
+    validate_barrier_tree_snapshot_auth(
+        &predecessor_hash,
+        n_max,
+        &snapshot_base_response.tree,
+    )?;
+
+    if session.barrier_state.bootstrap_join_records.is_empty()
+        && session.barrier_state.bootstrap_revoked_leaf_indices.is_empty()
+        && (parsed.prev_barrier_version != 0 || parsed.revocation_roots_hash != [0u8; 32])
+    {
+        return Err(anyhow!(
+            "join_finalize bootstrap missing authenticated JoinSet / RevokedLeafSet provisioning"
+        ));
+    }
+
+    let join_records = session.barrier_state.bootstrap_join_records.clone();
+    let revoked_leaf_indices = session.barrier_state.bootstrap_revoked_leaf_indices.clone();
+
+    let parsed_for_hash = parsed.clone();
+    let snapshot_base_entries = snapshot_base_response.tree.pk_entries.clone();
+    let (expected_before, expected_after) =
+        tokio::task::spawn_blocking(move || -> Result<([u8; 32], [u8; 32])> {
+            let mut snapshot_pre = snapshot_base_entries;
+            apply_join_set_to_snapshot(
+                snapshot_pre.as_mut_slice(),
+                n_max,
+                join_records.as_slice(),
+            )?;
+            apply_revoked_set_to_snapshot(
+                snapshot_pre.as_mut_slice(),
+                n_max,
+                revoked_leaf_indices.as_slice(),
+            )?;
+            let expected_before = compute_barrier_tree_hash(n_max, snapshot_pre.as_slice())?;
+
+            let mut snapshot_post = snapshot_pre;
+            for (node, ek) in &parsed_for_hash.new_public_keys {
+                let index = usize::try_from(*node)
+                    .map_err(|_| anyhow!("barrier node index out of range"))?;
+                let slot = snapshot_post
+                    .get_mut(index)
+                    .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+                *slot = ek.clone();
+            }
+            let expected_after = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
+            Ok((expected_before, expected_after))
+        })
+        .await
+        .map_err(|err| anyhow!("join_finalize bootstrap worker join failure (960.8): {err}"))??;
+
+    if expected_before != parsed.kem_tree_hash_before {
+        return Err(anyhow!(
+            "join_finalize bootstrap hash-chain failure (960.8): kem_tree_hash_before mismatch"
+        ));
+    }
+    if expected_after != parsed.kem_tree_hash_after {
+        return Err(anyhow!(
+            "join_finalize bootstrap hash-chain failure (960.8): kem_tree_hash_after mismatch"
+        ));
+    }
+
+    Ok(())
 }
 
 pub(super) fn self_path_nodes(n_max: u64, cover_leaf_index: u64) -> Vec<u64> {

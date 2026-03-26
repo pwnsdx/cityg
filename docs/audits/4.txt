@@ -224,3 +224,16 @@ Nouvelle passe implémentation:
 Conclusion:
 
 Le cœur protocolaire de l’audit 4 reste **inchangé**, mais l’implémentation client exprime maintenant plus correctement l’état “pas encore sûr de redevenir actif”.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 6)
+
+Nouvelle passe spec + implémentation:
+
+- **Join-finalize bootstrap réellement durci côté client**: le provisioning join embarque désormais l’update barrier courant accepté, le `HistoryCommitment` courant, le hash du snapshot committed prédécesseur, ainsi que le `JoinSet` / `RevokedLeafSet` provisionnés pour cette vue.
+- **Retry/crash-safe amélioré**: cet artefact est persisté dans l’état de session tant que le client reste `pending_barrier_recovery`, puis purgé une fois la vérification FULL bootstrap réussie.
+- **Fail-closed concret**: un joiner pending ne peut plus partir en `reason=2` sans cet artefact de bootstrap vérifié localement; le runtime refuse explicitement le chemin.
+- **Toujours vrai**: cette fermeture reste client-side. Le serveur ne vérifie toujours pas une attestation wire-visible de FULL verification.
+
+Statut audit: **COMPLETED**, avec fermeture implémentation supplémentaire du bootstrap `reason=2`, mais sans transformer la frontière FULL/recover-only en propriété protocolaire serveur-vérifiable.

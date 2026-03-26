@@ -206,3 +206,16 @@ Nouvelle passe spec + implémentation:
 - **Toujours partiellement ouvert**: cette passe ferme la faiblesse “view commune trop faible” au niveau local serveur/API, mais pas la canonité/finalité globale byzantine inter-serveurs.
 
 Statut audit: **COMPLETED**, avec remédiation supplémentaire concrète sur l’objet d’historique authentifié.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 6)
+
+Nouvelle passe spec + implémentation:
+
+- **Provisioning join nettement renforcé**: le ticket de join transporte maintenant non seulement le `HistoryCommitment` courant et l’update barrier courant accepté, mais aussi le hash du snapshot committed prédécesseur et les ensembles `JoinSet` / `RevokedLeafSet` provisionnés pour cette vue.
+- **Point important clarifié**: `BU_current.kem_tree_hash_before` n’est pas traité comme un snapshot fetchable; l’implémentation bootstrap repart maintenant d’un vrai snapshot committed prédécesseur provisionné, puis reconstruit `kem_tree_hash_before`.
+- **Conséquence**: un joiner peut reconstituer et vérifier l’état public courant provisionné même après l’acceptation de son propre JOIN, sans dépendre d’un endpoint historique sélectionnable par `history_view_id`.
+- **Toujours ouvert**: cette passe ferme une grosse tranche du finding “join provisioning incomplet”, mais ne fournit toujours pas de lookup historique canonique/final global au sens byzantin fort.
+
+Statut audit: **COMPLETED**, avec remédiation implémentation supplémentaire substantielle sur l’artefact de provisioning join.

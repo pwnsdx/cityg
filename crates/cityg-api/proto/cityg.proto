@@ -240,6 +240,11 @@ message JoinTicketResponse {
   uint64 n_max = 28;
   uint64 max_barrier_update_bytes = 29;
   bytes current_history_view_id = 30;
+  optional HistoryCommitment current_history_commitment = 31;
+  bytes current_barrier_update = 32;
+  bytes current_predecessor_kem_tree_hash_after = 33;
+  repeated BarrierJoinLeafRecord current_join_records = 34;
+  repeated uint32 current_revoked_leaf_indices = 35;
 }
 
 message MergeTicketRequest {

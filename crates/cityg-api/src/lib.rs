@@ -1984,6 +1984,21 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         n_max: ticket.n_max,
         max_barrier_update_bytes: ticket.max_barrier_update_bytes,
         current_history_view_id: ticket.current_history_view_id.to_vec(),
+        current_history_commitment: Some(pb_history_commitment(ticket.current_history_commitment)),
+        current_barrier_update: ticket.current_barrier_update,
+        current_predecessor_kem_tree_hash_after: ticket
+            .current_predecessor_kem_tree_hash_after
+            .to_vec(),
+        current_join_records: ticket
+            .current_join_records
+            .into_iter()
+            .map(|record| BarrierJoinLeafRecord {
+                device_pk: record.device_pk,
+                leaf_index: record.leaf_index,
+                ek_leaf: record.ek_leaf,
+            })
+            .collect(),
+        current_revoked_leaf_indices: ticket.current_revoked_leaf_indices,
     };
 
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);

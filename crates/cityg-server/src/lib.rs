@@ -262,6 +262,16 @@ pub struct JoinTicketBundle {
     pub kem_tree_hash_after: [u8; 32],
     /// Current authenticated history view for barrier membership and checkpoints.
     pub current_history_view_id: [u8; 32],
+    /// Current authenticated local append-only history commitment.
+    pub current_history_commitment: HistoryCommitment,
+    /// Authenticated accepted current barrier_update bytes for bootstrap verification.
+    pub current_barrier_update: Vec<u8>,
+    /// Committed predecessor tree hash used as snapshot_base for the accepted current update.
+    pub current_predecessor_kem_tree_hash_after: [u8; 32],
+    /// Authenticated JoinSet for the provisioned current committed state.
+    pub current_join_records: Vec<BarrierJoinLeafRecord>,
+    /// Authenticated RevokedLeafSet for the provisioned current committed state.
+    pub current_revoked_leaf_indices: Vec<u32>,
     /// Fixed barrier tree capacity.
     pub n_max: u64,
     /// Deployment-wide barrier update size limit.
@@ -465,6 +475,8 @@ impl CityGServer {
                 state.barrier_version = 0;
                 state.barrier_roots_hash = revocation_roots_hash;
                 state.kem_tree_hash_after = kem_tree_hash_after;
+                state.current_accepted_barrier_update.clear();
+                state.current_accepted_barrier_predecessor_hash = [0u8; 32];
                 state.n_max = n_max;
                 state.barrier_pk_entries = blank_entries;
                 record_barrier_public_tree_snapshot(gid.as_slice(), state)?;
@@ -546,6 +558,8 @@ impl CityGServer {
         state.barrier_version = 0;
         state.barrier_roots_hash = compute_revocation_roots_hash(&zero, &zero)?;
         state.kem_tree_hash_after = blank_tree_hash;
+        state.current_accepted_barrier_update.clear();
+        state.current_accepted_barrier_predecessor_hash = [0u8; 32];
         state.last_checkpoint_ec = 0;
         state.last_accepted_ec = 0;
         state.srx_root_sw = None;
@@ -990,12 +1004,58 @@ impl CityGServer {
             .barrier_group_state(gid)
             .cloned()
             .unwrap_or_default();
+        let (
+            current_history_commitment,
+            current_barrier_update,
+            current_predecessor_kem_tree_hash_after,
+        ) = {
+            let state = self.roster.groups.entry(gid.to_vec()).or_default();
+            (
+                ensure_current_history_commitment(gid, state)?,
+                state.current_accepted_barrier_update.clone(),
+                state.current_accepted_barrier_predecessor_hash,
+            )
+        };
         let barrier_n_max = validate_barrier_n_max(barrier_state.n_max)?;
-        let current_history_view_id = self.current_history_view_id(gid)?;
+        let current_history_view_id = current_history_commitment.history_view_id;
         let barrier_version = barrier_state.barrier_version;
         let cover_leaf_index = u64::from(cover_leaf_index(&leaf_id, barrier_n_max));
         let max_barrier_update_bytes =
             u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
+        let requires_current_barrier_update = parent_root != [0u8; 32] || barrier_version > 0;
+        if requires_current_barrier_update && current_barrier_update.is_empty() {
+            return Err(CityGError::InvalidInput(
+                "current barrier_update missing for join provisioning",
+            ));
+        }
+        if requires_current_barrier_update
+            && current_predecessor_kem_tree_hash_after == [0u8; 32]
+        {
+            return Err(CityGError::InvalidInput(
+                "current barrier predecessor hash missing for join provisioning",
+            ));
+        }
+        let (current_join_records, current_revoked_leaf_indices) = if requires_current_barrier_update
+        {
+            let BarrierUpdateWire(
+                _mode,
+                _barrier_version,
+                prev_barrier_version,
+                _tree_size,
+                revocation_roots_hash,
+                _kem_tree_hash_before,
+                _kem_tree_hash_after,
+                _cover_payload,
+            ) = parse_deterministic_cbor(current_barrier_update.as_slice())?;
+            let revocation_roots_hash = vec_to_32(revocation_roots_hash)?;
+            (
+                self.resolve_joins_since(gid, prev_barrier_version)?.records,
+                self.resolve_revoked_leaf_indices(gid, &revocation_roots_hash)?
+                    .leaf_indices,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         Ok(JoinTicketBundle {
             gid: *gid,
@@ -1015,6 +1075,11 @@ impl CityGServer {
             cover_leaf_index,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
             current_history_view_id,
+            current_history_commitment,
+            current_barrier_update,
+            current_predecessor_kem_tree_hash_after,
+            current_join_records,
+            current_revoked_leaf_indices,
             n_max: barrier_n_max,
             max_barrier_update_bytes,
         })
@@ -1421,6 +1486,10 @@ impl CityGServer {
                 .accepted_barrier_merges
                 .insert(record.barrier_version, record);
         }
+        if let Some(Value::Bytes(raw_update)) = bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE) {
+            group.current_accepted_barrier_update = raw_update.clone();
+            group.current_accepted_barrier_predecessor_hash = state_before.kem_tree_hash_after;
+        }
 
         let barrier_version = ctx
             .barrier_group_state(bundle.gid())
@@ -1615,6 +1684,9 @@ impl CityGServer {
                 &room_state.current_history_commitment,
                 [0u8; 32],
             )?;
+            group.current_accepted_barrier_update = room_state.current_accepted_barrier_update.clone();
+            group.current_accepted_barrier_predecessor_hash =
+                room_state.current_accepted_barrier_predecessor_hash;
             rebuild_barrier_public_tree_blob_index(group)?;
             group.barrier_public_tree_history.clear();
             for snapshot in &room_state.barrier_public_tree_history {
@@ -3495,6 +3567,9 @@ fn persisted_kbroad_room_state(
         room.accepted_barrier_merges = persisted_accepted_barrier_merges(state);
         room.current_history_commitment =
             persisted_history_commitment(state.current_history_commitment);
+        room.current_accepted_barrier_update = state.current_accepted_barrier_update.clone();
+        room.current_accepted_barrier_predecessor_hash =
+            state.current_accepted_barrier_predecessor_hash;
     }
     room
 }
@@ -5823,6 +5898,8 @@ mod tests {
                 max_barrier_update_bytes: 0,
                 accepted_barrier_merges: Vec::new(),
                 current_history_commitment: super::PersistedHistoryCommitment::default(),
+                current_accepted_barrier_update: Vec::new(),
+                current_accepted_barrier_predecessor_hash: [0u8; 32],
                 device_chain_states: Vec::new(),
             },
         )]);
@@ -5896,6 +5973,8 @@ mod tests {
                 max_barrier_update_bytes: 99,
                 accepted_barrier_merges: Vec::new(),
                 current_history_commitment: super::PersistedHistoryCommitment::default(),
+                current_accepted_barrier_update: Vec::new(),
+                current_accepted_barrier_predecessor_hash: [0u8; 32],
                 device_chain_states: Vec::new(),
             },
         )]);
@@ -6170,11 +6249,13 @@ mod tests {
         let mut demo_server = super::demo::demo_server();
         let bundle = cityg_client::demo::demo_bundle("alice")?;
         demo_server.accept_epoch(&bundle)?;
-        let demo_ticket = demo_server.build_join_ticket(&cityg_client::demo::DEMO_GID)?;
-        assert_ne!(
-            demo_ticket.parent_root, [0u8; 32],
-            "join ticket on non-empty roster should reference non-zero root"
-        );
+        let err = demo_server
+            .build_join_ticket(&cityg_client::demo::DEMO_GID)
+            .expect_err("join ticket must fail closed until current barrier_update is accepted");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("current barrier_update missing for join provisioning")
+        ));
         Ok(())
     }
 
@@ -10480,6 +10561,8 @@ struct GroupState {
     barrier_public_tree_history: BTreeMap<[u8; 32], BarrierPublicTreeSnapshotRef>,
     barrier_hash_cache: Option<Arc<HashMap<usize, [u8; 32]>>>,
     current_history_commitment: HistoryCommitment,
+    current_accepted_barrier_update: Vec<u8>,
+    current_accepted_barrier_predecessor_hash: [u8; 32],
     room_admin_pop_keys: BTreeSet<Vec<u8>>,
     room_admin_proof_replay_keys: BTreeSet<[u8; 32]>,
 }
@@ -10517,6 +10600,8 @@ impl Default for GroupState {
             barrier_public_tree_history: BTreeMap::new(),
             barrier_hash_cache: None,
             current_history_commitment: HistoryCommitment::default(),
+            current_accepted_barrier_update: Vec::new(),
+            current_accepted_barrier_predecessor_hash: [0u8; 32],
             room_admin_pop_keys: BTreeSet::new(),
             room_admin_proof_replay_keys: BTreeSet::new(),
         }
@@ -10663,6 +10748,10 @@ struct PersistedKbroadRoomState {
     accepted_barrier_merges: Vec<PersistedAcceptedBarrierMergeRecord>,
     #[serde(default)]
     current_history_commitment: PersistedHistoryCommitment,
+    #[serde(default)]
+    current_accepted_barrier_update: Vec<u8>,
+    #[serde(default)]
+    current_accepted_barrier_predecessor_hash: [u8; 32],
     #[serde(default)]
     device_chain_states: Vec<PersistedDeviceChainState>,
 }

@@ -216,6 +216,42 @@ fn ensure_full_barrier_verification_for_origin(
     Ok(())
 }
 
+async fn ensure_join_finalize_bootstrap_verified(request: &LeaveRequest) -> Result<bool> {
+    let Some(mut session) = load_session_at(&request.server_url, &request.room_id)? else {
+        return Err(anyhow!(
+            "persisted session missing before join_finalize bootstrap verification"
+        ));
+    };
+    if session.gid != request.gid || session.leaf_id != request.leaf_id {
+        return Err(anyhow!(
+            "session snapshot identity mismatch before join_finalize bootstrap verification"
+        ));
+    }
+    if session.barrier_state.current_barrier_full_verified {
+        return Ok(true);
+    }
+    if !session.barrier_state.barrier_recovery_pending {
+        return Ok(false);
+    }
+
+    if session.parent_root == [0u8; 32] && session.barrier_state.barrier_version == 0 {
+        session.barrier_state.current_barrier_full_verified = true;
+        session.barrier_state.barrier_recovery_issue = None;
+        clear_join_finalize_bootstrap_artifact(&mut session.barrier_state);
+        persist_session(&session)
+            .context("persist genesis join_finalize bootstrap verification state")?;
+        return Ok(true);
+    }
+
+    let client = new_api_client(&request.server_url);
+    verify_join_finalize_bootstrap_current_state(&client, &request.room_id, &session).await?;
+    session.barrier_state.current_barrier_full_verified = true;
+    session.barrier_state.barrier_recovery_issue = None;
+    clear_join_finalize_bootstrap_artifact(&mut session.barrier_state);
+    persist_session(&session).context("persist join_finalize bootstrap verification state")?;
+    Ok(true)
+}
+
 async fn publish_revocation_merge_from_ticket(
     request: LeaveRequest,
     ticket: MergeTicket,
@@ -346,18 +382,13 @@ async fn publish_revocation_merge_from_ticket(
         .await
         .context("resolve committed barrier revoked leaf indices")?;
     if require_same_history_commitment(
-        &barrier_tree_response.history_commitment,
         &join_resolution.history_commitment,
+        &revoked_resolution.history_commitment,
     )
     .is_err()
-        || require_same_history_commitment(
-            &barrier_tree_response.history_commitment,
-            &revoked_resolution.history_commitment,
-        )
-        .is_err()
     {
         return Err(anyhow!(
-            "barrier snapshot-auth history commitment mismatch (960.9): public tree / joins / revoked leaves do not share one authenticated commitment"
+            "barrier snapshot-auth history commitment mismatch (960.9): joins / revoked leaves do not share one authenticated current-state commitment"
         ));
     }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
@@ -721,7 +752,9 @@ async fn perform_pcs_refresh_inner(
     .await
 }
 
-async fn perform_join_finalize_inner(request: LeaveRequest) -> Result<PublishedBarrierMerge> {
+pub(super) async fn perform_join_finalize_inner(
+    request: LeaveRequest,
+) -> Result<PublishedBarrierMerge> {
     perform_barrier_merge_inner(request, BarrierMergeMode::JoinFinalize, true).await
 }
 
@@ -736,7 +769,7 @@ async fn perform_barrier_merge_inner(
         room_id,
         gid,
         leaf_id,
-        mut forward_state,
+        forward_state,
         pop_public_key,
         pop_secret_key,
         vrf_secret_key,
@@ -747,13 +780,21 @@ async fn perform_barrier_merge_inner(
         k_fs_current,
         max_barrier_update_bytes: stored_max_barrier_update_bytes,
         barrier_recovery_pending,
-        current_barrier_full_verified,
+        mut current_barrier_full_verified,
     } = request;
 
     if barrier_recovery_pending && !allow_pending_recovery {
         return Err(anyhow!(mode.pending_guard_message()));
     }
-    if !current_barrier_full_verified && !(allow_pending_recovery && barrier_recovery_pending) {
+    if !current_barrier_full_verified
+        && allow_pending_recovery
+        && barrier_recovery_pending
+        && mode == BarrierMergeMode::JoinFinalize
+    {
+        current_barrier_full_verified =
+            ensure_join_finalize_bootstrap_verified(&persist_request).await?;
+    }
+    if !current_barrier_full_verified {
         return Err(anyhow!(
             "cannot originate barrier updates from recover-only barrier state; re-establish FULL barrier verification first"
         ));
@@ -888,18 +929,13 @@ async fn perform_barrier_merge_inner(
         .await
         .context("resolve committed barrier revoked leaf indices")?;
     if require_same_history_commitment(
-        &barrier_tree_response.history_commitment,
         &join_resolution.history_commitment,
+        &revoked_resolution.history_commitment,
     )
     .is_err()
-        || require_same_history_commitment(
-            &barrier_tree_response.history_commitment,
-            &revoked_resolution.history_commitment,
-        )
-        .is_err()
     {
         return Err(anyhow!(
-            "barrier snapshot-auth history commitment mismatch (960.9): public tree / joins / revoked leaves do not share one authenticated commitment"
+            "barrier snapshot-auth history commitment mismatch (960.9): joins / revoked leaves do not share one authenticated current-state commitment"
         ));
     }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
@@ -952,7 +988,7 @@ async fn perform_barrier_merge_inner(
         hdr::HDR_BARRIER_UPDATE_REASON,
         Value::Integer(Integer::from(mode.reason())),
     );
-    let mut pending_barrier_state = BarrierPendingState {
+    let pending_barrier_state = BarrierPendingState {
         barrier_version: next_barrier_version,
         we_epoch_id: [0u8; 32],
         fs_ec,
