@@ -218,6 +218,17 @@ Nouvelle passe spec + implémentation:
 - **Conséquence**: un joiner peut reconstituer et vérifier l’état public courant provisionné même après l’acceptation de son propre JOIN, sans dépendre d’un endpoint historique sélectionnable par `history_view_id`.
 - **Toujours ouvert**: cette passe ferme une grosse tranche du finding “join provisioning incomplet”, mais ne fournit toujours pas de lookup historique canonique/final global au sens byzantin fort.
 
+--
+
+## Commentaires Codex (2026-03-26, tranche 7)
+
+Nouvelle passe spec + implémentation:
+
+- **Provisioning join encore durci**: l’artefact API `JoinTicketResponse` transporte maintenant un `provisioning_nonce` unique et des bornes temporelles explicites `provisioning_issued_at_ms` / `provisioning_expires_at_ms`.
+- **Validation fail-closed côté client**: `cityg-api-client` rejette désormais un ticket sans nonce, avec une émission trop future, un expiry incohérent, ou un artefact expiré au-delà du skew toléré.
+- **Résultat**: le provisioning join n’est plus seulement “présent et bien bindé au state courant”; il a aussi une fraîcheur minimale explicite au niveau wire/API.
+- **Toujours ouvert**: cette passe ne transforme pas encore l’artefact en bundle signé autonome ni en preuve de canonité globale de l’historique provisionné.
+
 Statut audit: **COMPLETED**, avec remédiation implémentation supplémentaire substantielle sur l’artefact de provisioning join.
 
 --

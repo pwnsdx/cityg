@@ -1460,6 +1460,9 @@ Barrier required fields:
 * current barrier_version (uint)
 * current_history_view_id (bstr32)
 * current_history_commitment (`HistoryCommitment`)
+* provisioning_nonce (bstr32)
+* provisioning_issued_at_ms (uint64)
+* provisioning_expires_at_ms (uint64; MUST be >= provisioning_issued_at_ms)
 * current predecessor committed `kem_tree_hash_after` (bstr32) for the accepted current `barrier_update` used by `join_finalize` bootstrap; this MAY be zero only when no accepted current `barrier_update` exists yet for the provisioned state
 * authenticated current `JoinSet` / `ResolveJoinsSince(BU_current.prev_barrier_version)` records for the provisioned current committed state, or an equivalent authenticated artifact from which the same set can be deterministically recovered
 * authenticated current `RevokedLeafSet` / `ResolveRevokedLeaves(BU_current.revocation_roots_hash)` records for the provisioned current committed state, or an equivalent authenticated artifact from which the same set can be deterministically recovered
@@ -1472,6 +1475,7 @@ Barrier required fields:
 * pcs_refresh_min_delta_group_ec (uint; >=1)
 * pcs_refresh_slot_width_ec (uint; >=1)
 * authenticated accepted current `barrier_update` bytes for the current committed state, together with authenticated history material sufficient to authenticate the predecessor committed snapshot `H_prev_bootstrap` used by that update and to execute the S11.11.2 chain-checks for `join_finalize` bootstrap eligibility against that current `history_view_id`; this MUST include the authenticated current-state `JoinSet` and `RevokedLeafSet` needed for that check unless the deployment provides an equivalent authenticated lookup keyed to the provisioned `current_history_commitment`
+* clients MUST reject a join provisioning artifact whose `provisioning_issued_at_ms` is implausibly far in the future, whose `provisioning_expires_at_ms` is in the authenticated past beyond bounded clock skew, or whose `provisioning_nonce` is absent or malformed
 FS-hybrid required fields:
 * initial K_fs (bstr32) and initial fs_ec (uint) -- or a derivation seed sufficient to deterministically compute the same initial `K_fs` and `fs_ec`
 * Joiners MUST NOT locally sample an unrelated fresh `K_fs` for an already-existing group, because PCS reseed in S6.6 requires all honest clients to evolve from the same pre-refresh `K_fs`.

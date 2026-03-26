@@ -246,6 +246,9 @@ message JoinTicketResponse {
   repeated BarrierJoinLeafRecord current_join_records = 34;
   repeated uint32 current_revoked_leaf_indices = 35;
   bytes join_finalize_auth_token = 36;
+  bytes provisioning_nonce = 37;
+  uint64 provisioning_issued_at_ms = 38;
+  uint64 provisioning_expires_at_ms = 39;
 }
 
 message MergeTicketRequest {

@@ -171,12 +171,13 @@ use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_bytes::ByteBuf;
 use std::convert::TryInto;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::warn;
 
 const ADMIN_TOKEN_HEADER: &str = "x-cityg-admin-token";
 const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
+const JOIN_PROVISIONING_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomAdminOperation {
@@ -1006,6 +1007,33 @@ impl CitygApiClient {
         if response.join_finalize_auth_token.len() != 32 {
             return Err(Error::Parse(
                 "join ticket missing join_finalize_auth_token".to_string(),
+            ));
+        }
+        if response.provisioning_nonce.len() != 32 {
+            return Err(Error::Parse(
+                "join ticket missing provisioning_nonce".to_string(),
+            ));
+        }
+        if response.provisioning_expires_at_ms < response.provisioning_issued_at_ms {
+            return Err(Error::Parse(
+                "join ticket provisioning expiry precedes issuance".to_string(),
+            ));
+        }
+        let now_ms = current_timestamp_ms();
+        if response.provisioning_issued_at_ms
+            > now_ms.saturating_add(JOIN_PROVISIONING_CLOCK_SKEW_MS)
+        {
+            return Err(Error::Parse(
+                "join ticket provisioning issuance is too far in the future".to_string(),
+            ));
+        }
+        if now_ms
+            > response
+                .provisioning_expires_at_ms
+                .saturating_add(JOIN_PROVISIONING_CLOCK_SKEW_MS)
+        {
+            return Err(Error::Parse(
+                "join ticket provisioning artifact expired".to_string(),
             ));
         }
         if response.cover_leaf_index >= n_max {
@@ -1933,6 +1961,13 @@ fn build_http_error(status: StatusCode, body: Vec<u8>) -> Error {
     }
 }
 
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
@@ -2000,6 +2035,9 @@ mod tests {
             current_history_view_id: vec![0xD0; 32],
             current_history_commitment: Some(history_commitment_ok_payload(0xD0, 0xD1, 0x00, 1)),
             join_finalize_auth_token: vec![0xE5; 32],
+            provisioning_nonce: vec![0xE6; 32],
+            provisioning_issued_at_ms: 1,
+            provisioning_expires_at_ms: u64::MAX,
             cover_leaf_index: 0,
             n_max: 1024,
             max_barrier_update_bytes: 1_048_576,
@@ -2602,6 +2640,9 @@ mod tests {
                 current_history_commitment: Some(history_commitment_ok_payload(
                     0xD0, 0xD1, 0x00, 1,
                 )),
+                provisioning_nonce: vec![0xE6; 32],
+                provisioning_issued_at_ms: 1,
+                provisioning_expires_at_ms: u64::MAX,
                 cover_leaf_index: 0,
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
@@ -2642,6 +2683,9 @@ mod tests {
                 parent_root: vec![0x11; 32],
                 barrier_version: 2,
                 current_history_view_id: vec![0xD0; 32],
+                provisioning_nonce: vec![0xE6; 32],
+                provisioning_issued_at_ms: 1,
+                provisioning_expires_at_ms: u64::MAX,
                 cover_leaf_index: 0,
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
@@ -2686,6 +2730,9 @@ mod tests {
                 current_history_commitment: Some(history_commitment_ok_payload(
                     0xD0, 0xD1, 0x00, 1,
                 )),
+                provisioning_nonce: vec![0xE6; 32],
+                provisioning_issued_at_ms: 1,
+                provisioning_expires_at_ms: u64::MAX,
                 cover_leaf_index: 0,
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
@@ -2728,6 +2775,9 @@ mod tests {
                 current_history_commitment: Some(history_commitment_ok_payload(
                     0xD0, 0xD1, 0x00, 1,
                 )),
+                provisioning_nonce: vec![0xE6; 32],
+                provisioning_issued_at_ms: 1,
+                provisioning_expires_at_ms: u64::MAX,
                 cover_leaf_index: 0,
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
@@ -2753,6 +2803,93 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("join ticket missing join_finalize_auth_token"),
+            "unexpected error: {err}"
+        );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_missing_provisioning_nonce() -> Result<(), Box<dyn StdError>> {
+        async fn mock_join_ticket_without_provisioning_nonce() -> impl IntoResponse {
+            encode_proto(JoinTicketResponse {
+                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                current_history_view_id: vec![0xD0; 32],
+                current_history_commitment: Some(history_commitment_ok_payload(
+                    0xD0, 0xD1, 0x00, 1,
+                )),
+                join_finalize_auth_token: vec![0xE5; 32],
+                provisioning_issued_at_ms: 1,
+                provisioning_expires_at_ms: u64::MAX,
+                cover_leaf_index: 0,
+                n_max: 1024,
+                max_barrier_update_bytes: 1_048_576,
+                ..JoinTicketResponse::default()
+            })
+        }
+
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_join_ticket_without_provisioning_nonce),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("missing provisioning nonce must fail closed");
+        assert!(
+            err.to_string()
+                .contains("join ticket missing provisioning_nonce"),
+            "unexpected error: {err}"
+        );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_expired_provisioning_artifact() -> Result<(), Box<dyn StdError>> {
+        async fn mock_join_ticket_with_expired_provisioning() -> impl IntoResponse {
+            encode_proto(JoinTicketResponse {
+                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                current_history_view_id: vec![0xD0; 32],
+                current_history_commitment: Some(history_commitment_ok_payload(
+                    0xD0, 0xD1, 0x00, 1,
+                )),
+                join_finalize_auth_token: vec![0xE5; 32],
+                provisioning_nonce: vec![0xE6; 32],
+                provisioning_issued_at_ms: 1,
+                provisioning_expires_at_ms: 2,
+                cover_leaf_index: 0,
+                n_max: 1024,
+                max_barrier_update_bytes: 1_048_576,
+                ..JoinTicketResponse::default()
+            })
+        }
+
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_join_ticket_with_expired_provisioning),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("expired provisioning artifact must fail closed");
+        assert!(
+            err.to_string()
+                .contains("join ticket provisioning artifact expired"),
             "unexpected error: {err}"
         );
         handle.abort();

@@ -73,7 +73,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use ciborium::value::Value;
@@ -275,6 +275,12 @@ pub struct JoinTicketBundle {
     pub current_revoked_leaf_indices: Vec<u32>,
     /// Opaque server-issued capability required for reason-2 join_finalize.
     pub join_finalize_auth_token: [u8; 32],
+    /// Unique nonce for this join provisioning artifact.
+    pub provisioning_nonce: [u8; 32],
+    /// Server issuance time for this join provisioning artifact.
+    pub provisioning_issued_at_ms: u64,
+    /// Expiry time for this join provisioning artifact.
+    pub provisioning_expires_at_ms: u64,
     /// Fixed barrier tree capacity.
     pub n_max: u64,
     /// Deployment-wide barrier update size limit.
@@ -419,6 +425,7 @@ pub struct MergeAcceptanceRecord {
 const DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR: &str = "duplicate active cover leaf allocation";
 const COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR: &str = "cover leaf index already allocated";
 const GENESIS_PROVISIONING_ARTIFACT_MISSING_ERR: &str = "genesis provisioning artifact missing";
+const JOIN_PROVISIONING_TTL_MS: u64 = 5 * 60 * 1000;
 const ROOM_ADMIN_PROOF_REPLAYED_ERR: &str = "room admin proof replayed";
 
 fn genesis_provisioning_artifact_missing_error() -> CityGError {
@@ -1062,6 +1069,10 @@ impl CityGServer {
                 (Vec::new(), Vec::new())
             };
         let join_finalize_auth_token = fresh_join_finalize_auth_token();
+        let provisioning_nonce = fresh_join_provisioning_nonce();
+        let provisioning_issued_at_ms = current_timestamp_ms();
+        let provisioning_expires_at_ms =
+            provisioning_issued_at_ms.saturating_add(JOIN_PROVISIONING_TTL_MS);
         {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
             state.pending_join_finalize_auth.insert(
@@ -1098,6 +1109,9 @@ impl CityGServer {
             current_join_records,
             current_revoked_leaf_indices,
             join_finalize_auth_token,
+            provisioning_nonce,
+            provisioning_issued_at_ms,
+            provisioning_expires_at_ms,
             n_max: barrier_n_max,
             max_barrier_update_bytes,
         })
@@ -3723,10 +3737,23 @@ fn fresh_kbroad_public() -> Vec<u8> {
     public.as_bytes().to_vec()
 }
 
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 fn fresh_join_finalize_auth_token() -> [u8; 32] {
     let mut token = [0u8; 32];
     rand::rng().fill(&mut token);
     token
+}
+
+fn fresh_join_provisioning_nonce() -> [u8; 32] {
+    let mut nonce = [0u8; 32];
+    rand::rng().fill(&mut nonce);
+    nonce
 }
 
 fn clear_barrier_path<T>(

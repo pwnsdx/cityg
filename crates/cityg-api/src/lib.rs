@@ -2005,6 +2005,9 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             .collect(),
         current_revoked_leaf_indices: ticket.current_revoked_leaf_indices,
         join_finalize_auth_token: ticket.join_finalize_auth_token.to_vec(),
+        provisioning_nonce: ticket.provisioning_nonce.to_vec(),
+        provisioning_issued_at_ms: ticket.provisioning_issued_at_ms,
+        provisioning_expires_at_ms: ticket.provisioning_expires_at_ms,
     };
 
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);
@@ -5065,6 +5068,8 @@ mod tests {
         assert_eq!(decoded.kbroad_generation, 1);
         assert_eq!(decoded.kbroad_public, rotated);
         assert_eq!(decoded.kem_tree_hash_after.len(), 32);
+        assert_eq!(decoded.provisioning_nonce.len(), 32);
+        assert!(decoded.provisioning_expires_at_ms >= decoded.provisioning_issued_at_ms);
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);
     }
@@ -5759,6 +5764,8 @@ mod tests {
         assert_eq!(decoded.kem_tree_hash_after.len(), 32);
         assert_eq!(decoded.current_history_view_id.len(), 32);
         assert!(decoded.current_history_commitment.is_some());
+        assert_eq!(decoded.provisioning_nonce.len(), 32);
+        assert!(decoded.provisioning_expires_at_ms >= decoded.provisioning_issued_at_ms);
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);
         let expected_cover_leaf_index = u64::from(u32::from_be_bytes(
