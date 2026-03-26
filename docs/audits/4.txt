@@ -318,3 +318,13 @@ Nouvelle clarification de spec:
 - `current_barrier_full_verified` est maintenant défini explicitement comme **prédicat local client**.
 - `header[180]` est explicitement limité à une preuve de **cohérence helper-state**, pas à une preuve de FULL verification côté serveur.
 - Le point “server-verifiable FULL verification” n’est donc plus une promesse implicite du profil de base; c’est désormais une **extension explicitement requise** si on veut cette propriété.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche full-verification-receipt)
+
+Nouvelle passe spec + implémentation:
+
+- la spec réserve maintenant `header[181]` pour une future extension `barrier_full_verification_receipt`;
+- elle impose qu’une telle extension définisse négociation, binding, fraîcheur et un vrai authentificateur, pas un simple écho des helper inputs;
+- le serveur courant **rejette explicitement** `header[181]` dans le profil de base, pour éviter toute illusion de support implicite.

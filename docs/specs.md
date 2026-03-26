@@ -382,6 +382,7 @@ Key 175: barrier_update (bstr; optional; only when permitted by S10.4, S10.4A, S
 Key 178: barrier_update_reason (uint; required iff key 175 is present)
 Key 179: join_finalize_auth (bstr32; required iff key 178 == 2; opaque server-issued capability for reason-2 join_finalize)
 Key 180: barrier_history_commitment (bstr; required iff key 175 is present; CBOR_det(HistoryCommitment) for the authenticated current-state snapshot_base/A/B view used to construct the barrier_update)
+Key 181: barrier_full_verification_receipt (bstr; RESERVED for an optional profile extension that provides server-verifiable proof of FULL verification; FORBIDDEN in the base profile)
 
 S4.2.4 Merge/checkpoint keys (merge-only set)
 130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148
@@ -405,6 +406,7 @@ Additional presence rule (normative):
 * key 178 MUST be present if and only if key 175 is present.
 * key 179 MUST be present if and only if key 178 == 2; it MUST be absent for merge reasons 0/1 and on all non-MERGE anchors.
 * key 180 MUST be present if and only if key 175 is present; it MUST be absent on anchors without barrier_update.
+* key 181 MUST be absent unless a deployment-specific FULL-verification-receipt extension is explicitly negotiated for this profile.
 
 S4.4 Size limits (normative; deployments MAY tighten)
 Max bytes per header field (unless otherwise specified by type):
@@ -414,6 +416,7 @@ Max bytes per header field (unless otherwise specified by type):
 * header[122] max 1048576
 * header[177] MUST be exactly 1184 bytes
 * header[179] MUST be exactly 32 bytes
+* header[181] is extension-defined and therefore has no base-profile size semantics; in the base profile it MUST be absent
 
 BarrierUpdate size policy (normative)
 * Deployment MUST define max_barrier_update_bytes (a positive integer).
@@ -1170,6 +1173,17 @@ Additional restriction (normative):
 * `header[180]` proves only that the author claims one authenticated current-state `HistoryCommitment` for its helper inputs; it does NOT, by itself, prove to the server that the author actually executed S11.11.2 correctly.
 * Therefore, in the base profile, the recover-only vs FULL distinction is enforced by honest-client behavior plus the server checks explicitly stated in S11.12. A deployment that requires server-verifiable proof of FULL verification MUST define an additional profile extension / receipt and MUST NOT claim that `header[180]` alone provides that guarantee.
 
+S11.11.4 Optional FULL-verification-receipt extension (not part of base profile)
+If a deployment requires the server to verify that a client actually completed FULL verification before originating some or all `barrier_update` reasons, it MUST define an explicit extension bound to key `181`.
+Requirements on that extension:
+* The extension MUST define negotiation / profile identification so both client and server know that key `181` is in use.
+* The receipt carried in key `181` MUST be cryptographically bound, at minimum, to `(gid, HistoryAuthorityScope, current HistoryCommitment, current barrier_version, current kem_tree_hash_after, author leaf_id, barrier_update_reason, header[180])`.
+* The extension MUST define freshness / anti-replay for the receipt. A static reusable blob is insufficient.
+* The extension MUST define who signs or authenticates the receipt and why that authenticator can distinguish FULL verification from recover-only processing.
+* A mere restatement of helper inputs, or a client self-assertion without an authenticated verifier/challenge, MUST NOT be documented as sufficient proof of FULL verification.
+Base-profile rule:
+* In the base profile defined by this document, key `181` MUST be absent and servers MUST reject its presence as malformed unless a deployment-specific extension explicitly enables it.
+
 S11.12 Server-side validation of barrier_update (normative; MUST)
 
 S11.12.1 Validation procedure (MUST)
@@ -1181,6 +1195,7 @@ A) Gating
 * If header[178] == 2 and header[179] is absent or not exactly 32 bytes: reject 960.1.
 * If header[178] != 2 and header[179] is present: reject 960.7.
 * If header[180] is absent, not a bstr, or not valid CBOR_det(HistoryCommitment): reject 960.7.
+* If header[181] is present in the base profile: reject 960.7.
 * If barrier_initialized == true and pending_revocations == false and header[178] == 0: reject 960.5 barrier_proactive_forbidden.
 * If barrier_initialized == true and pending_revocations == true and header[178] != 0: reject 960.13.
 * If header[178] == 1, later steps MUST enforce S10.4B.
