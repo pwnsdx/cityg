@@ -178,6 +178,7 @@ use tracing::warn;
 const ADMIN_TOKEN_HEADER: &str = "x-cityg-admin-token";
 const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
 const JOIN_PROVISIONING_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
+const MAX_BARRIER_HELPER_PAGE_ENTRIES: u32 = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomAdminOperation {
@@ -1184,21 +1185,73 @@ impl CitygApiClient {
         room_id: &str,
         revocation_roots_hash: &[u8; 32],
     ) -> Result<BarrierResolvedRevokedLeaves, Error> {
-        let request = BarrierResolveRevokedLeavesRequest {
-            room_id: room_id.to_string(),
-            revocation_roots_hash: revocation_roots_hash.to_vec(),
-        };
-        let response: BarrierResolveRevokedLeavesResponse = self
-            .post_proto("/v1/barrier/resolve_revoked_leaves", request)
-            .await?;
-        let history_view_id = array32(&response.history_view_id)?;
+        let mut page_offset = 0u32;
+        let mut expected_history = None;
+        let mut leaf_indices = Vec::new();
+
+        loop {
+            let request = BarrierResolveRevokedLeavesRequest {
+                room_id: room_id.to_string(),
+                revocation_roots_hash: revocation_roots_hash.to_vec(),
+                page_offset,
+                max_entries: MAX_BARRIER_HELPER_PAGE_ENTRIES,
+            };
+            let response: BarrierResolveRevokedLeavesResponse = self
+                .post_proto("/v1/barrier/resolve_revoked_leaves", request)
+                .await?;
+            if response.page_offset != page_offset {
+                return Err(Error::Parse(
+                    "barrier helper pagination page_offset mismatch".to_string(),
+                ));
+            }
+            if response.leaf_indices.len() > MAX_BARRIER_HELPER_PAGE_ENTRIES as usize {
+                return Err(Error::Parse(
+                    "barrier helper pagination page too large".to_string(),
+                ));
+            }
+            let history_view_id = array32(&response.history_view_id)?;
+            let history_commitment =
+                parse_history_commitment(history_view_id, response.history_commitment)?;
+            let total_entries = parse_barrier_helper_total_entries(response.total_entries)?;
+            ensure_barrier_helper_history_page(
+                &mut expected_history,
+                history_view_id,
+                history_commitment.clone(),
+                total_entries,
+            )?;
+            leaf_indices.extend(response.leaf_indices);
+            match response.next_page_offset {
+                Some(next_page_offset) => {
+                    if next_page_offset <= page_offset
+                        || usize::try_from(next_page_offset).map_err(|_| {
+                            Error::Parse(
+                                "barrier helper pagination next_page_offset overflow".to_string(),
+                            )
+                        })? != leaf_indices.len()
+                    {
+                        return Err(Error::Parse(
+                            "barrier helper pagination next_page_offset mismatch".to_string(),
+                        ));
+                    }
+                    page_offset = next_page_offset;
+                }
+                None => break,
+            }
+        }
+
+        let (history_view_id, history_commitment, total_entries) =
+            expected_history.ok_or_else(|| {
+                Error::Parse("barrier helper pagination missing first page".to_string())
+            })?;
+        if leaf_indices.len() != total_entries {
+            return Err(Error::Parse(
+                "barrier helper pagination truncated revoked leaves".to_string(),
+            ));
+        }
         Ok(BarrierResolvedRevokedLeaves {
             history_view_id,
-            history_commitment: parse_history_commitment(
-                history_view_id,
-                response.history_commitment,
-            )?,
-            leaf_indices: response.leaf_indices,
+            history_commitment,
+            leaf_indices,
         })
     }
 
@@ -1208,29 +1261,82 @@ impl CitygApiClient {
         room_id: &str,
         prev_barrier_version: u64,
     ) -> Result<BarrierResolvedJoins, Error> {
-        let request = BarrierResolveJoinsSinceRequest {
-            room_id: room_id.to_string(),
-            prev_barrier_version,
-        };
-        let response: BarrierResolveJoinsSinceResponse = self
-            .post_proto("/v1/barrier/resolve_joins_since", request)
-            .await?;
-        let history_view_id = array32(&response.history_view_id)?;
+        let mut page_offset = 0u32;
+        let mut expected_history = None;
+        let mut records = Vec::new();
+
+        loop {
+            let request = BarrierResolveJoinsSinceRequest {
+                room_id: room_id.to_string(),
+                prev_barrier_version,
+                page_offset,
+                max_entries: MAX_BARRIER_HELPER_PAGE_ENTRIES,
+            };
+            let response: BarrierResolveJoinsSinceResponse = self
+                .post_proto("/v1/barrier/resolve_joins_since", request)
+                .await?;
+            if response.page_offset != page_offset {
+                return Err(Error::Parse(
+                    "barrier helper pagination page_offset mismatch".to_string(),
+                ));
+            }
+            if response.records.len() > MAX_BARRIER_HELPER_PAGE_ENTRIES as usize {
+                return Err(Error::Parse(
+                    "barrier helper pagination page too large".to_string(),
+                ));
+            }
+            let history_view_id = array32(&response.history_view_id)?;
+            let history_commitment =
+                parse_history_commitment(history_view_id, response.history_commitment)?;
+            let total_entries = parse_barrier_helper_total_entries(response.total_entries)?;
+            ensure_barrier_helper_history_page(
+                &mut expected_history,
+                history_view_id,
+                history_commitment.clone(),
+                total_entries,
+            )?;
+            records.extend(
+                response
+                    .records
+                    .into_iter()
+                    .map(|record| BarrierJoinRecord {
+                        device_pk: record.device_pk,
+                        leaf_index: record.leaf_index,
+                        ek_leaf: record.ek_leaf,
+                    }),
+            );
+            match response.next_page_offset {
+                Some(next_page_offset) => {
+                    if next_page_offset <= page_offset
+                        || usize::try_from(next_page_offset).map_err(|_| {
+                            Error::Parse(
+                                "barrier helper pagination next_page_offset overflow".to_string(),
+                            )
+                        })? != records.len()
+                    {
+                        return Err(Error::Parse(
+                            "barrier helper pagination next_page_offset mismatch".to_string(),
+                        ));
+                    }
+                    page_offset = next_page_offset;
+                }
+                None => break,
+            }
+        }
+
+        let (history_view_id, history_commitment, total_entries) =
+            expected_history.ok_or_else(|| {
+                Error::Parse("barrier helper pagination missing first page".to_string())
+            })?;
+        if records.len() != total_entries {
+            return Err(Error::Parse(
+                "barrier helper pagination truncated joins".to_string(),
+            ));
+        }
         Ok(BarrierResolvedJoins {
             history_view_id,
-            history_commitment: parse_history_commitment(
-                history_view_id,
-                response.history_commitment,
-            )?,
-            records: response
-                .records
-                .into_iter()
-                .map(|record| BarrierJoinRecord {
-                    device_pk: record.device_pk,
-                    leaf_index: record.leaf_index,
-                    ek_leaf: record.ek_leaf,
-                })
-                .collect(),
+            history_commitment,
+            records,
         })
     }
 
@@ -1240,25 +1346,122 @@ impl CitygApiClient {
         room_id: &str,
         kem_tree_hash_after: &[u8; 32],
     ) -> Result<BarrierFetchedPublicTree, Error> {
-        let request = BarrierFetchPublicTreeRequest {
-            room_id: room_id.to_string(),
-            kem_tree_hash_after: kem_tree_hash_after.to_vec(),
-        };
-        let response: BarrierFetchPublicTreeResponse = self
-            .post_proto("/v1/barrier/fetch_public_tree", request)
-            .await?;
-        let n_max = validate_barrier_n_max(response.n_max)?;
-        let history_view_id = array32(&response.history_view_id)?;
+        let mut entry_offset = 0u32;
+        let mut expected_history = None;
+        let mut expected_n_max = None;
+        let mut expected_tree_hash = None;
+        let mut expected_total_entries = None;
+        let mut pk_entries = Vec::new();
+
+        loop {
+            let request = BarrierFetchPublicTreeRequest {
+                room_id: room_id.to_string(),
+                kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+                entry_offset,
+                max_entries: MAX_BARRIER_HELPER_PAGE_ENTRIES,
+            };
+            let response: BarrierFetchPublicTreeResponse = self
+                .post_proto("/v1/barrier/fetch_public_tree", request)
+                .await?;
+            if response.entry_offset != entry_offset {
+                return Err(Error::Parse(
+                    "barrier helper pagination entry_offset mismatch".to_string(),
+                ));
+            }
+            if response.pk_entries.len() > MAX_BARRIER_HELPER_PAGE_ENTRIES as usize {
+                return Err(Error::Parse(
+                    "barrier helper pagination page too large".to_string(),
+                ));
+            }
+            let n_max = validate_barrier_n_max(response.n_max)?;
+            let history_view_id = array32(&response.history_view_id)?;
+            let history_commitment =
+                parse_history_commitment(history_view_id, response.history_commitment)?;
+            let total_entries = parse_barrier_helper_total_entries(response.total_entries)?;
+            ensure_barrier_helper_history_page(
+                &mut expected_history,
+                history_view_id,
+                history_commitment.clone(),
+                total_entries,
+            )?;
+            let kem_tree_hash_after = array32(&response.kem_tree_hash_after)?;
+            match expected_n_max {
+                Some(expected) if expected != n_max => {
+                    return Err(Error::Parse(
+                        "barrier helper pagination n_max mismatch".to_string(),
+                    ));
+                }
+                None => expected_n_max = Some(n_max),
+                _ => {}
+            }
+            match expected_tree_hash {
+                Some(expected) if expected != kem_tree_hash_after => {
+                    return Err(Error::Parse(
+                        "barrier helper pagination tree hash mismatch".to_string(),
+                    ));
+                }
+                None => expected_tree_hash = Some(kem_tree_hash_after),
+                _ => {}
+            }
+            let expected_tree_entries = usize::try_from(n_max)
+                .map_err(|_| Error::Parse("barrier n_max too large".to_string()))?
+                .checked_mul(2)
+                .and_then(|value| value.checked_sub(1))
+                .ok_or_else(|| Error::Parse("barrier tree size overflow".to_string()))?;
+            match expected_total_entries {
+                Some(expected) if expected != total_entries => {
+                    return Err(Error::Parse(
+                        "barrier helper pagination total_entries mismatch".to_string(),
+                    ));
+                }
+                None => expected_total_entries = Some(total_entries),
+                _ => {}
+            }
+            if total_entries != expected_tree_entries {
+                return Err(Error::Parse(
+                    "barrier helper pagination total_entries does not match n_max".to_string(),
+                ));
+            }
+            pk_entries.extend(response.pk_entries);
+            match response.next_entry_offset {
+                Some(next_entry_offset) => {
+                    if next_entry_offset <= entry_offset
+                        || usize::try_from(next_entry_offset).map_err(|_| {
+                            Error::Parse(
+                                "barrier helper pagination next_entry_offset overflow".to_string(),
+                            )
+                        })? != pk_entries.len()
+                    {
+                        return Err(Error::Parse(
+                            "barrier helper pagination next_entry_offset mismatch".to_string(),
+                        ));
+                    }
+                    entry_offset = next_entry_offset;
+                }
+                None => break,
+            }
+        }
+
+        let (history_view_id, history_commitment, total_entries) =
+            expected_history.ok_or_else(|| {
+                Error::Parse("barrier helper pagination missing first page".to_string())
+            })?;
+        if pk_entries.len() != total_entries {
+            return Err(Error::Parse(
+                "barrier helper pagination truncated tree snapshot".to_string(),
+            ));
+        }
         Ok(BarrierFetchedPublicTree {
             history_view_id,
-            history_commitment: parse_history_commitment(
-                history_view_id,
-                response.history_commitment,
-            )?,
+            history_commitment,
             tree: BarrierPublicTree {
-                n_max,
-                kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
-                pk_entries: response.pk_entries,
+                n_max: expected_n_max.ok_or_else(|| {
+                    Error::Parse("barrier helper pagination missing n_max".to_string())
+                })?,
+                kem_tree_hash_after: expected_tree_hash.ok_or_else(|| {
+                    Error::Parse("barrier helper pagination missing tree hash".to_string())
+                })?,
+                pk_entries,
             },
         })
     }
@@ -1913,6 +2116,42 @@ fn parse_merge_acceptance_status(status: i32) -> Result<MergeAcceptanceStatus, E
     }
 }
 
+fn parse_barrier_helper_total_entries(total_entries: u32) -> Result<usize, Error> {
+    usize::try_from(total_entries)
+        .map_err(|_| Error::Parse("barrier helper total_entries overflow".to_string()))
+}
+
+fn ensure_barrier_helper_history_page(
+    expected: &mut Option<([u8; 32], HistoryCommitment, usize)>,
+    history_view_id: [u8; 32],
+    history_commitment: HistoryCommitment,
+    total_entries: usize,
+) -> Result<(), Error> {
+    match expected {
+        Some((expected_view_id, expected_commitment, expected_total_entries)) => {
+            if *expected_view_id != history_view_id {
+                return Err(Error::Parse(
+                    "barrier helper pagination history_view_id mismatch".to_string(),
+                ));
+            }
+            if *expected_commitment != history_commitment {
+                return Err(Error::Parse(
+                    "barrier helper pagination history_commitment mismatch".to_string(),
+                ));
+            }
+            if *expected_total_entries != total_entries {
+                return Err(Error::Parse(
+                    "barrier helper pagination total_entries mismatch".to_string(),
+                ));
+            }
+        }
+        None => {
+            *expected = Some((history_view_id, history_commitment, total_entries));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_profile_version(version: &str) -> Result<(), Error> {
     if version == EXPECTED_PROFILE_VERSION {
         return Ok(());
@@ -1985,19 +2224,22 @@ mod tests {
     use super::*;
     use axum::{
         Router,
+        body::Bytes,
         http::{HeaderMap, StatusCode as HttpStatusCode, Uri, header},
         response::{IntoResponse, Response},
         routing::{get, post},
     };
     use cityg_client::demo::demo_bundle_alice;
     use pb::{
-        AcceptEpochResponse, BarrierFetchPublicTreeResponse, BarrierLookupMergeAcceptanceResponse,
-        BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesResponse,
-        BootstrapRoomResponse, ConfigureWindowResponse, FetchMessagesResponse, GetBundleResponse,
-        GetTelemetryResponse, GetWindowResponse, HistoryCommitment as PbHistoryCommitment,
-        JoinTicketResponse, MembersResponse, MergeAcceptanceStatus as PbMergeAcceptanceStatus,
-        MergeTicketResponse, RefreshPivotResponse, RotateRoomKbroadResponse, SearchMembersResponse,
-        SeedHeadResponse, SendMessageResponse,
+        AcceptEpochResponse, BarrierFetchPublicTreeRequest, BarrierFetchPublicTreeResponse,
+        BarrierLookupMergeAcceptanceResponse, BarrierResolveJoinsSinceRequest,
+        BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
+        BarrierResolveRevokedLeavesResponse, BootstrapRoomResponse, ConfigureWindowResponse,
+        FetchMessagesResponse, GetBundleResponse, GetTelemetryResponse, GetWindowResponse,
+        HistoryCommitment as PbHistoryCommitment, JoinTicketResponse, MembersResponse,
+        MergeAcceptanceStatus as PbMergeAcceptanceStatus, MergeTicketResponse,
+        RefreshPivotResponse, RotateRoomKbroadResponse, SearchMembersResponse, SeedHeadResponse,
+        SendMessageResponse,
     };
     use prost::Message;
     use std::{error::Error as StdError, net::SocketAddr};
@@ -2077,7 +2319,18 @@ mod tests {
         )
     }
 
-    async fn mock_post(uri: Uri) -> Response {
+    fn page_bounds(offset: u32, total: usize, page_len: usize) -> (usize, usize, Option<u32>) {
+        let start = usize::try_from(offset).unwrap_or(total);
+        let end = total.min(start.saturating_add(page_len));
+        let next = if end < total {
+            Some(u32::try_from(end).unwrap_or(u32::MAX))
+        } else {
+            None
+        };
+        (start.min(total), end, next)
+    }
+
+    async fn mock_post(uri: Uri, body: Bytes) -> Response {
         let payload = match uri.path() {
             "/v1/rooms/bootstrap" => encode_proto(BootstrapRoomResponse::default()),
             "/v1/rooms/rotate_kbroad" => encode_proto(RotateRoomKbroadResponse::default()),
@@ -2099,28 +2352,61 @@ mod tests {
             "/v1/rooms/merge_ticket" => encode_proto(merge_ticket_ok_payload()),
             "/v1/accept_epoch" => encode_proto(AcceptEpochResponse::default()),
             "/v1/barrier/resolve_revoked_leaves" => {
+                let request = BarrierResolveRevokedLeavesRequest::decode(body)
+                    .unwrap_or_else(|_| BarrierResolveRevokedLeavesRequest::default());
+                let all = vec![1u32, 7u32];
+                let (start, end, next_page_offset) = page_bounds(request.page_offset, all.len(), 1);
                 encode_proto(BarrierResolveRevokedLeavesResponse {
-                    leaf_indices: vec![1, 7],
+                    leaf_indices: all[start..end].to_vec(),
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    page_offset: request.page_offset,
+                    next_page_offset,
+                    total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
                 })
             }
-            "/v1/barrier/resolve_joins_since" => encode_proto(BarrierResolveJoinsSinceResponse {
-                records: vec![pb::BarrierJoinLeafRecord {
-                    device_pk: vec![0xAA; 32],
-                    leaf_index: 9,
-                    ek_leaf: vec![0xBB; 1184],
-                }],
-                history_view_id: vec![0xD1; 32],
-                history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
-            }),
-            "/v1/barrier/fetch_public_tree" => encode_proto(BarrierFetchPublicTreeResponse {
-                n_max: 8,
-                kem_tree_hash_after: vec![0xCC; 32],
-                pk_entries: vec![Vec::new(); 15],
-                history_view_id: vec![0xD1; 32],
-                history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
-            }),
+            "/v1/barrier/resolve_joins_since" => {
+                let request = BarrierResolveJoinsSinceRequest::decode(body)
+                    .unwrap_or_else(|_| BarrierResolveJoinsSinceRequest::default());
+                let all = vec![
+                    pb::BarrierJoinLeafRecord {
+                        device_pk: vec![0xAA; 32],
+                        leaf_index: 9,
+                        ek_leaf: vec![0xBB; 1184],
+                    },
+                    pb::BarrierJoinLeafRecord {
+                        device_pk: vec![0xAB; 32],
+                        leaf_index: 10,
+                        ek_leaf: vec![0xBC; 1184],
+                    },
+                ];
+                let (start, end, next_page_offset) = page_bounds(request.page_offset, all.len(), 1);
+                encode_proto(BarrierResolveJoinsSinceResponse {
+                    records: all[start..end].to_vec(),
+                    history_view_id: vec![0xD1; 32],
+                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    page_offset: request.page_offset,
+                    next_page_offset,
+                    total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
+                })
+            }
+            "/v1/barrier/fetch_public_tree" => {
+                let request = BarrierFetchPublicTreeRequest::decode(body)
+                    .unwrap_or_else(|_| BarrierFetchPublicTreeRequest::default());
+                let all = vec![Vec::new(); 15];
+                let (start, end, next_entry_offset) =
+                    page_bounds(request.entry_offset, all.len(), 7);
+                encode_proto(BarrierFetchPublicTreeResponse {
+                    n_max: 8,
+                    kem_tree_hash_after: vec![0xCC; 32],
+                    pk_entries: all[start..end].to_vec(),
+                    history_view_id: vec![0xD1; 32],
+                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    entry_offset: request.entry_offset,
+                    next_entry_offset,
+                    total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
+                })
+            }
             "/v1/barrier/lookup_merge_acceptance" => {
                 encode_proto(BarrierLookupMergeAcceptanceResponse {
                     status: PbMergeAcceptanceStatus::Accepted as i32,
@@ -2601,8 +2887,9 @@ mod tests {
         let joins = client.barrier_resolve_joins_since("room-1", 3).await?;
         assert_eq!(joins.history_view_id, [0xD1; 32]);
         assert_eq!(joins.history_commitment.history_commitment_id, [0xE1; 32]);
-        assert_eq!(joins.records.len(), 1);
+        assert_eq!(joins.records.len(), 2);
         assert_eq!(joins.records[0].leaf_index, 9);
+        assert_eq!(joins.records[1].leaf_index, 10);
         assert_eq!(joins.records[0].ek_leaf.len(), 1184);
         let tree = client
             .barrier_fetch_public_tree("room-1", &[0xCC; 32])
@@ -3037,6 +3324,9 @@ mod tests {
                     pk_entries: Vec::new(),
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    entry_offset: 0,
+                    next_entry_offset: None,
+                    total_entries: 0,
                 })
             }),
         );
@@ -3073,6 +3363,9 @@ mod tests {
                     pk_entries: vec![Vec::new(); 15],
                     history_view_id: vec![0xD1; 32],
                     history_commitment: None,
+                    entry_offset: 0,
+                    next_entry_offset: None,
+                    total_entries: 15,
                 })
             }),
         );

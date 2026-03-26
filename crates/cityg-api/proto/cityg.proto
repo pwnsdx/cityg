@@ -300,6 +300,8 @@ message BarrierResolveRevokedLeavesRequest {
   reserved 1000 to 1999;
   string room_id = 1;
   bytes revocation_roots_hash = 2;
+  uint32 page_offset = 3;
+  uint32 max_entries = 4;
 }
 
 message BarrierResolveRevokedLeavesResponse {
@@ -307,6 +309,9 @@ message BarrierResolveRevokedLeavesResponse {
   repeated uint32 leaf_indices = 1;
   bytes history_view_id = 2;
   optional HistoryCommitment history_commitment = 3;
+  uint32 page_offset = 4;
+  optional uint32 next_page_offset = 5;
+  uint32 total_entries = 6;
 }
 
 message BarrierJoinLeafRecord {
@@ -320,6 +325,8 @@ message BarrierResolveJoinsSinceRequest {
   reserved 1000 to 1999;
   string room_id = 1;
   uint64 prev_barrier_version = 2;
+  uint32 page_offset = 3;
+  uint32 max_entries = 4;
 }
 
 message BarrierResolveJoinsSinceResponse {
@@ -327,12 +334,17 @@ message BarrierResolveJoinsSinceResponse {
   repeated BarrierJoinLeafRecord records = 1;
   bytes history_view_id = 2;
   optional HistoryCommitment history_commitment = 3;
+  uint32 page_offset = 4;
+  optional uint32 next_page_offset = 5;
+  uint32 total_entries = 6;
 }
 
 message BarrierFetchPublicTreeRequest {
   reserved 1000 to 1999;
   string room_id = 1;
   bytes kem_tree_hash_after = 2;
+  uint32 entry_offset = 3;
+  uint32 max_entries = 4;
 }
 
 message BarrierFetchPublicTreeResponse {
@@ -342,6 +354,9 @@ message BarrierFetchPublicTreeResponse {
   repeated bytes pk_entries = 3;
   bytes history_view_id = 4;
   optional HistoryCommitment history_commitment = 5;
+  uint32 entry_offset = 6;
+  optional uint32 next_entry_offset = 7;
+  uint32 total_entries = 8;
 }
 
 enum MergeAcceptanceStatus {

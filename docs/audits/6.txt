@@ -219,5 +219,25 @@ Preuves d’implémentation exécutées:
 Statut audit mis à jour:
 
 - **Closed**: 6.1, 6.2, 6.3, 6.6, 6.8
-- **Partial**: 6.5
+- **Open**: 6.4, 6.7
+
+--
+
+## Commentaires Codex (2026-03-26, tranche pagination wire)
+
+Nouvelle vérification après patch proto/API/client:
+
+- **Fermé**: `6.5`. Les interfaces `ResolveRevokedLeaves`, `ResolveJoinsSince` et `FetchBarrierPublicTree` sont maintenant paginées dans le wire, avec `page_offset`/`entry_offset`, `next_*_offset`, `total_entries`, et une borne `MAX_BARRIER_HELPER_PAGE_ENTRIES := 512`.
+- **Fermé en consommation client**: les wrappers `cityg-api-client` agrègent désormais les pages et fail-close si une page change de `HistoryCommitment`, saute un offset, dérive sur `total_entries`, ou dépasse la borne de page.
+- **Toujours distinct et ouvert**: `6.4` n’est pas fermé par cette tranche. Le path FULL reste potentiellement coûteux côté calcul whole-tree; on a borné la taille de réponse wire, pas supprimé le travail protocolaire.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p cityg-api-client --lib wrappers_roundtrip_against_mock_server`
+- `cargo test -p cityg-api --lib barrier_tree_and_revoked_leaves_endpoints_validate_inputs`
+- `cargo test -p cityg-api --lib barrier_helper`
+
+Statut audit mis à jour:
+
+- **Closed**: 6.1, 6.2, 6.3, 6.5, 6.6, 6.8
 - **Open**: 6.4, 6.7

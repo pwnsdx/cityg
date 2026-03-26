@@ -125,8 +125,8 @@ Summary:
   Proof: `docs/specs.md:563-565`, `crates/cityg-gui/src/message_crypto.rs:816-846`.
 - `6.4` `Open` — FULL chain-check still fundamentally needs whole-tree work in the general case.
   Proof: `docs/specs.md:1093-1104`, `docs/specs.md:1117-1122`.
-- `6.5` `Partial` — A/B/C are now cardinality-bounded by `N_max` and retained-window limits, but they still lack true pagination / max-bytes response framing.
-  Proof: `docs/specs.md:200`, `docs/specs.md:218-231`, `crates/cityg-server/src/lib.rs:3102-3182`, `crates/cityg-api/src/lib.rs:766-774`.
+- `6.5` `Closed` — A/B/C now have explicit page framing, bounded page size, and client-side aggregation checks tied to one `HistoryCommitment`.
+  Proof: `docs/specs.md:194-238`, `crates/cityg-api/proto/cityg.proto:303-358`, `crates/cityg-api/src/lib.rs:197,900-942,2497-2618,6326-6354`, `crates/cityg-api-client/src/lib.rs:181,1188-1464,2358-2407,2757-2869`.
 - `6.6` `Closed` — unresolved joins are now bounded by `N_max`, and resolved/revoked join activations are pruned from server state.
   Proof: `docs/specs.md:218`, `docs/specs.md:994-995`, `crates/cityg-server/src/lib.rs:1603`, `crates/cityg-server/src/lib.rs:2331`, `crates/cityg-server/src/lib.rs:3102-3141`, `crates/cityg-server/src/lib.rs:10203-10257`.
 - `6.7` `Open` — anti-replay write amplification remains structurally present.
@@ -169,5 +169,5 @@ Summary:
 1. Add a globally canonical, append-only, authenticated history/finality object, not just a server-local `HistoryCommitment`.
 2. Decide whether FULL/recover-only is only an honest-client rule or must become a server-verifiable protocol property.
 3. Add completeness proofs or equivalent fail-closed semantics for `ResolveJoinsSince` / `ResolveRevokedLeaves`.
-4. Finish pagination / max-response framing for A/B/C and bound replay persistence cost normatively.
+4. Bound replay persistence cost normatively.
 5. Close the remaining wire/profile issues: explicit `profile_version` binding and, if desired, a real wire discriminator for `header[97]` contexts.

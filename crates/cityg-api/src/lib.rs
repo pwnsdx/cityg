@@ -194,6 +194,7 @@ const GROUP_LANES_ENV: &str = "CITYG_SERVER_GROUP_LANES";
 const DEFAULT_GROUP_LANES: usize = 4;
 const MERGE_COALESCE_TTL_MS: u64 = 2_000;
 const MERGE_COALESCE_MAX_ENTRIES: usize = 8_192;
+const MAX_BARRIER_HELPER_PAGE_ENTRIES: u32 = 512;
 const ACCEPT_EPOCH_MAX_IN_FLIGHT_ENV: &str = "CITYG_SERVER_ACCEPT_EPOCH_MAX_IN_FLIGHT";
 const JOIN_TICKET_MAX_IN_FLIGHT_ENV: &str = "CITYG_SERVER_JOIN_TICKET_MAX_IN_FLIGHT";
 const DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT: usize = 8;
@@ -892,6 +893,53 @@ fn pb_history_commitment(commitment: ServerHistoryCommitment) -> PbHistoryCommit
         prev_history_commitment_id: commitment.prev_history_commitment_id.to_vec(),
         history_seq: commitment.history_seq,
     }
+}
+
+fn paginate_barrier_helper_slice<T: Clone>(
+    items: &[T],
+    page_offset: u32,
+    max_entries: u32,
+) -> Result<(Vec<T>, u32, Option<u32>, u32), ApiError> {
+    let page_len = if max_entries == 0 {
+        MAX_BARRIER_HELPER_PAGE_ENTRIES
+    } else {
+        max_entries
+    };
+    if page_len == 0 || page_len > MAX_BARRIER_HELPER_PAGE_ENTRIES {
+        return Err(ApiError::InvalidRequest(
+            "max_entries exceeds MAX_BARRIER_HELPER_PAGE_ENTRIES",
+        ));
+    }
+    let total_entries = u32::try_from(items.len())
+        .map_err(|_| ApiError::server_message("barrier helper total_entries overflow"))?;
+    if total_entries == 0 {
+        if page_offset != 0 {
+            return Err(ApiError::InvalidRequest("page_offset out of range"));
+        }
+        return Ok((Vec::new(), 0, None, 0));
+    }
+    if page_offset >= total_entries {
+        return Err(ApiError::InvalidRequest("page_offset out of range"));
+    }
+    let start = usize::try_from(page_offset)
+        .map_err(|_| ApiError::InvalidRequest("page_offset out of range"))?;
+    let page_len = usize::try_from(page_len)
+        .map_err(|_| ApiError::InvalidRequest("max_entries out of range"))?;
+    let end = items.len().min(start.saturating_add(page_len));
+    let next_page_offset =
+        if end < items.len() {
+            Some(u32::try_from(end).map_err(|_| {
+                ApiError::server_message("barrier helper next_page_offset overflow")
+            })?)
+        } else {
+            None
+        };
+    Ok((
+        items[start..end].to_vec(),
+        page_offset,
+        next_page_offset,
+        total_entries,
+    ))
 }
 
 fn configured_window_admin_token() -> Option<String> {
@@ -2446,11 +2494,20 @@ async fn barrier_resolve_revoked_leaves(
             .resolve_revoked_leaf_indices(&gid, &revocation_roots_hash)
             .map_err(map_barrier_helper_error)?
     };
+    let (leaf_indices, page_offset, next_page_offset, total_entries) =
+        paginate_barrier_helper_slice(
+            resolved.leaf_indices.as_slice(),
+            request.page_offset,
+            request.max_entries,
+        )?;
 
     let response = BarrierResolveRevokedLeavesResponse {
-        leaf_indices: resolved.leaf_indices,
+        leaf_indices,
         history_view_id: resolved.history_view_id.to_vec(),
         history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
+        page_offset,
+        next_page_offset,
+        total_entries,
     };
     Ok(protobuf_response(&response))
 }
@@ -2480,10 +2537,15 @@ async fn barrier_resolve_joins_since(
             .resolve_joins_since(&gid, request.prev_barrier_version)
             .map_err(map_barrier_helper_error)?
     };
+    let (records_page, page_offset, next_page_offset, total_entries) =
+        paginate_barrier_helper_slice(
+            resolved.records.as_slice(),
+            request.page_offset,
+            request.max_entries,
+        )?;
 
     let response = BarrierResolveJoinsSinceResponse {
-        records: resolved
-            .records
+        records: records_page
             .into_iter()
             .map(
                 |ServerBarrierJoinLeafRecord {
@@ -2499,6 +2561,9 @@ async fn barrier_resolve_joins_since(
             .collect(),
         history_view_id: resolved.history_view_id.to_vec(),
         history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
+        page_offset,
+        next_page_offset,
+        total_entries,
     };
     Ok(protobuf_response(&response))
 }
@@ -2535,13 +2600,22 @@ async fn barrier_fetch_public_tree(
             .fetch_barrier_public_tree(&gid, &kem_tree_hash_after)
             .map_err(map_barrier_helper_error)?
     };
+    let (pk_entries, entry_offset, next_entry_offset, total_entries) =
+        paginate_barrier_helper_slice(
+            snapshot.pk_entries.as_slice(),
+            request.entry_offset,
+            request.max_entries,
+        )?;
 
     let response = BarrierFetchPublicTreeResponse {
         n_max: snapshot.n_max,
         kem_tree_hash_after: snapshot.kem_tree_hash_after.to_vec(),
-        pk_entries: snapshot.pk_entries,
+        pk_entries,
         history_view_id: snapshot.history_view_id.to_vec(),
         history_commitment: Some(pb_history_commitment(snapshot.history_commitment)),
+        entry_offset,
+        next_entry_offset,
+        total_entries,
     };
     Ok(protobuf_response(&response))
 }
@@ -6015,6 +6089,7 @@ mod tests {
         BarrierResolveJoinsSinceRequest {
             room_id: String::new(),
             prev_barrier_version: 0,
+            ..BarrierResolveJoinsSinceRequest::default()
         }
         .encode(&mut bad_body)
         .expect("encode bad joins-since request");
@@ -6039,6 +6114,7 @@ mod tests {
         BarrierResolveJoinsSinceRequest {
             room_id: hex::encode(DEMO_GID),
             prev_barrier_version: 0,
+            ..BarrierResolveJoinsSinceRequest::default()
         }
         .encode(&mut body)
         .expect("encode joins-since request");
@@ -6086,6 +6162,7 @@ mod tests {
         BarrierResolveRevokedLeavesRequest {
             room_id: String::new(),
             revocation_roots_hash: revocation_roots_hash.to_vec(),
+            ..BarrierResolveRevokedLeavesRequest::default()
         }
         .encode(&mut bad_revoked_body)
         .expect("encode missing room revoked request");
@@ -6105,6 +6182,7 @@ mod tests {
         BarrierResolveRevokedLeavesRequest {
             room_id: "bad-room-id".to_string(),
             revocation_roots_hash: revocation_roots_hash.to_vec(),
+            ..BarrierResolveRevokedLeavesRequest::default()
         }
         .encode(&mut bad_revoked_room)
         .expect("encode invalid room revoked request");
@@ -6124,6 +6202,7 @@ mod tests {
         BarrierResolveRevokedLeavesRequest {
             room_id: hex::encode(DEMO_GID),
             revocation_roots_hash: vec![0xAB; 31],
+            ..BarrierResolveRevokedLeavesRequest::default()
         }
         .encode(&mut bad_revoked_hash)
         .expect("encode short hash revoked request");
@@ -6143,6 +6222,7 @@ mod tests {
         BarrierResolveRevokedLeavesRequest {
             room_id: hex::encode(DEMO_GID),
             revocation_roots_hash: revocation_roots_hash.to_vec(),
+            ..BarrierResolveRevokedLeavesRequest::default()
         }
         .encode(&mut revoked_body)
         .expect("encode revoked leaves request");
@@ -6161,6 +6241,7 @@ mod tests {
         BarrierFetchPublicTreeRequest {
             room_id: String::new(),
             kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+            ..BarrierFetchPublicTreeRequest::default()
         }
         .encode(&mut bad_tree_body)
         .expect("encode missing room tree request");
@@ -6180,6 +6261,7 @@ mod tests {
         BarrierFetchPublicTreeRequest {
             room_id: hex::encode(DEMO_GID),
             kem_tree_hash_after: vec![0xCD; 31],
+            ..BarrierFetchPublicTreeRequest::default()
         }
         .encode(&mut bad_tree_hash)
         .expect("encode short hash tree request");
@@ -6199,6 +6281,7 @@ mod tests {
         BarrierFetchPublicTreeRequest {
             room_id: hex::encode(DEMO_GID),
             kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+            ..BarrierFetchPublicTreeRequest::default()
         }
         .encode(&mut tree_body)
         .expect("encode barrier tree request");
@@ -6218,14 +6301,18 @@ mod tests {
             kem_tree_hash_after.to_vec()
         );
         assert_eq!(
-            tree_decoded.pk_entries.len() as u64,
+            tree_decoded.total_entries as u64,
             n_max.saturating_mul(2).saturating_sub(1)
         );
+        assert_eq!(tree_decoded.entry_offset, 0);
+        assert_eq!(tree_decoded.next_entry_offset, Some(512));
+        assert_eq!(tree_decoded.pk_entries.len(), 512);
 
         let mut bad_tree_body = Vec::new();
         BarrierFetchPublicTreeRequest {
             room_id: hex::encode(DEMO_GID),
             kem_tree_hash_after: vec![0xFF; 32],
+            ..BarrierFetchPublicTreeRequest::default()
         }
         .encode(&mut bad_tree_body)
         .expect("encode bad barrier tree request");
@@ -6233,6 +6320,38 @@ mod tests {
             .await
             .expect_err("mismatched tree hash must fail");
         assert!(matches!(err, ApiError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn barrier_helper_endpoints_reject_page_size_above_limit() {
+        let state = test_api_state();
+        let headers = message_auth_headers();
+        let alice = demo_bundle("alice").expect("alice demo bundle");
+
+        let kem_tree_hash_after = {
+            let mut guard = state.server.write().await;
+            guard.accept_epoch(&alice).expect("accept alice");
+            guard
+                .barrier_kem_tree_hash_after(DEMO_GID.as_ref())
+                .expect("barrier tree hash")
+        };
+
+        let mut body = Vec::new();
+        BarrierFetchPublicTreeRequest {
+            room_id: hex::encode(DEMO_GID),
+            kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+            entry_offset: 0,
+            max_entries: MAX_BARRIER_HELPER_PAGE_ENTRIES.saturating_add(1),
+        }
+        .encode(&mut body)
+        .expect("encode oversized pagination request");
+        let err = barrier_fetch_public_tree(State(state), headers, Bytes::from(body))
+            .await
+            .expect_err("oversized page size must fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("max_entries exceeds MAX_BARRIER_HELPER_PAGE_ENTRIES")
+        ));
     }
 
     #[test]

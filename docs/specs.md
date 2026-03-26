@@ -191,15 +191,20 @@ Shared authenticated-view rule (normative):
 * Any procedure that composes outputs from more than one of A)/B)/C)/D) for a single validation, activation, provisioning, or recovery decision MUST require all referenced authenticated responses/objects to validate to the same `HistoryCommitment`, unless that procedure explicitly defines a safe cross-view comparison. Missing or mismatched authenticated view binding MUST fail closed. In the FULL/updater chain-check and acceptance-correlation contexts, this failure MUST surface 960.9.
 * Historical snapshot fetches served from retained history MUST return the exact `HistoryCommitment` recorded when that snapshot became committed/fetchable, not a freshly recomputed current commitment.
 * If the deployment cannot provide authenticated completeness/finality for one requested result inside its `HistoryAuthorityScope`, it MUST return an authenticated "insufficient history / not available / pending" style outcome rather than silently omitting records and claiming success.
+* `MAX_BARRIER_HELPER_PAGE_ENTRIES := 512`.
+* A), B), and C) are paged interfaces in the base profile. Each request MUST accept an explicit `page_offset`/`entry_offset` and `max_entries`; `max_entries == 0` means "use the profile default page size", namely `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
+* A), B), and C) MUST reject requests whose effective page size exceeds `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
+* Every successful page of one logical A), B), or C) result MUST carry the same `history_view_id` and the same `HistoryCommitment` as every other page of that same logical result.
+* Page ordering MUST be deterministic and gap-free. The response MUST identify the returned page's starting offset, the logical total number of entries, and whether another page exists. Clients composing multiple pages MUST fail closed on offset gaps, overlaps, `total_entries` drift, or authenticated-view mismatch.
 
-A) ResolveRevokedLeaves(revocation_roots_hash) -> sorted unique list<uint>
+A) ResolveRevokedLeaves(revocation_roots_hash, page_offset?, max_entries?) -> sorted unique list<uint> page
 Returns revoked cover leaf indices corresponding to revocation_roots_hash.
 This enumeration MUST be integrity-protected by membership/SRX state referenced by header[112]/[113].
 The authenticated response MUST carry `history_view_id`.
 The authenticated response MUST carry the corresponding `HistoryCommitment`.
 Returned indices MUST be strictly sorted, unique, `< N_max`, and therefore bounded in cardinality by `N_max`.
 
-B) ResolveJoinsSince(prev_barrier_version) -> list of JoinLeafRecord
+B) ResolveJoinsSince(prev_barrier_version, page_offset?, max_entries?) -> list of JoinLeafRecord page
 JoinLeafRecord = [device_pk:bstr, leaf_index:uint, ek_leaf:bstr]
 Returns exactly the join leaf allocations and leaf public keys that:
 * were committed after prev_barrier_version,
@@ -219,7 +224,7 @@ Output constraints (normative):
 * the server MUST prune or compact resolved, revoked, and superseded join activations so that `ResolveJoinsSince(...)` remains bounded by the currently active join activations needed for the selected `history_view_id`,
 * if membership history is inconsistent (duplicate active allocation, out-of-range index, conflicting `ek_leaf` for the same activation), the implementation MUST fail closed and MUST NOT construct or accept a dependent `barrier_update`.
 
-C) FetchBarrierPublicTree(kem_tree_hash_after) -> pk_entries
+C) FetchBarrierPublicTree(kem_tree_hash_after, entry_offset?, max_entries?) -> pk_entries page
 pk_entries is an array of length (2*N_max-1) of bstr, where each entry is either empty bstr (BOTTOM) or ML-KEM ek (1184 bytes).
 The returned pk_entries MUST hash (per S11.4) to the requested kem_tree_hash_after.
 The authenticated response MUST carry `history_view_id`.
@@ -230,6 +235,7 @@ Historical retention contract (normative):
 * The server MUST retain the current committed snapshot plus the most recent committed historical snapshots up to `MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS`.
 * Older committed snapshots MAY be retired once they fall outside that bounded retained window. Retirement MUST fail closed: the server MUST return an authenticated "retired / not available" style outcome, or an equivalent deployment-defined typed error for that authenticated member request; it MUST NOT silently substitute the current snapshot.
 * This contract constrains fetch semantics, not internal storage layout. Implementations MAY satisfy it via deltas, structural sharing, compression, or other equivalent internal representations, provided FetchBarrierPublicTree(kem_tree_hash_after) deterministically reconstructs the exact pk_entries array for the requested committed snapshot.
+* `pk_entries` pages MUST enumerate heap indices in increasing order, starting at `entry_offset`, and `total_entries` MUST equal exactly `(2*N_max-1)` for every page of that same logical snapshot result.
 
 D) LookupMergeAcceptance(merge_locator) -> MergeAcceptanceRecord
 `merge_locator := [pending_barrier_version:uint, pending_barrier_update_digest:bstr32, pending_we_epoch_id:bstr32]`
