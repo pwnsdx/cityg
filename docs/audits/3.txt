@@ -227,3 +227,16 @@ Nouvelle passe implémentation:
 - **Toujours pas de finalité byzantine globale**: cette tranche ferme l’expression locale du fail-closed et la persistance de l’ambiguïté, pas la preuve append-only/canonique globale de l’historique accepté.
 
 Statut audit: **COMPLETED**, avec durcissement implémentation supplémentaire sur la recovery path locale.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 5)
+
+Nouvelle passe spec + implémentation:
+
+- **Fermeture locale supplémentaire sur l’historique**: la spec et le wire A/B/C/D transportent maintenant un `HistoryCommitment` explicite (`history_view_id`, `history_commitment_id`, `prev_history_commitment_id`, `history_seq`) au lieu d’un simple `history_view_id`.
+- **Append-only local matérialisé**: le serveur persiste et réémet désormais une chaîne locale monotone de commitments d’historique pour les réponses barrier/history, y compris les snapshots historiques retenus.
+- **Consommé côté client**: les clients API et GUI ne lient plus seulement leurs vérifications à une vue logique; ils exigent maintenant le même `HistoryCommitment` entre `ResolveRevokedLeaves`, `ResolveJoinsSince` et `FetchBarrierPublicTree`.
+- **Toujours ouvert**: cela ferme une partie concrète de l’ambiguïté “même view id, objet historique trop faible”, mais ce n’est toujours pas une canonité append-only globale/fédérée.
+
+Statut audit: **COMPLETED**, avec remédiation spec + implémentation supplémentaire sur l’objet d’historique local.

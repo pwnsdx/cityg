@@ -268,6 +268,39 @@ pub struct JoinTicketBundle {
     pub max_barrier_update_bytes: u64,
 }
 
+/// Server-local append-only authenticated history commitment.
+///
+/// This strengthens `history_view_id` with an explicit monotonic local chain for
+/// A/B/C/D barrier history responses. It does not claim global cross-server
+/// canonicality by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HistoryCommitment {
+    /// Exact committed membership/checkpoint/barrier view identifier.
+    pub history_view_id: [u8; 32],
+    /// Identifier for this local append-only commitment step.
+    pub history_commitment_id: [u8; 32],
+    /// Previous local append-only commitment step, or zero for the first step.
+    pub prev_history_commitment_id: [u8; 32],
+    /// Monotonic local append-only sequence number for this gid.
+    pub history_seq: u64,
+}
+
+/// Revoked leaf enumeration bound to one authenticated history commitment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRevokedLeaves {
+    pub history_view_id: [u8; 32],
+    pub history_commitment: HistoryCommitment,
+    pub leaf_indices: Vec<u32>,
+}
+
+/// Join enumeration bound to one authenticated history commitment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedJoins {
+    pub history_view_id: [u8; 32],
+    pub history_commitment: HistoryCommitment,
+    pub records: Vec<BarrierJoinLeafRecord>,
+}
+
 /// Merge ticket bundle provided to existing members during leave/rekey flow.
 ///
 /// Similar to [`JoinTicketBundle`] but for members who already have a leaf_id
@@ -343,6 +376,8 @@ pub struct BarrierPublicTreeSnapshot {
     pub kem_tree_hash_after: [u8; 32],
     /// Authenticated history view under which this snapshot was committed.
     pub history_view_id: [u8; 32],
+    /// Server-local append-only history commitment recorded for that snapshot.
+    pub history_commitment: HistoryCommitment,
     /// Heap-indexed public key entries (`2*n_max-1` length).
     pub pk_entries: Vec<Vec<u8>>,
 }
@@ -359,6 +394,7 @@ pub enum MergeAcceptanceStatus {
 pub struct MergeAcceptanceRecord {
     pub status: MergeAcceptanceStatus,
     pub history_view_id: [u8; 32],
+    pub history_commitment: HistoryCommitment,
     pub accepted_barrier_version: Option<u64>,
     pub accepted_fs_ec: Option<u64>,
     pub accepted_reason: Option<u64>,
@@ -1574,6 +1610,11 @@ impl CityGServer {
             group.barrier_public_tree_blobs = room_state.barrier_public_tree_blobs.clone();
             group.accepted_barrier_merges =
                 decode_persisted_accepted_barrier_merges(&room_state.accepted_barrier_merges);
+            group.current_history_commitment = decode_persisted_history_commitment(
+                gid.as_slice(),
+                &room_state.current_history_commitment,
+                [0u8; 32],
+            )?;
             rebuild_barrier_public_tree_blob_index(group)?;
             group.barrier_public_tree_history.clear();
             for snapshot in &room_state.barrier_public_tree_history {
@@ -1595,6 +1636,11 @@ impl CityGServer {
                                     .ok()
                                     .and_then(|bytes| bytes.try_into().ok())
                                     .unwrap_or([0u8; 32]);
+                            snapshot_ref.history_commitment = decode_persisted_history_commitment(
+                                gid.as_slice(),
+                                &snapshot.history_commitment,
+                                snapshot_ref.history_view_id,
+                            )?;
                             snapshot_ref
                         }
                         Err(_) => continue,
@@ -1606,6 +1652,14 @@ impl CityGServer {
                             .ok()
                             .and_then(|bytes| bytes.try_into().ok())
                             .unwrap_or([0u8; 32]),
+                        history_commitment: decode_persisted_history_commitment(
+                            gid.as_slice(),
+                            &snapshot.history_commitment,
+                            hex::decode(&snapshot.history_view_id_hex)
+                                .ok()
+                                .and_then(|bytes| bytes.try_into().ok())
+                                .unwrap_or([0u8; 32]),
+                        )?,
                     };
                     if decode_barrier_public_tree_snapshot_ref(group, &snapshot_ref).is_err() {
                         continue;
@@ -1618,6 +1672,8 @@ impl CityGServer {
             {
                 record_barrier_public_tree_snapshot(gid.as_slice(), group)?;
             } else if !group.barrier_pk_entries.is_empty() {
+                let current_history_commitment =
+                    ensure_current_history_commitment(gid.as_slice(), group)?;
                 let current_hash = group.kem_tree_hash_after;
                 if !group
                     .barrier_public_tree_history
@@ -1626,23 +1682,27 @@ impl CityGServer {
                     let current_entries = group.barrier_pk_entries.clone();
                     let mut snapshot_ref =
                         encode_barrier_public_tree_snapshot_ref(group, current_entries.as_slice())?;
-                    snapshot_ref.history_view_id = compute_history_view_id(gid.as_slice(), group)?;
+                    snapshot_ref.history_commitment = current_history_commitment;
+                    snapshot_ref.history_view_id = current_history_commitment.history_view_id;
                     group
                         .barrier_public_tree_history
                         .insert(current_hash, snapshot_ref);
                 } else {
-                    let needs_history_view_id = group
+                    let needs_history_commitment = group
                         .barrier_public_tree_history
                         .get(&current_hash)
-                        .map(|snapshot_ref| snapshot_ref.history_view_id == [0u8; 32])
+                        .map(|snapshot_ref| {
+                            snapshot_ref.history_view_id == [0u8; 32]
+                                || snapshot_ref.history_commitment.history_commitment_id
+                                    == [0u8; 32]
+                        })
                         .unwrap_or(false);
-                    if needs_history_view_id {
-                        let current_history_view_id =
-                            compute_history_view_id(gid.as_slice(), group)?;
+                    if needs_history_commitment {
                         if let Some(snapshot_ref) =
                             group.barrier_public_tree_history.get_mut(&current_hash)
                         {
-                            snapshot_ref.history_view_id = current_history_view_id;
+                            snapshot_ref.history_commitment = current_history_commitment;
+                            snapshot_ref.history_view_id = current_history_commitment.history_view_id;
                         }
                     }
                 }
@@ -2027,7 +2087,7 @@ impl CityGServer {
     }
 
     pub fn lookup_merge_acceptance(
-        &self,
+        &mut self,
         gid: &[u8; 32],
         pending_barrier_version: u64,
         pending_barrier_update_digest: &[u8; 32],
@@ -2036,9 +2096,10 @@ impl CityGServer {
         let state = self
             .roster
             .groups
-            .get(gid.as_slice())
+            .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
-        let history_view_id = compute_history_view_id(gid.as_slice(), state)?;
+        let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
+        let history_view_id = history_commitment.history_view_id;
         let accepted = state.accepted_barrier_merges.get(&pending_barrier_version);
         let response = match accepted {
             Some(record)
@@ -2048,6 +2109,7 @@ impl CityGServer {
                 MergeAcceptanceRecord {
                     status: MergeAcceptanceStatus::Accepted,
                     history_view_id,
+                    history_commitment,
                     accepted_barrier_version: Some(record.barrier_version),
                     accepted_fs_ec: Some(record.fs_ec),
                     accepted_reason: Some(record.reason),
@@ -2057,6 +2119,7 @@ impl CityGServer {
             Some(record) => MergeAcceptanceRecord {
                 status: MergeAcceptanceStatus::Superseded,
                 history_view_id,
+                history_commitment,
                 accepted_barrier_version: Some(record.barrier_version),
                 accepted_fs_ec: Some(record.fs_ec),
                 accepted_reason: Some(record.reason),
@@ -2065,6 +2128,7 @@ impl CityGServer {
             None if state.barrier_version > pending_barrier_version => MergeAcceptanceRecord {
                 status: MergeAcceptanceStatus::FinalRejected,
                 history_view_id,
+                history_commitment,
                 accepted_barrier_version: None,
                 accepted_fs_ec: None,
                 accepted_reason: None,
@@ -2073,6 +2137,7 @@ impl CityGServer {
             None => MergeAcceptanceRecord {
                 status: MergeAcceptanceStatus::Pending,
                 history_view_id,
+                history_commitment,
                 accepted_barrier_version: None,
                 accepted_fs_ec: None,
                 accepted_reason: None,
@@ -2083,20 +2148,21 @@ impl CityGServer {
     }
 
     pub fn resolve_revoked_leaf_indices(
-        &self,
+        &mut self,
         gid: &[u8; 32],
         revocation_roots_hash: &[u8; 32],
-    ) -> Result<Vec<u32>, CityGError> {
+    ) -> Result<ResolvedRevokedLeaves, CityGError> {
         let state = self
             .roster
             .groups
-            .get(gid.as_slice())
+            .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
         if state.barrier_roots_hash != *revocation_roots_hash {
             return Err(CityGError::InvalidInput(
                 "revocation_roots_hash does not match committed barrier roots",
             ));
         }
+        let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
         let mut indices: Vec<u32> = state
             .revoked
             .iter()
@@ -2104,19 +2170,24 @@ impl CityGServer {
             .collect();
         indices.sort_unstable();
         indices.dedup();
-        Ok(indices)
+        Ok(ResolvedRevokedLeaves {
+            history_view_id: history_commitment.history_view_id,
+            history_commitment,
+            leaf_indices: indices,
+        })
     }
 
     pub fn resolve_joins_since(
-        &self,
+        &mut self,
         gid: &[u8; 32],
         prev_barrier_version: u64,
-    ) -> Result<Vec<BarrierJoinLeafRecord>, CityGError> {
+    ) -> Result<ResolvedJoins, CityGError> {
         let state = self
             .roster
             .groups
-            .get(gid.as_slice())
+            .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
+        let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
         ensure_distinct_active_cover_leaf_indices(state)?;
         let active_leaves: BTreeSet<[u8; 32]> = state
             .latest_snapshot()
@@ -2149,7 +2220,11 @@ impl CityGServer {
                     DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR,
                 )?;
             }
-            return Ok(by_leaf.into_values().collect());
+            return Ok(ResolvedJoins {
+                history_view_id: history_commitment.history_view_id,
+                history_commitment,
+                records: by_leaf.into_values().collect(),
+            });
         }
         for record in &state.join_history {
             if record.barrier_version > prev_barrier_version
@@ -2167,25 +2242,44 @@ impl CityGServer {
                 )?;
             }
         }
-        Ok(by_leaf.into_values().collect())
+        Ok(ResolvedJoins {
+            history_view_id: history_commitment.history_view_id,
+            history_commitment,
+            records: by_leaf.into_values().collect(),
+        })
     }
 
     pub fn fetch_barrier_public_tree(
-        &self,
+        &mut self,
         gid: &[u8; 32],
         kem_tree_hash_after: &[u8; 32],
     ) -> Result<BarrierPublicTreeSnapshot, CityGError> {
         let state = self
             .roster
             .groups
-            .get(gid.as_slice())
+            .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
         let n_max = validate_barrier_n_max(state.n_max)?;
-        let (pk_entries, history_view_id) =
-            if let Some(snapshot) = state.barrier_public_tree_history.get(kem_tree_hash_after) {
+        let (pk_entries, history_commitment) =
+            if let Some(mut snapshot) = state
+                .barrier_public_tree_history
+                .get(kem_tree_hash_after)
+                .cloned()
+            {
+                if snapshot.history_commitment.history_commitment_id == [0u8; 32] {
+                    snapshot.history_commitment = synthesize_legacy_history_commitment(
+                        gid.as_slice(),
+                        snapshot.history_view_id,
+                    )?;
+                    if let Some(entry) = state.barrier_public_tree_history.get_mut(kem_tree_hash_after)
+                    {
+                        entry.history_commitment = snapshot.history_commitment;
+                        entry.history_view_id = snapshot.history_commitment.history_view_id;
+                    }
+                }
                 (
-                    decode_barrier_public_tree_snapshot_ref(state, snapshot)?,
-                    snapshot.history_view_id,
+                    decode_barrier_public_tree_snapshot_ref(state, &snapshot)?,
+                    snapshot.history_commitment,
                 )
             } else {
                 let pk_entries_view = build_pk_entries_view(state)?;
@@ -2201,7 +2295,8 @@ impl CityGServer {
                     Cow::Borrowed(entries) => entries.to_vec(),
                     Cow::Owned(entries) => entries,
                 };
-                (pk_entries, compute_history_view_id(gid, state)?)
+                let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
+                (pk_entries, history_commitment)
             };
         let computed_hash = compute_barrier_tree_hash(n_max, pk_entries.as_slice())?;
         if computed_hash != *kem_tree_hash_after {
@@ -2214,18 +2309,26 @@ impl CityGServer {
         Ok(BarrierPublicTreeSnapshot {
             n_max,
             kem_tree_hash_after: computed_hash,
-            history_view_id,
+            history_view_id: history_commitment.history_view_id,
+            history_commitment,
             pk_entries,
         })
     }
 
-    pub fn current_history_view_id(&self, gid: &[u8; 32]) -> Result<[u8; 32], CityGError> {
+    pub fn current_history_commitment(
+        &mut self,
+        gid: &[u8; 32],
+    ) -> Result<HistoryCommitment, CityGError> {
         let state = self
             .roster
             .groups
-            .get(gid.as_slice())
+            .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
-        compute_history_view_id(gid.as_slice(), state)
+        ensure_current_history_commitment(gid.as_slice(), state)
+    }
+
+    pub fn current_history_view_id(&mut self, gid: &[u8; 32]) -> Result<[u8; 32], CityGError> {
+        Ok(self.current_history_commitment(gid)?.history_view_id)
     }
 }
 
@@ -2266,6 +2369,17 @@ struct HistoryViewIdArgs<'a> {
     n_max: u64,
 }
 
+#[derive(Serialize)]
+struct HistoryCommitmentIdArgs<'a> {
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    history_view_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: &'a [u8; 32],
+    history_seq: u64,
+}
+
 fn compute_history_view_id(gid: &[u8], state: &GroupState) -> Result<[u8; 32], CityGError> {
     let latest_root = state.latest_root.as_ref().unwrap_or(&[0u8; 32]);
     let n_max = validate_barrier_n_max(state.n_max)?;
@@ -2284,6 +2398,108 @@ fn compute_history_view_id(gid: &[u8], state: &GroupState) -> Result<[u8; 32], C
         },
     )
     .map_err(CityGError::from)
+}
+
+fn compute_history_commitment_id(
+    gid: &[u8],
+    history_view_id: &[u8; 32],
+    prev_history_commitment_id: &[u8; 32],
+    history_seq: u64,
+) -> Result<[u8; 32], CityGError> {
+    h_l(
+        "barrier/history-commitment",
+        &HistoryCommitmentIdArgs {
+            gid,
+            history_view_id,
+            prev_history_commitment_id,
+            history_seq,
+        },
+    )
+    .map_err(CityGError::from)
+}
+
+fn synthesize_legacy_history_commitment(
+    gid: &[u8],
+    history_view_id: [u8; 32],
+) -> Result<HistoryCommitment, CityGError> {
+    if history_view_id == [0u8; 32] {
+        return Ok(HistoryCommitment::default());
+    }
+    let history_commitment_id = h_l(
+        "barrier/history-commitment/legacy",
+        &serde_bytes::Bytes::new(&[gid, history_view_id.as_slice()].concat()),
+    )
+    .map_err(CityGError::from)?;
+    Ok(HistoryCommitment {
+        history_view_id,
+        history_commitment_id,
+        prev_history_commitment_id: [0u8; 32],
+        history_seq: 0,
+    })
+}
+
+fn ensure_current_history_commitment(
+    gid: &[u8],
+    state: &mut GroupState,
+) -> Result<HistoryCommitment, CityGError> {
+    let history_view_id = compute_history_view_id(gid, state)?;
+    let current = state.current_history_commitment;
+    if current.history_view_id == history_view_id && current.history_commitment_id != [0u8; 32] {
+        return Ok(current);
+    }
+    let prev_history_commitment_id = current.history_commitment_id;
+    let history_seq = current.history_seq.saturating_add(1);
+    let history_commitment_id = compute_history_commitment_id(
+        gid,
+        &history_view_id,
+        &prev_history_commitment_id,
+        history_seq,
+    )?;
+    let commitment = HistoryCommitment {
+        history_view_id,
+        history_commitment_id,
+        prev_history_commitment_id,
+        history_seq,
+    };
+    state.current_history_commitment = commitment;
+    Ok(commitment)
+}
+
+fn persisted_history_commitment(commitment: HistoryCommitment) -> PersistedHistoryCommitment {
+    PersistedHistoryCommitment {
+        history_view_id_hex: hex::encode(commitment.history_view_id),
+        history_commitment_id_hex: hex::encode(commitment.history_commitment_id),
+        prev_history_commitment_id_hex: hex::encode(commitment.prev_history_commitment_id),
+        history_seq: commitment.history_seq,
+    }
+}
+
+fn decode_persisted_history_commitment(
+    gid: &[u8],
+    persisted: &PersistedHistoryCommitment,
+    fallback_history_view_id: [u8; 32],
+) -> Result<HistoryCommitment, CityGError> {
+    let history_view_id = hex::decode(&persisted.history_view_id_hex)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .unwrap_or(fallback_history_view_id);
+    let history_commitment_id = hex::decode(&persisted.history_commitment_id_hex)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .unwrap_or([0u8; 32]);
+    let prev_history_commitment_id = hex::decode(&persisted.prev_history_commitment_id_hex)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .unwrap_or([0u8; 32]);
+    if history_commitment_id == [0u8; 32] {
+        return synthesize_legacy_history_commitment(gid, history_view_id);
+    }
+    Ok(HistoryCommitment {
+        history_view_id,
+        history_commitment_id,
+        prev_history_commitment_id,
+        history_seq: persisted.history_seq,
+    })
 }
 
 fn compute_barrier_update_digest(raw_update: &[u8]) -> Result<[u8; 32], CityGError> {
@@ -2632,6 +2848,7 @@ fn encode_barrier_public_tree_snapshot_ref(
     Ok(BarrierPublicTreeSnapshotRef {
         blob_indices,
         history_view_id: [0u8; 32],
+        history_commitment: HistoryCommitment::default(),
     })
 }
 
@@ -2674,7 +2891,8 @@ fn record_barrier_public_tree_snapshot(
     }
     let current_entries = state.barrier_pk_entries.clone();
     let mut snapshot = encode_barrier_public_tree_snapshot_ref(state, current_entries.as_slice())?;
-    snapshot.history_view_id = compute_history_view_id(gid, state)?;
+    snapshot.history_commitment = ensure_current_history_commitment(gid, state)?;
+    snapshot.history_view_id = snapshot.history_commitment.history_view_id;
     state
         .barrier_public_tree_history
         .insert(state.kem_tree_hash_after, snapshot);
@@ -3183,6 +3401,7 @@ fn persisted_barrier_public_tree_history(
         .map(|(hash, snapshot)| PersistedBarrierPublicTreeSnapshot {
             kem_tree_hash_after_hex: hex::encode(hash),
             history_view_id_hex: hex::encode(snapshot.history_view_id),
+            history_commitment: persisted_history_commitment(snapshot.history_commitment),
             blob_indices: snapshot.blob_indices.clone(),
             pk_entries: Vec::new(),
         })
@@ -3274,6 +3493,8 @@ fn persisted_kbroad_room_state(
         room.max_barrier_update_bytes =
             u64::try_from(state.max_barrier_update_bytes).unwrap_or(u64::MAX);
         room.accepted_barrier_merges = persisted_accepted_barrier_merges(state);
+        room.current_history_commitment =
+            persisted_history_commitment(state.current_history_commitment);
     }
     room
 }
@@ -4409,6 +4630,7 @@ mod tests {
             .pk_entries;
         let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
         let unresolved_join_leaf_indices: BTreeSet<u32> = join_records
+            .records
             .iter()
             .map(|record| record.leaf_index)
             .collect();
@@ -4423,12 +4645,12 @@ mod tests {
         apply_join_records_to_snapshot(
             snapshot_pre.as_mut_slice(),
             ticket.n_max,
-            join_records.as_slice(),
+            join_records.records.as_slice(),
         )?;
         apply_revoked_indices_to_snapshot(
             snapshot_pre.as_mut_slice(),
             ticket.n_max,
-            committed_revoked.as_slice(),
+            committed_revoked.leaf_indices.as_slice(),
         )?;
         let kem_tree_hash_before =
             super::compute_barrier_tree_hash(ticket.n_max, snapshot_pre.as_slice())?;
@@ -4561,6 +4783,9 @@ mod tests {
         }
         let snapshot_ref =
             super::encode_barrier_public_tree_snapshot_ref(group, previous_entries.as_slice())?;
+        let mut snapshot_ref = snapshot_ref;
+        snapshot_ref.history_commitment = super::ensure_current_history_commitment(gid.as_slice(), group)?;
+        snapshot_ref.history_view_id = snapshot_ref.history_commitment.history_view_id;
         group
             .barrier_public_tree_history
             .insert(previous_hash, snapshot_ref);
@@ -5326,7 +5551,7 @@ mod tests {
 
         std::fs::remove_file(&journal_path).ok();
 
-        let reloaded = demo_server_with_journal(&journal_path);
+        let mut reloaded = demo_server_with_journal(&journal_path);
         let historical_snapshot = reloaded.fetch_barrier_public_tree(&gid, &historical_hash)?;
         let current_snapshot = reloaded.fetch_barrier_public_tree(&gid, &current_hash)?;
         assert_eq!(historical_snapshot.kem_tree_hash_after, historical_hash);
@@ -5586,6 +5811,7 @@ mod tests {
                 barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
                     kem_tree_hash_after_hex: "not-hex".to_string(),
                     history_view_id_hex: String::new(),
+                    history_commitment: super::PersistedHistoryCommitment::default(),
                     blob_indices: Vec::new(),
                     pk_entries: vec![vec![0x99; 3]],
                 }],
@@ -5596,6 +5822,7 @@ mod tests {
                 pcs_refresh_slot_width_ec: 0,
                 max_barrier_update_bytes: 0,
                 accepted_barrier_merges: Vec::new(),
+                current_history_commitment: super::PersistedHistoryCommitment::default(),
                 device_chain_states: Vec::new(),
             },
         )]);
@@ -5657,6 +5884,7 @@ mod tests {
                 barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
                     kem_tree_hash_after_hex: hex::encode(historical_hash),
                     history_view_id_hex: String::new(),
+                    history_commitment: super::PersistedHistoryCommitment::default(),
                     blob_indices: Vec::new(),
                     pk_entries: historical_entries.clone(),
                 }],
@@ -5667,6 +5895,7 @@ mod tests {
                 pcs_refresh_slot_width_ec: 5,
                 max_barrier_update_bytes: 99,
                 accepted_barrier_merges: Vec::new(),
+                current_history_commitment: super::PersistedHistoryCommitment::default(),
                 device_chain_states: Vec::new(),
             },
         )]);
@@ -9069,11 +9298,11 @@ mod tests {
         let journal_path = dir.path().join("cityg-server-genesis-artifact.journal");
 
         {
-            let mut server = demo_server_with_journal(&journal_path);
+            let server = demo_server_with_journal(&journal_path);
             server.persist_kbroad_state()?;
         }
 
-        let reloaded = demo_server_with_journal(&journal_path);
+        let mut reloaded = demo_server_with_journal(&journal_path);
         let err = reloaded
             .resolve_joins_since(&cityg_client::demo::DEMO_GID, 0)
             .expect_err("restart without membership artifact must fail closed");
@@ -9337,8 +9566,8 @@ mod tests {
         server.accept_epoch(&bundle)?;
 
         let records = server.resolve_joins_since(&cityg_client::demo::DEMO_GID, 0)?;
-        assert!(!records.is_empty(), "expected at least one join record");
-        let record = &records[0];
+        assert!(!records.records.is_empty(), "expected at least one join record");
+        let record = &records.records[0];
         assert!(record.leaf_index > 0);
         assert!(!record.device_pk.is_empty());
         assert!(
@@ -9397,12 +9626,12 @@ mod tests {
         ];
 
         let records = server.resolve_joins_since(&gid, 1)?;
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0].leaf_index, 8);
-        assert_eq!(records[0].device_pk, vec![0x12; 4]);
-        assert_eq!(records[0].ek_leaf, vec![0x22; 1184]);
-        assert_eq!(records[1].leaf_index, 9);
-        assert_eq!(records[2].leaf_index, 10);
+        assert_eq!(records.records.len(), 3);
+        assert_eq!(records.records[0].leaf_index, 8);
+        assert_eq!(records.records[0].device_pk, vec![0x12; 4]);
+        assert_eq!(records.records[0].ek_leaf, vec![0x22; 1184]);
+        assert_eq!(records.records[1].leaf_index, 9);
+        assert_eq!(records.records[2].leaf_index, 10);
         Ok(())
     }
 
@@ -9720,6 +9949,58 @@ mod tests {
     }
 
     #[test]
+    fn history_commitment_advances_monotonically_and_preserves_historical_snapshots()
+    -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x74)?;
+        let mut server = super::demo::demo_server();
+        server.accept_epoch(&generated.bundle)?;
+        let gid = cityg_client::demo::DEMO_GID;
+
+        let first_hash = {
+            let group = server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("group not found"))?;
+            group.kem_tree_hash_after
+        };
+        let first_snapshot = server.fetch_barrier_public_tree(&gid, &first_hash)?;
+        let (second_hash, _) = advance_committed_tree_for_tests(&mut server, &gid, 0x74)?;
+        let historical_hash = server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .and_then(|group| {
+                group
+                    .barrier_public_tree_history
+                    .keys()
+                    .copied()
+                    .find(|hash| *hash != second_hash)
+            })
+            .ok_or(CityGError::InvalidInput("missing historical barrier snapshot"))?;
+        let second_snapshot = server.fetch_barrier_public_tree(&gid, &second_hash)?;
+        let historical_snapshot = server.fetch_barrier_public_tree(&gid, &historical_hash)?;
+
+        assert_ne!(
+            first_snapshot.history_commitment.history_commitment_id,
+            [0u8; 32]
+        );
+        assert_ne!(
+            historical_snapshot.history_commitment.history_commitment_id,
+            [0u8; 32]
+        );
+        assert!(
+            second_snapshot.history_commitment.history_seq
+                > historical_snapshot.history_commitment.history_seq
+        );
+        assert_eq!(
+            second_snapshot.history_commitment.prev_history_commitment_id,
+            historical_snapshot.history_commitment.history_commitment_id
+        );
+        Ok(())
+    }
+
+    #[test]
     fn merge_ticket_hash_matches_fetchable_tree_snapshot() -> Result<(), CityGError> {
         let mut server = super::demo::demo_server();
         let alice = cityg_client::demo::demo_bundle("alice")?;
@@ -9818,7 +10099,7 @@ mod tests {
             .get(cityg_client::demo::DEMO_GID.as_slice())
             .map(|group| group.n_max)
             .unwrap_or(super::DEFAULT_BARRIER_N_MAX);
-        assert_eq!(indices, vec![super::cover_leaf_index(&leaf, n_max)]);
+        assert_eq!(indices.leaf_indices, vec![super::cover_leaf_index(&leaf, n_max)]);
 
         let err = server
             .resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &[0x42; 32])
@@ -9834,7 +10115,7 @@ mod tests {
 
     #[test]
     fn barrier_helpers_report_missing_group_state() {
-        let server = super::demo::demo_server();
+        let mut server = super::demo::demo_server();
         let gid = [0xE1; 32];
 
         assert!(matches!(
@@ -10198,6 +10479,7 @@ struct GroupState {
     barrier_public_tree_blob_index: HashMap<Vec<u8>, BarrierBlobIndex>,
     barrier_public_tree_history: BTreeMap<[u8; 32], BarrierPublicTreeSnapshotRef>,
     barrier_hash_cache: Option<Arc<HashMap<usize, [u8; 32]>>>,
+    current_history_commitment: HistoryCommitment,
     room_admin_pop_keys: BTreeSet<Vec<u8>>,
     room_admin_proof_replay_keys: BTreeSet<[u8; 32]>,
 }
@@ -10234,6 +10516,7 @@ impl Default for GroupState {
             barrier_public_tree_blob_index: HashMap::new(),
             barrier_public_tree_history: BTreeMap::new(),
             barrier_hash_cache: None,
+            current_history_commitment: HistoryCommitment::default(),
             room_admin_pop_keys: BTreeSet::new(),
             room_admin_proof_replay_keys: BTreeSet::new(),
         }
@@ -10264,6 +10547,7 @@ type BarrierBlobIndex = u32;
 struct BarrierPublicTreeSnapshotRef {
     blob_indices: Vec<BarrierBlobIndex>,
     history_view_id: [u8; 32],
+    history_commitment: HistoryCommitment,
 }
 
 impl GroupState {
@@ -10378,6 +10662,8 @@ struct PersistedKbroadRoomState {
     #[serde(default)]
     accepted_barrier_merges: Vec<PersistedAcceptedBarrierMergeRecord>,
     #[serde(default)]
+    current_history_commitment: PersistedHistoryCommitment,
+    #[serde(default)]
     device_chain_states: Vec<PersistedDeviceChainState>,
 }
 
@@ -10413,9 +10699,23 @@ struct PersistedBarrierPublicTreeSnapshot {
     #[serde(default)]
     history_view_id_hex: String,
     #[serde(default)]
+    history_commitment: PersistedHistoryCommitment,
+    #[serde(default)]
     blob_indices: Vec<BarrierBlobIndex>,
     #[serde(default)]
     pk_entries: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PersistedHistoryCommitment {
+    #[serde(default)]
+    history_view_id_hex: String,
+    #[serde(default)]
+    history_commitment_id_hex: String,
+    #[serde(default)]
+    prev_history_commitment_id_hex: String,
+    #[serde(default)]
+    history_seq: u64,
 }
 
 fn kbroad_state_path_for_journal(journal_path: &Path) -> PathBuf {

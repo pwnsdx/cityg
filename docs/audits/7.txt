@@ -201,3 +201,16 @@ Nouvelle passe implémentation:
 - **Toujours ouvert**: ce mécanisme améliore la réaction du client à une histoire insuffisante ou contradictoire, mais ne fournit toujours pas de preuve de canonité append-only globale ni de complétude forte des réponses membership/history.
 
 Statut audit: **COMPLETED**, avec amélioration locale supplémentaire de la réponse client face à un serveur actif, sans fermeture de la canonité globale.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 5)
+
+Nouvelle passe spec + implémentation:
+
+- **Trust-boundary history renforcée localement**: les réponses barrier/history ne reposent plus seulement sur un `history_view_id`; elles portent maintenant un `HistoryCommitment` append-only local, explicitement chaîné et monotone.
+- **Résistance accrue aux compositions faibles**: les clients GUI/API refusent désormais de composer un `JoinSet`, un `RevokedLeafSet` et un snapshot public si les commitments locaux divergent, même si le `history_view_id` seul paraît cohérent.
+- **Snapshot historique mieux borné**: les snapshots barrier retenus conservent maintenant leur commitment associé au moment de la rétention, ce qui évite de réémettre silencieusement un “current view id” recalculé pour un ancien arbre.
+- **Toujours ouvert**: ce durcissement améliore le boundary contre un serveur actif unique, mais ne constitue toujours pas une preuve de canonité append-only globale ni de complétude forte inter-serveurs.
+
+Statut audit: **COMPLETED**, avec remédiation supplémentaire concrète sur la boundary history locale.

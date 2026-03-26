@@ -1,5 +1,6 @@
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
+use crate::barrier_shared::require_same_history_commitment;
 
 fn is_fs_forward_jump_group_http_error(
     freeze_code: Option<u32>,
@@ -344,12 +345,19 @@ async fn publish_revocation_merge_from_ticket(
         .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
         .await
         .context("resolve committed barrier revoked leaf indices")?;
-    if barrier_tree_response.history_view_id == [0u8; 32]
-        || barrier_tree_response.history_view_id != join_resolution.history_view_id
-        || barrier_tree_response.history_view_id != revoked_resolution.history_view_id
+    if require_same_history_commitment(
+        &barrier_tree_response.history_commitment,
+        &join_resolution.history_commitment,
+    )
+    .is_err()
+        || require_same_history_commitment(
+            &barrier_tree_response.history_commitment,
+            &revoked_resolution.history_commitment,
+        )
+        .is_err()
     {
         return Err(anyhow!(
-            "barrier snapshot-auth history view mismatch (960.9): public tree / joins / revoked leaves do not share one authenticated view"
+            "barrier snapshot-auth history commitment mismatch (960.9): public tree / joins / revoked leaves do not share one authenticated commitment"
         ));
     }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
@@ -879,12 +887,19 @@ async fn perform_barrier_merge_inner(
         .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
         .await
         .context("resolve committed barrier revoked leaf indices")?;
-    if barrier_tree_response.history_view_id == [0u8; 32]
-        || barrier_tree_response.history_view_id != join_resolution.history_view_id
-        || barrier_tree_response.history_view_id != revoked_resolution.history_view_id
+    if require_same_history_commitment(
+        &barrier_tree_response.history_commitment,
+        &join_resolution.history_commitment,
+    )
+    .is_err()
+        || require_same_history_commitment(
+            &barrier_tree_response.history_commitment,
+            &revoked_resolution.history_commitment,
+        )
+        .is_err()
     {
         return Err(anyhow!(
-            "barrier snapshot-auth history view mismatch (960.9): public tree / joins / revoked leaves do not share one authenticated view"
+            "barrier snapshot-auth history commitment mismatch (960.9): public tree / joins / revoked leaves do not share one authenticated commitment"
         ));
     }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();

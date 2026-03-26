@@ -154,8 +154,8 @@ use pb::{
     ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
     FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest, GetBundleResponse,
     GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse,
-    JoinTicketRequest, JoinTicketResponse, ListRoomAdminsRequest, ListRoomAdminsResponse,
-    MembersRequest, MembersResponse, MergeAcceptanceStatus as PbMergeAcceptanceStatus,
+    HistoryCommitment as PbHistoryCommitment, JoinTicketRequest, JoinTicketResponse,
+    ListRoomAdminsRequest, ListRoomAdminsResponse, MembersRequest, MembersResponse, MergeAcceptanceStatus as PbMergeAcceptanceStatus,
     MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
     RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse,
     RotateRoomKbroadRequest, RotateRoomKbroadResponse, SearchMembersRequest, SearchMembersResponse,
@@ -1106,8 +1106,13 @@ impl CitygApiClient {
         let response: BarrierResolveRevokedLeavesResponse = self
             .post_proto("/v1/barrier/resolve_revoked_leaves", request)
             .await?;
+        let history_view_id = array32(&response.history_view_id)?;
         Ok(BarrierResolvedRevokedLeaves {
-            history_view_id: array32(&response.history_view_id)?,
+            history_view_id,
+            history_commitment: parse_history_commitment(
+                history_view_id,
+                response.history_commitment,
+            )?,
             leaf_indices: response.leaf_indices,
         })
     }
@@ -1125,8 +1130,13 @@ impl CitygApiClient {
         let response: BarrierResolveJoinsSinceResponse = self
             .post_proto("/v1/barrier/resolve_joins_since", request)
             .await?;
+        let history_view_id = array32(&response.history_view_id)?;
         Ok(BarrierResolvedJoins {
-            history_view_id: array32(&response.history_view_id)?,
+            history_view_id,
+            history_commitment: parse_history_commitment(
+                history_view_id,
+                response.history_commitment,
+            )?,
             records: response
                 .records
                 .into_iter()
@@ -1153,8 +1163,13 @@ impl CitygApiClient {
             .post_proto("/v1/barrier/fetch_public_tree", request)
             .await?;
         let n_max = validate_barrier_n_max(response.n_max)?;
+        let history_view_id = array32(&response.history_view_id)?;
         Ok(BarrierFetchedPublicTree {
-            history_view_id: array32(&response.history_view_id)?,
+            history_view_id,
+            history_commitment: parse_history_commitment(
+                history_view_id,
+                response.history_commitment,
+            )?,
             tree: BarrierPublicTree {
                 n_max,
                 kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
@@ -1180,9 +1195,14 @@ impl CitygApiClient {
         let response: BarrierLookupMergeAcceptanceResponse = self
             .post_proto("/v1/barrier/lookup_merge_acceptance", request)
             .await?;
+        let history_view_id = array32(&response.history_view_id)?;
         Ok(MergeAcceptanceLookup {
             status: parse_merge_acceptance_status(response.status)?,
-            history_view_id: array32(&response.history_view_id)?,
+            history_view_id,
+            history_commitment: parse_history_commitment(
+                history_view_id,
+                response.history_commitment,
+            )?,
             accepted_barrier_version: response.accepted_barrier_version,
             accepted_fs_ec: response.accepted_fs_ec,
             accepted_reason: response.accepted_reason,
@@ -1630,6 +1650,7 @@ pub struct BarrierJoinRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarrierResolvedRevokedLeaves {
     pub history_view_id: [u8; 32],
+    pub history_commitment: HistoryCommitment,
     pub leaf_indices: Vec<u32>,
 }
 
@@ -1637,6 +1658,7 @@ pub struct BarrierResolvedRevokedLeaves {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarrierResolvedJoins {
     pub history_view_id: [u8; 32],
+    pub history_commitment: HistoryCommitment,
     pub records: Vec<BarrierJoinRecord>,
 }
 
@@ -1652,7 +1674,17 @@ pub struct BarrierPublicTree {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarrierFetchedPublicTree {
     pub history_view_id: [u8; 32],
+    pub history_commitment: HistoryCommitment,
     pub tree: BarrierPublicTree,
+}
+
+/// Server-local append-only authenticated history commitment carried by A/B/C/D.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryCommitment {
+    pub history_view_id: [u8; 32],
+    pub history_commitment_id: [u8; 32],
+    pub prev_history_commitment_id: [u8; 32],
+    pub history_seq: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1667,6 +1699,7 @@ pub enum MergeAcceptanceStatus {
 pub struct MergeAcceptanceLookup {
     pub status: MergeAcceptanceStatus,
     pub history_view_id: [u8; 32],
+    pub history_commitment: HistoryCommitment,
     pub accepted_barrier_version: Option<u64>,
     pub accepted_fs_ec: Option<u64>,
     pub accepted_reason: Option<u64>,
@@ -1762,6 +1795,26 @@ fn optional_array32(bytes: Option<Vec<u8>>) -> Result<Option<[u8; 32]>, Error> {
     bytes.as_deref().map(array32).transpose()
 }
 
+fn parse_history_commitment(
+    history_view_id: [u8; 32],
+    commitment: Option<PbHistoryCommitment>,
+) -> Result<HistoryCommitment, Error> {
+    let commitment =
+        commitment.ok_or_else(|| Error::Parse("missing history_commitment".to_string()))?;
+    let commitment_view_id = array32(&commitment.history_view_id)?;
+    if commitment_view_id != history_view_id {
+        return Err(Error::Parse(
+            "history_commitment.history_view_id mismatch".to_string(),
+        ));
+    }
+    Ok(HistoryCommitment {
+        history_view_id,
+        history_commitment_id: array32(&commitment.history_commitment_id)?,
+        prev_history_commitment_id: array32(&commitment.prev_history_commitment_id)?,
+        history_seq: commitment.history_seq,
+    })
+}
+
 fn parse_merge_acceptance_status(status: i32) -> Result<MergeAcceptanceStatus, Error> {
     match PbMergeAcceptanceStatus::try_from(status) {
         Ok(PbMergeAcceptanceStatus::Pending) => Ok(MergeAcceptanceStatus::Pending),
@@ -1848,7 +1901,8 @@ mod tests {
         AcceptEpochResponse, BarrierFetchPublicTreeResponse, BarrierLookupMergeAcceptanceResponse,
         BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesResponse,
         BootstrapRoomResponse, ConfigureWindowResponse, FetchMessagesResponse, GetBundleResponse,
-        GetTelemetryResponse, GetWindowResponse, JoinTicketResponse, MembersResponse,
+        GetTelemetryResponse, GetWindowResponse, HistoryCommitment as PbHistoryCommitment,
+        JoinTicketResponse, MembersResponse,
         MergeAcceptanceStatus as PbMergeAcceptanceStatus, MergeTicketResponse,
         RefreshPivotResponse, RotateRoomKbroadResponse, SearchMembersResponse, SeedHeadResponse,
         SendMessageResponse,
@@ -1903,6 +1957,15 @@ mod tests {
         }
     }
 
+    fn history_commitment_ok_payload(view: u8, id: u8, prev: u8, seq: u64) -> PbHistoryCommitment {
+        PbHistoryCommitment {
+            history_view_id: vec![view; 32],
+            history_commitment_id: vec![id; 32],
+            prev_history_commitment_id: vec![prev; 32],
+            history_seq: seq,
+        }
+    }
+
     async fn mock_health() -> &'static str {
         "ok"
     }
@@ -1940,6 +2003,7 @@ mod tests {
                 encode_proto(BarrierResolveRevokedLeavesResponse {
                     leaf_indices: vec![1, 7],
                     history_view_id: vec![0xD1; 32],
+                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
                 })
             }
             "/v1/barrier/resolve_joins_since" => encode_proto(BarrierResolveJoinsSinceResponse {
@@ -1949,12 +2013,14 @@ mod tests {
                     ek_leaf: vec![0xBB; 1184],
                 }],
                 history_view_id: vec![0xD1; 32],
+                history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
             }),
             "/v1/barrier/fetch_public_tree" => encode_proto(BarrierFetchPublicTreeResponse {
                 n_max: 8,
                 kem_tree_hash_after: vec![0xCC; 32],
                 pk_entries: vec![Vec::new(); 15],
                 history_view_id: vec![0xD1; 32],
+                history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
             }),
             "/v1/barrier/lookup_merge_acceptance" => {
                 encode_proto(BarrierLookupMergeAcceptanceResponse {
@@ -1964,6 +2030,7 @@ mod tests {
                     accepted_fs_ec: Some(22),
                     accepted_reason: Some(1),
                     accepted_digest: Some(vec![0xDD; 32]),
+                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE2, 0xE1, 8)),
                 })
             }
             "/v1/send_message" => encode_proto(SendMessageResponse::default()),
@@ -2426,9 +2493,11 @@ mod tests {
             .barrier_resolve_revoked_leaves("room-1", &[0xCC; 32])
             .await?;
         assert_eq!(revoked.history_view_id, [0xD1; 32]);
+        assert_eq!(revoked.history_commitment.history_commitment_id, [0xE1; 32]);
         assert_eq!(revoked.leaf_indices, vec![1, 7]);
         let joins = client.barrier_resolve_joins_since("room-1", 3).await?;
         assert_eq!(joins.history_view_id, [0xD1; 32]);
+        assert_eq!(joins.history_commitment.history_commitment_id, [0xE1; 32]);
         assert_eq!(joins.records.len(), 1);
         assert_eq!(joins.records[0].leaf_index, 9);
         assert_eq!(joins.records[0].ek_leaf.len(), 1184);
@@ -2436,6 +2505,7 @@ mod tests {
             .barrier_fetch_public_tree("room-1", &[0xCC; 32])
             .await?;
         assert_eq!(tree.history_view_id, [0xD1; 32]);
+        assert_eq!(tree.history_commitment.history_commitment_id, [0xE1; 32]);
         assert_eq!(tree.tree.n_max, 8);
         assert_eq!(tree.tree.kem_tree_hash_after, [0xCC; 32]);
         assert_eq!(tree.tree.pk_entries.len(), 15);
@@ -2444,6 +2514,7 @@ mod tests {
             .await?;
         assert_eq!(acceptance.status, MergeAcceptanceStatus::Accepted);
         assert_eq!(acceptance.history_view_id, [0xD1; 32]);
+        assert_eq!(acceptance.history_commitment.history_commitment_id, [0xE2; 32]);
         assert_eq!(acceptance.accepted_barrier_version, Some(11));
         assert_eq!(acceptance.accepted_fs_ec, Some(22));
         assert_eq!(acceptance.accepted_reason, Some(1));
@@ -2572,6 +2643,7 @@ mod tests {
                     kem_tree_hash_after: vec![0xCC; 32],
                     pk_entries: Vec::new(),
                     history_view_id: vec![0xD1; 32],
+                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
                 })
             }),
         );
@@ -2589,6 +2661,42 @@ mod tests {
         assert!(matches!(
             err,
             Error::Parse(message) if message.contains("MAX_BARRIER_N_MAX")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn barrier_fetch_public_tree_rejects_missing_history_commitment()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let app = Router::new().route(
+            "/v1/barrier/fetch_public_tree",
+            post(|| async {
+                encode_proto(BarrierFetchPublicTreeResponse {
+                    n_max: 8,
+                    kem_tree_hash_after: vec![0xCC; 32],
+                    pk_entries: vec![Vec::new(); 15],
+                    history_view_id: vec![0xD1; 32],
+                    history_commitment: None,
+                })
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_fetch_public_tree("room-1", &[0xCC; 32])
+            .await
+            .expect_err("missing history_commitment must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("missing history_commitment")
         ));
 
         handle.abort();

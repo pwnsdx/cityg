@@ -1,4 +1,5 @@
 use super::*;
+use crate::barrier_shared::require_same_history_commitment;
 
 pub(super) const BARRIER_KEYGEN_D_INFO: &[u8] = b"city-g|barrier/keygen-d|v1";
 pub(super) const BARRIER_KEYGEN_Z_INFO: &[u8] = b"city-g|barrier/keygen-z|v1";
@@ -424,12 +425,19 @@ pub(super) async fn full_chain_check_barrier_update(
         .barrier_resolve_revoked_leaves(room_id, &revocation_roots_hash)
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
-    if snapshot_prev_response.history_view_id == [0u8; 32]
-        || snapshot_prev_response.history_view_id != join_resolution.history_view_id
-        || snapshot_prev_response.history_view_id != revoked_resolution.history_view_id
+    if require_same_history_commitment(
+        &snapshot_prev_response.history_commitment,
+        &join_resolution.history_commitment,
+    )
+    .is_err()
+        || require_same_history_commitment(
+            &snapshot_prev_response.history_commitment,
+            &revoked_resolution.history_commitment,
+        )
+        .is_err()
     {
         return Err(anyhow!(
-            "barrier full chain-check prevalidation failed (960.9): public tree / joins / revoked leaves do not share one authenticated history view"
+            "barrier full chain-check prevalidation failed (960.9): public tree / joins / revoked leaves do not share one authenticated history commitment"
         ));
     }
 

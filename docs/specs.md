@@ -162,6 +162,12 @@ S3.1 Core identifiers (inputs)
 * xk_hash : bstr32 transcript hash / handshake binding (opaque here)
 * E_k : bstr    ME-OR derived value / binding (opaque here)
 * history_view_id : bstr32 exact committed membership/checkpoint/barrier history view identifier
+* HistoryCommitment := [history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint]
+  * `history_commitment_id` names one server-local append-only commitment step for the authenticated history view.
+  * `prev_history_commitment_id` is all-zero only for the first locally committed history step for that `(gid, deployment)`.
+  * `history_seq` is a server-local monotonically increasing append-only sequence number for that `(gid, deployment)`.
+  * `history_commitment_id` MUST be computed as `H_L("barrier/history-commitment", [gid, history_view_id, prev_history_commitment_id, history_seq])`.
+  * This object strengthens local append-only correlation for A)/B)/C)/D); it is NOT, by itself, a federated/global consensus object.
 
 S3.2 Membership/SRX anchor roots (inputs)
 * header[110], header[111], header[112], header[113] : bstr32 roots (membership and revocation)
@@ -173,14 +179,20 @@ The membership/SRX/barrier subsystems MUST provide to any authenticated group me
 
 Shared authenticated-view rule (normative):
 * Every successful response from A), B), C), and D) MUST be bound to a `history_view_id` naming the exact committed history/checkpoint view under which the response was computed.
+* Every successful response from A), B), C), and D) MUST also carry a `HistoryCommitment` for that same view.
 * The proof/object format is deployment-defined, but it MUST cryptographically bind `(gid, history_view_id, request selector(s), response payload)` to committed history/checkpoint state.
-* Later sections may write `Resolve...(...)` / `Lookup...(...)` as shorthand for the payload component only; callers MUST also validate the accompanying `history_view_id` and authenticated proof/object per this section.
-* Any procedure that composes outputs from more than one of A)/B)/C)/D) for a single validation, activation, provisioning, or recovery decision MUST require all referenced authenticated responses/objects to validate to the same `history_view_id`, unless that procedure explicitly defines a safe cross-view comparison. Missing or mismatched authenticated view binding MUST fail closed. In the FULL/updater chain-check and acceptance-correlation contexts, this failure MUST surface 960.9.
+* The returned `HistoryCommitment.history_view_id` MUST equal the top-level `history_view_id`.
+* For responses computed against current state rather than a historical snapshot, the server MUST first advance/persist the current `HistoryCommitment` if the current committed state differs from the last emitted `HistoryCommitment`.
+* `history_seq` MUST strictly increase whenever the server locally appends a new committed history/checkpoint/barrier state for that `gid`; `history_commitment_id` MUST be unique for each such step.
+* Later sections may write `Resolve...(...)` / `Lookup...(...)` as shorthand for the payload component only; callers MUST also validate the accompanying `history_view_id`, `HistoryCommitment`, and authenticated proof/object per this section.
+* Any procedure that composes outputs from more than one of A)/B)/C)/D) for a single validation, activation, provisioning, or recovery decision MUST require all referenced authenticated responses/objects to validate to the same `HistoryCommitment`, unless that procedure explicitly defines a safe cross-view comparison. Missing or mismatched authenticated view binding MUST fail closed. In the FULL/updater chain-check and acceptance-correlation contexts, this failure MUST surface 960.9.
+* Historical snapshot fetches served from retained history MUST return the exact `HistoryCommitment` recorded when that snapshot became committed/fetchable, not a freshly recomputed current commitment.
 
 A) ResolveRevokedLeaves(revocation_roots_hash) -> sorted unique list<uint>
 Returns revoked cover leaf indices corresponding to revocation_roots_hash.
 This enumeration MUST be integrity-protected by membership/SRX state referenced by header[112]/[113].
 The authenticated response MUST carry `history_view_id`.
+The authenticated response MUST carry the corresponding `HistoryCommitment`.
 
 B) ResolveJoinsSince(prev_barrier_version) -> list of JoinLeafRecord
 JoinLeafRecord = [device_pk:bstr, leaf_index:uint, ek_leaf:bstr]
@@ -191,6 +203,7 @@ Returns exactly the join leaf allocations and leaf public keys that:
 Activations that were never committed, were superseded before commitment, or are no longer active at the selected `history_view_id` MUST NOT be returned.
 This enumeration MUST be integrity-protected by checkpoint history / membership state.
 The authenticated response MUST carry `history_view_id`.
+The authenticated response MUST carry the corresponding `HistoryCommitment`.
 When later sections refer to `JoinSet` or `unresolved JoinSet`, they mean exactly this authenticated payload for the selected `history_view_id`.
 Output constraints (normative):
 * entries MUST be strictly sorted by increasing `leaf_index`,
@@ -203,6 +216,7 @@ C) FetchBarrierPublicTree(kem_tree_hash_after) -> pk_entries
 pk_entries is an array of length (2*N_max-1) of bstr, where each entry is either empty bstr (BOTTOM) or ML-KEM ek (1184 bytes).
 The returned pk_entries MUST hash (per S11.4) to the requested kem_tree_hash_after.
 The authenticated response MUST carry `history_view_id`.
+The authenticated response MUST carry the corresponding `HistoryCommitment`.
 Historical retention contract (normative):
 * FetchBarrierPublicTree(kem_tree_hash_after) MUST work for any committed historical barrier public tree snapshot addressed by kem_tree_hash_after, not only the current one.
 * The server MUST retain every committed pk_entries snapshot for as long as the corresponding group history/checkpoint history remains fetchable. Implementations MAY garbage-collect only together with retirement of the associated group history.
@@ -210,12 +224,13 @@ Historical retention contract (normative):
 
 D) LookupMergeAcceptance(merge_locator) -> MergeAcceptanceRecord
 `merge_locator := [pending_barrier_version:uint, pending_barrier_update_digest:bstr32, pending_we_epoch_id:bstr32]`
-`MergeAcceptanceRecord := [status, history_view_id, accepted_barrier_version?, accepted_fs_ec?, accepted_reason?, accepted_digest?]`
+`MergeAcceptanceRecord := [status, history_view_id, history_commitment, accepted_barrier_version?, accepted_fs_ec?, accepted_reason?, accepted_digest?]`
 where:
 * `status` is one of `{accepted, superseded, pending, final_rejected}`,
+* `history_commitment` is the current authenticated `HistoryCommitment` under which `status` was evaluated,
 * `accepted_*` fields MUST be present iff `status == accepted`,
 * `final_rejected` means authenticated finality establishes that the specific merge identified by `merge_locator` can no longer become accepted.
-The authenticated response MUST bind `merge_locator`, `status`, and any populated `accepted_*` fields to the returned `history_view_id`.
+The authenticated response MUST bind `merge_locator`, `status`, `history_commitment`, and any populated `accepted_*` fields to the returned `history_view_id`.
 Implementations MAY store additional stable identifiers, but any such identifier MUST be injectively bound to `merge_locator` within `gid`; it MUST NOT identify two distinct merge attempts.
 
 Snapshot-auth failure handling (normative; 960.9 wiring):
@@ -938,7 +953,7 @@ Source of prev_barrier_version (normative):
 RevokedLeafSet := ResolveRevokedLeaves(revocation_roots_hash)
 JoinSet        := ResolveJoinsSince(prev_barrier_version)
 Canonical-view requirement (normative):
-* When S11.6 is executed for FULL client chain-check, updater chain-check, join-finalize eligibility, or server acceptance, `RevokedLeafSet`, `JoinSet`, and the non-genesis `snapshot_base` MUST all be authenticated under the same `history_view_id`.
+* When S11.6 is executed for FULL client chain-check, updater chain-check, join-finalize eligibility, or server acceptance, `RevokedLeafSet`, `JoinSet`, and the non-genesis `snapshot_base` MUST all be authenticated under the same `HistoryCommitment`.
 Genesis convention:
 When barrier_initialized == false, prev_barrier_version MUST be treated as 0 for JoinSet enumeration, and ResolveJoinsSince(0) MUST return the complete active leaf set for genesis.
 Leaf-allocation invariant (normative):
@@ -1091,7 +1106,7 @@ Join-finalize bootstrap exception (normative):
 Bootstrap verification context (normative):
 * For this exception only, the `H_prev` used by the S11.11.2-style checks is NOT the joiner's locally stored current `kem_tree_hash_after`.
 * Instead, define `BU_current :=` the authenticated accepted current `barrier_update` bytes provisioned for the current committed state, and define `H_prev_bootstrap := BU_current.kem_tree_hash_before`.
-* The joiner MUST fetch/authenticate `snapshot_base := FetchBarrierPublicTree(H_prev_bootstrap)` and MUST execute the S11.11.2 chain-checks against `BU_current`, `H_prev_bootstrap`, `current_history_view_id`, and the corresponding authenticated A/B/C responses for that same view.
+* The joiner MUST fetch/authenticate `snapshot_base := FetchBarrierPublicTree(H_prev_bootstrap)` and MUST execute the S11.11.2 chain-checks against `BU_current`, `H_prev_bootstrap`, `current_history_view_id`, and the corresponding authenticated A/B/C responses for that same `HistoryCommitment`.
 * A joiner MUST NOT treat its provisioned current `kem_tree_hash_after` alone as a sufficient trust root for this bootstrap check.
 * Satisfying the bullets above establishes FULL public-state verification sufficient for join_finalize eligibility even though the client has not yet derived the current `K_barrier`.
 * A pending joiner admitted under this exception MUST still NOT originate reason 0 or reason 1 while `pending_barrier_recovery == true`.
@@ -1100,7 +1115,7 @@ If this check fails, the updater MUST abort barrier_update creation, MUST NOT si
 S11.11.2 FULL clients MUST chain-check (CRITICAL)
 A FULL-verifying client processing a barrier_update MUST:
 * Let H_prev := client's locally stored kem_tree_hash_after.
-* Fetch pk_entries_prev := FetchBarrierPublicTree(H_prev), record its authenticated `history_view_id := hv_tree`, and verify it hashes to H_prev per S11.4; failure -> 960.9.
+* Fetch pk_entries_prev := FetchBarrierPublicTree(H_prev), record its authenticated `HistoryCommitment := hc_tree`, and verify it hashes to H_prev per S11.4; failure -> 960.9.
 * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
 * Obtain `RevokedLeafSet := ResolveRevokedLeaves(revocation_roots_hash)` and `JoinSet := ResolveJoinsSince(BU.prev_barrier_version)` and record their authenticated view identifiers `hv_revoked` and `hv_join`.
 * Require `hv_tree == hv_revoked == hv_join`; mismatch or missing authenticated view binding -> 960.9.
@@ -1168,7 +1183,7 @@ F) Updater identity binding + updater-not-revoked
 * Require updater_leaf NOT in RevokedLeafSet for this update; else reject 960.1.
 * Let JoinSet := ResolveJoinsSince(BU.prev_barrier_version).
 * Let JoinLeafSet := the set of `leaf_index` values carried by JoinSet.
-* The server MUST evaluate `RevokedLeafSet`, `JoinSet`, and the `snapshot_base` used below against one common authenticated `history_view_id`; inability to establish a single common view -> reject 960.9.
+* The server MUST evaluate `RevokedLeafSet`, `JoinSet`, and the `snapshot_base` used below against one common authenticated `HistoryCommitment`; inability to establish a single common commitment -> reject 960.9.
 * If header[178] == 1:
   * Require updater_leaf NOT IN JoinLeafSet, else reject 960.5.
   * Server MUST enforce S10.4B policy checks; on failure reject 960.12.
@@ -1357,7 +1372,7 @@ Persistence ordering:
 * If persistence fails, updater MUST abort emission of the barrier_update.
 
 S11.14.2 Acceptance correlation + activation (MUST)
-Upon observing acceptance of the merge carrying this barrier_update, or after `LookupMergeAcceptance(pending_merge_locator)` returns `status == accepted`:
+Upon observing acceptance of the merge carrying this barrier_update, or after `LookupMergeAcceptance(pending_merge_locator)` returns `status == accepted` under an authenticated `HistoryCommitment`:
 * Compute accepted_digest := H_L("barrier/update/digest", [accepted raw header[175] bytes]).
 * Require accepted_digest == pending_barrier_update_digest.
 * Require the observed accepted `barrier_version` to equal `pending_barrier_version`.

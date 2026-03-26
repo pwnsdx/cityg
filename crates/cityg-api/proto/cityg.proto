@@ -295,6 +295,7 @@ message BarrierResolveRevokedLeavesResponse {
   reserved 1000 to 1999;
   repeated uint32 leaf_indices = 1;
   bytes history_view_id = 2;
+  optional HistoryCommitment history_commitment = 3;
 }
 
 message BarrierJoinLeafRecord {
@@ -314,6 +315,7 @@ message BarrierResolveJoinsSinceResponse {
   reserved 1000 to 1999;
   repeated BarrierJoinLeafRecord records = 1;
   bytes history_view_id = 2;
+  optional HistoryCommitment history_commitment = 3;
 }
 
 message BarrierFetchPublicTreeRequest {
@@ -328,6 +330,7 @@ message BarrierFetchPublicTreeResponse {
   bytes kem_tree_hash_after = 2;
   repeated bytes pk_entries = 3;
   bytes history_view_id = 4;
+  optional HistoryCommitment history_commitment = 5;
 }
 
 enum MergeAcceptanceStatus {
@@ -353,6 +356,15 @@ message BarrierLookupMergeAcceptanceResponse {
   optional uint64 accepted_fs_ec = 4;
   optional uint64 accepted_reason = 5;
   optional bytes accepted_digest = 6;
+  optional HistoryCommitment history_commitment = 7;
+}
+
+message HistoryCommitment {
+  reserved 1000 to 1999;
+  bytes history_view_id = 1;
+  bytes history_commitment_id = 2;
+  bytes prev_history_commitment_id = 3;
+  uint64 history_seq = 4;
 }
 
 message RoomAdminProof {

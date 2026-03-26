@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use cityg_api_client::BarrierJoinRecord;
+use cityg_api_client::{BarrierJoinRecord, HistoryCommitment};
 use msphf_core::hash::h_l;
 use rand::{RngExt, rng};
 use serde::Serialize;
@@ -85,6 +85,21 @@ pub fn compute_revocation_roots_hash(
         &BarrierRootsPreimage(revoked_since_root, revoked_root),
     )
     .map_err(|err| anyhow!("compute revocation_roots_hash: {err}"))
+}
+
+pub fn require_same_history_commitment(
+    lhs: &HistoryCommitment,
+    rhs: &HistoryCommitment,
+) -> Result<()> {
+    if lhs.history_view_id == [0u8; 32]
+        || lhs.history_commitment_id == [0u8; 32]
+        || lhs != rhs
+    {
+        return Err(anyhow!(
+            "authenticated history commitment mismatch across barrier dependencies"
+        ));
+    }
+    Ok(())
 }
 
 pub fn validate_barrier_n_max(n_max: u64) -> Result<u64> {

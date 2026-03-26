@@ -6546,6 +6546,18 @@ async fn pending_barrier_history_lookup_discards_superseded_locator()
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[derive(Clone, PartialEq, Message)]
+    struct MockHistoryCommitment {
+        #[prost(bytes = "vec", tag = "1")]
+        history_view_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "2")]
+        history_commitment_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "3")]
+        prev_history_commitment_id: Vec<u8>,
+        #[prost(uint64, tag = "4")]
+        history_seq: u64,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
     struct MockBarrierLookupMergeAcceptanceResponse {
         #[prost(int32, tag = "1")]
         status: i32,
@@ -6559,6 +6571,8 @@ async fn pending_barrier_history_lookup_discards_superseded_locator()
         accepted_reason: Option<u64>,
         #[prost(bytes = "vec", optional, tag = "6")]
         accepted_digest: Option<Vec<u8>>,
+        #[prost(message, optional, tag = "7")]
+        history_commitment: Option<MockHistoryCommitment>,
     }
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -6609,6 +6623,12 @@ async fn pending_barrier_history_lookup_discards_superseded_locator()
             accepted_fs_ec: Some(31),
             accepted_reason: Some(2),
             accepted_digest: Some(vec![0xAA; 32]),
+            history_commitment: Some(MockHistoryCommitment {
+                history_view_id: vec![0xD1; 32],
+                history_commitment_id: vec![0xE1; 32],
+                prev_history_commitment_id: vec![0x00; 32],
+                history_seq: 7,
+            }),
         }
         .encode_to_vec();
         let response_head = format!(
@@ -6660,6 +6680,18 @@ async fn pending_barrier_history_lookup_discards_final_rejected_locator()
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[derive(Clone, PartialEq, Message)]
+    struct MockHistoryCommitment {
+        #[prost(bytes = "vec", tag = "1")]
+        history_view_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "2")]
+        history_commitment_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "3")]
+        prev_history_commitment_id: Vec<u8>,
+        #[prost(uint64, tag = "4")]
+        history_seq: u64,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
     struct MockBarrierLookupMergeAcceptanceResponse {
         #[prost(int32, tag = "1")]
         status: i32,
@@ -6673,6 +6705,8 @@ async fn pending_barrier_history_lookup_discards_final_rejected_locator()
         accepted_reason: Option<u64>,
         #[prost(bytes = "vec", optional, tag = "6")]
         accepted_digest: Option<Vec<u8>>,
+        #[prost(message, optional, tag = "7")]
+        history_commitment: Option<MockHistoryCommitment>,
     }
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -6723,6 +6757,12 @@ async fn pending_barrier_history_lookup_discards_final_rejected_locator()
             accepted_fs_ec: None,
             accepted_reason: None,
             accepted_digest: None,
+            history_commitment: Some(MockHistoryCommitment {
+                history_view_id: vec![0xD2; 32],
+                history_commitment_id: vec![0xE2; 32],
+                prev_history_commitment_id: vec![0xE1; 32],
+                history_seq: 8,
+            }),
         }
         .encode_to_vec();
         let response_head = format!(
@@ -6774,6 +6814,18 @@ async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[derive(Clone, PartialEq, Message)]
+    struct MockHistoryCommitment {
+        #[prost(bytes = "vec", tag = "1")]
+        history_view_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "2")]
+        history_commitment_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "3")]
+        prev_history_commitment_id: Vec<u8>,
+        #[prost(uint64, tag = "4")]
+        history_seq: u64,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
     struct MockBarrierLookupMergeAcceptanceResponse {
         #[prost(int32, tag = "1")]
         status: i32,
@@ -6787,6 +6839,8 @@ async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
         accepted_reason: Option<u64>,
         #[prost(bytes = "vec", optional, tag = "6")]
         accepted_digest: Option<Vec<u8>>,
+        #[prost(message, optional, tag = "7")]
+        history_commitment: Option<MockHistoryCommitment>,
     }
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -6837,6 +6891,12 @@ async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
             accepted_fs_ec: Some(42),
             accepted_reason: Some(1),
             accepted_digest: Some(vec![0xA9; 32]),
+            history_commitment: Some(MockHistoryCommitment {
+                history_view_id: vec![0xD3; 32],
+                history_commitment_id: vec![0xE3; 32],
+                prev_history_commitment_id: vec![0xE2; 32],
+                history_seq: 9,
+            }),
         }
         .encode_to_vec();
         let response_head = format!(

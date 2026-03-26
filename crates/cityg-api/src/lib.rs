@@ -46,7 +46,7 @@ use pb::{
     ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
     FetchMessagesRequest, FetchMessagesResponse, FreezeStat, GetBundleRequest, GetBundleResponse,
     GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse,
-    IdentityBinding, JoinTicketRequest, JoinTicketResponse, ListRoomAdminsRequest,
+    HistoryCommitment as PbHistoryCommitment, IdentityBinding, JoinTicketRequest, JoinTicketResponse, ListRoomAdminsRequest,
     ListRoomAdminsResponse, Member, MembersRequest, MembersResponse, MergeAcceptanceStatus,
     MergeTicketIntent, MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest,
     RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse, RoomAdminProof,
@@ -65,8 +65,8 @@ use unicode_normalization::UnicodeNormalization;
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_server::{
     BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord, CityGServer,
-    MergeAcceptanceStatus as ServerMergeAcceptanceStatus, MergeTicketBundle, ServerConfig,
-    ServerOutcome,
+    HistoryCommitment as ServerHistoryCommitment,
+    MergeAcceptanceStatus as ServerMergeAcceptanceStatus, MergeTicketBundle, ServerConfig, ServerOutcome,
 };
 use msphf_core::{
     MsphfError,
@@ -871,6 +871,15 @@ fn parse_hex_32(label: &'static str, value: &str) -> Result<[u8; 32], ApiError> 
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+fn pb_history_commitment(commitment: ServerHistoryCommitment) -> PbHistoryCommitment {
+    PbHistoryCommitment {
+        history_view_id: commitment.history_view_id.to_vec(),
+        history_commitment_id: commitment.history_commitment_id.to_vec(),
+        prev_history_commitment_id: commitment.prev_history_commitment_id.to_vec(),
+        history_seq: commitment.history_seq,
+    }
 }
 
 fn configured_window_admin_token() -> Option<String> {
@@ -2395,25 +2404,18 @@ async fn barrier_resolve_revoked_leaves(
     let mut revocation_roots_hash = [0u8; 32];
     revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
 
-    let leaf_indices = {
+    let resolved = {
         let lane = state.server_for_gid(&gid);
-        let guard = lane.read().await;
+        let mut guard = lane.write().await;
         guard
             .resolve_revoked_leaf_indices(&gid, &revocation_roots_hash)
             .map_err(ApiError::from)?
     };
 
-    let history_view_id = {
-        let lane = state.server_for_gid(&gid);
-        let guard = lane.read().await;
-        guard
-            .current_history_view_id(&gid)
-            .map_err(ApiError::from)?
-    };
-
     let response = BarrierResolveRevokedLeavesResponse {
-        leaf_indices,
-        history_view_id: history_view_id.to_vec(),
+        leaf_indices: resolved.leaf_indices,
+        history_view_id: resolved.history_view_id.to_vec(),
+        history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
     };
     Ok(protobuf_response(&response))
 }
@@ -2436,24 +2438,17 @@ async fn barrier_resolve_joins_since(
     )
     .await?;
 
-    let records = {
+    let resolved = {
         let lane = state.server_for_gid(&gid);
-        let guard = lane.read().await;
+        let mut guard = lane.write().await;
         guard
             .resolve_joins_since(&gid, request.prev_barrier_version)
             .map_err(ApiError::from)?
     };
 
-    let history_view_id = {
-        let lane = state.server_for_gid(&gid);
-        let guard = lane.read().await;
-        guard
-            .current_history_view_id(&gid)
-            .map_err(ApiError::from)?
-    };
-
     let response = BarrierResolveJoinsSinceResponse {
-        records: records
+        records: resolved
+            .records
             .into_iter()
             .map(
                 |ServerBarrierJoinLeafRecord {
@@ -2467,7 +2462,8 @@ async fn barrier_resolve_joins_since(
                 },
             )
             .collect(),
-        history_view_id: history_view_id.to_vec(),
+        history_view_id: resolved.history_view_id.to_vec(),
+        history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
     };
     Ok(protobuf_response(&response))
 }
@@ -2499,7 +2495,7 @@ async fn barrier_fetch_public_tree(
 
     let snapshot = {
         let lane = state.server_for_gid(&gid);
-        let guard = lane.read().await;
+        let mut guard = lane.write().await;
         guard
             .fetch_barrier_public_tree(&gid, &kem_tree_hash_after)
             .map_err(ApiError::from)?
@@ -2510,6 +2506,7 @@ async fn barrier_fetch_public_tree(
         kem_tree_hash_after: snapshot.kem_tree_hash_after.to_vec(),
         pk_entries: snapshot.pk_entries,
         history_view_id: snapshot.history_view_id.to_vec(),
+        history_commitment: Some(pb_history_commitment(snapshot.history_commitment)),
     };
     Ok(protobuf_response(&response))
 }
@@ -2549,7 +2546,7 @@ async fn barrier_lookup_merge_acceptance(
 
     let record = {
         let lane = state.server_for_gid(&gid);
-        let guard = lane.read().await;
+        let mut guard = lane.write().await;
         match guard.lookup_merge_acceptance(
             &gid,
             request.pending_barrier_version,
@@ -2576,6 +2573,7 @@ async fn barrier_lookup_merge_acceptance(
         accepted_fs_ec: record.accepted_fs_ec,
         accepted_reason: record.accepted_reason,
         accepted_digest: record.accepted_digest.map(|digest| digest.to_vec()),
+        history_commitment: Some(pb_history_commitment(record.history_commitment)),
     };
     Ok(protobuf_response(&response))
 }
@@ -6011,6 +6009,7 @@ mod tests {
             !decoded.records.is_empty(),
             "joins-since should return records"
         );
+        assert!(decoded.history_commitment.is_some());
         let first = &decoded.records[0];
         assert!(first.leaf_index > 0);
         assert!(!first.device_pk.is_empty());
@@ -6172,6 +6171,7 @@ mod tests {
         let tree_decoded: BarrierFetchPublicTreeResponse =
             decode_proto_response(tree_response).await;
         assert_eq!(tree_decoded.n_max, n_max);
+        assert!(tree_decoded.history_commitment.is_some());
         assert_eq!(
             tree_decoded.kem_tree_hash_after,
             kem_tree_hash_after.to_vec()
@@ -6764,6 +6764,7 @@ mod tests {
         assert_eq!(pending.accepted_reason, None);
         assert_eq!(pending.accepted_digest, None);
         assert_ne!(pending.history_view_id, vec![0u8; 32]);
+        assert!(pending.history_commitment.is_some());
 
         let err = barrier_lookup_merge_acceptance(
             State(state),

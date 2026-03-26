@@ -193,3 +193,16 @@ Re-vérification d’implémentation après patchs du jour:
 - **Toujours ouvert**: la gouvernance room-admin et les preuves d’exhaustivité/canonité globale de l’historique restent des frontières plus larges que cette tranche.
 
 Statut audit: **COMPLETED**, avec progression d’implémentation concrète sur deux findings retenus.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 5)
+
+Nouvelle passe spec + implémentation:
+
+- **Renfort du finding principal**: le simple `history_view_id` a été promu en objet `HistoryCommitment` append-only local dans la spec, le proto et l’implémentation A/B/C/D.
+- **Persisté côté serveur**: les snapshots barrier historiques et les réponses de lookup transportent maintenant un commitment monotone local, avec chaînage `prev_history_commitment_id`.
+- **Vérifié côté clients**: les chemins FULL/updater du GUI comparent désormais le même `HistoryCommitment`, pas seulement la même vue logique, avant de composer joins/revoked/tree.
+- **Toujours partiellement ouvert**: cette passe ferme la faiblesse “view commune trop faible” au niveau local serveur/API, mais pas la canonité/finalité globale byzantine inter-serveurs.
+
+Statut audit: **COMPLETED**, avec remédiation supplémentaire concrète sur l’objet d’historique authentifié.
