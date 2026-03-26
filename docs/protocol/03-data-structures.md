@@ -129,7 +129,7 @@ Legacy SRX keys are forbidden in this profile:
 
 ZK-VRF binding includes:
 
-`[xk_hash, 93, 94, 98, 99, 106, 110, 111, 112, 113, proof_mode, fs_policy_version, vrf_id, fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit, (160 when SRX applies)]`
+`[xk_hash, 93, 94, 98, 99, 106, 110, 111, 112, 113, proof_mode, profile_version, fs_policy_version, vrf_id, fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit, (160 when SRX applies)]`
 
 ### 3.3 VCK Preimage (`msphf/vck`)
 

@@ -614,6 +614,9 @@ Wire encoding requirement (normative, MUST):
 
 S8.2 msg_index uniqueness rule (CRITICAL)
 For any fixed sender-scoped tuple (gid, weid, t, xk_hash, E_k, barrier_version, sender_leaf_id), implementations MUST keep the probability of `msg_index` reuse negligible across all payloads encrypted under that tuple.
+Normative anti-replay bounds:
+* `MAX_MSGS_PER_TUPLE := 4096`
+* `MAX_REPLAY_TUPLES_PER_CONTEXT := N_max`
 Implementations MUST enforce:
 * fresh uniformly random uint64 `msg_index` sampled independently per payload from a cryptographically secure random source local to the sender, plus anti-replay state.
 * `msg_index` MUST be obtained at send time from the platform CSPRNG or an equivalent entropy source; it MUST NOT be derived from rollback-prone persisted local state.
@@ -623,11 +626,16 @@ Collision-risk rule (normative):
 * Deployments SHOULD rotate to a fresh tuple well before same-tuple send volume approaches the birthday bound of the 64-bit space. As an operational reference point, keeping same-tuple sends at or below 2^20 yields a random-collision bound below approximately 2^-25.
 Crash-safety requirement (normative, MUST):
 Receiver-local anti-replay state for accepted `(tuple_tag, msg_index)` pairs MUST be persisted durably (crash-safe) before the accepted payload is released to the application, or as part of the same logical transaction that makes the accepted payload durable to the application. If crash-safe anti-replay persistence is not available, this profile MUST NOT be used.
+Receivers MAY persist multiple accepted `(tuple_tag, msg_index)` pairs in one crash-safe batch, provided that no payload covered by that batch is released to the application before the whole batch is durable.
 If sender-side collision risk cannot be kept negligible, or receiver-side anti-replay cannot be enforced, this profile MUST NOT be used.
 Receiver duplicate-rejection rule (normative, MUST):
+Define `tuple_context_id` (normative):
+* `tuple_context_id := H_L("fs/msg/replay/context", [gid, weid, t, xk_hash, E_k, header[176]])`
 Define `tuple_tag` (normative):
 * `tuple_tag := H_L("fs/msg/replay/tuple", [gid, weid, t, xk_hash, E_k, header[176], sender_leaf_id])`
 Receivers MUST derive this exact `tuple_tag` and MUST reject a payload if the pair `(tuple_tag, msg_index)` has already been accepted locally. Duplicate detection MUST occur before the payload is released to the application.
+Receivers MUST retain at most `MAX_MSGS_PER_TUPLE` accepted indices per `tuple_tag`.
+Receivers MUST make persisted tuple state collectable once its `tuple_context_id` no longer matches the authenticated receive context for the current local session state. Under the base profile, receivers MUST retain at most `MAX_REPLAY_TUPLES_PER_CONTEXT` sender-scoped tuples for one current `tuple_context_id`; any excess or obsolete tuple state MUST be pruned before further accepted payloads are released.
 
 S8.3 K_msg_epoch
 K_msg_epoch := HKDF-BLAKE3(
@@ -678,6 +686,7 @@ bind_fs := CBOR_det([
   header[93], header[94], header[98], header[99], header[106],
   header[110], header[111], header[112], header[113],
   proof_mode,
+  profile_version,
   header[139],
   meor_vrf_id,
   header[142],

@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 
 // Receiver-side anti-replay tracks a bounded recent window per sender-scoped tuple tag.
 // S8.2 requires crash-safe persistence of accepted (tuple_tag, msg_index) replay state;
-// the GUI satisfies that by persisting this window in the encrypted session file.
+// the GUI satisfies that by persisting this bounded window in the encrypted session file.
 // Replays older than this window can be re-accepted after eviction by design.
-pub(crate) const MSG_INDEX_REPLAY_WINDOW: usize = 4_096;
+pub(crate) const MAX_MSGS_PER_REPLAY_TUPLE: usize = 4_096;
 
 const PAYLOAD_ENVELOPE_V2_MODE: &str = "fs-hybrid-msg-v2";
 const PAYLOAD_AEAD_TAG_LEN: usize = 16;
@@ -21,18 +21,48 @@ const PAYLOAD_MSG_KEY_INFO: &[u8] = b"city-g|fs/msg/key|v2";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MsgReplayTupleState {
+    context_id: [u8; 32],
     seen_msg_indices: VecDeque<u64>,
     seen_msg_index_set: HashSet<u64>,
+    last_seen_order: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MsgReplayState {
     pub(crate) tuples: BTreeMap<[u8; 32], MsgReplayTupleState>,
+    next_seen_order: u64,
 }
 
 impl MsgReplayState {
-    pub(crate) fn ensure_tuple(&mut self, tuple_tag: [u8; 32]) {
-        self.tuples.entry(tuple_tag).or_default();
+    pub(crate) fn ensure_tuple(&mut self, tuple_tag: [u8; 32], context_id: [u8; 32]) {
+        let state = self.tuples.entry(tuple_tag).or_default();
+        if state.context_id == [0u8; 32] {
+            state.context_id = context_id;
+        } else if state.context_id != context_id {
+            *state = MsgReplayTupleState {
+                context_id,
+                ..MsgReplayTupleState::default()
+            };
+        }
+    }
+
+    pub(crate) fn prune_to_context(&mut self, context_id: [u8; 32], max_tuples: usize) {
+        self.tuples.retain(|_, state| {
+            state.context_id == [0u8; 32] || state.context_id == context_id
+        });
+
+        let max_tuples = max_tuples.max(1);
+        while self.tuples.len() > max_tuples {
+            let Some((oldest_tag, _)) = self
+                .tuples
+                .iter()
+                .min_by_key(|(_, state)| state.last_seen_order)
+                .map(|(tag, state)| (*tag, state.last_seen_order))
+            else {
+                break;
+            };
+            self.tuples.remove(&oldest_tag);
+        }
     }
 
     pub(crate) fn contains(&self, tuple_tag: [u8; 32], msg_index: u64) -> bool {
@@ -41,13 +71,23 @@ impl MsgReplayState {
             .is_some_and(|state| state.seen_msg_index_set.contains(&msg_index))
     }
 
-    pub(crate) fn record(&mut self, tuple_tag: [u8; 32], msg_index: u64) {
+    pub(crate) fn record(&mut self, tuple_tag: [u8; 32], context_id: [u8; 32], msg_index: u64) {
         let state = self.tuples.entry(tuple_tag).or_default();
+        if state.context_id == [0u8; 32] {
+            state.context_id = context_id;
+        } else if state.context_id != context_id {
+            *state = MsgReplayTupleState {
+                context_id,
+                ..MsgReplayTupleState::default()
+            };
+        }
         if !state.seen_msg_index_set.insert(msg_index) {
             return;
         }
+        self.next_seen_order = self.next_seen_order.saturating_add(1);
+        state.last_seen_order = self.next_seen_order;
         state.seen_msg_indices.push_back(msg_index);
-        if state.seen_msg_indices.len() > MSG_INDEX_REPLAY_WINDOW
+        if state.seen_msg_indices.len() > MAX_MSGS_PER_REPLAY_TUPLE
             && let Some(oldest) = state.seen_msg_indices.pop_front()
         {
             state.seen_msg_index_set.remove(&oldest);
@@ -61,6 +101,11 @@ impl MsgReplayState {
             .map(|state| state.seen_msg_indices.len())
             .unwrap_or(0)
     }
+
+    #[cfg(test)]
+    pub(crate) fn tuple_count(&self) -> usize {
+        self.tuples.len()
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -71,6 +116,8 @@ pub(crate) struct PersistedMsgReplayState {
     seen_msg_indices: Vec<u64>,
     #[serde(default)]
     tuples: Vec<PersistedMsgReplayTupleState>,
+    #[serde(default)]
+    next_seen_order: u64,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -78,7 +125,11 @@ struct PersistedMsgReplayTupleState {
     #[serde(default)]
     tuple_tag_hex: String,
     #[serde(default)]
+    context_id_hex: String,
+    #[serde(default)]
     seen_msg_indices: Vec<u64>,
+    #[serde(default)]
+    last_seen_order: u64,
 }
 
 impl PersistedMsgReplayState {
@@ -88,26 +139,32 @@ impl PersistedMsgReplayState {
             .iter()
             .map(|(tuple_tag, tuple_state)| PersistedMsgReplayTupleState {
                 tuple_tag_hex: hex_encode(tuple_tag),
+                context_id_hex: hex_encode(tuple_state.context_id),
                 seen_msg_indices: tuple_state.seen_msg_indices.iter().copied().collect(),
+                last_seen_order: tuple_state.last_seen_order,
             })
             .collect();
         Self {
             tuple_tag_hex: String::new(),
             seen_msg_indices: Vec::new(),
             tuples,
+            next_seen_order: state.next_seen_order,
         }
     }
 
     pub(crate) fn into_runtime(self) -> Result<MsgReplayState> {
-        let mut runtime = MsgReplayState::default();
+        let mut runtime = MsgReplayState {
+            next_seen_order: self.next_seen_order,
+            ..MsgReplayState::default()
+        };
         if self.tuples.is_empty()
             && (!self.tuple_tag_hex.is_empty() || !self.seen_msg_indices.is_empty())
         {
             let tuple_tag =
                 decode_hex32_or_zero("msg_replay_state.tuple_tag_hex", &self.tuple_tag_hex)?;
-            runtime.ensure_tuple(tuple_tag);
+            runtime.ensure_tuple(tuple_tag, [0u8; 32]);
             for msg_index in self.seen_msg_indices {
-                runtime.record(tuple_tag, msg_index);
+                runtime.record(tuple_tag, [0u8; 32], msg_index);
             }
             return Ok(runtime);
         }
@@ -117,11 +174,21 @@ impl PersistedMsgReplayState {
                 &format!("msg_replay_state.tuples[{index}].tuple_tag_hex"),
                 &tuple.tuple_tag_hex,
             )?;
-            runtime.ensure_tuple(tuple_tag);
+            let context_id = decode_hex32_or_zero(
+                &format!("msg_replay_state.tuples[{index}].context_id_hex"),
+                &tuple.context_id_hex,
+            )?;
+            runtime.ensure_tuple(tuple_tag, context_id);
             for msg_index in tuple.seen_msg_indices {
-                runtime.record(tuple_tag, msg_index);
+                runtime.record(tuple_tag, context_id, msg_index);
+            }
+            if let Some(state) = runtime.tuples.get_mut(&tuple_tag) {
+                state.last_seen_order = tuple.last_seen_order.max(state.last_seen_order);
             }
         }
+        runtime.next_seen_order = runtime
+            .next_seen_order
+            .max(runtime.tuples.values().map(|state| state.last_seen_order).max().unwrap_or(0));
         Ok(runtime)
     }
 }
@@ -207,6 +274,20 @@ struct MsgReplayTupleArgs<'a> {
     barrier_version: u64,
     #[serde(with = "serde_bytes")]
     sender_leaf: &'a [u8; 32],
+}
+
+#[derive(Serialize)]
+struct MsgReplayContextArgs<'a> {
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    we_epoch_id: &'a [u8; 32],
+    fs_ec: u64,
+    #[serde(with = "serde_bytes")]
+    xk_hash: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    e_k: &'a [u8; 32],
+    barrier_version: u64,
 }
 
 #[derive(Serialize)]
@@ -297,6 +378,23 @@ pub(crate) fn derive_msg_replay_tuple_tag(context: &MessageCryptoContext<'_>) ->
         },
     )
     .context("derive fs/msg/replay/tuple")
+}
+
+pub(crate) fn derive_msg_replay_context_id(
+    context: &MessageCryptoContext<'_>,
+) -> Result<[u8; 32]> {
+    h_l(
+        "fs/msg/replay/context",
+        &MsgReplayContextArgs {
+            gid: context.gid,
+            we_epoch_id: context.we_epoch_id,
+            fs_ec: context.fs_ec,
+            xk_hash: context.xk_hash,
+            e_k: context.epoch_key,
+            barrier_version: context.barrier_version,
+        },
+    )
+    .context("derive fs/msg/replay/context")
 }
 
 pub(crate) fn encrypt_message_v2(
@@ -516,14 +614,15 @@ mod tests {
         assert_ne!(tag_a, tag_b);
 
         let mut replay = MsgReplayState::default();
-        replay.ensure_tuple(tag_a);
-        replay.ensure_tuple(tag_b);
+        let context_id = derive_msg_replay_context_id(&context_a)?;
+        replay.ensure_tuple(tag_a, context_id);
+        replay.ensure_tuple(tag_b, context_id);
 
         let (msg_index_a, plaintext_a) = decrypt_message_v2_with_index(&payload_a, &context_a)?;
         assert_eq!(msg_index_a, shared_msg_index);
         assert_eq!(plaintext_a, b"from-sender-a");
         assert!(!replay.contains(tag_a, msg_index_a));
-        replay.record(tag_a, msg_index_a);
+        replay.record(tag_a, context_id, msg_index_a);
         assert!(replay.contains(tag_a, shared_msg_index));
         assert!(
             !replay.contains(tag_b, shared_msg_index),
@@ -534,7 +633,7 @@ mod tests {
         assert_eq!(msg_index_b, shared_msg_index);
         assert_eq!(plaintext_b, b"from-sender-b");
         assert!(!replay.contains(tag_b, msg_index_b));
-        replay.record(tag_b, msg_index_b);
+        replay.record(tag_b, context_id, msg_index_b);
         assert!(replay.contains(tag_b, shared_msg_index));
 
         Ok(())
@@ -544,19 +643,20 @@ mod tests {
     fn msg_replay_state_tracks_multiple_tuples_and_caps_window() {
         let mut replay = MsgReplayState::default();
         let tuple_a = [0xA1; 32];
-        replay.ensure_tuple(tuple_a);
-        for msg_index in 0..(MSG_INDEX_REPLAY_WINDOW as u64 + 8) {
-            replay.record(tuple_a, msg_index);
+        let context_id = [0xC1; 32];
+        replay.ensure_tuple(tuple_a, context_id);
+        for msg_index in 0..(MAX_MSGS_PER_REPLAY_TUPLE as u64 + 8) {
+            replay.record(tuple_a, context_id, msg_index);
         }
-        assert_eq!(replay.len(tuple_a), MSG_INDEX_REPLAY_WINDOW);
+        assert_eq!(replay.len(tuple_a), MAX_MSGS_PER_REPLAY_TUPLE);
         assert!(!replay.contains(tuple_a, 0));
-        assert!(replay.contains(tuple_a, MSG_INDEX_REPLAY_WINDOW as u64 + 7));
+        assert!(replay.contains(tuple_a, MAX_MSGS_PER_REPLAY_TUPLE as u64 + 7));
 
         let tuple_b = [0xB2; 32];
-        replay.ensure_tuple(tuple_b);
-        assert!(replay.contains(tuple_a, MSG_INDEX_REPLAY_WINDOW as u64 + 7));
+        replay.ensure_tuple(tuple_b, context_id);
+        assert!(replay.contains(tuple_a, MAX_MSGS_PER_REPLAY_TUPLE as u64 + 7));
         assert_eq!(replay.len(tuple_b), 0);
-        replay.record(tuple_b, 99);
+        replay.record(tuple_b, context_id, 99);
         assert!(replay.contains(tuple_b, 99));
     }
 
@@ -622,10 +722,11 @@ mod tests {
     fn persisted_msg_replay_state_roundtrip_preserves_multi_tuple_state() -> Result<()> {
         let tuple_a = [0x11; 32];
         let tuple_b = [0x22; 32];
+        let context_id = [0x33; 32];
         let mut state = MsgReplayState::default();
-        state.record(tuple_a, 1);
-        state.record(tuple_a, 2);
-        state.record(tuple_b, 9);
+        state.record(tuple_a, context_id, 1);
+        state.record(tuple_a, context_id, 2);
+        state.record(tuple_b, context_id, 9);
 
         let persisted = PersistedMsgReplayState::from_runtime(&state);
         let restored = persisted.into_runtime()?;
@@ -640,9 +741,10 @@ mod tests {
     #[test]
     fn msg_replay_state_ignores_duplicate_recordings() {
         let tuple = [0x51; 32];
+        let context_id = [0x52; 32];
         let mut state = MsgReplayState::default();
-        state.record(tuple, 7);
-        state.record(tuple, 7);
+        state.record(tuple, context_id, 7);
+        state.record(tuple, context_id, 7);
         assert_eq!(state.len(tuple), 1);
         assert!(state.contains(tuple, 7));
     }
@@ -654,6 +756,7 @@ mod tests {
             tuple_tag_hex: hex_encode(tuple_tag),
             seen_msg_indices: vec![3, 5, 8],
             tuples: Vec::new(),
+            next_seen_order: 0,
         };
         let restored = persisted.into_runtime()?;
         assert!(restored.contains(tuple_tag, 3));
@@ -664,11 +767,61 @@ mod tests {
     }
 
     #[test]
+    fn derive_msg_replay_context_id_ignores_sender_scope() -> Result<()> {
+        let gid = [0x71u8; 32];
+        let we_epoch_id = [0x72u8; 32];
+        let xk_hash = [0x73u8; 32];
+        let epoch_key = [0x74u8; 32];
+        let k_barrier = [0x75u8; 32];
+        let sender_leaf_a = [0x76u8; 32];
+        let sender_leaf_b = [0x77u8; 32];
+        let context_a = MessageCryptoContext {
+            gid: &gid,
+            we_epoch_id: &we_epoch_id,
+            xk_hash: &xk_hash,
+            fs_ec: 10,
+            barrier_version: 3,
+            sender_leaf: &sender_leaf_a,
+            epoch_key: &epoch_key,
+            k_barrier: &k_barrier,
+        };
+        let context_b = MessageCryptoContext {
+            sender_leaf: &sender_leaf_b,
+            ..context_a
+        };
+        let id_a = derive_msg_replay_context_id(&context_a)?;
+        let id_b = derive_msg_replay_context_id(&context_b)?;
+        assert_eq!(id_a, id_b);
+        Ok(())
+    }
+
+    #[test]
+    fn msg_replay_state_prunes_obsolete_contexts_and_caps_tuple_count() {
+        let mut state = MsgReplayState::default();
+        let stale_context = [0x81; 32];
+        let current_context = [0x82; 32];
+        state.record([0x11; 32], stale_context, 1);
+        state.record([0x12; 32], stale_context, 2);
+        state.record([0x21; 32], current_context, 3);
+        state.record([0x22; 32], current_context, 4);
+        state.record([0x23; 32], current_context, 5);
+
+        state.prune_to_context(current_context, 2);
+
+        assert_eq!(state.tuple_count(), 2);
+        assert!(!state.contains([0x11; 32], 1));
+        assert!(!state.contains([0x12; 32], 2));
+        assert!(state.contains([0x22; 32], 4));
+        assert!(state.contains([0x23; 32], 5));
+    }
+
+    #[test]
     fn persisted_msg_replay_state_allows_empty_tuple_tag_as_zero_in_legacy_formats() -> Result<()> {
         let persisted = PersistedMsgReplayState {
             tuple_tag_hex: String::new(),
             seen_msg_indices: vec![13],
             tuples: Vec::new(),
+            next_seen_order: 0,
         };
         let restored = persisted.into_runtime()?;
         assert!(restored.contains([0u8; 32], 13));
@@ -681,6 +834,7 @@ mod tests {
             tuple_tag_hex: "zz".to_string(),
             seen_msg_indices: vec![1],
             tuples: Vec::new(),
+            next_seen_order: 0,
         };
         let err = match persisted.into_runtime() {
             Ok(_) => unreachable!("invalid legacy tuple tag hex must fail"),
@@ -696,8 +850,11 @@ mod tests {
             seen_msg_indices: Vec::new(),
             tuples: vec![PersistedMsgReplayTupleState {
                 tuple_tag_hex: "aa".repeat(31),
+                context_id_hex: String::new(),
                 seen_msg_indices: vec![9],
+                last_seen_order: 0,
             }],
+            next_seen_order: 0,
         };
         let err = match persisted.into_runtime() {
             Ok(_) => unreachable!("wrong tuple tag length must fail"),

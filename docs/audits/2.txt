@@ -209,3 +209,27 @@ Statut final de cet audit après relecture complète spec + implémentation:
 - **Reclassified**: 2.3
 
 Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche bind_fs/profile_version)
+
+Nouvelle vérification après patch spec + orchestrator:
+
+- **Fermé**: `2.2`. `bind_fs` inclut maintenant explicitement `profile_version` entre `proof_mode` et `fs_policy_version`, au lieu de dépendre seulement d’un invariant documentaire externe.
+- **Fermé dans l’implémentation**: `VrfCtx` porte désormais `profile_version`, l’encodage `bind_fs` de l’orchestrator le serialize effectivement, et les chemins prove/verify utilisent tous `BASE_PROFILE_VERSION = "v0.1.4"`.
+- **Preuve négative ajoutée**: un test VRF dédié vérifie qu’une preuve valide sous un `profile_version` est rejetée si on tente de la vérifier sous un autre.
+- **Toujours ouvert**: `2.4` reste distinct. Plusieurs KDF barrier/HP restent encore liés via `xk_hash` et le contexte room-local existant, pas via un terme `gid` direct ajouté partout.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p msphf-orchestrator --lib roundtrip_prove_verify`
+- `cargo test -p msphf-orchestrator --lib reject_proof_with_different_profile_version`
+- `cargo test -p cityg-server --lib --no-run`
+
+Statut audit mis à jour:
+
+- **Closed**: 2.1, 2.2
+- **Partial**: 2.5, 2.6
+- **Open**: 2.4
+- **Reclassified**: 2.3

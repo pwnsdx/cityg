@@ -323,7 +323,7 @@ pub fn h_branch_bytes(
 
 `bind_fs_tuple := [ xk_hash, seed_commit, seed_bundle_commit, rho_commit, crs_id, hp_commit,
 params_id, parent_root, join_delta_root, revoked_since_prev_root, revoked_root, proof_mode,
-fs_policy_version, vrf_id, fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit,
+profile_version, fs_policy_version, vrf_id, fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit,
 (srx_root_sw when SRX applies) ]`.
 
 **Profile**: `tswe/msphf-we/fs-hybrid` only

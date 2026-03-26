@@ -47,7 +47,10 @@ use futures::StreamExt;
 use hex::decode as hex_decode;
 use message_crypto::{MessageCryptoContext, encrypt_message_v2};
 #[cfg(test)]
-use message_crypto::{MsgReplayState, decrypt_message_v2_with_index, derive_msg_replay_tuple_tag};
+use message_crypto::{
+    MsgReplayState, decrypt_message_v2_with_index, derive_msg_replay_context_id,
+    derive_msg_replay_tuple_tag,
+};
 use msphf_core::{ds, hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
@@ -2372,7 +2375,11 @@ async fn fetch_and_decrypt_messages(session: &mut Session) -> Result<Vec<String>
         };
         let replay_tuple_tag =
             derive_msg_replay_tuple_tag(&replay_context).context("derive fs/msg/replay/tuple")?;
-        session.msg_replay_state.ensure_tuple(replay_tuple_tag);
+        let replay_context_id = derive_msg_replay_context_id(&replay_context)
+            .context("derive fs/msg/replay/context")?;
+        session
+            .msg_replay_state
+            .ensure_tuple(replay_tuple_tag, replay_context_id);
         let (msg_index, authenticated) =
             match decrypt_message_v2_with_index(&message.ciphertext, &replay_context) {
                 Ok(outcome) => outcome,
@@ -2402,7 +2409,9 @@ async fn fetch_and_decrypt_messages(session: &mut Session) -> Result<Vec<String>
         {
             continue;
         }
-        session.msg_replay_state.record(replay_tuple_tag, msg_index);
+        session
+            .msg_replay_state
+            .record(replay_tuple_tag, replay_context_id, msg_index);
         plaintexts.push(String::from_utf8_lossy(envelope.plaintext).into_owned());
     }
     Ok(plaintexts)

@@ -387,6 +387,7 @@ impl AcceptanceContext {
             revoked_since_prev_root: parts.revoked_since_prev_root,
             revoked_root: parts.revoked_root,
             proof_mode: proofs.proof_mode.as_str(),
+            profile_version: crate::BASE_PROFILE_VERSION,
             fs_policy_version: proofs.fs_policy_version,
             meor_vrf_id: proofs.vrf_id.as_str(),
             fs_epoch_commit: &fs_epoch_commit,

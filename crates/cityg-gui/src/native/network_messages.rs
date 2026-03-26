@@ -5,8 +5,8 @@ use pqcrypto_dilithium::dilithium3::{
 };
 
 use crate::message_crypto::{
-    MessageCryptoContext, decrypt_message_v2_with_index, derive_msg_replay_tuple_tag,
-    encrypt_message_v2,
+    MessageCryptoContext, decrypt_message_v2_with_index, derive_msg_replay_context_id,
+    derive_msg_replay_tuple_tag, encrypt_message_v2,
 };
 
 use super::*;
@@ -92,6 +92,7 @@ pub(super) async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
         fs_ec,
         barrier_version,
         k_barrier,
+        n_max,
         mut msg_replay_state,
         leaf_id,
         since,
@@ -102,6 +103,19 @@ pub(super) async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
         .fetch_messages(&we_epoch_id, &leaf_id)
         .await
         .context("failed to fetch messages")?;
+
+    let replay_context_id = derive_msg_replay_context_id(&MessageCryptoContext {
+        gid: &gid,
+        we_epoch_id: &we_epoch_id,
+        xk_hash: &xk_hash,
+        fs_ec,
+        barrier_version,
+        sender_leaf: &leaf_id,
+        epoch_key: &epoch_key,
+        k_barrier: &k_barrier,
+    })
+    .context("derive fs/msg/replay/context")?;
+    msg_replay_state.prune_to_context(replay_context_id, usize::try_from(n_max).unwrap_or(usize::MAX));
 
     let mut messages = Vec::new();
     let mut max_timestamp = since.unwrap_or(0);
@@ -132,7 +146,7 @@ pub(super) async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
         };
         let replay_tuple_tag =
             derive_msg_replay_tuple_tag(&replay_context).context("derive fs/msg/replay/tuple")?;
-        msg_replay_state.ensure_tuple(replay_tuple_tag);
+        msg_replay_state.ensure_tuple(replay_tuple_tag, replay_context_id);
 
         let (msg_index, authenticated_msg) =
             match decrypt_message_v2_with_index(&message.ciphertext, &replay_context) {
@@ -208,7 +222,7 @@ pub(super) async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
                 if message.timestamp_ms > max_timestamp {
                     max_timestamp = message.timestamp_ms;
                 }
-                msg_replay_state.record(replay_tuple_tag, msg_index);
+                msg_replay_state.record(replay_tuple_tag, replay_context_id, msg_index);
 
                 tracing::info!("message from {}: verification=verified", sender_display);
 

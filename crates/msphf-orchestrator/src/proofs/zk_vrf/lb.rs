@@ -123,7 +123,7 @@ pub fn verify_result(
 fn encode_message(ctx: &VrfCtx<'_>, masks: (&MaskDigest, &MaskDigest)) -> Result<Vec<u8>> {
     // Encode the complete bind_fs context as specified in Section 11
     // bind_fs := CBOR_det([xk_hash, 93, 94, 98, 99, 106, 110, 111, 112, 113,
-    //                      proof_mode, fs_policy_version, meor_vrf_id,
+    //                      proof_mode, profile_version, fs_policy_version, meor_vrf_id,
     //                      fs_epoch_commit, fs_ec, fs_dev_prev_commit, fs_dev_commit,
     //                      (srx_root_sw when SRX applies)])
 
@@ -140,7 +140,7 @@ fn encode_message(ctx: &VrfCtx<'_>, masks: (&MaskDigest, &MaskDigest)) -> Result
 }
 
 fn encode_bind_fs(ctx: &VrfCtx<'_>) -> Result<Vec<u8>> {
-    let mut fields = Vec::with_capacity(17 + usize::from(ctx.srx_root_sw.is_some()));
+    let mut fields = Vec::with_capacity(18 + usize::from(ctx.srx_root_sw.is_some()));
 
     fields.push(Value::Bytes(ctx.xk_hash.to_vec()));
     fields.push(Value::Bytes(ctx.rho_commit.to_vec()));
@@ -153,6 +153,7 @@ fn encode_bind_fs(ctx: &VrfCtx<'_>) -> Result<Vec<u8>> {
     fields.push(Value::Bytes(ctx.revoked_since_prev_root.to_vec()));
     fields.push(Value::Bytes(ctx.revoked_root.to_vec()));
     fields.push(Value::Text(ctx.proof_mode.to_string()));
+    fields.push(Value::Text(ctx.profile_version.to_string()));
     fields.push(Value::Integer(Integer::from(ctx.fs_policy_version)));
     fields.push(Value::Text(ctx.meor_vrf_id.to_string()));
     fields.push(Value::Bytes(ctx.fs_epoch_commit.to_vec()));
@@ -317,6 +318,7 @@ mod tests {
             revoked_since_prev_root: &[6u8; 32],
             revoked_root: &[7u8; 32],
             proof_mode: "test-mode",
+            profile_version: crate::BASE_PROFILE_VERSION,
             fs_policy_version: 1,
             meor_vrf_id: "lb-vrf/v1",
             fs_epoch_commit: &[8u8; 32],
@@ -441,6 +443,26 @@ mod tests {
         match verify_result(&derived_public, &ctx2, (&masks.0, &masks.1), &proof) {
             Ok(false) | Err(_) => Ok(()),
             Ok(true) => bail!("proof with different xk_hash should be rejected"),
+        }
+    }
+
+    #[test]
+    fn reject_proof_with_different_profile_version() -> Result<()> {
+        let params = generate_parameters([0x91u8; 32])?;
+        let (secret, _public) = generate_keypair(&params, [0x92u8; 32])?;
+        let ctx1 = demo_ctx();
+        let derived_public = public_for_epoch(&secret, ctx1.we_epoch_id)?;
+        let masks = mask_pair();
+        let proof = prove_result(&secret, &ctx1, (&masks.0, &masks.1))?;
+
+        let ctx2 = VrfCtx {
+            profile_version: "v0.1.999",
+            ..ctx1
+        };
+
+        match verify_result(&derived_public, &ctx2, (&masks.0, &masks.1), &proof) {
+            Ok(false) | Err(_) => Ok(()),
+            Ok(true) => bail!("proof with different profile_version should be rejected"),
         }
     }
 

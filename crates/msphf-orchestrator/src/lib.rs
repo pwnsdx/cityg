@@ -118,6 +118,7 @@ const KBROAD_ML_KEM_ALG: &str = "ml-kem-768";
 const HP_AEAD_SUITE: &str = "chacha20-poly1305";
 const BARRIER_HP_INFO_PREFIX: &[u8] = b"city-g|hp/barrier/v1";
 const FS_STEP_INFO: &[u8] = b"city-g|fs/step|v1";
+pub const BASE_PROFILE_VERSION: &str = "v0.1.4";
 const FS_TAU_INFO: &[u8] = b"city-g|fs/tau|v1";
 pub const DEFAULT_PROOF_MODE: &str = "lin+zkvrf";
 pub const DEFAULT_VRF_ID: &str = "lb-vrf/v1";
@@ -3017,6 +3018,7 @@ pub fn joiner_kgen_or<'a>(
         revoked_since_prev_root: parts.revoked_since_prev_root,
         revoked_root: parts.revoked_root,
         proof_mode: params.proof_mode,
+        profile_version: BASE_PROFILE_VERSION,
         fs_policy_version: fs_policy_version_u64,
         meor_vrf_id: params.vrf_id,
         fs_epoch_commit: &fs_inputs.fs_epoch_commit,

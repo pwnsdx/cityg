@@ -23,9 +23,9 @@ Scope-hardening addendum (same date, later tranche):
 
 Summary:
 - Total findings reviewed: `51`
-- `Closed`: `13`
+- `Closed`: `15`
 - `Partial`: `14`
-- `Open`: `20`
+- `Open`: `18`
 - `Reclassified`: `4`
 
 ## Audit 1
@@ -49,8 +49,8 @@ Summary:
 
 - `2.1` `Closed` — `header[99]` must be recomputed after HP decryption before using `header[97]`.
   Proof: `docs/specs.md:309-323`; KAT coverage in `docs/specs.md:1643-1650`.
-- `2.2` `Open` — `profile_version` is still not explicitly cryptographically bound in the anchor itself.
-  Proof: `docs/specs.md:642-656` defines `bind_fs` without `profile_version`.
+- `2.2` `Closed` — `profile_version` is now explicitly bound into `bind_fs` and therefore into ZK-VRF proof verification.
+  Proof: `docs/specs.md:683-698`, `crates/msphf-orchestrator/src/proofs/zk_vrf/mod.rs:23-36`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:123-157`, `crates/msphf-orchestrator/src/lib.rs:121,3009-3023`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:455-466`.
 - `2.3` `Reclassified` — the “missing `gid/weid` in bind_fs” claim is too strong as stated because `xk_hash` already carries handshake context; the remaining gap is documentary, not a confirmed local defect.
   Proof: `docs/specs.md:162`, `docs/specs.md:279-313`, `docs/specs.md:642-656`.
 - `2.4` `Open` — several barrier/HP KDFs still bind through `xk_hash` / room-local constants rather than an explicit direct `gid` term everywhere the audit wanted it.
@@ -112,8 +112,8 @@ Summary:
   Proof: `docs/specs.md:162-163`, `docs/specs.md:1479-1484`.
 - `5.7` `Partial` — join provisioning now has nonce/issuance/expiry/current history commitment, but still is not a standalone globally authenticated lineage artifact.
   Proof: `docs/specs.md:1455-1478`, `crates/cityg-api/proto/cityg.proto:243,248-251`, `crates/cityg-api-client/src/lib.rs:988-1038`.
-- `5.8` `Partial` — retention/fetch/config contracts are better tied to history, but still lack hard global bounds/pagination.
-  Proof: `docs/specs.md:220-223`, `docs/specs.md:1455`, and the remaining open Audit 6 findings.
+- `5.8` `Partial` — retention/fetch/config contracts are better tied to history and now have hard helper paging / replay-state bounds, but still are not backed by one signed global deployment manifest and global canonity.
+  Proof: `docs/specs.md:220-238`, `docs/specs.md:618-638`, `docs/specs.md:1532`, and the remaining open Audit 2 / Audit 3 findings.
 
 ## Audit 6
 
@@ -129,8 +129,8 @@ Summary:
   Proof: `docs/specs.md:194-238`, `crates/cityg-api/proto/cityg.proto:303-358`, `crates/cityg-api/src/lib.rs:197,900-942,2497-2618,6326-6354`, `crates/cityg-api-client/src/lib.rs:181,1188-1464,2358-2407,2757-2869`.
 - `6.6` `Closed` — unresolved joins are now bounded by `N_max`, and resolved/revoked join activations are pruned from server state.
   Proof: `docs/specs.md:218`, `docs/specs.md:994-995`, `crates/cityg-server/src/lib.rs:1603`, `crates/cityg-server/src/lib.rs:2331`, `crates/cityg-server/src/lib.rs:3102-3141`, `crates/cityg-server/src/lib.rs:10203-10257`.
-- `6.7` `Open` — anti-replay write amplification remains structurally present.
-  Proof: `docs/specs.md:583-596`; local replay windowing in `crates/cityg-gui/src/message_crypto.rs:33-55` does not close the normative durability/cost issue.
+- `6.7` `Closed` — anti-replay durability cost is now normatively bounded per tuple/context, obsolete tuples are collectable, batching is explicitly allowed, and the GUI persists replay state before releasing fetched messages.
+  Proof: `docs/specs.md:616-638`, `crates/cityg-gui/src/message_crypto.rs:9-120`, `crates/cityg-gui/src/native/network_messages.rs:85-118,147-149,225`, `crates/cityg-gui/src/native/session_fetch.rs:111-175`, `crates/cityg-gui/src/native/tests/mod.rs:2702-2753`.
 - `6.8` `Closed` — CBOR determinism is now a rejection property, not one mandated re-encode algorithm.
   Proof: `docs/specs.md:83-92`.
 
@@ -163,11 +163,15 @@ Summary:
   `docs/specs.md:566-572`, `crates/cityg-gui/src/native/message_auth.rs:139-156`, `crates/cityg-gui/src/native/network_messages.rs:188-203`.
 - Hard `N_max` and payload caps:
   `docs/specs.md:563-565`, `crates/cityg-server/src/lib.rs:11014-11032`, `crates/cityg-api-client/src/lib.rs:1914-1925`, `crates/cityg-gui/src/message_crypto.rs:816-846`.
+- Explicit `profile_version` binding in `bind_fs`:
+  `docs/specs.md:683-698`, `crates/msphf-orchestrator/src/proofs/zk_vrf/mod.rs:23-36`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:123-157`.
+- Bounded and crash-safe anti-replay release path:
+  `docs/specs.md:616-638`, `crates/cityg-gui/src/message_crypto.rs:9-120`, `crates/cityg-gui/src/native/network_messages.rs:107-118,147-149,225`, `crates/cityg-gui/src/native/session_fetch.rs:119-175`, `crates/cityg-gui/src/native/tests/mod.rs:2702-2753`.
 
 ## Highest-priority remaining work
 
 1. Add a globally canonical, append-only, authenticated history/finality object, not just a server-local `HistoryCommitment`.
 2. Decide whether FULL/recover-only is only an honest-client rule or must become a server-verifiable protocol property.
 3. Add completeness proofs or equivalent fail-closed semantics for `ResolveJoinsSince` / `ResolveRevokedLeaves`.
-4. Bound replay persistence cost normatively.
-5. Close the remaining wire/profile issues: explicit `profile_version` binding and, if desired, a real wire discriminator for `header[97]` contexts.
+4. Close the remaining wire/profile issues: direct room/gid terms where desired, and, if desired, a real wire discriminator for `header[97]` contexts.
+5. Decide whether to add a bounded-cost authenticated-cache / proof path for FULL verification, instead of relying on whole-tree work in the general case.

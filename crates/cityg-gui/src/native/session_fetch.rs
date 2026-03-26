@@ -116,41 +116,71 @@ impl AppModel {
                     msg_replay_state,
                 } = result;
 
-                if !messages.is_empty() {
-                    let added = self.append_messages(messages);
-                    if added > 0 {
-                        self.info_message = Some(format!("Fetched {added} new message(s)."));
-                        self.record_activity(
-                            ActivityKind::Message,
-                            format!("Fetched {added} new message(s)"),
-                        );
-                        self.notify_background_messages(added);
-                    }
-                }
-
                 if let Some(session) = self.session.as_mut() {
+                    let mut updated_session = session.clone();
                     let mut should_persist = false;
-                    if session.msg_replay_state != msg_replay_state {
-                        session.msg_replay_state = msg_replay_state;
+                    if updated_session.msg_replay_state != msg_replay_state {
+                        updated_session.msg_replay_state = msg_replay_state;
                         should_persist = true;
                     }
                     if let Some(ts) = last_timestamp_ms {
-                        let timestamp_changed = session
+                        let timestamp_changed = updated_session
                             .last_fetch_timestamp_ms
                             .map(|prev| ts > prev)
                             .unwrap_or(true);
                         if timestamp_changed {
-                            session.last_fetch_timestamp_ms = Some(ts);
+                            updated_session.last_fetch_timestamp_ms = Some(ts);
                             should_persist = true;
                         }
                     }
-                    if should_persist && let Err(err) = persist_session(session) {
-                        warn!("failed to persist session after fetch update: {err:?}");
+                    if should_persist {
+                        if let Err(err) = persist_session(&updated_session) {
+                            warn!("failed to persist session after fetch update: {err:?}");
+                            self.last_error =
+                                Some(format!("Failed to persist session after fetch update: {err}"));
+                            self.record_activity_with_detail(
+                                ActivityKind::Message,
+                                "Message fetch persistence failed",
+                                Some(err.to_string()),
+                            );
+                            self.fetch_status = FetchStatus::Idle;
+                            self.config.client.fetch_retry_interval()
+                        } else {
+                            *session = updated_session;
+                            if !messages.is_empty() {
+                                let added = self.append_messages(messages);
+                                if added > 0 {
+                                    self.info_message =
+                                        Some(format!("Fetched {added} new message(s)."));
+                                    self.record_activity(
+                                        ActivityKind::Message,
+                                        format!("Fetched {added} new message(s)"),
+                                    );
+                                    self.notify_background_messages(added);
+                                }
+                            }
+                            self.fetch_status = FetchStatus::Idle;
+                            self.config.client.fetch_poll_interval()
+                        }
+                    } else {
+                        if !messages.is_empty() {
+                            let added = self.append_messages(messages);
+                            if added > 0 {
+                                self.info_message = Some(format!("Fetched {added} new message(s)."));
+                                self.record_activity(
+                                    ActivityKind::Message,
+                                    format!("Fetched {added} new message(s)"),
+                                );
+                                self.notify_background_messages(added);
+                            }
+                        }
+                        self.fetch_status = FetchStatus::Idle;
+                        self.config.client.fetch_poll_interval()
                     }
+                } else {
+                    self.fetch_status = FetchStatus::Idle;
+                    self.config.client.fetch_poll_interval()
                 }
-
-                self.fetch_status = FetchStatus::Idle;
-                self.config.client.fetch_poll_interval()
             }
             Err(err) => {
                 if is_stale_server_session_error(&err) {

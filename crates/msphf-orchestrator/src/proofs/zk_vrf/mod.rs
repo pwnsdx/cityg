@@ -32,6 +32,7 @@ pub struct VrfCtx<'a> {
     pub revoked_since_prev_root: &'a [u8], // 112
     pub revoked_root: &'a [u8],            // 113
     pub proof_mode: &'a str,               // proof_mode
+    pub profile_version: &'a str,          // profile_version
     pub fs_policy_version: u64,            // fs_policy_version (139)
     pub meor_vrf_id: &'a str,              // 116
     pub fs_epoch_commit: &'a [u8; 32],     // 141

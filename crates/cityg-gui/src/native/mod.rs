@@ -15,7 +15,7 @@ use crate::barrier_shared::{
 };
 #[cfg(test)]
 use crate::message_crypto::{
-    MSG_INDEX_REPLAY_WINDOW, MessageCryptoContext, decrypt_message_v2,
+    MAX_MSGS_PER_REPLAY_TUPLE, MessageCryptoContext, decrypt_message_v2,
     decrypt_message_v2_with_index, derive_msg_replay_tuple_tag, encrypt_message_v2,
 };
 use crate::message_crypto::{MsgReplayState, PersistedMsgReplayState};

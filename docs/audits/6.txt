@@ -241,3 +241,27 @@ Statut audit mis à jour:
 
 - **Closed**: 6.1, 6.2, 6.3, 6.5, 6.6, 6.8
 - **Open**: 6.4, 6.7
+
+--
+
+## Commentaires Codex (2026-03-26, tranche anti-replay durable)
+
+Nouvelle vérification après patch spec + GUI:
+
+- **Fermé**: `6.7`. La spec impose maintenant `MAX_MSGS_PER_TUPLE := 4096`, borne les tuples actifs à `MAX_REPLAY_TUPLES_PER_CONTEXT := N_max`, définit `tuple_context_id`, et autorise explicitement un batching crash-safe tant qu’aucun payload n’est relâché avant durabilité du batch.
+- **Fermé dans l’implémentation**: la GUI ne garde plus un ensemble non borné de tuples replay. `MsgReplayState` borne les indices par tuple, marque chaque tuple par `context_id`, prune les tuples obsolètes avant fetch, et plafonne les tuples retenus au contexte courant.
+- **Fermé sur le point de release**: `handle_fetch_result(...)` persiste maintenant le `msg_replay_state` mis à jour avant d’ajouter les messages à l’UI. Un échec de persistance laisse les messages non relâchés et n’avance pas le watermark local.
+- **Toujours ouvert et distinct**: `6.4` reste le seul reste concret de cet audit. Le coût whole-tree du chemin FULL n’a pas été supprimé.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p cityg-gui --bin cityg-gui msg_replay_state_tracks_multiple_tuples_and_caps_window --features native-app`
+- `cargo test -p cityg-gui --bin cityg-gui msg_replay_state_prunes_obsolete_contexts_and_caps_tuple_count --features native-app`
+- `cargo test -p cityg-gui --bin cityg-gui persisted_msg_replay_state_roundtrip_preserves_multi_tuple_state --features native-app`
+- `cargo test -p cityg-gui --bin cityg-gui gpui_handle_fetch_result_requires_replay_persistence_before_release --features native-app`
+- `cargo test -p cityg-gui --bin cityg-gui gpui_async_handler_paths_cover_state_machine --features native-app`
+
+Statut audit mis à jour:
+
+- **Closed**: 6.1, 6.2, 6.3, 6.5, 6.6, 6.7, 6.8
+- **Open**: 6.4

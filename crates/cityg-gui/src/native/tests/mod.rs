@@ -2693,6 +2693,67 @@ fn gpui_on_refresh_finished_reloads_persisted_pending_barrier_state(cx: &mut Tes
 }
 
 #[gpui::test]
+fn gpui_handle_fetch_result_requires_replay_persistence_before_release(cx: &mut TestAppContext) {
+    cx.update(tokio_bridge::init);
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let (view, cx) = cx.add_window_view(|_, _| AppModel::new(CityGConfig::default()));
+    let session = build_test_session(
+        0xD15C,
+        "http://127.0.0.1:18082",
+        "22aabbccddeeff00112233445566778899aabbccddeeff001122334455667799",
+        "fetch-persist",
+    )
+    .expect("build session");
+    let mut session = session;
+    session.last_fetch_timestamp_ms = None;
+    let blocking_path =
+        session_file_path(&session.server_url, &session.room_id).expect("session path");
+    fs::create_dir_all(&blocking_path).expect("create blocking path");
+
+    view.update(cx, |model, view_cx| {
+        model.session = Some(session.clone());
+        model.handle_fetch_result(
+            Ok(FetchOutcome {
+                messages: vec![ChatMessageEntry {
+                    sender_leaf: Some(session.leaf_id),
+                    fallback_label: session.alias.clone(),
+                    plaintext: "must-not-release".to_string(),
+                    ciphertext_hex: "deadbeef".to_string(),
+                    timestamp_ms: 2_000_000,
+                    delivery: MessageDelivery::Sent,
+                    pending_id: None,
+                }],
+                last_timestamp_ms: Some(2_000_000),
+                msg_replay_state: MsgReplayState::default(),
+            }),
+            session.we_epoch_id,
+            view_cx,
+        );
+
+        assert!(
+            model.messages.is_empty(),
+            "messages must not be released before replay persistence succeeds"
+        );
+        assert!(
+            model
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Failed to persist session after fetch update"),
+            "persist failure must surface as fetch persistence failure"
+        );
+        assert_eq!(
+            model.session.as_ref().and_then(|s| s.last_fetch_timestamp_ms),
+            None,
+            "failed replay persistence must not advance in-memory fetch watermark"
+        );
+    });
+}
+
+#[gpui::test]
 fn gpui_keystroke_routing_covers_clipboard_shortcuts(cx: &mut TestAppContext) {
     cx.update(tokio_bridge::init);
     let temp_dir = TempDir::new().expect("create temp dir");
@@ -5565,12 +5626,13 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         current_barrier_full_verified: false,
     };
     let tuple_tag = array(0x30);
+    let replay_context = array(0x31);
     let mut replay_state = MsgReplayState::default();
-    replay_state.ensure_tuple(tuple_tag);
-    replay_state.record(tuple_tag, 11);
-    replay_state.record(tuple_tag, 22);
-    replay_state.record(tuple_tag, 33);
-    replay_state.record(tuple_tag, 44);
+    replay_state.ensure_tuple(tuple_tag, replay_context);
+    replay_state.record(tuple_tag, replay_context, 11);
+    replay_state.record(tuple_tag, replay_context, 22);
+    replay_state.record(tuple_tag, replay_context, 33);
+    replay_state.record(tuple_tag, replay_context, 44);
     session.msg_replay_state = replay_state;
     session.fs_fingerprint = derive_fs_fingerprint_from_fields(
         session.fs_policy_version.as_str(),
@@ -9195,25 +9257,26 @@ fn msg_replay_state_tracks_multiple_tuples_and_caps_window()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut replay = MsgReplayState::default();
     let tuple_a = [0xA1; 32];
-    replay.ensure_tuple(tuple_a);
-    for msg_index in 0..(MSG_INDEX_REPLAY_WINDOW as u64 + 8) {
-        replay.record(tuple_a, msg_index);
+    let context_id = [0xC1; 32];
+    replay.ensure_tuple(tuple_a, context_id);
+    for msg_index in 0..(MAX_MSGS_PER_REPLAY_TUPLE as u64 + 8) {
+        replay.record(tuple_a, context_id, msg_index);
     }
-    assert_eq!(replay.len(tuple_a), MSG_INDEX_REPLAY_WINDOW);
+    assert_eq!(replay.len(tuple_a), MAX_MSGS_PER_REPLAY_TUPLE);
     assert!(
         !replay.contains(tuple_a, 0),
         "oldest indices should be evicted"
     );
-    assert!(replay.contains(tuple_a, MSG_INDEX_REPLAY_WINDOW as u64 + 7));
+    assert!(replay.contains(tuple_a, MAX_MSGS_PER_REPLAY_TUPLE as u64 + 7));
 
     let tuple_b = [0xB2; 32];
-    replay.ensure_tuple(tuple_b);
+    replay.ensure_tuple(tuple_b, context_id);
     assert!(
-        replay.contains(tuple_a, MSG_INDEX_REPLAY_WINDOW as u64 + 7),
+        replay.contains(tuple_a, MAX_MSGS_PER_REPLAY_TUPLE as u64 + 7),
         "adding a second tuple must preserve the first tuple window"
     );
     assert_eq!(replay.len(tuple_b), 0);
-    replay.record(tuple_b, 99);
+    replay.record(tuple_b, context_id, 99);
     assert!(replay.contains(tuple_b, 99));
     Ok(())
 }
@@ -9222,10 +9285,11 @@ fn msg_replay_state_tracks_multiple_tuples_and_caps_window()
 fn msg_replay_state_ignores_duplicate_indices() -> Result<(), Box<dyn std::error::Error>> {
     let mut replay = MsgReplayState::default();
     let tuple = [0x42; 32];
-    replay.ensure_tuple(tuple);
-    replay.record(tuple, 7);
-    replay.record(tuple, 7);
-    replay.record(tuple, 7);
+    let context_id = [0x43; 32];
+    replay.ensure_tuple(tuple, context_id);
+    replay.record(tuple, context_id, 7);
+    replay.record(tuple, context_id, 7);
+    replay.record(tuple, context_id, 7);
     assert_eq!(
         replay.len(tuple),
         1,
@@ -9239,15 +9303,16 @@ fn msg_replay_state_ignores_duplicate_indices() -> Result<(), Box<dyn std::error
 fn msg_replay_state_allows_reuse_after_window_eviction() -> Result<(), Box<dyn std::error::Error>> {
     let mut replay = MsgReplayState::default();
     let tuple = [0x55; 32];
-    replay.ensure_tuple(tuple);
-    for msg_index in 0..=(MSG_INDEX_REPLAY_WINDOW as u64) {
-        replay.record(tuple, msg_index);
+    let context_id = [0x56; 32];
+    replay.ensure_tuple(tuple, context_id);
+    for msg_index in 0..=(MAX_MSGS_PER_REPLAY_TUPLE as u64) {
+        replay.record(tuple, context_id, msg_index);
     }
     assert!(
         !replay.contains(tuple, 0),
         "oldest index must be evicted once window is exceeded"
     );
-    replay.record(tuple, 0);
+    replay.record(tuple, context_id, 0);
     assert!(
         replay.contains(tuple, 0),
         "evicted index can be re-seen by design outside replay window"
