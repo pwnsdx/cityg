@@ -300,3 +300,13 @@ Nouvelle clarification de spec:
 - la résistance “serveur actif” du profil de base est maintenant bornée explicitement à **une `HistoryAuthorityScope` authentifiée**;
 - la spec dit noir sur blanc qu’elle ne fournit pas, à elle seule, une canonité/finalité **globale inter-sources**;
 - les restes correspondants sont donc mieux classés comme **extension de consensus/history authority**, pas comme contradiction cachée du texte de base.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche global-history-attestation)
+
+Nouvelle passe spec + implémentation:
+
+- la spec réserve désormais `header[182]` pour une extension explicite de **global history attestation**;
+- elle interdit qu’un simple ré-emballage d’un `HistoryCommitment` local soit décrit comme finalité/canonité globale;
+- le serveur courant rejette cette clé tant qu’aucune extension n’est négociée, ce qui évite toute illusion de support implicite.

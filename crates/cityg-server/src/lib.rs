@@ -3858,6 +3858,9 @@ fn validate_barrier_update_against_roster(
         if header.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT) {
             return Err(CityGError::InvalidInput("barrier_update malformed"));
         }
+        if header.contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION) {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
         if barrier_update_reason.is_none() {
             if history_commitment_present {
                 return Err(CityGError::InvalidInput("barrier_update malformed"));
@@ -6001,6 +6004,30 @@ mod tests {
         let err = server
             .accept_epoch(&bundle)
             .expect_err("base profile must reject unsupported full-verification receipt header");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput("barrier_update malformed")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn accept_epoch_rejects_barrier_update_global_history_attestation_without_extension()
+    -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x78)?;
+        let mut server = super::demo::demo_server();
+        server.accept_epoch(&generated.bundle)?;
+
+        let (mut bundle, _pristine_bundle) =
+            build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+        bundle.header_map.insert(
+            hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+            Value::Bytes(vec![0xCD; 32]),
+        );
+
+        let err = server
+            .accept_epoch(&bundle)
+            .expect_err("base profile must reject unsupported global-history attestation header");
         assert!(matches!(
             err,
             CityGError::InvalidInput("barrier_update malformed")

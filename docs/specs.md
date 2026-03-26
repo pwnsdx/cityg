@@ -239,6 +239,16 @@ where:
 The authenticated response MUST bind `merge_locator`, `status`, `history_commitment`, and any populated `accepted_*` fields to the returned `history_view_id`.
 Implementations MAY store additional stable identifiers, but any such identifier MUST be injectively bound to `merge_locator` within `gid`; it MUST NOT identify two distinct merge attempts.
 
+E) Optional global history authority extension (not part of base profile)
+Deployments that require canonity/finality stronger than one local `HistoryAuthorityScope` MUST define an explicit extension that lifts A)/B)/C)/D), provisioning, and activation onto one authenticated global history authority.
+Requirements on that extension:
+* The extension MUST define one authenticated `GlobalHistoryAttestation` object naming the globally canonical history step used for a decision.
+* `GlobalHistoryAttestation` MUST bind, at minimum, `(gid, global_history_authority_id, HistoryAuthorityScope, history_view_id, HistoryCommitment.history_commitment_id, parent_global_attestation_id, global_history_seq, finality_kind)`.
+* The extension MUST define how A)/B)/C)/D) responses prove completeness/non-omission for one exact `GlobalHistoryAttestation`.
+* The extension MUST define how `accepted`, `superseded`, and `final_rejected` are derived from that global attestation, not merely from one local server view.
+* The extension MUST define how provisioning artifacts bind to one exact `GlobalHistoryAttestation`.
+* A deployment MUST NOT describe itself as providing globally canonical/final history under this profile unless such an extension is present.
+
 Snapshot-auth failure handling (normative; 960.9 wiring):
 If FetchBarrierPublicTree(kem_tree_hash_after) returns pk_entries with TreeHash(root_node) != kem_tree_hash_after, the caller MUST treat the server as faulty/active, MUST NOT proceed with barrier_update creation/activation/verification that depends on that tree, and MUST surface local diagnostic code 960.9 barrier_tree_snapshot_auth_failure.
 
@@ -383,6 +393,7 @@ Key 178: barrier_update_reason (uint; required iff key 175 is present)
 Key 179: join_finalize_auth (bstr32; required iff key 178 == 2; opaque server-issued capability for reason-2 join_finalize)
 Key 180: barrier_history_commitment (bstr; required iff key 175 is present; CBOR_det(HistoryCommitment) for the authenticated current-state snapshot_base/A/B view used to construct the barrier_update)
 Key 181: barrier_full_verification_receipt (bstr; RESERVED for an optional profile extension that provides server-verifiable proof of FULL verification; FORBIDDEN in the base profile)
+Key 182: barrier_global_history_attestation (bstr; RESERVED for an optional profile extension that provides globally canonical/final history attestation; FORBIDDEN in the base profile)
 
 S4.2.4 Merge/checkpoint keys (merge-only set)
 130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148
@@ -407,6 +418,7 @@ Additional presence rule (normative):
 * key 179 MUST be present if and only if key 178 == 2; it MUST be absent for merge reasons 0/1 and on all non-MERGE anchors.
 * key 180 MUST be present if and only if key 175 is present; it MUST be absent on anchors without barrier_update.
 * key 181 MUST be absent unless a deployment-specific FULL-verification-receipt extension is explicitly negotiated for this profile.
+* key 182 MUST be absent unless a deployment-specific global-history-attestation extension is explicitly negotiated for this profile.
 
 S4.4 Size limits (normative; deployments MAY tighten)
 Max bytes per header field (unless otherwise specified by type):
@@ -417,6 +429,7 @@ Max bytes per header field (unless otherwise specified by type):
 * header[177] MUST be exactly 1184 bytes
 * header[179] MUST be exactly 32 bytes
 * header[181] is extension-defined and therefore has no base-profile size semantics; in the base profile it MUST be absent
+* header[182] is extension-defined and therefore has no base-profile size semantics; in the base profile it MUST be absent
 
 BarrierUpdate size policy (normative)
 * Deployment MUST define max_barrier_update_bytes (a positive integer).
@@ -1184,6 +1197,17 @@ Requirements on that extension:
 Base-profile rule:
 * In the base profile defined by this document, key `181` MUST be absent and servers MUST reject its presence as malformed unless a deployment-specific extension explicitly enables it.
 
+S11.11.5 Optional global-history-attestation extension (not part of base profile)
+If a deployment requires globally canonical/final history beyond one local `HistoryAuthorityScope`, it MUST define an explicit extension bound to key `182` and to the S3.3 optional global history authority extension above.
+Requirements on that extension:
+* The extension MUST define negotiation / profile identification so both client and server know that key `182` is in use.
+* The attestation carried in key `182`, or referenced by it, MUST bind at minimum `(gid, global_history_authority_id, HistoryAuthorityScope, history_view_id, HistoryCommitment.history_commitment_id, barrier_version, barrier_update_reason, header[180])`.
+* The extension MUST define whether the attestation states "committed", "final", or another monotone finality level, and MUST define the allowed activation/cleanup decisions for each level.
+* The extension MUST define how A)/B)/C)/D) responses and provisioning artifacts prove that they all correspond to that same globally canonical attestation.
+* A bare client self-assertion, or a restatement of one local `HistoryCommitment`, MUST NOT be documented as sufficient global-history attestation.
+Base-profile rule:
+* In the base profile defined by this document, key `182` MUST be absent and servers MUST reject its presence as malformed unless a deployment-specific extension explicitly enables it.
+
 S11.12 Server-side validation of barrier_update (normative; MUST)
 
 S11.12.1 Validation procedure (MUST)
@@ -1196,6 +1220,7 @@ A) Gating
 * If header[178] != 2 and header[179] is present: reject 960.7.
 * If header[180] is absent, not a bstr, or not valid CBOR_det(HistoryCommitment): reject 960.7.
 * If header[181] is present in the base profile: reject 960.7.
+* If header[182] is present in the base profile: reject 960.7.
 * If barrier_initialized == true and pending_revocations == false and header[178] == 0: reject 960.5 barrier_proactive_forbidden.
 * If barrier_initialized == true and pending_revocations == true and header[178] != 0: reject 960.13.
 * If header[178] == 1, later steps MUST enforce S10.4B.

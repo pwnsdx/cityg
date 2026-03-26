@@ -263,3 +263,13 @@ Nouvelle clarification de spec:
 - `docs/specs.md` définit maintenant explicitement un `HistoryAuthorityScope`.
 - L’acceptance/finality de `LookupMergeAcceptance` et l’activation S11.14 sont désormais déclarées comme **scope-locales**, pas implicitement globales/fédérées.
 - Cela ne ferme pas le besoin d’une finalité/canonité globale si elle est voulue; cela le requalifie en **extension requise**, au lieu de laisser une promesse implicite floue dans le profil de base.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche global-history-attestation)
+
+Nouvelle passe spec + implémentation:
+
+- la spec réserve maintenant `header[182]` pour une future extension `barrier_global_history_attestation`;
+- elle impose que cette extension définisse un vrai `GlobalHistoryAttestation`, avec autorité, parenté, monotonie et niveau de finalité;
+- le serveur courant **rejette explicitement** `header[182]` dans le profil de base.
