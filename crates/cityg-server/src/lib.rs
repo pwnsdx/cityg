@@ -425,6 +425,9 @@ pub struct MergeAcceptanceRecord {
 const DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR: &str = "duplicate active cover leaf allocation";
 const COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR: &str = "cover leaf index already allocated";
 const GENESIS_PROVISIONING_ARTIFACT_MISSING_ERR: &str = "genesis provisioning artifact missing";
+const HISTORICAL_BARRIER_PUBLIC_TREE_SNAPSHOT_UNAVAILABLE_ERR: &str =
+    "historical barrier public tree snapshot unavailable";
+const UNRESOLVED_JOIN_HISTORY_EXHAUSTED_ERR: &str = "unresolved join history exceeds n_max";
 const JOIN_PROVISIONING_TTL_MS: u64 = 5 * 60 * 1000;
 const ROOM_ADMIN_PROOF_REPLAYED_ERR: &str = "room admin proof replayed";
 
@@ -1597,6 +1600,7 @@ impl CityGServer {
                 state.leaf_barrier_public.remove(leaf);
                 state.pending_join_finalize_auth.remove(leaf);
             }
+            prune_join_history(state)?;
         }
         if let Some(state) = roster.groups.get_mut(bundle.gid()) {
             if matches!(barrier_update_reason, Some(2))
@@ -1841,6 +1845,7 @@ impl CityGServer {
                     }
                 }
             }
+            prune_barrier_public_tree_history(group)?;
             group.barrier_hash_cache = None;
             group.last_pcs_refresh_ec = room_state.last_pcs_refresh_ec;
             group.pcs_refresh_min_delta_device_ec =
@@ -2323,6 +2328,7 @@ impl CityGServer {
             .ok_or(CityGError::InvalidInput("group not found"))?;
         let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
         ensure_distinct_active_cover_leaf_indices(state)?;
+        prune_join_history(state)?;
         let active_leaves: BTreeSet<[u8; 32]> = state
             .latest_snapshot()
             .map(|snapshot| snapshot.members().copied().collect())
@@ -2394,6 +2400,7 @@ impl CityGServer {
             .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
         let n_max = validate_barrier_n_max(state.n_max)?;
+        prune_barrier_public_tree_history(state)?;
         let (pk_entries, history_commitment) = if let Some(mut snapshot) = state
             .barrier_public_tree_history
             .get(kem_tree_hash_after)
@@ -2418,10 +2425,8 @@ impl CityGServer {
             let pk_entries_view = build_pk_entries_view(state)?;
             let computed_hash = compute_barrier_tree_hash(n_max, pk_entries_view.as_ref())?;
             if computed_hash != *kem_tree_hash_after {
-                return Err(CityGError::Acceptance(
-                    msphf_orchestrator::AcceptanceError::Freeze(
-                        msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE,
-                    ),
+                return Err(CityGError::InvalidInput(
+                    HISTORICAL_BARRIER_PUBLIC_TREE_SNAPSHOT_UNAVAILABLE_ERR,
                 ));
             }
             let pk_entries = match pk_entries_view {
@@ -2808,15 +2813,16 @@ struct BarrierHistoryCommitmentHeaderWire(
     u64,
 );
 
+#[allow(dead_code)]
 fn encode_barrier_history_commitment_header(
     commitment: HistoryCommitment,
 ) -> Result<Vec<u8>, CityGError> {
-    to_cbor_vec(&BarrierHistoryCommitmentHeaderWire(
+    Ok(to_cbor_vec(&BarrierHistoryCommitmentHeaderWire(
         commitment.history_view_id.to_vec(),
         commitment.history_commitment_id.to_vec(),
         commitment.prev_history_commitment_id.to_vec(),
         commitment.history_seq,
-    ))
+    ))?)
 }
 
 fn parse_barrier_history_commitment(
@@ -3040,14 +3046,23 @@ fn decode_barrier_public_tree_snapshot_ref(
     state: &GroupState,
     snapshot: &BarrierPublicTreeSnapshotRef,
 ) -> Result<Vec<Vec<u8>>, CityGError> {
+    decode_barrier_public_tree_snapshot_ref_with_blobs(
+        state.barrier_public_tree_blobs.as_slice(),
+        snapshot,
+    )
+}
+
+fn decode_barrier_public_tree_snapshot_ref_with_blobs(
+    blobs: &[Vec<u8>],
+    snapshot: &BarrierPublicTreeSnapshotRef,
+) -> Result<Vec<Vec<u8>>, CityGError> {
     snapshot
         .blob_indices
         .iter()
         .map(|index| {
             let index = usize::try_from(*index)
                 .map_err(|_| CityGError::InvalidInput("barrier public tree blob index overflow"))?;
-            state
-                .barrier_public_tree_blobs
+            blobs
                 .get(index)
                 .cloned()
                 .ok_or(CityGError::InvalidInput("barrier public tree blob missing"))
@@ -3080,6 +3095,90 @@ fn record_barrier_public_tree_snapshot(
     state
         .barrier_public_tree_history
         .insert(state.kem_tree_hash_after, snapshot);
+    prune_barrier_public_tree_history(state)?;
+    Ok(())
+}
+
+fn prune_join_history(state: &mut GroupState) -> Result<(), CityGError> {
+    if state.join_history.is_empty() {
+        return Ok(());
+    }
+    let n_max = validate_barrier_n_max(state.n_max)?;
+    let max_records =
+        usize::try_from(n_max).map_err(|_| CityGError::InvalidInput("barrier n_max too large"))?;
+    let active_leaves: BTreeSet<[u8; 32]> = state
+        .latest_snapshot()
+        .map(|snapshot| snapshot.members().copied().collect())
+        .unwrap_or_default();
+    if active_leaves.is_empty() {
+        state.join_history.clear();
+        return Ok(());
+    }
+    let mut latest_by_leaf: BTreeMap<[u8; 32], JoinLeafHistoryRecord> = BTreeMap::new();
+    for record in &state.join_history {
+        if !active_leaves.contains(&record.leaf_id) {
+            continue;
+        }
+        match latest_by_leaf.get_mut(&record.leaf_id) {
+            Some(existing) if record.barrier_version >= existing.barrier_version => {
+                *existing = record.clone();
+            }
+            None => {
+                latest_by_leaf.insert(record.leaf_id, record.clone());
+            }
+            _ => {}
+        }
+    }
+    if latest_by_leaf.len() > max_records {
+        return Err(CityGError::InvalidInput(
+            UNRESOLVED_JOIN_HISTORY_EXHAUSTED_ERR,
+        ));
+    }
+    let mut pruned: Vec<JoinLeafHistoryRecord> = latest_by_leaf.into_values().collect();
+    pruned.sort_by_key(|record| (record.leaf_index, record.barrier_version, record.leaf_id));
+    state.join_history = pruned;
+    Ok(())
+}
+
+fn prune_barrier_public_tree_history(state: &mut GroupState) -> Result<(), CityGError> {
+    if state.barrier_public_tree_history.is_empty() {
+        state.barrier_public_tree_blobs.clear();
+        state.barrier_public_tree_blob_index.clear();
+        return Ok(());
+    }
+
+    let current_hash = state.kem_tree_hash_after;
+    let mut retained: Vec<([u8; 32], BarrierPublicTreeSnapshotRef)> = state
+        .barrier_public_tree_history
+        .iter()
+        .map(|(hash, snapshot)| (*hash, snapshot.clone()))
+        .collect();
+    retained.sort_by(|(left_hash, left), (right_hash, right)| {
+        (*right_hash == current_hash)
+            .cmp(&(*left_hash == current_hash))
+            .then_with(|| {
+                right
+                    .history_commitment
+                    .history_seq
+                    .cmp(&left.history_commitment.history_seq)
+            })
+            .then_with(|| right_hash.cmp(left_hash))
+    });
+    retained.truncate(MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS);
+
+    let old_blobs = state.barrier_public_tree_blobs.clone();
+    state.barrier_public_tree_history.clear();
+    state.barrier_public_tree_blobs.clear();
+    state.barrier_public_tree_blob_index.clear();
+
+    for (hash, snapshot) in retained {
+        let pk_entries =
+            decode_barrier_public_tree_snapshot_ref_with_blobs(old_blobs.as_slice(), &snapshot)?;
+        let mut encoded = encode_barrier_public_tree_snapshot_ref(state, pk_entries.as_slice())?;
+        encoded.history_view_id = snapshot.history_view_id;
+        encoded.history_commitment = snapshot.history_commitment;
+        state.barrier_public_tree_history.insert(hash, encoded);
+    }
     Ok(())
 }
 
@@ -5012,7 +5111,7 @@ mod tests {
         );
         header.insert(
             hdr::HDR_BARRIER_HISTORY_COMMITMENT,
-            Value::Bytes(encode_barrier_history_commitment_header(
+            Value::Bytes(super::encode_barrier_history_commitment_header(
                 server.current_history_commitment(&gid)?,
             )?),
         );
@@ -7693,7 +7792,7 @@ mod tests {
         let leaf = cityg_client::demo::demo_member_leaf("barrier-join-finalize-must-use-reason2");
         let pop_pk = vec![0xAC; 32];
         state.leaf_device_pk.insert(leaf, pop_pk.clone());
-        let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf);
+        let _join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf);
         let join_ek = vec![0xA5; 1184];
         let delta = cityg_client::MembershipDelta {
             joined: vec![leaf],
@@ -10101,6 +10200,65 @@ mod tests {
     }
 
     #[test]
+    fn resolve_joins_since_prunes_resolved_and_revoked_join_history() -> Result<(), CityGError> {
+        let gid = [0x85; 32];
+        let mut server = CityGServer::new(ServerConfig::new());
+        let leaf_active = colliding_cover_leaf(11);
+        let leaf_revoked = colliding_cover_leaf(12);
+        let latest_root = [0xB1; 32];
+
+        let mut membership = cityg_client::GroupMembership::default();
+        membership.apply_delta(&cityg_client::MembershipDelta {
+            joined: vec![leaf_active],
+            revoked: Vec::new(),
+        });
+        let state = server.roster.groups.entry(gid.to_vec()).or_default();
+        state.barrier_version = 5;
+        state.latest_root = Some(latest_root);
+        state.snapshots.insert(latest_root, membership);
+        state.join_history = vec![
+            super::JoinLeafHistoryRecord {
+                leaf_id: leaf_active,
+                barrier_version: 2,
+                leaf_index: 11,
+                device_pk: vec![0x11; 4],
+                ek_leaf: vec![0x21; 1184],
+            },
+            super::JoinLeafHistoryRecord {
+                leaf_id: leaf_active,
+                barrier_version: 5,
+                leaf_index: 11,
+                device_pk: vec![0x15; 4],
+                ek_leaf: vec![0x25; 1184],
+            },
+            super::JoinLeafHistoryRecord {
+                leaf_id: leaf_revoked,
+                barrier_version: 4,
+                leaf_index: 12,
+                device_pk: vec![0x12; 4],
+                ek_leaf: vec![0x22; 1184],
+            },
+        ];
+
+        let records = server.resolve_joins_since(&gid, 1)?;
+        assert_eq!(records.records.len(), 1);
+        assert_eq!(records.records[0].leaf_index, 11);
+        assert_eq!(records.records[0].device_pk, vec![0x15; 4]);
+        assert_eq!(records.records[0].ek_leaf, vec![0x25; 1184]);
+
+        let pruned = &server
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?
+            .join_history;
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].leaf_id, leaf_active);
+        assert_eq!(pruned[0].barrier_version, 5);
+        Ok(())
+    }
+
+    #[test]
     fn resolve_joins_since_rejects_duplicate_active_cover_allocations() -> Result<(), CityGError> {
         let gid = [0x84; 32];
         let mut server = CityGServer::new(ServerConfig::new());
@@ -10466,6 +10624,61 @@ mod tests {
                 .prev_history_commitment_id,
             historical_snapshot.history_commitment.history_commitment_id
         );
+        Ok(())
+    }
+
+    #[test]
+    fn barrier_public_tree_history_prunes_retired_snapshots() -> Result<(), CityGError> {
+        let gid = [0x91; 32];
+        let mut state = super::GroupState::default();
+        state.n_max = super::DEFAULT_BARRIER_N_MAX;
+        state.barrier_pk_entries = super::build_all_blank_pk_entries(state.n_max)?;
+        let mut historical_hashes = Vec::new();
+
+        for seq in 0..(super::MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS + 8) {
+            state.barrier_version = u64::try_from(seq).unwrap_or(u64::MAX);
+            state.barrier_pk_entries[0] = (seq as u64).to_le_bytes().to_vec();
+            state.kem_tree_hash_after = super::compute_group_barrier_tree_hash(&state)?;
+            historical_hashes.push(state.kem_tree_hash_after);
+            super::record_barrier_public_tree_snapshot(&gid, &mut state)?;
+        }
+
+        assert_eq!(
+            state.barrier_public_tree_history.len(),
+            super::MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS
+        );
+        let retired_hash = historical_hashes[0];
+        assert!(
+            !state
+                .barrier_public_tree_history
+                .contains_key(&retired_hash),
+            "oldest committed snapshot should be retired once retention window is exceeded"
+        );
+        let current_hash = *historical_hashes
+            .last()
+            .ok_or(CityGError::InvalidInput("missing current hash"))?;
+        assert!(
+            state
+                .barrier_public_tree_history
+                .contains_key(&current_hash),
+            "current committed snapshot must remain retained"
+        );
+
+        let mut server = CityGServer::new(ServerConfig::new());
+        server.roster.groups.insert(gid.to_vec(), state);
+
+        let err = server
+            .fetch_barrier_public_tree(&gid, &retired_hash)
+            .expect_err("retired historical snapshot should fail closed");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(
+                super::HISTORICAL_BARRIER_PUBLIC_TREE_SNAPSHOT_UNAVAILABLE_ERR
+            )
+        ));
+
+        let current = server.fetch_barrier_public_tree(&gid, &current_hash)?;
+        assert_eq!(current.kem_tree_hash_after, current_hash);
         Ok(())
     }
 
@@ -11067,6 +11280,7 @@ type PersistedKbroadState = BTreeMap<Vec<u8>, PersistedKbroadRoomState>;
 
 const DEFAULT_BARRIER_N_MAX: u64 = 1_024;
 const MAX_BARRIER_N_MAX: u64 = 65_536;
+const MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS: usize = 256;
 
 fn default_barrier_n_max() -> u64 {
     DEFAULT_BARRIER_N_MAX

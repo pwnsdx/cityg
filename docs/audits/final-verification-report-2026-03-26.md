@@ -119,16 +119,16 @@ Summary:
 
 - `6.1` `Closed` — `N_max` is now bounded and enforced fail-closed across layers.
   Proof: `docs/specs.md:899-900`, `crates/cityg-server/src/lib.rs:11014-11032`, `crates/cityg-api-client/src/lib.rs:1914-1925,2440-2457,2987-3010`, `crates/cityg-gui/src/barrier_shared.rs:9-10`.
-- `6.2` `Open` — historical retention is still not globally bounded.
-  Proof: `docs/specs.md:220-223` still requires retention while history remains fetchable, without hard maxima.
+- `6.2` `Closed` — retained historical public-tree state is now normatively and concretely bounded.
+  Proof: `docs/specs.md:229-231`, `crates/cityg-server/src/lib.rs:3143-3182`, `crates/cityg-server/src/lib.rs:10631-10680`.
 - `6.3` `Closed` — payload envelope size is bounded in spec and code.
   Proof: `docs/specs.md:563-565`, `crates/cityg-gui/src/message_crypto.rs:816-846`.
 - `6.4` `Open` — FULL chain-check still fundamentally needs whole-tree work in the general case.
   Proof: `docs/specs.md:1093-1104`, `docs/specs.md:1117-1122`.
-- `6.5` `Open` — A/B/C still lack normative pagination / max-response bounds.
-  Proof: `docs/specs.md:191-223`.
-- `6.6` `Open` — there is still no hard cap on unresolved joins per barrier version.
-  Proof: no `MAX_UNRESOLVED_JOINS_PER_BARRIER_VERSION` equivalent was added.
+- `6.5` `Partial` — A/B/C are now cardinality-bounded by `N_max` and retained-window limits, but they still lack true pagination / max-bytes response framing.
+  Proof: `docs/specs.md:200`, `docs/specs.md:218-231`, `crates/cityg-server/src/lib.rs:3102-3182`, `crates/cityg-api/src/lib.rs:766-774`.
+- `6.6` `Closed` — unresolved joins are now bounded by `N_max`, and resolved/revoked join activations are pruned from server state.
+  Proof: `docs/specs.md:218`, `docs/specs.md:994-995`, `crates/cityg-server/src/lib.rs:1603`, `crates/cityg-server/src/lib.rs:2331`, `crates/cityg-server/src/lib.rs:3102-3141`, `crates/cityg-server/src/lib.rs:10203-10257`.
 - `6.7` `Open` — anti-replay write amplification remains structurally present.
   Proof: `docs/specs.md:583-596`; local replay windowing in `crates/cityg-gui/src/message_crypto.rs:33-55` does not close the normative durability/cost issue.
 - `6.8` `Closed` — CBOR determinism is now a rejection property, not one mandated re-encode algorithm.
@@ -169,5 +169,5 @@ Summary:
 1. Add a globally canonical, append-only, authenticated history/finality object, not just a server-local `HistoryCommitment`.
 2. Decide whether FULL/recover-only is only an honest-client rule or must become a server-verifiable protocol property.
 3. Add completeness proofs or equivalent fail-closed semantics for `ResolveJoinsSince` / `ResolveRevokedLeaves`.
-4. Bound history retention, A/B/C response sizes, unresolved joins, and replay persistence cost normatively.
+4. Finish pagination / max-response framing for A/B/C and bound replay persistence cost normatively.
 5. Close the remaining wire/profile issues: explicit `profile_version` binding and, if desired, a real wire discriminator for `header[97]` contexts.

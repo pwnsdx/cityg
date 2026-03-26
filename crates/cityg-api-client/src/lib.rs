@@ -704,6 +704,16 @@ impl CitygApiClient {
         let revoked_root = array32(&response.revoked_root)?;
         let tswe_salt_hash = array32(&response.tswe_salt_hash)?;
         let pox_r_commit = array32(&response.pox_r_commit)?;
+        let n_max = validate_barrier_n_max(response.n_max)?;
+        let current_history_view_id = array32(&response.current_history_view_id)?;
+        let current_history_commitment =
+            parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
+        if response.cover_leaf_index >= n_max {
+            return Err(Error::Parse(format!(
+                "merge ticket cover_leaf_index out of range: {} >= {}",
+                response.cover_leaf_index, n_max
+            )));
+        }
 
         Ok(MergeTicket {
             we_epoch_id,
@@ -729,6 +739,7 @@ impl CitygApiClient {
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
+            current_history_commitment,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })

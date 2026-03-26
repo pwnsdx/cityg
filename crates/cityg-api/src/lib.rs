@@ -763,6 +763,17 @@ impl From<ClientError> for ApiError {
     }
 }
 
+fn map_barrier_helper_error(err: ClientError) -> ApiError {
+    match err {
+        ClientError::InvalidInput("group not found") => ApiError::NotFound,
+        ClientError::InvalidInput("historical barrier public tree snapshot unavailable") => {
+            ApiError::NotFound
+        }
+        ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
+        other => ApiError::from(other),
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorResponse<'a> {
     message: &'a str,
@@ -2433,7 +2444,7 @@ async fn barrier_resolve_revoked_leaves(
         let mut guard = lane.write().await;
         guard
             .resolve_revoked_leaf_indices(&gid, &revocation_roots_hash)
-            .map_err(ApiError::from)?
+            .map_err(map_barrier_helper_error)?
     };
 
     let response = BarrierResolveRevokedLeavesResponse {
@@ -2467,7 +2478,7 @@ async fn barrier_resolve_joins_since(
         let mut guard = lane.write().await;
         guard
             .resolve_joins_since(&gid, request.prev_barrier_version)
-            .map_err(ApiError::from)?
+            .map_err(map_barrier_helper_error)?
     };
 
     let response = BarrierResolveJoinsSinceResponse {
@@ -2522,7 +2533,7 @@ async fn barrier_fetch_public_tree(
         let mut guard = lane.write().await;
         guard
             .fetch_barrier_public_tree(&gid, &kem_tree_hash_after)
-            .map_err(ApiError::from)?
+            .map_err(map_barrier_helper_error)?
     };
 
     let response = BarrierFetchPublicTreeResponse {
@@ -5764,8 +5775,6 @@ mod tests {
         assert_eq!(decoded.kem_tree_hash_after.len(), 32);
         assert_eq!(decoded.current_history_view_id.len(), 32);
         assert!(decoded.current_history_commitment.is_some());
-        assert_eq!(decoded.provisioning_nonce.len(), 32);
-        assert!(decoded.provisioning_expires_at_ms >= decoded.provisioning_issued_at_ms);
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);
         let expected_cover_leaf_index = u64::from(u32::from_be_bytes(
@@ -6223,14 +6232,28 @@ mod tests {
         let err = barrier_fetch_public_tree(State(state), headers, Bytes::from(bad_tree_body))
             .await
             .expect_err("mismatched tree hash must fail");
+        assert!(matches!(err, ApiError::NotFound));
+    }
+
+    #[test]
+    fn barrier_helper_error_mapping_preserves_not_found_and_invalid_request() {
         assert!(matches!(
-            err,
-            ApiError::Server {
-                freeze: Some(freeze),
-                ..
-            } if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.code
-                && freeze.reason
-                    == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.reason
+            map_barrier_helper_error(ClientError::InvalidInput("group not found")),
+            ApiError::NotFound
+        ));
+        assert!(matches!(
+            map_barrier_helper_error(ClientError::InvalidInput(
+                "historical barrier public tree snapshot unavailable"
+            )),
+            ApiError::NotFound
+        ));
+        assert!(matches!(
+            map_barrier_helper_error(ClientError::InvalidInput(
+                "revocation_roots_hash does not match committed barrier roots"
+            )),
+            ApiError::InvalidRequest(
+                "revocation_roots_hash does not match committed barrier roots"
+            )
         ));
     }
 

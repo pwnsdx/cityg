@@ -196,3 +196,28 @@ Statut final de cet audit après relecture complète spec + implémentation:
 Les restes sont structurels: rétention historique, coût whole-tree, pagination/caps sur A/B/C, unresolved joins et coût anti-replay durable.
 
 Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche DoS structurelle)
+
+Nouvelle vérification après patch spec + implémentation:
+
+- **Fermé**: la rétention des snapshots publics n’est plus illimitée. La spec borne maintenant la fenêtre retenue à `MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS := 256`, et le serveur compacte réellement `barrier_public_tree_history` / `barrier_public_tree_blobs` au-delà de cette fenêtre.
+- **Fermé**: le `JoinSet` unresolved n’est plus structurellement non borné. La spec borne désormais la cardinalité à `N_max`, et le serveur prune `join_history` aux activations encore actives et pertinentes avant `ResolveJoinsSince(...)`.
+- **Partiellement fermé**: les interfaces A/B/C sont maintenant cardinality-bounded par `N_max` et par la fenêtre de snapshots retenus, mais elles ne sont toujours pas paginées et ne portent pas encore de borne wire explicite en octets/réponse.
+- **Toujours ouvert**: le coût whole-tree du FULL chain-check et l’amplification I/O durable de l’anti-replay.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p cityg-server --lib resolve_joins_since_prunes_resolved_and_revoked_join_history`
+- `cargo test -p cityg-server --lib barrier_public_tree_history_prunes_retired_snapshots`
+- `cargo test -p cityg-api --lib barrier_helper_error_mapping_preserves_not_found_and_invalid_request`
+- `cargo test -p cityg-api --lib barrier_tree_and_revoked_leaves_endpoints_validate_inputs`
+- `cargo test -p cityg-api-client --lib wrappers_roundtrip_against_mock_server`
+
+Statut audit mis à jour:
+
+- **Closed**: 6.1, 6.2, 6.3, 6.6, 6.8
+- **Partial**: 6.5
+- **Open**: 6.4, 6.7

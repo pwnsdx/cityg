@@ -197,6 +197,7 @@ Returns revoked cover leaf indices corresponding to revocation_roots_hash.
 This enumeration MUST be integrity-protected by membership/SRX state referenced by header[112]/[113].
 The authenticated response MUST carry `history_view_id`.
 The authenticated response MUST carry the corresponding `HistoryCommitment`.
+Returned indices MUST be strictly sorted, unique, `< N_max`, and therefore bounded in cardinality by `N_max`.
 
 B) ResolveJoinsSince(prev_barrier_version) -> list of JoinLeafRecord
 JoinLeafRecord = [device_pk:bstr, leaf_index:uint, ek_leaf:bstr]
@@ -214,6 +215,8 @@ Output constraints (normative):
 * `leaf_index` values MUST be unique,
 * `leaf_index` MUST be `< N_max`,
 * `ek_leaf` MUST be exactly 1184 bytes,
+* the number of returned records MUST be `<= N_max`,
+* the server MUST prune or compact resolved, revoked, and superseded join activations so that `ResolveJoinsSince(...)` remains bounded by the currently active join activations needed for the selected `history_view_id`,
 * if membership history is inconsistent (duplicate active allocation, out-of-range index, conflicting `ek_leaf` for the same activation), the implementation MUST fail closed and MUST NOT construct or accept a dependent `barrier_update`.
 
 C) FetchBarrierPublicTree(kem_tree_hash_after) -> pk_entries
@@ -223,7 +226,9 @@ The authenticated response MUST carry `history_view_id`.
 The authenticated response MUST carry the corresponding `HistoryCommitment`.
 Historical retention contract (normative):
 * FetchBarrierPublicTree(kem_tree_hash_after) MUST work for any committed historical barrier public tree snapshot addressed by kem_tree_hash_after, not only the current one.
-* The server MUST retain every committed pk_entries snapshot for as long as the corresponding group history/checkpoint history remains fetchable. Implementations MAY garbage-collect only together with retirement of the associated group history.
+* `MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS := 256` committed snapshots per `gid`, inclusive of the current committed snapshot.
+* The server MUST retain the current committed snapshot plus the most recent committed historical snapshots up to `MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS`.
+* Older committed snapshots MAY be retired once they fall outside that bounded retained window. Retirement MUST fail closed: the server MUST return an authenticated "retired / not available" style outcome, or an equivalent deployment-defined typed error for that authenticated member request; it MUST NOT silently substitute the current snapshot.
 * This contract constrains fetch semantics, not internal storage layout. Implementations MAY satisfy it via deltas, structural sharing, compression, or other equivalent internal representations, provided FetchBarrierPublicTree(kem_tree_hash_after) deterministically reconstructs the exact pk_entries array for the requested committed snapshot.
 
 D) LookupMergeAcceptance(merge_locator) -> MergeAcceptanceRecord
@@ -463,7 +468,7 @@ Barrier public state:
 * barrier_roots_hash : bstr32
 * kem_tree_hash_after : bstr32
 * N_max : uint (power of two; fixed group lifetime; deployment/profile MUST define and enforce a finite `N_max_max`, and groups with `N_max > N_max_max` are out of profile)
-* Server MUST store pk_entries matching kem_tree_hash_after and a historical map from each committed kem_tree_hash_after to its corresponding pk_entries, and MUST serve both current and historical committed snapshots via FetchBarrierPublicTree.
+* Server MUST store pk_entries matching kem_tree_hash_after and a bounded retained historical map from committed `kem_tree_hash_after` values to their corresponding `pk_entries`, and MUST serve the current retained snapshot window via FetchBarrierPublicTree per S3.3.C.
 
 S5.2 Client persistent secret state
 FS state:
@@ -986,6 +991,8 @@ Genesis convention:
 When barrier_initialized == false, prev_barrier_version MUST be treated as 0 for JoinSet enumeration, and ResolveJoinsSince(0) MUST return the complete active leaf set for genesis.
 Leaf-allocation invariant (normative):
 * cover leaf indices are single-assignment for the lifetime of `gid` and MUST NOT be reused after revocation.
+* For any selected committed `history_view_id`, the authenticated unresolved `JoinSet` returned by `ResolveJoinsSince(prev_barrier_version)` MUST contain at most one record per currently active leaf and therefore at most `N_max` records.
+* Servers MUST prune or compact historical join-activation state so that `ResolveJoinsSince(...)` depends only on activations that remain active at the selected committed view.
 
 Leaf-exhaustion note (informative):
 Because cover leaf indices are single-assignment and N_max is fixed, a group that churns members will eventually exhaust its leaf address space. Deployments SHOULD monitor the ratio of (active + historically revoked) leaves to N_max. When this ratio approaches saturation, the deployment SHOULD initiate group retirement and re-creation with a fresh gid and appropriately sized N_max. This profile does not define an in-protocol group migration or N_max extension mechanism; such a mechanism MAY be defined by a future profile.
