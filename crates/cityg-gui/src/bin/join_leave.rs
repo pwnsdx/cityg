@@ -36,7 +36,9 @@ use barrier_shared::{
 use ciborium::value::{Integer, Value};
 #[cfg(test)]
 use cityg_api_client::BarrierJoinRecord;
-use cityg_api_client::{CitygApiClient, Error as ApiClientError, IdentityBinding};
+use cityg_api_client::{
+    CitygApiClient, Error as ApiClientError, HistoryCommitment, IdentityBinding,
+};
 #[cfg(test)]
 use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
 #[cfg(test)]
@@ -371,12 +373,16 @@ fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
     )
 }
 
-fn ensure_matching_history_views(
+fn ensure_matching_history_dependencies(
     context: &str,
-    expected: Option<&[u8; 32]>,
+    expected_view_id: Option<&[u8; 32]>,
+    expected_commitment: &HistoryCommitment,
     tree_history_view_id: &[u8; 32],
+    tree_history_commitment: &HistoryCommitment,
     joins_history_view_id: &[u8; 32],
+    joins_history_commitment: &HistoryCommitment,
     revoked_history_view_id: &[u8; 32],
+    revoked_history_commitment: &HistoryCommitment,
 ) -> Result<()> {
     if *tree_history_view_id == [0u8; 32]
         || tree_history_view_id != joins_history_view_id
@@ -386,7 +392,20 @@ fn ensure_matching_history_views(
             "{context}: public tree / joins / revoked leaves do not share one authenticated history view (960.9)"
         ));
     }
-    if let Some(expected_history_view_id) = expected
+    if tree_history_commitment.history_view_id == [0u8; 32]
+        || *tree_history_commitment != *joins_history_commitment
+        || *tree_history_commitment != *revoked_history_commitment
+    {
+        return Err(anyhow!(
+            "{context}: public tree / joins / revoked leaves do not share one authenticated history commitment (960.9)"
+        ));
+    }
+    if *tree_history_commitment != *expected_commitment {
+        return Err(anyhow!(
+            "{context}: authenticated history commitment does not match ticket/provisioning state (960.9)"
+        ));
+    }
+    if let Some(expected_history_view_id) = expected_view_id
         && tree_history_view_id != expected_history_view_id
     {
         return Err(anyhow!(
@@ -814,12 +833,9 @@ struct Session {
     xk_hash: [u8; 32],
     epoch_key: [u8; 32],
     barrier_version: u64,
-    current_history_view_id: [u8; 32],
     k_barrier: [u8; 32],
     pop_public_key: Vec<u8>,
     pop_secret: Box<MlDsaSecretKey>,
-    msg_sign_public_key: Vec<u8>,
-    msg_sign_secret_key: Vec<u8>,
     vrf_secret_key: Vec<u8>,
     vrf_public_key: Vec<u8>,
     forward_state: ForwardSecrecyState,
@@ -1098,10 +1114,6 @@ async fn prepare_join_session_with_identity(
         seed
     });
 
-    let (msg_sign_pk, msg_sign_sk) = dilithium5::keypair();
-    let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
-    let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
-
     let (vrf_secret_key, vrf_public_key) =
         generate_vrf_keys().context("generate runtime VRF keypair")?;
 
@@ -1246,15 +1258,9 @@ async fn prepare_join_session_with_identity(
         xk_hash: bundle.hp_binding.xk_hash,
         epoch_key: bundle.epoch_key,
         barrier_version: ticket.barrier_version,
-        current_history_view_id: bytes32(
-            "current_history_view_id",
-            &ticket.current_history_view_id,
-        )?,
         k_barrier: [0u8; 32],
         pop_public_key,
         pop_secret,
-        msg_sign_public_key,
-        msg_sign_secret_key,
         vrf_secret_key,
         vrf_public_key,
         forward_state: fs_state,
@@ -1413,12 +1419,16 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         .barrier_resolve_revoked_leaves(&session.room_id, &committed_revocation_roots_hash)
         .await
         .context("resolve committed barrier revoked leaves for join finalize")?;
-    ensure_matching_history_views(
+    ensure_matching_history_dependencies(
         "join finalize",
-        Some(&session.current_history_view_id),
+        Some(&ticket.current_history_commitment.history_view_id),
+        &ticket.current_history_commitment,
         &barrier_tree_response.history_view_id,
+        &barrier_tree_response.history_commitment,
         &join_resolution.history_view_id,
+        &join_resolution.history_commitment,
         &revoked_resolution.history_view_id,
+        &revoked_resolution.history_commitment,
     )?;
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     apply_join_set_to_snapshot(
@@ -1847,12 +1857,16 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         .barrier_resolve_revoked_leaves(&session.room_id, &committed_revocation_roots_hash)
         .await
         .context("resolve committed barrier revoked leaf indices")?;
-    ensure_matching_history_views(
-        "join finalize",
-        Some(&session.current_history_view_id),
+    ensure_matching_history_dependencies(
+        "leave",
+        Some(&ticket.current_history_commitment.history_view_id),
+        &ticket.current_history_commitment,
         &barrier_tree_response.history_view_id,
+        &barrier_tree_response.history_commitment,
         &join_resolution.history_view_id,
+        &join_resolution.history_commitment,
         &revoked_resolution.history_view_id,
+        &revoked_resolution.history_commitment,
     )?;
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     apply_join_set_to_snapshot(
@@ -2932,12 +2946,9 @@ mod tests {
             xk_hash: [0x23; 32],
             epoch_key: [0x24; 32],
             barrier_version: 1,
-            current_history_view_id: [0x2A; 32],
             k_barrier: [0x25; 32],
             pop_public_key: vec![0x33; 32],
             pop_secret: Box::new(pop_sk),
-            msg_sign_public_key: vec![0x34; 1952],
-            msg_sign_secret_key: vec![0x35; 4032],
             vrf_secret_key: vec![0x44; 32],
             vrf_public_key: vec![0x55; 32],
             forward_state: ForwardSecrecyState::with_state([0x10; 32], 7, [0x77; 32], [0x88; 32]),
@@ -3027,6 +3038,46 @@ mod tests {
         }
     }
 
+    fn sample_history_commitment() -> HistoryCommitment {
+        HistoryCommitment {
+            history_view_id: [0x90; 32],
+            history_commitment_id: [0x91; 32],
+            prev_history_commitment_id: [0x92; 32],
+            history_seq: 17,
+        }
+    }
+
+    fn sample_merge_ticket() -> cityg_api_client::MergeTicket {
+        cityg_api_client::MergeTicket {
+            we_epoch_id: [0x04; 32],
+            parities: vec![sample_pivot_parity()],
+            witness_cbor: vec![0xA1, 0x01, 0x02],
+            srx_cbor: vec![0xA1, 0x03, 0x04],
+            proof_mode: "lin+zkvrf".to_string(),
+            vrf_id: "lb-vrf".to_string(),
+            policy_version: "7".to_string(),
+            cat: [0x02; 32],
+            parent_root: [0x03; 32],
+            join_delta_root: [0x0A; 32],
+            revoked_since_root: [0x0B; 32],
+            revoked_root: [0x0C; 32],
+            tswe_salt_hash: [0x0D; 32],
+            pox_r_commit: [0x0E; 32],
+            kbroad_public: vec![0x33; 32],
+            msphf_crs_id: "crs-v1".to_string(),
+            msphf_params_id: "params-v1".to_string(),
+            fs_policy_version: "fs-v1".to_string(),
+            fs_epoch_base_ts: 1_717_171_717,
+            kbroad_generation: 3,
+            barrier_version: 9,
+            cover_leaf_index: 1,
+            kem_tree_hash_after: [0x0F; 32],
+            current_history_commitment: sample_history_commitment(),
+            n_max: 8,
+            max_barrier_update_bytes: 64 * 1024,
+        }
+    }
+
     #[derive(Clone, PartialEq, Message)]
     struct MergeTicketResponsePb {
         #[prost(bytes = "vec", tag = "1")]
@@ -3081,8 +3132,22 @@ mod tests {
         n_max: u64,
         #[prost(uint64, tag = "27")]
         max_barrier_update_bytes: u64,
-        #[prost(bytes = "vec", tag = "30")]
+        #[prost(bytes = "vec", tag = "28")]
         current_history_view_id: Vec<u8>,
+        #[prost(message, optional, tag = "29")]
+        current_history_commitment: Option<HistoryCommitmentPb>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct HistoryCommitmentPb {
+        #[prost(bytes = "vec", tag = "1")]
+        history_view_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "2")]
+        history_commitment_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "3")]
+        prev_history_commitment_id: Vec<u8>,
+        #[prost(uint64, tag = "4")]
+        history_seq: u64,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3101,6 +3166,14 @@ mod tests {
         records: Vec<BarrierJoinLeafRecordPb>,
         #[prost(bytes = "vec", tag = "2")]
         history_view_id: Vec<u8>,
+        #[prost(message, optional, tag = "3")]
+        history_commitment: Option<HistoryCommitmentPb>,
+        #[prost(uint32, tag = "4")]
+        page_offset: u32,
+        #[prost(uint32, optional, tag = "5")]
+        next_page_offset: Option<u32>,
+        #[prost(uint32, tag = "6")]
+        total_entries: u32,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3109,6 +3182,14 @@ mod tests {
         leaf_indices: Vec<u32>,
         #[prost(bytes = "vec", tag = "2")]
         history_view_id: Vec<u8>,
+        #[prost(message, optional, tag = "3")]
+        history_commitment: Option<HistoryCommitmentPb>,
+        #[prost(uint32, tag = "4")]
+        page_offset: u32,
+        #[prost(uint32, optional, tag = "5")]
+        next_page_offset: Option<u32>,
+        #[prost(uint32, tag = "6")]
+        total_entries: u32,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3121,6 +3202,14 @@ mod tests {
         pk_entries: Vec<Vec<u8>>,
         #[prost(bytes = "vec", tag = "4")]
         history_view_id: Vec<u8>,
+        #[prost(message, optional, tag = "5")]
+        history_commitment: Option<HistoryCommitmentPb>,
+        #[prost(uint32, tag = "6")]
+        entry_offset: u32,
+        #[prost(uint32, optional, tag = "7")]
+        next_entry_offset: Option<u32>,
+        #[prost(uint32, tag = "8")]
+        total_entries: u32,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3478,22 +3567,46 @@ mod tests {
             kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
             n_max: ticket.n_max,
             max_barrier_update_bytes: ticket.max_barrier_update_bytes,
-            current_history_view_id: vec![0xD1; 32],
+            current_history_view_id: ticket.current_history_commitment.history_view_id.to_vec(),
+            current_history_commitment: Some(encode_history_commitment(
+                &ticket.current_history_commitment,
+            )),
         }
         .encode_to_vec())
     }
 
-    fn encode_barrier_tree_snapshot(tree: &cityg_api_client::BarrierPublicTree) -> Vec<u8> {
+    fn encode_history_commitment(commitment: &HistoryCommitment) -> HistoryCommitmentPb {
+        HistoryCommitmentPb {
+            history_view_id: commitment.history_view_id.to_vec(),
+            history_commitment_id: commitment.history_commitment_id.to_vec(),
+            prev_history_commitment_id: commitment.prev_history_commitment_id.to_vec(),
+            history_seq: commitment.history_seq,
+        }
+    }
+
+    fn encode_barrier_tree_snapshot(
+        tree: &cityg_api_client::BarrierPublicTree,
+        history_commitment: &HistoryCommitment,
+    ) -> Vec<u8> {
+        let total_entries = u32::try_from(tree.pk_entries.len()).expect("tree entries fit in u32");
         BarrierFetchPublicTreeResponsePb {
             n_max: tree.n_max,
             kem_tree_hash_after: tree.kem_tree_hash_after.to_vec(),
             pk_entries: tree.pk_entries.clone(),
-            history_view_id: vec![0xD1; 32],
+            history_view_id: history_commitment.history_view_id.to_vec(),
+            history_commitment: Some(encode_history_commitment(history_commitment)),
+            entry_offset: 0,
+            next_entry_offset: None,
+            total_entries,
         }
         .encode_to_vec()
     }
 
-    fn encode_join_records(records: &[BarrierJoinRecord]) -> Vec<u8> {
+    fn encode_join_records(
+        records: &[BarrierJoinRecord],
+        history_commitment: &HistoryCommitment,
+    ) -> Vec<u8> {
+        let total_entries = u32::try_from(records.len()).expect("join records fit in u32");
         BarrierResolveJoinsSinceResponsePb {
             records: records
                 .iter()
@@ -3503,15 +3616,27 @@ mod tests {
                     ek_leaf: record.ek_leaf.clone(),
                 })
                 .collect(),
-            history_view_id: vec![0xD1; 32],
+            history_view_id: history_commitment.history_view_id.to_vec(),
+            history_commitment: Some(encode_history_commitment(history_commitment)),
+            page_offset: 0,
+            next_page_offset: None,
+            total_entries,
         }
         .encode_to_vec()
     }
 
-    fn encode_revoked_leaf_indices(indices: &[u32]) -> Vec<u8> {
+    fn encode_revoked_leaf_indices(
+        indices: &[u32],
+        history_commitment: &HistoryCommitment,
+    ) -> Vec<u8> {
+        let total_entries = u32::try_from(indices.len()).expect("revoked indices fit in u32");
         BarrierResolveRevokedLeavesResponsePb {
             leaf_indices: indices.to_vec(),
-            history_view_id: vec![0xD1; 32],
+            history_view_id: history_commitment.history_view_id.to_vec(),
+            history_commitment: Some(encode_history_commitment(history_commitment)),
+            page_offset: 0,
+            next_page_offset: None,
+            total_entries,
         }
         .encode_to_vec()
     }
@@ -4667,12 +4792,9 @@ mod tests {
             xk_hash: [0x03; 32],
             epoch_key: [0x04; 32],
             barrier_version: 1,
-            current_history_view_id: [0x0A; 32],
             k_barrier: [0x05; 32],
             pop_public_key: vec![0x11],
             pop_secret: Box::new(sk),
-            msg_sign_public_key: vec![0x12; 1952],
-            msg_sign_secret_key: vec![0x13; 4032],
             vrf_secret_key: vec![0x22],
             vrf_public_key: vec![0x33],
             forward_state: ForwardSecrecyState::with_state([0x12; 32], 5, [0x55; 32], [0x66; 32]),
@@ -5003,18 +5125,21 @@ mod tests {
                 "/v1/barrier/fetch_public_tree",
                 vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
                     &fixture.barrier_tree_snapshot,
+                    &fixture.ticket.current_history_commitment,
                 ))],
             ),
             (
                 "/v1/barrier/resolve_joins_since",
                 vec![MockResponse::proto_bytes(encode_join_records(
                     fixture.join_records.as_slice(),
+                    &fixture.ticket.current_history_commitment,
                 ))],
             ),
             (
                 "/v1/barrier/resolve_revoked_leaves",
                 vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
                     fixture.revoked_leaf_indices.as_slice(),
+                    &fixture.ticket.current_history_commitment,
                 ))],
             ),
             (
@@ -5069,18 +5194,21 @@ mod tests {
                 "/v1/barrier/fetch_public_tree",
                 vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
                     &fixture.barrier_tree_snapshot,
+                    &ticket.current_history_commitment,
                 ))],
             ),
             (
                 "/v1/barrier/resolve_joins_since",
                 vec![MockResponse::proto_bytes(encode_join_records(
                     fixture.join_records.as_slice(),
+                    &ticket.current_history_commitment,
                 ))],
             ),
             (
                 "/v1/barrier/resolve_revoked_leaves",
                 vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
                     fixture.revoked_leaf_indices.as_slice(),
+                    &ticket.current_history_commitment,
                 ))],
             ),
             ("/v1/pivot/refresh", vec![MockResponse::empty_proto()]),
@@ -5464,6 +5592,7 @@ mod tests {
                 "/v1/barrier/fetch_public_tree",
                 vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
                     &fixture.barrier_tree_snapshot,
+                    &bad_ticket.current_history_commitment,
                 ))],
             ),
         ]);
@@ -5503,6 +5632,7 @@ mod tests {
                 "/v1/barrier/fetch_public_tree",
                 vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
                     &bad_snapshot,
+                    &bad_ticket.current_history_commitment,
                 ))],
             ),
         ]);
@@ -5545,18 +5675,21 @@ mod tests {
                 "/v1/barrier/fetch_public_tree",
                 vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
                     &fixture.barrier_tree_snapshot,
+                    &adjusted_ticket.current_history_commitment,
                 ))],
             ),
             (
                 "/v1/barrier/resolve_joins_since",
                 vec![MockResponse::proto_bytes(encode_join_records(
                     fixture.join_records.as_slice(),
+                    &adjusted_ticket.current_history_commitment,
                 ))],
             ),
             (
                 "/v1/barrier/resolve_revoked_leaves",
                 vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
                     fixture.revoked_leaf_indices.as_slice(),
+                    &adjusted_ticket.current_history_commitment,
                 ))],
             ),
             (
@@ -5598,6 +5731,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mock_merge_ticket_roundtrips_current_history_commitment() -> Result<()> {
+        let ticket = sample_merge_ticket();
+        let state = LeaveMockState::new([(
+            "/v1/rooms/merge_ticket",
+            vec![MockResponse::proto_bytes(encode_merge_ticket(&ticket)?)],
+        )]);
+        let (server_url, handle) = start_leave_mock_server(state).await?;
+
+        let client = new_api_client(&server_url);
+        let decoded = client
+            .merge_ticket(&hex::encode([0x44; 32]), &[0x55; 32])
+            .await?;
+        assert_eq!(
+            decoded.current_history_commitment,
+            ticket.current_history_commitment
+        );
+
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn perform_leave_surfaces_final_accept_epoch_failure_detail() -> Result<()> {
         let fixture = capture_leave_fixture().await?;
         let state = LeaveMockState::new([
@@ -5611,18 +5767,21 @@ mod tests {
                 "/v1/barrier/fetch_public_tree",
                 vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
                     &fixture.barrier_tree_snapshot,
+                    &fixture.ticket.current_history_commitment,
                 ))],
             ),
             (
                 "/v1/barrier/resolve_joins_since",
                 vec![MockResponse::proto_bytes(encode_join_records(
                     fixture.join_records.as_slice(),
+                    &fixture.ticket.current_history_commitment,
                 ))],
             ),
             (
                 "/v1/barrier/resolve_revoked_leaves",
                 vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
                     fixture.revoked_leaf_indices.as_slice(),
+                    &fixture.ticket.current_history_commitment,
                 ))],
             ),
             ("/v1/pivot/refresh", vec![MockResponse::empty_proto()]),
@@ -5656,6 +5815,36 @@ mod tests {
         handle.abort();
         let _ = handle.await;
         Ok(())
+    }
+
+    #[test]
+    fn ensure_matching_history_dependencies_rejects_commitment_mismatch() {
+        let expected = HistoryCommitment {
+            history_view_id: [0x11; 32],
+            history_commitment_id: [0x22; 32],
+            prev_history_commitment_id: [0x33; 32],
+            history_seq: 7,
+        };
+        let mut mismatched = expected;
+        mismatched.history_commitment_id[0] ^= 0x5A;
+
+        let err = ensure_matching_history_dependencies(
+            "leave",
+            Some(&expected.history_view_id),
+            &expected,
+            &mismatched.history_view_id,
+            &mismatched,
+            &expected.history_view_id,
+            &expected,
+            &expected.history_view_id,
+            &expected,
+        )
+        .expect_err("history commitment mismatch must fail");
+        assert!(
+            err.to_string()
+                .contains("do not share one authenticated history commitment"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

@@ -350,3 +350,13 @@ Nouvelle passe implémentation:
 - la self-finalization du deuxième membre n’aboutit plus à une session qui échoue au premier envoi pour cause de clé de signature incohérente; le chemin d’envoi message-plane est désormais aligné avec l’identité de device persistée par le join;
 - le helper `FetchBarrierPublicTree(H_prev)` renvoie désormais le `HistoryCommitment` courant quand `H_prev` est le prédécesseur immédiat de l’état accepté courant, ce qui réaligne le chain-check FULL normal avec la sémantique de la spec durcie;
 - les tests `perform_join_second_member_can_send_immediately` et `send_fetch_and_members_roundtrip` repassent, ce qui redonne un signal end-to-end propre sur “join -> self-finalize -> send -> sync/fetch”.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche join_leave helper-state alignment)
+
+Nouvelle passe implémentation:
+
+- le binaire `join_leave` n’utilise plus le `current_history_view_id` local de session comme source de vérité pour les helpers A/B/C; il exige désormais que `FetchBarrierPublicTree`, `ResolveJoinsSince` et `ResolveRevokedLeaves` matchent le `HistoryCommitment` courant porté par le `merge_ticket` lui-même;
+- le mock protobuf `MergeTicketResponse` de `join_leave` a aussi été réaligné sur les tags wire actuels de `cityg.proto`, ce qui supprime un faux positif où les tests parlaient encore un wire obsolète;
+- preuves exécutées sur cette tranche: `ensure_matching_history_dependencies_rejects_commitment_mismatch`, `mock_merge_ticket_roundtrips_current_history_commitment`, `authenticated_message_helpers_cover_roundtrip_and_error_paths`.

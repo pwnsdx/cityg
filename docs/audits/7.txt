@@ -332,3 +332,13 @@ Nouvelle passe implémentation:
 - le helper serveur `FetchBarrierPublicTree(H_prev)` distingue maintenant le cas où `H_prev` est le prédécesseur immédiat de l’état accepté courant et renvoie alors ce snapshot sous le `HistoryCommitment` courant attendu par le chain-check FULL normal;
 - cela ferme un mismatch local qui faisait échouer `epoch_sync` sur un vrai scénario `join -> send -> stale sync`, sans pour autant prétendre résoudre la canonité globale de l’historique;
 - en parallèle, la voie d’envoi message-plane signe désormais avec la même identité de device persistée que celle dont la réception re-dérive `sender_leaf_id`, ce qui supprime une incohérence locale de la défense “sender-bound message auth”.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche join_leave helper-state alignment)
+
+Nouvelle passe implémentation:
+
+- `join_leave` applique maintenant la même contrainte que le runtime GUI principal: les helpers A/B/C doivent partager un `HistoryCommitment` unique et ce commitment doit matcher celui du `merge_ticket` courant, pas un `current_history_view_id` local potentiellement stale;
+- le mock `merge_ticket` utilisé par ce binaire round-trippe désormais correctement `current_history_commitment` sur le vrai client API, ce qui évite qu’un wire de test obsolète masque des divergences réelles;
+- cela renforce la preuve locale de `7.3`, mais ne change pas le statut global: il manque toujours une preuve de complétude / canonité globale contre omission serveur.

@@ -92,7 +92,7 @@ Summary:
 - `4.6` `Open` — the “applicable `ek_n` verification” path is still not globally anchored enough to rule out vacuous server-steered contexts.
   Proof: `docs/specs.md:1115-1124` improves bootstrap checks, but relies on local/current authenticated artifacts rather than global canonity.
 - `4.7` `Partial` — current version/current tree/current JoinSet binding is much tighter now through shared `HistoryCommitment`, `header[180]`, helper-state binding, and explicit current-commitment treatment for the immediate predecessor snapshot used by the normal FULL chain-check.
-  Proof: `docs/specs.md:180-189`, `docs/specs.md:1157`, `docs/specs.md:1181-1190`, `crates/cityg-server/src/lib.rs:2396-2445,4443-4450,10749-10780`, `crates/cityg-gui/src/native/join_ops.rs:220-247`, `crates/cityg-gui/src/native/barrier_ops.rs:312-320,882-905`, `crates/cityg-gui/src/native/tests/mod.rs:7636-7659`.
+  Proof: `docs/specs.md:180-189`, `docs/specs.md:1157`, `docs/specs.md:1181-1190`, `crates/cityg-server/src/lib.rs:2396-2445,4443-4450,10749-10780`, `crates/cityg-gui/src/native/join_ops.rs:220-247`, `crates/cityg-gui/src/native/barrier_ops.rs:312-320,882-905`, `crates/cityg-gui/src/bin/join_leave.rs:376-416,1432-1440,1870-1878,5746-5761`, `crates/cityg-gui/src/native/tests/mod.rs:7636-7659`.
 - `4.8` `Partial` — external history/provisioning dependencies are more constrained, but still not fully closed against a byzantine server.
   Proof: `docs/specs.md:1455-1478`; remaining lack of global finality/canonity is still explicit at `docs/specs.md:170`.
 
@@ -141,7 +141,7 @@ Summary:
 - `7.2` `Partial` — clients now replay a mandatory client-visible subset of activation invariants before committing recovered or locally pending barrier state, but they still do not replay the full server-side S10 policy surface.
   Proof: `docs/specs.md:1168-1174`, `docs/specs.md:1470-1496`, `crates/cityg-gui/src/native/barrier_runtime.rs:486-655`, `crates/cityg-gui/src/native/epoch_sync.rs:65-206`, `crates/cityg-gui/src/native/barrier_ops.rs:107-171`, `crates/cityg-gui/src/native/tests/mod.rs:250-592,6200-6260,7184-7321`.
 - `7.3` `Partial` — `ResolveJoinsSince` is now tied to an exact authenticated view and shared commitment, but not yet to a globally canonical target state with completeness proof.
-  Proof: `docs/specs.md:180-189`, `docs/specs.md:197-213`.
+  Proof: `docs/specs.md:180-189`, `docs/specs.md:197-213`, `crates/cityg-gui/src/bin/join_leave.rs:376-416,1432-1440,1870-1878`.
 - `7.4` `Open` — omission/completeness proofs for joins/revocations are still missing.
   Proof: `docs/specs.md:183` leaves proof/object format deployment-defined; no completeness proof is mandated.
 - `7.5` `Partial` — recover-only is now explicit, persisted, and escalates to `recovery_required`, but still remains a server-imposable degraded mode until FULL is re-established locally.
