@@ -196,3 +196,16 @@ Re-vérification d’implémentation après patchs du jour:
 - **Encore ouvert**: il n’existe toujours pas de binding cryptographique explicite du `profile_version` dans l’ancre elle-même; ce reste est protocolaire, pas localement corrigeable sans évolution wire.
 
 Statut audit: **COMPLETED**, avec fermeture effective d’un vrai gap cut-and-paste/spoofing dans l’implémentation.
+
+--
+
+## Commentaires Codex (2026-03-26, vérification finale)
+
+Statut final de cet audit après relecture complète spec + implémentation:
+
+- **Closed**: 2.1
+- **Partial**: 2.5, 2.6
+- **Open**: 2.2, 2.4
+- **Reclassified**: 2.3
+
+Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.

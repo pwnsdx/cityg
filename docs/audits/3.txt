@@ -240,3 +240,16 @@ Nouvelle passe spec + implémentation:
 - **Toujours ouvert**: cela ferme une partie concrète de l’ambiguïté “même view id, objet historique trop faible”, mais ce n’est toujours pas une canonité append-only globale/fédérée.
 
 Statut audit: **COMPLETED**, avec remédiation spec + implémentation supplémentaire sur l’objet d’historique local.
+
+--
+
+## Commentaires Codex (2026-03-26, vérification finale)
+
+Statut final de cet audit après relecture complète spec + implémentation:
+
+- **Partial**: 3.3
+- **Open**: 3.1, 3.2, 3.4, 3.5, 3.6, 3.7
+
+Le gros résiduel est désormais clairement protocolaire: finalité/canonité globale, pas simple corrélation locale.
+
+Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.

@@ -183,3 +183,16 @@ Re-vérification d’implémentation après patchs du jour:
 - **Encore ouvert**: rétention historique bornée, pagination bornée des interfaces A/B/C et caps normatifs sur l’historique public ne sont pas encore implémentés.
 
 Statut audit: **COMPLETED**, avec renforcement DoS supplémentaire effectif dans le code.
+
+--
+
+## Commentaires Codex (2026-03-26, vérification finale)
+
+Statut final de cet audit après relecture complète spec + implémentation:
+
+- **Closed**: 6.1, 6.3, 6.8
+- **Open**: 6.2, 6.4, 6.5, 6.6, 6.7
+
+Les restes sont structurels: rétention historique, coût whole-tree, pagination/caps sur A/B/C, unresolved joins et coût anti-replay durable.
+
+Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.

@@ -370,3 +370,15 @@ Re-vérification d’implémentation après patchs du jour:
 - **Encore ouvert**: la distinction wire auto-descriptive entre formes `author-local` et `barrier-recovery` n’a pas été transformée aujourd’hui; elle reste un sujet de profil/wire, pas un simple patch local.
 
 Statut audit: **COMPLETED**, revalidé contre l’implémentation courante.
+
+--
+
+## Commentaires Codex (2026-03-26, vérification finale)
+
+Statut final de cet audit après relecture complète spec + implémentation:
+
+- **Closed**: 1.1, 1.3, 1.4, 1.6, 1.7
+- **Partial**: 1.2
+- **Reclassified**: 1.5
+
+Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.

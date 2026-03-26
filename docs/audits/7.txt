@@ -277,3 +277,16 @@ Nouvelle passe spec + implémentation:
 - **Limite inchangée**: cette cohérence reste locale à un serveur donné et ne fournit toujours pas de canonité append-only globale.
 
 Statut audit: **COMPLETED**, avec renforcement supplémentaire de la boundary “ticket helper vs current authenticated view”.
+
+--
+
+## Commentaires Codex (2026-03-26, vérification finale)
+
+Statut final de cet audit après relecture complète spec + implémentation:
+
+- **Partial**: 7.3, 7.5, 7.6, 7.7
+- **Open**: 7.1, 7.2, 7.4
+
+Le problème directeur reste inchangé: la défense contre serveur actif est aujourd’hui nettement meilleure localement, mais toujours pas équivalente à une canonité/finalité globale append-only.
+
+Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.

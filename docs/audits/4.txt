@@ -294,3 +294,17 @@ Nouvelle passe spec + implémentation:
 Conclusion:
 
 L’audit 4 reste **partiellement ouvert**, mais le chemin helper `merge_ticket -> snapshot/A/B -> header[180]` est maintenant beaucoup plus cohérent et explicite.
+
+--
+
+## Commentaires Codex (2026-03-26, vérification finale)
+
+Statut final de cet audit après relecture complète spec + implémentation:
+
+- **Closed**: 4.3
+- **Partial**: 4.2, 4.7, 4.8
+- **Open**: 4.1, 4.4, 4.5, 4.6
+
+Le point le plus important encore ouvert est l’absence d’une preuve wire-visible/server-checkable de FULL verification pour les reasons `0/1`.
+
+Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.
