@@ -25,6 +25,8 @@ lcov.info
 *.tmp
 *.bak
 *.log
+/.cargo-home/
+/.home/
 
 # Whitepaper (LaTeX temporary artifacts)
 docs/whitepaper/*.aux

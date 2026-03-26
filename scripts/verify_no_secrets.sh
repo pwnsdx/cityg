@@ -13,6 +13,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source "$REPO_ROOT/scripts/cargo_repo_env.sh"
 
 echo "═══════════════════════════════════════════════════════════"
 echo "City-G Security Verification — No Secrets in Server Code"
@@ -132,7 +133,7 @@ echo ""
 # Check 9: Compile-time verification (cargo check)
 echo "Check 9: Code compiles (type safety)..."
 CHECK_LOG="$(mktemp)"
-if cargo check --quiet > "$CHECK_LOG" 2>&1; then
+if cargo check --locked --quiet > "$CHECK_LOG" 2>&1; then
     echo "  PASSED: Code compiles (type-safe)"
 else
     echo "  FAILED: Compilation errors"
@@ -145,7 +146,7 @@ echo ""
 # Check 10: Tests pass (functional verification)
 echo "Check 10: Tests pass (cargo test --all)..."
 TEST_LOG="$(mktemp)"
-if cargo test --quiet --all > "$TEST_LOG" 2>&1; then
+if cargo test --locked --quiet --all > "$TEST_LOG" 2>&1; then
     echo "  PASSED: All tests pass (exit code 0)"
 else
     echo "  FAILED: Some tests failed"
