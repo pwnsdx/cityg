@@ -23,17 +23,17 @@ Scope-hardening addendum (same date, later tranche):
 
 Summary:
 - Total findings reviewed: `51`
-- `Closed`: `15`
-- `Partial`: `14`
-- `Open`: `18`
+- `Closed`: `18`
+- `Partial`: `12`
+- `Open`: `17`
 - `Reclassified`: `4`
 
 ## Audit 1
 
 - `1.1` `Closed` — bootstrap `join_finalize` no longer depends on a circular `H_prev`.
   Proof: `docs/specs.md:1111-1124` defines `H_prev_bootstrap` from the authenticated predecessor of `BU_current`.
-- `1.2` `Partial` — `header[97]` is normatively clarified, but still has the same wire shape across `author-local` and `barrier-recovery`.
-  Proof: `docs/specs.md:271-276`.
+- `1.2` `Closed` — `header[97]` now carries an explicit wire discriminator between `author-local` and `barrier-recovery`.
+  Proof: `docs/specs.md:271-303`, `crates/msphf-orchestrator/src/lib.rs:737-845`, `crates/msphf-orchestrator/src/accept/stages.rs:210-244,714-736`.
 - `1.3` `Closed` — exact CBOR array lengths are now normative and testable.
   Proof: `docs/specs.md:574-579`, `docs/specs.md:907-926`.
 - `1.4` `Closed` — `ResolveJoinsSince` / `JoinSet` semantics are now explicit for the selected authenticated view.
@@ -53,12 +53,12 @@ Summary:
   Proof: `docs/specs.md:683-698`, `crates/msphf-orchestrator/src/proofs/zk_vrf/mod.rs:23-36`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:123-157`, `crates/msphf-orchestrator/src/lib.rs:121,3009-3023`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:455-466`.
 - `2.3` `Reclassified` — the “missing `gid/weid` in bind_fs” claim is too strong as stated because `xk_hash` already carries handshake context; the remaining gap is documentary, not a confirmed local defect.
   Proof: `docs/specs.md:162`, `docs/specs.md:279-313`, `docs/specs.md:642-656`.
-- `2.4` `Open` — several barrier/HP KDFs still bind through `xk_hash` / room-local constants rather than an explicit direct `gid` term everywhere the audit wanted it.
-  Proof: `docs/specs.md:297-313`, `docs/specs.md:1042`, `crates/cityg-gui/src/barrier_shared.rs:11-12`.
+- `2.4` `Closed` — barrier/HP KDFs now bind `gid` directly in the spec and in the concrete barrier/HP derivation helpers.
+  Proof: `docs/specs.md:324-338`, `docs/specs.md:1072-1127`, `docs/specs.md:1390-1402`, `docs/specs.md:1716-1731`, `crates/msphf-orchestrator/src/lib.rs:698-845`, `crates/cityg-gui/src/barrier_shared.rs:47-55`, `crates/cityg-gui/src/native/barrier_core.rs:33-39,689-706`, `crates/cityg-gui/src/native/tests/mod.rs:1484-1539`, `crates/cityg-client/src/lib.rs:699-705,718-735`, `crates/msphf-orchestrator/tests/end_to_end.rs:954-988`.
 - `2.5` `Partial` — recover-only misuse is reduced by persistent `current_barrier_full_verified`, but still not protocol-enforced end-to-end.
   Proof: `docs/specs.md:1093-1096`, `docs/specs.md:1154-1157`, `crates/cityg-gui/src/native/session_types.rs:72-99`, `crates/cityg-gui/src/native/barrier_ops.rs:214-251`.
-- `2.6` `Partial` — sender/device binding is now enforced in code, but the stronger lifetime/non-reuse semantics are still only partially specified.
-  Proof: `docs/specs.md:566-572`, `crates/cityg-gui/src/native/message_auth.rs:139-156`, `crates/cityg-gui/src/native/network_messages.rs:188-203`.
+- `2.6` `Closed` — sender/device binding is enforced in code, and the spec now makes `leaf_id(device_pk)` deterministic per `(gid, device_pk, device_pk_alg)` and non-reassignable across distinct device keys within a `gid`.
+  Proof: `docs/specs.md:176-178`, `docs/specs.md:600-606`, `crates/cityg-gui/src/native/message_auth.rs:139-156,388-437`, `crates/cityg-gui/src/native/network_messages.rs:188-203`.
 
 ## Audit 3
 
@@ -165,6 +165,10 @@ Summary:
   `docs/specs.md:563-565`, `crates/cityg-server/src/lib.rs:11014-11032`, `crates/cityg-api-client/src/lib.rs:1914-1925`, `crates/cityg-gui/src/message_crypto.rs:816-846`.
 - Explicit `profile_version` binding in `bind_fs`:
   `docs/specs.md:683-698`, `crates/msphf-orchestrator/src/proofs/zk_vrf/mod.rs:23-36`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:123-157`.
+- Direct `gid` binding in barrier/HP KDFs:
+  `docs/specs.md:324-338`, `docs/specs.md:1072-1127`, `docs/specs.md:1716-1731`, `crates/msphf-orchestrator/src/lib.rs:698-845`, `crates/cityg-gui/src/native/tests/mod.rs:1484-1539`.
+- Self-describing HP transport forms and deterministic sender leaf semantics:
+  `docs/specs.md:271-303`, `docs/specs.md:600-606`, `crates/msphf-orchestrator/src/lib.rs:737-845`, `crates/msphf-orchestrator/src/accept/stages.rs:210-244,714-736`, `crates/cityg-gui/src/native/message_auth.rs:139-156,388-437`.
 - Bounded and crash-safe anti-replay release path:
   `docs/specs.md:616-638`, `crates/cityg-gui/src/message_crypto.rs:9-120`, `crates/cityg-gui/src/native/network_messages.rs:107-118,147-149,225`, `crates/cityg-gui/src/native/session_fetch.rs:119-175`, `crates/cityg-gui/src/native/tests/mod.rs:2702-2753`.
 
@@ -173,5 +177,4 @@ Summary:
 1. Add a globally canonical, append-only, authenticated history/finality object, not just a server-local `HistoryCommitment`.
 2. Decide whether FULL/recover-only is only an honest-client rule or must become a server-verifiable protocol property.
 3. Add completeness proofs or equivalent fail-closed semantics for `ResolveJoinsSince` / `ResolveRevokedLeaves`.
-4. Close the remaining wire/profile issues: direct room/gid terms where desired, and, if desired, a real wire discriminator for `header[97]` contexts.
-5. Decide whether to add a bounded-cost authenticated-cache / proof path for FULL verification, instead of relying on whole-tree work in the general case.
+4. Decide whether to add a bounded-cost authenticated-cache / proof path for FULL verification, instead of relying on whole-tree work in the general case.

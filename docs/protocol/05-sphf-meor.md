@@ -615,6 +615,7 @@ The MSPHF_HP tuple is encrypted in the barrier-scoped HP envelope:
 ```cbor
 BARRIER_HP_V1 := [
   "barrier-sealed-v1",      # Type tag
+  hp_context: tstr,         # "author-local" or "barrier-recovery"
   hp_ciphertext: bstr,      # ChaCha20-Poly1305 encrypted MSPHF_HP
   "chacha20-poly1305"       # AEAD algorithm tag
 ]
@@ -646,16 +647,17 @@ Normative bounds:
    ```
 3. **Exact KDF binding**:
    ```rust
-   hp_salt := H_L("hp/barrier/salt", [barrier_version, xk_hash])
+   hp_salt := H_L("hp/barrier/salt", [gid, barrier_version, xk_hash])
    hp_info := "city-g|hp/barrier/v1" || hp_commit
    HP_KEY := HKDF-BLAKE3(ikm = barrier_key, salt32 = hp_salt, info_bytes = hp_info, L = 32)
    ```
 
 **Server validation** (blind):
-- Check envelope shape is `[tstr, bstr, tstr]`
+- Check envelope shape is `[tstr, tstr, bstr, tstr]`
 - Require `envelope[0] == "barrier-sealed-v1"`
-- Require `AEAD_TAG_LEN <= len(envelope[1]) <= MAX_HP_ENVELOPE_BYTES`
-- Require `envelope[2] == "chacha20-poly1305"`
+- Require `envelope[1] ∈ {"author-local", "barrier-recovery"}`
+- Require `AEAD_TAG_LEN <= len(envelope[2]) <= MAX_HP_ENVELOPE_BYTES`
+- Require `envelope[3] == "chacha20-poly1305"`
 - **NEVER** derive the client HP key or AEAD-decrypt
 
 **Client rejection conditions**:

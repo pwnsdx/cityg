@@ -490,21 +490,16 @@ impl AppModel {
                 .child(ciphertext_button),
         );
 
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(toolbar)
-            .child(
-                material_surface(
-                    window,
-                    MaterialStyle::scroll_edge()
-                        .variant(MaterialVariant::Clear)
-                        .emphasis(MaterialEmphasis::Low),
-                )
-                .w_full()
-                .h(px(12.0))
-                .border(px(0.0)),
+        div().flex().flex_col().gap(px(6.0)).child(toolbar).child(
+            material_surface(
+                window,
+                MaterialStyle::scroll_edge()
+                    .variant(MaterialVariant::Clear)
+                    .emphasis(MaterialEmphasis::Low),
             )
+            .w_full()
+            .h(px(12.0))
+            .border(px(0.0)),
+        )
     }
 }

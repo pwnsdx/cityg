@@ -374,6 +374,7 @@ impl AcceptanceContext {
             self,
             header_map,
             Some(envelope_value),
+            crate::BARRIER_HP_CONTEXT_BARRIER_RECOVERY,
             if use_local_hp_transport {
                 &xk_hash
             } else {

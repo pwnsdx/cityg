@@ -953,6 +953,7 @@ fn base_header(kbroad_pk_bytes: &[u8]) -> BTreeMap<u64, Value> {
 
 fn derive_barrier_sealed_hp_material(
     header: &BTreeMap<u64, Value>,
+    gid: &[u8],
     hp_ciphertext: &[u8],
     hp_aead_key: &[u8; 32],
     xk_hash: &[u8; 32],
@@ -961,18 +962,31 @@ fn derive_barrier_sealed_hp_material(
 ) -> Result<([u8; 32], Vec<u8>), Box<dyn std::error::Error>> {
     let rebound = rebind_local_hp_envelope_with_barrier_key(
         header,
-        HpEnvelopeBinding { xk_hash, hp_commit },
+        HpEnvelopeBinding {
+            gid,
+            xk_hash,
+            hp_commit,
+        },
         LocalHpEnvelopeMaterial {
             hp_ciphertext,
             hp_aead_key,
         },
         barrier_key,
-        HpEnvelopeBinding { xk_hash, hp_commit },
+        HpEnvelopeBinding {
+            gid,
+            xk_hash,
+            hp_commit,
+        },
     )?;
     let mut sealed_header = header.clone();
     sealed_header.insert(97, rebound.envelope);
-    let (sealed_ciphertext, sealed_key) =
-        recover_barrier_hp_material_from_header(&sealed_header, xk_hash, hp_commit, barrier_key)?;
+    let (sealed_ciphertext, sealed_key) = recover_barrier_hp_material_from_header(
+        &sealed_header,
+        gid,
+        xk_hash,
+        hp_commit,
+        barrier_key,
+    )?;
     Ok((sealed_key, sealed_ciphertext))
 }
 
@@ -1635,6 +1649,7 @@ fn stale_witness_rejected_after_new_anchor() -> Result<(), Box<dyn std::error::E
     let barrier_key_round1 = [0xA1; 32];
     let (k_hp, c_hp) = derive_barrier_sealed_hp_material(
         &header_with_pop1,
+        anchor1.gid,
         &fixture_round1.joiner.hp_ciphertext,
         &fixture_round1.joiner.hp_aead_key,
         &fixture_round1.joiner.xk_hash,
@@ -1765,6 +1780,7 @@ fn two_anchor_members_converge_on_epoch_key() -> Result<(), Box<dyn std::error::
     let barrier_key_round1 = [0xB2; 32];
     let (k_hp, c_hp) = derive_barrier_sealed_hp_material(
         &header_with_pop1,
+        anchor1.gid,
         &fixture_round1.joiner.hp_ciphertext,
         &fixture_round1.joiner.hp_aead_key,
         &fixture_round1.joiner.xk_hash,

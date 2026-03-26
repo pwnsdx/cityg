@@ -173,6 +173,7 @@ pub(super) fn verify_join_payload_hp_envelope(
     _ctx: &AcceptanceContext,
     header: &BTreeMap<u64, Value>,
     envelope_override: Option<&Value>,
+    expected_context: &str,
     _xk_hash: &[u8; 32],
     _hp_commit: &[u8; 32],
 ) -> Result<(), AcceptanceError> {
@@ -203,35 +204,48 @@ pub(super) fn verify_join_payload_hp_envelope(
     if mode != BARRIER_HP_MODE {
         return Err(AcceptanceError::Freeze(FREEZE_PARENT_EID_FORBIDDEN));
     }
-    if items.len() != 3 {
+    if items.len() != 4 {
         debug!(
-            "verify_join_payload_hp_envelope: barrier envelope len {} != 3",
+            "verify_join_payload_hp_envelope: barrier envelope len {} != 4",
             items.len()
         );
         return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     }
-    match &items[1] {
+    let context = match &items[1] {
+        Value::Text(text) => text.as_str(),
+        _ => {
+            debug!("verify_join_payload_hp_envelope: context not text");
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+    };
+    if context != expected_context {
+        debug!(
+            "verify_join_payload_hp_envelope: unexpected context {context} != {expected_context}"
+        );
+        return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+    }
+    match &items[2] {
         Value::Bytes(bytes)
             if bytes.len() >= crate::AEAD_TAG_LEN
                 && bytes.len() <= super::HP_MAX_CIPHERTEXT_BYTES => {}
         Value::Bytes(_) => {
             debug!(
-                "verify_join_payload_hp_envelope: item[1] len {} outside [{}, {}]",
-                items[1].as_bytes().map(|b| b.len()).unwrap_or_default(),
+                "verify_join_payload_hp_envelope: item[2] len {} outside [{}, {}]",
+                items[2].as_bytes().map(|b| b.len()).unwrap_or_default(),
                 crate::AEAD_TAG_LEN,
                 super::HP_MAX_CIPHERTEXT_BYTES
             );
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
         _ => {
-            debug!("verify_join_payload_hp_envelope: item[1] not bytes");
+            debug!("verify_join_payload_hp_envelope: item[2] not bytes");
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     }
-    let aead = match &items[2] {
+    let aead = match &items[3] {
         Value::Text(text) => text.as_str(),
         _ => {
-            debug!("verify_join_payload_hp_envelope: item[2] not text");
+            debug!("verify_join_payload_hp_envelope: item[3] not text");
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     };
@@ -634,27 +648,40 @@ mod tests {
     use crate::accept::fixtures::{
         anchor_from_result, header_ready_with_pop, sample_parts_params_joiner, sample_pop_keys,
     };
-    use crate::{AEAD_TAG_LEN, HP_AEAD_SUITE};
+    use crate::{
+        AEAD_TAG_LEN, BARRIER_HP_CONTEXT_AUTHOR_LOCAL, BARRIER_HP_CONTEXT_BARRIER_RECOVERY,
+        HP_AEAD_SUITE,
+    };
     use anyhow::Result;
 
     fn base_header() -> BTreeMap<u64, Value> {
         BTreeMap::new()
     }
 
+    fn hp_envelope(context: &str, ciphertext: Vec<u8>, aead: Value) -> Value {
+        Value::Array(vec![
+            Value::Text(BARRIER_HP_MODE.to_string()),
+            Value::Text(context.to_string()),
+            Value::Bytes(ciphertext),
+            aead,
+        ])
+    }
+
     #[test]
     fn verify_join_payload_hp_envelope_accepts_well_formed_envelope() -> Result<()> {
         let mut header = base_header();
-        let envelope = Value::Array(vec![
-            Value::Text(BARRIER_HP_MODE.to_string()),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
+        let envelope = hp_envelope(
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
+            vec![0u8; crate::AEAD_TAG_LEN + 32],
             Value::Text(HP_AEAD_SUITE.to_string()),
-        ]);
+        );
         header.insert(super::HDR_HP_BYTES, envelope);
 
         verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )?;
@@ -664,21 +691,47 @@ mod tests {
     #[test]
     fn verify_join_payload_hp_envelope_rejects_invalid_ciphertext_length() -> Result<()> {
         let mut header = base_header();
-        let envelope = Value::Array(vec![
-            Value::Text(BARRIER_HP_MODE.to_string()),
-            Value::Bytes(Vec::new()),
+        let envelope = hp_envelope(
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
+            Vec::new(),
             Value::Text(HP_AEAD_SUITE.to_string()),
-        ]);
+        );
         header.insert(super::HDR_HP_BYTES, envelope);
 
         let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
         .expect_err("expected failure");
+        expect_freeze(err, FREEZE_HASH_CBOR);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_join_payload_hp_envelope_rejects_wrong_context() -> Result<()> {
+        let mut header = base_header();
+        header.insert(
+            super::HDR_HP_BYTES,
+            hp_envelope(
+                BARRIER_HP_CONTEXT_BARRIER_RECOVERY,
+                vec![0u8; crate::AEAD_TAG_LEN + 32],
+                Value::Text(HP_AEAD_SUITE.to_string()),
+            ),
+        );
+
+        let err = verify_join_payload_hp_envelope(
+            &AcceptanceContext::with_defaults(),
+            &header,
+            None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
+            &[0u8; 32],
+            &[0u8; 32],
+        )
+        .expect_err("barrier-recovery context must not pass join validation");
         expect_freeze(err, FREEZE_HASH_CBOR);
         Ok(())
     }
@@ -699,11 +752,11 @@ mod tests {
         header.insert(super::HDR_POP_PK, Value::Bytes(vec![0xA5; 32]));
         header.insert(
             super::HDR_HP_BYTES,
-            Value::Array(vec![
-                Value::Text(super::BARRIER_HP_MODE.to_string()),
-                Value::Bytes(vec![0x33; AEAD_TAG_LEN]),
+            hp_envelope(
+                BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
+                vec![0x33; AEAD_TAG_LEN],
                 Value::Text(HP_AEAD_SUITE.to_string()),
-            ]),
+            ),
         );
         ensure_merge_join_keys_absent(&header)?;
         Ok(())
@@ -895,6 +948,7 @@ mod tests {
         let mut header = base_header();
         let wrong_mode = Value::Array(vec![
             Value::Text("wrong-mode".to_string()),
+            Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
             Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
@@ -903,22 +957,24 @@ mod tests {
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
         .expect_err("wrong kbroad mode should freeze");
         expect_freeze(err, FREEZE_PARENT_EID_FORBIDDEN);
 
-        let wrong_aead = Value::Array(vec![
-            Value::Text(BARRIER_HP_MODE.to_string()),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
+        let wrong_aead = hp_envelope(
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
+            vec![0u8; crate::AEAD_TAG_LEN + 32],
             Value::Text("aes-gcm".to_string()),
-        ]);
+        );
         header.insert(super::HDR_HP_BYTES, wrong_aead);
         let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
@@ -930,6 +986,7 @@ mod tests {
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
@@ -943,16 +1000,17 @@ mod tests {
         let mut header = base_header();
         header.insert(
             super::HDR_HP_BYTES,
-            Value::Array(vec![
-                Value::Text(BARRIER_HP_MODE.to_string()),
-                Value::Bytes(vec![0xA5; crate::AEAD_TAG_LEN + 32]),
+            hp_envelope(
+                BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
+                vec![0xA5; crate::AEAD_TAG_LEN + 32],
                 Value::Text(HP_AEAD_SUITE.to_string()),
-            ]),
+            ),
         );
         verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )?;
@@ -1109,6 +1167,7 @@ mod tests {
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
@@ -1117,6 +1176,7 @@ mod tests {
 
         let short = Value::Array(vec![
             Value::Text(BARRIER_HP_MODE.to_string()),
+            Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
             Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN]),
         ]);
         header.insert(super::HDR_HP_BYTES, short);
@@ -1124,6 +1184,7 @@ mod tests {
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
@@ -1132,6 +1193,7 @@ mod tests {
 
         let malformed_mode = Value::Array(vec![
             Value::Bytes(vec![0xFF]),
+            Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
             Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
@@ -1140,6 +1202,7 @@ mod tests {
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
@@ -1148,6 +1211,7 @@ mod tests {
 
         let bytes_mode = Value::Array(vec![
             Value::Bytes(BARRIER_HP_MODE.as_bytes().to_vec()),
+            Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
             Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
@@ -1156,6 +1220,7 @@ mod tests {
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
@@ -1164,6 +1229,7 @@ mod tests {
 
         let wrong_mode_type = Value::Array(vec![
             Value::Integer(Integer::from(7u64)),
+            Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
             Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
@@ -1172,6 +1238,7 @@ mod tests {
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
@@ -1180,6 +1247,7 @@ mod tests {
 
         let wrong_ct_type = Value::Array(vec![
             Value::Text(BARRIER_HP_MODE.to_string()),
+            Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
             Value::Text("bad".to_string()),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
@@ -1188,54 +1256,58 @@ mod tests {
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
         .expect_err("ct type mismatch must freeze");
         expect_freeze(err, FREEZE_HASH_CBOR);
 
-        let wrong_aead_utf8 = Value::Array(vec![
-            Value::Text(BARRIER_HP_MODE.to_string()),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
+        let wrong_aead_utf8 = hp_envelope(
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
+            vec![0u8; crate::AEAD_TAG_LEN + 32],
             Value::Bytes(vec![0xFF]),
-        ]);
+        );
         header.insert(super::HDR_HP_BYTES, wrong_aead_utf8);
         let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
         .expect_err("invalid aead utf8 must freeze");
         expect_freeze(err, FREEZE_HASH_CBOR);
 
-        let bytes_aead = Value::Array(vec![
-            Value::Text(BARRIER_HP_MODE.to_string()),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
+        let bytes_aead = hp_envelope(
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
+            vec![0u8; crate::AEAD_TAG_LEN + 32],
             Value::Bytes(HP_AEAD_SUITE.as_bytes().to_vec()),
-        ]);
+        );
         header.insert(super::HDR_HP_BYTES, bytes_aead);
         let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )
         .expect_err("aead encoded as bytes must freeze");
         expect_freeze(err, FREEZE_HASH_CBOR);
 
-        let wrong_aead_type = Value::Array(vec![
-            Value::Text(BARRIER_HP_MODE.to_string()),
-            Value::Bytes(vec![0u8; crate::AEAD_TAG_LEN + 32]),
+        let wrong_aead_type = hp_envelope(
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
+            vec![0u8; crate::AEAD_TAG_LEN + 32],
             Value::Integer(Integer::from(1u64)),
-        ]);
+        );
         header.insert(super::HDR_HP_BYTES, wrong_aead_type);
         let err = verify_join_payload_hp_envelope(
             &AcceptanceContext::with_defaults(),
             &header,
             None,
+            BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
             &[0u8; 32],
             &[0u8; 32],
         )

@@ -377,8 +377,30 @@ Statut audit: **COMPLETED**, revalidé contre l’implémentation courante.
 
 Statut final de cet audit après relecture complète spec + implémentation:
 
-- **Closed**: 1.1, 1.3, 1.4, 1.6, 1.7
-- **Partial**: 1.2
+- **Closed**: 1.1, 1.2, 1.3, 1.4, 1.6, 1.7
 - **Reclassified**: 1.5
 
 Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche header97-discriminator)
+
+Nouvelle vérification après patch spec + orchestrator:
+
+- **Fermé**: `1.2`. `header[97]` n’a plus deux “contexts” seulement procéduraux: le wire porte maintenant explicitement `hp_context ∈ {"author-local", "barrier-recovery"}`.
+- **Fermé dans l’implémentation**: l’orchestrator émet `author-local` pour les enveloppes locales et `barrier-recovery` pour les enveloppes rebondées peer-recoverable; le recovery et l’acceptation JOIN/MERGE rejettent le mauvais contexte.
+- **Couverture de tests ajoutée**: une matrice d’erreurs couvre la nouvelle forme 4 champs, et un test d’acceptation JOIN vérifie qu’un envelope `barrier-recovery` ne passe pas sur un chemin `author-local`.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p msphf-orchestrator barrier_hp_envelope_and_recovery_error_matrix`
+- `cargo test -p msphf-orchestrator verify_join_payload_hp_envelope_rejects_wrong_context`
+- `cargo test -p msphf-orchestrator barrier_hp_recovery_rejects_binding_transplants`
+- `cargo test -p msphf-orchestrator --example rollup_replay --no-run`
+- `cargo test -p cityg-client --lib rebind_local_barrier_hp_envelope_works_for_generated_merge`
+
+Statut audit mis à jour:
+
+- **Closed**: 1.1, 1.2, 1.3, 1.4, 1.6, 1.7
+- **Reclassified**: 1.5

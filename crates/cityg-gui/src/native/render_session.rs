@@ -81,17 +81,17 @@ impl AppModel {
                             .variant(MaterialVariant::Clear)
                             .emphasis(MaterialEmphasis::Low),
                     )
-                        .flex()
-                        .flex_col()
-                        .min_w(px(sidebar_width))
-                        .max_w(px(sidebar_width))
-                        .min_h(px(0.0))
-                        .h_full()
-                        .gap(px(10.0))
-                        .px(px(6.0))
-                        .py(px(6.0))
-                        .child(self.render_workspace_sidebar(session, window, cx))
-                        .child(self.render_leave_controls(window, cx)),
+                    .flex()
+                    .flex_col()
+                    .min_w(px(sidebar_width))
+                    .max_w(px(sidebar_width))
+                    .min_h(px(0.0))
+                    .h_full()
+                    .gap(px(10.0))
+                    .px(px(6.0))
+                    .py(px(6.0))
+                    .child(self.render_workspace_sidebar(session, window, cx))
+                    .child(self.render_leave_controls(window, cx)),
                 )
                 .child(self.render_sidebar_divider(sidebar_width, cx));
         }

@@ -47,9 +47,8 @@ impl MsgReplayState {
     }
 
     pub(crate) fn prune_to_context(&mut self, context_id: [u8; 32], max_tuples: usize) {
-        self.tuples.retain(|_, state| {
-            state.context_id == [0u8; 32] || state.context_id == context_id
-        });
+        self.tuples
+            .retain(|_, state| state.context_id == [0u8; 32] || state.context_id == context_id);
 
         let max_tuples = max_tuples.max(1);
         while self.tuples.len() > max_tuples {
@@ -186,9 +185,14 @@ impl PersistedMsgReplayState {
                 state.last_seen_order = tuple.last_seen_order.max(state.last_seen_order);
             }
         }
-        runtime.next_seen_order = runtime
-            .next_seen_order
-            .max(runtime.tuples.values().map(|state| state.last_seen_order).max().unwrap_or(0));
+        runtime.next_seen_order = runtime.next_seen_order.max(
+            runtime
+                .tuples
+                .values()
+                .map(|state| state.last_seen_order)
+                .max()
+                .unwrap_or(0),
+        );
         Ok(runtime)
     }
 }
@@ -380,9 +384,7 @@ pub(crate) fn derive_msg_replay_tuple_tag(context: &MessageCryptoContext<'_>) ->
     .context("derive fs/msg/replay/tuple")
 }
 
-pub(crate) fn derive_msg_replay_context_id(
-    context: &MessageCryptoContext<'_>,
-) -> Result<[u8; 32]> {
+pub(crate) fn derive_msg_replay_context_id(context: &MessageCryptoContext<'_>) -> Result<[u8; 32]> {
     h_l(
         "fs/msg/replay/context",
         &MsgReplayContextArgs {
@@ -1000,7 +1002,10 @@ mod tests {
         ))?;
         let err = decrypt_message_v2(&oversized, &context)
             .expect_err("oversized ciphertext must fail before decryption");
-        assert!(err.to_string().contains("payload ciphertext length is out of bounds"));
+        assert!(
+            err.to_string()
+                .contains("payload ciphertext length is out of bounds")
+        );
         Ok(())
     }
 }

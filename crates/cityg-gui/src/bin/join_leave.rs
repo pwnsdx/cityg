@@ -147,6 +147,7 @@ struct BarrierUpdateBuildResult {
 }
 
 fn build_barrier_update_bytes(
+    gid: &[u8],
     n_max: u64,
     updater_leaf: u64,
     barrier_version: u64,
@@ -215,7 +216,7 @@ fn build_barrier_update_bytes(
             .ok_or_else(|| anyhow!("missing path secret for node {child_node}"))?;
         let salt = h_l(
             "barrier/tree/path",
-            &BarrierTreePathSaltPreimage(parent_node),
+            &BarrierTreePathSaltPreimage(gid, parent_node),
         )
         .map_err(|err| anyhow!("derive barrier tree/path salt: {err}"))?;
         let parent_secret = hkdf_blake3(&salt, child_secret, BARRIER_TREE_INFO);
@@ -226,7 +227,7 @@ fn build_barrier_update_bytes(
         .ok_or_else(|| anyhow!("missing barrier root path secret"))?;
     let barrier_salt = h_l(
         "barrier/derive/salt",
-        &BarrierDeriveSaltPreimage(barrier_version, &revocation_roots_hash),
+        &BarrierDeriveSaltPreimage(gid, barrier_version, &revocation_roots_hash),
     )
     .map_err(|err| anyhow!("derive barrier/derive/salt: {err}"))?;
     let k_barrier_new = hkdf_blake3(&barrier_salt, root_secret, BARRIER_KEY_INFO);
@@ -1434,6 +1435,7 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let next_barrier_version = ticket.barrier_version.saturating_add(1);
     let barrier_update = build_barrier_update_bytes(
+        &session.gid,
         barrier_n_max,
         ticket.cover_leaf_index,
         next_barrier_version,
@@ -1869,6 +1871,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     blank_leaf_and_path(snapshot_pre.as_mut_slice(), revoked_leaf_node)?;
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let barrier_update = build_barrier_update_bytes(
+        &session.gid,
         barrier_n_max,
         ticket.cover_leaf_index,
         next_barrier_version,
@@ -3619,6 +3622,7 @@ mod tests {
     fn build_barrier_update_bytes_encodes_expected_shape() -> Result<()> {
         let snapshot_pre = vec![Vec::new(); 2 * 1_024 - 1];
         let update = build_barrier_update_bytes(
+            &[0x44; 32],
             1_024,
             0,
             9,
@@ -3658,6 +3662,7 @@ mod tests {
         let n_max = 8u64;
         let snapshot_pre = vec![Vec::new(); (n_max as usize) * 2 - 1];
         let update = build_barrier_update_bytes(
+            &[0x11; 32],
             n_max,
             0,
             2,
@@ -3723,21 +3728,57 @@ mod tests {
     fn build_barrier_update_bytes_rejects_invalid_tree_parameters() {
         let snapshot_pre = vec![Vec::new(); 2 * 8 - 1];
         assert!(
-            build_barrier_update_bytes(0, 0, 1, 0, [0u8; 32], [0u8; 32], snapshot_pre.as_slice())
-                .is_err()
+            build_barrier_update_bytes(
+                &[0u8; 32],
+                0,
+                0,
+                1,
+                0,
+                [0u8; 32],
+                [0u8; 32],
+                snapshot_pre.as_slice(),
+            )
+            .is_err()
         );
         assert!(
-            build_barrier_update_bytes(3, 0, 1, 0, [0u8; 32], [0u8; 32], snapshot_pre.as_slice())
-                .is_err()
+            build_barrier_update_bytes(
+                &[0u8; 32],
+                3,
+                0,
+                1,
+                0,
+                [0u8; 32],
+                [0u8; 32],
+                snapshot_pre.as_slice(),
+            )
+            .is_err()
         );
         assert!(
-            build_barrier_update_bytes(8, 8, 1, 0, [0u8; 32], [0u8; 32], snapshot_pre.as_slice())
-                .is_err()
+            build_barrier_update_bytes(
+                &[0u8; 32],
+                8,
+                8,
+                1,
+                0,
+                [0u8; 32],
+                [0u8; 32],
+                snapshot_pre.as_slice(),
+            )
+            .is_err()
         );
         let wrong_snapshot = vec![Vec::new(); 3];
         assert!(
-            build_barrier_update_bytes(8, 0, 1, 0, [0u8; 32], [0u8; 32], wrong_snapshot.as_slice())
-                .is_err()
+            build_barrier_update_bytes(
+                &[0u8; 32],
+                8,
+                0,
+                1,
+                0,
+                [0u8; 32],
+                [0u8; 32],
+                wrong_snapshot.as_slice(),
+            )
+            .is_err()
         );
     }
 

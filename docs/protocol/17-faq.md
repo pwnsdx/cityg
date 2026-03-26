@@ -176,7 +176,7 @@ Y* = Proj(pk, Δ_B) ⊕ M_B   (if Branch B valid)
 **A**: The current HP transport mechanism is the barrier-scoped envelope:
 
 1. Publisher derives a barrier-scoped HP AEAD key from authenticated barrier state
-2. Envelope structure: `["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]`
+2. Envelope structure: `["barrier-sealed-v1", hp_context, hp_ciphertext, "chacha20-poly1305"]`
 3. Server **never decrypts** (structural validation only)
 4. Clients decrypt hp using the same derived barrier-scoped HP key
 

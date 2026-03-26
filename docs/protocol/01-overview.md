@@ -165,7 +165,7 @@ Result: Y* = Y*_A = Y*_B  (masks ensure equality for valid members)
 
 **Structure:**
 ```rust
-["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
+["barrier-sealed-v1", hp_context, hp_ciphertext, "chacha20-poly1305"]
 ```
 
 **Flow:**
@@ -175,6 +175,7 @@ Result: Y* = Y*_A = Y*_B  (masks ensure equality for valid members)
 4. Devices: derive the same barrier-scoped HP AEAD key, decrypt hp, compute `Y*` and `E_k`
 
 Binding tuple:
+- `gid`
 - `barrier_key`
 - `barrier_version`
 - `xk_hash`

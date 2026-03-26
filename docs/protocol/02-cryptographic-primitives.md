@@ -927,7 +927,7 @@ Both client and server MUST derive the same digests for a given `(xk_hash, hp_co
 
 **Envelope Structure:**
 ```
-BARRIER_HP_V1 := ["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
+BARRIER_HP_V1 := ["barrier-sealed-v1", hp_context, hp_ciphertext, "chacha20-poly1305"]
 ```
 
 **Server Validation:**
@@ -936,7 +936,10 @@ BARRIER_HP_V1 := ["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
 if envelope[0] != "barrier-sealed-v1" {
     return Freeze(921, "parent_eid_forbidden");
 }
-if envelope[2] != "chacha20-poly1305" {
+if envelope[1] != "author-local" && envelope[1] != "barrier-recovery" {
+    return Freeze(934, "hash_cbor");
+}
+if envelope[3] != "chacha20-poly1305" {
     return Freeze(934, "suite_deprecated");
 }
 // Validate sizes: hp_ciphertext only

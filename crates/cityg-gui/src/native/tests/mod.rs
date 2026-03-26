@@ -662,9 +662,15 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
     let source_node = 4u64;
     let target_node = 10u64;
     let path_secret_source = [0x44; 32];
-    let salt_1 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(1))?;
+    let salt_1 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 1),
+    )?;
     let ps_1 = hkdf_blake3(&salt_1, &path_secret_source, BARRIER_TREE_INFO);
-    let salt_0 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(0))?;
+    let salt_0 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
+    )?;
     let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
     let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
     let (ss, ct) = kyber768::encapsulate(&target_pk);
@@ -702,9 +708,18 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
         KemCiphertext::as_bytes(&ct).to_vec(),
         wrapped_ps,
     )];
-    let (_, _, ek_0) = derive_internal_node_key_material(&ps_0, 9, &rrh, 8, 0)?;
-    let (_, _, ek_1) = derive_internal_node_key_material(&ps_1, 9, &rrh, 8, 1)?;
-    let (_, _, ek_4) = derive_internal_node_key_material(&path_secret_source, 9, &rrh, 8, 4)?;
+    let (_, _, ek_0) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_0, 9, &rrh, 8, 0)?;
+    let (_, _, ek_1) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_1, 9, &rrh, 8, 1)?;
+    let (_, _, ek_4) = derive_internal_node_key_material(
+        session.gid.as_slice(),
+        &path_secret_source,
+        9,
+        &rrh,
+        8,
+        4,
+    )?;
     let new_public_keys = vec![
         NewPublicKeyWire(0, ek_0),
         NewPublicKeyWire(1, ek_1),
@@ -752,7 +767,10 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
     )?
     .ok_or_else(|| anyhow!("expected recover result"))?;
 
-    let barrier_salt = h_l("barrier/derive/salt", &BarrierDeriveSaltPreimage(9, &rrh))?;
+    let barrier_salt = h_l(
+        "barrier/derive/salt",
+        &BarrierDeriveSaltPreimage(session.gid.as_slice(), 9, &rrh),
+    )?;
     let expected_k_barrier = hkdf_blake3(&barrier_salt, &ps_0, BARRIER_KEY_INFO);
     assert_eq!(*recovered.k_barrier_new, expected_k_barrier);
     assert_eq!(recovered.derived_node_key_material.len(), 3);
@@ -803,9 +821,15 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
     let source_node = 4u64;
     let target_node = 10u64;
     let path_secret_source = [0x44; 32];
-    let salt_1 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(1))?;
+    let salt_1 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 1),
+    )?;
     let ps_1 = hkdf_blake3(&salt_1, &path_secret_source, BARRIER_TREE_INFO);
-    let salt_0 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(0))?;
+    let salt_0 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
+    )?;
     let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
     let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
     let (ss, ct) = kyber768::encapsulate(&target_pk);
@@ -843,9 +867,18 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
         KemCiphertext::as_bytes(&ct).to_vec(),
         wrapped_ps,
     )];
-    let (_, _, ek_0) = derive_internal_node_key_material(&ps_0, 9, &rrh, 8, 0)?;
-    let (_, _, mut ek_1) = derive_internal_node_key_material(&ps_1, 9, &rrh, 8, 1)?;
-    let (_, _, ek_4) = derive_internal_node_key_material(&path_secret_source, 9, &rrh, 8, 4)?;
+    let (_, _, ek_0) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_0, 9, &rrh, 8, 0)?;
+    let (_, _, mut ek_1) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_1, 9, &rrh, 8, 1)?;
+    let (_, _, ek_4) = derive_internal_node_key_material(
+        session.gid.as_slice(),
+        &path_secret_source,
+        9,
+        &rrh,
+        8,
+        4,
+    )?;
     ek_1[0] ^= 0xA5;
     let new_public_keys = vec![
         NewPublicKeyWire(0, ek_0),
@@ -930,9 +963,15 @@ fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
     let source_node = 4u64;
     let target_node = 10u64;
     let path_secret_source = [0x44; 32];
-    let salt_1 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(1))?;
+    let salt_1 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 1),
+    )?;
     let ps_1 = hkdf_blake3(&salt_1, &path_secret_source, BARRIER_TREE_INFO);
-    let salt_0 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(0))?;
+    let salt_0 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
+    )?;
     let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
     let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
     let (ss, ct) = kyber768::encapsulate(&target_pk);
@@ -969,9 +1008,18 @@ fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
         KemCiphertext::as_bytes(&ct).to_vec(),
         wrapped_ps,
     )];
-    let (_, _, ek_0) = derive_internal_node_key_material(&ps_0, 9, &rrh, 8, 0)?;
-    let (_, _, ek_1) = derive_internal_node_key_material(&ps_1, 9, &rrh, 8, 1)?;
-    let (_, _, ek_4) = derive_internal_node_key_material(&path_secret_source, 9, &rrh, 8, 4)?;
+    let (_, _, ek_0) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_0, 9, &rrh, 8, 0)?;
+    let (_, _, ek_1) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_1, 9, &rrh, 8, 1)?;
+    let (_, _, ek_4) = derive_internal_node_key_material(
+        session.gid.as_slice(),
+        &path_secret_source,
+        9,
+        &rrh,
+        8,
+        4,
+    )?;
     let new_public_keys = vec![
         NewPublicKeyWire(0, ek_0),
         NewPublicKeyWire(1, ek_1),
@@ -1302,9 +1350,15 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
     let source_node = 4u64;
     let target_node = 10u64;
     let path_secret_source = [0x74; 32];
-    let salt_1 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(1))?;
+    let salt_1 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 1),
+    )?;
     let ps_1 = hkdf_blake3(&salt_1, &path_secret_source, BARRIER_TREE_INFO);
-    let salt_0 = h_l("barrier/tree/path", &BarrierTreePathSaltPreimage(0))?;
+    let salt_0 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
+    )?;
     let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
     let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
     let (ss, ct) = kyber768::encapsulate(&target_pk);
@@ -1342,9 +1396,18 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
         KemCiphertext::as_bytes(&ct).to_vec(),
         wrapped_ps,
     )];
-    let (_, _, ek_0) = derive_internal_node_key_material(&ps_0, 9, &rrh, 8, 0)?;
-    let (_, _, ek_1) = derive_internal_node_key_material(&ps_1, 9, &rrh, 8, 1)?;
-    let (_, _, ek_4) = derive_internal_node_key_material(&path_secret_source, 9, &rrh, 8, 4)?;
+    let (_, _, ek_0) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_0, 9, &rrh, 8, 0)?;
+    let (_, _, ek_1) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_1, 9, &rrh, 8, 1)?;
+    let (_, _, ek_4) = derive_internal_node_key_material(
+        session.gid.as_slice(),
+        &path_secret_source,
+        9,
+        &rrh,
+        8,
+        4,
+    )?;
     let new_public_keys = vec![
         NewPublicKeyWire(0, ek_0),
         NewPublicKeyWire(1, ek_1),
@@ -1392,7 +1455,10 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
     )?
     .ok_or_else(|| anyhow!("expected best-effort recover result"))?;
 
-    let barrier_salt = h_l("barrier/derive/salt", &BarrierDeriveSaltPreimage(9, &rrh))?;
+    let barrier_salt = h_l(
+        "barrier/derive/salt",
+        &BarrierDeriveSaltPreimage(session.gid.as_slice(), 9, &rrh),
+    )?;
     let expected_k_barrier = hkdf_blake3(&barrier_salt, &ps_0, BARRIER_KEY_INFO);
     assert_eq!(*recovered.k_barrier_new, expected_k_barrier);
     assert_eq!(recovered.kem_tree_hash_after, [0xBD; 32]);
@@ -1412,6 +1478,64 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
     apply_recovered_barrier_state(&mut session, recovered, false)?;
     assert!(!session.barrier_state.barrier_recovery_pending);
     assert!(!session.barrier_state.current_barrier_full_verified);
+    Ok(())
+}
+
+#[test]
+fn barrier_kdfs_bind_gid_directly() -> Result<(), Box<dyn std::error::Error>> {
+    let gid_a = [0x11; 32];
+    let gid_b = [0x22; 32];
+    let rrh = [0x33; 32];
+    let path_secret_leaf = [0x44; 32];
+
+    let salt_a_1 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(gid_a.as_slice(), 1),
+    )?;
+    let salt_b_1 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(gid_b.as_slice(), 1),
+    )?;
+    assert_ne!(salt_a_1, salt_b_1, "tree path salt must bind gid");
+
+    let ps_a_1 = hkdf_blake3(&salt_a_1, &path_secret_leaf, BARRIER_TREE_INFO);
+    let ps_b_1 = hkdf_blake3(&salt_b_1, &path_secret_leaf, BARRIER_TREE_INFO);
+    assert_ne!(ps_a_1, ps_b_1, "path secret lineage must separate gids");
+
+    let salt_a_0 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(gid_a.as_slice(), 0),
+    )?;
+    let salt_b_0 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(gid_b.as_slice(), 0),
+    )?;
+    let ps_a_0 = hkdf_blake3(&salt_a_0, &ps_a_1, BARRIER_TREE_INFO);
+    let ps_b_0 = hkdf_blake3(&salt_b_0, &ps_b_1, BARRIER_TREE_INFO);
+
+    let barrier_salt_a = h_l(
+        "barrier/derive/salt",
+        &BarrierDeriveSaltPreimage(gid_a.as_slice(), 9, &rrh),
+    )?;
+    let barrier_salt_b = h_l(
+        "barrier/derive/salt",
+        &BarrierDeriveSaltPreimage(gid_b.as_slice(), 9, &rrh),
+    )?;
+    assert_ne!(barrier_salt_a, barrier_salt_b, "barrier salt must bind gid");
+
+    let k_barrier_a = hkdf_blake3(&barrier_salt_a, &ps_a_0, BARRIER_KEY_INFO);
+    let k_barrier_b = hkdf_blake3(&barrier_salt_b, &ps_b_0, BARRIER_KEY_INFO);
+    assert_ne!(k_barrier_a, k_barrier_b, "barrier key must separate gids");
+
+    let (_, pkhash_a, ek_a) =
+        derive_internal_node_key_material(gid_a.as_slice(), &ps_a_1, 9, &rrh, 8, 1)?;
+    let (_, pkhash_b, ek_b) =
+        derive_internal_node_key_material(gid_b.as_slice(), &ps_b_1, 9, &rrh, 8, 1)?;
+    assert_ne!(
+        pkhash_a, pkhash_b,
+        "internal node pkhash must separate gids"
+    );
+    assert_ne!(ek_a, ek_b, "internal node ek must separate gids");
     Ok(())
 }
 
@@ -2746,7 +2870,10 @@ fn gpui_handle_fetch_result_requires_replay_persistence_before_release(cx: &mut 
             "persist failure must surface as fetch persistence failure"
         );
         assert_eq!(
-            model.session.as_ref().and_then(|s| s.last_fetch_timestamp_ms),
+            model
+                .session
+                .as_ref()
+                .and_then(|s| s.last_fetch_timestamp_ms),
             None,
             "failed replay persistence must not advance in-memory fetch watermark"
         );

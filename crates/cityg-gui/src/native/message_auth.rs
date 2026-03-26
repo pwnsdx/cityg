@@ -414,6 +414,44 @@ mod tests {
     }
 
     #[test]
+    fn test_sender_leaf_id_is_gid_scoped_and_stable_for_same_device()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid_a = [0x51u8; 32];
+        let gid_b = [0x52u8; 32];
+        let (pk_alice, _sk_alice) = dilithium3::keypair();
+
+        let leaf_a_first = compute_leaf_id(
+            LeafIdMode::PerGroup,
+            &gid_a,
+            MESSAGE_SENDER_DEVICE_PK_ALG,
+            pk_alice.as_bytes(),
+        )?;
+        let leaf_a_second = compute_leaf_id(
+            LeafIdMode::PerGroup,
+            &gid_a,
+            MESSAGE_SENDER_DEVICE_PK_ALG,
+            pk_alice.as_bytes(),
+        )?;
+        let leaf_b = compute_leaf_id(
+            LeafIdMode::PerGroup,
+            &gid_b,
+            MESSAGE_SENDER_DEVICE_PK_ALG,
+            pk_alice.as_bytes(),
+        )?;
+
+        assert_eq!(
+            leaf_a_first, leaf_a_second,
+            "same gid + sender device key must re-derive the same sender leaf"
+        );
+        assert_ne!(
+            leaf_a_first, leaf_b,
+            "sender leaf derivation must stay gid-scoped"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_message_format_size_constraints() -> Result<(), Box<dyn std::error::Error>> {
         const MLDSA65_PUBKEY_SIZE: usize = ml_dsa_public_key_bytes();
         const MLDSA65_SIG_SIZE: usize = ml_dsa_signature_bytes();

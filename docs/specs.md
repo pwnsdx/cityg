@@ -175,6 +175,7 @@ S3.2 Membership/SRX anchor roots (inputs)
 * header[110], header[111], header[112], header[113] : bstr32 roots (membership and revocation)
 * membership mapping: cover_leaf_index(device_pk) -> uint, committed by membership state
 * membership state also defines the current per-group membership leaf identifier `leaf_id(device_pk) -> bstr32` for each active device. This 32-byte `leaf_id` is distinct from `cover_leaf_index(device_pk)` and is the canonical `sender_leaf_id` used in S8.
+* For this base profile, `leaf_id(device_pk)` MUST be a deterministic per-group function of `(gid, device_pk, device_pk_alg)` under the selected leaf-id mode. Re-deriving `leaf_id` for the same `(gid, device_pk, device_pk_alg)` tuple MUST yield the same 32-byte value.
 
 S3.3 Interfaces REQUIRED by this profile (implementability requirement)
 The membership/SRX/barrier subsystems MUST provide to any authenticated group member:
@@ -271,7 +272,7 @@ S3.4 Header[97] HP envelope transport (normative)
 `header[97]` carries the opaque HP transport envelope used by merge/join-finalize publication and client recovery.
 
 In profile `v0.1.4`, the only in-profile encoding is:
-* `BarrierHpEnvelope := ["barrier-sealed-v1", hp_ciphertext:bstr, "chacha20-poly1305"]`
+* `BarrierHpEnvelope := ["barrier-sealed-v1", hp_context:tstr, hp_ciphertext:bstr, "chacha20-poly1305"]`
 * `BarrierHpPlaintext := hp_k:bstr`
 * `HpArtifact := { hp_a:bstr, hp_b:bstr, m_a:bstr32, m_b:bstr32, params_id:tstr, hp_version:uint }`
 
@@ -289,15 +290,16 @@ Normative constants:
 * `MAX_HP_ENVELOPE_BYTES := MAX_HP_BYTES + AEAD_TAG_LEN = 16400`  /* maximum hp_ciphertext byte length; excludes the surrounding CBOR array/tag overhead */
 
 Constraints (MUST):
-* the array length MUST equal 3,
+* the array length MUST equal 4,
 * element 0 MUST equal the UTF-8 text string `"barrier-sealed-v1"`,
-* element 1 MUST be a non-empty ciphertext byte string whose length is at least `AEAD_TAG_LEN` and at most `MAX_HP_ENVELOPE_BYTES`,
-* element 2 MUST equal the UTF-8 text string `"chacha20-poly1305"`.
+* element 1 MUST equal exactly one of the UTF-8 text strings `"author-local"` or `"barrier-recovery"`,
+* element 2 MUST be a non-empty ciphertext byte string whose length is at least `AEAD_TAG_LEN` and at most `MAX_HP_ENVELOPE_BYTES`,
+* element 3 MUST equal the UTF-8 text string `"chacha20-poly1305"`.
 
 Publication contexts (normative):
-* `header[97]` has the same wire shape in two publication contexts:
-  * `author-local form`: the form produced by the author while constructing a new JOIN/REGULAR anchor, and by a locally built MERGE bundle before it is rebound/sealed for peer recovery;
-  * `barrier-recovery form`: the form carried by a MERGE publication intended for cross-client recovery from serialized wire state.
+* `header[97]` carries an explicit publication-context discriminator in `element 1`:
+  * `author-local form`: `hp_context == "author-local"`; this is the form produced by the author while constructing a new JOIN/REGULAR anchor, and by a locally built MERGE bundle before it is rebound/sealed for peer recovery;
+  * `barrier-recovery form`: `hp_context == "barrier-recovery"`; this is the form carried by a MERGE publication intended for cross-client recovery from serialized wire state.
 * The initial JOIN anchor published by a pending joiner MUST use the `author-local form`; the joiner does not yet know `K_barrier`, and no server-side provisioning of `K_barrier` is permitted.
 * Cross-client recovery from serialized wire state is defined only for the `barrier-recovery form`. A JOIN anchor by itself is not a peer-recoverable HP transport artifact.
 * Any MERGE publication that is intended to remain peer-recoverable after acceptance/persistence MUST carry the `barrier-recovery form`. `author-local form` is ephemeral local construction state only and MUST NOT be treated as satisfying cross-client recovery from accepted wire state.
@@ -321,7 +323,7 @@ Barrier-recovery sealing algorithm (normative):
 * For a MERGE carrying `header[175]`, `barrier_key` MUST be the post-activation barrier key corresponding to the published `barrier_version = header[176]`.
 * For a MERGE that does not carry `header[175]`, `barrier_key` MUST be the currently authenticated barrier key already bound locally to the published `barrier_version = header[176]`.
 * Let:
-  * `hp_salt := H_L("hp/barrier/salt", [barrier_version, xk_hash])`
+  * `hp_salt := H_L("hp/barrier/salt", [gid, barrier_version, xk_hash])`
   * `hp_info := ASCII("city-g|hp/barrier/v1") || hp_commit`
   * `hp_key := HKDF-BLAKE3(ikm=barrier_key, salt32=hp_salt, info_bytes=hp_info, L=32)`
   * `hp_nonce := H_L("hp/nonce", [xk_hash, hp_commit])[0..11]`
@@ -334,8 +336,8 @@ Semantics / security properties (normative):
 * `hp_ciphertext` is an opaque client-to-client transport blob.
 * The server MAY store, replay, and authenticate this blob as part of the anchor header, but MUST treat it as opaque and MUST NOT claim knowledge of the underlying HP keying material.
 * `header[99]` is the authenticated commitment to `BarrierHpPlaintext`. Implementations MUST freshly sample each authored `HpArtifact` and MUST NOT deliberately reuse a prior `BarrierHpPlaintext` for a distinct anchor publication.
-* In `barrier-recovery form`, the confidentiality/binding tuple is `(barrier_key, barrier_version, xk_hash, hp_commit)`.
-* A cut-and-paste of `hp_ciphertext` into another anchor with a different `barrier_version`, `xk_hash`, `hp_commit`, or barrier key MUST fail client recovery.
+* In `barrier-recovery form`, the confidentiality/binding tuple is `(gid, barrier_key, barrier_version, xk_hash, hp_commit)`.
+* A cut-and-paste of `hp_ciphertext` into another anchor with a different `gid`, `barrier_version`, `xk_hash`, `hp_commit`, or barrier key MUST fail client recovery.
 * `BarrierHpPlaintext` length MUST be in `[1, MAX_HP_BYTES]` both before encryption and after decryption.
 * Any implementation that successfully decrypts `header[97]` MUST recompute `H_L("msphf/hp/commit", [BarrierHpPlaintext])` from the recovered plaintext and MUST require exact equality with `header[99]` before parsing or using `HpArtifact`.
 
@@ -602,7 +604,7 @@ Define sender_leaf_id (normative):
 * The same sender_leaf_id MUST be supplied to both the encrypt and decrypt paths for S8.3/S8.4 derivations.
 * If sender_leaf_id is missing, malformed, or not exactly 32 bytes, the implementation MUST fail closed and MUST NOT attempt payload decryption.
 * Implementations MUST verify that `sender_leaf_id` corresponds to the authenticated sender device's current membership `leaf_id` in the authenticated membership view for this payload; mismatch -> drop payload.
-* The membership subsystem MUST ensure `leaf_id(device_pk)` is injective within a `gid` across simultaneously active devices. Reassignment of a historical `leaf_id` to a different active device within the same `gid` is out of profile.
+* The membership subsystem MUST ensure `leaf_id(device_pk)` is injective within a `gid` across distinct authenticated device public keys. Re-using the same `device_pk` in the same `gid` MUST re-derive the same `leaf_id`; assigning that same `leaf_id` to a different `device_pk` at any later time in the same `gid` is out of profile.
 Wire encoding requirement (normative, MUST):
 * PayloadEnvelope MUST be encoded as CBOR_det array of length exactly 3.
 * `PayloadEnvelope[0]` MUST be the CBOR text string exactly equal to `"fs-hybrid-msg-v2"`.
@@ -1074,7 +1076,7 @@ U2) Derive path_secret upward on pn:
   child_node  := pn[k-1]
   path_secret[parent_node] := HKDF-BLAKE3(
     ikm  = path_secret[child_node],
-    salt = H_L("barrier/tree/path", [parent_node]),
+    salt = H_L("barrier/tree/path", [gid, parent_node]),
     info = "city-g|barrier/tree|v1",
     L=32
   )
@@ -1082,7 +1084,7 @@ This derivation MUST be used so that client Recover (S11.13.4) computes identica
 U3) Compute K_barrier_new:
 * Set K_barrier_new := HKDF-BLAKE3(
     ikm  = path_secret[root_node],
-    salt = H_L("barrier/derive/salt", [v_new, RRH]),
+    salt = H_L("barrier/derive/salt", [gid, v_new, RRH]),
     info = "city-g|barrier/key|v1",
     L=32
   )
@@ -1114,16 +1116,16 @@ S11.10 Deterministic internal-node key derivation (normative)
 Applicability:
 * applies ONLY to internal nodes whose ek is distributed via new_public_keys and whose dk may be stored on SelfPath.
 * Does NOT apply to barrier leaf keys generated at join (header[177]) and stored as dk_leaf.
-For node index n with context (barrier_version=v, revocation_roots_hash=RRH, tree_size=N_max):
+For node index n with context (gid, barrier_version=v, revocation_roots_hash=RRH, tree_size=N_max):
 d_n := HKDF-BLAKE3(
   ikm  = path_secret[n],
-  salt = H_L("barrier/keygen/d_salt", [v, RRH, N_max, n]),
+  salt = H_L("barrier/keygen/d_salt", [gid, v, RRH, N_max, n]),
   info = "city-g|barrier/keygen-d|v1",
   L=32
 )
 z_n := HKDF-BLAKE3(
   ikm  = path_secret[n],
-  salt = H_L("barrier/keygen/z_salt", [v, RRH, N_max, n]),
+  salt = H_L("barrier/keygen/z_salt", [gid, v, RRH, N_max, n]),
   info = "city-g|barrier/keygen-z|v1",
   L=32
 )
@@ -1391,14 +1393,14 @@ For k = j+1 .. last:
   child_node  := pn[k-1]
   path_secret[parent_node] := HKDF-BLAKE3(
     ikm  = path_secret[child_node],
-    salt = H_L("barrier/tree/path", [parent_node]),
+    salt = H_L("barrier/tree/path", [gid, parent_node]),
     info = "city-g|barrier/tree|v1",
     L=32
   )
 Compute K_barrier_new:
 K_barrier_new := HKDF-BLAKE3(
   ikm  = path_secret[root_node],
-  salt = H_L("barrier/derive/salt", [v_new, revocation_roots_hash]),
+  salt = H_L("barrier/derive/salt", [gid, v_new, revocation_roots_hash]),
   info = "city-g|barrier/key|v1",
   L=32
 )
@@ -1716,18 +1718,19 @@ The test suite MUST include a scenario where:
 S14.9 KAT: barrier-sealed-v1 transport validation and binding (MUST)
 The test suite MUST include:
 * Positive case:
-  * a valid author-local JOIN envelope with mode `"barrier-sealed-v1"` is accepted by S10.1/S12.1 shape validation without requiring `K_barrier`,
-  * a valid `BarrierHpEnvelope` with mode `"barrier-sealed-v1"`,
+  * a valid author-local JOIN envelope with mode `"barrier-sealed-v1"` and context `"author-local"` is accepted by S10.1/S12.1 shape validation without requiring `K_barrier`,
+  * a valid `BarrierHpEnvelope` with mode `"barrier-sealed-v1"` and context `"barrier-recovery"`,
   * ciphertext length in `[AEAD_TAG_LEN, MAX_HP_ENVELOPE_BYTES]`,
   * AEAD suite `"chacha20-poly1305"`,
-  * decryption using the authenticated `(barrier_key, barrier_version, xk_hash, hp_commit)` tuple succeeds and recovers the original `BarrierHpPlaintext`.
+  * decryption using the authenticated `(gid, barrier_key, barrier_version, xk_hash, hp_commit)` tuple succeeds and recovers the original `BarrierHpPlaintext`.
 * Negative cases:
   * any legacy/unknown transport mode in `header[97]` -> reject as malformed,
+  * any unknown or wrong publication context in `element 1` -> reject as malformed,
   * empty ciphertext, ciphertext shorter than `AEAD_TAG_LEN`, or ciphertext longer than `MAX_HP_ENVELOPE_BYTES` -> reject as malformed,
   * successful AEAD open to an empty `BarrierHpPlaintext` -> reject as malformed,
   * successful AEAD open where recomputed `H_L("msphf/hp/commit", [BarrierHpPlaintext]) != header[99]` -> reject as malformed,
   * wrong AEAD suite or malformed UTF-8/text shape -> reject as malformed,
-  * replay / cut-and-paste of a valid `hp_ciphertext` into a different `(barrier_version, xk_hash, hp_commit)` context -> recovery MUST fail,
+  * replay / cut-and-paste of a valid `hp_ciphertext` into a different `(gid, barrier_version, xk_hash, hp_commit)` context -> recovery MUST fail,
   * recovery attempted under the wrong barrier key -> recovery MUST fail.
 
 END CITY-G UNIFIED SPEC (FS-HYBRID + PRS BARRIER) v0.1.4

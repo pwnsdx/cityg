@@ -136,8 +136,9 @@ impl AppModel {
                     if should_persist {
                         if let Err(err) = persist_session(&updated_session) {
                             warn!("failed to persist session after fetch update: {err:?}");
-                            self.last_error =
-                                Some(format!("Failed to persist session after fetch update: {err}"));
+                            self.last_error = Some(format!(
+                                "Failed to persist session after fetch update: {err}"
+                            ));
                             self.record_activity_with_detail(
                                 ActivityKind::Message,
                                 "Message fetch persistence failed",
@@ -166,7 +167,8 @@ impl AppModel {
                         if !messages.is_empty() {
                             let added = self.append_messages(messages);
                             if added > 0 {
-                                self.info_message = Some(format!("Fetched {added} new message(s)."));
+                                self.info_message =
+                                    Some(format!("Fetched {added} new message(s)."));
                                 self.record_activity(
                                     ActivityKind::Message,
                                     format!("Fetched {added} new message(s)"),

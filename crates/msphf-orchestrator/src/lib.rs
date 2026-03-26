@@ -114,6 +114,8 @@ const MERKLE_DS_ID: &str = "rpo-256/v2";
 const TSWE_ALG_CODE: u8 = 31;
 const TSWE_ALG_LABEL: &str = "tswe/msphf-we/fs-hybrid";
 const BARRIER_HP_MODE: &str = "barrier-sealed-v1";
+pub(crate) const BARRIER_HP_CONTEXT_AUTHOR_LOCAL: &str = "author-local";
+pub(crate) const BARRIER_HP_CONTEXT_BARRIER_RECOVERY: &str = "barrier-recovery";
 const KBROAD_ML_KEM_ALG: &str = "ml-kem-768";
 const HP_AEAD_SUITE: &str = "chacha20-poly1305";
 const BARRIER_HP_INFO_PREFIX: &[u8] = b"city-g|hp/barrier/v1";
@@ -696,6 +698,7 @@ pub(crate) struct BarrierHpEnvelopeWire {
 }
 
 fn derive_barrier_hp_key(
+    gid: &[u8],
     barrier_key: &[u8; 32],
     barrier_version: u64,
     xk_hash: &[u8; 32],
@@ -703,6 +706,8 @@ fn derive_barrier_hp_key(
 ) -> Result<[u8; 32], MsphfError> {
     #[derive(Serialize)]
     struct BarrierSalt<'a> {
+        #[serde(with = "serde_bytes")]
+        gid: &'a [u8],
         barrier_version: u64,
         #[serde(with = "serde_bytes")]
         xk_hash: &'a [u8; 32],
@@ -711,6 +716,7 @@ fn derive_barrier_hp_key(
     let salt = h_l(
         "hp/barrier/salt",
         &BarrierSalt {
+            gid,
             barrier_version,
             xk_hash,
         },
@@ -723,6 +729,7 @@ fn derive_barrier_hp_key(
 
 pub(crate) fn build_barrier_hp_envelope(
     header_map: &BTreeMap<u64, Value>,
+    gid: &[u8],
     hp_k: &[u8],
     xk_hash: &[u8; 32],
     hp_commit: &[u8; 32],
@@ -734,10 +741,11 @@ pub(crate) fn build_barrier_hp_envelope(
         .ok_or_else(|| MsphfError::invalid_input("missing barrier_version"))?
         .try_into()
         .map_err(|_| MsphfError::invalid_input("barrier_version malformed"))?;
-    let hp_key = derive_barrier_hp_key(barrier_key, barrier_version, xk_hash, hp_commit)?;
+    let hp_key = derive_barrier_hp_key(gid, barrier_key, barrier_version, xk_hash, hp_commit)?;
     let hp_ciphertext = encrypt_hp_bytes(hp_k, xk_hash, hp_commit, &hp_key)?;
     let envelope = Value::Array(vec![
         Value::Text(BARRIER_HP_MODE.to_string()),
+        Value::Text(BARRIER_HP_CONTEXT_BARRIER_RECOVERY.to_string()),
         Value::Bytes(hp_ciphertext.clone()),
         Value::Text(HP_AEAD_SUITE.to_string()),
     ]);
@@ -759,6 +767,7 @@ pub(crate) fn build_local_barrier_hp_envelope(
     let hp_ciphertext = encrypt_hp_bytes(hp_k, xk_hash, hp_commit, &hp_key)?;
     let envelope = Value::Array(vec![
         Value::Text(BARRIER_HP_MODE.to_string()),
+        Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
         Value::Bytes(hp_ciphertext.clone()),
         Value::Text(HP_AEAD_SUITE.to_string()),
     ]);
@@ -778,6 +787,7 @@ pub struct ReboundHpEnvelope {
 
 fn recover_barrier_hp_material_from_value(
     hp_value: &Value,
+    gid: &[u8],
     xk_hash: &[u8; 32],
     hp_commit: &[u8; 32],
     barrier_key: &[u8; 32],
@@ -798,10 +808,19 @@ fn recover_barrier_hp_material_from_value(
     if mode != BARRIER_HP_MODE {
         return Err(MsphfError::invalid_input("unsupported barrier hp mode"));
     }
-    if items.len() != 3 {
+    if items.len() != 4 {
         return Err(MsphfError::invalid_input("barrier hp shape mismatch"));
     }
-    let hp_ciphertext = match &items[1] {
+    let context = match &items[1] {
+        Value::Text(text) => text.as_str(),
+        _ => return Err(MsphfError::invalid_input("barrier hp context malformed")),
+    };
+    if context != BARRIER_HP_CONTEXT_BARRIER_RECOVERY {
+        return Err(MsphfError::invalid_input(
+            "barrier hp envelope is not barrier-recovery form",
+        ));
+    }
+    let hp_ciphertext = match &items[2] {
         Value::Bytes(bytes) => bytes.clone(),
         _ => return Err(MsphfError::invalid_input("barrier hp ciphertext malformed")),
     };
@@ -810,19 +829,20 @@ fn recover_barrier_hp_material_from_value(
             "barrier hp ciphertext length mismatch",
         ));
     }
-    let aead = match &items[2] {
+    let aead = match &items[3] {
         Value::Text(text) => text.as_str(),
         _ => return Err(MsphfError::invalid_input("barrier hp aead malformed")),
     };
     if aead != HP_AEAD_SUITE {
         return Err(MsphfError::invalid_input("unsupported barrier hp aead"));
     }
-    let hp_key = derive_barrier_hp_key(barrier_key, barrier_version, xk_hash, hp_commit)?;
+    let hp_key = derive_barrier_hp_key(gid, barrier_key, barrier_version, xk_hash, hp_commit)?;
     Ok((hp_ciphertext, hp_key))
 }
 
 pub fn recover_barrier_hp_material_from_header(
     header_map: &BTreeMap<u64, Value>,
+    gid: &[u8],
     xk_hash: &[u8; 32],
     hp_commit: &[u8; 32],
     barrier_key: &[u8; 32],
@@ -843,6 +863,7 @@ pub fn recover_barrier_hp_material_from_header(
         barrier_version.ok_or_else(|| MsphfError::invalid_input("barrier_version missing"))?;
     recover_barrier_hp_material_from_value(
         hp_value,
+        gid,
         xk_hash,
         hp_commit,
         barrier_key,
@@ -852,6 +873,7 @@ pub fn recover_barrier_hp_material_from_header(
 
 #[derive(Clone, Copy)]
 pub struct HpEnvelopeBinding<'a> {
+    pub gid: &'a [u8],
     pub xk_hash: &'a [u8; 32],
     pub hp_commit: &'a [u8; 32],
 }
@@ -877,6 +899,7 @@ pub fn rebind_local_hp_envelope_with_barrier_key(
     )?);
     let rebuilt = build_barrier_hp_envelope(
         target_header_map,
+        target_binding.gid,
         hp_plain.as_slice(),
         target_binding.xk_hash,
         target_binding.hp_commit,
@@ -3761,6 +3784,7 @@ mod tests {
     #[test]
     fn barrier_hp_build_and_recover_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let barrier_key = [0xA5; 32];
+        let gid = b"roundtrip-gid";
         let mut header = BTreeMap::new();
         header.insert(HDR_BARRIER_VERSION, Value::Integer(7u64.into()));
 
@@ -3768,12 +3792,23 @@ mod tests {
         let hp_commit = [0x52; 32];
         let hp_plaintext = b"hp/plaintext/regression";
 
-        let envelope =
-            build_barrier_hp_envelope(&header, hp_plaintext, &xk_hash, &hp_commit, &barrier_key)?;
+        let envelope = build_barrier_hp_envelope(
+            &header,
+            gid,
+            hp_plaintext,
+            &xk_hash,
+            &hp_commit,
+            &barrier_key,
+        )?;
         header.insert(HDR_HP_BYTES, envelope.envelope.clone());
 
-        let (hp_ciphertext, hp_key) =
-            recover_barrier_hp_material_from_header(&header, &xk_hash, &hp_commit, &barrier_key)?;
+        let (hp_ciphertext, hp_key) = recover_barrier_hp_material_from_header(
+            &header,
+            gid,
+            &xk_hash,
+            &hp_commit,
+            &barrier_key,
+        )?;
         assert_eq!(hp_ciphertext, envelope.c_hp);
         assert_eq!(hp_key, envelope.k_hp);
 
@@ -3892,17 +3927,24 @@ mod tests {
     #[test]
     fn barrier_hp_envelope_and_recovery_error_matrix() -> Result<(), Box<dyn std::error::Error>> {
         let barrier_key = [0x6C; 32];
+        let gid = b"error-matrix-gid";
         let xk_hash = [0x31; 32];
         let hp_commit = [0x42; 32];
         let hp_plaintext = b"barrier-hp-regression";
 
         let mut base = BTreeMap::new();
         base.insert(HDR_BARRIER_VERSION, Value::Integer(9u64.into()));
-        let built =
-            build_barrier_hp_envelope(&base, hp_plaintext, &xk_hash, &hp_commit, &barrier_key)?;
+        let built = build_barrier_hp_envelope(
+            &base,
+            gid,
+            hp_plaintext,
+            &xk_hash,
+            &hp_commit,
+            &barrier_key,
+        )?;
         base.insert(HDR_HP_BYTES, built.envelope.clone());
         assert!(
-            recover_barrier_hp_material_from_header(&base, &xk_hash, &hp_commit, &barrier_key)
+            recover_barrier_hp_material_from_header(&base, gid, &xk_hash, &hp_commit, &barrier_key)
                 .is_ok()
         );
 
@@ -3914,16 +3956,28 @@ mod tests {
         let run_recover_case = |items: Vec<Value>| {
             let mut header = base.clone();
             header.insert(HDR_HP_BYTES, Value::Array(items));
-            recover_barrier_hp_material_from_header(&header, &xk_hash, &hp_commit, &barrier_key)
-                .is_err()
+            recover_barrier_hp_material_from_header(
+                &header,
+                gid,
+                &xk_hash,
+                &hp_commit,
+                &barrier_key,
+            )
+            .is_err()
         };
 
         assert!(run_recover_case(vec![]));
         assert!({
             let mut header = base.clone();
             header.insert(HDR_HP_BYTES, Value::Map(Vec::new()));
-            recover_barrier_hp_material_from_header(&header, &xk_hash, &hp_commit, &barrier_key)
-                .is_err()
+            recover_barrier_hp_material_from_header(
+                &header,
+                gid,
+                &xk_hash,
+                &hp_commit,
+                &barrier_key,
+            )
+            .is_err()
         });
 
         let mut mode_utf8 = base_items.clone();
@@ -3939,19 +3993,20 @@ mod tests {
         assert!(run_recover_case(bytes_mode));
 
         let mut bad_ct_type = base_items.clone();
-        bad_ct_type[1] = Value::Integer(Integer::from(1u64));
+        bad_ct_type[2] = Value::Integer(Integer::from(1u64));
         assert!(run_recover_case(bad_ct_type));
 
         let mut bad_ct_len = base_items.clone();
-        bad_ct_len[1] = Value::Bytes(vec![0u8; MAX_HP_BYTES + AEAD_TAG_LEN + 1]);
+        bad_ct_len[2] = Value::Bytes(vec![0u8; MAX_HP_BYTES + AEAD_TAG_LEN + 1]);
         assert!(run_recover_case(bad_ct_len));
 
         let mut truncated_ct = base_items.clone();
-        truncated_ct[1] = Value::Bytes(vec![0u8; 8]);
+        truncated_ct[2] = Value::Bytes(vec![0u8; 8]);
         let mut truncated_header = base.clone();
         truncated_header.insert(HDR_HP_BYTES, Value::Array(truncated_ct));
         let (truncated_ciphertext, truncated_key) = recover_barrier_hp_material_from_header(
             &truncated_header,
+            gid,
             &xk_hash,
             &hp_commit,
             &barrier_key,
@@ -3961,19 +4016,19 @@ mod tests {
         );
 
         let mut bad_aead_utf8 = base_items.clone();
-        bad_aead_utf8[2] = Value::Bytes(vec![0xFF]);
+        bad_aead_utf8[3] = Value::Bytes(vec![0xFF]);
         assert!(run_recover_case(bad_aead_utf8));
 
         let mut bad_aead = base_items.clone();
-        bad_aead[2] = Value::Text("aes-gcm".to_string());
+        bad_aead[3] = Value::Text("aes-gcm".to_string());
         assert!(run_recover_case(bad_aead));
 
         let mut bytes_aead = base_items.clone();
-        bytes_aead[2] = Value::Bytes(HP_AEAD_SUITE.as_bytes().to_vec());
+        bytes_aead[3] = Value::Bytes(HP_AEAD_SUITE.as_bytes().to_vec());
         assert!(run_recover_case(bytes_aead));
 
         let (wrong_key_ciphertext, wrong_key_material) =
-            recover_barrier_hp_material_from_header(&base, &xk_hash, &hp_commit, &[0u8; 32])?;
+            recover_barrier_hp_material_from_header(&base, gid, &xk_hash, &hp_commit, &[0u8; 32])?;
         assert!(
             decrypt_hp_bytes(
                 &wrong_key_ciphertext,
@@ -3989,44 +4044,61 @@ mod tests {
     #[test]
     fn barrier_hp_recovery_rejects_binding_transplants() -> Result<(), Box<dyn std::error::Error>> {
         let barrier_key = [0x7Au8; 32];
+        let gid = b"binding-gid";
         let xk_hash = [0x1Bu8; 32];
         let hp_commit = [0x2Cu8; 32];
         let hp_plaintext = b"barrier-hp-binding";
 
         let mut header = BTreeMap::new();
         header.insert(HDR_BARRIER_VERSION, Value::Integer(12u64.into()));
-        let envelope =
-            build_barrier_hp_envelope(&header, hp_plaintext, &xk_hash, &hp_commit, &barrier_key)?;
+        let envelope = build_barrier_hp_envelope(
+            &header,
+            gid,
+            hp_plaintext,
+            &xk_hash,
+            &hp_commit,
+            &barrier_key,
+        )?;
         header.insert(HDR_HP_BYTES, envelope.envelope);
 
-        let decrypt_fails = |header: &BTreeMap<u64, Value>,
+        let decrypt_fails = |gid: &[u8],
+                             header: &BTreeMap<u64, Value>,
                              xk_hash: &[u8; 32],
                              hp_commit: &[u8; 32]|
          -> Result<bool, MsphfError> {
-            let (hp_ciphertext, hp_key) =
-                recover_barrier_hp_material_from_header(header, xk_hash, hp_commit, &barrier_key)?;
+            let (hp_ciphertext, hp_key) = recover_barrier_hp_material_from_header(
+                header,
+                gid,
+                xk_hash,
+                hp_commit,
+                &barrier_key,
+            )?;
             Ok(decrypt_hp_bytes(&hp_ciphertext, xk_hash, hp_commit, &hp_key).is_err())
         };
 
         let mut wrong_xk_hash = xk_hash;
         wrong_xk_hash[0] ^= 0x01;
         assert!(
-            decrypt_fails(&header, &wrong_xk_hash, &hp_commit)?,
+            decrypt_fails(gid, &header, &wrong_xk_hash, &hp_commit)?,
             "xk_hash transplant must fail"
         );
 
         let mut wrong_commit = hp_commit;
         wrong_commit[0] ^= 0x01;
         assert!(
-            decrypt_fails(&header, &xk_hash, &wrong_commit)?,
+            decrypt_fails(gid, &header, &xk_hash, &wrong_commit)?,
             "hp_commit transplant must fail"
         );
 
         let mut wrong_version_header = header.clone();
         wrong_version_header.insert(HDR_BARRIER_VERSION, Value::Integer(13u64.into()));
         assert!(
-            decrypt_fails(&wrong_version_header, &xk_hash, &hp_commit)?,
+            decrypt_fails(gid, &wrong_version_header, &xk_hash, &hp_commit)?,
             "barrier_version transplant must fail"
+        );
+        assert!(
+            decrypt_fails(b"other-gid", &header, &xk_hash, &hp_commit)?,
+            "gid transplant must fail"
         );
 
         Ok(())

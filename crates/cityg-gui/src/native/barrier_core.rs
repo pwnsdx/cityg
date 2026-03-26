@@ -30,7 +30,13 @@ pub(super) struct BarrierWrapAadPreimage<'a>(
 struct FsPcsSaltPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8; 32], u64, u64);
 
 #[derive(Serialize)]
-struct BarrierKeygenSaltPreimage<'a>(u64, #[serde(with = "serde_bytes")] &'a [u8; 32], u64, u64);
+struct BarrierKeygenSaltPreimage<'a>(
+    #[serde(with = "serde_bytes")] &'a [u8],
+    u64,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    u64,
+    u64,
+);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct BarrierUpdateWire(
@@ -681,6 +687,7 @@ pub(super) fn derive_k_fs_after_pcs(
 }
 
 pub(super) fn derive_internal_node_key_material(
+    gid: &[u8],
     path_secret: &[u8; 32],
     barrier_version: u64,
     revocation_roots_hash: &[u8; 32],
@@ -689,12 +696,12 @@ pub(super) fn derive_internal_node_key_material(
 ) -> Result<(Vec<u8>, [u8; 32], Vec<u8>)> {
     let d_salt = h_l(
         "barrier/keygen/d_salt",
-        &BarrierKeygenSaltPreimage(barrier_version, revocation_roots_hash, n_max, node),
+        &BarrierKeygenSaltPreimage(gid, barrier_version, revocation_roots_hash, n_max, node),
     )
     .map_err(|err| anyhow!("derive barrier keygen d_salt: {err}"))?;
     let z_salt = h_l(
         "barrier/keygen/z_salt",
-        &BarrierKeygenSaltPreimage(barrier_version, revocation_roots_hash, n_max, node),
+        &BarrierKeygenSaltPreimage(gid, barrier_version, revocation_roots_hash, n_max, node),
     )
     .map_err(|err| anyhow!("derive barrier keygen z_salt: {err}"))?;
     let d = hkdf_blake3(&d_salt, path_secret, BARRIER_KEYGEN_D_INFO);

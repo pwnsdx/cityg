@@ -1,7 +1,7 @@
 use super::app_actions::{ShowSessionOverviewAction, ToggleSidebarAction};
 use super::*;
-use gpui::StatefulInteractiveElement;
 use gpui::MaterialVariant;
+use gpui::StatefulInteractiveElement;
 
 const SESSION_HORIZONTAL_PADDING: f32 = 24.0;
 pub(super) const SESSION_SPLIT_GAP: f32 = 10.0;
@@ -272,17 +272,17 @@ impl AppModel {
                 .variant(MaterialVariant::Clear)
                 .emphasis(MaterialEmphasis::Low),
         )
-            .flex()
-            .flex_col()
-            .min_w(px(inspector_width))
-            .max_w(px(inspector_width))
-            .min_h(px(0.0))
-            .h_full()
-            .gap(px(10.0))
-            .px(px(6.0))
-            .py(px(6.0))
-            .child(header)
-            .child(details_scroll)
+        .flex()
+        .flex_col()
+        .min_w(px(inspector_width))
+        .max_w(px(inspector_width))
+        .min_h(px(0.0))
+        .h_full()
+        .gap(px(10.0))
+        .px(px(6.0))
+        .py(px(6.0))
+        .child(header)
+        .child(details_scroll)
     }
 
     pub(super) fn render_sidebar_divider(

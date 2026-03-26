@@ -349,7 +349,7 @@ pub(super) fn try_recover_barrier_inner(
             .ok_or_else(|| anyhow!("barrier recover missing child path secret"))?;
         let salt = h_l(
             "barrier/tree/path",
-            &BarrierTreePathSaltPreimage(parent_node),
+            &BarrierTreePathSaltPreimage(session.gid.as_slice(), parent_node),
         )
         .map_err(|err| anyhow!("derive barrier tree salt: {err}"))?;
         let parent_secret = hkdf_blake3(&salt, child_secret, BARRIER_TREE_INFO);
@@ -361,7 +361,11 @@ pub(super) fn try_recover_barrier_inner(
         .ok_or_else(|| anyhow!("barrier recover failed to derive root path secret"))?;
     let barrier_salt = h_l(
         "barrier/derive/salt",
-        &BarrierDeriveSaltPreimage(parsed.barrier_version, &parsed.revocation_roots_hash),
+        &BarrierDeriveSaltPreimage(
+            session.gid.as_slice(),
+            parsed.barrier_version,
+            &parsed.revocation_roots_hash,
+        ),
     )
     .map_err(|err| anyhow!("derive barrier key salt: {err}"))?;
     let k_barrier_new = hkdf_blake3(&barrier_salt, root_secret, BARRIER_KEY_INFO);
@@ -376,6 +380,7 @@ pub(super) fn try_recover_barrier_inner(
             .get(&node)
             .ok_or_else(|| anyhow!("barrier recover missing path secret for node {node}"))?;
         let (dk_bytes, pkhash, ek_bytes) = derive_internal_node_key_material(
+            session.gid.as_slice(),
             path_secret,
             parsed.barrier_version,
             &parsed.revocation_roots_hash,
@@ -699,7 +704,7 @@ pub(super) fn build_barrier_update_bytes(
             .ok_or_else(|| anyhow!("barrier path secret derivation missing child"))?;
         let salt = h_l(
             "barrier/tree/path",
-            &BarrierTreePathSaltPreimage(parent_node),
+            &BarrierTreePathSaltPreimage(gid.as_slice(), parent_node),
         )
         .map_err(|err| anyhow!("derive barrier tree/path salt: {err}"))?;
         let parent_secret = hkdf_blake3(&salt, child_secret, BARRIER_TREE_INFO);
@@ -711,7 +716,7 @@ pub(super) fn build_barrier_update_bytes(
         .ok_or_else(|| anyhow!("barrier path secret derivation missing root"))?;
     let barrier_salt = h_l(
         "barrier/derive/salt",
-        &BarrierDeriveSaltPreimage(barrier_version, &revocation_roots_hash),
+        &BarrierDeriveSaltPreimage(gid.as_slice(), barrier_version, &revocation_roots_hash),
     )
     .map_err(|err| anyhow!("derive barrier/derive/salt: {err}"))?;
     let k_barrier_new = hkdf_blake3(&barrier_salt, root_secret, BARRIER_KEY_INFO);
@@ -725,6 +730,7 @@ pub(super) fn build_barrier_update_bytes(
             .get(&node)
             .ok_or_else(|| anyhow!("missing path secret for node {node}"))?;
         let (dk_bytes, pkhash, ek_bytes) = derive_internal_node_key_material(
+            gid.as_slice(),
             path_secret,
             barrier_version,
             &revocation_roots_hash,

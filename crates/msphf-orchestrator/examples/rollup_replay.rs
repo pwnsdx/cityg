@@ -219,20 +219,25 @@ fn ensure_kbroad_shape(bytes: &[u8]) -> anyhow::Result<()> {
     let Value::Array(items) = value else {
         anyhow::bail!("envelope must be array");
     };
-    if items.len() != 3 {
-        anyhow::bail!("envelope must have 3 elements");
+    if items.len() != 4 {
+        anyhow::bail!("envelope must have 4 elements");
     }
     if items[0] != Value::Text("barrier-sealed-v1".to_string()) {
         anyhow::bail!("unexpected barrier hp mode");
     }
-    if let Value::Bytes(ciphertext) = &items[1] {
+    match &items[1] {
+        Value::Text(context) if context == "author-local" || context == "barrier-recovery" => {}
+        Value::Text(_) => anyhow::bail!("unexpected barrier hp context"),
+        _ => anyhow::bail!("barrier hp context must be text"),
+    }
+    if let Value::Bytes(ciphertext) = &items[2] {
         if ciphertext.len() < 16 {
             anyhow::bail!("barrier hp ciphertext must be at least 16 bytes");
         }
     } else {
         anyhow::bail!("barrier hp ciphertext must be bytes");
     }
-    if items[2] != Value::Text("chacha20-poly1305".to_string()) {
+    if items[3] != Value::Text("chacha20-poly1305".to_string()) {
         anyhow::bail!("unexpected AEAD suite");
     }
     Ok(())
@@ -355,6 +360,7 @@ fn sample_rollup_header() -> anyhow::Result<BTreeMap<u64, Value>> {
     // One barrier-sealed envelope corresponding to the join epoch.
     let kbroad_envelope = Value::Array(vec![
         Value::Text("barrier-sealed-v1".to_string()),
+        Value::Text("barrier-recovery".to_string()),
         Value::Bytes(vec![0xCC; 80]),
         Value::Text("chacha20-poly1305".to_string()),
     ]);

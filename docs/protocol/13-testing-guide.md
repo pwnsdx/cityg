@@ -266,6 +266,7 @@ fn test_barrier_hp_envelope_structure() {
     // Change AEAD suite
     header[&97] = Value::Array(vec![
         Value::Text("barrier-sealed-v1".into()),
+        Value::Text("barrier-recovery".into()),
         /* hp_ciphertext */,
         Value::Text("aes-gcm".into()), // Wrong AEAD
     ]);

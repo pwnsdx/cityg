@@ -233,3 +233,47 @@ Statut audit mis à jour:
 - **Partial**: 2.5, 2.6
 - **Open**: 2.4
 - **Reclassified**: 2.3
+
+--
+
+## Commentaires Codex (2026-03-26, tranche gid barrier/hp)
+
+Nouvelle vérification après patch spec + implémentation:
+
+- **Fermé**: `2.4`. Les dérivations `hp/barrier/salt`, `barrier/tree/path`, `barrier/derive/salt`, `barrier/keygen/d_salt` et `barrier/keygen/z_salt` bindent maintenant `gid` directement dans la spec et dans les helpers Rust.
+- **Fermé dans l’implémentation**: `msphf-orchestrator` dérive désormais la clé HP barrier avec `gid`, `cityg-client` transmet `gid` sur les chemins de rebind/recover, et la GUI lie explicitement `gid` aux dérivations de `path_secret`, `K_barrier_new` et `ek_n`.
+- **Couverture de tests ajoutée**: un test GUI dédié vérifie que, à secret/path/version/roots identiques, changer seulement `gid` fait diverger `path_secret`, `K_barrier_new` et `ek_n`; un test orchestrator vérifie qu’un transplant HP vers un autre `gid` échoue au recovery.
+- **Blocage non lié**: la cible de tests `cityg-gui --bin join_leave` reste cassée sur le bug préexistant `Session.pop_secret_key` absent; ce n’est pas causé par cette tranche.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p msphf-orchestrator barrier_hp_recovery_rejects_binding_transplants`
+- `cargo test -p msphf-orchestrator --test end_to_end --no-run`
+- `cargo test -p cityg-client --lib rebind_local_barrier_hp_envelope_works_for_generated_merge`
+- `cargo test -p cityg-gui --bin cityg-gui barrier_kdfs_bind_gid_directly --features native-app`
+
+Statut audit mis à jour:
+
+- **Closed**: 2.1, 2.2, 2.4
+- **Partial**: 2.5, 2.6
+- **Reclassified**: 2.3
+
+--
+
+## Commentaires Codex (2026-03-26, tranche sender_leaf semantics)
+
+Nouvelle vérification après patch spec + GUI:
+
+- **Fermé**: `2.6`. La spec ne se contente plus d’une injectivité “entre devices actifs”; elle dit maintenant que `leaf_id(device_pk)` est une fonction déterministe de `(gid, device_pk, device_pk_alg)`, que le même `device_pk` dans le même `gid` doit re-dériver le même `leaf_id`, et que ce `leaf_id` ne peut jamais être réassigné à un autre `device_pk`.
+- **Fermé dans l’implémentation**: la réception continue de re-dériver `sender_leaf_id` depuis la clé publique authentifiée, et un test explicite couvre maintenant la stabilité same-device / séparation inter-`gid`.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p cityg-gui --bin cityg-gui test_sender_leaf_binding_rejects_mismatched_public_key --features native-app`
+- `cargo test -p cityg-gui --bin cityg-gui test_sender_leaf_id_is_gid_scoped_and_stable_for_same_device --features native-app`
+
+Statut audit mis à jour:
+
+- **Closed**: 2.1, 2.2, 2.4, 2.6
+- **Partial**: 2.5
+- **Reclassified**: 2.3

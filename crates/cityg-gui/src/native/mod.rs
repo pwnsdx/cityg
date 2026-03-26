@@ -28,8 +28,9 @@ use anyhow::{Context as AnyhowContext, Result, anyhow};
 use ciborium::value::{Integer, Value};
 use cityg_api_client::{
     BarrierJoinRecord, BarrierPublicTree, CitygApiClient, Error as ApiClientError,
-    HistoryCommitment, MergeAcceptanceStatus, MergeTicket, RoomAdminOperation, build_room_admin_leaf_pair_proof,
-    build_room_admin_listing_proof, build_room_admin_proof, build_room_admin_target_proof,
+    HistoryCommitment, MergeAcceptanceStatus, MergeTicket, RoomAdminOperation,
+    build_room_admin_leaf_pair_proof, build_room_admin_listing_proof, build_room_admin_proof,
+    build_room_admin_target_proof,
 };
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};

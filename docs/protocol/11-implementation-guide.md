@@ -1030,7 +1030,7 @@ WID [32 bytes]
    └─► zk_vrf_proof = ZK-VRF.Prove(hp, vrf_ctx)
 
 6. Assemble header
-   └─► header[97] = ["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
+   └─► header[97] = ["barrier-sealed-v1", hp_context, hp_ciphertext, "chacha20-poly1305"]
    └─► header[146] = capss_proof
    └─► header[95] = zk_vrf_proof
 
@@ -1061,7 +1061,8 @@ WID [32 bytes]
    └─► Verify: H_L("msphf/kgen/rho", [rho_raw]) == header[93]
 
 6. Barrier-sealed HP envelope structure (NO DECRYPT)
-   └─► Validate: header[97] = ["barrier-sealed-v1", hp_ciphertext, "chacha20-poly1305"]
+   └─► Validate: header[97] = ["barrier-sealed-v1", hp_context, hp_ciphertext, "chacha20-poly1305"]
+   └─► Require: hp_context ∈ {"author-local", "barrier-recovery"}
    └─► Require: 16 <= len(hp_ciphertext) <= 16400
    └─► Reject any legacy/unknown mode before JOIN/MERGE-specific acceptance continues
 

@@ -390,9 +390,12 @@ $ rg "decrypt_hp|unwrap_kbroad_envelope" crates/msphf-orchestrator/src/
 fn validate_barrier_hp_envelope_bytes(
     header: &BTreeMap<u64, Value>
 ) -> Result<(), AcceptanceError> {
-    let items = /* extract 3-element array */;
+    let items = /* extract 4-element array */;
     if items[0] != "barrier-sealed-v1" { return Err(FREEZE_PARENT_EID_FORBIDDEN); }
-    if items[2] != "chacha20-poly1305" { return Err(FREEZE_HASH_CBOR); }
+    if items[1] != "author-local" && items[1] != "barrier-recovery" {
+        return Err(FREEZE_HASH_CBOR);
+    }
+    if items[3] != "chacha20-poly1305" { return Err(FREEZE_HASH_CBOR); }
     // ✅ NO HP-key derivation, NO decryption
     Ok(())
 }

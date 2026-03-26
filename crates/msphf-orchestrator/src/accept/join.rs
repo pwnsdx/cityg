@@ -292,7 +292,14 @@ impl AcceptanceContext {
 
         ensure_join_pop(header_map, &anchor_instance, self.leaf_id_mode)?;
         let pop_sig = extract_pop_signature(header_map)?;
-        verify_join_payload_hp_envelope(self, header_map, None, &xk_hash, &hp_commit)?;
+        verify_join_payload_hp_envelope(
+            self,
+            header_map,
+            None,
+            crate::BARRIER_HP_CONTEXT_AUTHOR_LOCAL,
+            &xk_hash,
+            &hp_commit,
+        )?;
         let proofs = ensure_proofs(
             header_map,
             self.allowed_proof_modes.as_ref(),

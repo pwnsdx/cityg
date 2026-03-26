@@ -698,6 +698,7 @@ impl ClientEpochBundle {
 
         let (hp_ciphertext, hp_key) = recover_barrier_hp_material_from_header(
             &self.header_map,
+            self.gid(),
             &self.hp_binding.xk_hash,
             &self.hp_binding.hp_commit,
             barrier_key,
@@ -717,6 +718,7 @@ impl ClientEpochBundle {
         let rebound = rebuild_local_hp_envelope_with_barrier_key(
             &self.header_map,
             HpEnvelopeBinding {
+                gid: self.gid(),
                 xk_hash: &self.hp_binding.xk_hash,
                 hp_commit: &self.hp_binding.hp_commit,
             },
@@ -726,6 +728,7 @@ impl ClientEpochBundle {
             },
             barrier_key,
             HpEnvelopeBinding {
+                gid: self.gid(),
                 xk_hash: &self.hp_binding.xk_hash,
                 hp_commit: &self.hp_binding.hp_commit,
             },
@@ -752,6 +755,7 @@ impl ClientEpochBundle {
         let rebound = rebuild_local_hp_envelope_with_barrier_key(
             &self.header_map,
             HpEnvelopeBinding {
+                gid: self.gid(),
                 xk_hash: &self.hp_binding.xk_hash,
                 hp_commit: &self.hp_binding.hp_commit,
             },
@@ -761,6 +765,7 @@ impl ClientEpochBundle {
             },
             barrier_key,
             HpEnvelopeBinding {
+                gid: self.gid(),
                 xk_hash: &self.hp_binding.xk_hash,
                 hp_commit: &self.hp_binding.hp_commit,
             },

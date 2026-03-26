@@ -115,7 +115,10 @@ pub(super) async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
         k_barrier: &k_barrier,
     })
     .context("derive fs/msg/replay/context")?;
-    msg_replay_state.prune_to_context(replay_context_id, usize::try_from(n_max).unwrap_or(usize::MAX));
+    msg_replay_state.prune_to_context(
+        replay_context_id,
+        usize::try_from(n_max).unwrap_or(usize::MAX),
+    );
 
     let mut messages = Vec::new();
     let mut max_timestamp = since.unwrap_or(0);

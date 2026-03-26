@@ -42,9 +42,10 @@ use tracing::{debug, info};
 
 use crate::proofs::zk_vrf::{MaskDigest, VrfCtx, VrfProof, zk_vrf_impl};
 use crate::{
-    AnchorInstanceParts, BARRIER_HP_MODE, CapssWitnessBundle, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
-    HP_AEAD_SUITE, MERKLE_DS_ID, PivotParity, PivotParityStore, compute_proofs_commit_bytes,
-    compute_window_id, derive_we_epoch_id,
+    AnchorInstanceParts, BARRIER_HP_CONTEXT_AUTHOR_LOCAL, BARRIER_HP_CONTEXT_BARRIER_RECOVERY,
+    BARRIER_HP_MODE, CapssWitnessBundle, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, HP_AEAD_SUITE,
+    MERKLE_DS_ID, PivotParity, PivotParityStore, compute_proofs_commit_bytes, compute_window_id,
+    derive_we_epoch_id,
     hdr::*,
     mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW, FreezeError, HeadRecord, MultiHeadWindow},
     proofs::hp_binding,
@@ -2120,7 +2121,7 @@ pub(crate) fn validate_barrier_hp_envelope_bytes(bytes: &[u8]) -> Result<(), Acc
         debug!("barrier hp envelope: not array");
         return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     };
-    if items.len() != 3 {
+    if items.len() != 4 {
         debug!("barrier hp envelope len {}", items.len());
         return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
     }
@@ -2134,7 +2135,18 @@ pub(crate) fn validate_barrier_hp_envelope_bytes(bytes: &[u8]) -> Result<(), Acc
     if mode != BARRIER_HP_MODE {
         return Err(AcceptanceError::Freeze(FREEZE_PARENT_EID_FORBIDDEN));
     }
-    match &items[1] {
+    let context = match &items[1] {
+        Value::Text(text) => text.as_str(),
+        _ => {
+            debug!("barrier hp envelope: context not text");
+            return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+        }
+    };
+    if context != BARRIER_HP_CONTEXT_AUTHOR_LOCAL && context != BARRIER_HP_CONTEXT_BARRIER_RECOVERY
+    {
+        return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
+    }
+    match &items[2] {
         Value::Bytes(bytes)
             if bytes.len() >= crate::AEAD_TAG_LEN && bytes.len() <= HP_MAX_CIPHERTEXT_BYTES => {}
         Value::Bytes(_) => {
@@ -2146,7 +2158,7 @@ pub(crate) fn validate_barrier_hp_envelope_bytes(bytes: &[u8]) -> Result<(), Acc
             return Err(AcceptanceError::Freeze(FREEZE_HASH_CBOR));
         }
     }
-    let aead = match &items[2] {
+    let aead = match &items[3] {
         Value::Text(text) => text.as_str(),
         _ => {
             debug!("barrier hp envelope: aead not text");
@@ -3019,6 +3031,7 @@ mod tests {
     fn valid_barrier_hp_envelope_value() -> Value {
         Value::Array(vec![
             Value::Text("barrier-sealed-v1".to_string()),
+            Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
             Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
             Value::Text("chacha20-poly1305".to_string()),
         ])
@@ -3488,6 +3501,7 @@ mod tests {
             (
                 Value::Array(vec![
                     Value::Text("bad-mode".to_string()),
+                    Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
                     Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
                     Value::Text("chacha20-poly1305".to_string()),
                 ]),
@@ -3496,6 +3510,7 @@ mod tests {
             (
                 Value::Array(vec![
                     Value::Text("barrier-sealed-v1".to_string()),
+                    Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
                     Value::Bytes(vec![0x01; 8]),
                     Value::Text("chacha20-poly1305".to_string()),
                 ]),
@@ -3504,6 +3519,7 @@ mod tests {
             (
                 Value::Array(vec![
                     Value::Text("barrier-sealed-v1".to_string()),
+                    Value::Text("wrong-context".to_string()),
                     Value::Text("no-wrap".to_string()),
                     Value::Text("chacha20-poly1305".to_string()),
                 ]),
@@ -3512,6 +3528,7 @@ mod tests {
             (
                 Value::Array(vec![
                     Value::Text("barrier-sealed-v1".to_string()),
+                    Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
                     Value::Bytes(vec![0x03; 4]),
                     Value::Text("chacha20-poly1305".to_string()),
                 ]),
@@ -3520,6 +3537,7 @@ mod tests {
             (
                 Value::Array(vec![
                     Value::Text("barrier-sealed-v1".to_string()),
+                    Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
                     Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
                     Value::Text("aes-gcm".to_string()),
                 ]),
@@ -3528,6 +3546,7 @@ mod tests {
             (
                 Value::Array(vec![
                     Value::Bytes(BARRIER_HP_MODE.as_bytes().to_vec()),
+                    Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
                     Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
                     Value::Text("chacha20-poly1305".to_string()),
                 ]),
@@ -3536,6 +3555,7 @@ mod tests {
             (
                 Value::Array(vec![
                     Value::Text("barrier-sealed-v1".to_string()),
+                    Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
                     Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
                     Value::Bytes(HP_AEAD_SUITE.as_bytes().to_vec()),
                 ]),
@@ -3559,6 +3579,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let legacy_mode = Value::Array(vec![
             Value::Text("kbroad-v1".to_string()),
+            Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
             Value::Bytes(vec![0x03; crate::AEAD_TAG_LEN]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
@@ -3570,6 +3591,7 @@ mod tests {
 
         let oversized = Value::Array(vec![
             Value::Text("barrier-sealed-v1".to_string()),
+            Value::Text(BARRIER_HP_CONTEXT_AUTHOR_LOCAL.to_string()),
             Value::Bytes(vec![0x55; crate::MAX_HP_BYTES + crate::AEAD_TAG_LEN + 1]),
             Value::Text("chacha20-poly1305".to_string()),
         ]);
