@@ -187,6 +187,11 @@ fn apply_local_published_barrier_merge(
             "accepted local refresh bundle did not match persisted pending barrier state"
         ));
     }
+    // The accepted local publish advances the authenticated current state, but
+    // the post-accept HistoryCommitment is only available from a subsequent
+    // helper lookup / merge ticket refresh.
+    session.barrier_state.current_history_view_id = [0u8; 32];
+    session.barrier_state.current_history_commitment = None;
 
     session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {

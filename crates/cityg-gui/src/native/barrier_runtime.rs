@@ -1,4 +1,5 @@
 use super::*;
+use crate::barrier_shared::{header_history_commitment, require_same_history_commitment};
 
 pub(super) fn clear_join_finalize_bootstrap_artifact(state: &mut BarrierSecretState) {
     state.bootstrap_history_commitment = None;
@@ -562,6 +563,32 @@ pub(super) fn validate_client_visible_activation_guards(
         if fs_dev_prev_commit != session.fs_dev_prev_commit || fs_ec < session.fs_ec {
             return Err(anyhow!(
                 "client-side activation guard failed (947.0): local device chain continuity mismatch"
+            ));
+        }
+    }
+
+    let Some(bundle_history_commitment) = header_history_commitment(header_map)? else {
+        return Err(anyhow!(
+            "client-side activation guard failed (960.9): missing barrier history commitment header"
+        ));
+    };
+    let authored_by_local_device = bundle_authored_by_local_device(session, header_map);
+    if !authored_by_local_device && session.barrier_state.pending.is_none() {
+        if let Some(current_history_commitment) =
+            session.barrier_state.current_history_commitment.as_ref()
+        {
+            require_same_history_commitment(current_history_commitment, &bundle_history_commitment)
+                .map_err(|_| {
+                    anyhow!(
+                        "client-side activation guard failed (960.9): bundle barrier history commitment mismatch with local authenticated current state"
+                    )
+                })?;
+        } else if session.barrier_state.current_history_view_id != [0u8; 32]
+            && bundle_history_commitment.history_view_id
+                != session.barrier_state.current_history_view_id
+        {
+            return Err(anyhow!(
+                "client-side activation guard failed (960.9): bundle barrier history commitment view mismatch"
             ));
         }
     }

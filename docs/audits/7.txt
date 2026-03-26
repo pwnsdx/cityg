@@ -342,3 +342,24 @@ Nouvelle passe implémentation:
 - `join_leave` applique maintenant la même contrainte que le runtime GUI principal: les helpers A/B/C doivent partager un `HistoryCommitment` unique et ce commitment doit matcher celui du `merge_ticket` courant, pas un `current_history_view_id` local potentiellement stale;
 - le mock `merge_ticket` utilisé par ce binaire round-trippe désormais correctement `current_history_commitment` sur le vrai client API, ce qui évite qu’un wire de test obsolète masque des divergences réelles;
 - cela renforce la preuve locale de `7.3`, mais ne change pas le statut global: il manque toujours une preuve de complétude / canonité globale contre omission serveur.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche gui current-history commitment persistence)
+
+Nouvelle passe implémentation:
+
+- le client GUI conserve désormais un `current_history_commitment` courant persistant, réaligné depuis le `merge_ticket` après sync, au lieu de ne retenir qu’un `history_view_id` local partiel;
+- un `barrier_update` distant est maintenant rejeté fail-closed si son `header[180]` ne correspond pas à ce commitment courant authentifié local;
+- les publishes locaux invalident explicitement ce commitment jusqu’au prochain helper lookup, ce qui évite qu’un commitment ancien soit réutilisé comme s’il décrivait encore l’état courant.
+
+Preuves exécutées sur cette tranche:
+
+- `persisted_barrier_state_roundtrip_preserves_current_history_commitment`
+- `epoch_sync_rejects_barrier_bundle_history_commitment_mismatch`
+- `epoch_sync_after_second_join_keeps_local_pcs_refresh_valid`
+
+Impact audit:
+
+- cela renforce `7.3` sur la cohérence locale client entre helper context et bundle reçu;
+- cela ne change pas l’ouverture de `7.1/7.4`, qui restent bloqués sur l’absence de canonité/finalité/completeness proof globale.

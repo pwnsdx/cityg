@@ -1,10 +1,13 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use ciborium::Value;
 use cityg_api_client::{BarrierJoinRecord, HistoryCommitment};
 use msphf_core::{hash::h_l, serde_utils::to_cbor_vec};
+use msphf_orchestrator::hdr;
 use rand::{RngExt, rng};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_BARRIER_N_MAX: u64 = 1_024;
 pub const MAX_BARRIER_N_MAX: u64 = 65_536;
@@ -121,6 +124,14 @@ struct BarrierHistoryCommitmentHeader<'a>(
     u64,
 );
 
+#[derive(Serialize, Deserialize)]
+struct BarrierHistoryCommitmentHeaderOwned(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    u64,
+);
+
 pub fn encode_history_commitment_header(commitment: &HistoryCommitment) -> Result<Vec<u8>> {
     to_cbor_vec(&BarrierHistoryCommitmentHeader(
         &commitment.history_view_id,
@@ -129,6 +140,39 @@ pub fn encode_history_commitment_header(commitment: &HistoryCommitment) -> Resul
         commitment.history_seq,
     ))
     .map_err(|err| anyhow!("encode barrier history commitment header: {err}"))
+}
+
+pub fn decode_history_commitment_header(raw: &[u8]) -> Result<HistoryCommitment> {
+    let decoded: BarrierHistoryCommitmentHeaderOwned = ciborium::de::from_reader(raw)
+        .map_err(|err| anyhow!("failed to parse barrier history commitment header: {err}"))?;
+    let canonical = to_cbor_vec(&decoded).map_err(|err| {
+        anyhow!("failed to re-encode canonical barrier history commitment header: {err}")
+    })?;
+    if canonical.as_slice() != raw {
+        return Err(anyhow!("non-canonical barrier history commitment header"));
+    }
+    Ok(HistoryCommitment {
+        history_view_id: decoded.0.as_slice().try_into().map_err(|_| {
+            anyhow!("barrier history commitment header history_view_id must be 32 bytes")
+        })?,
+        history_commitment_id: decoded.1.as_slice().try_into().map_err(|_| {
+            anyhow!("barrier history commitment header history_commitment_id must be 32 bytes")
+        })?,
+        prev_history_commitment_id: decoded.2.as_slice().try_into().map_err(|_| {
+            anyhow!("barrier history commitment header prev_history_commitment_id must be 32 bytes")
+        })?,
+        history_seq: decoded.3,
+    })
+}
+
+pub fn header_history_commitment(
+    header_map: &BTreeMap<u64, Value>,
+) -> Result<Option<HistoryCommitment>> {
+    match header_map.get(&hdr::HDR_BARRIER_HISTORY_COMMITMENT) {
+        Some(Value::Bytes(raw)) => decode_history_commitment_header(raw).map(Some),
+        Some(_) => Err(anyhow!("barrier history commitment header must be bytes")),
+        None => Ok(None),
+    }
 }
 
 pub fn validate_barrier_n_max(n_max: u64) -> Result<u64> {

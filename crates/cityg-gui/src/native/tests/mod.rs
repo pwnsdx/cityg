@@ -347,6 +347,48 @@ fn pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs()
 }
 
 #[test]
+fn persisted_barrier_state_roundtrip_preserves_current_history_commitment()
+-> Result<(), Box<dyn std::error::Error>> {
+    let runtime = BarrierSecretState {
+        barrier_initialized: true,
+        barrier_version: 7,
+        barrier_roots_hash: [0x11; 32],
+        current_history_view_id: [0x22; 32],
+        current_history_commitment: Some(HistoryCommitment {
+            history_view_id: [0x22; 32],
+            history_commitment_id: [0x23; 32],
+            prev_history_commitment_id: [0x21; 32],
+            history_seq: 9,
+        }),
+        bootstrap_history_commitment: Some(HistoryCommitment {
+            history_view_id: [0x22; 32],
+            history_commitment_id: [0x20; 32],
+            prev_history_commitment_id: [0x19; 32],
+            history_seq: 8,
+        }),
+        kem_tree_hash_after: [0x33; 32],
+        max_barrier_update_bytes: DEFAULT_MAX_BARRIER_UPDATE_BYTES,
+        n_max: 8,
+        ..BarrierSecretState::default()
+    };
+
+    let roundtrip = PersistedBarrierState::from_runtime(&runtime).into_runtime()?;
+    assert_eq!(
+        roundtrip.current_history_view_id,
+        runtime.current_history_view_id
+    );
+    assert_eq!(
+        roundtrip.current_history_commitment,
+        runtime.current_history_commitment
+    );
+    assert_eq!(
+        roundtrip.bootstrap_history_commitment,
+        runtime.bootstrap_history_commitment
+    );
+    Ok(())
+}
+
+#[test]
 fn pending_barrier_activation_keeps_state_when_overtaken_without_exact_match()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xB22, "http://127.0.0.1:9", "room-b", "bob")?;
@@ -5838,6 +5880,12 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         barrier_version: 5,
         barrier_roots_hash: array(0x20),
         current_history_view_id: array(0x24),
+        current_history_commitment: Some(HistoryCommitment {
+            history_view_id: array(0x24),
+            history_commitment_id: array(0x30),
+            prev_history_commitment_id: array(0x2F),
+            history_seq: 4,
+        }),
         bootstrap_history_commitment: Some(HistoryCommitment {
             history_view_id: array(0x24),
             history_commitment_id: array(0x31),
@@ -6023,6 +6071,10 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         loaded.barrier_state.current_barrier_full_verified,
         session.barrier_state.current_barrier_full_verified
+    );
+    assert_eq!(
+        loaded.barrier_state.current_history_commitment,
+        session.barrier_state.current_history_commitment
     );
     assert_eq!(
         loaded.barrier_state.bootstrap_history_commitment,
@@ -8137,6 +8189,12 @@ async fn latest_bundle_after_second_join_retains_hp_envelope_for_sync()
         })
         .await?
     };
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let synced = perform_epoch_sync(alice).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
     let bob = {
         let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
         perform_join(JoinParams {
@@ -8274,6 +8332,12 @@ async fn epoch_sync_after_second_join_does_not_require_kbroad_secret()
         })
         .await?
     };
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let synced = perform_epoch_sync(alice).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
     {
         let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
         perform_join(JoinParams {
@@ -8294,6 +8358,85 @@ async fn epoch_sync_after_second_join_does_not_require_kbroad_secret()
                 .barrier_recovery_pending
         },
         "epoch sync after second join should complete without a room KBROAD secret"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn epoch_sync_rejects_barrier_bundle_history_commitment_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+
+    let port = next_test_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let room_id = hex_encode([0x7Eu8; 32]);
+
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let synced = perform_epoch_sync(alice).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+    }
+
+    let current_commitment = alice
+        .barrier_state
+        .current_history_commitment
+        .clone()
+        .ok_or_else(|| anyhow!("expected local current history commitment after join"))?;
+    let mut mismatched = alice.clone();
+    mismatched.barrier_state.current_history_commitment = Some(HistoryCommitment {
+        history_view_id: current_commitment.history_view_id,
+        history_commitment_id: [0xEF; 32],
+        prev_history_commitment_id: current_commitment.prev_history_commitment_id,
+        history_seq: current_commitment.history_seq,
+    });
+    let sync_result = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+        perform_epoch_sync(mismatched).await
+    };
+    let err = match sync_result {
+        Ok(_) => {
+            return Err(anyhow!(
+                "epoch sync should fail when the local authenticated current history commitment is falsified"
+            )
+            .into());
+        }
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains(
+            "bundle barrier history commitment mismatch with local authenticated current state"
+        ),
+        "expected explicit history commitment mismatch error: {err}"
     );
 
     handle.abort();
@@ -8794,6 +8937,18 @@ async fn epoch_sync_after_second_join_keeps_local_pcs_refresh_valid()
     assert_eq!(
         synced_alice.fs_dev_prev_commit, alice_prev_commit_before_sync,
         "syncing another member's join_finalize must not overwrite local device fs_dev_prev_commit"
+    );
+    let synced_current_commitment = synced_alice
+        .barrier_state
+        .current_history_commitment
+        .as_ref()
+        .ok_or_else(|| {
+            anyhow!("epoch sync should persist authenticated current history commitment")
+        })?;
+    assert_eq!(
+        synced_alice.barrier_state.current_history_view_id,
+        synced_current_commitment.history_view_id,
+        "epoch sync should keep current_history_view_id aligned with the authenticated current history commitment"
     );
 
     {

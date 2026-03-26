@@ -20,6 +20,8 @@ pub(in crate::native) struct PersistedBarrierState {
     #[serde(default)]
     pub(in crate::native) current_history_view_id_hex: String,
     #[serde(default)]
+    pub(in crate::native) current_history_commitment: Option<PersistedBarrierHistoryCommitment>,
+    #[serde(default)]
     pub(in crate::native) bootstrap_history_commitment: Option<PersistedBarrierHistoryCommitment>,
     #[serde(default)]
     pub(in crate::native) bootstrap_predecessor_kem_tree_hash_after_hex: String,
@@ -164,18 +166,18 @@ impl PersistedBarrierHistoryCommitment {
         }
     }
 
-    pub(in crate::native) fn into_runtime(self) -> Result<HistoryCommitment> {
+    pub(in crate::native) fn into_runtime(self, field_prefix: &str) -> Result<HistoryCommitment> {
         Ok(HistoryCommitment {
             history_view_id: decode_hex32_or_zero(
-                "barrier_state.bootstrap_history_commitment.history_view_id_hex",
+                &format!("{field_prefix}.history_view_id_hex"),
                 &self.history_view_id_hex,
             )?,
             history_commitment_id: decode_hex32_or_zero(
-                "barrier_state.bootstrap_history_commitment.history_commitment_id_hex",
+                &format!("{field_prefix}.history_commitment_id_hex"),
                 &self.history_commitment_id_hex,
             )?,
             prev_history_commitment_id: decode_hex32_or_zero(
-                "barrier_state.bootstrap_history_commitment.prev_history_commitment_id_hex",
+                &format!("{field_prefix}.prev_history_commitment_id_hex"),
                 &self.prev_history_commitment_id_hex,
             )?,
             history_seq: self.history_seq,
@@ -354,6 +356,9 @@ impl PersistedBarrierState {
             barrier_version: state.barrier_version,
             barrier_roots_hash_hex: hex_encode(state.barrier_roots_hash),
             current_history_view_id_hex: hex_encode(state.current_history_view_id),
+            current_history_commitment: state
+                .current_history_commitment
+                .map(PersistedBarrierHistoryCommitment::from_runtime),
             bootstrap_history_commitment: state
                 .bootstrap_history_commitment
                 .map(PersistedBarrierHistoryCommitment::from_runtime),
@@ -409,9 +414,17 @@ impl PersistedBarrierState {
                 "barrier_state.current_history_view_id_hex",
                 &self.current_history_view_id_hex,
             )?,
+            current_history_commitment: self
+                .current_history_commitment
+                .map(|commitment| {
+                    commitment.into_runtime("barrier_state.current_history_commitment")
+                })
+                .transpose()?,
             bootstrap_history_commitment: self
                 .bootstrap_history_commitment
-                .map(PersistedBarrierHistoryCommitment::into_runtime)
+                .map(|commitment| {
+                    commitment.into_runtime("barrier_state.bootstrap_history_commitment")
+                })
                 .transpose()?,
             bootstrap_predecessor_kem_tree_hash_after: decode_hex32_or_zero(
                 "barrier_state.bootstrap_predecessor_kem_tree_hash_after_hex",

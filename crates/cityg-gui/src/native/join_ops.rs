@@ -428,6 +428,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 "current_history_view_id",
                 &ticket.current_history_view_id,
             )?,
+            current_history_commitment: current_history_commitment.clone(),
             bootstrap_history_commitment: current_history_commitment,
             bootstrap_predecessor_kem_tree_hash_after: current_predecessor_kem_tree_hash_after,
             bootstrap_join_records: ticket

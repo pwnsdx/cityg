@@ -1,5 +1,7 @@
 use super::*;
-use crate::barrier_shared::require_current_state_history_commitment;
+use crate::barrier_shared::{
+    require_current_state_history_commitment, require_same_history_commitment,
+};
 
 pub(super) const BARRIER_KEYGEN_D_INFO: &[u8] = b"city-g|barrier/keygen-d|v1";
 pub(super) const BARRIER_KEYGEN_Z_INFO: &[u8] = b"city-g|barrier/keygen-z|v1";
@@ -517,14 +519,18 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
         .barrier_state
         .bootstrap_history_commitment
         .ok_or_else(|| anyhow!("join_finalize bootstrap missing current_history_commitment"))?;
+    let current_commitment = session
+        .barrier_state
+        .current_history_commitment
+        .as_ref()
+        .ok_or_else(|| {
+            anyhow!("join_finalize bootstrap missing local current_history_commitment")
+        })?;
     let predecessor_hash = session
         .barrier_state
         .bootstrap_predecessor_kem_tree_hash_after;
-    if expected_commitment.history_view_id != session.barrier_state.current_history_view_id {
-        return Err(anyhow!(
-            "join_finalize bootstrap current_history_view_id mismatch"
-        ));
-    }
+    require_same_history_commitment(current_commitment, &expected_commitment)
+        .map_err(|_| anyhow!("join_finalize bootstrap current_history_commitment mismatch"))?;
     if predecessor_hash == [0u8; 32] {
         return Err(anyhow!(
             "join_finalize bootstrap missing predecessor committed kem_tree_hash_after"

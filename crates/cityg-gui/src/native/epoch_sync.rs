@@ -37,6 +37,7 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
         }
     };
     let ticket_kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
+    let ticket_history_commitment = ticket.current_history_commitment.clone();
     let ticket_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
@@ -85,6 +86,8 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
     if ticket.we_epoch_id == session.we_epoch_id {
         session.barrier_state.barrier_version = ticket.barrier_version;
         session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
+        session.barrier_state.current_history_view_id = ticket_history_commitment.history_view_id;
+        session.barrier_state.current_history_commitment = Some(ticket_history_commitment);
         return Ok(EpochSyncOutcome {
             session,
             changed: barrier_changed
@@ -340,6 +343,8 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
     }
     session.barrier_state.barrier_version = ticket.barrier_version;
     session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
+    session.barrier_state.current_history_view_id = ticket_history_commitment.history_view_id;
+    session.barrier_state.current_history_commitment = Some(ticket_history_commitment);
 
     session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {

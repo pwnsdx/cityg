@@ -360,3 +360,24 @@ Nouvelle passe implémentation:
 - le binaire `join_leave` n’utilise plus le `current_history_view_id` local de session comme source de vérité pour les helpers A/B/C; il exige désormais que `FetchBarrierPublicTree`, `ResolveJoinsSince` et `ResolveRevokedLeaves` matchent le `HistoryCommitment` courant porté par le `merge_ticket` lui-même;
 - le mock protobuf `MergeTicketResponse` de `join_leave` a aussi été réaligné sur les tags wire actuels de `cityg.proto`, ce qui supprime un faux positif où les tests parlaient encore un wire obsolète;
 - preuves exécutées sur cette tranche: `ensure_matching_history_dependencies_rejects_commitment_mismatch`, `mock_merge_ticket_roundtrips_current_history_commitment`, `authenticated_message_helpers_cover_roundtrip_and_error_paths`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche gui current-history commitment persistence)
+
+Nouvelle passe implémentation:
+
+- le runtime GUI persiste désormais un `current_history_commitment` complet dans `BarrierSecretState`, au lieu de ne garder qu’un `current_history_view_id` nu et un artefact bootstrap séparé;
+- `epoch_sync` réacquiert ce commitment courant depuis le `merge_ticket` après resynchronisation, et le runtime rejette désormais fail-closed un `barrier_update` distant dont le `header[180]` ne matche pas cet état courant authentifié local;
+- les publishes locaux invalident explicitement ce commitment courant jusqu’au prochain helper lookup, ce qui évite de traiter un commitment pré-publish comme s’il décrivait encore l’état accepté courant après publication locale.
+
+Preuves exécutées sur cette tranche:
+
+- `persisted_barrier_state_roundtrip_preserves_current_history_commitment`
+- `epoch_sync_rejects_barrier_bundle_history_commitment_mismatch`
+- `epoch_sync_after_second_join_keeps_local_pcs_refresh_valid`
+
+Impact audit:
+
+- cela renforce encore `4.7` côté client/runtime;
+- cela ne ferme pas `4.1/4.4/4.5/4.6`, qui restent des sujets protocole / preuve FULL server-verifiable.
