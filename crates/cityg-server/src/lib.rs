@@ -2401,7 +2401,17 @@ impl CityGServer {
             .ok_or(CityGError::InvalidInput("group not found"))?;
         let n_max = validate_barrier_n_max(state.n_max)?;
         prune_barrier_public_tree_history(state)?;
-        let (pk_entries, history_commitment) = if let Some(mut snapshot) = state
+        let pk_entries_view = build_pk_entries_view(state)?;
+        let current_hash = compute_barrier_tree_hash(n_max, pk_entries_view.as_ref())?;
+        let current_predecessor_hash = state.current_accepted_barrier_predecessor_hash;
+        let (pk_entries, history_commitment) = if current_hash == *kem_tree_hash_after {
+            let pk_entries = match pk_entries_view {
+                Cow::Borrowed(entries) => entries.to_vec(),
+                Cow::Owned(entries) => entries,
+            };
+            let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
+            (pk_entries, history_commitment)
+        } else if let Some(mut snapshot) = state
             .barrier_public_tree_history
             .get(kem_tree_hash_after)
             .cloned()
@@ -2417,24 +2427,21 @@ impl CityGServer {
                     entry.history_view_id = snapshot.history_commitment.history_view_id;
                 }
             }
+            let history_commitment = if current_predecessor_hash != [0u8; 32]
+                && current_predecessor_hash == *kem_tree_hash_after
+            {
+                ensure_current_history_commitment(gid.as_slice(), state)?
+            } else {
+                snapshot.history_commitment
+            };
             (
                 decode_barrier_public_tree_snapshot_ref(state, &snapshot)?,
-                snapshot.history_commitment,
+                history_commitment,
             )
         } else {
-            let pk_entries_view = build_pk_entries_view(state)?;
-            let computed_hash = compute_barrier_tree_hash(n_max, pk_entries_view.as_ref())?;
-            if computed_hash != *kem_tree_hash_after {
-                return Err(CityGError::InvalidInput(
-                    HISTORICAL_BARRIER_PUBLIC_TREE_SNAPSHOT_UNAVAILABLE_ERR,
-                ));
-            }
-            let pk_entries = match pk_entries_view {
-                Cow::Borrowed(entries) => entries.to_vec(),
-                Cow::Owned(entries) => entries,
-            };
-            let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
-            (pk_entries, history_commitment)
+            return Err(CityGError::InvalidInput(
+                HISTORICAL_BARRIER_PUBLIC_TREE_SNAPSHOT_UNAVAILABLE_ERR,
+            ));
         };
         let computed_hash = compute_barrier_tree_hash(n_max, pk_entries.as_slice())?;
         if computed_hash != *kem_tree_hash_after {
@@ -10698,6 +10705,78 @@ mod tests {
         )?;
         assert_eq!(snapshot.kem_tree_hash_after, ticket.kem_tree_hash_after);
         assert_eq!(snapshot.n_max, ticket.n_max);
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_barrier_public_tree_prefers_current_commitment_for_current_hash()
+    -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let alice = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&alice)?;
+
+        let gid = cityg_client::demo::DEMO_GID;
+        let ticket =
+            server.build_merge_ticket(&gid, &cityg_client::demo::demo_member_leaf("alice"))?;
+        let current = server.current_history_commitment(&gid)?;
+        {
+            let group = server
+                .roster
+                .groups
+                .get_mut(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("group missing"))?;
+            group.barrier_public_tree_history.insert(
+                ticket.kem_tree_hash_after,
+                super::BarrierPublicTreeSnapshotRef {
+                    blob_indices: Vec::new(),
+                    history_view_id: [0xA1; 32],
+                    history_commitment: super::HistoryCommitment {
+                        history_view_id: [0xA1; 32],
+                        history_commitment_id: [0xB2; 32],
+                        prev_history_commitment_id: [0xC3; 32],
+                        history_seq: current.history_seq.saturating_sub(1),
+                    },
+                },
+            );
+        }
+
+        let snapshot = server.fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?;
+        assert_eq!(snapshot.kem_tree_hash_after, ticket.kem_tree_hash_after);
+        assert_eq!(snapshot.history_commitment, current);
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_barrier_public_tree_prefers_current_commitment_for_current_predecessor_hash()
+    -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&alice)?;
+        let predecessor_hash = {
+            let group = server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("group missing"))?;
+            group.kem_tree_hash_after
+        };
+        let bob = cityg_client::demo::demo_bundle("bob")?;
+        server.accept_epoch(&bob)?;
+
+        let current = server.current_history_commitment(&gid)?;
+        {
+            let group = server
+                .roster
+                .groups
+                .get_mut(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("group missing"))?;
+            group.current_accepted_barrier_predecessor_hash = predecessor_hash;
+        }
+
+        let snapshot = server.fetch_barrier_public_tree(&gid, &predecessor_hash)?;
+        assert_eq!(snapshot.kem_tree_hash_after, predecessor_hash);
+        assert_eq!(snapshot.history_commitment, current);
         Ok(())
     }
 

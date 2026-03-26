@@ -115,6 +115,22 @@ pub(in crate::native) struct PersistedBarrierPendingState {
     pub(in crate::native) barrier_update_digest_hex: String,
     #[serde(default)]
     pub(in crate::native) on_path_key_material: BTreeMap<u32, PersistedBarrierNodeKeyMaterial>,
+    #[serde(default)]
+    pub(in crate::native) activation_source: Option<PersistedBarrierPendingActivationSource>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub(in crate::native) struct PersistedBarrierPendingActivationSource {
+    #[serde(default)]
+    pub(in crate::native) barrier_version: u64,
+    #[serde(default)]
+    pub(in crate::native) barrier_roots_hash_hex: String,
+    #[serde(default)]
+    pub(in crate::native) kem_tree_hash_after_hex: String,
+    #[serde(default)]
+    pub(in crate::native) fs_ec: u64,
+    #[serde(default)]
+    pub(in crate::native) fs_dev_prev_commit_hex: String,
 }
 
 impl PersistedBarrierNodeKeyMaterial {
@@ -221,6 +237,10 @@ impl PersistedBarrierPendingState {
             barrier_update_reason: pending.barrier_update_reason,
             barrier_update_digest_hex: hex_encode(pending.barrier_update_digest),
             on_path_key_material,
+            activation_source: pending
+                .activation_source
+                .as_ref()
+                .map(PersistedBarrierPendingActivationSource::from_runtime),
         }
     }
 
@@ -278,6 +298,41 @@ impl PersistedBarrierPendingState {
                 &self.barrier_update_digest_hex,
             )?,
             on_path_key_material,
+            activation_source: self
+                .activation_source
+                .map(PersistedBarrierPendingActivationSource::into_runtime)
+                .transpose()?,
+        })
+    }
+}
+
+impl PersistedBarrierPendingActivationSource {
+    pub(in crate::native) fn from_runtime(source: &BarrierPendingActivationSource) -> Self {
+        Self {
+            barrier_version: source.barrier_version,
+            barrier_roots_hash_hex: hex_encode(source.barrier_roots_hash),
+            kem_tree_hash_after_hex: hex_encode(source.kem_tree_hash_after),
+            fs_ec: source.fs_ec,
+            fs_dev_prev_commit_hex: hex_encode(source.fs_dev_prev_commit),
+        }
+    }
+
+    pub(in crate::native) fn into_runtime(self) -> Result<BarrierPendingActivationSource> {
+        Ok(BarrierPendingActivationSource {
+            barrier_version: self.barrier_version,
+            barrier_roots_hash: decode_hex32_or_zero(
+                "barrier_state.pending.activation_source.barrier_roots_hash_hex",
+                &self.barrier_roots_hash_hex,
+            )?,
+            kem_tree_hash_after: decode_hex32_or_zero(
+                "barrier_state.pending.activation_source.kem_tree_hash_after_hex",
+                &self.kem_tree_hash_after_hex,
+            )?,
+            fs_ec: self.fs_ec,
+            fs_dev_prev_commit: decode_hex32_or_zero(
+                "barrier_state.pending.activation_source.fs_dev_prev_commit_hex",
+                &self.fs_dev_prev_commit_hex,
+            )?,
         })
     }
 }

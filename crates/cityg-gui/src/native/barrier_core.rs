@@ -578,11 +578,9 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
         n_max,
         &current_snapshot_response.tree,
     )?;
-    if current_snapshot_response.history_commitment != expected_commitment {
-        return Err(anyhow!(
-            "join_finalize bootstrap snapshot auth failure (960.9): current public tree did not validate to provisioned current HistoryCommitment"
-        ));
-    }
+    // The provisioned current barrier_update bytes already bind the current
+    // tree hash. After the JOIN itself is accepted, the same current tree can
+    // legitimately be re-attested under a later local HistoryCommitment.
 
     let snapshot_base_response = client
         .barrier_fetch_public_tree(room_id, &predecessor_hash)

@@ -328,3 +328,25 @@ Nouvelle passe spec + implémentation:
 - la spec réserve maintenant `header[181]` pour une future extension `barrier_full_verification_receipt`;
 - elle impose qu’une telle extension définisse négociation, binding, fraîcheur et un vrai authentificateur, pas un simple écho des helper inputs;
 - le serveur courant **rejette explicitement** `header[181]` dans le profil de base, pour éviter toute illusion de support implicite.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche join_finalize bootstrap hardening)
+
+Nouvelle passe spec + implémentation:
+
+- le chemin `join_finalize` n’est plus rejeté par erreur comme `cbor_malformed` sur `header[179]` / `header[180]`; l’allowlist d’acceptation reconnaît maintenant ces headers réservés du profil courant;
+- le bootstrap joiner n’exige plus une égalité trop forte entre commitment provisionné et commitment retourné avec le `current tree` quand les bytes de l’arbre courant sont identiques mais ré-attestés sous un head local plus récent après le JOIN;
+- le test d’intégration `perform_join_existing_room_can_self_finalize_without_room_secret` repasse, ce qui redonne un signal end-to-end propre sur la self-finalization du deuxième membre.
+
+Statut audit: **COMPLETED**, avec renforcement supplémentaire de la voie `join_finalize`, sans fermeture du besoin d’une preuve server-verifiable de FULL verification pour les reasons `0/1`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche sender-path + predecessor snapshot coherence)
+
+Nouvelle passe implémentation:
+
+- la self-finalization du deuxième membre n’aboutit plus à une session qui échoue au premier envoi pour cause de clé de signature incohérente; le chemin d’envoi message-plane est désormais aligné avec l’identité de device persistée par le join;
+- le helper `FetchBarrierPublicTree(H_prev)` renvoie désormais le `HistoryCommitment` courant quand `H_prev` est le prédécesseur immédiat de l’état accepté courant, ce qui réaligne le chain-check FULL normal avec la sémantique de la spec durcie;
+- les tests `perform_join_second_member_can_send_immediately` et `send_fetch_and_members_roundtrip` repassent, ce qui redonne un signal end-to-end propre sur “join -> self-finalize -> send -> sync/fetch”.

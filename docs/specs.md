@@ -1160,17 +1160,19 @@ Join-finalize bootstrap exception (normative):
 * A newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if, it has:
   * the S12.2 provisioned current barrier metadata for the current committed state,
   * the S12.2 provisioned `join_finalize_auth` capability bound to its `(gid, leaf_id, cover_leaf_index)`,
-  * authenticated access to S3.3.A/B and to `FetchBarrierPublicTree(current kem_tree_hash_after)` at that same current committed state, with all such responses validating to the provisioned `current_history_commitment`,
+  * authenticated access to S3.3.A/B for that same current committed state, with those A/B responses validating to the provisioned `current_history_commitment`,
+  * authenticated access to `FetchBarrierPublicTree(current kem_tree_hash_after)` for that same current committed state,
   * the authenticated accepted current `barrier_update` bytes for that same current committed state, together with authenticated history material sufficient to authenticate the predecessor snapshot named by that accepted update,
   * and has executed the bootstrap verification context below for that accepted current committed state,
   * successfully performed the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 for that current committed state.
 Bootstrap verification context (normative):
 * For this exception only, the `H_prev` used by the S11.11.2-style checks is NOT the joiner's locally stored current `kem_tree_hash_after`.
 * Instead, define `BU_current :=` the authenticated accepted current `barrier_update` bytes provisioned for the current committed state, and define `H_prev_bootstrap :=` the provisioned committed predecessor `kem_tree_hash_after` used as `snapshot_base` when authoring `BU_current`.
-* The joiner MUST fetch/authenticate `snapshot_current := FetchBarrierPublicTree(current kem_tree_hash_after)` and require it validates to the provisioned `current_history_commitment`.
+* The joiner MUST fetch/authenticate `snapshot_current := FetchBarrierPublicTree(current kem_tree_hash_after)` and require that its tree bytes validate to the provisioned current `kem_tree_hash_after`.
+* Exact equality of `snapshot_current`'s returned `HistoryCommitment` to the provisioned `current_history_commitment` is NOT required if the returned tree bytes validate to that provisioned current `kem_tree_hash_after`; after the JOIN itself is accepted, the same current tree MAY legitimately be re-attested under a later `HistoryCommitment` from the same `HistoryAuthorityScope`.
 * The joiner MUST fetch/authenticate `snapshot_base := FetchBarrierPublicTree(H_prev_bootstrap)`.
 * `snapshot_base` MAY be a retained historical predecessor snapshot whose own `HistoryCommitment` predates the provisioned current commitment; for this bootstrap exception, authenticity of `snapshot_base` is established by `TreeHash(snapshot_base) == H_prev_bootstrap`, not by requiring `snapshot_base` to carry the same current `HistoryCommitment`.
-* The joiner MUST execute the S11.11.2 chain-checks against `BU_current`, the provisioned predecessor `H_prev_bootstrap`, the provisioned `current_history_commitment`, and the corresponding authenticated current-state A/B responses for that same `HistoryCommitment`.
+* The joiner MUST execute the S11.11.2 chain-checks against `BU_current`, the provisioned predecessor `H_prev_bootstrap`, the provisioned `current_history_commitment`, and the corresponding authenticated current-state A/B responses for that same provisioned `HistoryCommitment`.
 * A joiner MUST NOT treat its provisioned current `kem_tree_hash_after` alone as a sufficient trust root for this bootstrap check.
 * Satisfying the bullets above establishes FULL public-state verification sufficient for join_finalize eligibility even though the client has not yet derived the current `K_barrier`.
 * A pending joiner admitted under this exception MUST still NOT originate reason 0 or reason 1 while `pending_barrier_recovery == true`.
@@ -1181,6 +1183,7 @@ A FULL-verifying client processing a barrier_update MUST:
 * Let H_prev := client's locally stored kem_tree_hash_after.
 * Fetch pk_entries_prev := FetchBarrierPublicTree(H_prev), record its authenticated `HistoryCommitment := hc_tree`, and verify it hashes to H_prev per S11.4; failure -> 960.9.
 * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
+* If `H_prev` is the immediate predecessor committed tree of the current accepted barrier state within the same `HistoryAuthorityScope`, `FetchBarrierPublicTree(H_prev)` MUST return that predecessor tree authenticated under the current-state `HistoryCommitment` used by A/B for the current committed state.
 * Obtain `RevokedLeafSet := ResolveRevokedLeaves(revocation_roots_hash)` and `JoinSet := ResolveJoinsSince(BU.prev_barrier_version)` and record their authenticated view identifiers `hv_revoked` and `hv_join`.
 * Require `hv_revoked == hv_join`; mismatch or missing authenticated current-state view binding -> 960.9.
 * In this FULL-client flow, `H_prev` is the client's locally stored current committed tree, so `hc_tree` MUST equal the current-state `HistoryCommitment` authenticated by A/B; mismatch -> 960.9.
@@ -1427,6 +1430,11 @@ For each node n in (SuffixNodes INTERSECT ExpectedNodeSet):
 * If any mismatch occurs, client MUST reject barrier_update locally (fail closed) with 960.7.
 
 S11.13.7 State update (normative)
+Before committing the recovered post-state, the client MUST replay every server-side S10 invariant that is both client-visible and checkable from authenticated headers plus locally persisted state. At minimum:
+* `header[143]` MUST equal the locally persisted `fs_epoch_base_ts` for the current session state.
+* `header[153]` MUST equal `H_L("fs/dev/chain/v2", [header[108], header[141], header[152], header[176], barrier_update_digest])`.
+* If `header[108]` equals the local author's device key, then `header[152]` MUST equal the locally persisted `fs_dev_prev_commit` and `header[141]` MUST be >= the locally persisted local-device `fs_ec`.
+* If the client cannot perform these checks from authenticated headers plus locally persisted state, it MUST NOT commit the recovered post-state and MUST enter `barrier_recovery_pending` or `recovery_required`.
 On successful processing:
 * barrier_initialized := true
 * barrier_version     := v_new
@@ -1462,6 +1470,12 @@ Before publishing/submitting any merge carrying header[175], the updater MUST pe
     )
   else null)
 * pending_barrier_update_digest = H_L("barrier/update/digest", [raw header[175] bytes to publish])
+* pending_activation_source = locally persisted pre-publish source state consisting at minimum of:
+  * source_barrier_version
+  * source_barrier_roots_hash
+  * source_kem_tree_hash_after
+  * source_fs_ec
+  * source_fs_dev_prev_commit
 * pending_on_path_key_material = { for each node n in ExpectedNodeSet:
     [ n:uint, dk_n:bstr(2400 bytes), pkhash_n:bstr32 ]
   }
@@ -1482,6 +1496,7 @@ Upon observing acceptance of the merge carrying this barrier_update, or after `L
 * Require the observed accepted `barrier_version` to equal `pending_barrier_version`.
 * Require the observed accepted `header[141]` to equal `pending_fs_ec`.
 * Require the observed accepted `header[178]` to equal `pending_barrier_update_reason`.
+* Require the client's current locally persisted pre-activation source state to equal `pending_activation_source`; if not, the updater MUST enter `recovery_required/history_inconsistent` and MUST NOT activate.
 * If match: activate -- update local state:
   * barrier_initialized := true
   * barrier_version := pending_barrier_version
@@ -1564,7 +1579,9 @@ FS-hybrid required fields:
 * fs_policy_version (uint)
 * any suite identifiers required to verify proofs (Smallwood/VRF/SRX profiles)
 Eligibility note (normative):
-* A just-provisioned joiner into an already-existing group MUST be able to invoke S3.3.A/B and `FetchBarrierPublicTree(current kem_tree_hash_after)` for the provisioned current committed barrier state immediately after provisioning, and those responses MUST validate to the provisioned `current_history_commitment`.
+* A just-provisioned joiner into an already-existing group MUST be able to invoke S3.3.A/B and `FetchBarrierPublicTree(current kem_tree_hash_after)` for the provisioned current committed barrier state immediately after provisioning.
+* The authenticated current-state A/B responses used for `join_finalize` bootstrap MUST validate to the provisioned `current_history_commitment`.
+* `FetchBarrierPublicTree(current kem_tree_hash_after)` for that provisioned current state MUST at minimum return tree bytes that validate to the provisioned current `kem_tree_hash_after`; it MAY return a later same-scope `HistoryCommitment` if the current tree bytes are unchanged.
 * The joiner MUST also be able to invoke `FetchBarrierPublicTree(H_prev_bootstrap)` for the provisioned accepted current `barrier_update`; that predecessor committed snapshot MAY carry an older retained `HistoryCommitment`, but MUST authenticate exactly to the provisioned predecessor committed `kem_tree_hash_after`.
 * For reason 2 (`join_finalize`) eligibility only, a joiner that has the S12.2 current barrier metadata and successfully performs the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 against that provisioned current state is deemed FULL-verifying for current public state, even before it has derived the current `K_barrier`.
 * This deeming rule is still a client-local predicate in the base profile. The server validates `join_finalize_auth` and helper-state coherence, not a cryptographic proof that the joiner performed those checks.

@@ -284,8 +284,8 @@ Statut audit: **COMPLETED**, avec renforcement supplémentaire de la boundary �
 
 Statut final de cet audit après relecture complète spec + implémentation:
 
-- **Partial**: 7.3, 7.5, 7.6, 7.7
-- **Open**: 7.1, 7.2, 7.4
+- **Partial**: 7.2, 7.3, 7.5, 7.6, 7.7
+- **Open**: 7.1, 7.4
 
 Le problème directeur reste inchangé: la défense contre serveur actif est aujourd’hui nettement meilleure localement, mais toujours pas équivalente à une canonité/finalité globale append-only.
 
@@ -310,3 +310,25 @@ Nouvelle passe spec + implémentation:
 - la spec réserve désormais `header[182]` pour une extension explicite de **global history attestation**;
 - elle interdit qu’un simple ré-emballage d’un `HistoryCommitment` local soit décrit comme finalité/canonité globale;
 - le serveur courant rejette cette clé tant qu’aucune extension n’est négociée, ce qui évite toute illusion de support implicite.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche activation-subset + bootstrap-fixes)
+
+Nouvelle passe spec + implémentation:
+
+- **7.2 passe à Partial**: le client rejoue maintenant un sous-ensemble client-visible obligatoire avant activation locale d’un barrier state pending ou recovered: `fs_epoch_base_ts`, `fs_dev_chain_bind`, continuité locale du device chain, et égalité du `pending_activation_source` pré-persisté.
+- **Fail-closed réel sur les chemins critiques**: ces gardes s’appliquent désormais à `epoch_sync` et au chemin “bundle local publié puis activation directe”, qui pouvait autrement contourner la revalidation locale.
+- **Régression join_finalize fermée côté implémentation**: l’accept path autorise maintenant explicitement `header[179]` / `header[180]`, et le serveur préfère le commitment courant quand `FetchBarrierPublicTree` reçoit le hash courant.
+- **Bootstrap joiner réaligné**: la spec et le client n’exigent plus à tort que le `current tree` fetched porte exactement le même commitment provisionné quand les bytes de l’arbre courant sont inchangés mais ré-attestés sous un head local plus récent après l’acceptation du JOIN.
+- **Toujours ouvert**: la revalidation locale ne couvre pas encore toute la surface policy/gouvernance de S10, et rien ici ne crée une canonité/finalité globale append-only.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche predecessor commitment + sender-path)
+
+Nouvelle passe implémentation:
+
+- le helper serveur `FetchBarrierPublicTree(H_prev)` distingue maintenant le cas où `H_prev` est le prédécesseur immédiat de l’état accepté courant et renvoie alors ce snapshot sous le `HistoryCommitment` courant attendu par le chain-check FULL normal;
+- cela ferme un mismatch local qui faisait échouer `epoch_sync` sur un vrai scénario `join -> send -> stale sync`, sans pour autant prétendre résoudre la canonité globale de l’historique;
+- en parallèle, la voie d’envoi message-plane signe désormais avec la même identité de device persistée que celle dont la réception re-dérive `sender_leaf_id`, ce qui supprime une incohérence locale de la défense “sender-bound message auth”.

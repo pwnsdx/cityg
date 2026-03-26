@@ -57,7 +57,6 @@ use msphf_orchestrator::{
     OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_leaf_id, derive_we_epoch_id,
     hdr,
 };
-use pqcrypto_dilithium::dilithium3;
 use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
 use pqcrypto_kyber::kyber768;
 use pqcrypto_traits::kem::{PublicKey as KemPublicKeyTrait, SecretKey as KemSecretKeyTrait};
@@ -877,13 +876,13 @@ fn sign_message(
     plaintext: &[u8],
     secret_key: &[u8],
 ) -> Result<Vec<u8>> {
-    let sk = dilithium3::SecretKey::from_bytes(secret_key)
+    let sk = dilithium5::SecretKey::from_bytes(secret_key)
         .map_err(|_| anyhow!("invalid ML-DSA-65 secret key"))?;
     let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
     payload.extend_from_slice(leaf_id);
     payload.extend_from_slice(&timestamp_ms.to_le_bytes());
     payload.extend_from_slice(plaintext);
-    let signature = dilithium3::detached_sign(&payload, &sk);
+    let signature = dilithium5::detached_sign(&payload, &sk);
     Ok(signature.as_bytes().to_vec())
 }
 
@@ -957,9 +956,9 @@ fn verify_message_signature(
     signature_bytes: &[u8],
     public_key_bytes: &[u8],
 ) -> Result<()> {
-    let pk = dilithium3::PublicKey::from_bytes(public_key_bytes)
+    let pk = dilithium5::PublicKey::from_bytes(public_key_bytes)
         .map_err(|_| anyhow!("invalid ML-DSA-65 public key"))?;
-    let signature = dilithium3::DetachedSignature::from_bytes(signature_bytes)
+    let signature = dilithium5::DetachedSignature::from_bytes(signature_bytes)
         .map_err(|_| anyhow!("invalid ML-DSA-65 signature"))?;
 
     let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
@@ -967,7 +966,7 @@ fn verify_message_signature(
     payload.extend_from_slice(&timestamp_ms.to_le_bytes());
     payload.extend_from_slice(plaintext);
 
-    dilithium3::verify_detached_signature(&signature, &payload, &pk)
+    dilithium5::verify_detached_signature(&signature, &payload, &pk)
         .map_err(|_| anyhow!("signature verification failed"))?;
 
     Ok(())
@@ -1099,7 +1098,7 @@ async fn prepare_join_session_with_identity(
         seed
     });
 
-    let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
+    let (msg_sign_pk, msg_sign_sk) = dilithium5::keypair();
     let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
     let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
 
@@ -2319,7 +2318,7 @@ async fn send_text_message(session: &mut Session, plaintext: &str) -> Result<()>
         &session.leaf_id,
         timestamp_ms,
         plaintext.as_bytes(),
-        &session.pop_secret_key,
+        DilithiumSecretKeyTrait::as_bytes(session.pop_secret.as_ref()),
     )?;
     let authenticated = encode_authenticated_message(
         timestamp_ms,
@@ -4060,7 +4059,7 @@ mod tests {
         let leaf_id = [0x44; 32];
         let timestamp_ms = 123_456u64;
         let plaintext = b"hello world";
-        let (public_key, secret_key) = dilithium3::keypair();
+        let (public_key, secret_key) = dilithium5::keypair();
         let signature = sign_message(
             &leaf_id,
             timestamp_ms,

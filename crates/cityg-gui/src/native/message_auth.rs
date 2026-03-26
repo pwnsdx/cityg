@@ -100,7 +100,7 @@ pub(super) fn sign_message(
     plaintext: &[u8],
     secret_key: &[u8],
 ) -> Result<Vec<u8>> {
-    let sk = dilithium3::SecretKey::from_bytes(secret_key)
+    let sk = dilithium5::SecretKey::from_bytes(secret_key)
         .map_err(|_| anyhow!("invalid ML-DSA-65 secret key"))?;
 
     let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
@@ -108,7 +108,7 @@ pub(super) fn sign_message(
     payload.extend_from_slice(&timestamp_ms.to_le_bytes());
     payload.extend_from_slice(plaintext);
 
-    let signature = dilithium3::detached_sign(&payload, &sk);
+    let signature = dilithium5::detached_sign(&payload, &sk);
     Ok(signature.as_bytes().to_vec())
 }
 
@@ -119,10 +119,10 @@ pub(super) fn verify_message_signature(
     signature_bytes: &[u8],
     public_key_bytes: &[u8],
 ) -> Result<()> {
-    let pk = dilithium3::PublicKey::from_bytes(public_key_bytes)
+    let pk = dilithium5::PublicKey::from_bytes(public_key_bytes)
         .map_err(|_| anyhow!("invalid ML-DSA-65 public key"))?;
 
-    let signature = dilithium3::DetachedSignature::from_bytes(signature_bytes)
+    let signature = dilithium5::DetachedSignature::from_bytes(signature_bytes)
         .map_err(|_| anyhow!("invalid ML-DSA-65 signature"))?;
 
     let mut payload = Vec::with_capacity(32 + 8 + plaintext.len());
@@ -130,7 +130,7 @@ pub(super) fn verify_message_signature(
     payload.extend_from_slice(&timestamp_ms.to_le_bytes());
     payload.extend_from_slice(plaintext);
 
-    dilithium3::verify_detached_signature(&signature, &payload, &pk)
+    dilithium5::verify_detached_signature(&signature, &payload, &pk)
         .map_err(|_| anyhow!("signature verification failed"))?;
 
     Ok(())
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_message_signing_and_verification() -> Result<(), Box<dyn std::error::Error>> {
-        let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
+        let (msg_sign_pk, msg_sign_sk) = dilithium5::keypair();
         let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
         let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
 
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_authenticated_message_format() -> Result<(), Box<dyn std::error::Error>> {
-        let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
+        let (msg_sign_pk, msg_sign_sk) = dilithium5::keypair();
         let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
         let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
 
@@ -330,8 +330,8 @@ mod tests {
 
     #[test]
     fn test_message_authentication_prevents_spoofing() -> Result<(), Box<dyn std::error::Error>> {
-        let (pk_alice, sk_alice) = dilithium3::keypair();
-        let (pk_bob, _sk_bob) = dilithium3::keypair();
+        let (pk_alice, sk_alice) = dilithium5::keypair();
+        let (pk_bob, _sk_bob) = dilithium5::keypair();
 
         let leaf_id_alice = [0x11u8; 32];
         let leaf_id_bob = [0x22u8; 32];
@@ -395,8 +395,8 @@ mod tests {
     fn test_sender_leaf_binding_rejects_mismatched_public_key()
     -> Result<(), Box<dyn std::error::Error>> {
         let gid = [0x44u8; 32];
-        let (pk_alice, _sk_alice) = dilithium3::keypair();
-        let (pk_bob, _sk_bob) = dilithium3::keypair();
+        let (pk_alice, _sk_alice) = dilithium5::keypair();
+        let (pk_bob, _sk_bob) = dilithium5::keypair();
         let alice_leaf = compute_leaf_id(
             LeafIdMode::PerGroup,
             &gid,
@@ -418,7 +418,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let gid_a = [0x51u8; 32];
         let gid_b = [0x52u8; 32];
-        let (pk_alice, _sk_alice) = dilithium3::keypair();
+        let (pk_alice, _sk_alice) = dilithium5::keypair();
 
         let leaf_a_first = compute_leaf_id(
             LeafIdMode::PerGroup,
@@ -463,12 +463,12 @@ mod tests {
             4 + 8 + 4 + 4 + MLDSA65_PUBKEY_SIZE + 4 + MLDSA65_SIG_SIZE
         );
 
-        let (pk, sk) = dilithium3::keypair();
+        let (pk, sk) = dilithium5::keypair();
         assert_eq!(pk.as_bytes().len(), MLDSA65_PUBKEY_SIZE);
         assert_eq!(
             sk.as_bytes().len(),
-            4032,
-            "ML-DSA-65 secret key is 4032 bytes"
+            dilithium5::secret_key_bytes(),
+            "ML-DSA-65 secret key length should match the active message auth signer"
         );
 
         let leaf_id = [0u8; 32];

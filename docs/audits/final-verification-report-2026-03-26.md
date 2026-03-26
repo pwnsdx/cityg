@@ -24,8 +24,8 @@ Scope-hardening addendum (same date, later tranche):
 Summary:
 - Total findings reviewed: `51`
 - `Closed`: `18`
-- `Partial`: `12`
-- `Open`: `17`
+- `Partial`: `13`
+- `Open`: `16`
 - `Reclassified`: `4`
 
 ## Audit 1
@@ -57,8 +57,8 @@ Summary:
   Proof: `docs/specs.md:324-338`, `docs/specs.md:1072-1127`, `docs/specs.md:1390-1402`, `docs/specs.md:1716-1731`, `crates/msphf-orchestrator/src/lib.rs:698-845`, `crates/cityg-gui/src/barrier_shared.rs:47-55`, `crates/cityg-gui/src/native/barrier_core.rs:33-39,689-706`, `crates/cityg-gui/src/native/tests/mod.rs:1484-1539`, `crates/cityg-client/src/lib.rs:699-705,718-735`, `crates/msphf-orchestrator/tests/end_to_end.rs:954-988`.
 - `2.5` `Partial` — recover-only misuse is reduced by persistent `current_barrier_full_verified`, but still not protocol-enforced end-to-end.
   Proof: `docs/specs.md:1093-1096`, `docs/specs.md:1154-1157`, `crates/cityg-gui/src/native/session_types.rs:72-99`, `crates/cityg-gui/src/native/barrier_ops.rs:214-251`.
-- `2.6` `Closed` — sender/device binding is enforced in code, and the spec now makes `leaf_id(device_pk)` deterministic per `(gid, device_pk, device_pk_alg)` and non-reassignable across distinct device keys within a `gid`.
-  Proof: `docs/specs.md:176-178`, `docs/specs.md:600-606`, `crates/cityg-gui/src/native/message_auth.rs:139-156,388-437`, `crates/cityg-gui/src/native/network_messages.rs:188-203`.
+- `2.6` `Closed` — sender/device binding is enforced in code, and the message plane now signs with the same persisted device identity family that the sender-leaf binding checks derive from; the spec also makes `leaf_id(device_pk)` deterministic per `(gid, device_pk, device_pk_alg)` and non-reassignable across distinct device keys within a `gid`.
+  Proof: `docs/specs.md:176-178`, `docs/specs.md:600-606`, `crates/cityg-gui/src/native/message_auth.rs:97-156,388-437`, `crates/cityg-gui/src/native/network_messages.rs:14-50,188-203`, `crates/cityg-gui/src/native/tests/mod.rs:7606-7659,8670-8740`, `crates/cityg-gui/src/bin/join_leave.rs:873-970,2311-2328`.
 
 ## Audit 3
 
@@ -81,8 +81,8 @@ Summary:
 
 - `4.1` `Open` — recover-only to updater / `pcs_refresh` remains mostly honest-client-enforced, not fully protocol-enforced.
   Proof: `docs/specs.md:1154-1157` restricts behavior normatively, but there is no server-verifiable FULL proof for reasons `0/1`.
-- `4.2` `Partial` — `join_finalize` is now server-checkable via `header[179] join_finalize_auth`, but still does not prove full public-state verification to the server.
-  Proof: `docs/specs.md:1155-1157`, `docs/specs.md:1467-1469`, `crates/cityg-server/src/lib.rs:4022-4085`.
+- `4.2` `Partial` — `join_finalize` is now server-checkable via `header[179] join_finalize_auth`, and the end-to-end path now accepts the reserved helper headers and tolerates later same-tree re-attestation during bootstrap, but it still does not prove full public-state verification to the server.
+  Proof: `docs/specs.md:1155-1174`, `docs/specs.md:1579-1583`, `crates/msphf-orchestrator/src/accept/mod.rs:1884-1949`, `crates/cityg-server/src/lib.rs:2381-2438,4022-4085,10705-10735`, `crates/cityg-gui/src/native/barrier_core.rs:568-589`, `crates/cityg-gui/src/native/tests/mod.rs:8589-8658,9070-9130`.
 - `4.3` `Closed` — provenance that the current barrier state is not FULL-verified is now persisted and surfaced.
   Proof: `docs/specs.md:458-465`, `crates/cityg-gui/src/native/session_types.rs:72-99`, `crates/cityg-gui/src/native/persisted/barrier.rs:56-57,334-405`.
 - `4.4` `Open` — recover-only to FULL promotion is still not backed by a globally authenticated head; the circularity is reduced but not eliminated.
@@ -91,8 +91,8 @@ Summary:
   Proof: the spec narrows usage but still lacks a single wire-visible proof object for FULL status.
 - `4.6` `Open` — the “applicable `ek_n` verification” path is still not globally anchored enough to rule out vacuous server-steered contexts.
   Proof: `docs/specs.md:1115-1124` improves bootstrap checks, but relies on local/current authenticated artifacts rather than global canonity.
-- `4.7` `Partial` — current version/current tree/current JoinSet binding is much tighter now through shared `HistoryCommitment`, `header[180]`, and helper-state binding.
-  Proof: `docs/specs.md:180-189`, `docs/specs.md:1157`, `crates/cityg-server/src/lib.rs:4443-4450`, `crates/cityg-gui/src/native/join_ops.rs:220-247`, `crates/cityg-gui/src/native/barrier_ops.rs:312-320,882-905`.
+- `4.7` `Partial` — current version/current tree/current JoinSet binding is much tighter now through shared `HistoryCommitment`, `header[180]`, helper-state binding, and explicit current-commitment treatment for the immediate predecessor snapshot used by the normal FULL chain-check.
+  Proof: `docs/specs.md:180-189`, `docs/specs.md:1157`, `docs/specs.md:1181-1190`, `crates/cityg-server/src/lib.rs:2396-2445,4443-4450,10749-10780`, `crates/cityg-gui/src/native/join_ops.rs:220-247`, `crates/cityg-gui/src/native/barrier_ops.rs:312-320,882-905`, `crates/cityg-gui/src/native/tests/mod.rs:7636-7659`.
 - `4.8` `Partial` — external history/provisioning dependencies are more constrained, but still not fully closed against a byzantine server.
   Proof: `docs/specs.md:1455-1478`; remaining lack of global finality/canonity is still explicit at `docs/specs.md:170`.
 
@@ -106,12 +106,12 @@ Summary:
   Proof: `docs/specs.md:225-233`, `docs/specs.md:1420-1434`, `crates/cityg-server/src/lib.rs:6384-6399`, `crates/cityg-api-client/src/lib.rs:2327-2331`.
 - `5.4` `Reclassified` — room-admin authorization remains a multi-doc normative boundary, not a local defect of this file alone.
   Proof: this was intentionally scoped outside `docs/specs.md`.
-- `5.5` `Closed` — sender identity is no longer optional in practice on the message plane.
-  Proof: `docs/specs.md:566-572`, `crates/cityg-gui/src/native/message_auth.rs:139-156`, `crates/cityg-gui/src/native/network_messages.rs:188-203`.
+- `5.5` `Closed` — sender identity is no longer optional in practice on the message plane, and the concrete send path now signs with the same persisted sender device key family that receivers bind back to `sender_leaf_id`.
+  Proof: `docs/specs.md:566-572`, `crates/cityg-gui/src/native/message_auth.rs:97-156`, `crates/cityg-gui/src/native/network_messages.rs:14-50,188-203`, `crates/cityg-gui/src/native/tests/mod.rs:7606-7659,8670-8740`.
 - `5.6` `Reclassified` — opaque external proof/KDF suites remain a registry/documentation issue; not enough evidence to call the current local implementation unsafely weak from this repo alone.
   Proof: `docs/specs.md:162-163`, `docs/specs.md:1479-1484`.
-- `5.7` `Partial` — join provisioning now has nonce/issuance/expiry/current history commitment, but still is not a standalone globally authenticated lineage artifact.
-  Proof: `docs/specs.md:1455-1478`, `crates/cityg-api/proto/cityg.proto:243,248-251`, `crates/cityg-api-client/src/lib.rs:988-1038`.
+- `5.7` `Partial` — join provisioning now has nonce/issuance/expiry/current history commitment, and bootstrap verification no longer falsely rejects a same-tree later re-attestation, but it still is not a standalone globally authenticated lineage artifact.
+  Proof: `docs/specs.md:1455-1478`, `docs/specs.md:1579-1583`, `crates/cityg-api/proto/cityg.proto:243,248-251`, `crates/cityg-api-client/src/lib.rs:988-1038`, `crates/cityg-gui/src/native/barrier_core.rs:568-589`.
 - `5.8` `Partial` — retention/fetch/config contracts are better tied to history and now have hard helper paging / replay-state bounds, but still are not backed by one signed global deployment manifest and global canonity.
   Proof: `docs/specs.md:220-238`, `docs/specs.md:618-638`, `docs/specs.md:1532`, and the remaining open Audit 2 / Audit 3 findings.
 
@@ -138,8 +138,8 @@ Summary:
 
 - `7.1` `Open` — snapshot authentication is still not a proof of globally canonical history.
   Proof: `docs/specs.md:165-170`, `docs/specs.md:215-223`.
-- `7.2` `Open` — critical acceptance invariants are still not fully replayed client-side before activation.
-  Proof: `docs/specs.md:1154-1157` and lack of a full client revalidation subset for all S10 guards.
+- `7.2` `Partial` — clients now replay a mandatory client-visible subset of activation invariants before committing recovered or locally pending barrier state, but they still do not replay the full server-side S10 policy surface.
+  Proof: `docs/specs.md:1168-1174`, `docs/specs.md:1470-1496`, `crates/cityg-gui/src/native/barrier_runtime.rs:486-655`, `crates/cityg-gui/src/native/epoch_sync.rs:65-206`, `crates/cityg-gui/src/native/barrier_ops.rs:107-171`, `crates/cityg-gui/src/native/tests/mod.rs:250-592,6200-6260,7184-7321`.
 - `7.3` `Partial` — `ResolveJoinsSince` is now tied to an exact authenticated view and shared commitment, but not yet to a globally canonical target state with completeness proof.
   Proof: `docs/specs.md:180-189`, `docs/specs.md:197-213`.
 - `7.4` `Open` — omission/completeness proofs for joins/revocations are still missing.
@@ -169,6 +169,8 @@ Summary:
   `docs/specs.md:324-338`, `docs/specs.md:1072-1127`, `docs/specs.md:1716-1731`, `crates/msphf-orchestrator/src/lib.rs:698-845`, `crates/cityg-gui/src/native/tests/mod.rs:1484-1539`.
 - Self-describing HP transport forms and deterministic sender leaf semantics:
   `docs/specs.md:271-303`, `docs/specs.md:600-606`, `crates/msphf-orchestrator/src/lib.rs:737-845`, `crates/msphf-orchestrator/src/accept/stages.rs:210-244,714-736`, `crates/cityg-gui/src/native/message_auth.rs:139-156,388-437`.
+- End-to-end sender/device signing and predecessor-snapshot helper coherence:
+  `docs/specs.md:1181-1190`, `crates/cityg-gui/src/native/message_auth.rs:97-156`, `crates/cityg-gui/src/native/network_messages.rs:14-50`, `crates/cityg-server/src/lib.rs:2396-2445,10749-10780`, `crates/cityg-gui/src/native/tests/mod.rs:7606-7659,8670-8740`.
 - Bounded and crash-safe anti-replay release path:
   `docs/specs.md:616-638`, `crates/cityg-gui/src/message_crypto.rs:9-120`, `crates/cityg-gui/src/native/network_messages.rs:107-118,147-149,225`, `crates/cityg-gui/src/native/session_fetch.rs:119-175`, `crates/cityg-gui/src/native/tests/mod.rs:2702-2753`.
 

@@ -62,6 +62,7 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
         ));
     }
     let previous_we_epoch_id = session.we_epoch_id;
+    let activation_source_before_sync = capture_barrier_pending_activation_source(&session);
     session.barrier_state.max_barrier_update_bytes = ticket_max_barrier_update_bytes_u64;
     session.barrier_state.n_max = ticket_n_max;
     session.barrier_state.cover_leaf_index = ticket.cover_leaf_index;
@@ -136,6 +137,9 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
             hex_encode(gid)
         ));
     }
+    if has_barrier_update {
+        validate_client_visible_activation_guards(&session, &bundle.header_map)?;
+    }
 
     let defer_epoch_derivation = uses_barrier_hp_envelope && has_barrier_update;
     let mut derived_epoch_key = None;
@@ -198,8 +202,9 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
     let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC);
     let observed_barrier_update_reason =
         header_u64(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON);
-    let pending_changed_with_bundle = apply_pending_barrier_activation(
+    let pending_changed_with_bundle = apply_pending_barrier_activation_with_source(
         &mut session,
+        &activation_source_before_sync,
         ticket.barrier_version,
         observed_fs_ec,
         observed_barrier_update_reason,

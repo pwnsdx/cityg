@@ -277,3 +277,13 @@ Statut audit mis à jour:
 - **Closed**: 2.1, 2.2, 2.4, 2.6
 - **Partial**: 2.5
 - **Reclassified**: 2.3
+
+--
+
+## Commentaires Codex (2026-03-26, tranche message-plane signer alignment)
+
+Nouvelle vérification implémentation:
+
+- le chemin concret `perform_send` de la GUI ne réutilise plus une famille de clé incompatible avec la vérification `sender_leaf_id`; il signe maintenant avec la même identité de device persistée que la réception rebind vers `leaf_id`;
+- le scénario d’intégration `perform_join_second_member_can_send_immediately` repasse, ce qui prouve que la self-finalization join n’aboutit plus à une session incapable de signer sur le message-plane;
+- le binaire `join_leave` a été réaligné sur la même sémantique de signature/vérification pour éviter de garder un deuxième frontend divergent.

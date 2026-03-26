@@ -419,6 +419,7 @@ proptest! {
             barrier_update_reason,
             barrier_update_digest,
             on_path_key_material: on_path.clone(),
+            activation_source: Some(capture_barrier_pending_activation_source(&session)),
         });
 
         persist_session(&session).map_err(testcase_fail)?;

@@ -120,6 +120,14 @@ fn apply_local_published_barrier_merge(
         pending_barrier_state,
         mut forward_state_after,
     } = published;
+    let activation_source_before_apply = capture_barrier_pending_activation_source(session);
+    let has_barrier_update = matches!(
+        bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE),
+        Some(Value::Bytes(_))
+    );
+    if has_barrier_update {
+        validate_client_visible_activation_guards(session, &bundle.header_map)?;
+    }
     session.barrier_state.pending = Some(pending_barrier_state.clone());
     session.we_epoch_id = bundle.we_epoch_id;
     session.xk_hash = bundle.hp_binding.xk_hash;
@@ -167,8 +175,9 @@ fn apply_local_published_barrier_merge(
     let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC);
     let observed_barrier_update_reason =
         header_u64(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON);
-    if !apply_pending_barrier_activation(
+    if !apply_pending_barrier_activation_with_source(
         session,
+        &activation_source_before_apply,
         observed_barrier_version,
         observed_fs_ec,
         observed_barrier_update_reason,
@@ -479,6 +488,13 @@ async fn publish_revocation_merge_from_ticket(
         barrier_update_reason: Some(0),
         barrier_update_digest: barrier_update.barrier_update_digest,
         on_path_key_material: barrier_update.on_path_key_material.clone(),
+        activation_source: Some(BarrierPendingActivationSource {
+            barrier_version,
+            barrier_roots_hash: committed_revocation_roots_hash,
+            kem_tree_hash_after: snapshot_hash,
+            fs_ec,
+            fs_dev_prev_commit,
+        }),
     };
 
     let params = OrchestrationParams {
@@ -1053,6 +1069,13 @@ async fn perform_barrier_merge_inner(
         barrier_update_reason: Some(mode.reason()),
         barrier_update_digest: barrier_update.barrier_update_digest,
         on_path_key_material: barrier_update.on_path_key_material.clone(),
+        activation_source: Some(BarrierPendingActivationSource {
+            barrier_version,
+            barrier_roots_hash: committed_revocation_roots_hash,
+            kem_tree_hash_after: snapshot_hash,
+            fs_ec,
+            fs_dev_prev_commit,
+        }),
     };
 
     let params = OrchestrationParams {

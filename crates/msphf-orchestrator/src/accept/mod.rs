@@ -1927,6 +1927,10 @@ fn is_known_header_key(key: u64, is_merge: bool) -> bool {
             | HDR_BARRIER_VERSION
             | HDR_BARRIER_LEAF_PK
             | HDR_BARRIER_UPDATE_REASON
+            | HDR_JOIN_FINALIZE_AUTH
+            | HDR_BARRIER_HISTORY_COMMITMENT
+            | HDR_BARRIER_FULL_VERIFICATION_RECEIPT
+            | HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION
             | HDR_VRF_MASK_A
             | HDR_VRF_MASK_B
             | HDR_VRF_PUBLIC_KEY
@@ -4041,6 +4045,11 @@ mod tests {
             ensure_known_header_keys(&unknown, false),
             Err(AcceptanceError::Freeze(code)) if code == FREEZE_HASH_CBOR
         ));
+        header.insert(HDR_JOIN_FINALIZE_AUTH, Value::Bytes(vec![0x11; 32]));
+        header.insert(
+            HDR_BARRIER_HISTORY_COMMITMENT,
+            Value::Bytes(vec![0x82, 0x40, 0x40, 0x40, 0x00]),
+        );
         ensure_known_header_keys(&header, true)?;
 
         Ok(())

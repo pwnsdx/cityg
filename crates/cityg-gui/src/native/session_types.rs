@@ -27,8 +27,8 @@ pub(super) struct AppSession {
     pub(super) fs_epoch_rotation_interval_secs: u64, // Epoch rotation interval (default: 300 = 5 min)
     pub(super) pop_public_key: Vec<u8>,
     pub(super) pop_secret_key: Vec<u8>,
-    pub(super) msg_sign_public_key: Vec<u8>, // ML-DSA-65 (Dilithium3) for message authentication
-    pub(super) msg_sign_secret_key: Vec<u8>, // ML-DSA-65 (Dilithium3) for message authentication
+    pub(super) msg_sign_public_key: Vec<u8>, // message-auth signer public key
+    pub(super) msg_sign_secret_key: Vec<u8>, // message-auth signer secret key
     pub(super) vrf_secret_key: Vec<u8>,
     pub(super) vrf_public_key: Vec<u8>,
     pub(super) kbroad_public: Vec<u8>,
@@ -135,6 +135,15 @@ impl Drop for BarrierNodeKeyMaterial {
     }
 }
 
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct BarrierPendingActivationSource {
+    pub(super) barrier_version: u64,
+    pub(super) barrier_roots_hash: [u8; 32],
+    pub(super) kem_tree_hash_after: [u8; 32],
+    pub(super) fs_ec: u64,
+    pub(super) fs_dev_prev_commit: [u8; 32],
+}
+
 #[derive(Clone, Default)]
 pub(super) struct BarrierPendingState {
     pub(super) barrier_version: u64,
@@ -150,6 +159,7 @@ pub(super) struct BarrierPendingState {
     pub(super) barrier_update_reason: Option<u64>,
     pub(super) barrier_update_digest: [u8; 32],
     pub(super) on_path_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
+    pub(super) activation_source: Option<BarrierPendingActivationSource>,
 }
 
 #[derive(Clone)]

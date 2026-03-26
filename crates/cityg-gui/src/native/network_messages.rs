@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use pqcrypto_dilithium::dilithium3::{
+use pqcrypto_dilithium::dilithium5::{
     public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
 };
 

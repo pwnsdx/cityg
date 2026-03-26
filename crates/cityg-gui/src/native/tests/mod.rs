@@ -182,6 +182,49 @@ fn build_test_session(
     Ok(session)
 }
 
+fn current_pending_activation_source(
+    session: &AppSession,
+) -> Option<BarrierPendingActivationSource> {
+    Some(capture_barrier_pending_activation_source(session))
+}
+
+fn build_activation_guard_header(
+    session: &AppSession,
+    barrier_version: u64,
+    fs_ec: u64,
+    raw_update: &[u8],
+) -> Result<BTreeMap<u64, Value>, Box<dyn std::error::Error>> {
+    let barrier_update_digest = compute_barrier_update_digest(raw_update)?;
+    let fs_dev_commit = compute_fs_dev_commit_v2(
+        session.pop_public_key.as_slice(),
+        fs_ec,
+        &session.fs_dev_prev_commit,
+        barrier_version,
+        &barrier_update_digest,
+    )?;
+    let mut header = BTreeMap::new();
+    header.insert(
+        hdr::HDR_POP_PK,
+        Value::Bytes(session.pop_public_key.clone()),
+    );
+    header.insert(hdr::HDR_FS_EC, Value::Integer(Integer::from(fs_ec)));
+    header.insert(
+        hdr::HDR_FS_EPOCH_BASE_TS,
+        Value::Integer(Integer::from(session.fs_epoch_base_ts)),
+    );
+    header.insert(
+        hdr::HDR_FS_DEV_PREV_COMMIT,
+        Value::Bytes(session.fs_dev_prev_commit.to_vec()),
+    );
+    header.insert(hdr::HDR_FS_DEV_COMMIT, Value::Bytes(fs_dev_commit.to_vec()));
+    header.insert(
+        hdr::HDR_BARRIER_VERSION,
+        Value::Integer(Integer::from(barrier_version)),
+    );
+    header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(raw_update.to_vec()));
+    Ok(header)
+}
+
 fn fault_step(
     cut_point: FaultInjectionCutPoint,
     action: FaultInjectionAction,
@@ -230,6 +273,7 @@ fn pending_barrier_activation_applies_on_digest_match() -> Result<(), Box<dyn st
         barrier_update_reason: Some(1),
         barrier_update_digest: digest,
         on_path_key_material: on_path,
+        activation_source: current_pending_activation_source(&session),
     });
 
     let changed =
@@ -277,6 +321,7 @@ fn pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs()
         barrier_update_reason: Some(2),
         barrier_update_digest: [0x67; 32],
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let changed =
@@ -319,6 +364,7 @@ fn pending_barrier_activation_keeps_state_when_overtaken_without_exact_match()
         barrier_update_reason: Some(1),
         barrier_update_digest: [0x44; 32],
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let changed = apply_pending_barrier_activation(&mut session, 6, None, None, None)?;
@@ -346,6 +392,7 @@ fn pending_barrier_activation_keeps_state_on_digest_mismatch()
         barrier_update_reason: Some(1),
         barrier_update_digest: [0x91; 32],
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let changed =
@@ -376,6 +423,7 @@ fn pending_barrier_activation_does_not_activate_on_digest_match_with_newer_obser
         barrier_update_reason: Some(1),
         barrier_update_digest: digest,
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let changed =
@@ -414,6 +462,7 @@ fn pending_join_finalize_activation_does_not_activate_on_digest_match_with_newer
         barrier_update_reason: Some(2),
         barrier_update_digest: digest,
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let changed =
@@ -452,6 +501,7 @@ fn pending_barrier_activation_keeps_state_on_fs_ec_mismatch()
         barrier_update_reason: Some(1),
         barrier_update_digest: digest,
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let changed =
@@ -460,6 +510,84 @@ fn pending_barrier_activation_keeps_state_on_fs_ec_mismatch()
     assert!(session.barrier_state.pending.is_some());
     assert_eq!(session.barrier_state.barrier_version, 0);
     assert_eq!(session.forward_state.snapshot().k_fs, [0xAAu8; 32]);
+    Ok(())
+}
+
+#[test]
+fn pending_barrier_activation_requires_matching_persisted_source_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB6, "http://127.0.0.1:9", "room-b5", "bob")?;
+    let digest = [0x51; 32];
+    session.barrier_state.pending = Some(BarrierPendingState {
+        barrier_version: 7,
+        we_epoch_id: [0x46; 32],
+        fs_ec: 31,
+        next_forward_fs_ec: 0,
+        next_forward_fs_dev_commit: [0u8; 32],
+        next_forward_last_weid: [0u8; 32],
+        revocation_roots_hash: [0x61; 32],
+        kem_tree_hash_after: [0x71; 32],
+        k_barrier_new: Zeroizing::new([0x81; 32]),
+        k_fs_after_pcs: Some(Zeroizing::new([0x91; 32])),
+        barrier_update_reason: Some(1),
+        barrier_update_digest: digest,
+        on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
+    });
+
+    session.fs_dev_prev_commit = [0xEE; 32];
+    let err = apply_pending_barrier_activation(&mut session, 7, Some(31), Some(1), Some(digest))
+        .expect_err("mismatched persisted activation source must fail closed");
+    assert!(
+        err.to_string().contains("960.9"),
+        "unexpected activation-source mismatch error: {err}"
+    );
+    assert!(
+        session.barrier_state.pending.is_some(),
+        "failed activation must retain pending state for recovery"
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_accepts_valid_local_bundle()
+-> Result<(), Box<dyn std::error::Error>> {
+    let session = build_test_session(0xB7, "http://127.0.0.1:9", "room-b6", "bob")?;
+    let header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xBB])?;
+    validate_client_visible_activation_guards(&session, &header)?;
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_rejects_tampered_dev_chain_bind()
+-> Result<(), Box<dyn std::error::Error>> {
+    let session = build_test_session(0xB8, "http://127.0.0.1:9", "room-b7", "bob")?;
+    let mut header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xCC])?;
+    header.insert(hdr::HDR_FS_DEV_COMMIT, Value::Bytes([0xEF; 32].to_vec()));
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("tampered fs_dev_commit must fail");
+    assert!(
+        err.to_string().contains("947.2"),
+        "unexpected dev-chain-bind error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_rejects_fs_epoch_base_ts_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let session = build_test_session(0xB9, "http://127.0.0.1:9", "room-b8", "bob")?;
+    let mut header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xDD])?;
+    header.insert(
+        hdr::HDR_FS_EPOCH_BASE_TS,
+        Value::Integer(Integer::from(session.fs_epoch_base_ts.saturating_add(1))),
+    );
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("mismatched fs_epoch_base_ts must fail");
+    assert!(
+        err.to_string().contains("945.0"),
+        "unexpected fs_epoch_base_ts error: {err}"
+    );
     Ok(())
 }
 
@@ -5747,6 +5875,13 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             barrier_update_reason: Some(1),
             barrier_update_digest: array(0x29),
             on_path_key_material: pending_on_path,
+            activation_source: Some(BarrierPendingActivationSource {
+                barrier_version: 5,
+                barrier_roots_hash: array(0x20),
+                kem_tree_hash_after: array(0x22),
+                fs_ec: 17,
+                fs_dev_prev_commit: array(0x13),
+            }),
         }),
         barrier_recovery_pending: true,
         barrier_recovery_issue: Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory),
@@ -6089,6 +6224,7 @@ fn persisted_pending_state_mismatch_survives_restart_without_normalization()
         barrier_update_reason: Some(2),
         barrier_update_digest: [0x48; 32],
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
     persist_session(&session)?;
 
@@ -6145,6 +6281,7 @@ fn pending_barrier_activation_fault_injection_preserves_pending_state_on_error()
         barrier_update_reason: Some(2),
         barrier_update_digest: [0x67; 32],
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let err = with_fault_injection(
@@ -6692,6 +6829,7 @@ async fn pending_join_finalize_history_lookup_retains_state_after_history_404()
         barrier_update_reason: Some(2),
         barrier_update_digest: [0xD5; 32],
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let outcome = apply_pending_barrier_activation_from_history(&client, &mut session, 5).await?;
@@ -6744,6 +6882,7 @@ async fn pending_join_finalize_history_lookup_404_after_newer_version_requires_r
         barrier_update_reason: Some(2),
         barrier_update_digest: [0xD5; 32],
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let outcome = apply_pending_barrier_activation_from_history(&client, &mut session, 6).await?;
@@ -6891,6 +7030,7 @@ async fn pending_barrier_history_lookup_discards_superseded_locator()
         barrier_update_reason: Some(2),
         barrier_update_digest: [0xEE; 32],
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let client = new_api_client(&server_url);
@@ -7025,6 +7165,7 @@ async fn pending_barrier_history_lookup_discards_final_rejected_locator()
         barrier_update_reason: Some(1),
         barrier_update_digest: [0xE5; 32],
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let client = new_api_client(&server_url);
@@ -7159,6 +7300,7 @@ async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
         barrier_update_reason: Some(1),
         barrier_update_digest: [0xE5; 32],
         on_path_key_material: BTreeMap::new(),
+        activation_source: current_pending_activation_source(&session),
     });
 
     let client = new_api_client(&server_url);

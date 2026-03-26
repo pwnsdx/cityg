@@ -483,6 +483,92 @@ pub(super) fn apply_forward_state_snapshot(
     session.forward_state = updated_state;
 }
 
+pub(super) fn capture_barrier_pending_activation_source(
+    session: &AppSession,
+) -> BarrierPendingActivationSource {
+    BarrierPendingActivationSource {
+        barrier_version: session.barrier_state.barrier_version,
+        barrier_roots_hash: session.barrier_state.barrier_roots_hash,
+        kem_tree_hash_after: session.barrier_state.kem_tree_hash_after,
+        fs_ec: session.fs_ec,
+        fs_dev_prev_commit: session.fs_dev_prev_commit,
+    }
+}
+
+fn validate_pending_activation_source_state(
+    current_source: &BarrierPendingActivationSource,
+    pending: &BarrierPendingState,
+) -> Result<()> {
+    let Some(expected_source) = pending.activation_source.as_ref() else {
+        return Ok(());
+    };
+
+    if current_source != expected_source {
+        return Err(anyhow!(
+            "pending barrier activation preconditions no longer match the locally persisted pre-publish state (960.9)"
+        ));
+    }
+
+    Ok(())
+}
+
+pub(super) fn validate_client_visible_activation_guards(
+    session: &AppSession,
+    header_map: &BTreeMap<u64, Value>,
+) -> Result<()> {
+    let fs_epoch_base_ts = header_u64(header_map, hdr::HDR_FS_EPOCH_BASE_TS).ok_or_else(|| {
+        anyhow!("client-side activation guard failed (945.0): missing fs_epoch_base_ts")
+    })?;
+    if session.fs_epoch_base_ts != 0 && fs_epoch_base_ts != session.fs_epoch_base_ts {
+        return Err(anyhow!(
+            "client-side activation guard failed (945.0): fs_epoch_base_ts mismatch"
+        ));
+    }
+
+    let author_device_pk = header_map
+        .get(&hdr::HDR_POP_PK)
+        .and_then(Value::as_bytes)
+        .ok_or_else(|| {
+            anyhow!("client-side activation guard failed (947.2): missing author_device_pk")
+        })?;
+    let fs_ec = header_u64(header_map, hdr::HDR_FS_EC)
+        .ok_or_else(|| anyhow!("client-side activation guard failed (947.2): missing fs_ec"))?;
+    let fs_dev_prev_commit =
+        header_bytes32(header_map, hdr::HDR_FS_DEV_PREV_COMMIT).ok_or_else(|| {
+            anyhow!("client-side activation guard failed (947.2): missing fs_dev_prev_commit")
+        })?;
+    let fs_dev_commit = header_bytes32(header_map, hdr::HDR_FS_DEV_COMMIT).ok_or_else(|| {
+        anyhow!("client-side activation guard failed (947.2): missing fs_dev_commit")
+    })?;
+    let barrier_version = header_u64(header_map, hdr::HDR_BARRIER_VERSION).ok_or_else(|| {
+        anyhow!("client-side activation guard failed (947.2): missing barrier_version")
+    })?;
+    let barrier_update_digest = extract_barrier_update_digest(header_map)?.unwrap_or([0u8; 32]);
+    let expected_fs_dev_commit = compute_fs_dev_commit_v2(
+        author_device_pk,
+        fs_ec,
+        &fs_dev_prev_commit,
+        barrier_version,
+        &barrier_update_digest,
+    )
+    .map_err(|err| anyhow!("client-side activation guard failed (947.2): {err}"))?;
+    if fs_dev_commit != expected_fs_dev_commit {
+        return Err(anyhow!(
+            "client-side activation guard failed (947.2): fs_dev_chain_bind mismatch"
+        ));
+    }
+
+    if author_device_pk == session.pop_public_key.as_slice() {
+        if fs_dev_prev_commit != session.fs_dev_prev_commit || fs_ec < session.fs_ec {
+            return Err(anyhow!(
+                "client-side activation guard failed (947.0): local device chain continuity mismatch"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) fn bundle_authored_by_local_device(
     session: &AppSession,
     header: &BTreeMap<u64, Value>,
@@ -508,6 +594,25 @@ pub(super) fn apply_pending_barrier_activation(
     observed_barrier_update_reason: Option<u64>,
     accepted_digest: Option<[u8; 32]>,
 ) -> Result<bool> {
+    let current_source = capture_barrier_pending_activation_source(session);
+    apply_pending_barrier_activation_with_source(
+        session,
+        &current_source,
+        observed_barrier_version,
+        observed_fs_ec,
+        observed_barrier_update_reason,
+        accepted_digest,
+    )
+}
+
+pub(super) fn apply_pending_barrier_activation_with_source(
+    session: &mut AppSession,
+    current_source: &BarrierPendingActivationSource,
+    observed_barrier_version: u64,
+    observed_fs_ec: Option<u64>,
+    observed_barrier_update_reason: Option<u64>,
+    accepted_digest: Option<[u8; 32]>,
+) -> Result<bool> {
     let Some(pending) = session.barrier_state.pending.clone() else {
         return Ok(false);
     };
@@ -522,6 +627,7 @@ pub(super) fn apply_pending_barrier_activation(
         && observed_fs_ec == Some(pending.fs_ec)
         && observed_barrier_update_reason == pending.barrier_update_reason
     {
+        validate_pending_activation_source_state(current_source, &pending)?;
         let BarrierPendingState {
             barrier_version,
             k_barrier_new,

@@ -64,11 +64,11 @@ use msphf_core::{
 use msphf_orchestrator::CapssWitnessBundle;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
-    OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_leaf_id,
-    compute_proofs_commit_bytes, derive_we_epoch_id, hdr,
+    OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_fs_dev_commit_v2,
+    compute_leaf_id, compute_proofs_commit_bytes, derive_we_epoch_id, hdr,
 };
 #[cfg(test)]
-use pqcrypto_dilithium::dilithium3::{
+use pqcrypto_dilithium::dilithium5::{
     public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
 };
 use pqcrypto_dilithium::{

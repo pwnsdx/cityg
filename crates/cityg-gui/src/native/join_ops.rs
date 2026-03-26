@@ -168,8 +168,9 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
 
     // Room-scoped PoP identity was loaded or created above.
 
-    // Generate ML-DSA-65 (Dilithium3) keys for message authentication
-    let (msg_sign_pk, msg_sign_sk) = dilithium3::keypair();
+    // Keep the persisted message-auth key material aligned with the active
+    // sender-device signer family used on the message plane.
+    let (msg_sign_pk, msg_sign_sk) = dilithium5::keypair();
     let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
     let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
 

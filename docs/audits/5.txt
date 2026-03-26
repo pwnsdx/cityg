@@ -295,3 +295,15 @@ Statut final de cet audit après relecture complète spec + implémentation:
 Le reste utile de cet audit se concentre sur la finalité/canonité globale et sur un artefact de provisioning encore plus fort, pas sur les bindings locaux déjà corrigés.
 
 Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche provisioning/current-tree alignment)
+
+Nouvelle passe spec + implémentation:
+
+- le provisioning `join_finalize` n’échoue plus localement quand le `current tree` provisionné est re-fetché sous un commitment plus récent mais avec les mêmes bytes d’arbre courant;
+- la spec précise maintenant que, pour ce `current tree` précis, l’authentification critique vient du `current barrier_update` provisionné et de son `kem_tree_hash_after`, tandis que les réponses A/B restent, elles, liées au commitment provisionné;
+- côté serveur, `FetchBarrierPublicTree(current hash)` préfère désormais l’état courant et son commitment courant, ce qui supprime une ambiguïté locale entre snapshot historique retenu et snapshot courant.
+
+Statut audit: **COMPLETED**, avec meilleure cohérence locale entre artefact de provisioning, helper fetch et bootstrap courant; la question d’un artefact de lineage globalement canonique reste ouverte.
