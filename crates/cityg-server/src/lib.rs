@@ -356,6 +356,8 @@ pub struct MergeTicketBundle {
     pub barrier_version: u64,
     pub cover_leaf_index: u64,
     pub kem_tree_hash_after: [u8; 32],
+    pub current_history_view_id: [u8; 32],
+    pub current_history_commitment: HistoryCommitment,
     pub n_max: u64,
     pub max_barrier_update_bytes: u64,
 }
@@ -1345,6 +1347,10 @@ impl CityGServer {
             .unwrap_or_default();
         let barrier_n_max = validate_barrier_n_max(barrier_state.n_max)?;
         let barrier_version = barrier_state.barrier_version;
+        let current_history_commitment = {
+            let state = self.roster.groups.entry(gid.to_vec()).or_default();
+            ensure_current_history_commitment(gid, state)?
+        };
         let cover_leaf_index = u64::from(cover_leaf_index(
             revoked_leaf_id.as_ref().unwrap_or(author_leaf_id),
             barrier_n_max,
@@ -1394,6 +1400,8 @@ impl CityGServer {
             barrier_version,
             cover_leaf_index,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
+            current_history_view_id: current_history_commitment.history_view_id,
+            current_history_commitment,
             n_max: barrier_n_max,
             max_barrier_update_bytes,
         })

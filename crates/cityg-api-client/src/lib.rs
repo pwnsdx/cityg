@@ -1099,6 +1099,9 @@ impl CitygApiClient {
         let tswe_salt_hash = array32(&response.tswe_salt_hash)?;
         let pox_r_commit = array32(&response.pox_r_commit)?;
         let n_max = validate_barrier_n_max(response.n_max)?;
+        let current_history_view_id = array32(&response.current_history_view_id)?;
+        let current_history_commitment =
+            parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
         if response.cover_leaf_index >= n_max {
             return Err(Error::Parse(format!(
                 "merge ticket cover_leaf_index out of range: {} >= {}",
@@ -1130,6 +1133,7 @@ impl CitygApiClient {
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
+            current_history_commitment,
             n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
@@ -1823,6 +1827,7 @@ pub struct MergeTicket {
     pub barrier_version: u64,
     pub cover_leaf_index: u64,
     pub kem_tree_hash_after: [u8; 32],
+    pub current_history_commitment: HistoryCommitment,
     pub n_max: u64,
     pub max_barrier_update_bytes: u64,
 }
@@ -1984,6 +1989,8 @@ mod tests {
             kem_tree_hash_after: vec![0x09; 32],
             n_max: 1024,
             max_barrier_update_bytes: 1_048_576,
+            current_history_view_id: vec![0xD1; 32],
+            current_history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
         }
     }
 
@@ -2523,6 +2530,10 @@ mod tests {
         assert_eq!(merge.kbroad_generation, 0);
         assert_eq!(merge.cover_leaf_index, 0);
         assert_eq!(merge.kem_tree_hash_after, [0x09; 32]);
+        assert_eq!(
+            merge.current_history_commitment.history_commitment_id,
+            [0xE1; 32]
+        );
         assert_eq!(merge.n_max, 1024);
         assert_eq!(merge.max_barrier_update_bytes, 1_048_576);
         let refresh_merge = client.merge_ticket_refresh("room-1", &[0x01; 32]).await?;
@@ -2811,6 +2822,25 @@ mod tests {
         assert!(matches!(
             err,
             Error::Parse(message) if message.contains("invalid 32-byte field")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_rejects_missing_current_history_commitment()
+    -> Result<(), Box<dyn StdError>> {
+        let mut payload = merge_ticket_ok_payload();
+        payload.current_history_commitment = None;
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("missing current_history_commitment must fail");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("missing history_commitment")
         ));
         handle.abort();
         Ok(())

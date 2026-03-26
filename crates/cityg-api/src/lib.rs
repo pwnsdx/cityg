@@ -1370,6 +1370,8 @@ fn encode_merge_ticket_response(bundle: MergeTicketBundle) -> Result<Vec<u8>, Ap
         barrier_version,
         cover_leaf_index,
         kem_tree_hash_after,
+        current_history_view_id,
+        current_history_commitment,
         n_max,
         max_barrier_update_bytes,
     } = bundle;
@@ -1406,6 +1408,8 @@ fn encode_merge_ticket_response(bundle: MergeTicketBundle) -> Result<Vec<u8>, Ap
         kem_tree_hash_after: kem_tree_hash_after.to_vec(),
         n_max,
         max_barrier_update_bytes,
+        current_history_view_id: current_history_view_id.to_vec(),
+        current_history_commitment: Some(pb_history_commitment(current_history_commitment)),
     };
 
     let mut response_bytes = Vec::new();
@@ -5753,6 +5757,8 @@ mod tests {
         assert_eq!(decoded.revoked_since_root, expected_revoked_root.to_vec());
         assert_eq!(decoded.revoked_root, expected_revoked_root.to_vec());
         assert_eq!(decoded.kem_tree_hash_after.len(), 32);
+        assert_eq!(decoded.current_history_view_id.len(), 32);
+        assert!(decoded.current_history_commitment.is_some());
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);
         let expected_cover_leaf_index = u64::from(u32::from_be_bytes(
@@ -5782,6 +5788,8 @@ mod tests {
             .expect("refresh merge ticket request");
         let refresh_decoded: MergeTicketResponse = decode_proto_response(refresh_response).await;
         assert_eq!(refresh_decoded.srx_cbor, Vec::<u8>::new());
+        assert_eq!(refresh_decoded.current_history_view_id.len(), 32);
+        assert!(refresh_decoded.current_history_commitment.is_some());
         assert_eq!(refresh_decoded.join_delta_root, vec![0u8; 32]);
         assert_eq!(
             refresh_decoded.revoked_since_root,

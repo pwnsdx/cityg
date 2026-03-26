@@ -1102,6 +1102,7 @@ Before constructing any barrier_update, the updater MUST:
   * fetch pk_entries_prev := FetchBarrierPublicTree(H_prev).
   * Compute TreeHash(root_node) over pk_entries_prev per S11.4 and require it equals H_prev.
   * Because this updater flow uses the locally stored current committed tree as `snapshot_base`, the authenticated `HistoryCommitment` returned with `pk_entries_prev` MUST equal the authenticated current-state `HistoryCommitment` used for `ResolveJoinsSince(...)` and `ResolveRevokedLeaves(...)`; mismatch -> 960.9.
+  * If the deployment exposes a merge-ticket helper/API for this current state, that helper MUST also identify the same current-state `HistoryCommitment`; clients MUST reject the helper result if the fetched current snapshot/A/B responses do not match it.
   * The emitted MERGE anchor MUST carry that exact current-state `HistoryCommitment` as `header[180]`.
   * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
 Join-finalize bootstrap exception (normative):

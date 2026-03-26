@@ -258,3 +258,15 @@ Nouvelle passe spec + implémentation:
 - **Toujours ouvert**: ce renfort reste local à un serveur/API donné; il ne donne ni complétude forte, ni canonité append-only globale inter-serveurs.
 
 Statut audit: **COMPLETED**, avec renforcement supplémentaire du binding history wire-visible.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 11)
+
+Nouvelle passe spec + implémentation:
+
+- **Binding helper-state renforcé**: le merge-ticket n’est plus un objet flottant purement “best effort”; il déclare maintenant explicitement le `HistoryCommitment` courant auquel il correspond.
+- **Fail-closed côté client API**: un `MergeTicketResponse` sans `current_history_commitment` est maintenant rejeté au parse.
+- **Fail-closed côté GUI**: le snapshot courant fetché pour construire `snapshot_pre` doit matcher le commitment annoncé par le ticket, avant même la comparaison avec `JoinSet` / `RevokedLeafSet`.
+
+Statut audit: **COMPLETED**, avec fermeture supplémentaire d’un gap de binding entre helper de ticket et dépendances history.

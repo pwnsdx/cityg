@@ -280,3 +280,17 @@ Nouvelle passe spec + implémentation:
 Conclusion:
 
 L’audit 4 est **encore partiellement ouvert**, mais la frontière `reason 0/1` n’est plus totalement honnête-client-only: le serveur exige maintenant au moins le binding explicite au `HistoryCommitment` courant.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 11)
+
+Nouvelle passe spec + implémentation:
+
+- **Le merge-ticket annonce maintenant sa vue courante**: `MergeTicketResponse` transporte désormais le `current_history_view_id` et le `current_history_commitment` du state courant ticketé.
+- **Contrôle client supplémentaire**: avant d’originer une merge avec `barrier_update`, le GUI exige maintenant que le ticket et le snapshot public courant fetché partagent le même `HistoryCommitment`, puis il recoupe ce même commitment avec A/B.
+- **Portée**: cela ne crée toujours pas une preuve de FULL verification, mais cela retire une autre latitude où le helper `merge_ticket` pouvait implicitement représenter une vue différente de celle ensuite utilisée pour construire `snapshot_pre`.
+
+Conclusion:
+
+L’audit 4 reste **partiellement ouvert**, mais le chemin helper `merge_ticket -> snapshot/A/B -> header[180]` est maintenant beaucoup plus cohérent et explicite.

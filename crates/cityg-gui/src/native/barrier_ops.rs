@@ -2,6 +2,7 @@ use super::epoch_sync::perform_epoch_sync;
 use super::*;
 use crate::barrier_shared::{
     encode_history_commitment_header, require_current_state_history_commitment,
+    require_same_history_commitment,
 };
 
 fn is_fs_forward_jump_group_http_error(
@@ -308,6 +309,7 @@ async fn publish_revocation_merge_from_ticket(
         barrier_version,
         cover_leaf_index: revoked_cover_leaf_index,
         kem_tree_hash_after,
+        current_history_commitment: ticket_history_commitment,
         n_max,
         max_barrier_update_bytes,
     } = ticket;
@@ -375,6 +377,16 @@ async fn publish_revocation_merge_from_ticket(
         ));
     }
     validate_barrier_tree_snapshot_auth(&snapshot_hash, barrier_n_max, &barrier_tree_snapshot)?;
+    if require_same_history_commitment(
+        &ticket_history_commitment,
+        &barrier_tree_response.history_commitment,
+    )
+    .is_err()
+    {
+        return Err(anyhow!(
+            "barrier merge ticket history commitment mismatch (960.9): ticket / current snapshot do not share one authenticated current-state commitment"
+        ));
+    }
     header.insert(
         hdr::HDR_BARRIER_HISTORY_COMMITMENT,
         Value::Bytes(encode_history_commitment_header(
@@ -867,6 +879,7 @@ async fn perform_barrier_merge_inner(
         barrier_version,
         cover_leaf_index,
         kem_tree_hash_after,
+        current_history_commitment: ticket_history_commitment,
         n_max,
         max_barrier_update_bytes,
     } = ticket;
@@ -941,6 +954,16 @@ async fn perform_barrier_merge_inner(
         ));
     }
     validate_barrier_tree_snapshot_auth(&snapshot_hash, barrier_n_max, &barrier_tree_snapshot)?;
+    if require_same_history_commitment(
+        &ticket_history_commitment,
+        &barrier_tree_response.history_commitment,
+    )
+    .is_err()
+    {
+        return Err(anyhow!(
+            "barrier merge ticket history commitment mismatch (960.9): ticket / current snapshot do not share one authenticated current-state commitment"
+        ));
+    }
     header.insert(
         hdr::HDR_BARRIER_HISTORY_COMMITMENT,
         Value::Bytes(encode_history_commitment_header(

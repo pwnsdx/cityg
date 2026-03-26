@@ -265,3 +265,15 @@ Nouvelle passe spec + implémentation:
 - **Limite inchangée**: cette passe ne crée pas de canonité append-only globale ni de preuve de complétude forte contre un ensemble de serveurs byzantins.
 
 Statut audit: **COMPLETED**, avec durcissement supplémentaire de la boundary “client-declared history context”.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 11)
+
+Nouvelle passe spec + implémentation:
+
+- **Moins de steering via helper ticket**: un serveur/API ne peut plus faire dériver silencieusement le client entre “vue du merge-ticket” et “vue du snapshot courant” sans déclencher un fail-closed local.
+- **Effet pratique**: le helper `merge_ticket` devient une entrée de contexte history explicite plutôt qu’un simple paquet de paramètres merge; cela réduit encore l’espace de divergence locale exploitable.
+- **Limite inchangée**: cette cohérence reste locale à un serveur donné et ne fournit toujours pas de canonité append-only globale.
+
+Statut audit: **COMPLETED**, avec renforcement supplémentaire de la boundary “ticket helper vs current authenticated view”.
