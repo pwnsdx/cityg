@@ -374,6 +374,7 @@ Key 177: barrier_leaf_pk (bstr; ML-KEM ek; MUST be 1184 bytes)
 S4.2.3 Keys PERMITTED only on MERGE anchors and FORBIDDEN on JOIN/REGULAR (merge-only)
 Key 175: barrier_update (bstr; optional; only when permitted by S10.4, S10.4A, S10.4B, S10.4C, and S11)
 Key 178: barrier_update_reason (uint; required iff key 175 is present)
+Key 179: join_finalize_auth (bstr32; required iff key 178 == 2; opaque server-issued capability for reason-2 join_finalize)
 
 S4.2.4 Merge/checkpoint keys (merge-only set)
 130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148
@@ -395,6 +396,7 @@ S4.3 Presence matrix summary (normative)
   MUST NOT include S4.2.2.
 Additional presence rule (normative):
 * key 178 MUST be present if and only if key 175 is present.
+* key 179 MUST be present if and only if key 178 == 2; it MUST be absent for merge reasons 0/1 and on all non-MERGE anchors.
 
 S4.4 Size limits (normative; deployments MAY tighten)
 Max bytes per header field (unless otherwise specified by type):
@@ -403,6 +405,7 @@ Max bytes per header field (unless otherwise specified by type):
 * header[161] max 16384
 * header[122] max 1048576
 * header[177] MUST be exactly 1184 bytes
+* header[179] MUST be exactly 32 bytes
 
 BarrierUpdate size policy (normative)
 * Deployment MUST define max_barrier_update_bytes (a positive integer).
@@ -1099,6 +1102,7 @@ Before constructing any barrier_update, the updater MUST:
 Join-finalize bootstrap exception (normative):
 * A newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if, it has:
   * the S12.2 provisioned current barrier metadata for the current committed state,
+  * the S12.2 provisioned `join_finalize_auth` capability bound to its `(gid, leaf_id, cover_leaf_index)`,
   * authenticated access to S3.3.A/B and to `FetchBarrierPublicTree(current kem_tree_hash_after)` at that same current committed state, with all such responses validating to the provisioned `current_history_commitment`,
   * the authenticated accepted current `barrier_update` bytes for that same current committed state, together with authenticated history material sufficient to authenticate the predecessor snapshot named by that accepted update,
   * and has executed the bootstrap verification context below for that accepted current committed state,
@@ -1142,6 +1146,7 @@ A client that cannot fetch/verify snapshot_base MAY still attempt recovery (uniq
 Additional restriction (normative):
 * A recover-only client MUST NOT originate `barrier_update`, MUST NOT act as updater, and MUST NOT originate pcs_refresh merges until it has obtained FULL verification of the current public tree at the current `barrier_version`.
 * Exception: a newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, after satisfying the S11.11.1 join_finalize bootstrap exception. Until then, and for all other reasons, the restriction above remains absolute.
+* A client originating reason 2 MUST carry the exact provisioned `header[179] join_finalize_auth` value from S12.2. Clients MUST NOT reuse a cleared or zero value.
 
 S11.12 Server-side validation of barrier_update (normative; MUST)
 
@@ -1151,6 +1156,8 @@ If header[175] present, the server MUST execute steps A through I in order:
 A) Gating
 * If header[178] is absent: reject 960.7.
 * If header[178] is present and header[178] is not in {0,1,2}: reject 960.7.
+* If header[178] == 2 and header[179] is absent or not exactly 32 bytes: reject 960.1.
+* If header[178] != 2 and header[179] is present: reject 960.7.
 * If barrier_initialized == true and pending_revocations == false and header[178] == 0: reject 960.5 barrier_proactive_forbidden.
 * If barrier_initialized == true and pending_revocations == true and header[178] != 0: reject 960.13.
 * If header[178] == 1, later steps MUST enforce S10.4B.
@@ -1193,6 +1200,7 @@ F) Updater identity binding + updater-not-revoked
   * Server MUST enforce S10.4B policy checks; on failure reject 960.12.
 * If header[178] == 2:
   * Require updater_leaf IN JoinLeafSet, else reject 960.5.
+  * Require `header[179]` to match one server-issued pending `join_finalize_auth` capability bound to the acting `(gid, leaf_id, updater_leaf)`; otherwise reject 960.1.
   * join_finalize MUST NOT execute S10.4B PCS rate-limit checks.
 
 G) Hash-chain checks MUST
@@ -1221,6 +1229,8 @@ Upon acceptance of this merge, server MUST set:
 * barrier_roots_hash := BU.revocation_roots_hash
 * kem_tree_hash_after := BU.kem_tree_hash_after
 and MUST persist the corresponding pk_entries snapshot_post as the current public tree.
+If header[178] == 2, the matched pending `join_finalize_auth` capability for that leaf MUST be consumed/cleared on acceptance.
+If any leaves are revoked by the accepted delta, any pending `join_finalize_auth` capability for those revoked leaves MUST be cleared.
 
 NOTE (security model): server-side checks alone do not protect against an actively malicious server. Active-server injection protections are enforced by updater chain-check (S11.11.1), FULL client chain-check (S11.11.2), and FULL client ek_n verification (S11.13.6).
 
@@ -1443,6 +1453,7 @@ Barrier required fields:
 * current predecessor committed `kem_tree_hash_after` (bstr32) for the accepted current `barrier_update` used by `join_finalize` bootstrap; this MAY be zero only when no accepted current `barrier_update` exists yet for the provisioned state
 * authenticated current `JoinSet` / `ResolveJoinsSince(BU_current.prev_barrier_version)` records for the provisioned current committed state, or an equivalent authenticated artifact from which the same set can be deterministically recovered
 * authenticated current `RevokedLeafSet` / `ResolveRevokedLeaves(BU_current.revocation_roots_hash)` records for the provisioned current committed state, or an equivalent authenticated artifact from which the same set can be deterministically recovered
+* `join_finalize_auth` (bstr32), an opaque server-issued capability bound at minimum to `(gid, leaf_id, cover_leaf_index)` and required as `header[179]` when the joiner later originates reason 2
 * current barrier_roots_hash (bstr32), OR authenticated current revocation-root material sufficient to deterministically compute the same barrier_roots_hash before any local S11.13.3 checks are applied
 * current kem_tree_hash_after (bstr32)
 * N_max (uint)

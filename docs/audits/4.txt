@@ -237,3 +237,18 @@ Nouvelle passe spec + implémentation:
 - **Toujours vrai**: cette fermeture reste client-side. Le serveur ne vérifie toujours pas une attestation wire-visible de FULL verification.
 
 Statut audit: **COMPLETED**, avec fermeture implémentation supplémentaire du bootstrap `reason=2`, mais sans transformer la frontière FULL/recover-only en propriété protocolaire serveur-vérifiable.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 8)
+
+Nouvelle passe spec + implémentation:
+
+- **Fermeture partielle réelle du gap `reason=2`**: le protocole profile/wire impose maintenant un `join_finalize_auth` opaque (`header[179]`), provisionné dans le join ticket et exigé côté serveur pour toute merge `join_finalize`.
+- **Server-checkable sur l’exception, pas sur FULL global**: le serveur ne se contente plus de `updater_leaf in JoinSet`; il exige aussi un capability serveur-émis lié au leaf pending. Cela ferme l’ancienne situation où l’exception `join_finalize` n’était visible/vérifiable nulle part sur le wire.
+- **Persisté crash-safe côté client et serveur**: le token est maintenant persisté avec l’artefact bootstrap côté GUI et avec l’état de room côté serveur; il est purgé après `join_finalize` accepté ou révocation de la leaf.
+- **Limite inchangée**: les merges `reason 0/1` restent honnête-client-enforced. Il n’existe toujours pas d’attestation wire-visible de FULL verification vérifiable par le serveur.
+
+Conclusion:
+
+Le finding principal de l’audit 4 est maintenant **réduit**: l’exception `join_finalize` n’est plus purement locale au client. En revanche, la frontière FULL/recover-only au sens large reste **partiellement ouverte** pour les paths `reason 0/1`.

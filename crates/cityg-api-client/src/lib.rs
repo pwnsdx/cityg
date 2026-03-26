@@ -155,11 +155,12 @@ use pb::{
     FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest, GetBundleResponse,
     GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse,
     HistoryCommitment as PbHistoryCommitment, JoinTicketRequest, JoinTicketResponse,
-    ListRoomAdminsRequest, ListRoomAdminsResponse, MembersRequest, MembersResponse, MergeAcceptanceStatus as PbMergeAcceptanceStatus,
-    MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
-    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse,
-    RotateRoomKbroadRequest, RotateRoomKbroadResponse, SearchMembersRequest, SearchMembersResponse,
-    SendMessageRequest, SendMessageResponse,
+    ListRoomAdminsRequest, ListRoomAdminsResponse, MembersRequest, MembersResponse,
+    MergeAcceptanceStatus as PbMergeAcceptanceStatus, MergeTicketIntent as PbMergeTicketIntent,
+    MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
+    RoomAdminMutationRequest, RoomAdminMutationResponse, RotateRoomKbroadRequest,
+    RotateRoomKbroadResponse, SearchMembersRequest, SearchMembersResponse, SendMessageRequest,
+    SendMessageResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -977,20 +978,17 @@ impl CitygApiClient {
             .clone()
             .map(|commitment| parse_history_commitment(current_history_view_id, Some(commitment)))
             .transpose()?;
-        let current_predecessor_kem_tree_hash_after = if response
-            .current_predecessor_kem_tree_hash_after
-            .is_empty()
-        {
-            [0u8; 32]
-        } else {
-            array32(&response.current_predecessor_kem_tree_hash_after)?
-        };
+        let current_predecessor_kem_tree_hash_after =
+            if response.current_predecessor_kem_tree_hash_after.is_empty() {
+                [0u8; 32]
+            } else {
+                array32(&response.current_predecessor_kem_tree_hash_after)?
+            };
         let requires_bootstrap_artifact = response.barrier_version > 0 || parent_root != [0u8; 32];
         if requires_bootstrap_artifact {
             if current_history_commitment.is_none() {
                 return Err(Error::Parse(
-                    "join ticket missing current_history_commitment for existing group"
-                        .to_string(),
+                    "join ticket missing current_history_commitment for existing group".to_string(),
                 ));
             }
             if response.current_barrier_update.is_empty() {
@@ -1004,6 +1002,11 @@ impl CitygApiClient {
                         .to_string(),
                 ));
             }
+        }
+        if response.join_finalize_auth_token.len() != 32 {
+            return Err(Error::Parse(
+                "join ticket missing join_finalize_auth_token".to_string(),
+            ));
         }
         if response.cover_leaf_index >= n_max {
             return Err(Error::Parse(format!(
@@ -1941,10 +1944,9 @@ mod tests {
         BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesResponse,
         BootstrapRoomResponse, ConfigureWindowResponse, FetchMessagesResponse, GetBundleResponse,
         GetTelemetryResponse, GetWindowResponse, HistoryCommitment as PbHistoryCommitment,
-        JoinTicketResponse, MembersResponse,
-        MergeAcceptanceStatus as PbMergeAcceptanceStatus, MergeTicketResponse,
-        RefreshPivotResponse, RotateRoomKbroadResponse, SearchMembersResponse, SeedHeadResponse,
-        SendMessageResponse,
+        JoinTicketResponse, MembersResponse, MergeAcceptanceStatus as PbMergeAcceptanceStatus,
+        MergeTicketResponse, RefreshPivotResponse, RotateRoomKbroadResponse, SearchMembersResponse,
+        SeedHeadResponse, SendMessageResponse,
     };
     use prost::Message;
     use std::{error::Error as StdError, net::SocketAddr};
@@ -1990,6 +1992,7 @@ mod tests {
             profile_version: EXPECTED_PROFILE_VERSION.to_string(),
             current_history_view_id: vec![0xD0; 32],
             current_history_commitment: Some(history_commitment_ok_payload(0xD0, 0xD1, 0x00, 1)),
+            join_finalize_auth_token: vec![0xE5; 32],
             cover_leaf_index: 0,
             n_max: 1024,
             max_barrier_update_bytes: 1_048_576,
@@ -2554,7 +2557,10 @@ mod tests {
             .await?;
         assert_eq!(acceptance.status, MergeAcceptanceStatus::Accepted);
         assert_eq!(acceptance.history_view_id, [0xD1; 32]);
-        assert_eq!(acceptance.history_commitment.history_commitment_id, [0xE2; 32]);
+        assert_eq!(
+            acceptance.history_commitment.history_commitment_id,
+            [0xE2; 32]
+        );
         assert_eq!(acceptance.accepted_barrier_version, Some(11));
         assert_eq!(acceptance.accepted_fs_ec, Some(22));
         assert_eq!(acceptance.accepted_reason, Some(1));
@@ -2582,7 +2588,9 @@ mod tests {
                 parent_root: vec![0x11; 32],
                 barrier_version: 2,
                 current_history_view_id: vec![0xD0; 32],
-                current_history_commitment: Some(history_commitment_ok_payload(0xD0, 0xD1, 0x00, 1)),
+                current_history_commitment: Some(history_commitment_ok_payload(
+                    0xD0, 0xD1, 0x00, 1,
+                )),
                 cover_leaf_index: 0,
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
@@ -2590,12 +2598,10 @@ mod tests {
             })
         }
 
-        let app = Router::new()
-            .route("/health", get(mock_health))
-            .route(
-                "/v1/rooms/join_ticket",
-                post(mock_existing_group_without_barrier_update),
-            );
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_existing_group_without_barrier_update),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr: SocketAddr = listener.local_addr()?;
         let base = format!("http://{}", addr);
@@ -2633,9 +2639,10 @@ mod tests {
             })
         }
 
-        let app = Router::new()
-            .route("/health", get(mock_health))
-            .route("/v1/rooms/join_ticket", post(mock_existing_group_without_commitment));
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_existing_group_without_commitment),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr: SocketAddr = listener.local_addr()?;
         let base = format!("http://{}", addr);
@@ -2665,7 +2672,9 @@ mod tests {
                 parent_root: vec![0x11; 32],
                 barrier_version: 2,
                 current_history_view_id: vec![0xD0; 32],
-                current_history_commitment: Some(history_commitment_ok_payload(0xD0, 0xD1, 0x00, 1)),
+                current_history_commitment: Some(history_commitment_ok_payload(
+                    0xD0, 0xD1, 0x00, 1,
+                )),
                 cover_leaf_index: 0,
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
@@ -2674,12 +2683,10 @@ mod tests {
             })
         }
 
-        let app = Router::new()
-            .route("/health", get(mock_health))
-            .route(
-                "/v1/rooms/join_ticket",
-                post(mock_existing_group_without_predecessor_hash),
-            );
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_existing_group_without_predecessor_hash),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr: SocketAddr = listener.local_addr()?;
         let base = format!("http://{}", addr);
@@ -2694,6 +2701,47 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("join ticket missing current_predecessor_kem_tree_hash_after"),
+            "unexpected error: {err}"
+        );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_missing_join_finalize_auth_token() -> Result<(), Box<dyn StdError>>
+    {
+        async fn mock_join_ticket_without_auth_token() -> impl IntoResponse {
+            encode_proto(JoinTicketResponse {
+                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                current_history_view_id: vec![0xD0; 32],
+                current_history_commitment: Some(history_commitment_ok_payload(
+                    0xD0, 0xD1, 0x00, 1,
+                )),
+                cover_leaf_index: 0,
+                n_max: 1024,
+                max_barrier_update_bytes: 1_048_576,
+                ..JoinTicketResponse::default()
+            })
+        }
+
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_join_ticket_without_auth_token),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("missing join_finalize auth token must fail closed");
+        assert!(
+            err.to_string()
+                .contains("join ticket missing join_finalize_auth_token"),
             "unexpected error: {err}"
         );
         handle.abort();

@@ -89,6 +89,7 @@ use msphf_orchestrator::{
     DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes, hdr,
 };
 use pqcrypto_kyber::kyber768;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 /// Re-export commonly used client-side bundle types for convenience.
@@ -272,6 +273,8 @@ pub struct JoinTicketBundle {
     pub current_join_records: Vec<BarrierJoinLeafRecord>,
     /// Authenticated RevokedLeafSet for the provisioned current committed state.
     pub current_revoked_leaf_indices: Vec<u32>,
+    /// Opaque server-issued capability required for reason-2 join_finalize.
+    pub join_finalize_auth_token: [u8; 32],
     /// Fixed barrier tree capacity.
     pub n_max: u64,
     /// Deployment-wide barrier update size limit.
@@ -477,6 +480,7 @@ impl CityGServer {
                 state.kem_tree_hash_after = kem_tree_hash_after;
                 state.current_accepted_barrier_update.clear();
                 state.current_accepted_barrier_predecessor_hash = [0u8; 32];
+                state.pending_join_finalize_auth.clear();
                 state.n_max = n_max;
                 state.barrier_pk_entries = blank_entries;
                 record_barrier_public_tree_snapshot(gid.as_slice(), state)?;
@@ -560,6 +564,7 @@ impl CityGServer {
         state.kem_tree_hash_after = blank_tree_hash;
         state.current_accepted_barrier_update.clear();
         state.current_accepted_barrier_predecessor_hash = [0u8; 32];
+        state.pending_join_finalize_auth.clear();
         state.last_checkpoint_ec = 0;
         state.last_accepted_ec = 0;
         state.srx_root_sw = None;
@@ -1028,34 +1033,44 @@ impl CityGServer {
                 "current barrier_update missing for join provisioning",
             ));
         }
-        if requires_current_barrier_update
-            && current_predecessor_kem_tree_hash_after == [0u8; 32]
-        {
+        if requires_current_barrier_update && current_predecessor_kem_tree_hash_after == [0u8; 32] {
             return Err(CityGError::InvalidInput(
                 "current barrier predecessor hash missing for join provisioning",
             ));
         }
-        let (current_join_records, current_revoked_leaf_indices) = if requires_current_barrier_update
+        let (current_join_records, current_revoked_leaf_indices) =
+            if requires_current_barrier_update {
+                let BarrierUpdateWire(
+                    _mode,
+                    _barrier_version,
+                    prev_barrier_version,
+                    _tree_size,
+                    revocation_roots_hash,
+                    _kem_tree_hash_before,
+                    _kem_tree_hash_after,
+                    _cover_payload,
+                ) = parse_deterministic_cbor(current_barrier_update.as_slice())?;
+                let revocation_roots_hash = vec_to_32(revocation_roots_hash)?;
+                (
+                    self.resolve_joins_since(gid, prev_barrier_version)?.records,
+                    self.resolve_revoked_leaf_indices(gid, &revocation_roots_hash)?
+                        .leaf_indices,
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+        let join_finalize_auth_token = fresh_join_finalize_auth_token();
         {
-            let BarrierUpdateWire(
-                _mode,
-                _barrier_version,
-                prev_barrier_version,
-                _tree_size,
-                revocation_roots_hash,
-                _kem_tree_hash_before,
-                _kem_tree_hash_after,
-                _cover_payload,
-            ) = parse_deterministic_cbor(current_barrier_update.as_slice())?;
-            let revocation_roots_hash = vec_to_32(revocation_roots_hash)?;
-            (
-                self.resolve_joins_since(gid, prev_barrier_version)?.records,
-                self.resolve_revoked_leaf_indices(gid, &revocation_roots_hash)?
-                    .leaf_indices,
-            )
-        } else {
-            (Vec::new(), Vec::new())
-        };
+            let state = self.roster.groups.entry(gid.to_vec()).or_default();
+            state.pending_join_finalize_auth.insert(
+                leaf_id,
+                JoinFinalizeAuthRecord {
+                    leaf_id,
+                    cover_leaf_index: cover_leaf_index as u32,
+                    token: join_finalize_auth_token,
+                },
+            );
+        }
 
         Ok(JoinTicketBundle {
             gid: *gid,
@@ -1080,6 +1095,7 @@ impl CityGServer {
             current_predecessor_kem_tree_hash_after,
             current_join_records,
             current_revoked_leaf_indices,
+            join_finalize_auth_token,
             n_max: barrier_n_max,
             max_barrier_update_bytes,
         })
@@ -1505,6 +1521,7 @@ impl CityGServer {
             .get(&hdr::HDR_BARRIER_LEAF_PK)
             .and_then(Value::as_bytes)
             .map(ToOwned::to_owned);
+        let barrier_update_reason = parse_barrier_update_reason(&bundle.header_map)?;
         let required_join_barrier_leaf_pk = if delta.joined.is_empty() {
             None
         } else {
@@ -1550,6 +1567,19 @@ impl CityGServer {
             for leaf in &delta.revoked {
                 state.leaf_device_pk.remove(leaf);
                 state.leaf_barrier_public.remove(leaf);
+                state.pending_join_finalize_auth.remove(leaf);
+            }
+        }
+        if let Some(state) = roster.groups.get_mut(bundle.gid()) {
+            if matches!(barrier_update_reason, Some(2))
+                && let Some(pop_pk) = maybe_device_pk.as_deref()
+                && let Some(author_leaf_id) = state
+                    .leaf_device_pk
+                    .iter()
+                    .find(|(_, device_pk)| device_pk.as_slice() == pop_pk)
+                    .map(|(leaf_id, _)| *leaf_id)
+            {
+                state.pending_join_finalize_auth.remove(&author_leaf_id);
             }
         }
         if let Some(validation) = barrier_validation.as_ref() {
@@ -1684,9 +1714,12 @@ impl CityGServer {
                 &room_state.current_history_commitment,
                 [0u8; 32],
             )?;
-            group.current_accepted_barrier_update = room_state.current_accepted_barrier_update.clone();
+            group.current_accepted_barrier_update =
+                room_state.current_accepted_barrier_update.clone();
             group.current_accepted_barrier_predecessor_hash =
                 room_state.current_accepted_barrier_predecessor_hash;
+            group.pending_join_finalize_auth =
+                decode_persisted_join_finalize_auth(&room_state.pending_join_finalize_auth);
             rebuild_barrier_public_tree_blob_index(group)?;
             group.barrier_public_tree_history.clear();
             for snapshot in &room_state.barrier_public_tree_history {
@@ -1774,7 +1807,8 @@ impl CityGServer {
                             group.barrier_public_tree_history.get_mut(&current_hash)
                         {
                             snapshot_ref.history_commitment = current_history_commitment;
-                            snapshot_ref.history_view_id = current_history_commitment.history_view_id;
+                            snapshot_ref.history_view_id =
+                                current_history_commitment.history_view_id;
                         }
                     }
                 }
@@ -2332,44 +2366,43 @@ impl CityGServer {
             .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
         let n_max = validate_barrier_n_max(state.n_max)?;
-        let (pk_entries, history_commitment) =
-            if let Some(mut snapshot) = state
-                .barrier_public_tree_history
-                .get(kem_tree_hash_after)
-                .cloned()
-            {
-                if snapshot.history_commitment.history_commitment_id == [0u8; 32] {
-                    snapshot.history_commitment = synthesize_legacy_history_commitment(
-                        gid.as_slice(),
-                        snapshot.history_view_id,
-                    )?;
-                    if let Some(entry) = state.barrier_public_tree_history.get_mut(kem_tree_hash_after)
-                    {
-                        entry.history_commitment = snapshot.history_commitment;
-                        entry.history_view_id = snapshot.history_commitment.history_view_id;
-                    }
+        let (pk_entries, history_commitment) = if let Some(mut snapshot) = state
+            .barrier_public_tree_history
+            .get(kem_tree_hash_after)
+            .cloned()
+        {
+            if snapshot.history_commitment.history_commitment_id == [0u8; 32] {
+                snapshot.history_commitment =
+                    synthesize_legacy_history_commitment(gid.as_slice(), snapshot.history_view_id)?;
+                if let Some(entry) = state
+                    .barrier_public_tree_history
+                    .get_mut(kem_tree_hash_after)
+                {
+                    entry.history_commitment = snapshot.history_commitment;
+                    entry.history_view_id = snapshot.history_commitment.history_view_id;
                 }
-                (
-                    decode_barrier_public_tree_snapshot_ref(state, &snapshot)?,
-                    snapshot.history_commitment,
-                )
-            } else {
-                let pk_entries_view = build_pk_entries_view(state)?;
-                let computed_hash = compute_barrier_tree_hash(n_max, pk_entries_view.as_ref())?;
-                if computed_hash != *kem_tree_hash_after {
-                    return Err(CityGError::Acceptance(
-                        msphf_orchestrator::AcceptanceError::Freeze(
-                            msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE,
-                        ),
-                    ));
-                }
-                let pk_entries = match pk_entries_view {
-                    Cow::Borrowed(entries) => entries.to_vec(),
-                    Cow::Owned(entries) => entries,
-                };
-                let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
-                (pk_entries, history_commitment)
+            }
+            (
+                decode_barrier_public_tree_snapshot_ref(state, &snapshot)?,
+                snapshot.history_commitment,
+            )
+        } else {
+            let pk_entries_view = build_pk_entries_view(state)?;
+            let computed_hash = compute_barrier_tree_hash(n_max, pk_entries_view.as_ref())?;
+            if computed_hash != *kem_tree_hash_after {
+                return Err(CityGError::Acceptance(
+                    msphf_orchestrator::AcceptanceError::Freeze(
+                        msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE,
+                    ),
+                ));
+            }
+            let pk_entries = match pk_entries_view {
+                Cow::Borrowed(entries) => entries.to_vec(),
+                Cow::Owned(entries) => entries,
             };
+            let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
+            (pk_entries, history_commitment)
+        };
         let computed_hash = compute_barrier_tree_hash(n_max, pk_entries.as_slice())?;
         if computed_hash != *kem_tree_hash_after {
             return Err(CityGError::Acceptance(
@@ -2729,6 +2762,14 @@ fn parse_barrier_update_reason(header: &BTreeMap<u64, Value>) -> Result<Option<u
         return Err(CityGError::InvalidInput("barrier_update malformed"));
     }
     Ok(Some(reason))
+}
+
+fn parse_join_finalize_auth_token(
+    header: &BTreeMap<u64, Value>,
+) -> Result<Option<[u8; 32]>, CityGError> {
+    header_optional_bytes(header, hdr::HDR_JOIN_FINALIZE_AUTH)?
+        .map(header_bytes32_from_slice)
+        .transpose()
 }
 
 fn parse_barrier_update(
@@ -3522,6 +3563,42 @@ fn decode_persisted_accepted_barrier_merges(
         .collect()
 }
 
+fn persisted_join_finalize_auth(state: &GroupState) -> Vec<PersistedJoinFinalizeAuthRecord> {
+    state
+        .pending_join_finalize_auth
+        .values()
+        .map(|record| PersistedJoinFinalizeAuthRecord {
+            leaf_id_hex: hex::encode(record.leaf_id),
+            cover_leaf_index: record.cover_leaf_index,
+            token_hex: hex::encode(record.token),
+        })
+        .collect()
+}
+
+fn decode_persisted_join_finalize_auth(
+    records: &[PersistedJoinFinalizeAuthRecord],
+) -> BTreeMap<[u8; 32], JoinFinalizeAuthRecord> {
+    records
+        .iter()
+        .filter_map(|record| {
+            let leaf_id = hex::decode(&record.leaf_id_hex)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())?;
+            let token = hex::decode(&record.token_hex)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())?;
+            Some((
+                leaf_id,
+                JoinFinalizeAuthRecord {
+                    leaf_id,
+                    cover_leaf_index: record.cover_leaf_index,
+                    token,
+                },
+            ))
+        })
+        .collect()
+}
+
 fn persisted_kbroad_room_state(
     state: Option<&GroupState>,
     kbroad_public: Vec<u8>,
@@ -3570,6 +3647,7 @@ fn persisted_kbroad_room_state(
         room.current_accepted_barrier_update = state.current_accepted_barrier_update.clone();
         room.current_accepted_barrier_predecessor_hash =
             state.current_accepted_barrier_predecessor_hash;
+        room.pending_join_finalize_auth = persisted_join_finalize_auth(state);
     }
     room
 }
@@ -3586,6 +3664,12 @@ fn merge_optional_u64_max(current: Option<u64>, persisted: Option<u64>) -> Optio
 fn fresh_kbroad_public() -> Vec<u8> {
     let (public, _) = kyber768::keypair();
     public.as_bytes().to_vec()
+}
+
+fn fresh_join_finalize_auth_token() -> [u8; 32] {
+    let mut token = [0u8; 32];
+    rand::rng().fill(&mut token);
+    token
 }
 
 fn clear_barrier_path<T>(
@@ -3807,13 +3891,16 @@ fn validate_barrier_update_against_roster(
                 ))
             })?;
         let mut author_cover_indices = BTreeSet::new();
+        let mut author_leaf_ids = Vec::new();
         for (leaf, device_pk) in &state_before.leaf_device_pk {
             if device_pk.as_slice() == author_pop_pk {
                 author_cover_indices.insert(u64::from(cover_leaf_index(leaf, tree_n_max)));
+                author_leaf_ids.push(*leaf);
             }
         }
         if author_cover_indices.len() != 1
             || !author_cover_indices.contains(&parsed.updater_leaf)
+            || author_leaf_ids.len() != 1
             || committed_revoked_indices.contains(
                 &usize::try_from(parsed.updater_leaf)
                     .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
@@ -3825,6 +3912,8 @@ fn validate_barrier_update_against_roster(
                 ),
             ));
         }
+        let author_leaf_id = author_leaf_ids[0];
+        let join_finalize_auth_token = parse_join_finalize_auth_token(header)?;
 
         let author_is_unresolved_joiner = unresolved_join_leaf_set.contains(
             &u32::try_from(parsed.updater_leaf)
@@ -3857,6 +3946,37 @@ fn validate_barrier_update_against_roster(
                     ));
                 }
                 _ => {}
+            }
+        }
+        match barrier_update_reason {
+            Some(2) => {
+                let supplied = join_finalize_auth_token.ok_or(CityGError::Acceptance(
+                    msphf_orchestrator::AcceptanceError::Freeze(
+                        msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+                    ),
+                ))?;
+                let record = state_before
+                    .pending_join_finalize_auth
+                    .get(&author_leaf_id)
+                    .ok_or(CityGError::Acceptance(
+                        msphf_orchestrator::AcceptanceError::Freeze(
+                            msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+                        ),
+                    ))?;
+                if record.token != supplied
+                    || u64::from(record.cover_leaf_index) != parsed.updater_leaf
+                {
+                    return Err(CityGError::Acceptance(
+                        msphf_orchestrator::AcceptanceError::Freeze(
+                            msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+                        ),
+                    ));
+                }
+            }
+            Some(_) | None => {
+                if join_finalize_auth_token.is_some() {
+                    return Err(CityGError::InvalidInput("barrier_update malformed"));
+                }
             }
         }
 
@@ -4196,6 +4316,22 @@ mod tests {
                 .map_err(|_| CityGError::InvalidInput("integer header out of range")),
             _ => Err(CityGError::InvalidInput("header field must be integer")),
         }
+    }
+
+    fn install_pending_join_finalize_auth(
+        state: &mut super::GroupState,
+        leaf_id: [u8; 32],
+    ) -> [u8; 32] {
+        let token = [0xE7; 32];
+        state.pending_join_finalize_auth.insert(
+            leaf_id,
+            super::JoinFinalizeAuthRecord {
+                leaf_id,
+                cover_leaf_index: super::cover_leaf_index(&leaf_id, state.n_max),
+                token,
+            },
+        );
+        token
     }
 
     struct GeneratedMemberBundle {
@@ -4859,7 +4995,8 @@ mod tests {
         let snapshot_ref =
             super::encode_barrier_public_tree_snapshot_ref(group, previous_entries.as_slice())?;
         let mut snapshot_ref = snapshot_ref;
-        snapshot_ref.history_commitment = super::ensure_current_history_commitment(gid.as_slice(), group)?;
+        snapshot_ref.history_commitment =
+            super::ensure_current_history_commitment(gid.as_slice(), group)?;
         snapshot_ref.history_view_id = snapshot_ref.history_commitment.history_view_id;
         group
             .barrier_public_tree_history
@@ -5900,6 +6037,7 @@ mod tests {
                 current_history_commitment: super::PersistedHistoryCommitment::default(),
                 current_accepted_barrier_update: Vec::new(),
                 current_accepted_barrier_predecessor_hash: [0u8; 32],
+                pending_join_finalize_auth: Vec::new(),
                 device_chain_states: Vec::new(),
             },
         )]);
@@ -5975,6 +6113,7 @@ mod tests {
                 current_history_commitment: super::PersistedHistoryCommitment::default(),
                 current_accepted_barrier_update: Vec::new(),
                 current_accepted_barrier_predecessor_hash: [0u8; 32],
+                pending_join_finalize_auth: Vec::new(),
                 device_chain_states: Vec::new(),
             },
         )]);
@@ -7323,6 +7462,7 @@ mod tests {
         let leaf = cityg_client::demo::demo_member_leaf("barrier-join-finalize-must-use-reason2");
         let pop_pk = vec![0xAC; 32];
         state.leaf_device_pk.insert(leaf, pop_pk.clone());
+        let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf);
         let join_ek = vec![0xA5; 1184];
         let delta = cityg_client::MembershipDelta {
             joined: vec![leaf],
@@ -7534,6 +7674,7 @@ mod tests {
         let leaf = cityg_client::demo::demo_member_leaf("barrier-target-pkhash-mismatch");
         let pop_pk = vec![0xAD; 32];
         state.leaf_device_pk.insert(leaf, pop_pk.clone());
+        let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf);
         let join_ek = vec![0xA5; 1184];
         let delta = cityg_client::MembershipDelta {
             joined: vec![leaf],
@@ -7606,6 +7747,10 @@ mod tests {
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(vec![0u8; 32]));
         header.insert(hdr::HDR_BARRIER_LEAF_PK, Value::Bytes(join_ek));
         header.insert(hdr::HDR_POP_PK, Value::Bytes(pop_pk));
+        header.insert(
+            hdr::HDR_JOIN_FINALIZE_AUTH,
+            Value::Bytes(join_finalize_auth_token.to_vec()),
+        );
 
         let err = match super::validate_barrier_update_against_roster(&state, &header, &delta) {
             Ok(_) => {
@@ -7636,6 +7781,7 @@ mod tests {
         let leaf = cityg_client::demo::demo_member_leaf("barrier-pairs-mismatch");
         let pop_pk = vec![0xBC; 32];
         state.leaf_device_pk.insert(leaf, pop_pk.clone());
+        let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf);
         let join_ek = vec![0xA5; 1184];
         let delta = cityg_client::MembershipDelta {
             joined: vec![leaf],
@@ -7708,6 +7854,10 @@ mod tests {
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
         header.insert(hdr::HDR_BARRIER_LEAF_PK, Value::Bytes(join_ek));
         header.insert(hdr::HDR_POP_PK, Value::Bytes(pop_pk));
+        header.insert(
+            hdr::HDR_JOIN_FINALIZE_AUTH,
+            Value::Bytes(join_finalize_auth_token.to_vec()),
+        );
 
         let err = match super::validate_barrier_update_against_roster(&state, &header, &delta) {
             Ok(_) => {
@@ -9647,7 +9797,10 @@ mod tests {
         server.accept_epoch(&bundle)?;
 
         let records = server.resolve_joins_since(&cityg_client::demo::DEMO_GID, 0)?;
-        assert!(!records.records.is_empty(), "expected at least one join record");
+        assert!(
+            !records.records.is_empty(),
+            "expected at least one join record"
+        );
         let record = &records.records[0];
         assert!(record.leaf_index > 0);
         assert!(!record.device_pk.is_empty());
@@ -10058,7 +10211,9 @@ mod tests {
                     .copied()
                     .find(|hash| *hash != second_hash)
             })
-            .ok_or(CityGError::InvalidInput("missing historical barrier snapshot"))?;
+            .ok_or(CityGError::InvalidInput(
+                "missing historical barrier snapshot",
+            ))?;
         let second_snapshot = server.fetch_barrier_public_tree(&gid, &second_hash)?;
         let historical_snapshot = server.fetch_barrier_public_tree(&gid, &historical_hash)?;
 
@@ -10075,7 +10230,9 @@ mod tests {
                 > historical_snapshot.history_commitment.history_seq
         );
         assert_eq!(
-            second_snapshot.history_commitment.prev_history_commitment_id,
+            second_snapshot
+                .history_commitment
+                .prev_history_commitment_id,
             historical_snapshot.history_commitment.history_commitment_id
         );
         Ok(())
@@ -10180,7 +10337,10 @@ mod tests {
             .get(cityg_client::demo::DEMO_GID.as_slice())
             .map(|group| group.n_max)
             .unwrap_or(super::DEFAULT_BARRIER_N_MAX);
-        assert_eq!(indices.leaf_indices, vec![super::cover_leaf_index(&leaf, n_max)]);
+        assert_eq!(
+            indices.leaf_indices,
+            vec![super::cover_leaf_index(&leaf, n_max)]
+        );
 
         let err = server
             .resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &[0x42; 32])
@@ -10563,6 +10723,7 @@ struct GroupState {
     current_history_commitment: HistoryCommitment,
     current_accepted_barrier_update: Vec<u8>,
     current_accepted_barrier_predecessor_hash: [u8; 32],
+    pending_join_finalize_auth: BTreeMap<[u8; 32], JoinFinalizeAuthRecord>,
     room_admin_pop_keys: BTreeSet<Vec<u8>>,
     room_admin_proof_replay_keys: BTreeSet<[u8; 32]>,
 }
@@ -10602,6 +10763,7 @@ impl Default for GroupState {
             current_history_commitment: HistoryCommitment::default(),
             current_accepted_barrier_update: Vec::new(),
             current_accepted_barrier_predecessor_hash: [0u8; 32],
+            pending_join_finalize_auth: BTreeMap::new(),
             room_admin_pop_keys: BTreeSet::new(),
             room_admin_proof_replay_keys: BTreeSet::new(),
         }
@@ -10624,6 +10786,13 @@ struct AcceptedBarrierMergeRecord {
     reason: u64,
     digest: [u8; 32],
     we_epoch_id: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct JoinFinalizeAuthRecord {
+    leaf_id: [u8; 32],
+    cover_leaf_index: u32,
+    token: [u8; 32],
 }
 
 type BarrierBlobIndex = u32;
@@ -10753,6 +10922,8 @@ struct PersistedKbroadRoomState {
     #[serde(default)]
     current_accepted_barrier_predecessor_hash: [u8; 32],
     #[serde(default)]
+    pending_join_finalize_auth: Vec<PersistedJoinFinalizeAuthRecord>,
+    #[serde(default)]
     device_chain_states: Vec<PersistedDeviceChainState>,
 }
 
@@ -10779,6 +10950,16 @@ struct PersistedAcceptedBarrierMergeRecord {
     digest_hex: String,
     #[serde(default)]
     we_epoch_id_hex: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PersistedJoinFinalizeAuthRecord {
+    #[serde(default)]
+    leaf_id_hex: String,
+    #[serde(default)]
+    cover_leaf_index: u32,
+    #[serde(default)]
+    token_hex: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

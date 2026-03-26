@@ -46,12 +46,12 @@ use pb::{
     ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
     FetchMessagesRequest, FetchMessagesResponse, FreezeStat, GetBundleRequest, GetBundleResponse,
     GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse,
-    HistoryCommitment as PbHistoryCommitment, IdentityBinding, JoinTicketRequest, JoinTicketResponse, ListRoomAdminsRequest,
-    ListRoomAdminsResponse, Member, MembersRequest, MembersResponse, MergeAcceptanceStatus,
-    MergeTicketIntent, MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest,
-    RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse, RoomAdminProof,
-    RotateRoomKbroadRequest, RotateRoomKbroadResponse, SendMessageRequest, SendMessageResponse,
-    TelemetryEntry, WindowEntry, WindowHead,
+    HistoryCommitment as PbHistoryCommitment, IdentityBinding, JoinTicketRequest,
+    JoinTicketResponse, ListRoomAdminsRequest, ListRoomAdminsResponse, Member, MembersRequest,
+    MembersResponse, MergeAcceptanceStatus, MergeTicketIntent, MergeTicketRequest,
+    MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
+    RoomAdminMutationResponse, RoomAdminProof, RotateRoomKbroadRequest, RotateRoomKbroadResponse,
+    SendMessageRequest, SendMessageResponse, TelemetryEntry, WindowEntry, WindowHead,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -66,7 +66,8 @@ use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_server::{
     BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord, CityGServer,
     HistoryCommitment as ServerHistoryCommitment,
-    MergeAcceptanceStatus as ServerMergeAcceptanceStatus, MergeTicketBundle, ServerConfig, ServerOutcome,
+    MergeAcceptanceStatus as ServerMergeAcceptanceStatus, MergeTicketBundle, ServerConfig,
+    ServerOutcome,
 };
 use msphf_core::{
     MsphfError,
@@ -1999,6 +2000,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             })
             .collect(),
         current_revoked_leaf_indices: ticket.current_revoked_leaf_indices,
+        join_finalize_auth_token: ticket.join_finalize_auth_token.to_vec(),
     };
 
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);

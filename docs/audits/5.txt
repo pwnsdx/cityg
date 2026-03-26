@@ -219,3 +219,18 @@ Nouvelle passe spec + implémentation:
 - **Toujours ouvert**: cette passe ferme une grosse tranche du finding “join provisioning incomplet”, mais ne fournit toujours pas de lookup historique canonique/final global au sens byzantin fort.
 
 Statut audit: **COMPLETED**, avec remédiation implémentation supplémentaire substantielle sur l’artefact de provisioning join.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 8)
+
+Nouvelle passe spec + implémentation:
+
+- **Provisioning join encore resserré**: l’artefact de join transporte maintenant un `join_finalize_auth` opaque en plus des éléments bootstrap déjà ajoutés.
+- **Consommation protocolaire explicite**: ce capability est maintenant normé dans `docs/specs.md`, présent dans `JoinTicketResponse`, persisté côté client, puis exigé côté serveur sur `header[179]` pour tout `reason=2`.
+- **Impact sur l’audit 5**: cela ferme un sous-ensemble concret du finding “provisioning insuffisamment spécifié”, à savoir l’absence d’un capability explicite et server-checkable pour le bootstrap `join_finalize`.
+- **Toujours ouvert**: l’artefact de provisioning complet reste plus large que ce token; la finalité/historique canonique globale et la formalisation exhaustive de tous les handles restent des restes séparés.
+
+Conclusion:
+
+Audit **toujours complété**, avec un renforcement additionnel réel du provisioning join au niveau wire + serveur + client.

@@ -5535,6 +5535,7 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             ek_leaf: vec![0x42; kyber768::public_key_bytes()],
         }],
         bootstrap_revoked_leaf_indices: vec![1, 2],
+        bootstrap_join_finalize_auth_token: array(0x34),
         k_barrier: Zeroizing::new(array(0x21)),
         kem_tree_hash_after: array(0x22),
         bootstrap_current_barrier_update: vec![0xAB, 0xCD],
@@ -5704,8 +5705,12 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         session.barrier_state.bootstrap_history_commitment
     );
     assert_eq!(
-        loaded.barrier_state.bootstrap_predecessor_kem_tree_hash_after,
-        session.barrier_state.bootstrap_predecessor_kem_tree_hash_after
+        loaded
+            .barrier_state
+            .bootstrap_predecessor_kem_tree_hash_after,
+        session
+            .barrier_state
+            .bootstrap_predecessor_kem_tree_hash_after
     );
     assert_eq!(
         loaded.barrier_state.bootstrap_current_barrier_update,
@@ -5718,6 +5723,10 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         loaded.barrier_state.bootstrap_revoked_leaf_indices,
         session.barrier_state.bootstrap_revoked_leaf_indices
+    );
+    assert_eq!(
+        loaded.barrier_state.bootstrap_join_finalize_auth_token,
+        session.barrier_state.bootstrap_join_finalize_auth_token
     );
     assert_eq!(loaded.barrier_state.dk_leaf, session.barrier_state.dk_leaf);
     assert_eq!(
@@ -8127,18 +8136,47 @@ async fn perform_join_finalize_rejects_pending_session_without_bootstrap_artifac
     session.barrier_state.barrier_recovery_pending = true;
     session.barrier_state.current_barrier_full_verified = false;
     session.barrier_state.bootstrap_history_commitment = None;
-    session.barrier_state.bootstrap_current_barrier_update.clear();
+    session
+        .barrier_state
+        .bootstrap_current_barrier_update
+        .clear();
     persist_session(&session)?;
 
     let err = match perform_join_finalize_inner(LeaveRequest::from_session(&session)).await {
         Ok(_) => {
-            return Err("pending join_finalize must fail closed without bootstrap artifact".into())
+            return Err("pending join_finalize must fail closed without bootstrap artifact".into());
         }
         Err(err) => err,
     };
     assert!(
         err.to_string().contains("bootstrap missing"),
         "expected explicit bootstrap-artifact guidance: {err}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn perform_join_finalize_rejects_pending_session_without_auth_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(
+        0xC36,
+        "http://127.0.0.1:9",
+        "room-join-finalize-auth-guard",
+        "alice",
+    )?;
+    session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.current_barrier_full_verified = true;
+    session.barrier_state.bootstrap_join_finalize_auth_token = [0u8; 32];
+
+    let err = match perform_join_finalize_inner(LeaveRequest::from_session(&session)).await {
+        Ok(_) => {
+            return Err("pending join_finalize must fail closed without auth token".into());
+        }
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("join_finalize auth token"),
+        "expected explicit join_finalize auth-token guidance: {err}"
     );
     Ok(())
 }
@@ -8348,8 +8386,11 @@ async fn perform_join_second_member_can_send_immediately() -> Result<(), Box<dyn
         "second join should bootstrap FULL public-state verification before join_finalize"
     );
     assert!(
-        bob.barrier_state.bootstrap_current_barrier_update.is_empty()
-            && bob.barrier_state.bootstrap_history_commitment.is_none(),
+        bob.barrier_state
+            .bootstrap_current_barrier_update
+            .is_empty()
+            && bob.barrier_state.bootstrap_history_commitment.is_none()
+            && bob.barrier_state.bootstrap_join_finalize_auth_token == [0u8; 32],
         "post-finalize session should clear bootstrap provisioning artifact"
     );
     assert!(
@@ -8747,11 +8788,14 @@ async fn perform_join_existing_room_can_self_finalize_without_room_secret()
         "existing-room join should bootstrap FULL public-state verification before join_finalize"
     );
     assert!(
-        bob.barrier_state.bootstrap_current_barrier_update.is_empty()
+        bob.barrier_state
+            .bootstrap_current_barrier_update
+            .is_empty()
             && bob.barrier_state.bootstrap_history_commitment.is_none()
             && bob.barrier_state.bootstrap_predecessor_kem_tree_hash_after == [0u8; 32]
             && bob.barrier_state.bootstrap_join_records.is_empty()
-            && bob.barrier_state.bootstrap_revoked_leaf_indices.is_empty(),
+            && bob.barrier_state.bootstrap_revoked_leaf_indices.is_empty()
+            && bob.barrier_state.bootstrap_join_finalize_auth_token == [0u8; 32],
         "post-finalize session should clear bootstrap provisioning artifacts"
     );
     assert!(

@@ -226,3 +226,18 @@ Nouvelle passe implémentation:
 - **Toujours ouvert**: on reste sur une boundary locale à un serveur/API donné; la canonité append-only globale et la complétude forte inter-serveurs ne sont toujours pas closes.
 
 Statut audit: **COMPLETED**, avec durcissement supplémentaire du boundary “join provisioning / bootstrap history”.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 8)
+
+Nouvelle passe spec + implémentation:
+
+- **Trust-boundary `join_finalize` resserrée**: le serveur n’accepte plus `reason=2` sur la seule base de `JoinSet`; il exige désormais aussi un `join_finalize_auth` opaque provisionné au join ticket et fourni sur le wire (`header[179]`).
+- **Moins de latitude pour un serveur actif sur l’exception**: l’exception `join_finalize` devient enfin explicite et server-checkable. Un client ne peut plus simplement prétendre localement être dans le bon sous-mode sans présenter ce capability serveur-émis.
+- **Persisté et consommé**: le capability est stocké côté serveur pour la leaf pending, persisté côté client tant que la recovery reste pending, puis purgé après `join_finalize` accepté ou après révocation.
+- **Limite inchangée**: cela améliore la boundary d’une exception précise, pas la canonité append-only globale ni la résistance byzantine complète pour les merges `reason 0/1`.
+
+Conclusion:
+
+Audit **toujours complété**, avec réduction supplémentaire de la surface “serveur actif / steering de l’exception join_finalize”, sans fermeture du problème global d’historique canonique.

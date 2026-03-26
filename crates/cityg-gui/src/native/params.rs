@@ -24,6 +24,7 @@ pub(super) struct LeaveRequest {
     pub(super) max_barrier_update_bytes: u64,
     pub(super) barrier_recovery_pending: bool,
     pub(super) current_barrier_full_verified: bool,
+    pub(super) join_finalize_auth_token: [u8; 32],
 }
 
 #[derive(Clone)]
@@ -112,6 +113,7 @@ impl LeaveRequest {
             max_barrier_update_bytes: session.barrier_state.max_barrier_update_bytes,
             barrier_recovery_pending: session.barrier_state.barrier_recovery_pending,
             current_barrier_full_verified: session.barrier_state.current_barrier_full_verified,
+            join_finalize_auth_token: session.barrier_state.bootstrap_join_finalize_auth_token,
         }
     }
 }

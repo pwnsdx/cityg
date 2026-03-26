@@ -20,14 +20,15 @@ pub(in crate::native) struct PersistedBarrierState {
     #[serde(default)]
     pub(in crate::native) current_history_view_id_hex: String,
     #[serde(default)]
-    pub(in crate::native) bootstrap_history_commitment:
-        Option<PersistedBarrierHistoryCommitment>,
+    pub(in crate::native) bootstrap_history_commitment: Option<PersistedBarrierHistoryCommitment>,
     #[serde(default)]
     pub(in crate::native) bootstrap_predecessor_kem_tree_hash_after_hex: String,
     #[serde(default)]
     pub(in crate::native) bootstrap_join_records: Vec<PersistedBarrierJoinRecord>,
     #[serde(default)]
     pub(in crate::native) bootstrap_revoked_leaf_indices: Vec<u32>,
+    #[serde(default)]
+    pub(in crate::native) bootstrap_join_finalize_auth_token_hex: String,
     #[serde(default)]
     pub(in crate::native) k_barrier_hex: String,
     #[serde(default)]
@@ -310,6 +311,9 @@ impl PersistedBarrierState {
                 .map(PersistedBarrierJoinRecord::from_runtime)
                 .collect(),
             bootstrap_revoked_leaf_indices: state.bootstrap_revoked_leaf_indices.clone(),
+            bootstrap_join_finalize_auth_token_hex: hex_encode(
+                state.bootstrap_join_finalize_auth_token,
+            ),
             k_barrier_hex: hex_encode(*state.k_barrier),
             kem_tree_hash_after_hex: hex_encode(state.kem_tree_hash_after),
             bootstrap_current_barrier_update_hex: hex_encode(
@@ -364,6 +368,10 @@ impl PersistedBarrierState {
                 .map(PersistedBarrierJoinRecord::into_runtime)
                 .collect::<Result<Vec<_>>>()?,
             bootstrap_revoked_leaf_indices: self.bootstrap_revoked_leaf_indices,
+            bootstrap_join_finalize_auth_token: decode_hex32_or_zero(
+                "barrier_state.bootstrap_join_finalize_auth_token_hex",
+                &self.bootstrap_join_finalize_auth_token_hex,
+            )?,
             k_barrier: Zeroizing::new(decode_hex32_or_zero(
                 "barrier_state.k_barrier_hex",
                 &self.k_barrier_hex,

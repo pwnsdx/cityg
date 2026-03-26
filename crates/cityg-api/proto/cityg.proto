@@ -245,6 +245,7 @@ message JoinTicketResponse {
   bytes current_predecessor_kem_tree_hash_after = 33;
   repeated BarrierJoinLeafRecord current_join_records = 34;
   repeated uint32 current_revoked_leaf_indices = 35;
+  bytes join_finalize_auth_token = 36;
 }
 
 message MergeTicketRequest {

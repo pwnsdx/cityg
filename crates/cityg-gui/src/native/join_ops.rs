@@ -208,26 +208,22 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     };
     let fs_epoch_base_ts = ticket.fs_epoch_base_ts;
     let kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
-    let current_predecessor_kem_tree_hash_after = if ticket
-        .current_predecessor_kem_tree_hash_after
-        .is_empty()
-    {
-        [0u8; 32]
-    } else {
-        bytes32(
-            "current_predecessor_kem_tree_hash_after",
-            &ticket.current_predecessor_kem_tree_hash_after,
-        )?
-    };
+    let current_predecessor_kem_tree_hash_after =
+        if ticket.current_predecessor_kem_tree_hash_after.is_empty() {
+            [0u8; 32]
+        } else {
+            bytes32(
+                "current_predecessor_kem_tree_hash_after",
+                &ticket.current_predecessor_kem_tree_hash_after,
+            )?
+        };
     let current_history_commitment = ticket
         .current_history_commitment
         .clone()
         .map(|commitment| -> Result<HistoryCommitment> {
             let history_view_id = bytes32("current_history_view_id", &commitment.history_view_id)?;
-            let expected_view_id = bytes32(
-                "current_history_view_id",
-                &ticket.current_history_view_id,
-            )?;
+            let expected_view_id =
+                bytes32("current_history_view_id", &ticket.current_history_view_id)?;
             if history_view_id != expected_view_id {
                 return Err(anyhow!(
                     "join ticket current_history_commitment.history_view_id mismatch"
@@ -247,6 +243,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             })
         })
         .transpose()?;
+    let join_finalize_auth_token =
+        bytes32("join_finalize_auth_token", &ticket.join_finalize_auth_token)?;
     let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
@@ -441,6 +439,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 })
                 .collect(),
             bootstrap_revoked_leaf_indices: ticket.current_revoked_leaf_indices.clone(),
+            bootstrap_join_finalize_auth_token: join_finalize_auth_token,
             k_barrier: Zeroizing::new([0u8; 32]),
             kem_tree_hash_after,
             bootstrap_current_barrier_update: ticket.current_barrier_update.clone(),

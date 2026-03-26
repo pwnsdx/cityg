@@ -781,6 +781,7 @@ async fn perform_barrier_merge_inner(
         max_barrier_update_bytes: stored_max_barrier_update_bytes,
         barrier_recovery_pending,
         mut current_barrier_full_verified,
+        join_finalize_auth_token,
     } = request;
 
     if barrier_recovery_pending && !allow_pending_recovery {
@@ -871,6 +872,17 @@ async fn perform_barrier_merge_inner(
     let mut header = BTreeMap::new();
     header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
     header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
+    if mode == BarrierMergeMode::JoinFinalize {
+        if join_finalize_auth_token == [0u8; 32] {
+            return Err(anyhow!(
+                "cannot originate join_finalize without server-issued join_finalize auth token"
+            ));
+        }
+        header.insert(
+            hdr::HDR_JOIN_FINALIZE_AUTH,
+            Value::Bytes(join_finalize_auth_token.to_vec()),
+        );
+    }
 
     let cat_arr = bytes32("cat", &cat)?;
     let pox_r_commit_arr = bytes32("pox_r_commit", &pox_r_commit)?;
