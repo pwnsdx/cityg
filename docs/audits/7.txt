@@ -241,3 +241,15 @@ Nouvelle passe spec + implémentation:
 Conclusion:
 
 Audit **toujours complété**, avec réduction supplémentaire de la surface “serveur actif / steering de l’exception join_finalize”, sans fermeture du problème global d’historique canonique.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 9)
+
+Nouvelle passe spec + implémentation:
+
+- **Boundary locale serveur-actif encore resserrée**: un serveur/API ne peut plus fournir au client honnête un snapshot public courant authentifié sous un commitment différent de celui des réponses `ResolveJoinsSince` / `ResolveRevokedLeaves` sans déclencher un fail-closed explicite dans les paths FULL/updater.
+- **Valeur pratique**: cela retire une latitude réelle de steering local où le client pouvait reconstruire `snapshot_pre` à partir d’un tree courant et de réponses A/B cohérentes entre elles mais pas avec ce tree.
+- **Toujours ouvert**: on reste sur une garantie locale à une vue/API donnée; cette tranche n’apporte pas encore de canonité append-only globale ni de preuve de complétude forte inter-serveurs.
+
+Statut audit: **COMPLETED**, avec durcissement supplémentaire tangible sur la boundary “current snapshot vs membership/history”.

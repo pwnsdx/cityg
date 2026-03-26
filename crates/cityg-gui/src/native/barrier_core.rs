@@ -1,5 +1,5 @@
 use super::*;
-use crate::barrier_shared::require_same_history_commitment;
+use crate::barrier_shared::require_current_state_history_commitment;
 
 pub(super) const BARRIER_KEYGEN_D_INFO: &[u8] = b"city-g|barrier/keygen-d|v1";
 pub(super) const BARRIER_KEYGEN_Z_INFO: &[u8] = b"city-g|barrier/keygen-z|v1";
@@ -425,14 +425,15 @@ pub(super) async fn full_chain_check_barrier_update(
         .barrier_resolve_revoked_leaves(room_id, &revocation_roots_hash)
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
-    if require_same_history_commitment(
+    if require_current_state_history_commitment(
+        &snapshot_prev_response.history_commitment,
         &join_resolution.history_commitment,
         &revoked_resolution.history_commitment,
     )
     .is_err()
     {
         return Err(anyhow!(
-            "barrier full chain-check prevalidation failed (960.9): joins / revoked leaves do not share one authenticated current-state history commitment"
+            "barrier full chain-check prevalidation failed (960.9): snapshot / joins / revoked leaves do not share one authenticated current-state history commitment"
         ));
     }
 
@@ -537,7 +538,10 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
     let max_barrier_update_bytes =
         normalize_max_barrier_update_bytes(session.barrier_state.max_barrier_update_bytes.max(1))?;
     let parsed = parse_barrier_update_for_recover(
-        session.barrier_state.bootstrap_current_barrier_update.as_slice(),
+        session
+            .barrier_state
+            .bootstrap_current_barrier_update
+            .as_slice(),
         n_max,
         max_barrier_update_bytes,
     )
@@ -583,14 +587,13 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
             "join_finalize bootstrap snapshot auth failure (960.9): predecessor n_max mismatch"
         ));
     }
-    validate_barrier_tree_snapshot_auth(
-        &predecessor_hash,
-        n_max,
-        &snapshot_base_response.tree,
-    )?;
+    validate_barrier_tree_snapshot_auth(&predecessor_hash, n_max, &snapshot_base_response.tree)?;
 
     if session.barrier_state.bootstrap_join_records.is_empty()
-        && session.barrier_state.bootstrap_revoked_leaf_indices.is_empty()
+        && session
+            .barrier_state
+            .bootstrap_revoked_leaf_indices
+            .is_empty()
         && (parsed.prev_barrier_version != 0 || parsed.revocation_roots_hash != [0u8; 32])
     {
         return Err(anyhow!(

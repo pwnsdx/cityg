@@ -91,14 +91,21 @@ pub fn require_same_history_commitment(
     lhs: &HistoryCommitment,
     rhs: &HistoryCommitment,
 ) -> Result<()> {
-    if lhs.history_view_id == [0u8; 32]
-        || lhs.history_commitment_id == [0u8; 32]
-        || lhs != rhs
-    {
+    if lhs.history_view_id == [0u8; 32] || lhs.history_commitment_id == [0u8; 32] || lhs != rhs {
         return Err(anyhow!(
             "authenticated history commitment mismatch across barrier dependencies"
         ));
     }
+    Ok(())
+}
+
+pub fn require_current_state_history_commitment(
+    snapshot: &HistoryCommitment,
+    joins: &HistoryCommitment,
+    revoked: &HistoryCommitment,
+) -> Result<()> {
+    require_same_history_commitment(snapshot, joins)?;
+    require_same_history_commitment(snapshot, revoked)?;
     Ok(())
 }
 
@@ -325,5 +332,37 @@ mod tests {
         assert!(validate_barrier_n_max(0).is_err());
         assert!(validate_barrier_n_max(3).is_err());
         assert!(validate_barrier_n_max(MAX_BARRIER_N_MAX * 2).is_err());
+    }
+
+    #[test]
+    fn require_current_state_history_commitment_rejects_snapshot_mismatch() {
+        let current = HistoryCommitment {
+            history_view_id: [0xA1; 32],
+            history_commitment_id: [0xB1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let joins = current;
+        let revoked = HistoryCommitment {
+            history_view_id: [0xA1; 32],
+            history_commitment_id: [0xB2; 32],
+            prev_history_commitment_id: [0xB1; 32],
+            history_seq: 8,
+        };
+
+        assert!(require_current_state_history_commitment(&current, &joins, &revoked).is_err());
+    }
+
+    #[test]
+    fn require_current_state_history_commitment_accepts_one_common_commitment() {
+        let current = HistoryCommitment {
+            history_view_id: [0xC1; 32],
+            history_commitment_id: [0xD1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 9,
+        };
+
+        require_current_state_history_commitment(&current, &current, &current)
+            .expect("one authenticated current-state commitment must pass");
     }
 }

@@ -957,6 +957,7 @@ RevokedLeafSet := ResolveRevokedLeaves(revocation_roots_hash)
 JoinSet        := ResolveJoinsSince(prev_barrier_version)
 Canonical-view requirement (normative):
 * When S11.6 is executed for FULL client chain-check, updater chain-check, join-finalize eligibility, or server acceptance, `RevokedLeafSet`, `JoinSet`, and the non-genesis `snapshot_base` MUST all be authenticated under the same `HistoryCommitment`.
+* If the non-genesis `snapshot_base` is the caller's locally stored current committed tree for the same `barrier_version` being validated or incremented, equality with that current-state `HistoryCommitment` is mandatory, not optional.
 Genesis convention:
 When barrier_initialized == false, prev_barrier_version MUST be treated as 0 for JoinSet enumeration, and ResolveJoinsSince(0) MUST return the complete active leaf set for genesis.
 Leaf-allocation invariant (normative):
@@ -1098,6 +1099,7 @@ Before constructing any barrier_update, the updater MUST:
 * Non-genesis:
   * fetch pk_entries_prev := FetchBarrierPublicTree(H_prev).
   * Compute TreeHash(root_node) over pk_entries_prev per S11.4 and require it equals H_prev.
+  * Because this updater flow uses the locally stored current committed tree as `snapshot_base`, the authenticated `HistoryCommitment` returned with `pk_entries_prev` MUST equal the authenticated current-state `HistoryCommitment` used for `ResolveJoinsSince(...)` and `ResolveRevokedLeaves(...)`; mismatch -> 960.9.
   * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
 Join-finalize bootstrap exception (normative):
 * A newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, while pending if, and only if, it has:
@@ -1126,7 +1128,8 @@ A FULL-verifying client processing a barrier_update MUST:
 * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
 * Obtain `RevokedLeafSet := ResolveRevokedLeaves(revocation_roots_hash)` and `JoinSet := ResolveJoinsSince(BU.prev_barrier_version)` and record their authenticated view identifiers `hv_revoked` and `hv_join`.
 * Require `hv_revoked == hv_join`; mismatch or missing authenticated current-state view binding -> 960.9.
-* If `hc_tree` also validates to that same current-state `HistoryCommitment`, clients MAY additionally enforce equality. Otherwise, when `H_prev` designates a retained predecessor snapshot, authenticity of `pk_entries_prev` is established by `TreeHash(pk_entries_prev) == H_prev`, while current-state consistency is established by the matching authenticated A/B responses.
+* In this FULL-client flow, `H_prev` is the client's locally stored current committed tree, so `hc_tree` MUST equal the current-state `HistoryCommitment` authenticated by A/B; mismatch -> 960.9.
+* The weaker rule where `TreeHash(pk_entries_prev) == H_prev` is sufficient without current-state commitment equality applies only to explicitly historical predecessor snapshots such as the join-finalize bootstrap exception, where the spec calls that exception out by name.
 * Using pk_entries_prev as snapshot_base, construct snapshot_pre using S11.6 (with verifiable JoinSet and RevokedLeafSet).
 * Verify BU.kem_tree_hash_before equals hash(snapshot_pre).
 * Parse CP := KemTreeCoverPayload from BU.cover_payload bytes and enforce CBOR_det determinism per S1.3; parse or determinism failure -> 960.7.

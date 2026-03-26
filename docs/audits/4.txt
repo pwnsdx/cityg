@@ -252,3 +252,17 @@ Nouvelle passe spec + implémentation:
 Conclusion:
 
 Le finding principal de l’audit 4 est maintenant **réduit**: l’exception `join_finalize` n’est plus purement locale au client. En revanche, la frontière FULL/recover-only au sens large reste **partiellement ouverte** pour les paths `reason 0/1`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 9)
+
+Nouvelle passe spec + implémentation:
+
+- **FULL chain-check local resserré**: les paths GUI qui composent `FetchBarrierPublicTree(H_prev)` avec `ResolveJoinsSince(...)` et `ResolveRevokedLeaves(...)` exigent maintenant explicitement que les trois objets partagent le même `HistoryCommitment` courant.
+- **Contradiction spec corrigée**: `docs/specs.md` ne dit plus à la fois MUST et MAY sur ce point. Quand `snapshot_base` est le tree courant localement stocké, l’égalité de commitment est maintenant normative; la souplesse restante est réservée aux snapshots historiques explicites comme le bootstrap `join_finalize`.
+- **Limite inchangée**: cela renforce la discipline FULL côté client honnête, mais n’introduit toujours pas d’attestation wire-visible de FULL verification vérifiable par le serveur.
+
+Conclusion:
+
+Le cœur protocolaire de l’audit 4 reste **ouvert**, mais l’implémentation et la spec sont maintenant plus cohérentes sur ce qu’un client FULL doit réellement comparer avant d’émettre ou d’accepter un `barrier_update`.

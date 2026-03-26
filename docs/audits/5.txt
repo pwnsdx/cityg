@@ -234,3 +234,15 @@ Nouvelle passe spec + implémentation:
 Conclusion:
 
 Audit **toujours complété**, avec un renforcement additionnel réel du provisioning join au niveau wire + serveur + client.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 9)
+
+Nouvelle passe spec + implémentation:
+
+- **Fermeture d’un gap concret d’assemblage history**: les flows GUI d’origination et de FULL chain-check ne comparent plus seulement `JoinSet` et `RevokedLeafSet`; ils exigent aussi que le `FetchBarrierPublicTree(H_prev courant)` partage le même `HistoryCommitment`.
+- **Spec nettoyée**: la règle générique S11.6 “snapshot_base / JoinSet / RevokedLeafSet sous le même commitment” est maintenant alignée avec S11.11.1/S11.11.2, qui imposent explicitement cette égalité quand `snapshot_base` est le tree courant localement stocké.
+- **Toujours ouvert**: cette passe ferme une faiblesse locale de composition côté client, mais ne donne toujours pas de preuve de complétude forte ni de canonité globale byzantine.
+
+Statut audit: **COMPLETED**, avec remédiation implémentation supplémentaire sur la cohérence `snapshot / joins / revoked`.
