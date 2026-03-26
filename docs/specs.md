@@ -162,12 +162,14 @@ S3.1 Core identifiers (inputs)
 * xk_hash : bstr32 transcript hash / handshake binding (opaque here)
 * E_k : bstr    ME-OR derived value / binding (opaque here)
 * history_view_id : bstr32 exact committed membership/checkpoint/barrier history view identifier
+* HistoryAuthorityScope : one deployment-defined authenticated history authority domain for `(gid, deployment)` that issues the A)/B)/C)/D) responses consumed together by one client decision. In this base profile, the scope is the authenticated deployment/server context that vends those responses unless an extension defines a stronger explicit scope identifier.
 * HistoryCommitment := [history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint]
   * `history_commitment_id` names one server-local append-only commitment step for the authenticated history view.
   * `prev_history_commitment_id` is all-zero only for the first locally committed history step for that `(gid, deployment)`.
   * `history_seq` is a server-local monotonically increasing append-only sequence number for that `(gid, deployment)`.
   * `history_commitment_id` MUST be computed as `H_L("barrier/history-commitment", [gid, history_view_id, prev_history_commitment_id, history_seq])`.
   * This object strengthens local append-only correlation for A)/B)/C)/D); it is NOT, by itself, a federated/global consensus object.
+* Authenticated acceptance/finality in this document is always scoped to one `HistoryAuthorityScope` unless a later extension explicitly states stronger cross-scope consensus semantics.
 
 S3.2 Membership/SRX anchor roots (inputs)
 * header[110], header[111], header[112], header[113] : bstr32 roots (membership and revocation)
@@ -181,12 +183,14 @@ Shared authenticated-view rule (normative):
 * Every successful response from A), B), C), and D) MUST be bound to a `history_view_id` naming the exact committed history/checkpoint view under which the response was computed.
 * Every successful response from A), B), C), and D) MUST also carry a `HistoryCommitment` for that same view.
 * The proof/object format is deployment-defined, but it MUST cryptographically bind `(gid, history_view_id, request selector(s), response payload)` to committed history/checkpoint state.
+* The deployment MUST define one `HistoryAuthorityScope` for these authenticated responses. All A)/B)/C)/D) responses composed for one validation, activation, provisioning, or recovery decision MUST come from that same scope. Mixing authenticated responses from different scopes for one decision is out of profile and MUST fail closed.
 * The returned `HistoryCommitment.history_view_id` MUST equal the top-level `history_view_id`.
 * For responses computed against current state rather than a historical snapshot, the server MUST first advance/persist the current `HistoryCommitment` if the current committed state differs from the last emitted `HistoryCommitment`.
 * `history_seq` MUST strictly increase whenever the server locally appends a new committed history/checkpoint/barrier state for that `gid`; `history_commitment_id` MUST be unique for each such step.
 * Later sections may write `Resolve...(...)` / `Lookup...(...)` as shorthand for the payload component only; callers MUST also validate the accompanying `history_view_id`, `HistoryCommitment`, and authenticated proof/object per this section.
 * Any procedure that composes outputs from more than one of A)/B)/C)/D) for a single validation, activation, provisioning, or recovery decision MUST require all referenced authenticated responses/objects to validate to the same `HistoryCommitment`, unless that procedure explicitly defines a safe cross-view comparison. Missing or mismatched authenticated view binding MUST fail closed. In the FULL/updater chain-check and acceptance-correlation contexts, this failure MUST surface 960.9.
 * Historical snapshot fetches served from retained history MUST return the exact `HistoryCommitment` recorded when that snapshot became committed/fetchable, not a freshly recomputed current commitment.
+* If the deployment cannot provide authenticated completeness/finality for one requested result inside its `HistoryAuthorityScope`, it MUST return an authenticated "insufficient history / not available / pending" style outcome rather than silently omitting records and claiming success.
 
 A) ResolveRevokedLeaves(revocation_roots_hash) -> sorted unique list<uint>
 Returns revoked cover leaf indices corresponding to revocation_roots_hash.
@@ -229,7 +233,9 @@ where:
 * `status` is one of `{accepted, superseded, pending, final_rejected}`,
 * `history_commitment` is the current authenticated `HistoryCommitment` under which `status` was evaluated,
 * `accepted_*` fields MUST be present iff `status == accepted`,
-* `final_rejected` means authenticated finality establishes that the specific merge identified by `merge_locator` can no longer become accepted.
+* `accepted`, `superseded`, and `final_rejected` are statements about one `HistoryAuthorityScope`, not a cross-scope/global consensus claim.
+* `final_rejected` means authenticated finality within that same `HistoryAuthorityScope` establishes that the specific merge identified by `merge_locator` can no longer become accepted there.
+* A deployment that cannot establish scope-local authenticated finality for a locator MUST return `pending` rather than synthesizing `final_rejected`.
 The authenticated response MUST bind `merge_locator`, `status`, `history_commitment`, and any populated `accepted_*` fields to the returned `history_view_id`.
 Implementations MAY store additional stable identifiers, but any such identifier MUST be injectively bound to `merge_locator` within `gid`; it MUST NOT identify two distinct merge attempts.
 
@@ -1090,6 +1096,11 @@ Constraints (MUST):
 
 S11.11 Active-server resistance (normative; 960.9 wired)
 
+Threat-model scope clarification (normative):
+* The base profile's "active-server resistance" means fail-closed resistance to tampering, stale/mismatched helper state, and local append-only history steering within one authenticated `HistoryAuthorityScope` when the client actually performs the required S11.11.2 checks.
+* The base profile does NOT by itself define a federated/global consensus object across multiple independent history authorities. Cross-scope canonity/finality is therefore out of scope unless a deployment-specific extension defines it.
+* A client that later observes authenticated but incompatible lineage claims for the same `gid` from different `HistoryAuthorityScope`s, or incompatible append-only lineage claims within one claimed scope, MUST enter `recovery_required/history_inconsistent` and MUST NOT treat either lineage as a valid base for barrier activation or origination until reprovisioned or otherwise repaired by deployment-defined recovery.
+
 S11.11.1 Updater MUST authenticate snapshot_base (CRITICAL)
 Before constructing any barrier_update, the updater MUST:
 * already hold FULL-verified current barrier state at its locally stored current `barrier_version`, OR satisfy the join_finalize bootstrap exception below.
@@ -1155,6 +1166,9 @@ Additional restriction (normative):
 * Exception: a newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, after satisfying the S11.11.1 join_finalize bootstrap exception. Until then, and for all other reasons, the restriction above remains absolute.
 * A client originating reason 2 MUST carry the exact provisioned `header[179] join_finalize_auth` value from S12.2. Clients MUST NOT reuse a cleared or zero value.
 * Any client originating a `barrier_update`, including reason 2 under the bootstrap exception, MUST carry `header[180]` equal to the authenticated current-state `HistoryCommitment` used for the A/B/current-snapshot checks that justified origination.
+* `current_barrier_full_verified` is a client-local safety predicate, not a wire-visible proof in the base profile.
+* `header[180]` proves only that the author claims one authenticated current-state `HistoryCommitment` for its helper inputs; it does NOT, by itself, prove to the server that the author actually executed S11.11.2 correctly.
+* Therefore, in the base profile, the recover-only vs FULL distinction is enforced by honest-client behavior plus the server checks explicitly stated in S11.12. A deployment that requires server-verifiable proof of FULL verification MUST define an additional profile extension / receipt and MUST NOT claim that `header[180]` alone provides that guarantee.
 
 S11.12 Server-side validation of barrier_update (normative; MUST)
 
@@ -1205,6 +1219,7 @@ F) Updater identity binding + updater-not-revoked
 * Let JoinLeafSet := the set of `leaf_index` values carried by JoinSet.
 * The server MUST evaluate `RevokedLeafSet`, `JoinSet`, and the `snapshot_base` used below against one common authenticated `HistoryCommitment`; inability to establish a single common commitment -> reject 960.9.
 * The server MUST require `header[180]` to equal that same authenticated current-state `HistoryCommitment`; mismatch -> reject 960.9.
+* These checks establish helper-state coherence only. They MUST NOT be documented or relied upon as proof that the client performed FULL verification, unless a deployment-defined extension adds such a proof.
 * If header[178] == 1:
   * Require updater_leaf NOT IN JoinLeafSet, else reject 960.5.
   * Server MUST enforce S10.4B policy checks; on failure reject 960.12.
@@ -1397,6 +1412,7 @@ Persistence ordering:
 
 S11.14.2 Acceptance correlation + activation (MUST)
 Upon observing acceptance of the merge carrying this barrier_update, or after `LookupMergeAcceptance(pending_merge_locator)` returns `status == accepted` under an authenticated `HistoryCommitment`:
+* The observed acceptance / lookup result used for activation MUST come from the same `HistoryAuthorityScope` as the authenticated helper state used when the pending merge was constructed. If that cannot be established, the updater MUST enter `recovery_required/history_inconsistent` and MUST NOT activate.
 * Compute accepted_digest := H_L("barrier/update/digest", [accepted raw header[175] bytes]).
 * Require accepted_digest == pending_barrier_update_digest.
 * Require the observed accepted `barrier_version` to equal `pending_barrier_version`.
@@ -1453,6 +1469,7 @@ The initial JOIN anchor published by the joiner MUST carry `header[97]` in the S
 
 S12.2 Provisioning to joiner
 Join provisioning MUST deliver to the joiner as a signed and confidential provisioning artifact bound, at minimum, to `(gid, profile_version, current_history_view_id, current_history_commitment, current barrier_version, current kem_tree_hash_after, cover_leaf_index, N_max, max_barrier_update_bytes)`, and carrying a unique nonce, issuance time, and expiry. Joiners MUST reject artifacts that are stale, expired, replayed for the same join attempt, or not bound to the current `(gid, profile_version)`.
+The provisioning artifact, the provisioned `current_history_commitment`, the provisioned accepted current `barrier_update`, and any subsequent authenticated S3.3 A/B/C lookups used to justify `join_finalize` bootstrap MUST all come from one common `HistoryAuthorityScope`; otherwise the joiner MUST fail closed and remain pending.
 Join provisioning MUST deliver to the joiner:
 Barrier required fields:
 * current barrier_initialized (bool) -- for joins into an already-existing group under this profile, this MUST be true
@@ -1486,6 +1503,7 @@ Eligibility note (normative):
 * A just-provisioned joiner into an already-existing group MUST be able to invoke S3.3.A/B and `FetchBarrierPublicTree(current kem_tree_hash_after)` for the provisioned current committed barrier state immediately after provisioning, and those responses MUST validate to the provisioned `current_history_commitment`.
 * The joiner MUST also be able to invoke `FetchBarrierPublicTree(H_prev_bootstrap)` for the provisioned accepted current `barrier_update`; that predecessor committed snapshot MAY carry an older retained `HistoryCommitment`, but MUST authenticate exactly to the provisioned predecessor committed `kem_tree_hash_after`.
 * For reason 2 (`join_finalize`) eligibility only, a joiner that has the S12.2 current barrier metadata and successfully performs the FULL public-tree checks of S11.11.2 and the applicable `ek_n` verification of S11.13.6 against that provisioned current state is deemed FULL-verifying for current public state, even before it has derived the current `K_barrier`.
+* This deeming rule is still a client-local predicate in the base profile. The server validates `join_finalize_auth` and helper-state coherence, not a cryptographic proof that the joiner performed those checks.
 
 S12.3 Pending barrier recovery (normative)
 Because the server is untrusted and blind to `K_barrier`, it CANNOT provision `K_barrier` directly to the joiner. Joiners MUST begin in a `pending_barrier_recovery` state.

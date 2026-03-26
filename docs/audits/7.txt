@@ -290,3 +290,13 @@ Statut final de cet audit après relecture complète spec + implémentation:
 Le problème directeur reste inchangé: la défense contre serveur actif est aujourd’hui nettement meilleure localement, mais toujours pas équivalente à une canonité/finalité globale append-only.
 
 Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche scope-hardening)
+
+Nouvelle clarification de spec:
+
+- la résistance “serveur actif” du profil de base est maintenant bornée explicitement à **une `HistoryAuthorityScope` authentifiée**;
+- la spec dit noir sur blanc qu’elle ne fournit pas, à elle seule, une canonité/finalité **globale inter-sources**;
+- les restes correspondants sont donc mieux classés comme **extension de consensus/history authority**, pas comme contradiction cachée du texte de base.

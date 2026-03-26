@@ -308,3 +308,13 @@ Statut final de cet audit après relecture complète spec + implémentation:
 Le point le plus important encore ouvert est l’absence d’une preuve wire-visible/server-checkable de FULL verification pour les reasons `0/1`.
 
 Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche scope-hardening)
+
+Nouvelle clarification de spec:
+
+- `current_barrier_full_verified` est maintenant défini explicitement comme **prédicat local client**.
+- `header[180]` est explicitement limité à une preuve de **cohérence helper-state**, pas à une preuve de FULL verification côté serveur.
+- Le point “server-verifiable FULL verification” n’est donc plus une promesse implicite du profil de base; c’est désormais une **extension explicitement requise** si on veut cette propriété.

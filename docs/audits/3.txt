@@ -253,3 +253,13 @@ Statut final de cet audit après relecture complète spec + implémentation:
 Le gros résiduel est désormais clairement protocolaire: finalité/canonité globale, pas simple corrélation locale.
 
 Preuve consolidée et références exactes: `docs/audits/final-verification-report-2026-03-26.md`.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche scope-hardening)
+
+Nouvelle clarification de spec:
+
+- `docs/specs.md` définit maintenant explicitement un `HistoryAuthorityScope`.
+- L’acceptance/finality de `LookupMergeAcceptance` et l’activation S11.14 sont désormais déclarées comme **scope-locales**, pas implicitement globales/fédérées.
+- Cela ne ferme pas le besoin d’une finalité/canonité globale si elle est voulue; cela le requalifie en **extension requise**, au lieu de laisser une promesse implicite floue dans le profil de base.

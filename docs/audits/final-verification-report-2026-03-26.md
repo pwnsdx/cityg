@@ -14,6 +14,11 @@ Verification method:
 - Verified live repo hygiene with `git status --short` clean, `git diff --check` clean, and `cargo metadata --locked --format-version 1 --no-deps` succeeding under `scripts/cargo_repo_env.sh`.
 - Used existing targeted tests as proof anchors where they exist.
 
+Scope-hardening addendum (same date, later tranche):
+- `docs/specs.md` now explicitly defines `HistoryAuthorityScope` and states that authenticated acceptance/finality is scoped to one such authority, not to an implicit global/federated consensus object.
+- `docs/specs.md` now also states explicitly that `current_barrier_full_verified` is a client-local predicate and that `header[180]` proves helper-state coherence, not FULL verification to the server.
+- As a result, some previously listed `Open` items are now better interpreted as `extension required / intentionally out of base profile`, not as latent contradictions inside the base profile text. The per-item matrix below remains a conservative baseline unless otherwise noted in a later audit comment.
+
 Summary:
 - Total findings reviewed: `51`
 - `Closed`: `13`
