@@ -39,18 +39,19 @@ use futures::{SinkExt, StreamExt};
 use hex::FromHex;
 use pb::{
     AcceptEpochRequest, AcceptEpochResponse, BarrierFetchPublicTreeRequest,
-    BarrierFetchPublicTreeResponse, BarrierJoinLeafRecord, BarrierResolveJoinsSinceRequest,
+    BarrierFetchPublicTreeResponse, BarrierJoinLeafRecord, BarrierLookupMergeAcceptanceRequest,
+    BarrierLookupMergeAcceptanceResponse, BarrierResolveJoinsSinceRequest,
     BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
     BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest, BootstrapRoomResponse, ChatMessage,
     ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
     FetchMessagesRequest, FetchMessagesResponse, FreezeStat, GetBundleRequest, GetBundleResponse,
     GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse,
     IdentityBinding, JoinTicketRequest, JoinTicketResponse, ListRoomAdminsRequest,
-    ListRoomAdminsResponse, Member, MembersRequest, MembersResponse, MergeTicketIntent,
-    MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
-    RoomAdminMutationRequest, RoomAdminMutationResponse, RoomAdminProof, RotateRoomKbroadRequest,
-    RotateRoomKbroadResponse, SendMessageRequest, SendMessageResponse, TelemetryEntry, WindowEntry,
-    WindowHead,
+    ListRoomAdminsResponse, Member, MembersRequest, MembersResponse, MergeAcceptanceStatus,
+    MergeTicketIntent, MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest,
+    RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse, RoomAdminProof,
+    RotateRoomKbroadRequest, RotateRoomKbroadResponse, SendMessageRequest, SendMessageResponse,
+    TelemetryEntry, WindowEntry, WindowHead,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -63,8 +64,9 @@ use unicode_normalization::UnicodeNormalization;
 
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_server::{
-    BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord, CityGServer, MergeTicketBundle,
-    ServerConfig, ServerOutcome,
+    BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord, CityGServer,
+    MergeAcceptanceStatus as ServerMergeAcceptanceStatus, MergeTicketBundle, ServerConfig,
+    ServerOutcome,
 };
 use msphf_core::{
     MsphfError,
@@ -2404,7 +2406,9 @@ async fn barrier_resolve_revoked_leaves(
     let history_view_id = {
         let lane = state.server_for_gid(&gid);
         let guard = lane.read().await;
-        guard.current_history_view_id(&gid).map_err(ApiError::from)?
+        guard
+            .current_history_view_id(&gid)
+            .map_err(ApiError::from)?
     };
 
     let response = BarrierResolveRevokedLeavesResponse {
@@ -2443,7 +2447,9 @@ async fn barrier_resolve_joins_since(
     let history_view_id = {
         let lane = state.server_for_gid(&gid);
         let guard = lane.read().await;
-        guard.current_history_view_id(&gid).map_err(ApiError::from)?
+        guard
+            .current_history_view_id(&gid)
+            .map_err(ApiError::from)?
     };
 
     let response = BarrierResolveJoinsSinceResponse {
@@ -2504,6 +2510,72 @@ async fn barrier_fetch_public_tree(
         kem_tree_hash_after: snapshot.kem_tree_hash_after.to_vec(),
         pk_entries: snapshot.pk_entries,
         history_view_id: snapshot.history_view_id.to_vec(),
+    };
+    Ok(protobuf_response(&response))
+}
+
+async fn barrier_lookup_merge_acceptance(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
+    let request = BarrierLookupMergeAcceptanceRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    if request.pending_barrier_update_digest.len() != 32 {
+        return Err(ApiError::InvalidRequest(
+            "pending_barrier_update_digest must be 32 bytes",
+        ));
+    }
+    if request.pending_we_epoch_id.len() != 32 {
+        return Err(ApiError::InvalidRequest(
+            "pending_we_epoch_id must be 32 bytes",
+        ));
+    }
+    let gid = parse_gid(&request.room_id)?;
+    enforce_expensive_rate_limit(
+        &state,
+        "barrier_lookup_merge_acceptance",
+        message_scoped_rate_limit_key(&headers, request.pending_we_epoch_id.as_slice()),
+    )
+    .await?;
+
+    let mut pending_barrier_update_digest = [0u8; 32];
+    pending_barrier_update_digest.copy_from_slice(&request.pending_barrier_update_digest);
+    let mut pending_we_epoch_id = [0u8; 32];
+    pending_we_epoch_id.copy_from_slice(&request.pending_we_epoch_id);
+
+    let record = {
+        let lane = state.server_for_gid(&gid);
+        let guard = lane.read().await;
+        match guard.lookup_merge_acceptance(
+            &gid,
+            request.pending_barrier_version,
+            &pending_barrier_update_digest,
+            &pending_we_epoch_id,
+        ) {
+            Ok(record) => record,
+            Err(ClientError::InvalidInput("group not found")) => return Err(ApiError::NotFound),
+            Err(err) => return Err(ApiError::from(err)),
+        }
+    };
+
+    let response = BarrierLookupMergeAcceptanceResponse {
+        status: match record.status {
+            ServerMergeAcceptanceStatus::Pending => MergeAcceptanceStatus::Pending as i32,
+            ServerMergeAcceptanceStatus::Accepted => MergeAcceptanceStatus::Accepted as i32,
+            ServerMergeAcceptanceStatus::Superseded => MergeAcceptanceStatus::Superseded as i32,
+            ServerMergeAcceptanceStatus::FinalRejected => {
+                MergeAcceptanceStatus::FinalRejected as i32
+            }
+        },
+        history_view_id: record.history_view_id.to_vec(),
+        accepted_barrier_version: record.accepted_barrier_version,
+        accepted_fs_ec: record.accepted_fs_ec,
+        accepted_reason: record.accepted_reason,
+        accepted_digest: record.accepted_digest.map(|digest| digest.to_vec()),
     };
     Ok(protobuf_response(&response))
 }
@@ -3398,6 +3470,10 @@ pub async fn run_with_config(
         .route(
             "/v1/barrier/fetch_public_tree",
             post(barrier_fetch_public_tree),
+        )
+        .route(
+            "/v1/barrier/lookup_merge_acceptance",
+            post(barrier_lookup_merge_acceptance),
         )
         .route("/v1/pivot/refresh", post(refresh_pivot));
 
@@ -6653,6 +6729,55 @@ mod tests {
         let legacy: HealthResponse =
             decode_proto_response(health_legacy_with_state(State(state)).await).await;
         assert_eq!(legacy.status, "ok");
+    }
+
+    #[tokio::test]
+    async fn barrier_lookup_merge_acceptance_validates_pending_and_not_found() {
+        let state = test_api_state();
+        let headers = message_auth_headers();
+        let gid = [0xA9; 32];
+
+        {
+            let lane = state.server_for_gid(&gid);
+            let mut guard = lane.write().await;
+            guard
+                .register_group(&gid, vec![0xAA; 16])
+                .expect("group registration should succeed");
+        }
+
+        let pending = barrier_lookup_merge_acceptance(
+            State(state.clone()),
+            headers.clone(),
+            encode_proto_request(&BarrierLookupMergeAcceptanceRequest {
+                room_id: hex::encode(gid),
+                pending_barrier_version: 11,
+                pending_barrier_update_digest: vec![0xAB; 32],
+                pending_we_epoch_id: vec![0xCD; 32],
+            }),
+        )
+        .await
+        .expect("registered group should return pending lookup");
+        let pending: BarrierLookupMergeAcceptanceResponse = decode_proto_response(pending).await;
+        assert_eq!(pending.status, MergeAcceptanceStatus::Pending as i32);
+        assert_eq!(pending.accepted_barrier_version, None);
+        assert_eq!(pending.accepted_fs_ec, None);
+        assert_eq!(pending.accepted_reason, None);
+        assert_eq!(pending.accepted_digest, None);
+        assert_ne!(pending.history_view_id, vec![0u8; 32]);
+
+        let err = barrier_lookup_merge_acceptance(
+            State(state),
+            headers,
+            encode_proto_request(&BarrierLookupMergeAcceptanceRequest {
+                room_id: hex::encode([0xEE; 32]),
+                pending_barrier_version: 11,
+                pending_barrier_update_digest: vec![0xEE; 32],
+                pending_we_epoch_id: vec![0xEF; 32],
+            }),
+        )
+        .await
+        .expect_err("unknown group should map to not found");
+        assert!(matches!(err, ApiError::NotFound));
     }
 
     #[tokio::test]

@@ -194,3 +194,21 @@ Re-vérification d’implémentation après patchs du jour:
 - **Priorité restante**: introduire un vrai `LookupMergeAcceptance(merge_locator)` côté API/serveur/client pour fermer ce point autrement qu’avec des heuristiques autour de `we_epoch_id`.
 
 Statut audit: **COMPLETED** pour le triage, mais la remédiation implémentation reste **partielle**.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 3)
+
+Nouvelle passe implémentation:
+
+- **Fermé partiellement mais concrètement**: l’API/server/client implémentent maintenant un vrai `LookupMergeAcceptance` aligné sur la spec durcie, via un locator `(pending_barrier_version, pending_barrier_update_digest, pending_we_epoch_id)`.
+- **Fermé côté client updater**: `apply_pending_barrier_activation_from_history` n’utilise plus `get_bundle(we_epoch_id)` comme heuristique principale. Le runtime natif consomme désormais un verdict authentifié `pending / accepted / superseded`, ce qui ferme le point le plus concret de corrélation pending-history.
+- **Durci fail-closed**: un `404` ou une absence d’historique n’implique plus “lost race”. Le pending state est conservé. Seuls `superseded` / `final_rejected` permettent désormais de jeter le pending state.
+- **Persisté côté serveur**: un index compact des merges barrier acceptés est maintenant conservé dans l’état serveur et persisté avec le state KBROAD, ce qui évite de dépendre d’un scan opportuniste des bundles encore retenus.
+
+Ce qui reste ouvert:
+
+- **Toujours pas de finalité forte**: l’implémentation retourne aujourd’hui surtout `pending`, `accepted` et `superseded`; la vraie sémantique `final_rejected` reste encore non fermée faute d’objet de finalité append-only/canonique plus fort.
+- **Toujours pas de canonité globale d’historique**: cette tranche améliore la corrélation d’acceptation, pas la preuve byzantine qu’il n’existe qu’une seule branche acceptée.
+
+Statut audit: **COMPLETED**, avec remédiation implémentation désormais **substantielle mais pas totale**.

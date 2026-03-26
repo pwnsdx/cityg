@@ -196,3 +196,17 @@ Re-vérification d’implémentation après patchs du jour:
 - **Encore ouvert**: `reason=2` reste validé surtout via `JoinSet` et l’état local du client, pas via une attestation protocolaire serveur-checkable de FULL/public-state verification.
 
 Statut audit: **COMPLETED**, sans changement de classement du gap principal.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 3)
+
+Nouvelle passe implémentation:
+
+- **Pas de changement de classement du finding principal**: il n’y a toujours pas de preuve wire-visible de FULL verification vérifiable par le serveur. La frontière FULL/recover-only reste principalement honnête-client-enforced.
+- **Durci côté client**: la corrélation pending-history utilisée après refresh/join-finalize ne traite plus l’absence d’historique comme une preuve implicite de non-acceptation. Cela réduit un chemin où un client recover-only/pending pouvait jeter son état trop agressivement.
+- **Toujours vrai**: `reason=2` reste server-checkable surtout via `JoinSet` et le contexte d’acceptation, pas via une attestation explicite de FULL/public-state verification fournie par le client.
+
+Conclusion:
+
+Cette tranche améliore la sûreté de la recovery path, mais **ne transforme pas** la frontière FULL/recover-only en propriété protocolaire server-verifiable. Le diagnostic central de l’audit reste inchangé.

@@ -330,6 +330,31 @@ message BarrierFetchPublicTreeResponse {
   bytes history_view_id = 4;
 }
 
+enum MergeAcceptanceStatus {
+  MERGE_ACCEPTANCE_STATUS_PENDING = 0;
+  MERGE_ACCEPTANCE_STATUS_ACCEPTED = 1;
+  MERGE_ACCEPTANCE_STATUS_SUPERSEDED = 2;
+  MERGE_ACCEPTANCE_STATUS_FINAL_REJECTED = 3;
+}
+
+message BarrierLookupMergeAcceptanceRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  uint64 pending_barrier_version = 2;
+  bytes pending_barrier_update_digest = 3;
+  bytes pending_we_epoch_id = 4;
+}
+
+message BarrierLookupMergeAcceptanceResponse {
+  reserved 1000 to 1999;
+  MergeAcceptanceStatus status = 1;
+  bytes history_view_id = 2;
+  optional uint64 accepted_barrier_version = 3;
+  optional uint64 accepted_fs_ec = 4;
+  optional uint64 accepted_reason = 5;
+  optional bytes accepted_digest = 6;
+}
+
 message RoomAdminProof {
   reserved 1000 to 1999;
   bytes pop_public_key = 1;  // ML-DSA-87 public key (Dilithium5)

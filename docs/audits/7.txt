@@ -171,3 +171,20 @@ Re-vérification d’implémentation après patchs du jour:
 - **Toujours ouvert**: l’API de finalité/history et les preuves de complétude des réponses membership restent la prochaine tranche nécessaire pour parler de résistance byzantine plus forte.
 
 Statut audit: **COMPLETED**, avec fermeture de symptômes locaux mais pas du problème global d’historique canonique.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 3)
+
+Nouvelle passe implémentation:
+
+- **Amélioration réelle du trust-boundary history**: le serveur expose maintenant un objet d’acceptance lookup stable pour les merges barrier, et le client l’utilise explicitement au lieu de dériver l’état depuis un simple `get_bundle`.
+- **Fail-closed renforcé**: un serveur qui répond `404` / “not found” sur ce lookup ne force plus le client à conclure qu’un pending merge a perdu. Le pending state est conservé tant que l’historique authentifié n’a pas tranché.
+- **Persisté côté serveur**: les métadonnées minimales d’acceptation barrier sont maintenant gardées dans l’état persistant, ce qui réduit la dépendance à la seule rétention opportuniste des bundles.
+
+Ce qui reste ouvert:
+
+- **Toujours pas de canonité append-only globale**: le lookup améliore la décision locale sur un merge pending, mais ne prouve toujours pas qu’il n’existe pas de branche concurrente canonique ailleurs.
+- **Toujours pas de preuve de complétude membership/history**: l’audit garde raison sur le fait que la résistance byzantine globale reste limitée par l’absence d’objet d’historique plus fort.
+
+Statut audit: **COMPLETED**, avec amélioration implémentation tangible sur la boundary “pending merge vs history”, mais sans fermeture du problème de branche canonique globale.

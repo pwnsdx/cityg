@@ -147,17 +147,19 @@ pub use pb::IdentityBinding;
 pub use pb::RoomAdminProof;
 use pb::{
     AcceptEpochRequest, AcceptEpochResponse, BarrierFetchPublicTreeRequest,
-    BarrierFetchPublicTreeResponse, BarrierResolveJoinsSinceRequest,
+    BarrierFetchPublicTreeResponse, BarrierLookupMergeAcceptanceRequest,
+    BarrierLookupMergeAcceptanceResponse, BarrierResolveJoinsSinceRequest,
     BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
     BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest, BootstrapRoomResponse,
     ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
     FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest, GetBundleResponse,
     GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse,
     JoinTicketRequest, JoinTicketResponse, ListRoomAdminsRequest, ListRoomAdminsResponse,
-    MembersRequest, MembersResponse, MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest,
-    MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
-    RoomAdminMutationResponse, RotateRoomKbroadRequest, RotateRoomKbroadResponse,
-    SearchMembersRequest, SearchMembersResponse, SendMessageRequest, SendMessageResponse,
+    MembersRequest, MembersResponse, MergeAcceptanceStatus as PbMergeAcceptanceStatus,
+    MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
+    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse,
+    RotateRoomKbroadRequest, RotateRoomKbroadResponse, SearchMembersRequest, SearchMembersResponse,
+    SendMessageRequest, SendMessageResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -1161,6 +1163,33 @@ impl CitygApiClient {
         })
     }
 
+    /// Looks up authenticated acceptance status for a persisted pending merge locator.
+    pub async fn barrier_lookup_merge_acceptance(
+        &self,
+        room_id: &str,
+        pending_barrier_version: u64,
+        pending_barrier_update_digest: &[u8; 32],
+        pending_we_epoch_id: &[u8; 32],
+    ) -> Result<MergeAcceptanceLookup, Error> {
+        let request = BarrierLookupMergeAcceptanceRequest {
+            room_id: room_id.to_string(),
+            pending_barrier_version,
+            pending_barrier_update_digest: pending_barrier_update_digest.to_vec(),
+            pending_we_epoch_id: pending_we_epoch_id.to_vec(),
+        };
+        let response: BarrierLookupMergeAcceptanceResponse = self
+            .post_proto("/v1/barrier/lookup_merge_acceptance", request)
+            .await?;
+        Ok(MergeAcceptanceLookup {
+            status: parse_merge_acceptance_status(response.status)?,
+            history_view_id: array32(&response.history_view_id)?,
+            accepted_barrier_version: response.accepted_barrier_version,
+            accepted_fs_ec: response.accepted_fs_ec,
+            accepted_reason: response.accepted_reason,
+            accepted_digest: optional_array32(response.accepted_digest)?,
+        })
+    }
+
     /// Stores an encrypted message in an epoch.
     ///
     /// Messages are associated with a specific epoch ID and can be retrieved
@@ -1580,6 +1609,7 @@ impl CitygApiClient {
                 | "/v1/barrier/resolve_revoked_leaves"
                 | "/v1/barrier/resolve_joins_since"
                 | "/v1/barrier/fetch_public_tree"
+                | "/v1/barrier/lookup_merge_acceptance"
                 | "/v1/bundle"
                 | "/v1/window"
                 | "/v1/telemetry"
@@ -1623,6 +1653,24 @@ pub struct BarrierPublicTree {
 pub struct BarrierFetchedPublicTree {
     pub history_view_id: [u8; 32],
     pub tree: BarrierPublicTree,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeAcceptanceStatus {
+    Pending,
+    Accepted,
+    Superseded,
+    FinalRejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeAcceptanceLookup {
+    pub status: MergeAcceptanceStatus,
+    pub history_view_id: [u8; 32],
+    pub accepted_barrier_version: Option<u64>,
+    pub accepted_fs_ec: Option<u64>,
+    pub accepted_reason: Option<u64>,
+    pub accepted_digest: Option<[u8; 32]>,
 }
 
 /// Merge ticket containing all data needed to create a new epoch.
@@ -1710,6 +1758,22 @@ fn array32(bytes: &[u8]) -> Result<[u8; 32], Error> {
         .map_err(|_| Error::Parse("invalid 32-byte field".to_string()))
 }
 
+fn optional_array32(bytes: Option<Vec<u8>>) -> Result<Option<[u8; 32]>, Error> {
+    bytes.as_deref().map(array32).transpose()
+}
+
+fn parse_merge_acceptance_status(status: i32) -> Result<MergeAcceptanceStatus, Error> {
+    match PbMergeAcceptanceStatus::try_from(status) {
+        Ok(PbMergeAcceptanceStatus::Pending) => Ok(MergeAcceptanceStatus::Pending),
+        Ok(PbMergeAcceptanceStatus::Accepted) => Ok(MergeAcceptanceStatus::Accepted),
+        Ok(PbMergeAcceptanceStatus::Superseded) => Ok(MergeAcceptanceStatus::Superseded),
+        Ok(PbMergeAcceptanceStatus::FinalRejected) => Ok(MergeAcceptanceStatus::FinalRejected),
+        Err(_) => Err(Error::Parse(format!(
+            "invalid merge acceptance status: {status}"
+        ))),
+    }
+}
+
 fn ensure_profile_version(version: &str) -> Result<(), Error> {
     if version == EXPECTED_PROFILE_VERSION {
         return Ok(());
@@ -1781,11 +1845,13 @@ mod tests {
     };
     use cityg_client::demo::demo_bundle_alice;
     use pb::{
-        AcceptEpochResponse, BarrierFetchPublicTreeResponse, BarrierResolveJoinsSinceResponse,
-        BarrierResolveRevokedLeavesResponse, BootstrapRoomResponse, ConfigureWindowResponse,
-        FetchMessagesResponse, GetBundleResponse, GetTelemetryResponse, GetWindowResponse,
-        JoinTicketResponse, MembersResponse, MergeTicketResponse, RefreshPivotResponse,
-        RotateRoomKbroadResponse, SearchMembersResponse, SeedHeadResponse, SendMessageResponse,
+        AcceptEpochResponse, BarrierFetchPublicTreeResponse, BarrierLookupMergeAcceptanceResponse,
+        BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesResponse,
+        BootstrapRoomResponse, ConfigureWindowResponse, FetchMessagesResponse, GetBundleResponse,
+        GetTelemetryResponse, GetWindowResponse, JoinTicketResponse, MembersResponse,
+        MergeAcceptanceStatus as PbMergeAcceptanceStatus, MergeTicketResponse,
+        RefreshPivotResponse, RotateRoomKbroadResponse, SearchMembersResponse, SeedHeadResponse,
+        SendMessageResponse,
     };
     use prost::Message;
     use std::{error::Error as StdError, net::SocketAddr};
@@ -1890,6 +1956,16 @@ mod tests {
                 pk_entries: vec![Vec::new(); 15],
                 history_view_id: vec![0xD1; 32],
             }),
+            "/v1/barrier/lookup_merge_acceptance" => {
+                encode_proto(BarrierLookupMergeAcceptanceResponse {
+                    status: PbMergeAcceptanceStatus::Accepted as i32,
+                    history_view_id: vec![0xD1; 32],
+                    accepted_barrier_version: Some(11),
+                    accepted_fs_ec: Some(22),
+                    accepted_reason: Some(1),
+                    accepted_digest: Some(vec![0xDD; 32]),
+                })
+            }
             "/v1/send_message" => encode_proto(SendMessageResponse::default()),
             "/v1/messages" => encode_proto(FetchMessagesResponse::default()),
             "/v1/bundle" => encode_proto(GetBundleResponse::default()),
@@ -2355,6 +2431,15 @@ mod tests {
         assert_eq!(tree.tree.n_max, 8);
         assert_eq!(tree.tree.kem_tree_hash_after, [0xCC; 32]);
         assert_eq!(tree.tree.pk_entries.len(), 15);
+        let acceptance = client
+            .barrier_lookup_merge_acceptance("room-1", 11, &[0x44; 32], &[0x55; 32])
+            .await?;
+        assert_eq!(acceptance.status, MergeAcceptanceStatus::Accepted);
+        assert_eq!(acceptance.history_view_id, [0xD1; 32]);
+        assert_eq!(acceptance.accepted_barrier_version, Some(11));
+        assert_eq!(acceptance.accepted_fs_ec, Some(22));
+        assert_eq!(acceptance.accepted_reason, Some(1));
+        assert_eq!(acceptance.accepted_digest, Some([0xDD; 32]));
 
         let _ = client
             .send_message(&[0x22; 32], b"ciphertext", Some(&[0xAA; 32]))

@@ -564,41 +564,46 @@ pub(super) async fn apply_pending_barrier_activation_from_history(
         return Ok(PendingBarrierHistoryOutcome::Unchanged);
     }
 
-    match client.get_bundle(&pending.we_epoch_id).await {
-        Ok(bundle_response) => {
-            let bundle = ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor).context(
-                "decode accepted pending bundle for barrier activation correlation (960.9)",
-            )?;
-            let accepted_digest = extract_barrier_update_digest(&bundle.header_map)?.ok_or_else(|| {
-                anyhow!(
-                    "pending barrier activation history returned bundle without barrier_update (960.9)"
-                )
-            })?;
-            let observed_barrier_version = header_u64(&bundle.header_map, hdr::HDR_BARRIER_VERSION)
-                .ok_or_else(|| {
-                    anyhow!("pending barrier activation history missing barrier_version (960.9)")
-                })?;
-            let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC);
-            let observed_barrier_update_reason =
-                header_u64(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON);
-            if apply_pending_barrier_activation(
-                session,
-                observed_barrier_version,
-                observed_fs_ec,
-                observed_barrier_update_reason,
-                Some(accepted_digest),
-            )? {
-                return Ok(PendingBarrierHistoryOutcome::Activated(bundle.we_epoch_id));
+    match client
+        .barrier_lookup_merge_acceptance(
+            &session.room_id,
+            pending.barrier_version,
+            &pending.barrier_update_digest,
+            &pending.we_epoch_id,
+        )
+        .await
+    {
+        Ok(lookup) => match lookup.status {
+            MergeAcceptanceStatus::Accepted => {
+                let observed_barrier_version =
+                    lookup.accepted_barrier_version.ok_or_else(|| {
+                        anyhow!(
+                            "pending barrier activation history missing accepted barrier_version (960.9)"
+                        )
+                    })?;
+                if apply_pending_barrier_activation(
+                    session,
+                    observed_barrier_version,
+                    lookup.accepted_fs_ec,
+                    lookup.accepted_reason,
+                    lookup.accepted_digest,
+                )? {
+                    return Ok(PendingBarrierHistoryOutcome::Activated(pending.we_epoch_id));
+                }
+                Err(anyhow!(
+                    "pending barrier activation history mismatch (960.9): acceptance record did not match persisted pending state"
+                ))
             }
-            Err(anyhow!(
-                "pending barrier activation history mismatch (960.9): accepted bundle did not match persisted pending state"
-            ))
-        }
-        Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
-            if current_barrier_version > pending.barrier_version {
+            MergeAcceptanceStatus::Superseded | MergeAcceptanceStatus::FinalRejected => {
                 session.barrier_state.pending = None;
-                return Ok(PendingBarrierHistoryOutcome::Discarded);
+                Ok(PendingBarrierHistoryOutcome::Discarded)
             }
+            MergeAcceptanceStatus::Pending => {
+                let _ = current_barrier_version;
+                Ok(PendingBarrierHistoryOutcome::Unchanged)
+            }
+        },
+        Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
             Ok(PendingBarrierHistoryOutcome::Unchanged)
         }
         Err(err) => Err(anyhow!(

@@ -347,6 +347,24 @@ pub struct BarrierPublicTreeSnapshot {
     pub pk_entries: Vec<Vec<u8>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeAcceptanceStatus {
+    Pending,
+    Accepted,
+    Superseded,
+    FinalRejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeAcceptanceRecord {
+    pub status: MergeAcceptanceStatus,
+    pub history_view_id: [u8; 32],
+    pub accepted_barrier_version: Option<u64>,
+    pub accepted_fs_ec: Option<u64>,
+    pub accepted_reason: Option<u64>,
+    pub accepted_digest: Option<[u8; 32]>,
+}
+
 const DUPLICATE_ACTIVE_COVER_LEAF_ALLOCATION_ERR: &str = "duplicate active cover leaf allocation";
 const COVER_LEAF_INDEX_ALREADY_ALLOCATED_ERR: &str = "cover leaf index already allocated";
 const GENESIS_PROVISIONING_ARTIFACT_MISSING_ERR: &str = "genesis provisioning artifact missing";
@@ -1362,6 +1380,11 @@ impl CityGServer {
         group.pcs_refresh_min_delta_group_ec = barrier_state.pcs_refresh_min_delta_group_ec.max(1);
         group.pcs_refresh_slot_width_ec = barrier_state.pcs_refresh_slot_width_ec.max(1);
         group.max_barrier_update_bytes = barrier_state.max_barrier_update_bytes.max(1);
+        if let Some(record) = accepted_barrier_merge_record(bundle)? {
+            group
+                .accepted_barrier_merges
+                .insert(record.barrier_version, record);
+        }
 
         let barrier_version = ctx
             .barrier_group_state(bundle.gid())
@@ -1549,6 +1572,8 @@ impl CityGServer {
             group.last_accepted_ec = room_state.last_accepted_ec;
             group.barrier_pk_entries = room_state.barrier_pk_entries.clone();
             group.barrier_public_tree_blobs = room_state.barrier_public_tree_blobs.clone();
+            group.accepted_barrier_merges =
+                decode_persisted_accepted_barrier_merges(&room_state.accepted_barrier_merges);
             rebuild_barrier_public_tree_blob_index(group)?;
             group.barrier_public_tree_history.clear();
             for snapshot in &room_state.barrier_public_tree_history {
@@ -1694,6 +1719,14 @@ impl CityGServer {
                     msphf_orchestrator::BarrierGroupState::default().max_barrier_update_bytes,
                 )
                 .max(1);
+            for (barrier_version, record) in
+                decode_persisted_accepted_barrier_merges(&room_state.accepted_barrier_merges)
+            {
+                group
+                    .accepted_barrier_merges
+                    .entry(barrier_version)
+                    .or_insert(record);
+            }
             group.n_max = validate_barrier_n_max(group.n_max)?;
 
             let ctx_state = self.ctx.barrier_group_state_entry_mut(gid.as_slice());
@@ -1993,6 +2026,54 @@ impl CityGServer {
         self.roster.groups.get(gid).map(|state| state.n_max)
     }
 
+    pub fn lookup_merge_acceptance(
+        &self,
+        gid: &[u8; 32],
+        pending_barrier_version: u64,
+        pending_barrier_update_digest: &[u8; 32],
+        pending_we_epoch_id: &[u8; 32],
+    ) -> Result<MergeAcceptanceRecord, CityGError> {
+        let state = self
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        let history_view_id = compute_history_view_id(gid.as_slice(), state)?;
+        let accepted = state.accepted_barrier_merges.get(&pending_barrier_version);
+        let response = match accepted {
+            Some(record)
+                if record.digest == *pending_barrier_update_digest
+                    && record.we_epoch_id == *pending_we_epoch_id =>
+            {
+                MergeAcceptanceRecord {
+                    status: MergeAcceptanceStatus::Accepted,
+                    history_view_id,
+                    accepted_barrier_version: Some(record.barrier_version),
+                    accepted_fs_ec: Some(record.fs_ec),
+                    accepted_reason: Some(record.reason),
+                    accepted_digest: Some(record.digest),
+                }
+            }
+            Some(record) => MergeAcceptanceRecord {
+                status: MergeAcceptanceStatus::Superseded,
+                history_view_id,
+                accepted_barrier_version: Some(record.barrier_version),
+                accepted_fs_ec: Some(record.fs_ec),
+                accepted_reason: Some(record.reason),
+                accepted_digest: Some(record.digest),
+            },
+            None => MergeAcceptanceRecord {
+                status: MergeAcceptanceStatus::Pending,
+                history_view_id,
+                accepted_barrier_version: None,
+                accepted_fs_ec: None,
+                accepted_reason: None,
+                accepted_digest: None,
+            },
+        };
+        Ok(response)
+    }
+
     pub fn resolve_revoked_leaf_indices(
         &self,
         gid: &[u8; 32],
@@ -2195,6 +2276,53 @@ fn compute_history_view_id(gid: &[u8], state: &GroupState) -> Result<[u8; 32], C
         },
     )
     .map_err(CityGError::from)
+}
+
+fn compute_barrier_update_digest(raw_update: &[u8]) -> Result<[u8; 32], CityGError> {
+    h_l(
+        "barrier/update/digest",
+        &serde_bytes::Bytes::new(raw_update),
+    )
+    .map_err(CityGError::from)
+}
+
+fn accepted_barrier_merge_record(
+    bundle: &ClientEpochBundle,
+) -> Result<Option<AcceptedBarrierMergeRecord>, CityGError> {
+    let Some(Value::Bytes(raw_update)) = bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE) else {
+        return Ok(None);
+    };
+    let barrier_version = match bundle.header_map.get(&hdr::HDR_BARRIER_VERSION) {
+        Some(Value::Integer(value)) => u64::try_from(*value).map_err(|_| {
+            CityGError::InvalidInput("accepted barrier merge missing barrier_version")
+        })?,
+        _ => {
+            return Err(CityGError::InvalidInput(
+                "accepted barrier merge missing barrier_version",
+            ));
+        }
+    };
+    let fs_ec = match bundle.header_map.get(&hdr::HDR_FS_EC) {
+        Some(Value::Integer(value)) => u64::try_from(*value)
+            .map_err(|_| CityGError::InvalidInput("accepted barrier merge missing fs_ec"))?,
+        _ => {
+            return Err(CityGError::InvalidInput(
+                "accepted barrier merge missing fs_ec",
+            ));
+        }
+    };
+    let reason = parse_barrier_update_reason(&bundle.header_map)?.ok_or(
+        CityGError::InvalidInput("accepted barrier merge missing barrier_update_reason"),
+    )?;
+    let mut we_epoch_id = [0u8; 32];
+    we_epoch_id.copy_from_slice(bundle.we_epoch_id.as_slice());
+    Ok(Some(AcceptedBarrierMergeRecord {
+        barrier_version,
+        fs_ec,
+        reason,
+        digest: compute_barrier_update_digest(raw_update)?,
+        we_epoch_id,
+    }))
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -3053,6 +3181,48 @@ fn persisted_barrier_public_tree_history(
         .collect()
 }
 
+fn persisted_accepted_barrier_merges(
+    state: &GroupState,
+) -> Vec<PersistedAcceptedBarrierMergeRecord> {
+    state
+        .accepted_barrier_merges
+        .values()
+        .map(|record| PersistedAcceptedBarrierMergeRecord {
+            barrier_version: record.barrier_version,
+            fs_ec: record.fs_ec,
+            reason: record.reason,
+            digest_hex: hex::encode(record.digest),
+            we_epoch_id_hex: hex::encode(record.we_epoch_id),
+        })
+        .collect()
+}
+
+fn decode_persisted_accepted_barrier_merges(
+    records: &[PersistedAcceptedBarrierMergeRecord],
+) -> BTreeMap<u64, AcceptedBarrierMergeRecord> {
+    records
+        .iter()
+        .filter_map(|record| {
+            let digest = hex::decode(&record.digest_hex)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())?;
+            let we_epoch_id = hex::decode(&record.we_epoch_id_hex)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())?;
+            Some((
+                record.barrier_version,
+                AcceptedBarrierMergeRecord {
+                    barrier_version: record.barrier_version,
+                    fs_ec: record.fs_ec,
+                    reason: record.reason,
+                    digest,
+                    we_epoch_id,
+                },
+            ))
+        })
+        .collect()
+}
+
 fn persisted_kbroad_room_state(
     state: Option<&GroupState>,
     kbroad_public: Vec<u8>,
@@ -3095,6 +3265,7 @@ fn persisted_kbroad_room_state(
         room.pcs_refresh_slot_width_ec = state.pcs_refresh_slot_width_ec.max(1);
         room.max_barrier_update_bytes =
             u64::try_from(state.max_barrier_update_bytes).unwrap_or(u64::MAX);
+        room.accepted_barrier_merges = persisted_accepted_barrier_merges(state);
     }
     room
 }
@@ -5416,6 +5587,7 @@ mod tests {
                 pcs_refresh_min_delta_group_ec: 0,
                 pcs_refresh_slot_width_ec: 0,
                 max_barrier_update_bytes: 0,
+                accepted_barrier_merges: Vec::new(),
                 device_chain_states: Vec::new(),
             },
         )]);
@@ -5486,6 +5658,7 @@ mod tests {
                 pcs_refresh_min_delta_group_ec: 4,
                 pcs_refresh_slot_width_ec: 5,
                 max_barrier_update_bytes: 99,
+                accepted_barrier_merges: Vec::new(),
                 device_chain_states: Vec::new(),
             },
         )]);
@@ -5512,6 +5685,66 @@ mod tests {
         assert_eq!(group.max_barrier_update_bytes, 99);
         assert_eq!(group.last_checkpoint_ec, 55);
         assert_eq!(group.last_accepted_ec, 89);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_persisted_kbroad_state_restores_accepted_barrier_merges() -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x95; 32];
+        let state = BTreeMap::from([(
+            gid.to_vec(),
+            PersistedKbroadRoomState {
+                kbroad_public: vec![0x77; 16],
+                barrier_initialized: true,
+                barrier_version: 11,
+                last_accepted_ec: 22,
+                n_max: 2,
+                accepted_barrier_merges: vec![super::PersistedAcceptedBarrierMergeRecord {
+                    barrier_version: 11,
+                    fs_ec: 22,
+                    reason: 1,
+                    digest_hex: "ab".repeat(32),
+                    we_epoch_id_hex: "cd".repeat(32),
+                }],
+                ..PersistedKbroadRoomState::default()
+            },
+        )]);
+
+        server.apply_persisted_kbroad_state(&state)?;
+        let lookup = server.lookup_merge_acceptance(&gid, 11, &[0xAB; 32], &[0xCD; 32])?;
+        assert_eq!(lookup.status, super::MergeAcceptanceStatus::Accepted);
+        assert_eq!(lookup.accepted_barrier_version, Some(11));
+        assert_eq!(lookup.accepted_fs_ec, Some(22));
+        assert_eq!(lookup.accepted_reason, Some(1));
+        assert_eq!(lookup.accepted_digest, Some([0xAB; 32]));
+        Ok(())
+    }
+
+    #[test]
+    fn lookup_merge_acceptance_returns_superseded_for_mismatched_locator() -> Result<(), CityGError>
+    {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x96; 32];
+        let group = server.roster.groups.entry(gid.to_vec()).or_default();
+        group.barrier_initialized = true;
+        group.barrier_version = 9;
+        group.last_accepted_ec = 17;
+        group.accepted_barrier_merges.insert(
+            9,
+            super::AcceptedBarrierMergeRecord {
+                barrier_version: 9,
+                fs_ec: 17,
+                reason: 2,
+                digest: [0x11; 32],
+                we_epoch_id: [0x22; 32],
+            },
+        );
+
+        let lookup = server.lookup_merge_acceptance(&gid, 9, &[0x33; 32], &[0x44; 32])?;
+        assert_eq!(lookup.status, super::MergeAcceptanceStatus::Superseded);
+        assert_eq!(lookup.accepted_digest, Some([0x11; 32]));
+        assert_eq!(lookup.accepted_reason, Some(2));
         Ok(())
     }
 
@@ -9929,6 +10162,7 @@ struct GroupState {
     pcs_refresh_min_delta_group_ec: u64,
     pcs_refresh_slot_width_ec: u64,
     max_barrier_update_bytes: usize,
+    accepted_barrier_merges: BTreeMap<u64, AcceptedBarrierMergeRecord>,
     join_history: Vec<JoinLeafHistoryRecord>,
     leaf_device_pk: BTreeMap<[u8; 32], Vec<u8>>,
     leaf_barrier_public: BTreeMap<[u8; 32], Vec<u8>>,
@@ -9964,6 +10198,7 @@ impl Default for GroupState {
             pcs_refresh_slot_width_ec: default_pcs_refresh_slot_width_ec(),
             max_barrier_update_bytes: usize::try_from(default_max_barrier_update_bytes())
                 .unwrap_or(1_048_576),
+            accepted_barrier_merges: BTreeMap::new(),
             join_history: Vec::new(),
             leaf_device_pk: BTreeMap::new(),
             leaf_barrier_public: BTreeMap::new(),
@@ -9985,6 +10220,15 @@ struct JoinLeafHistoryRecord {
     leaf_index: u32,
     device_pk: Vec<u8>,
     ek_leaf: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct AcceptedBarrierMergeRecord {
+    barrier_version: u64,
+    fs_ec: u64,
+    reason: u64,
+    digest: [u8; 32],
+    we_epoch_id: [u8; 32],
 }
 
 type BarrierBlobIndex = u32;
@@ -10105,6 +10349,8 @@ struct PersistedKbroadRoomState {
     #[serde(default = "default_max_barrier_update_bytes")]
     max_barrier_update_bytes: u64,
     #[serde(default)]
+    accepted_barrier_merges: Vec<PersistedAcceptedBarrierMergeRecord>,
+    #[serde(default)]
     device_chain_states: Vec<PersistedDeviceChainState>,
 }
 
@@ -10117,6 +10363,20 @@ struct PersistedDeviceChainState {
     last_ec: u64,
     #[serde(default)]
     last_pcs_refresh_ec: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PersistedAcceptedBarrierMergeRecord {
+    #[serde(default)]
+    barrier_version: u64,
+    #[serde(default)]
+    fs_ec: u64,
+    #[serde(default)]
+    reason: u64,
+    #[serde(default)]
+    digest_hex: String,
+    #[serde(default)]
+    we_epoch_id_hex: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
