@@ -2169,6 +2169,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_merge_acceptance_status_covers_final_rejected() -> Result<(), String> {
+        let parsed = parse_merge_acceptance_status(PbMergeAcceptanceStatus::FinalRejected as i32)
+            .map_err(|err| err.to_string())?;
+        assert_eq!(parsed, MergeAcceptanceStatus::FinalRejected);
+        Ok(())
+    }
+
+    #[test]
     fn parse_error_envelope_falls_back_to_raw_body() {
         let (message, freeze_code, freeze_reason, failed_index) =
             parse_error_envelope(b"plain text body");

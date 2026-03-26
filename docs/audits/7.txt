@@ -181,6 +181,7 @@ Nouvelle passe implémentation:
 - **Amélioration réelle du trust-boundary history**: le serveur expose maintenant un objet d’acceptance lookup stable pour les merges barrier, et le client l’utilise explicitement au lieu de dériver l’état depuis un simple `get_bundle`.
 - **Fail-closed renforcé**: un serveur qui répond `404` / “not found” sur ce lookup ne force plus le client à conclure qu’un pending merge a perdu. Le pending state est conservé tant que l’historique authentifié n’a pas tranché.
 - **Persisté côté serveur**: les métadonnées minimales d’acceptation barrier sont maintenant gardées dans l’état persistant, ce qui réduit la dépendance à la seule rétention opportuniste des bundles.
+- **Finalité locale un peu plus nette**: quand la branche serveur a déjà dépassé un `pending_barrier_version` sans record accepted correspondant, le lookup retourne désormais `final_rejected` plutôt que `pending`, ce qui ferme un cas de rétention inutile côté client.
 
 Ce qui reste ouvert:
 

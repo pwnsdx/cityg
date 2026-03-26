@@ -2062,6 +2062,14 @@ impl CityGServer {
                 accepted_reason: Some(record.reason),
                 accepted_digest: Some(record.digest),
             },
+            None if state.barrier_version > pending_barrier_version => MergeAcceptanceRecord {
+                status: MergeAcceptanceStatus::FinalRejected,
+                history_view_id,
+                accepted_barrier_version: None,
+                accepted_fs_ec: None,
+                accepted_reason: None,
+                accepted_digest: None,
+            },
             None => MergeAcceptanceRecord {
                 status: MergeAcceptanceStatus::Pending,
                 history_view_id,
@@ -5745,6 +5753,25 @@ mod tests {
         assert_eq!(lookup.status, super::MergeAcceptanceStatus::Superseded);
         assert_eq!(lookup.accepted_digest, Some([0x11; 32]));
         assert_eq!(lookup.accepted_reason, Some(2));
+        Ok(())
+    }
+
+    #[test]
+    fn lookup_merge_acceptance_returns_final_rejected_after_version_advances_without_record()
+    -> Result<(), CityGError> {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x97; 32];
+        let group = server.roster.groups.entry(gid.to_vec()).or_default();
+        group.barrier_initialized = true;
+        group.barrier_version = 12;
+        group.last_accepted_ec = 19;
+
+        let lookup = server.lookup_merge_acceptance(&gid, 11, &[0x55; 32], &[0x66; 32])?;
+        assert_eq!(lookup.status, super::MergeAcceptanceStatus::FinalRejected);
+        assert_eq!(lookup.accepted_barrier_version, None);
+        assert_eq!(lookup.accepted_fs_ec, None);
+        assert_eq!(lookup.accepted_reason, None);
+        assert_eq!(lookup.accepted_digest, None);
         Ok(())
     }
 

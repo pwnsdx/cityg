@@ -205,10 +205,12 @@ Nouvelle passe implémentation:
 - **Fermé côté client updater**: `apply_pending_barrier_activation_from_history` n’utilise plus `get_bundle(we_epoch_id)` comme heuristique principale. Le runtime natif consomme désormais un verdict authentifié `pending / accepted / superseded`, ce qui ferme le point le plus concret de corrélation pending-history.
 - **Durci fail-closed**: un `404` ou une absence d’historique n’implique plus “lost race”. Le pending state est conservé. Seuls `superseded` / `final_rejected` permettent désormais de jeter le pending state.
 - **Persisté côté serveur**: un index compact des merges barrier acceptés est maintenant conservé dans l’état serveur et persisté avec le state KBROAD, ce qui évite de dépendre d’un scan opportuniste des bundles encore retenus.
+- **Durci encore un cran**: quand le serveur a déjà avancé à un `barrier_version` strictement supérieur au locator demandé et ne possède aucun record accepted correspondant, `LookupMergeAcceptance` retourne maintenant `final_rejected` au lieu de rester bloqué sur `pending`. C’est une finalité locale de branche, pas une finalité byzantine globale.
 
 Ce qui reste ouvert:
 
 - **Toujours pas de finalité forte**: l’implémentation retourne aujourd’hui surtout `pending`, `accepted` et `superseded`; la vraie sémantique `final_rejected` reste encore non fermée faute d’objet de finalité append-only/canonique plus fort.
+- **Toujours pas de finalité globale forte**: `final_rejected` couvre maintenant le cas local “la branche serveur a déjà avancé au-delà de cette version”, mais pas une preuve append-only/canonique globale au sens byzantin fort.
 - **Toujours pas de canonité globale d’historique**: cette tranche améliore la corrélation d’acceptation, pas la preuve byzantine qu’il n’existe qu’une seule branche acceptée.
 
 Statut audit: **COMPLETED**, avec remédiation implémentation désormais **substantielle mais pas totale**.
