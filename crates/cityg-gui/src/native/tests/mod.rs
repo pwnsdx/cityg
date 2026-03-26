@@ -5546,6 +5546,7 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             on_path_key_material: pending_on_path,
         }),
         barrier_recovery_pending: true,
+        barrier_recovery_issue: Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory),
         current_barrier_full_verified: false,
     };
     let tuple_tag = array(0x30);
@@ -5675,6 +5676,10 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         loaded.barrier_state.barrier_recovery_pending,
         session.barrier_state.barrier_recovery_pending
+    );
+    assert_eq!(
+        loaded.barrier_state.barrier_recovery_issue,
+        session.barrier_state.barrier_recovery_issue
     );
     assert_eq!(
         loaded.barrier_state.current_barrier_full_verified,
@@ -6457,7 +6462,7 @@ async fn pending_join_finalize_history_lookup_retains_state_after_history_404()
         on_path_key_material: BTreeMap::new(),
     });
 
-    let outcome = apply_pending_barrier_activation_from_history(&client, &mut session, 6).await?;
+    let outcome = apply_pending_barrier_activation_from_history(&client, &mut session, 5).await?;
     assert_eq!(outcome, PendingBarrierHistoryOutcome::Unchanged);
     assert!(
         session.barrier_state.pending.is_some(),
@@ -6466,6 +6471,67 @@ async fn pending_join_finalize_history_lookup_retains_state_after_history_404()
     assert!(
         session.barrier_state.barrier_recovery_pending,
         "history discard alone must not falsely mark the session as recovered"
+    );
+    assert!(
+        session.barrier_state.barrier_recovery_issue.is_none(),
+        "plain 404 without a newer committed barrier version should stay pending, not escalate to recovery-required"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_join_finalize_history_lookup_404_after_newer_version_requires_recovery()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let port = next_test_port();
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let client = new_api_client(&server_url);
+    let room_id = hex_encode([0xC7u8; 32]);
+    let mut session = build_test_session(0xC64, &server_url, &room_id, "erin")?;
+    session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.pending = Some(BarrierPendingState {
+        barrier_version: 5,
+        we_epoch_id: [0xD1; 32],
+        fs_ec: 31,
+        next_forward_fs_ec: 0,
+        next_forward_fs_dev_commit: [0u8; 32],
+        next_forward_last_weid: [0u8; 32],
+        revocation_roots_hash: [0xD2; 32],
+        kem_tree_hash_after: [0xD3; 32],
+        k_barrier_new: Zeroizing::new([0xD4; 32]),
+        k_fs_after_pcs: None,
+        barrier_update_reason: Some(2),
+        barrier_update_digest: [0xD5; 32],
+        on_path_key_material: BTreeMap::new(),
+    });
+
+    let outcome = apply_pending_barrier_activation_from_history(&client, &mut session, 6).await?;
+    assert_eq!(
+        outcome,
+        PendingBarrierHistoryOutcome::RecoveryRequired(
+            BarrierRecoveryIssue::InsufficientAuthenticatedHistory
+        )
+    );
+    assert!(
+        session.barrier_state.pending.is_some(),
+        "recovery-required escalation must retain pending state for later authenticated resolution"
+    );
+    assert!(
+        session.barrier_state.barrier_recovery_pending,
+        "recovery-required escalation must keep the session fail-closed"
+    );
+    assert_eq!(
+        session.barrier_state.barrier_recovery_issue,
+        Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory)
     );
 
     handle.abort();
@@ -6695,6 +6761,129 @@ async fn pending_barrier_history_lookup_discards_final_rejected_locator()
     assert!(
         session.barrier_state.pending.is_none(),
         "final_rejected authenticated locator must discard stale pending state"
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), server).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prost::Message;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Clone, PartialEq, Message)]
+    struct MockBarrierLookupMergeAcceptanceResponse {
+        #[prost(int32, tag = "1")]
+        status: i32,
+        #[prost(bytes = "vec", tag = "2")]
+        history_view_id: Vec<u8>,
+        #[prost(uint64, optional, tag = "3")]
+        accepted_barrier_version: Option<u64>,
+        #[prost(uint64, optional, tag = "4")]
+        accepted_fs_ec: Option<u64>,
+        #[prost(uint64, optional, tag = "5")]
+        accepted_reason: Option<u64>,
+        #[prost(bytes = "vec", optional, tag = "6")]
+        accepted_digest: Option<Vec<u8>>,
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = Vec::new();
+        let mut header_end = None;
+        let mut expected_len = None;
+        loop {
+            let mut chunk = [0u8; 4096];
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if header_end.is_none()
+                && let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let end = offset + 4;
+                header_end = Some(end);
+                let header_text = String::from_utf8_lossy(&request[..end]);
+                expected_len = header_text
+                    .lines()
+                    .find_map(|line| {
+                        let mut parts = line.splitn(2, ':');
+                        let name = parts.next()?.trim();
+                        let value = parts.next()?.trim();
+                        if name.eq_ignore_ascii_case("content-length") {
+                            value.parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .or(Some(0));
+            }
+            if let (Some(end), Some(content_len)) = (header_end, expected_len)
+                && request.len() >= end.saturating_add(content_len)
+            {
+                break;
+            }
+        }
+
+        let body = MockBarrierLookupMergeAcceptanceResponse {
+            status: 1,
+            history_view_id: vec![0xD3; 32],
+            accepted_barrier_version: Some(9),
+            accepted_fs_ec: Some(42),
+            accepted_reason: Some(1),
+            accepted_digest: Some(vec![0xA9; 32]),
+        }
+        .encode_to_vec();
+        let response_head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/protobuf\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response_head.as_bytes()).await?;
+        stream.write_all(body.as_slice()).await?;
+        stream.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let server_url = format!("http://{addr}");
+    let room_id = hex_encode([0x59u8; 32]);
+    let mut session = build_test_session(0xC65, &server_url, &room_id, "frank")?;
+    session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.pending = Some(BarrierPendingState {
+        barrier_version: 9,
+        we_epoch_id: [0xA1; 32],
+        fs_ec: 41,
+        next_forward_fs_ec: 0,
+        next_forward_fs_dev_commit: [0u8; 32],
+        next_forward_last_weid: [0u8; 32],
+        revocation_roots_hash: [0xB2; 32],
+        kem_tree_hash_after: [0xC3; 32],
+        k_barrier_new: Zeroizing::new([0xD4; 32]),
+        k_fs_after_pcs: None,
+        barrier_update_reason: Some(1),
+        barrier_update_digest: [0xE5; 32],
+        on_path_key_material: BTreeMap::new(),
+    });
+
+    let client = new_api_client(&server_url);
+    let outcome = apply_pending_barrier_activation_from_history(&client, &mut session, 9).await?;
+    assert_eq!(
+        outcome,
+        PendingBarrierHistoryOutcome::RecoveryRequired(
+            BarrierRecoveryIssue::ContradictoryAuthenticatedHistory
+        )
+    );
+    assert!(
+        session.barrier_state.pending.is_some(),
+        "contradictory acceptance evidence must retain pending state fail-closed"
+    );
+    assert_eq!(
+        session.barrier_state.barrier_recovery_issue,
+        Some(BarrierRecoveryIssue::ContradictoryAuthenticatedHistory)
     );
 
     tokio::time::timeout(Duration::from_secs(1), server).await???;

@@ -48,7 +48,9 @@ impl AppModel {
         list = list.overflow_y_scroll().block_mouse_except_scroll();
 
         if self.messages.is_empty() {
-            let empty_text = if self.barrier_recovery_pending() {
+            let empty_text = if let Some(issue) = self.barrier_recovery_issue() {
+                issue.user_message()
+            } else if self.barrier_recovery_pending() {
                 "Joined room. Waiting for barrier recovery before messages can be sent or decrypted."
             } else {
                 "No messages yet. Send one to warm up this room."

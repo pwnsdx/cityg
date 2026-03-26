@@ -94,8 +94,22 @@ impl AppModel {
             .unwrap_or(false)
     }
 
+    pub(super) fn barrier_recovery_issue(&self) -> Option<BarrierRecoveryIssue> {
+        self.session
+            .as_ref()
+            .and_then(|session| session.barrier_state.barrier_recovery_issue)
+    }
+
     pub(super) fn barrier_recovery_wait_message() -> &'static str {
         "Joined room. Waiting for barrier recovery before messaging."
+    }
+
+    pub(super) fn barrier_recovery_message_for_session(session: &AppSession) -> &'static str {
+        session
+            .barrier_state
+            .barrier_recovery_issue
+            .map(BarrierRecoveryIssue::user_message)
+            .unwrap_or_else(Self::barrier_recovery_wait_message)
     }
 
     pub(super) fn new(config: CityGConfig) -> Self {

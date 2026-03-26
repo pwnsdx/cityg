@@ -3,6 +3,7 @@ use super::*;
 impl AppModel {
     pub(super) fn render_message_composer(&self, cx: &mut ViewContext<Self>) -> Div {
         let barrier_pending = self.barrier_recovery_pending();
+        let recovery_issue = self.barrier_recovery_issue();
         let border_color = if self.composer.active {
             rgb(UI_ACCENT_TEXT)
         } else {
@@ -20,7 +21,17 @@ impl AppModel {
             rgb(UI_PANEL_TEXT)
         };
 
-        let placeholder = if barrier_pending {
+        let placeholder = if let Some(issue) = recovery_issue {
+            match issue {
+                BarrierRecoveryIssue::ContradictoryAuthenticatedHistory => {
+                    "Recovery requires history reconciliation…"
+                }
+                BarrierRecoveryIssue::InsufficientAuthenticatedHistory
+                | BarrierRecoveryIssue::LegacyPendingLocatorMissing => {
+                    "Recovery requires authenticated history…"
+                }
+            }
+        } else if barrier_pending {
             "Waiting for barrier recovery…"
         } else if self.composer.active {
             "Type a message…"
@@ -81,6 +92,7 @@ impl AppModel {
 
         let label = match self.send_status {
             SendStatus::Sending => "Sending…",
+            SendStatus::Idle if recovery_issue.is_some() => "Recovery required",
             SendStatus::Idle if barrier_pending => "Awaiting recovery",
             SendStatus::Idle => "Send",
         };

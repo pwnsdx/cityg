@@ -78,7 +78,12 @@ impl AppModel {
                     .unwrap_or(false);
                 if !sync.changed {
                     if was_pending {
-                        self.info_message = Some(Self::barrier_recovery_wait_message().to_string());
+                        let message = self
+                            .session
+                            .as_ref()
+                            .map(Self::barrier_recovery_message_for_session)
+                            .unwrap_or_else(Self::barrier_recovery_wait_message);
+                        self.info_message = Some(message.to_string());
                         cx.notify();
                     } else if fetch_after_epoch_sync {
                         self.schedule_fetch(cx, Duration::ZERO);
@@ -101,8 +106,21 @@ impl AppModel {
                         ActivityKind::Sync,
                         "Barrier recovery completed after epoch sync",
                     );
+                } else if let Some(issue) = self.barrier_recovery_issue() {
+                    self.info_message = Some(issue.user_message().to_string());
+                    self.record_activity_with_detail(
+                        ActivityKind::Sync,
+                        "Epoch sync requires explicit barrier recovery",
+                        Some(format!("{issue:?}")),
+                    );
                 } else if now_pending {
-                    self.info_message = Some(Self::barrier_recovery_wait_message().to_string());
+                    self.info_message = Some(
+                        self.session
+                            .as_ref()
+                            .map(Self::barrier_recovery_message_for_session)
+                            .unwrap_or_else(Self::barrier_recovery_wait_message)
+                            .to_string(),
+                    );
                     self.record_activity(
                         ActivityKind::Sync,
                         "Epoch sync completed; barrier recovery still pending",

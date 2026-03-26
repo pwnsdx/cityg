@@ -63,6 +63,7 @@ pub(super) fn apply_recovered_barrier_state(
         apply_forward_state_k_fs(session, *k_fs_after_pcs);
     }
     session.barrier_state.barrier_recovery_pending = false;
+    session.barrier_state.barrier_recovery_issue = None;
     session.barrier_state.current_barrier_full_verified = current_barrier_full_verified;
     Ok(())
 }
@@ -72,8 +73,19 @@ pub(super) fn enter_barrier_recovery_pending(session: &mut AppSession) -> Result
     session.barrier_state.barrier_roots_hash =
         compute_revocation_roots_hash(&session.revoked_since_root, &session.revoked_root)?;
     session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.barrier_recovery_issue = None;
     session.barrier_state.current_barrier_full_verified = false;
     Ok(())
+}
+
+fn mark_barrier_recovery_required(
+    session: &mut AppSession,
+    issue: BarrierRecoveryIssue,
+) -> PendingBarrierHistoryOutcome {
+    session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.barrier_recovery_issue = Some(issue);
+    session.barrier_state.current_barrier_full_verified = false;
+    PendingBarrierHistoryOutcome::RecoveryRequired(issue)
 }
 
 pub(super) fn try_recover_barrier_inner(
@@ -471,6 +483,7 @@ pub(super) enum PendingBarrierHistoryOutcome {
     Unchanged,
     Activated([u8; 32]),
     Discarded,
+    RecoveryRequired(BarrierRecoveryIssue),
 }
 
 pub(super) fn apply_pending_barrier_activation(
@@ -534,6 +547,7 @@ pub(super) fn apply_pending_barrier_activation(
         )?;
         session.barrier_state.pending = None;
         session.barrier_state.barrier_recovery_pending = false;
+        session.barrier_state.barrier_recovery_issue = None;
         session.barrier_state.current_barrier_full_verified = true;
         return Ok(true);
     }
@@ -556,10 +570,12 @@ pub(super) async fn apply_pending_barrier_activation_from_history(
                 code = BARRIER_CODE_SNAPSHOT_AUTH_FAILURE,
                 pending_barrier_version = pending.barrier_version,
                 current_barrier_version,
-                "pending barrier state predates pending we_epoch_id persistence; discarding after newer barrier version observed"
+                "pending barrier state predates pending we_epoch_id persistence; entering recovery-required state after newer barrier version observed"
             );
-            session.barrier_state.pending = None;
-            return Ok(PendingBarrierHistoryOutcome::Discarded);
+            return Ok(mark_barrier_recovery_required(
+                session,
+                BarrierRecoveryIssue::LegacyPendingLocatorMissing,
+            ));
         }
         return Ok(PendingBarrierHistoryOutcome::Unchanged);
     }
@@ -580,7 +596,13 @@ pub(super) async fn apply_pending_barrier_activation_from_history(
                         anyhow!(
                             "pending barrier activation history missing accepted barrier_version (960.9)"
                         )
-                    })?;
+                    });
+                let Some(observed_barrier_version) = observed_barrier_version.ok() else {
+                    return Ok(mark_barrier_recovery_required(
+                        session,
+                        BarrierRecoveryIssue::ContradictoryAuthenticatedHistory,
+                    ));
+                };
                 if apply_pending_barrier_activation(
                     session,
                     observed_barrier_version,
@@ -590,21 +612,36 @@ pub(super) async fn apply_pending_barrier_activation_from_history(
                 )? {
                     return Ok(PendingBarrierHistoryOutcome::Activated(pending.we_epoch_id));
                 }
-                Err(anyhow!(
-                    "pending barrier activation history mismatch (960.9): acceptance record did not match persisted pending state"
+                Ok(mark_barrier_recovery_required(
+                    session,
+                    BarrierRecoveryIssue::ContradictoryAuthenticatedHistory,
                 ))
             }
             MergeAcceptanceStatus::Superseded | MergeAcceptanceStatus::FinalRejected => {
                 session.barrier_state.pending = None;
+                session.barrier_state.barrier_recovery_issue = None;
                 Ok(PendingBarrierHistoryOutcome::Discarded)
             }
             MergeAcceptanceStatus::Pending => {
-                let _ = current_barrier_version;
-                Ok(PendingBarrierHistoryOutcome::Unchanged)
+                Ok(if current_barrier_version > pending.barrier_version {
+                    mark_barrier_recovery_required(
+                        session,
+                        BarrierRecoveryIssue::InsufficientAuthenticatedHistory,
+                    )
+                } else {
+                    PendingBarrierHistoryOutcome::Unchanged
+                })
             }
         },
         Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
-            Ok(PendingBarrierHistoryOutcome::Unchanged)
+            Ok(if current_barrier_version > pending.barrier_version {
+                mark_barrier_recovery_required(
+                    session,
+                    BarrierRecoveryIssue::InsufficientAuthenticatedHistory,
+                )
+            } else {
+                PendingBarrierHistoryOutcome::Unchanged
+            })
         }
         Err(err) => Err(anyhow!(
             "pending barrier activation history lookup failed (960.9): {err}"

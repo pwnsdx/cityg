@@ -189,3 +189,15 @@ Ce qui reste ouvert:
 - **Toujours pas de preuve de complétude membership/history**: l’audit garde raison sur le fait que la résistance byzantine globale reste limitée par l’absence d’objet d’historique plus fort.
 
 Statut audit: **COMPLETED**, avec amélioration implémentation tangible sur la boundary “pending merge vs history”, mais sans fermeture du problème de branche canonique globale.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 4)
+
+Nouvelle passe implémentation:
+
+- **Trust-boundary locale renforcée**: un serveur qui répond `pending`, `404`, ou une acceptation contradictoire après qu’un head plus récent a déjà été observé ne peut plus laisser le client dans un état ambigu purement implicite.
+- **Réaction client plus actionnable**: le runtime persiste maintenant une cause explicite de `barrier_recovery_required`, bloque les opérations sensibles via le même garde-fou `barrier_recovery_pending`, et surface un message distinct au lieu d’un simple “awaiting recovery”.
+- **Toujours ouvert**: ce mécanisme améliore la réaction du client à une histoire insuffisante ou contradictoire, mais ne fournit toujours pas de preuve de canonité append-only globale ni de complétude forte des réponses membership/history.
+
+Statut audit: **COMPLETED**, avec amélioration locale supplémentaire de la réponse client face à un serveur actif, sans fermeture de la canonité globale.

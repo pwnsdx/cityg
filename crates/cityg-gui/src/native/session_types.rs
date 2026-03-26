@@ -62,6 +62,7 @@ pub(super) struct BarrierSecretState {
     pub(super) dk_nodes: BTreeMap<u32, BarrierNodeKeyMaterial>,
     pub(super) pending: Option<BarrierPendingState>,
     pub(super) barrier_recovery_pending: bool,
+    pub(super) barrier_recovery_issue: Option<BarrierRecoveryIssue>,
     pub(super) current_barrier_full_verified: bool,
 }
 
@@ -82,7 +83,29 @@ impl Default for BarrierSecretState {
             dk_nodes: BTreeMap::new(),
             pending: None,
             barrier_recovery_pending: false,
+            barrier_recovery_issue: None,
             current_barrier_full_verified: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum BarrierRecoveryIssue {
+    InsufficientAuthenticatedHistory,
+    ContradictoryAuthenticatedHistory,
+    LegacyPendingLocatorMissing,
+}
+
+impl BarrierRecoveryIssue {
+    pub(super) fn user_message(self) -> &'static str {
+        match self {
+            Self::InsufficientAuthenticatedHistory | Self::LegacyPendingLocatorMissing => {
+                "Barrier recovery requires authenticated history before messaging can resume."
+            }
+            Self::ContradictoryAuthenticatedHistory => {
+                "Barrier recovery found contradictory authenticated history. Sync again or reset this session."
+            }
         }
     }
 }

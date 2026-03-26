@@ -210,3 +210,17 @@ Nouvelle passe implémentation:
 Conclusion:
 
 Cette tranche améliore la sûreté de la recovery path, mais **ne transforme pas** la frontière FULL/recover-only en propriété protocolaire server-verifiable. Le diagnostic central de l’audit reste inchangé.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 4)
+
+Nouvelle passe implémentation:
+
+- **Amélioration locale réelle**: le client persiste désormais un état explicite `barrier_recovery_required` quand l’historique authentifié est insuffisant ou contradictoire pour trancher un pending merge après observation d’une version plus récente.
+- **Impact sur la frontière FULL/recover-only**: cela évite qu’un client retombe dans un état seulement “pending” ou apparemment stable alors que sa promotion vers un état sûr reste ambiguë. Le runtime reste bloqué fail-closed tant que cette ambiguïté n’est pas résolue.
+- **Limite inchangée**: cette fermeture reste locale au client honnête. Le serveur ne vérifie toujours pas une attestation wire-visible de FULL verification.
+
+Conclusion:
+
+Le cœur protocolaire de l’audit 4 reste **inchangé**, mais l’implémentation client exprime maintenant plus correctement l’état “pas encore sûr de redevenir actif”.

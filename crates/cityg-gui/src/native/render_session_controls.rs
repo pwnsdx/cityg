@@ -10,6 +10,7 @@ impl AppModel {
         let expelling = matches!(self.leave_status, LeaveStatus::Expelling);
         let refreshing = matches!(self.leave_status, LeaveStatus::Refreshing);
         let barrier_pending = self.barrier_recovery_pending();
+        let recovery_required = self.barrier_recovery_issue().is_some();
         let membership_op_busy = leaving || expelling || refreshing || barrier_pending;
         let button_fill = ui_button_fill(self.window_active);
         let refresh_hover_fill = ui_hover_fill(self.window_active);
@@ -86,6 +87,8 @@ impl AppModel {
                 "Refreshing…"
             } else if expelling {
                 "Updating roster…"
+            } else if recovery_required {
+                "Recovery required"
             } else if barrier_pending {
                 "Awaiting recovery"
             } else {

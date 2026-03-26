@@ -214,3 +214,16 @@ Ce qui reste ouvert:
 - **Toujours pas de canonité globale d’historique**: cette tranche améliore la corrélation d’acceptation, pas la preuve byzantine qu’il n’existe qu’une seule branche acceptée.
 
 Statut audit: **COMPLETED**, avec remédiation implémentation désormais **substantielle mais pas totale**.
+
+--
+
+## Commentaires Codex (2026-03-26, tranche 4)
+
+Nouvelle passe implémentation:
+
+- **Fermeture utile côté machine d’état locale**: le client GUI persiste maintenant une raison structurée de `barrier_recovery_required` (`insufficient_authenticated_history`, `contradictory_authenticated_history`, `legacy_pending_locator_missing`) au lieu de rester dans un `pending` purement implicite.
+- **Fail-closed plus explicite**: quand une version plus récente est observée mais que `LookupMergeAcceptance` reste `pending`, répond `404`, ou contredit le pending state persisté, le runtime n’essaie plus seulement de “garder pending”; il entre dans un état explicite de recovery-required, crash-safe, tout en conservant le locator pending pour une future résolution authentifiée.
+- **Persisté et visible après restart**: cet état est sérialisé dans la session GUI et re-survit donc à un reboot local, ce qui ferme un angle de perte de contexte entre “pending non résolu” et “ready apparent”.
+- **Toujours pas de finalité byzantine globale**: cette tranche ferme l’expression locale du fail-closed et la persistance de l’ambiguïté, pas la preuve append-only/canonique globale de l’historique accepté.
+
+Statut audit: **COMPLETED**, avec durcissement implémentation supplémentaire sur la recovery path locale.

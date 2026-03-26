@@ -53,7 +53,9 @@ impl AppModel {
             Ok(params) => params,
             Err(err) => {
                 if session_snapshot.barrier_state.barrier_recovery_pending {
-                    self.info_message = Some(Self::barrier_recovery_wait_message().to_string());
+                    self.info_message = Some(
+                        Self::barrier_recovery_message_for_session(&session_snapshot).to_string(),
+                    );
                     self.record_activity_with_detail(
                         ActivityKind::Message,
                         "Message send blocked",
@@ -113,7 +115,7 @@ impl AppModel {
                     self.last_error = None;
                     self.categorized_error = None;
                     self.info_message = Some(if barrier_pending {
-                        Self::barrier_recovery_wait_message().to_string()
+                        Self::barrier_recovery_message_for_session(&session).to_string()
                     } else {
                         "Joined room. Session saved locally.".to_string()
                     });

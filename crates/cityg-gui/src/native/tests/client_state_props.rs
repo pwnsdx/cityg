@@ -157,8 +157,7 @@ impl ClientStateModel {
         self.barrier_recovery_pending = false;
     }
 
-    fn discard_to_recovery_required(&mut self) {
-        self.pending = None;
+    fn escalate_to_recovery_required(&mut self) {
         self.state = ClientRecoveryState::RecoveryRequired;
         self.barrier_recovery_pending = true;
     }
@@ -228,7 +227,7 @@ impl ClientStateModel {
                     && pending.kind == PendingKind::JoinFinalize
                     && pending.newer_version_seen
                 {
-                    self.discard_to_recovery_required();
+                    self.escalate_to_recovery_required();
                 } else if had_pending && matches!(self.state, ClientRecoveryState::Ready) {
                     self.insufficient_history_ready_detected = true;
                 }
@@ -243,7 +242,7 @@ impl ClientStateModel {
                 if let Some(pending) = &self.pending
                     && pending.newer_version_seen
                 {
-                    self.discard_to_recovery_required();
+                    self.escalate_to_recovery_required();
                 } else if had_pending && matches!(self.state, ClientRecoveryState::Ready) {
                     self.insufficient_history_ready_detected = true;
                 }
