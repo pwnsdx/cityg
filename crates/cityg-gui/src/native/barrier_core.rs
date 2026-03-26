@@ -199,9 +199,7 @@ pub(super) fn parse_barrier_update_for_recover(
             max_barrier_update_bytes
         ));
     }
-    if expected_n_max == 0 || !expected_n_max.is_power_of_two() {
-        return Err(anyhow!("barrier n_max must be a non-zero power of two"));
-    }
+    let expected_n_max = validate_barrier_n_max(expected_n_max)?;
 
     let BarrierUpdateWire(
         mode,
@@ -437,11 +435,10 @@ pub(super) async fn full_chain_check_barrier_update(
 
     if !genesis_local_case {
         if session.barrier_state.barrier_roots_hash == parsed.revocation_roots_hash {
-            let expected_reason =
-                expected_same_rrh_barrier_reason(
-                    join_resolution.records.as_slice(),
-                    parsed.updater_leaf,
-                );
+            let expected_reason = expected_same_rrh_barrier_reason(
+                join_resolution.records.as_slice(),
+                parsed.updater_leaf,
+            );
             if barrier_reason != expected_reason {
                 return Err(anyhow!(
                     "barrier full chain-check prevalidation failed (960.7): local barrier_roots_hash unchanged but barrier_update_reason != {expected_reason}"

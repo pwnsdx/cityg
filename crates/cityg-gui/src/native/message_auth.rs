@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) const MESSAGE_PREFIX: &[u8; 4] = b"CGM1";
+pub(super) const MESSAGE_SENDER_DEVICE_PK_ALG: &str = "ML-DSA-65";
 
 #[derive(Debug)]
 pub(super) struct AuthenticatedMessage<'a> {
@@ -132,6 +133,26 @@ pub(super) fn verify_message_signature(
     dilithium3::verify_detached_signature(&signature, &payload, &pk)
         .map_err(|_| anyhow!("signature verification failed"))?;
 
+    Ok(())
+}
+
+pub(super) fn verify_sender_leaf_binding(
+    gid: &[u8; 32],
+    sender_leaf: &[u8; 32],
+    public_key_bytes: &[u8],
+) -> Result<()> {
+    let derived_leaf = compute_leaf_id(
+        LeafIdMode::PerGroup,
+        gid,
+        MESSAGE_SENDER_DEVICE_PK_ALG,
+        public_key_bytes,
+    )
+    .map_err(|err| anyhow!("sender leaf derivation failed: {err}"))?;
+    if &derived_leaf != sender_leaf {
+        return Err(anyhow!(
+            "sender leaf does not match authenticated sender public key"
+        ));
+    }
     Ok(())
 }
 
@@ -365,6 +386,28 @@ mod tests {
         assert!(
             result.is_err(),
             "Verification should fail with wrong timestamp"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sender_leaf_binding_rejects_mismatched_public_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gid = [0x44u8; 32];
+        let (pk_alice, _sk_alice) = dilithium3::keypair();
+        let (pk_bob, _sk_bob) = dilithium3::keypair();
+        let alice_leaf = compute_leaf_id(
+            LeafIdMode::PerGroup,
+            &gid,
+            MESSAGE_SENDER_DEVICE_PK_ALG,
+            pk_alice.as_bytes(),
+        )?;
+
+        verify_sender_leaf_binding(&gid, &alice_leaf, pk_alice.as_bytes())?;
+        assert!(
+            verify_sender_leaf_binding(&gid, &alice_leaf, pk_bob.as_bytes()).is_err(),
+            "a different authenticated sender public key must not bind to Alice's leaf"
         );
 
         Ok(())

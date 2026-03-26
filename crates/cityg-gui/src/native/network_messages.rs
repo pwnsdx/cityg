@@ -25,8 +25,8 @@ pub(super) async fn perform_send(params: SendParams) -> Result<ChatMessageEntry>
         leaf_id,
         alias,
         plaintext,
-        msg_sign_secret_key,
-        msg_sign_public_key,
+        pop_secret_key,
+        pop_public_key,
     } = params;
 
     let timestamp_ms = SystemTime::now()
@@ -38,14 +38,14 @@ pub(super) async fn perform_send(params: SendParams) -> Result<ChatMessageEntry>
         &leaf_id,
         timestamp_ms,
         plaintext.as_bytes(),
-        &msg_sign_secret_key,
+        &pop_secret_key,
     )
     .context("failed to sign message")?;
 
     let authenticated_msg = encode_authenticated_message(
         timestamp_ms,
         plaintext.as_bytes(),
-        &msg_sign_public_key,
+        &pop_public_key,
         &signature,
     );
 
@@ -182,6 +182,14 @@ pub(super) async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
                 "unexpected signature length: {} (expected {})",
                 envelope.signature.len(),
                 MLDSA65_SIG_SIZE
+            );
+            continue;
+        }
+        if let Err(err) = verify_sender_leaf_binding(&gid, &leaf_id, envelope.public_key) {
+            tracing::warn!(
+                "sender leaf binding failed for message from {}: {}",
+                hex_encode(&leaf_id[..4]),
+                err
             );
             continue;
         }

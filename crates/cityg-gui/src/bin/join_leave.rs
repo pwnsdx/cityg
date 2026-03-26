@@ -26,7 +26,7 @@ use barrier_shared::{
     apply_revoked_set_to_snapshot, barrier_path_nodes, blank_leaf_and_path,
     collect_resolution_targets, compute_barrier_pkhash, compute_barrier_tree_hash,
     compute_revocation_roots_hash, expected_barrier_tree_nodes, should_retry_ticket_http_error,
-    sibling_node, ticket_retry_delay,
+    sibling_node, ticket_retry_delay, validate_barrier_n_max,
 };
 #[cfg(test)]
 use barrier_shared::{
@@ -51,7 +51,8 @@ use message_crypto::{MsgReplayState, decrypt_message_v2_with_index, derive_msg_r
 use msphf_core::{ds, hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
-    OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
+    OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_leaf_id, derive_we_epoch_id,
+    hdr,
 };
 use pqcrypto_dilithium::dilithium3;
 use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
@@ -151,7 +152,8 @@ fn build_barrier_update_bytes(
     kem_tree_hash_before: [u8; 32],
     snapshot_pre: &[Vec<u8>],
 ) -> Result<BarrierUpdateBuildResult> {
-    if n_max == 0 || !n_max.is_power_of_two() || updater_leaf >= n_max {
+    let n_max = validate_barrier_n_max(n_max)?;
+    if updater_leaf >= n_max {
         return Err(anyhow!("invalid barrier update tree parameters"));
     }
     let expected_nodes = expected_barrier_tree_nodes(n_max)?;
@@ -834,6 +836,7 @@ struct Session {
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 const MESSAGE_PREFIX: &[u8; 4] = b"CGM1";
+const MESSAGE_SENDER_DEVICE_PK_ALG: &str = "ML-DSA-65";
 
 #[cfg(test)]
 #[derive(Debug)]
@@ -963,6 +966,27 @@ fn verify_message_signature(
     dilithium3::verify_detached_signature(&signature, &payload, &pk)
         .map_err(|_| anyhow!("signature verification failed"))?;
 
+    Ok(())
+}
+
+#[cfg(test)]
+fn verify_sender_leaf_binding(
+    gid: &[u8; 32],
+    sender_leaf: &[u8; 32],
+    public_key_bytes: &[u8],
+) -> Result<()> {
+    let derived_leaf = compute_leaf_id(
+        LeafIdMode::PerGroup,
+        gid,
+        MESSAGE_SENDER_DEVICE_PK_ALG,
+        public_key_bytes,
+    )
+    .map_err(|err| anyhow!("sender leaf derivation failed: {err}"))?;
+    if &derived_leaf != sender_leaf {
+        return Err(anyhow!(
+            "sender leaf does not match authenticated sender public key"
+        ));
+    }
     Ok(())
 }
 
@@ -1351,11 +1375,11 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     let revoked_root_arr = bytes32("revoked_root", &ticket.revoked_root)?;
     let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
     let snapshot_hash = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
-    let barrier_n_max = if ticket.n_max == 0 {
+    let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
         ticket.n_max
-    };
+    })?;
     if ticket.cover_leaf_index >= barrier_n_max {
         return Err(anyhow!(
             "cover_leaf_index out of range for barrier tree: {} >= {}",
@@ -1793,11 +1817,11 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         .await
         .context("fetch barrier public tree snapshot")?;
     let barrier_tree_snapshot = barrier_tree_response.tree;
-    let barrier_n_max = if ticket.n_max == 0 {
+    let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
         ticket.n_max
-    };
+    })?;
     if ticket.cover_leaf_index >= barrier_n_max {
         return Err(anyhow!(
             "cover_leaf_index out of range for barrier tree: {} >= {}",
@@ -2289,12 +2313,12 @@ async fn send_text_message(session: &mut Session, plaintext: &str) -> Result<()>
         &session.leaf_id,
         timestamp_ms,
         plaintext.as_bytes(),
-        &session.msg_sign_secret_key,
+        &session.pop_secret_key,
     )?;
     let authenticated = encode_authenticated_message(
         timestamp_ms,
         plaintext.as_bytes(),
-        &session.msg_sign_public_key,
+        &session.pop_public_key,
         &signature,
     );
     let msg_index: u64 = rng().random();
@@ -2364,6 +2388,9 @@ async fn fetch_and_decrypt_messages(session: &mut Session) -> Result<Vec<String>
             Ok(envelope) => envelope,
             Err(_) => continue,
         };
+        if verify_sender_leaf_binding(&session.gid, &sender_leaf, envelope.public_key).is_err() {
+            continue;
+        }
         if verify_message_signature(
             &sender_leaf,
             envelope.timestamp_ms,

@@ -11,7 +11,7 @@ use crate::barrier_shared::{
     apply_revoked_set_to_snapshot, barrier_path_nodes, blank_leaf_and_path,
     collect_resolution_targets, compute_barrier_pkhash, compute_barrier_tree_hash,
     compute_revocation_roots_hash, expected_barrier_tree_nodes, should_retry_ticket_http_error,
-    sibling_node, ticket_retry_delay,
+    sibling_node, ticket_retry_delay, validate_barrier_n_max,
 };
 #[cfg(test)]
 use crate::message_crypto::{
@@ -63,8 +63,8 @@ use msphf_core::{
 use msphf_orchestrator::CapssWitnessBundle;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
-    OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_proofs_commit_bytes,
-    derive_we_epoch_id, hdr,
+    OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_leaf_id,
+    compute_proofs_commit_bytes, derive_we_epoch_id, hdr,
 };
 #[cfg(test)]
 use pqcrypto_dilithium::dilithium3::{

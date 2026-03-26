@@ -618,7 +618,8 @@ pub(super) fn build_barrier_update_bytes(
     kem_tree_hash_before: [u8; 32],
     snapshot_pre: &[Vec<u8>],
 ) -> Result<BarrierUpdateBuildResult> {
-    if n_max == 0 || !n_max.is_power_of_two() || updater_leaf >= n_max {
+    let n_max = validate_barrier_n_max(n_max)?;
+    if updater_leaf >= n_max {
         return Err(anyhow!("invalid barrier update tree parameters"));
     }
     let expected_nodes = expected_barrier_tree_nodes(n_max)?;

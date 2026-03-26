@@ -180,3 +180,16 @@ Tranche d’implémentation réalisée pour aligner le repo sur les findings ret
 Conclusion:
 
 Cet audit est considéré **complété** pour la phase de triage et de première remédiation. Les findings les plus structurants ont été intégrés dans la spec et partiellement dans le code. Les écarts résiduels relèvent maintenant d’une seconde passe d’implémentation conformance, pas d’un manque de triage sur l’audit lui-même.
+
+--
+
+## Commentaires Codex (2026-03-26)
+
+Re-vérification d’implémentation après patchs du jour:
+
+- **Fermeture implémentation directe**: le binding `sender_leaf_id` n’est plus laissé au seul “transport context” côté client. Les messages reçus doivent maintenant embarquer une clé publique qui re-dérive exactement la leaf annoncée.
+- **Fermeture implémentation complémentaire**: la borne `N_max_max` est maintenant matérialisée côté serveur, client API et clients GUI/CLI; un `n_max` mal formé ou hors plafond est rejeté fail-closed.
+- **Toujours partiellement ouvert**: l’artefact complet de provisioning join et l’API d’acceptance-history/finality restent absents; ils n’ont pas été fermés dans cette passe.
+- **Toujours ouvert**: la gouvernance room-admin et les preuves d’exhaustivité/canonité globale de l’historique restent des frontières plus larges que cette tranche.
+
+Statut audit: **COMPLETED**, avec progression d’implémentation concrète sur deux findings retenus.

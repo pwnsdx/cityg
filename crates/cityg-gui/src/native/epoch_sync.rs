@@ -37,11 +37,11 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
         }
     };
     let ticket_kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
-    let ticket_n_max = if ticket.n_max == 0 {
+    let ticket_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
         ticket.n_max
-    };
+    })?;
     let ticket_max_barrier_update_bytes_u64 = ticket.max_barrier_update_bytes.max(1);
     let ticket_max_barrier_update_bytes =
         normalize_max_barrier_update_bytes(ticket_max_barrier_update_bytes_u64)?;

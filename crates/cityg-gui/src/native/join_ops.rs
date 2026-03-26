@@ -208,11 +208,11 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     };
     let fs_epoch_base_ts = ticket.fs_epoch_base_ts;
     let kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
-    let barrier_n_max = if ticket.n_max == 0 {
+    let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
         ticket.n_max
-    };
+    })?;
     if ticket.cover_leaf_index >= barrier_n_max {
         return Err(anyhow!(
             "cover_leaf_index out of range for barrier tree: {} >= {}",

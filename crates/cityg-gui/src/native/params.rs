@@ -159,8 +159,8 @@ pub(super) struct SendParams {
     pub(super) leaf_id: [u8; 32],
     pub(super) alias: String,
     pub(super) plaintext: String,
-    pub(super) msg_sign_secret_key: Vec<u8>,
-    pub(super) msg_sign_public_key: Vec<u8>,
+    pub(super) pop_secret_key: Vec<u8>,
+    pub(super) pop_public_key: Vec<u8>,
 }
 
 impl SendParams {
@@ -187,8 +187,8 @@ impl SendParams {
             leaf_id: session.leaf_id,
             alias: session.alias.clone(),
             plaintext,
-            msg_sign_secret_key: session.msg_sign_secret_key.clone(),
-            msg_sign_public_key: session.msg_sign_public_key.clone(),
+            pop_secret_key: session.pop_secret_key.clone(),
+            pop_public_key: session.pop_public_key.clone(),
         })
     }
 }

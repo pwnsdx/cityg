@@ -296,6 +296,7 @@ pub fn build_room_admin_leaf_pair_proof(
     )
 }
 const EXPECTED_PROFILE_VERSION: &str = "v0.1.4";
+const MAX_BARRIER_N_MAX: u64 = 65_536;
 
 /// HTTP client for the City-G API server.
 ///
@@ -962,6 +963,13 @@ impl CitygApiClient {
         let response: JoinTicketResponse =
             self.post_proto("/v1/rooms/join_ticket", request).await?;
         ensure_profile_version(&response.profile_version)?;
+        let n_max = validate_barrier_n_max(response.n_max)?;
+        if response.cover_leaf_index >= n_max {
+            return Err(Error::Parse(format!(
+                "join ticket cover_leaf_index out of range: {} >= {}",
+                response.cover_leaf_index, n_max
+            )));
+        }
         Ok(response)
     }
 
@@ -1046,6 +1054,13 @@ impl CitygApiClient {
         let revoked_root = array32(&response.revoked_root)?;
         let tswe_salt_hash = array32(&response.tswe_salt_hash)?;
         let pox_r_commit = array32(&response.pox_r_commit)?;
+        let n_max = validate_barrier_n_max(response.n_max)?;
+        if response.cover_leaf_index >= n_max {
+            return Err(Error::Parse(format!(
+                "merge ticket cover_leaf_index out of range: {} >= {}",
+                response.cover_leaf_index, n_max
+            )));
+        }
 
         Ok(MergeTicket {
             we_epoch_id,
@@ -1071,7 +1086,7 @@ impl CitygApiClient {
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
-            n_max: response.n_max,
+            n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
     }
@@ -1135,10 +1150,11 @@ impl CitygApiClient {
         let response: BarrierFetchPublicTreeResponse = self
             .post_proto("/v1/barrier/fetch_public_tree", request)
             .await?;
+        let n_max = validate_barrier_n_max(response.n_max)?;
         Ok(BarrierFetchedPublicTree {
             history_view_id: array32(&response.history_view_id)?,
             tree: BarrierPublicTree {
-                n_max: response.n_max,
+                n_max,
                 kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
                 pk_entries: response.pk_entries,
             },
@@ -1703,6 +1719,20 @@ fn ensure_profile_version(version: &str) -> Result<(), Error> {
     )))
 }
 
+fn validate_barrier_n_max(n_max: u64) -> Result<u64, Error> {
+    if n_max == 0 || !n_max.is_power_of_two() {
+        return Err(Error::Parse(
+            "barrier n_max must be a non-zero power of two".to_string(),
+        ));
+    }
+    if n_max > MAX_BARRIER_N_MAX {
+        return Err(Error::Parse(format!(
+            "barrier n_max exceeds MAX_BARRIER_N_MAX: {n_max} > {MAX_BARRIER_N_MAX}"
+        )));
+    }
+    Ok(n_max)
+}
+
 #[allow(dead_code)]
 #[derive(Deserialize)]
 struct ErrorEnvelope {
@@ -1796,6 +1826,17 @@ mod tests {
         }
     }
 
+    fn join_ticket_ok_payload() -> JoinTicketResponse {
+        JoinTicketResponse {
+            profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+            current_history_view_id: vec![0xD0; 32],
+            cover_leaf_index: 0,
+            n_max: 1024,
+            max_barrier_update_bytes: 1_048_576,
+            ..JoinTicketResponse::default()
+        }
+    }
+
     async fn mock_health() -> &'static str {
         "ok"
     }
@@ -1826,11 +1867,7 @@ mod tests {
             "/v1/rooms/expel_member_ticket" => encode_proto(merge_ticket_ok_payload()),
             "/v1/members" => encode_proto(MembersResponse::default()),
             "/v1/members/search" => encode_proto(SearchMembersResponse::default()),
-            "/v1/rooms/join_ticket" => encode_proto(JoinTicketResponse {
-                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
-                current_history_view_id: vec![0xD0; 32],
-                ..JoinTicketResponse::default()
-            }),
+            "/v1/rooms/join_ticket" => encode_proto(join_ticket_ok_payload()),
             "/v1/rooms/merge_ticket" => encode_proto(merge_ticket_ok_payload()),
             "/v1/accept_epoch" => encode_proto(AcceptEpochResponse::default()),
             "/v1/barrier/resolve_revoked_leaves" => {
@@ -2160,6 +2197,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn barrier_n_max_validator_rejects_zero_non_power_of_two_and_oversized_values() {
+        assert_eq!(
+            validate_barrier_n_max(1024).expect("1024 must be accepted"),
+            1024
+        );
+        assert!(matches!(
+            validate_barrier_n_max(0),
+            Err(Error::Parse(message)) if message.contains("non-zero power of two")
+        ));
+        assert!(matches!(
+            validate_barrier_n_max(3),
+            Err(Error::Parse(message)) if message.contains("non-zero power of two")
+        ));
+        assert!(matches!(
+            validate_barrier_n_max(MAX_BARRIER_N_MAX * 2),
+            Err(Error::Parse(message)) if message.contains("MAX_BARRIER_N_MAX")
+        ));
+    }
+
     #[tokio::test]
     async fn wrappers_roundtrip_against_mock_server() -> Result<(), Box<dyn StdError>> {
         let (base_url, handle) = start_mock_server().await?;
@@ -2376,6 +2433,71 @@ mod tests {
             err,
             Error::Parse(message) if message.contains("invalid 32-byte field")
         ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_invalid_n_max() -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let app = Router::new().route(
+            "/v1/rooms/join_ticket",
+            post(|| async {
+                let mut response = join_ticket_ok_payload();
+                response.n_max = MAX_BARRIER_N_MAX * 2;
+                encode_proto(response)
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("oversized n_max must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("MAX_BARRIER_N_MAX")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn barrier_fetch_public_tree_rejects_invalid_n_max() -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let app = Router::new().route(
+            "/v1/barrier/fetch_public_tree",
+            post(|| async {
+                encode_proto(BarrierFetchPublicTreeResponse {
+                    n_max: MAX_BARRIER_N_MAX * 2,
+                    kem_tree_hash_after: vec![0xCC; 32],
+                    pk_entries: Vec::new(),
+                    history_view_id: vec![0xD1; 32],
+                })
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_fetch_public_tree("room-1", &[0xCC; 32])
+            .await
+            .expect_err("oversized n_max must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("MAX_BARRIER_N_MAX")
+        ));
+
         handle.abort();
         Ok(())
     }

@@ -183,3 +183,16 @@ Verdict après vérification contre la spec et l’implémentation:
 Conclusion:
 
 Audit **complété** pour la phase triage/remédiation. Le finding critique concret a été fermé, plusieurs points ont été reclassés car sur-vendus, et les gaps vraiment restants sont maintenant identifiés comme des évolutions de profil/wire plus larges.
+
+--
+
+## Commentaires Codex (2026-03-26)
+
+Re-vérification d’implémentation après patchs du jour:
+
+- **Fermé dans le code**: le client natif et `join_leave` lient maintenant le `sender_leaf` à la clé publique authentifiée du message via `compute_leaf_id(..., "ML-DSA-65", public_key)`. Un membre ne peut plus signer avec sa propre clé et se faire passer pour une autre leaf active.
+- **Fermé côté émission**: les messages sortants sont désormais signés avec l’identité POP liée à la leaf, ce qui aligne enfin l’artefact de message avec la dérivation `leaf_id` vérifiée à la réception.
+- **Couverture de tests ajoutée**: un test d’intégration natif injecte un message chiffré avec `sender = alice.leaf_id` mais signé par la clé de Bob et vérifie qu’il est ignoré.
+- **Encore ouvert**: il n’existe toujours pas de binding cryptographique explicite du `profile_version` dans l’ancre elle-même; ce reste est protocolaire, pas localement corrigeable sans évolution wire.
+
+Statut audit: **COMPLETED**, avec fermeture effective d’un vrai gap cut-and-paste/spoofing dans l’implémentation.

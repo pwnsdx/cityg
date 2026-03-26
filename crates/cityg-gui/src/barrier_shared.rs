@@ -7,6 +7,7 @@ use rand::{RngExt, rng};
 use serde::Serialize;
 
 pub const DEFAULT_BARRIER_N_MAX: u64 = 1_024;
+pub const MAX_BARRIER_N_MAX: u64 = 65_536;
 pub const BARRIER_TREE_INFO: &[u8] = b"city-g|barrier/tree|v1";
 pub const BARRIER_KEY_INFO: &[u8] = b"city-g|barrier/key|v1";
 pub const TICKET_RETRY_MAX_ATTEMPTS: u32 = 4;
@@ -86,12 +87,25 @@ pub fn compute_revocation_roots_hash(
     .map_err(|err| anyhow!("compute revocation_roots_hash: {err}"))
 }
 
+pub fn validate_barrier_n_max(n_max: u64) -> Result<u64> {
+    if n_max == 0 || !n_max.is_power_of_two() {
+        return Err(anyhow!("barrier n_max must be a non-zero power of two"));
+    }
+    if n_max > MAX_BARRIER_N_MAX {
+        return Err(anyhow!(
+            "barrier n_max exceeds MAX_BARRIER_N_MAX: {n_max} > {MAX_BARRIER_N_MAX}"
+        ));
+    }
+    Ok(n_max)
+}
+
 pub fn compute_barrier_pkhash(ek: &[u8]) -> Result<[u8; 32]> {
     h_l("barrier/pk-hash", &BarrierPkHashPreimage(ek))
         .map_err(|err| anyhow!("compute barrier/pk-hash: {err}"))
 }
 
 pub fn compute_barrier_tree_hash(n_max: u64, pk_entries: &[Vec<u8>]) -> Result<[u8; 32]> {
+    let n_max = validate_barrier_n_max(n_max)?;
     let n_max_usize =
         usize::try_from(n_max).map_err(|_| anyhow!("barrier tree n_max too large"))?;
     let expected_len = n_max_usize
@@ -155,6 +169,7 @@ fn compute_barrier_tree_hash_recursive(
 }
 
 pub fn expected_barrier_tree_nodes(n_max: u64) -> Result<usize> {
+    let n_max = validate_barrier_n_max(n_max)?;
     usize::try_from(n_max)
         .ok()
         .and_then(|n| n.checked_mul(2))
@@ -163,7 +178,8 @@ pub fn expected_barrier_tree_nodes(n_max: u64) -> Result<usize> {
 }
 
 pub fn barrier_path_nodes(n_max: u64, updater_leaf: u64) -> Result<Vec<u64>> {
-    if n_max == 0 || !n_max.is_power_of_two() || updater_leaf >= n_max {
+    let n_max = validate_barrier_n_max(n_max)?;
+    if updater_leaf >= n_max {
         return Err(anyhow!("invalid barrier update tree parameters"));
     }
     let leaf_base = n_max.saturating_sub(1);
@@ -279,4 +295,20 @@ pub fn collect_resolution_targets(
     collect_resolution_targets(snapshot, left, leaf_base, targets)?;
     collect_resolution_targets(snapshot, right, leaf_base, targets)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_barrier_n_max_rejects_invalid_shapes_and_oversized_values() {
+        assert_eq!(
+            validate_barrier_n_max(DEFAULT_BARRIER_N_MAX).expect("default n_max must be valid"),
+            DEFAULT_BARRIER_N_MAX
+        );
+        assert!(validate_barrier_n_max(0).is_err());
+        assert!(validate_barrier_n_max(3).is_err());
+        assert!(validate_barrier_n_max(MAX_BARRIER_N_MAX * 2).is_err());
+    }
 }

@@ -936,9 +936,10 @@ impl CityGServer {
             .barrier_group_state(gid)
             .cloned()
             .unwrap_or_default();
+        let barrier_n_max = validate_barrier_n_max(barrier_state.n_max)?;
         let current_history_view_id = self.current_history_view_id(gid)?;
         let barrier_version = barrier_state.barrier_version;
-        let cover_leaf_index = u64::from(cover_leaf_index(&leaf_id, barrier_state.n_max));
+        let cover_leaf_index = u64::from(cover_leaf_index(&leaf_id, barrier_n_max));
         let max_barrier_update_bytes =
             u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
 
@@ -960,7 +961,7 @@ impl CityGServer {
             cover_leaf_index,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
             current_history_view_id,
-            n_max: barrier_state.n_max.max(1),
+            n_max: barrier_n_max,
             max_barrier_update_bytes,
         })
     }
@@ -1207,10 +1208,11 @@ impl CityGServer {
             .barrier_group_state(gid)
             .cloned()
             .unwrap_or_default();
+        let barrier_n_max = validate_barrier_n_max(barrier_state.n_max)?;
         let barrier_version = barrier_state.barrier_version;
         let cover_leaf_index = u64::from(cover_leaf_index(
             revoked_leaf_id.as_ref().unwrap_or(author_leaf_id),
-            barrier_state.n_max,
+            barrier_n_max,
         ));
         let max_barrier_update_bytes =
             u64::try_from(barrier_state.max_barrier_update_bytes).unwrap_or(u64::MAX);
@@ -1257,7 +1259,7 @@ impl CityGServer {
             barrier_version,
             cover_leaf_index,
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
-            n_max: barrier_state.n_max.max(1),
+            n_max: barrier_n_max,
             max_barrier_update_bytes,
         })
     }
@@ -1542,7 +1544,7 @@ impl CityGServer {
             group.barrier_roots_hash = room_state.barrier_roots_hash;
             group.kem_tree_hash_after = room_state.kem_tree_hash_after;
             group.srx_root_sw = room_state.srx_root_sw;
-            group.n_max = room_state.n_max.max(1);
+            group.n_max = validate_barrier_n_max(room_state.n_max)?;
             group.last_checkpoint_ec = room_state.last_checkpoint_ec;
             group.last_accepted_ec = room_state.last_accepted_ec;
             group.barrier_pk_entries = room_state.barrier_pk_entries.clone();
@@ -1563,10 +1565,11 @@ impl CityGServer {
                         snapshot.pk_entries.as_slice(),
                     ) {
                         Ok(mut snapshot_ref) => {
-                            snapshot_ref.history_view_id = hex::decode(&snapshot.history_view_id_hex)
-                                .ok()
-                                .and_then(|bytes| bytes.try_into().ok())
-                                .unwrap_or([0u8; 32]);
+                            snapshot_ref.history_view_id =
+                                hex::decode(&snapshot.history_view_id_hex)
+                                    .ok()
+                                    .and_then(|bytes| bytes.try_into().ok())
+                                    .unwrap_or([0u8; 32]);
                             snapshot_ref
                         }
                         Err(_) => continue,
@@ -1598,8 +1601,7 @@ impl CityGServer {
                     let current_entries = group.barrier_pk_entries.clone();
                     let mut snapshot_ref =
                         encode_barrier_public_tree_snapshot_ref(group, current_entries.as_slice())?;
-                    snapshot_ref.history_view_id =
-                        compute_history_view_id(gid.as_slice(), group)?;
+                    snapshot_ref.history_view_id = compute_history_view_id(gid.as_slice(), group)?;
                     group
                         .barrier_public_tree_history
                         .insert(current_hash, snapshot_ref);
@@ -1692,8 +1694,10 @@ impl CityGServer {
                     msphf_orchestrator::BarrierGroupState::default().max_barrier_update_bytes,
                 )
                 .max(1);
+            group.n_max = validate_barrier_n_max(group.n_max)?;
 
             let ctx_state = self.ctx.barrier_group_state_entry_mut(gid.as_slice());
+            ctx_state.n_max = validate_barrier_n_max(ctx_state.n_max)?;
             ctx_state.last_pcs_refresh_ec = merge_optional_u64_max(
                 ctx_state.last_pcs_refresh_ec,
                 room_state.last_pcs_refresh_ec,
@@ -2087,33 +2091,30 @@ impl CityGServer {
             .groups
             .get(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
-        let (pk_entries, history_view_id) = if let Some(snapshot) =
-            state.barrier_public_tree_history.get(kem_tree_hash_after)
-        {
-            (
-                decode_barrier_public_tree_snapshot_ref(state, snapshot)?,
-                snapshot.history_view_id,
-            )
-        } else {
-            let pk_entries_view = build_pk_entries_view(state)?;
-            let computed_hash = compute_barrier_tree_hash(state.n_max, pk_entries_view.as_ref())?;
-            if computed_hash != *kem_tree_hash_after {
-                return Err(CityGError::Acceptance(
-                    msphf_orchestrator::AcceptanceError::Freeze(
-                        msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE,
-                    ),
-                ));
-            }
-            let pk_entries = match pk_entries_view {
-                Cow::Borrowed(entries) => entries.to_vec(),
-                Cow::Owned(entries) => entries,
+        let n_max = validate_barrier_n_max(state.n_max)?;
+        let (pk_entries, history_view_id) =
+            if let Some(snapshot) = state.barrier_public_tree_history.get(kem_tree_hash_after) {
+                (
+                    decode_barrier_public_tree_snapshot_ref(state, snapshot)?,
+                    snapshot.history_view_id,
+                )
+            } else {
+                let pk_entries_view = build_pk_entries_view(state)?;
+                let computed_hash = compute_barrier_tree_hash(n_max, pk_entries_view.as_ref())?;
+                if computed_hash != *kem_tree_hash_after {
+                    return Err(CityGError::Acceptance(
+                        msphf_orchestrator::AcceptanceError::Freeze(
+                            msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE,
+                        ),
+                    ));
+                }
+                let pk_entries = match pk_entries_view {
+                    Cow::Borrowed(entries) => entries.to_vec(),
+                    Cow::Owned(entries) => entries,
+                };
+                (pk_entries, compute_history_view_id(gid, state)?)
             };
-            (
-                pk_entries,
-                compute_history_view_id(gid, state)?,
-            )
-        };
-        let computed_hash = compute_barrier_tree_hash(state.n_max, pk_entries.as_slice())?;
+        let computed_hash = compute_barrier_tree_hash(n_max, pk_entries.as_slice())?;
         if computed_hash != *kem_tree_hash_after {
             return Err(CityGError::Acceptance(
                 msphf_orchestrator::AcceptanceError::Freeze(
@@ -2122,7 +2123,7 @@ impl CityGServer {
             ));
         }
         Ok(BarrierPublicTreeSnapshot {
-            n_max: state.n_max,
+            n_max,
             kem_tree_hash_after: computed_hash,
             history_view_id,
             pk_entries,
@@ -2178,6 +2179,7 @@ struct HistoryViewIdArgs<'a> {
 
 fn compute_history_view_id(gid: &[u8], state: &GroupState) -> Result<[u8; 32], CityGError> {
     let latest_root = state.latest_root.as_ref().unwrap_or(&[0u8; 32]);
+    let n_max = validate_barrier_n_max(state.n_max)?;
     h_l(
         "barrier/history-view",
         &HistoryViewIdArgs {
@@ -2189,7 +2191,7 @@ fn compute_history_view_id(gid: &[u8], state: &GroupState) -> Result<[u8; 32], C
             latest_root,
             last_checkpoint_ec: state.last_checkpoint_ec,
             last_accepted_ec: state.last_accepted_ec,
-            n_max: state.n_max.max(1),
+            n_max,
         },
     )
     .map_err(CityGError::from)
@@ -2527,7 +2529,10 @@ fn history_barrier_public_tree_entries(
         .and_then(|snapshot| decode_barrier_public_tree_snapshot_ref(state, snapshot).ok())
 }
 
-fn record_barrier_public_tree_snapshot(gid: &[u8], state: &mut GroupState) -> Result<(), CityGError> {
+fn record_barrier_public_tree_snapshot(
+    gid: &[u8],
+    state: &mut GroupState,
+) -> Result<(), CityGError> {
     if state.barrier_pk_entries.is_empty() {
         return Ok(());
     }
@@ -2910,11 +2915,9 @@ fn compute_revocation_roots_hash(
 }
 
 fn barrier_pk_entry_layout(n_max: u64) -> Result<(usize, usize, usize), CityGError> {
+    let n_max = validate_barrier_n_max(n_max)?;
     let n_max_usize = usize::try_from(n_max)
         .map_err(|_| CityGError::InvalidInput("barrier n_max does not fit usize"))?;
-    if n_max_usize == 0 {
-        return Err(CityGError::InvalidInput("barrier n_max must be positive"));
-    }
     let expected_len = n_max_usize.saturating_mul(2).saturating_sub(1);
     let leaf_base = n_max_usize.saturating_sub(1);
     Ok((n_max_usize, expected_len, leaf_base))
@@ -5513,6 +5516,40 @@ mod tests {
     }
 
     #[test]
+    fn apply_persisted_kbroad_state_rejects_oversized_n_max() {
+        let mut server = CityGServer::new(ServerConfig::new());
+        let gid = [0x95; 32];
+        let state = BTreeMap::from([(
+            gid.to_vec(),
+            PersistedKbroadRoomState {
+                kbroad_public: vec![0x11; 16],
+                n_max: super::MAX_BARRIER_N_MAX * 2,
+                ..PersistedKbroadRoomState::default()
+            },
+        )]);
+
+        let err = server
+            .apply_persisted_kbroad_state(&state)
+            .expect_err("oversized n_max must fail closed");
+        assert!(matches!(
+            err,
+            CityGError::InvalidInput(message) if message.contains("MAX_BARRIER_N_MAX")
+        ));
+    }
+
+    #[test]
+    fn validate_barrier_n_max_rejects_invalid_shapes_and_oversized_values() {
+        assert_eq!(
+            super::validate_barrier_n_max(super::DEFAULT_BARRIER_N_MAX)
+                .expect("default n_max must be valid"),
+            super::DEFAULT_BARRIER_N_MAX
+        );
+        assert!(super::validate_barrier_n_max(0).is_err());
+        assert!(super::validate_barrier_n_max(3).is_err());
+        assert!(super::validate_barrier_n_max(super::MAX_BARRIER_N_MAX * 2).is_err());
+    }
+
+    #[test]
     fn snapshot_kbroad_state_captures_group_state_and_registry_defaults() -> Result<(), CityGError>
     {
         let mut server = CityGServer::new(ServerConfig::new());
@@ -6453,7 +6490,9 @@ mod tests {
         };
         assert!(matches!(
             super::build_pk_entries_view(&zero_state),
-            Err(CityGError::InvalidInput("barrier n_max must be positive"))
+            Err(CityGError::InvalidInput(
+                "barrier n_max must be a non-zero power of two"
+            ))
         ));
 
         let mut state = super::GroupState {
@@ -9987,9 +10026,24 @@ impl GroupState {
 type PersistedKbroadState = BTreeMap<Vec<u8>, PersistedKbroadRoomState>;
 
 const DEFAULT_BARRIER_N_MAX: u64 = 1_024;
+const MAX_BARRIER_N_MAX: u64 = 65_536;
 
 fn default_barrier_n_max() -> u64 {
     DEFAULT_BARRIER_N_MAX
+}
+
+fn validate_barrier_n_max(n_max: u64) -> Result<u64, CityGError> {
+    if n_max == 0 || !n_max.is_power_of_two() {
+        return Err(CityGError::InvalidInput(
+            "barrier n_max must be a non-zero power of two",
+        ));
+    }
+    if n_max > MAX_BARRIER_N_MAX {
+        return Err(CityGError::InvalidInput(
+            "barrier n_max exceeds MAX_BARRIER_N_MAX",
+        ));
+    }
+    Ok(n_max)
 }
 
 fn default_pcs_refresh_min_delta_device_ec() -> u64 {

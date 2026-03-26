@@ -183,3 +183,16 @@ Verdict après vérification contre la spec et l’implémentation:
 Conclusion:
 
 Audit **complété** pour la phase triage/remédiation. Le protocole reste honnête-client-enforced sur la frontière FULL/recover-only; la fermeture complète demanderait une attestation wire-visible d’éligibilité, ce qui dépasse cette tranche.
+
+--
+
+## Commentaires Codex (2026-03-26)
+
+Re-vérification d’implémentation après patchs du jour:
+
+- **Toujours vrai**: la frontière FULL/recover-only reste principalement enforced côté client honnête; il n’y a toujours pas de preuve wire-visible de FULL verification vérifiable par le serveur.
+- **Pas de régression**: les chemins client déjà durcis continuent d’empêcher l’origination de refresh/update depuis un état `recover-only`.
+- **Lien avec la tranche du jour**: le durcissement `sender_leaf` et `n_max` réduit des surfaces annexes, mais ne change pas le cœur du finding protocolaire de cet audit.
+- **Encore ouvert**: `reason=2` reste validé surtout via `JoinSet` et l’état local du client, pas via une attestation protocolaire serveur-checkable de FULL/public-state verification.
+
+Statut audit: **COMPLETED**, sans changement de classement du gap principal.

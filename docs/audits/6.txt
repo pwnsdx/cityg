@@ -170,3 +170,16 @@ Verdict après vérification contre la spec et l’implémentation:
 Conclusion:
 
 Audit **complété** pour la phase triage/remédiation. Le finding le plus immédiat et exploitable a été corrigé en spec et en code. Le reste constitue une seconde tranche de hardening DoS, plus structurelle.
+
+--
+
+## Commentaires Codex (2026-03-26)
+
+Re-vérification d’implémentation après patchs du jour:
+
+- **Fermé dans le code**: `N_max_max` n’est plus seulement une contrainte de spec; l’implémentation rejette désormais les `n_max` non puissance de deux, nuls, ou supérieurs à `65_536`.
+- **Couverture appliquée à plusieurs couches**: serveur, client API et clients GUI/CLI valident maintenant cette borne au lieu de propager silencieusement un `n_max` aberrant.
+- **Toujours fermé de la tranche précédente**: `MAX_CT_PAYLOAD_BYTES` / `MAX_PAYLOAD_ENVELOPE_BYTES` restent enforced côté message-plane.
+- **Encore ouvert**: rétention historique bornée, pagination bornée des interfaces A/B/C et caps normatifs sur l’historique public ne sont pas encore implémentés.
+
+Statut audit: **COMPLETED**, avec renforcement DoS supplémentaire effectif dans le code.

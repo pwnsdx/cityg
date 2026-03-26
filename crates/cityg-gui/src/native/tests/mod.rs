@@ -8351,6 +8351,87 @@ async fn perform_fetch_skips_malformed_ciphertexts_and_invalid_auth_envelopes()
     Ok(())
 }
 
+#[tokio::test]
+async fn perform_fetch_rejects_sender_leaf_spoofing_with_mismatched_public_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+
+    let port = next_test_port();
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let room_id = hex_encode([0x8Du8; 32]);
+    bootstrap_test_room(&server_url, &room_id).await?;
+
+    let mut alice = perform_join(JoinParams {
+        server_url: server_url.clone(),
+        room_id: room_id.clone(),
+        alias: "alice".to_string(),
+    })
+    .await?;
+    alice.barrier_state.barrier_recovery_pending = false;
+
+    let bob = perform_join(JoinParams {
+        server_url: server_url.clone(),
+        room_id: room_id.clone(),
+        alias: "bob".to_string(),
+    })
+    .await?;
+
+    let client = new_api_client(&server_url);
+    let spoofed_plaintext = "spoofed-sender-marker";
+    let spoofed_timestamp_ms = 7u64;
+    let spoofed_signature = sign_message(
+        &alice.leaf_id,
+        spoofed_timestamp_ms,
+        spoofed_plaintext.as_bytes(),
+        &bob.pop_secret_key,
+    )?;
+    let spoofed_authenticated = encode_authenticated_message(
+        spoofed_timestamp_ms,
+        spoofed_plaintext.as_bytes(),
+        &bob.pop_public_key,
+        &spoofed_signature,
+    );
+    let spoofed_ciphertext = encrypt_message_v2(
+        &spoofed_authenticated,
+        &MessageCryptoContext {
+            gid: &alice.gid,
+            we_epoch_id: &alice.we_epoch_id,
+            xk_hash: &alice.xk_hash,
+            fs_ec: alice.fs_ec,
+            barrier_version: alice.barrier_state.barrier_version,
+            sender_leaf: &alice.leaf_id,
+            epoch_key: &alice.epoch_key,
+            k_barrier: &alice.barrier_state.k_barrier,
+        },
+        1,
+    )?;
+    client
+        .send_message(
+            &alice.we_epoch_id,
+            &spoofed_ciphertext,
+            Some(&alice.leaf_id),
+        )
+        .await?;
+
+    let fetched = perform_fetch(FetchParams::from_session(&alice, None)?).await?;
+    assert!(
+        fetched
+            .messages
+            .iter()
+            .all(|message| message.plaintext != spoofed_plaintext),
+        "messages whose authenticated sender public key maps to a different leaf must be dropped"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
 #[test]
 fn encrypt_decrypt_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let key = [42u8; 32];

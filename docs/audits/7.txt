@@ -158,3 +158,16 @@ Verdict après vérification contre la spec et l’implémentation:
 Conclusion:
 
 Audit **complété** pour la phase triage. Le diagnostic reste valable: la résistance au serveur actif est locale mais pas globalement fermée. Cette tranche améliore la fail-closed behavior, mais la fermeture byzantine complète demandera encore une passe dédiée sur history/finality/proof of completeness.
+
+--
+
+## Commentaires Codex (2026-03-26)
+
+Re-vérification d’implémentation après patchs du jour:
+
+- **Amélioration locale réelle**: le client n’accepte plus qu’une leaf distante soit “authentifiée” par une clé publique arbitraire. Cela ferme une vraie faille locale de trust-boundary sur le message-plane.
+- **Amélioration locale réelle**: les `n_max` aberrants ne peuvent plus être injectés pour pousser le serveur ou les clients dans des états publics incohérents ou coûteux.
+- **Toujours ouvert**: aucune preuve de canonité append-only globale de l’historique accepté n’a été ajoutée aujourd’hui; l’audit garde donc son diagnostic central.
+- **Toujours ouvert**: l’API de finalité/history et les preuves de complétude des réponses membership restent la prochaine tranche nécessaire pour parler de résistance byzantine plus forte.
+
+Statut audit: **COMPLETED**, avec fermeture de symptômes locaux mais pas du problème global d’historique canonique.

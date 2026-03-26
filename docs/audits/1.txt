@@ -357,3 +357,16 @@ Verdict après vérification contre la spec et le code:
 Conclusion:
 
 Audit **complété** pour la phase triage/remédiation. Les contradictions les plus dangereuses ont été clarifiées dans la spec. Les écarts restants relèvent surtout d’une refonte plus large du wire profile `header[97]` et de la modularisation des docs normatives.
+
+--
+
+## Commentaires Codex (2026-03-26)
+
+Re-vérification d’implémentation après patchs du jour:
+
+- **Toujours cohérent avec la remédiation précédente**: le bootstrap `join_finalize` continue de suivre le prédécesseur authentifié et non un `H_prev` circulaire.
+- **Fermeture implémentation complémentaire**: le code rejette maintenant explicitement les `n_max` hors borne ou mal formés au lieu de les tolérer implicitement dans plusieurs chemins serveur/client.
+- **Fermeture implémentation complémentaire**: le message-plane client ne se contente plus d’une signature valide; il exige désormais que la clé publique authentifiée embarquée re-dérive bien le `sender_leaf` annoncé.
+- **Encore ouvert**: la distinction wire auto-descriptive entre formes `author-local` et `barrier-recovery` n’a pas été transformée aujourd’hui; elle reste un sujet de profil/wire, pas un simple patch local.
+
+Statut audit: **COMPLETED**, revalidé contre l’implémentation courante.

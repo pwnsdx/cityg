@@ -181,3 +181,16 @@ Verdict après vérification contre la spec et l’implémentation:
 Conclusion:
 
 Audit **complété** pour la phase de triage. Les conclusions utiles sont intégrées dans la spec, mais la remédiation complète dépend d’une seconde passe d’implémentation sur l’historique accepté et la finalité authentifiée.
+
+--
+
+## Commentaires Codex (2026-03-26)
+
+Re-vérification d’implémentation après patchs du jour:
+
+- **Pas de fermeture complète aujourd’hui**: l’API normative d’acceptance-history / finality n’est toujours pas implémentée; le runtime continue de corréler un pending merge principalement via `get_bundle(we_epoch_id)` et le digest persisté.
+- **Pas de régression observée**: les durcissements du jour n’ont pas détendu la persistance crash-safe ou les tests restart/replay serveur, qui restent verts.
+- **Toujours partiellement fermé côté client**: le marqueur `current_barrier_full_verified` et la conservation fail-closed du pending state restent en place.
+- **Priorité restante**: introduire un vrai `LookupMergeAcceptance(merge_locator)` côté API/serveur/client pour fermer ce point autrement qu’avec des heuristiques autour de `we_epoch_id`.
+
+Statut audit: **COMPLETED** pour le triage, mais la remédiation implémentation reste **partielle**.

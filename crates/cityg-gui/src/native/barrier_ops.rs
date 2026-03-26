@@ -319,11 +319,11 @@ async fn publish_revocation_merge_from_ticket(
         .await
         .context("fetch barrier public tree snapshot")?;
     let barrier_tree_snapshot = barrier_tree_response.tree;
-    let barrier_n_max = if n_max == 0 {
+    let barrier_n_max = validate_barrier_n_max(if n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
         n_max
-    };
+    })?;
     if revoked_cover_leaf_index >= barrier_n_max {
         return Err(anyhow!(
             "cover_leaf_index out of range for barrier tree: {revoked_cover_leaf_index} >= {barrier_n_max}"
@@ -854,11 +854,11 @@ async fn perform_barrier_merge_inner(
         .await
         .context("fetch barrier public tree snapshot")?;
     let barrier_tree_snapshot = barrier_tree_response.tree;
-    let barrier_n_max = if n_max == 0 {
+    let barrier_n_max = validate_barrier_n_max(if n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {
         n_max
-    };
+    })?;
     if cover_leaf_index >= barrier_n_max {
         return Err(anyhow!(
             "cover_leaf_index out of range for barrier tree: {cover_leaf_index} >= {barrier_n_max}"
