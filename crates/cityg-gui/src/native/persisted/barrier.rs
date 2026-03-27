@@ -22,6 +22,8 @@ pub(in crate::native) struct PersistedBarrierState {
     #[serde(default)]
     pub(in crate::native) current_history_commitment: Option<PersistedBarrierHistoryCommitment>,
     #[serde(default)]
+    pub(in crate::native) current_global_history_attestation_hex: String,
+    #[serde(default)]
     pub(in crate::native) bootstrap_history_commitment: Option<PersistedBarrierHistoryCommitment>,
     #[serde(default)]
     pub(in crate::native) bootstrap_predecessor_kem_tree_hash_after_hex: String,
@@ -359,6 +361,9 @@ impl PersistedBarrierState {
             current_history_commitment: state
                 .current_history_commitment
                 .map(PersistedBarrierHistoryCommitment::from_runtime),
+            current_global_history_attestation_hex: hex_encode(
+                state.current_global_history_attestation_bytes.as_slice(),
+            ),
             bootstrap_history_commitment: state
                 .bootstrap_history_commitment
                 .map(PersistedBarrierHistoryCommitment::from_runtime),
@@ -420,6 +425,10 @@ impl PersistedBarrierState {
                     commitment.into_runtime("barrier_state.current_history_commitment")
                 })
                 .transpose()?,
+            current_global_history_attestation_bytes: decode_hex_vec(
+                "barrier_state.current_global_history_attestation_hex",
+                &self.current_global_history_attestation_hex,
+            )?,
             current_public_tree: None,
             retained_public_trees: Vec::new(),
             bootstrap_history_commitment: self

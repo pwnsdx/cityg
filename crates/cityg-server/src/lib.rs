@@ -88,7 +88,9 @@ use msphf_orchestrator::{
     self, AcceptanceContext, AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE,
     DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes, hdr,
 };
+use pqcrypto_dilithium::dilithium5;
 use pqcrypto_kyber::kyber768;
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
@@ -133,6 +135,20 @@ pub struct ServerConfig {
     pub acceptance_options: Option<AcceptanceOptions>,
     /// Journal file path for crash recovery (default: None, in-memory only)
     pub state_path: Option<PathBuf>,
+    /// Optional local history authority extension.
+    pub history_authority: Option<HistoryAuthorityConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryAuthorityConfig {
+    pub mode: HistoryAuthorityMode,
+    pub require_full_verification_receipt: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryAuthorityMode {
+    Disabled,
+    Local,
 }
 
 impl Default for ServerConfig {
@@ -148,7 +164,15 @@ impl ServerConfig {
             window_ttl: None,
             acceptance_options: None,
             state_path: None,
+            history_authority: None,
         }
+    }
+
+    pub fn enable_local_history_authority(&mut self) {
+        self.history_authority = Some(HistoryAuthorityConfig {
+            mode: HistoryAuthorityMode::Local,
+            require_full_verification_receipt: true,
+        });
     }
 }
 
@@ -206,6 +230,8 @@ pub struct CityGServer {
     acceptance_options: AcceptanceOptions,
     journal: Option<ServerJournal>,
     kbroad_state_path: Option<PathBuf>,
+    history_authority_path: Option<PathBuf>,
+    history_authority: Option<HistoryAuthorityState>,
     replaying: bool,
 }
 
@@ -317,6 +343,19 @@ pub struct HistoryCommitment {
     pub history_seq: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryAuthorityDescriptor {
+    pub scope_id: [u8; 32],
+    pub public_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistoryAuthorityState {
+    descriptor: HistoryAuthorityDescriptor,
+    secret_key: Vec<u8>,
+    require_full_verification_receipt: bool,
+}
+
 /// Revoked leaf enumeration bound to one authenticated history commitment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRevokedLeaves {
@@ -393,7 +432,7 @@ pub enum MergeTicketIntent {
 }
 
 /// Join-leaf record returned by barrier membership enumeration APIs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BarrierJoinLeafRecord {
     /// Device public key associated with the join leaf.
     pub device_pk: Vec<u8>,
@@ -410,6 +449,8 @@ pub struct BarrierPublicTreeSnapshot {
     pub n_max: u64,
     /// Requested tree commitment after barrier activation.
     pub kem_tree_hash_after: [u8; 32],
+    /// Barrier version under which this snapshot was committed.
+    pub barrier_version: u64,
     /// Authenticated history view under which this snapshot was committed.
     pub history_view_id: [u8; 32],
     /// Server-local append-only history commitment recorded for that snapshot.
@@ -898,6 +939,10 @@ impl CityGServer {
             .state_path
             .as_ref()
             .map(|path| kbroad_state_path_for_journal(path.as_path()));
+        let history_authority_path = config
+            .state_path
+            .as_ref()
+            .map(|path| history_authority_path_for_journal(path.as_path()));
         let persisted_kbroad_state = kbroad_state_path
             .as_ref()
             .and_then(|path| match load_kbroad_state(path) {
@@ -908,6 +953,21 @@ impl CityGServer {
                 }
             })
             .filter(|state| !state.is_empty());
+        let history_authority = match config.history_authority.as_ref() {
+            Some(authority) if authority.mode == HistoryAuthorityMode::Local => {
+                match load_or_generate_history_authority_state(
+                    history_authority_path.as_deref(),
+                    authority.require_full_verification_receipt,
+                ) {
+                    Ok(state) => Some(state),
+                    Err(err) => {
+                        eprintln!("cityg-server: history authority init failed: {err:?}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let options = config.acceptance_options.unwrap_or_default();
         let journal = config
             .state_path
@@ -922,6 +982,8 @@ impl CityGServer {
             acceptance_options: options,
             journal,
             kbroad_state_path,
+            history_authority_path,
+            history_authority,
             replaying: false,
         };
         #[allow(clippy::collapsible_if)]
@@ -1498,6 +1560,7 @@ impl CityGServer {
             &mut staged_receiver,
             &mut staged_roster,
             bundle,
+            self.history_authority.as_ref(),
             replaying,
         ) {
             Ok(outcome) => Ok((outcome, staged_ctx, staged_receiver, staged_roster)),
@@ -1513,6 +1576,7 @@ impl CityGServer {
         receiver: &mut ReceiverCache,
         roster: &mut GroupRoster,
         bundle: &ClientEpochBundle,
+        history_authority: Option<&HistoryAuthorityState>,
         replaying: bool,
     ) -> Result<ServerOutcome, CityGError> {
         let mut state_before = {
@@ -1530,6 +1594,16 @@ impl CityGServer {
         ensure_join_cover_leaf_indices_available(&state_before, delta.joined.as_slice())?;
         let barrier_validation =
             validate_barrier_update_against_roster(&state_before, &bundle.header_map, &delta)?;
+        let gid: [u8; 32] = bundle
+            .gid()
+            .try_into()
+            .map_err(|_| CityGError::InvalidInput("gid must be 32 bytes"))?;
+        validate_history_authority_headers(
+            history_authority,
+            &gid,
+            &state_before,
+            &bundle.header_map,
+        )?;
 
         // Keep barrier acceptance/state logic on a single deterministic path:
         // groups without explicit prior state are treated as default-initialized.
@@ -1825,6 +1899,7 @@ impl CityGServer {
                 } else {
                     let snapshot_ref = BarrierPublicTreeSnapshotRef {
                         blob_indices: snapshot.blob_indices.clone(),
+                        barrier_version: snapshot.barrier_version,
                         history_view_id: hex::decode(&snapshot.history_view_id_hex)
                             .ok()
                             .and_then(|bytes| bytes.try_into().ok())
@@ -1859,6 +1934,7 @@ impl CityGServer {
                     let current_entries = group.barrier_pk_entries.clone();
                     let mut snapshot_ref =
                         encode_barrier_public_tree_snapshot_ref(group, current_entries.as_slice())?;
+                    snapshot_ref.barrier_version = group.barrier_version;
                     snapshot_ref.history_commitment = current_history_commitment;
                     snapshot_ref.history_view_id = current_history_commitment.history_view_id;
                     group
@@ -2261,6 +2337,10 @@ impl CityGServer {
             .map(|state| state.kem_tree_hash_after)
     }
 
+    pub fn barrier_version(&self, gid: &[u8]) -> Option<u64> {
+        self.roster.groups.get(gid).map(|state| state.barrier_version)
+    }
+
     pub fn barrier_n_max(&self, gid: &[u8]) -> Option<u64> {
         self.roster.groups.get(gid).map(|state| state.n_max)
     }
@@ -2444,13 +2524,13 @@ impl CityGServer {
         let pk_entries_view = build_pk_entries_view(state)?;
         let current_hash = compute_barrier_tree_hash(n_max, pk_entries_view.as_ref())?;
         let current_predecessor_hash = state.current_accepted_barrier_predecessor_hash;
-        let (pk_entries, history_commitment) = if current_hash == *kem_tree_hash_after {
+        let (pk_entries, barrier_version, history_commitment) = if current_hash == *kem_tree_hash_after {
             let pk_entries = match pk_entries_view {
                 Cow::Borrowed(entries) => entries.to_vec(),
                 Cow::Owned(entries) => entries,
             };
             let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
-            (pk_entries, history_commitment)
+            (pk_entries, state.barrier_version, history_commitment)
         } else if let Some(mut snapshot) = state
             .barrier_public_tree_history
             .get(kem_tree_hash_after)
@@ -2476,6 +2556,13 @@ impl CityGServer {
             };
             (
                 decode_barrier_public_tree_snapshot_ref(state, &snapshot)?,
+                if current_predecessor_hash != [0u8; 32]
+                    && current_predecessor_hash == *kem_tree_hash_after
+                {
+                    state.barrier_version
+                } else {
+                    snapshot.barrier_version
+                },
                 history_commitment,
             )
         } else {
@@ -2494,6 +2581,7 @@ impl CityGServer {
         Ok(BarrierPublicTreeSnapshot {
             n_max,
             kem_tree_hash_after: computed_hash,
+            barrier_version,
             history_view_id: history_commitment.history_view_id,
             history_commitment,
             pk_entries,
@@ -2514,6 +2602,106 @@ impl CityGServer {
 
     pub fn current_history_view_id(&mut self, gid: &[u8; 32]) -> Result<[u8; 32], CityGError> {
         Ok(self.current_history_commitment(gid)?.history_view_id)
+    }
+
+    pub fn history_authority_descriptor_bytes(&self) -> Result<Vec<u8>, CityGError> {
+        match self.history_authority.as_ref() {
+            Some(authority) => encode_history_authority_descriptor(&authority.descriptor),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn history_authority_descriptor(&self) -> Option<HistoryAuthorityDescriptor> {
+        self.history_authority.as_ref().map(|state| state.descriptor.clone())
+    }
+
+    pub fn history_authority_requires_full_verification_receipt(&self) -> bool {
+        self.history_authority
+            .as_ref()
+            .map(|authority| authority.require_full_verification_receipt)
+            .unwrap_or(false)
+    }
+
+    pub fn global_history_attestation_bytes(
+        &self,
+        gid: &[u8; 32],
+        history_commitment: &HistoryCommitment,
+        barrier_version: u64,
+        kem_tree_hash_after: &[u8; 32],
+    ) -> Result<Vec<u8>, CityGError> {
+        let Some(authority) = self.history_authority.as_ref() else {
+            return Ok(Vec::new());
+        };
+        encode_global_history_attestation(
+            authority,
+            gid,
+            history_commitment,
+            barrier_version,
+            kem_tree_hash_after,
+        )
+    }
+
+    pub fn helper_completeness_attestation_revoked_bytes(
+        &self,
+        history_commitment: &HistoryCommitment,
+        revocation_roots_hash: &[u8; 32],
+        page_offset: u32,
+        total_entries: u32,
+        leaf_indices: &[u32],
+    ) -> Result<Vec<u8>, CityGError> {
+        let Some(authority) = self.history_authority.as_ref() else {
+            return Ok(Vec::new());
+        };
+        encode_helper_completeness_attestation_revoked(
+            authority,
+            history_commitment,
+            revocation_roots_hash,
+            page_offset,
+            total_entries,
+            leaf_indices,
+        )
+    }
+
+    pub fn helper_completeness_attestation_joins_bytes(
+        &self,
+        history_commitment: &HistoryCommitment,
+        prev_barrier_version: u64,
+        page_offset: u32,
+        total_entries: u32,
+        records: &[BarrierJoinLeafRecord],
+    ) -> Result<Vec<u8>, CityGError> {
+        let Some(authority) = self.history_authority.as_ref() else {
+            return Ok(Vec::new());
+        };
+        encode_helper_completeness_attestation_joins(
+            authority,
+            history_commitment,
+            prev_barrier_version,
+            page_offset,
+            total_entries,
+            records,
+        )
+    }
+
+    pub fn helper_completeness_attestation_tree_bytes(
+        &self,
+        history_commitment: &HistoryCommitment,
+        kem_tree_hash_after: &[u8; 32],
+        entry_offset: u32,
+        total_entries: u32,
+        pk_entries: &[Vec<u8>],
+    ) -> Result<Vec<u8>, CityGError> {
+        let Some(authority) = self.history_authority.as_ref() else {
+            return Ok(Vec::new());
+        };
+        encode_helper_completeness_attestation_tree(
+            authority,
+            history_commitment,
+            kem_tree_hash_after,
+            entry_offset,
+            total_entries,
+            pk_entries,
+        )
     }
 }
 
@@ -2853,6 +3041,385 @@ fn parse_join_finalize_auth_token(
 }
 
 #[derive(Serialize, Deserialize)]
+struct HistoryAuthorityDescriptorWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize, Deserialize)]
+struct GlobalHistoryAttestationWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    String,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize)]
+struct GlobalHistoryAttestationSignedPayload<'a>(
+    &'static str,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    &'a str,
+);
+
+#[derive(Serialize, Deserialize)]
+struct HelperCompletenessAttestationWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    String,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize)]
+struct HelperCompletenessSignedPayload<'a, T> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    helper_kind: &'a str,
+    #[serde(with = "serde_bytes")]
+    history_view_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: &'a [u8; 32],
+    page_offset: u32,
+    total_entries: u32,
+    selector: T,
+}
+
+#[derive(Serialize)]
+struct RevokedLeavesSelector<'a> {
+    #[serde(with = "serde_bytes")]
+    revocation_roots_hash: &'a [u8; 32],
+    leaf_indices: &'a [u32],
+}
+
+#[derive(Serialize)]
+struct JoinsSinceSelector<'a> {
+    prev_barrier_version: u64,
+    records: &'a [BarrierJoinLeafRecord],
+}
+
+#[derive(Serialize)]
+struct FetchPublicTreeSelector<'a> {
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: &'a [u8; 32],
+    pk_entries: &'a [Vec<u8>],
+}
+
+#[derive(Serialize, Deserialize)]
+struct FullVerificationReceiptWire {
+    #[serde(with = "serde_bytes")]
+    author_leaf_id: Vec<u8>,
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct FullVerificationReceiptSignedPayload<'a> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    author_leaf_id: &'a [u8; 32],
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    #[serde(with = "serde_bytes")]
+    barrier_history_commitment: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    global_history_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    barrier_update: &'a [u8],
+}
+
+fn encode_history_authority_descriptor(
+    descriptor: &HistoryAuthorityDescriptor,
+) -> Result<Vec<u8>, CityGError> {
+    Ok(to_cbor_vec(&HistoryAuthorityDescriptorWire(
+        descriptor.scope_id.to_vec(),
+        descriptor.public_key.clone(),
+    ))?)
+}
+
+fn history_authority_secret_key(state: &HistoryAuthorityState) -> Result<dilithium5::SecretKey, CityGError> {
+    dilithium5::SecretKey::from_bytes(&state.secret_key)
+        .map_err(|_| CityGError::InvalidInput("invalid history authority secret key"))
+}
+
+fn sign_history_authority_message(
+    state: &HistoryAuthorityState,
+    payload: &[u8],
+) -> Result<Vec<u8>, CityGError> {
+    let secret_key = history_authority_secret_key(state)?;
+    Ok(dilithium5::detached_sign(payload, &secret_key)
+        .as_bytes()
+        .to_vec())
+}
+
+fn verify_history_authority_signature(
+    descriptor: &HistoryAuthorityDescriptor,
+    payload: &[u8],
+    signature: &[u8],
+) -> Result<(), CityGError> {
+    let public_key = dilithium5::PublicKey::from_bytes(&descriptor.public_key)
+        .map_err(|_| CityGError::InvalidInput("invalid history authority public key"))?;
+    let signature = dilithium5::DetachedSignature::from_bytes(signature)
+        .map_err(|_| CityGError::InvalidInput("invalid history authority signature"))?;
+    dilithium5::verify_detached_signature(&signature, payload, &public_key)
+        .map_err(|_| CityGError::InvalidInput("history authority signature verification failed"))
+}
+
+fn global_history_parent_attestation_id(
+    scope_id: &[u8; 32],
+    gid: &[u8; 32],
+    prev_history_commitment_id: &[u8; 32],
+) -> Result<[u8; 32], CityGError> {
+    if *prev_history_commitment_id == [0u8; 32] {
+        return Ok([0u8; 32]);
+    }
+    #[derive(Serialize)]
+    struct Preimage<'a>(
+        #[serde(with = "serde_bytes")] &'a [u8; 32],
+        #[serde(with = "serde_bytes")] &'a [u8; 32],
+        #[serde(with = "serde_bytes")] &'a [u8; 32],
+    );
+    h_l(
+        "barrier/global-history/parent-attestation",
+        &Preimage(scope_id, gid, prev_history_commitment_id),
+    )
+    .map_err(CityGError::from)
+}
+
+fn encode_global_history_attestation(
+    state: &HistoryAuthorityState,
+    gid: &[u8; 32],
+    history_commitment: &HistoryCommitment,
+    barrier_version: u64,
+    kem_tree_hash_after: &[u8; 32],
+) -> Result<Vec<u8>, CityGError> {
+    let parent_attestation_id = global_history_parent_attestation_id(
+        &state.descriptor.scope_id,
+        gid,
+        &history_commitment.prev_history_commitment_id,
+    )?;
+    let finality_kind = "local-append-only".to_string();
+    let payload = to_cbor_vec(&GlobalHistoryAttestationSignedPayload(
+        "cityg/global-history-attestation-v1",
+        &state.descriptor.scope_id,
+        gid,
+        &history_commitment.history_view_id,
+        &history_commitment.history_commitment_id,
+        &history_commitment.prev_history_commitment_id,
+        history_commitment.history_seq,
+        barrier_version,
+        kem_tree_hash_after,
+        &parent_attestation_id,
+        finality_kind.as_str(),
+    ))?;
+    let signature = sign_history_authority_message(state, payload.as_slice())?;
+    Ok(to_cbor_vec(&GlobalHistoryAttestationWire(
+        state.descriptor.scope_id.to_vec(),
+        gid.to_vec(),
+        history_commitment.history_view_id.to_vec(),
+        history_commitment.history_commitment_id.to_vec(),
+        history_commitment.prev_history_commitment_id.to_vec(),
+        history_commitment.history_seq,
+        barrier_version,
+        kem_tree_hash_after.to_vec(),
+        parent_attestation_id.to_vec(),
+        finality_kind,
+        signature,
+    ))?)
+}
+
+fn parse_global_history_attestation(
+    raw: &[u8],
+) -> Result<
+    (
+        HistoryAuthorityDescriptor,
+        [u8; 32],
+        HistoryCommitment,
+        u64,
+        [u8; 32],
+        [u8; 32],
+        String,
+        Vec<u8>,
+    ),
+    CityGError,
+> {
+    let GlobalHistoryAttestationWire(
+        scope_id,
+        gid,
+        history_view_id,
+        history_commitment_id,
+        prev_history_commitment_id,
+        history_seq,
+        barrier_version,
+        kem_tree_hash_after,
+        parent_attestation_id,
+        finality_kind,
+        signature,
+    ) = parse_deterministic_cbor::<GlobalHistoryAttestationWire>(raw)?;
+    Ok((
+        HistoryAuthorityDescriptor {
+            scope_id: vec_to_32(scope_id)?,
+            public_key: Vec::new(),
+        },
+        vec_to_32(gid)?,
+        HistoryCommitment {
+            history_view_id: vec_to_32(history_view_id)?,
+            history_commitment_id: vec_to_32(history_commitment_id)?,
+            prev_history_commitment_id: vec_to_32(prev_history_commitment_id)?,
+            history_seq,
+        },
+        barrier_version,
+        vec_to_32(kem_tree_hash_after)?,
+        vec_to_32(parent_attestation_id)?,
+        finality_kind,
+        signature,
+    ))
+}
+
+fn encode_full_verification_receipt(
+    author_leaf_id: &[u8; 32],
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    signature: Vec<u8>,
+) -> Result<Vec<u8>, CityGError> {
+    Ok(to_cbor_vec(&FullVerificationReceiptWire {
+        author_leaf_id: author_leaf_id.to_vec(),
+        barrier_update_reason,
+        updater_leaf,
+        signature,
+    })?)
+}
+
+fn full_verification_receipt_payload(
+    gid: &[u8; 32],
+    author_leaf_id: &[u8; 32],
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    barrier_history_commitment: &[u8],
+    global_history_attestation: &[u8],
+    barrier_update: &[u8],
+) -> Result<Vec<u8>, CityGError> {
+    to_cbor_vec(&FullVerificationReceiptSignedPayload {
+        label: "cityg/full-verification-receipt-v1",
+        gid,
+        author_leaf_id,
+        barrier_update_reason,
+        updater_leaf,
+        barrier_history_commitment,
+        global_history_attestation,
+        barrier_update,
+    })
+    .map_err(CityGError::from)
+}
+
+fn encode_helper_completeness_attestation_revoked(
+    state: &HistoryAuthorityState,
+    history_commitment: &HistoryCommitment,
+    revocation_roots_hash: &[u8; 32],
+    page_offset: u32,
+    total_entries: u32,
+    leaf_indices: &[u32],
+) -> Result<Vec<u8>, CityGError> {
+    let helper_kind = "resolve_revoked_leaves";
+    let payload = to_cbor_vec(&HelperCompletenessSignedPayload {
+        label: "cityg/helper-completeness-attestation-v1",
+        scope_id: &state.descriptor.scope_id,
+        helper_kind,
+        history_view_id: &history_commitment.history_view_id,
+        history_commitment_id: &history_commitment.history_commitment_id,
+        page_offset,
+        total_entries,
+        selector: RevokedLeavesSelector {
+            revocation_roots_hash,
+            leaf_indices,
+        },
+    })?;
+    let signature = sign_history_authority_message(state, payload.as_slice())?;
+    Ok(to_cbor_vec(&HelperCompletenessAttestationWire(
+        state.descriptor.scope_id.to_vec(),
+        helper_kind.to_string(),
+        signature,
+    ))?)
+}
+
+fn encode_helper_completeness_attestation_joins(
+    state: &HistoryAuthorityState,
+    history_commitment: &HistoryCommitment,
+    prev_barrier_version: u64,
+    page_offset: u32,
+    total_entries: u32,
+    records: &[BarrierJoinLeafRecord],
+) -> Result<Vec<u8>, CityGError> {
+    let helper_kind = "resolve_joins_since";
+    let payload = to_cbor_vec(&HelperCompletenessSignedPayload {
+        label: "cityg/helper-completeness-attestation-v1",
+        scope_id: &state.descriptor.scope_id,
+        helper_kind,
+        history_view_id: &history_commitment.history_view_id,
+        history_commitment_id: &history_commitment.history_commitment_id,
+        page_offset,
+        total_entries,
+        selector: JoinsSinceSelector {
+            prev_barrier_version,
+            records,
+        },
+    })?;
+    let signature = sign_history_authority_message(state, payload.as_slice())?;
+    Ok(to_cbor_vec(&HelperCompletenessAttestationWire(
+        state.descriptor.scope_id.to_vec(),
+        helper_kind.to_string(),
+        signature,
+    ))?)
+}
+
+fn encode_helper_completeness_attestation_tree(
+    state: &HistoryAuthorityState,
+    history_commitment: &HistoryCommitment,
+    kem_tree_hash_after: &[u8; 32],
+    entry_offset: u32,
+    total_entries: u32,
+    pk_entries: &[Vec<u8>],
+) -> Result<Vec<u8>, CityGError> {
+    let helper_kind = "fetch_public_tree";
+    let payload = to_cbor_vec(&HelperCompletenessSignedPayload {
+        label: "cityg/helper-completeness-attestation-v1",
+        scope_id: &state.descriptor.scope_id,
+        helper_kind,
+        history_view_id: &history_commitment.history_view_id,
+        history_commitment_id: &history_commitment.history_commitment_id,
+        page_offset: entry_offset,
+        total_entries,
+        selector: FetchPublicTreeSelector {
+            kem_tree_hash_after,
+            pk_entries,
+        },
+    })?;
+    let signature = sign_history_authority_message(state, payload.as_slice())?;
+    Ok(to_cbor_vec(&HelperCompletenessAttestationWire(
+        state.descriptor.scope_id.to_vec(),
+        helper_kind.to_string(),
+        signature,
+    ))?)
+}
+
+#[derive(Serialize, Deserialize)]
 struct BarrierHistoryCommitmentHeaderWire(
     #[serde(with = "serde_bytes")] Vec<u8>,
     #[serde(with = "serde_bytes")] Vec<u8>,
@@ -3084,6 +3651,7 @@ fn encode_barrier_public_tree_snapshot_ref(
     }
     Ok(BarrierPublicTreeSnapshotRef {
         blob_indices,
+        barrier_version: 0,
         history_view_id: [0u8; 32],
         history_commitment: HistoryCommitment::default(),
     })
@@ -3137,6 +3705,7 @@ fn record_barrier_public_tree_snapshot(
     }
     let current_entries = state.barrier_pk_entries.clone();
     let mut snapshot = encode_barrier_public_tree_snapshot_ref(state, current_entries.as_slice())?;
+    snapshot.barrier_version = state.barrier_version;
     snapshot.history_commitment = ensure_current_history_commitment(gid, state)?;
     snapshot.history_view_id = snapshot.history_commitment.history_view_id;
     state
@@ -3730,6 +4299,7 @@ fn persisted_barrier_public_tree_history(
         .iter()
         .map(|(hash, snapshot)| PersistedBarrierPublicTreeSnapshot {
             kem_tree_hash_after_hex: hex::encode(hash),
+            barrier_version: snapshot.barrier_version,
             history_view_id_hex: hex::encode(snapshot.history_view_id),
             history_commitment: persisted_history_commitment(snapshot.history_commitment),
             blob_indices: snapshot.blob_indices.clone(),
@@ -4034,6 +4604,138 @@ fn rehydrate_replay_join_finalize_auth(
     Ok(())
 }
 
+fn freeze_barrier_updater_invalid_error() -> CityGError {
+    CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(
+        msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID,
+    ))
+}
+
+fn parse_full_verification_receipt(
+    raw: &[u8],
+) -> Result<([u8; 32], u64, u64, Vec<u8>), CityGError> {
+    let decoded = parse_deterministic_cbor::<FullVerificationReceiptWire>(raw)?;
+    Ok((
+        vec_to_32(decoded.author_leaf_id)?,
+        decoded.barrier_update_reason,
+        decoded.updater_leaf,
+        decoded.signature,
+    ))
+}
+
+fn unique_author_leaf_for_pop_pk(
+    state_before: &GroupState,
+    author_pop_pk: &[u8],
+) -> Result<[u8; 32], CityGError> {
+    let mut matching_leafs = state_before
+        .leaf_device_pk
+        .iter()
+        .filter(|(_, device_pk)| device_pk.as_slice() == author_pop_pk)
+        .map(|(leaf_id, _)| *leaf_id);
+    let Some(author_leaf_id) = matching_leafs.next() else {
+        return Err(freeze_barrier_updater_invalid_error());
+    };
+    if matching_leafs.next().is_some() {
+        return Err(freeze_barrier_updater_invalid_error());
+    }
+    Ok(author_leaf_id)
+}
+
+fn validate_history_authority_headers(
+    history_authority: Option<&HistoryAuthorityState>,
+    gid: &[u8; 32],
+    state_before: &GroupState,
+    header: &BTreeMap<u64, Value>,
+) -> Result<(), CityGError> {
+    let barrier_reason = parse_barrier_update_reason(header)?;
+    let has_receipt = header.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT);
+    let has_attestation = header.contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION);
+    if barrier_reason.is_none() {
+        if has_receipt || has_attestation {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
+        return Ok(());
+    }
+
+    let Some(authority) = history_authority else {
+        if has_receipt || has_attestation {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
+        return Ok(());
+    };
+
+    let raw_attestation = match header.get(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION) {
+        Some(Value::Bytes(raw)) => raw.as_slice(),
+        Some(_) => return Err(CityGError::InvalidInput("barrier_update malformed")),
+        None => return Err(CityGError::InvalidInput("barrier_update malformed")),
+    };
+    let expected_attestation = encode_global_history_attestation(
+        authority,
+        gid,
+        &state_before.current_history_commitment,
+        state_before.barrier_version,
+        &state_before.kem_tree_hash_after,
+    )?;
+    if raw_attestation != expected_attestation.as_slice() {
+        return Err(CityGError::Acceptance(
+            msphf_orchestrator::AcceptanceError::Freeze(
+                msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE,
+            ),
+        ));
+    }
+
+    let Some(Value::Bytes(raw_history_commitment)) = header.get(&hdr::HDR_BARRIER_HISTORY_COMMITMENT)
+    else {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    };
+    let Some(Value::Bytes(raw_barrier_update)) = header.get(&hdr::HDR_BARRIER_UPDATE) else {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    };
+    let Some(author_pop_pk) = header.get(&hdr::HDR_POP_PK).and_then(Value::as_bytes) else {
+        return Err(freeze_barrier_updater_invalid_error());
+    };
+    let author_leaf_id = unique_author_leaf_for_pop_pk(state_before, author_pop_pk)?;
+
+    let parsed = parse_barrier_update(header, state_before.n_max)?
+        .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+    let barrier_reason = barrier_reason.ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+
+    let raw_receipt = match header.get(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT) {
+        Some(Value::Bytes(raw)) => Some(raw.as_slice()),
+        Some(_) => return Err(CityGError::InvalidInput("barrier_update malformed")),
+        None => None,
+    };
+    if authority.require_full_verification_receipt && raw_receipt.is_none() {
+        return Err(freeze_barrier_updater_invalid_error());
+    }
+    if let Some(raw_receipt) = raw_receipt {
+        let (receipt_author_leaf_id, receipt_reason, receipt_updater_leaf, signature) =
+            parse_full_verification_receipt(raw_receipt)?;
+        if receipt_author_leaf_id != author_leaf_id
+            || receipt_reason != barrier_reason
+            || receipt_updater_leaf != parsed.updater_leaf
+        {
+            return Err(freeze_barrier_updater_invalid_error());
+        }
+        let payload = full_verification_receipt_payload(
+            gid,
+            &author_leaf_id,
+            barrier_reason,
+            parsed.updater_leaf,
+            raw_history_commitment,
+            raw_attestation,
+            raw_barrier_update,
+        )?;
+        let author_pop_pk = dilithium5::PublicKey::from_bytes(author_pop_pk)
+            .map_err(|_| freeze_barrier_updater_invalid_error())?;
+        let signature = dilithium5::DetachedSignature::from_bytes(signature.as_slice())
+            .map_err(|_| freeze_barrier_updater_invalid_error())?;
+        dilithium5::verify_detached_signature(&signature, payload.as_slice(), &author_pop_pk)
+            .map_err(|_| freeze_barrier_updater_invalid_error())?;
+    }
+
+    Ok(())
+}
+
 fn validate_barrier_update_against_roster(
     state_before: &GroupState,
     header: &BTreeMap<u64, Value>,
@@ -4049,12 +4751,6 @@ fn validate_barrier_update_against_roster(
         let barrier_update_reason = parse_barrier_update_reason(header)?;
         let history_commitment_present = header.contains_key(&hdr::HDR_BARRIER_HISTORY_COMMITMENT);
         let supplied_history_commitment = parse_barrier_history_commitment(header)?;
-        if header.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT) {
-            return Err(CityGError::InvalidInput("barrier_update malformed"));
-        }
-        if header.contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION) {
-            return Err(CityGError::InvalidInput("barrier_update malformed"));
-        }
         if barrier_update_reason.is_none() {
             if history_commitment_present {
                 return Err(CityGError::InvalidInput("barrier_update malformed"));
@@ -4543,8 +5239,10 @@ mod tests {
         OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_leaf_id, hdr,
         mhw::HeadRecord,
     };
-    use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, keypair as ml_dsa_keypair};
-    use pqcrypto_traits::sign::PublicKey;
+    use pqcrypto_dilithium::dilithium5::{
+        self, SecretKey as MlDsaSecretKey, keypair as ml_dsa_keypair,
+    };
+    use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey};
     use rand::{RngExt, SeedableRng, rngs::StdRng};
     use serde::Serialize;
     use std::{
@@ -4564,6 +5262,12 @@ mod tests {
     fn demo_server_with_journal(path: impl AsRef<Path>) -> CityGServer {
         let mut config = demo_acceptance_config();
         config.state_path = Some(path.as_ref().to_path_buf());
+        CityGServer::new(config)
+    }
+
+    fn demo_server_with_local_history_authority() -> CityGServer {
+        let mut config = demo_acceptance_config();
+        config.enable_local_history_authority();
         CityGServer::new(config)
     }
 
@@ -5233,11 +5937,12 @@ mod tests {
             hdr::HDR_BARRIER_UPDATE_REASON,
             Value::Integer(Integer::from(barrier_update_reason)),
         );
+        let history_commitment = server.current_history_commitment(&gid)?;
+        let history_commitment_header =
+            super::encode_barrier_history_commitment_header(history_commitment)?;
         header.insert(
             hdr::HDR_BARRIER_HISTORY_COMMITMENT,
-            Value::Bytes(super::encode_barrier_history_commitment_header(
-                server.current_history_commitment(&gid)?,
-            )?),
+            Value::Bytes(history_commitment_header.clone()),
         );
         if barrier_update_reason == 2 {
             if generated.join_finalize_auth_token != [0u8; 32] {
@@ -5300,9 +6005,59 @@ mod tests {
             None,
             witness_bytes,
         )?;
-        let pristine_bundle = refresh_bundle.clone();
         strip_rollup_metadata(&mut refresh_bundle.header_map);
         apply_pivot_alignment(&mut refresh_bundle.header_map, pivot);
+        if let Some(authority) = server.history_authority.as_ref() {
+            let raw_history_commitment = match refresh_bundle
+                .header_map
+                .get(&hdr::HDR_BARRIER_HISTORY_COMMITMENT)
+            {
+                Some(Value::Bytes(raw)) => raw.clone(),
+                _ => return Err(CityGError::InvalidInput("barrier_update malformed")),
+            };
+            let raw_barrier_update = match refresh_bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE) {
+                Some(Value::Bytes(raw)) => raw.clone(),
+                _ => return Err(CityGError::InvalidInput("barrier_update malformed")),
+            };
+            let parsed_barrier_update = super::parse_barrier_update(&refresh_bundle.header_map, ticket.n_max)?
+                .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+            let global_history_attestation = super::encode_global_history_attestation(
+                authority,
+                &gid,
+                &history_commitment,
+                ticket.barrier_version,
+                &ticket.kem_tree_hash_after,
+            )?;
+            refresh_bundle.header_map.insert(
+                hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+                Value::Bytes(global_history_attestation.clone()),
+            );
+            let receipt_payload = super::full_verification_receipt_payload(
+                &gid,
+                &generated.leaf_id,
+                barrier_update_reason,
+                parsed_barrier_update.updater_leaf,
+                raw_history_commitment.as_slice(),
+                global_history_attestation.as_slice(),
+                raw_barrier_update.as_slice(),
+            )?;
+            let receipt_signature = dilithium5::detached_sign(
+                receipt_payload.as_slice(),
+                &generated.pop_secret_key,
+            )
+            .as_bytes()
+            .to_vec();
+            refresh_bundle.header_map.insert(
+                hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+                Value::Bytes(super::encode_full_verification_receipt(
+                    &generated.leaf_id,
+                    barrier_update_reason,
+                    parsed_barrier_update.updater_leaf,
+                    receipt_signature,
+                )?),
+            );
+        }
+        let pristine_bundle = refresh_bundle.clone();
 
         Ok((refresh_bundle, pristine_bundle))
     }
@@ -6267,6 +7022,48 @@ mod tests {
     }
 
     #[test]
+    fn build_refresh_bundle_includes_local_history_authority_headers() -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x79)?;
+        let mut server = demo_server_with_local_history_authority();
+        server.accept_epoch(&generated.bundle)?;
+
+        let (bundle, _pristine_bundle) =
+            build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+        assert!(bundle
+            .header_map
+            .contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION));
+        assert!(bundle
+            .header_map
+            .contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT));
+        Ok(())
+    }
+
+    #[test]
+    fn accept_epoch_rejects_barrier_update_missing_receipt_under_local_history_authority()
+    -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x7A)?;
+        let mut server = demo_server_with_local_history_authority();
+        server.accept_epoch(&generated.bundle)?;
+
+        let (mut bundle, _pristine_bundle) =
+            build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+        bundle
+            .header_map
+            .remove(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT);
+
+        let err = server
+            .accept_epoch(&bundle)
+            .expect_err("local history authority must require full verification receipt");
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                    && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn invalid_persisted_kbroad_state_is_ignored_on_boot() -> Result<(), CityGError> {
         let _serial = super::journal_serial_guard();
         let dir = tempdir()?;
@@ -6484,6 +7281,7 @@ mod tests {
                 barrier_public_tree_blobs: Vec::new(),
                 barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
                     kem_tree_hash_after_hex: "not-hex".to_string(),
+                    barrier_version: 5,
                     history_view_id_hex: String::new(),
                     history_commitment: super::PersistedHistoryCommitment::default(),
                     blob_indices: Vec::new(),
@@ -6560,6 +7358,7 @@ mod tests {
                 barrier_public_tree_blobs: Vec::new(),
                 barrier_public_tree_history: vec![PersistedBarrierPublicTreeSnapshot {
                     kem_tree_hash_after_hex: hex::encode(historical_hash),
+                    barrier_version: 7,
                     history_view_id_hex: String::new(),
                     history_commitment: super::PersistedHistoryCommitment::default(),
                     blob_indices: Vec::new(),
@@ -10979,6 +11778,7 @@ mod tests {
                 ticket.kem_tree_hash_after,
                 super::BarrierPublicTreeSnapshotRef {
                     blob_indices: Vec::new(),
+                    barrier_version: ticket.barrier_version,
                     history_view_id: [0xA1; 32],
                     history_commitment: super::HistoryCommitment {
                         history_view_id: [0xA1; 32],
@@ -11573,6 +12373,7 @@ type BarrierBlobIndex = u32;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct BarrierPublicTreeSnapshotRef {
     blob_indices: Vec<BarrierBlobIndex>,
+    barrier_version: u64,
     history_view_id: [u8; 32],
     history_commitment: HistoryCommitment,
 }
@@ -11741,6 +12542,8 @@ struct PersistedBarrierPublicTreeSnapshot {
     #[serde(default)]
     kem_tree_hash_after_hex: String,
     #[serde(default)]
+    barrier_version: u64,
+    #[serde(default)]
     history_view_id_hex: String,
     #[serde(default)]
     history_commitment: PersistedHistoryCommitment,
@@ -11760,6 +12563,131 @@ struct PersistedHistoryCommitment {
     prev_history_commitment_id_hex: String,
     #[serde(default)]
     history_seq: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PersistedHistoryAuthorityState {
+    #[serde(default)]
+    scope_id_hex: String,
+    #[serde(default)]
+    public_key_hex: String,
+    #[serde(default)]
+    secret_key_hex: String,
+    #[serde(default = "default_require_full_verification_receipt")]
+    require_full_verification_receipt: bool,
+}
+
+fn default_require_full_verification_receipt() -> bool {
+    true
+}
+
+fn history_authority_path_for_journal(journal_path: &Path) -> PathBuf {
+    journal_path.with_extension("history-authority.cbor")
+}
+
+fn load_history_authority_state(path: &Path) -> Result<Option<HistoryAuthorityState>, CityGError> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(CityGError::Io(err)),
+    };
+    let persisted: PersistedHistoryAuthorityState = ciborium::de::from_reader(file)
+        .map_err(|_| CityGError::InvalidInput("invalid history authority state"))?;
+    if persisted.scope_id_hex.is_empty()
+        || persisted.public_key_hex.is_empty()
+        || persisted.secret_key_hex.is_empty()
+    {
+        return Ok(None);
+    }
+    Ok(Some(HistoryAuthorityState {
+        descriptor: HistoryAuthorityDescriptor {
+            scope_id: decode_hex_32("history authority scope_id", &persisted.scope_id_hex)?,
+            public_key: hex::decode(&persisted.public_key_hex)
+                .map_err(|_| CityGError::InvalidInput("invalid history authority public key"))?,
+        },
+        secret_key: hex::decode(&persisted.secret_key_hex)
+            .map_err(|_| CityGError::InvalidInput("invalid history authority secret key"))?,
+        require_full_verification_receipt: persisted.require_full_verification_receipt,
+    }))
+}
+
+fn persist_history_authority_state(
+    path: &Path,
+    state: &HistoryAuthorityState,
+) -> Result<(), CityGError> {
+    #[allow(clippy::collapsible_if)]
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let persisted = PersistedHistoryAuthorityState {
+        scope_id_hex: hex::encode(state.descriptor.scope_id),
+        public_key_hex: hex::encode(&state.descriptor.public_key),
+        secret_key_hex: hex::encode(&state.secret_key),
+        require_full_verification_receipt: state.require_full_verification_receipt,
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&persisted, &mut bytes)
+        .map_err(|_| CityGError::InvalidInput("failed to encode history authority state"))?;
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_os);
+    {
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(&bytes)?;
+        file.flush()?;
+        file.sync_data()?;
+    }
+    std::fs::rename(tmp_path, path)?;
+    Ok(())
+}
+
+fn derive_history_authority_scope_id(public_key: &[u8]) -> Result<[u8; 32], CityGError> {
+    #[derive(Serialize)]
+    struct ScopePreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
+    h_l("barrier/history-authority/scope", &ScopePreimage(public_key)).map_err(CityGError::from)
+}
+
+fn generate_history_authority_state(
+    require_full_verification_receipt: bool,
+) -> Result<HistoryAuthorityState, CityGError> {
+    let (public_key, secret_key) = dilithium5::keypair();
+    let public_key = public_key.as_bytes().to_vec();
+    let secret_key = secret_key.as_bytes().to_vec();
+    Ok(HistoryAuthorityState {
+        descriptor: HistoryAuthorityDescriptor {
+            scope_id: derive_history_authority_scope_id(public_key.as_slice())?,
+            public_key,
+        },
+        secret_key,
+        require_full_verification_receipt,
+    })
+}
+
+fn load_or_generate_history_authority_state(
+    path: Option<&Path>,
+    require_full_verification_receipt: bool,
+) -> Result<HistoryAuthorityState, CityGError> {
+    if let Some(path) = path {
+        if let Some(mut state) = load_history_authority_state(path)? {
+            state.require_full_verification_receipt = require_full_verification_receipt;
+            persist_history_authority_state(path, &state)?;
+            return Ok(state);
+        }
+        let state = generate_history_authority_state(require_full_verification_receipt)?;
+        persist_history_authority_state(path, &state)?;
+        return Ok(state);
+    }
+    generate_history_authority_state(require_full_verification_receipt)
+}
+
+fn decode_hex_32(label: &'static str, value: &str) -> Result<[u8; 32], CityGError> {
+    let bytes = hex::decode(value).map_err(|_| CityGError::InvalidInput(label))?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CityGError::InvalidInput(label))
 }
 
 fn kbroad_state_path_for_journal(journal_path: &Path) -> PathBuf {

@@ -240,6 +240,21 @@ Statut audit: **COMPLETED**, avec fermeture implémentation supplémentaire du b
 
 --
 
+## Commentaires Codex (2026-03-27, tranche local-history-authority)
+
+Nouvelle passe spec + implémentation:
+
+- **Reclassement partiel du gap principal**: la frontière FULL/recover-only n’est toujours pas une propriété globale du protocole de base, mais elle n’est plus seulement “locale et invisible”. Une extension explicite `local-history-authority-v1` est maintenant définie dans la spec et déjà câblée dans le code.
+- **Côté serveur**: `header[181]` est maintenant un vrai reçu scope-local vérifiable lié à `header[180]`, `header[182]` et au `barrier_update` exact; le serveur le requiert et le valide quand cette extension est activée.
+- **Côté client/API**: les tickets, helpers A/B/C et l’acceptance lookup transportent déjà le `HistoryAuthorityDescriptor`, l’attestation scope-locale et les preuves helpers correspondantes; le client parse et vérifie positivement ces objets.
+- **Toujours ouvert**: cette fermeture reste optionnelle et scope-locale. Les raisons `0/1` ne deviennent pas pour autant une propriété server-verifiable dans la base profile universelle, et l’extension ne prouve pas une canonité globale inter-serveurs.
+
+Conclusion:
+
+Le diagnostic central de l’audit 4 reste vrai au niveau **base profile**, mais il est maintenant **Partial** au niveau repo/protocole courant: il existe bien une voie protocolaire concrète et implémentée pour rendre cette frontière vérifiable dans un déploiement local.
+
+--
+
 ## Commentaires Codex (2026-03-26, tranche 8)
 
 Nouvelle passe spec + implémentation:
@@ -396,3 +411,20 @@ Preuves d’implémentation exécutées:
 
 - `cargo test -p cityg-gui --bin cityg-gui native::tests::validate_client_visible_activation_guards_rejects_full_verification_receipt_header --features native-app -- --exact`
 - `cargo test -p cityg-gui --bin cityg-gui native::tests::validate_client_visible_activation_guards_rejects_global_history_attestation_header --features native-app -- --exact`
+
+--
+
+## Commentaires Codex (2026-03-27, statut final courant)
+
+Re-vérification finale après formalisation de `local-history-authority-v1`:
+
+- **Partial**: `4.1`, `4.2`, `4.5`, `4.7`, `4.8`
+- **Open**: `4.4`, `4.6`
+- **Closed**: `4.3`
+
+Lecture consolidée:
+
+- `4.1` et `4.5` ne sont plus honnêtement `Open`: il existe maintenant une famille d’objets wire explicites (`header[181]`, `header[182]`, `HistoryAuthorityDescriptor`) qui rendent la frontière FULL/updater vérifiable dans un scope local quand l’extension est activée.
+- `4.4` et `4.6` restent ouverts parce qu’ils demandent encore une ré-promotion FULL et une canonité de head qui tiennent face à un serveur byzantin au-delà d’un unique scope local.
+
+Référence de synthèse: `docs/audits/final-verification-report-2026-03-26.md`.

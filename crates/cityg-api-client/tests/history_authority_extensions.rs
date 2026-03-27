@@ -1,0 +1,338 @@
+use std::error::Error as StdError;
+
+use cityg_api_client::{
+    BarrierJoinRecord, GlobalHistoryAttestation, HelperCompletenessAttestation,
+    HistoryAuthorityDescriptor, HistoryCommitment,
+    parse_fetch_public_tree_completeness_attestation_bytes,
+    parse_global_history_attestation_bytes, parse_history_authority_descriptor_bytes,
+    parse_joins_since_completeness_attestation_bytes,
+    parse_revoked_leaves_completeness_attestation_bytes,
+    verify_fetch_public_tree_completeness_attestation,
+    verify_joins_since_completeness_attestation, verify_revoked_leaves_completeness_attestation,
+};
+use pqcrypto_dilithium::dilithium5;
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
+use serde::{Deserialize, Serialize};
+
+const HELPER_KIND_REVOKED_LEAVES: &str = "resolve_revoked_leaves";
+const HELPER_KIND_JOINS_SINCE: &str = "resolve_joins_since";
+const HELPER_KIND_FETCH_PUBLIC_TREE: &str = "fetch_public_tree";
+
+#[derive(Serialize, Deserialize)]
+struct HistoryAuthorityDescriptorWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize, Deserialize)]
+struct GlobalHistoryAttestationWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    String,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize, Deserialize)]
+struct HelperCompletenessAttestationWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    String,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize)]
+struct GlobalHistoryAttestationSignedPayload<'a>(
+    &'static str,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    &'a str,
+);
+
+#[derive(Serialize)]
+struct HelperCompletenessSignedPayload<'a, T> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    helper_kind: &'a str,
+    #[serde(with = "serde_bytes")]
+    history_view_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: &'a [u8; 32],
+    page_offset: u32,
+    total_entries: u32,
+    selector: T,
+}
+
+#[derive(Serialize)]
+struct RevokedLeavesSelector<'a> {
+    #[serde(with = "serde_bytes")]
+    revocation_roots_hash: &'a [u8; 32],
+    leaf_indices: &'a [u32],
+}
+
+#[derive(Serialize)]
+struct JoinsSinceSelector<'a> {
+    prev_barrier_version: u64,
+    records: &'a [BarrierJoinRecord],
+}
+
+#[derive(Serialize)]
+struct FetchPublicTreeSelector<'a> {
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: &'a [u8; 32],
+    pk_entries: &'a [Vec<u8>],
+}
+
+fn encode_cbor_det<T: Serialize>(value: &T) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).expect("deterministic cbor encoding");
+    bytes
+}
+
+fn history_authority(seed: u8) -> (HistoryAuthorityDescriptor, dilithium5::SecretKey) {
+    let (public_key, secret_key) = dilithium5::keypair();
+    (
+        HistoryAuthorityDescriptor {
+            scope_id: [seed; 32],
+            public_key: public_key.as_bytes().to_vec(),
+        },
+        secret_key,
+    )
+}
+
+fn parent_attestation_id(prev_history_commitment_id: &[u8; 32]) -> [u8; 32] {
+    if *prev_history_commitment_id == [0u8; 32] {
+        return [0u8; 32];
+    }
+    let mut parent = *prev_history_commitment_id;
+    parent[0] ^= 0xA5;
+    parent
+}
+
+fn sign_global_history_attestation(
+    authority: &HistoryAuthorityDescriptor,
+    secret_key: &dilithium5::SecretKey,
+    gid: &[u8; 32],
+    history_commitment: &HistoryCommitment,
+    barrier_version: u64,
+    kem_tree_hash_after: &[u8; 32],
+) -> (Vec<u8>, GlobalHistoryAttestation) {
+    let parent_attestation_id =
+        parent_attestation_id(&history_commitment.prev_history_commitment_id);
+    let finality_kind = "local-append-only".to_string();
+    let payload = encode_cbor_det(&GlobalHistoryAttestationSignedPayload(
+        "cityg/global-history-attestation-v1",
+        &authority.scope_id,
+        gid,
+        &history_commitment.history_view_id,
+        &history_commitment.history_commitment_id,
+        &history_commitment.prev_history_commitment_id,
+        history_commitment.history_seq,
+        barrier_version,
+        kem_tree_hash_after,
+        &parent_attestation_id,
+        finality_kind.as_str(),
+    ));
+    let signature = dilithium5::detached_sign(payload.as_slice(), secret_key)
+        .as_bytes()
+        .to_vec();
+    let wire = encode_cbor_det(&GlobalHistoryAttestationWire(
+        authority.scope_id.to_vec(),
+        gid.to_vec(),
+        history_commitment.history_view_id.to_vec(),
+        history_commitment.history_commitment_id.to_vec(),
+        history_commitment.prev_history_commitment_id.to_vec(),
+        history_commitment.history_seq,
+        barrier_version,
+        kem_tree_hash_after.to_vec(),
+        parent_attestation_id.to_vec(),
+        finality_kind.clone(),
+        signature.clone(),
+    ));
+    (
+        wire,
+        GlobalHistoryAttestation {
+            scope_id: authority.scope_id,
+            gid: *gid,
+            history_commitment: *history_commitment,
+            barrier_version,
+            kem_tree_hash_after: *kem_tree_hash_after,
+            parent_attestation_id,
+            finality_kind,
+            signature,
+        },
+    )
+}
+
+fn sign_helper_completeness_attestation<T: Serialize>(
+    authority: &HistoryAuthorityDescriptor,
+    secret_key: &dilithium5::SecretKey,
+    helper_kind: &'static str,
+    history_commitment: &HistoryCommitment,
+    page_offset: u32,
+    total_entries: u32,
+    selector: T,
+) -> Vec<u8> {
+    let payload = encode_cbor_det(&HelperCompletenessSignedPayload {
+        label: "cityg/helper-completeness-attestation-v1",
+        scope_id: &authority.scope_id,
+        helper_kind,
+        history_view_id: &history_commitment.history_view_id,
+        history_commitment_id: &history_commitment.history_commitment_id,
+        page_offset,
+        total_entries,
+        selector,
+    });
+    let signature = dilithium5::detached_sign(payload.as_slice(), secret_key)
+        .as_bytes()
+        .to_vec();
+    encode_cbor_det(&HelperCompletenessAttestationWire(
+        authority.scope_id.to_vec(),
+        helper_kind.to_string(),
+        signature,
+    ))
+}
+
+#[test]
+fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdError>> {
+    let gid = [0x41; 32];
+    let history_commitment = HistoryCommitment {
+        history_view_id: [0xD1; 32],
+        history_commitment_id: [0xE1; 32],
+        prev_history_commitment_id: [0x00; 32],
+        history_seq: 7,
+    };
+    let (authority, secret_key) = history_authority(0xA1);
+    let descriptor_bytes = encode_cbor_det(&HistoryAuthorityDescriptorWire(
+        authority.scope_id.to_vec(),
+        authority.public_key.clone(),
+    ));
+    let parsed_authority = parse_history_authority_descriptor_bytes(&descriptor_bytes)?
+        .expect("authority descriptor should parse");
+    assert_eq!(parsed_authority, authority);
+
+    let (global_attestation_bytes, expected_attestation) = sign_global_history_attestation(
+        &authority,
+        &secret_key,
+        &gid,
+        &history_commitment,
+        7,
+        &[0xCF; 32],
+    );
+    let parsed_attestation = parse_global_history_attestation_bytes(
+        &global_attestation_bytes,
+        Some(&authority),
+    )?
+    .expect("global attestation should parse");
+    assert_eq!(parsed_attestation, expected_attestation);
+
+    let revoked_bytes = sign_helper_completeness_attestation(
+        &authority,
+        &secret_key,
+        HELPER_KIND_REVOKED_LEAVES,
+        &history_commitment,
+        0,
+        2,
+        RevokedLeavesSelector {
+            revocation_roots_hash: &[0xDD; 32],
+            leaf_indices: &[1, 7],
+        },
+    );
+    let revoked_attestation = parse_revoked_leaves_completeness_attestation_bytes(
+        &revoked_bytes,
+        &authority,
+    )?
+    .expect("revoked helper attestation should parse");
+    assert_eq!(
+        revoked_attestation,
+        HelperCompletenessAttestation {
+            scope_id: authority.scope_id,
+            helper_kind: HELPER_KIND_REVOKED_LEAVES.to_string(),
+            signature: revoked_attestation.signature.clone(),
+        }
+    );
+    verify_revoked_leaves_completeness_attestation(
+        &revoked_attestation,
+        &authority,
+        &history_commitment,
+        &[0xDD; 32],
+        0,
+        2,
+        &[1, 7],
+    )?;
+
+    let join_record = BarrierJoinRecord {
+        device_pk: vec![0xAA; 32],
+        leaf_index: 9,
+        ek_leaf: vec![0xBB; 1184],
+    };
+    let joins_bytes = sign_helper_completeness_attestation(
+        &authority,
+        &secret_key,
+        HELPER_KIND_JOINS_SINCE,
+        &history_commitment,
+        0,
+        1,
+        JoinsSinceSelector {
+            prev_barrier_version: 3,
+            records: std::slice::from_ref(&join_record),
+        },
+    );
+    let joins_attestation = parse_joins_since_completeness_attestation_bytes(
+        &joins_bytes,
+        &authority,
+    )?
+    .expect("joins helper attestation should parse");
+    verify_joins_since_completeness_attestation(
+        &joins_attestation,
+        &authority,
+        &history_commitment,
+        3,
+        0,
+        1,
+        std::slice::from_ref(&join_record),
+    )?;
+
+    let pk_entries = vec![Vec::new(); 15];
+    let tree_bytes = sign_helper_completeness_attestation(
+        &authority,
+        &secret_key,
+        HELPER_KIND_FETCH_PUBLIC_TREE,
+        &history_commitment,
+        0,
+        pk_entries.len() as u32,
+        FetchPublicTreeSelector {
+            kem_tree_hash_after: &[0xCF; 32],
+            pk_entries: pk_entries.as_slice(),
+        },
+    );
+    let tree_attestation = parse_fetch_public_tree_completeness_attestation_bytes(
+        &tree_bytes,
+        &authority,
+    )?
+    .expect("tree helper attestation should parse");
+    verify_fetch_public_tree_completeness_attestation(
+        &tree_attestation,
+        &authority,
+        &history_commitment,
+        &[0xCF; 32],
+        0,
+        pk_entries.len() as u32,
+        pk_entries.as_slice(),
+    )?;
+
+    Ok(())
+}

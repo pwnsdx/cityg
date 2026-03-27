@@ -958,6 +958,24 @@ fn validate_client_visible_activation_guards_rejects_global_history_attestation_
 }
 
 #[test]
+fn validate_client_visible_activation_guards_accepts_matching_authority_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB96, "http://127.0.0.1:9", "room-b86", "bob")?;
+    session.barrier_state.current_global_history_attestation_bytes = vec![0xAA, 0xBB, 0xCC];
+    let mut header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xE3])?;
+    header.insert(
+        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+        Value::Bytes(session.barrier_state.current_global_history_attestation_bytes.clone()),
+    );
+    header.insert(
+        hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+        Value::Bytes(vec![0x10, 0x20]),
+    );
+    validate_client_visible_activation_guards(&session, &header)?;
+    Ok(())
+}
+
+#[test]
 fn extract_barrier_update_digest_uses_raw_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let mut header = BTreeMap::new();
     let raw = vec![0x01, 0x02, 0x03, 0x04];
@@ -6218,6 +6236,7 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             prev_history_commitment_id: array(0x2F),
             history_seq: 4,
         }),
+        current_global_history_attestation_bytes: Vec::new(),
         current_public_tree: None,
         retained_public_trees: Vec::new(),
         bootstrap_history_commitment: Some(HistoryCommitment {

@@ -6,6 +6,10 @@ use ciborium::Value;
 use cityg_api_client::{BarrierJoinRecord, HistoryCommitment};
 use msphf_core::{hash::h_l, serde_utils::to_cbor_vec};
 use msphf_orchestrator::hdr;
+use pqcrypto_dilithium::dilithium5;
+use pqcrypto_traits::sign::{
+    DetachedSignature as _, PublicKey as _, SecretKey as _,
+};
 use rand::{RngExt, rng};
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +136,33 @@ struct BarrierHistoryCommitmentHeaderOwned(
     u64,
 );
 
+#[derive(Serialize, Deserialize)]
+struct FullVerificationReceiptWire {
+    #[serde(with = "serde_bytes")]
+    author_leaf_id: Vec<u8>,
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct FullVerificationReceiptSignedPayload<'a> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    author_leaf_id: &'a [u8; 32],
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    #[serde(with = "serde_bytes")]
+    barrier_history_commitment: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    global_history_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    barrier_update: &'a [u8],
+}
+
 pub fn encode_history_commitment_header(commitment: &HistoryCommitment) -> Result<Vec<u8>> {
     to_cbor_vec(&BarrierHistoryCommitmentHeader(
         &commitment.history_view_id,
@@ -173,6 +204,89 @@ pub fn header_history_commitment(
         Some(_) => Err(anyhow!("barrier history commitment header must be bytes")),
         None => Ok(None),
     }
+}
+
+pub fn encode_full_verification_receipt(
+    gid: &[u8; 32],
+    author_leaf_id: &[u8; 32],
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    barrier_history_commitment: &[u8],
+    global_history_attestation: &[u8],
+    barrier_update: &[u8],
+    author_pop_secret_key: &[u8],
+) -> Result<Vec<u8>> {
+    let payload = to_cbor_vec(&FullVerificationReceiptSignedPayload {
+        label: "cityg/full-verification-receipt-v1",
+        gid,
+        author_leaf_id,
+        barrier_update_reason,
+        updater_leaf,
+        barrier_history_commitment,
+        global_history_attestation,
+        barrier_update,
+    })
+    .map_err(|err| anyhow!("encode full verification receipt payload: {err}"))?;
+    let secret_key = dilithium5::SecretKey::from_bytes(author_pop_secret_key)
+        .map_err(|_| anyhow!("invalid ML-DSA-65 POP secret key"))?;
+    let signature = dilithium5::detached_sign(payload.as_slice(), &secret_key)
+        .as_bytes()
+        .to_vec();
+    to_cbor_vec(&FullVerificationReceiptWire {
+        author_leaf_id: author_leaf_id.to_vec(),
+        barrier_update_reason,
+        updater_leaf,
+        signature,
+    })
+    .map_err(|err| anyhow!("encode full verification receipt: {err}"))
+}
+
+pub fn verify_full_verification_receipt(
+    raw: &[u8],
+    gid: &[u8; 32],
+    expected_author_leaf_id: &[u8; 32],
+    expected_barrier_update_reason: u64,
+    expected_updater_leaf: u64,
+    barrier_history_commitment: &[u8],
+    global_history_attestation: &[u8],
+    barrier_update: &[u8],
+    author_pop_public_key: &[u8],
+) -> Result<()> {
+    let decoded: FullVerificationReceiptWire = ciborium::de::from_reader(raw)
+        .map_err(|err| anyhow!("failed to parse full verification receipt: {err}"))?;
+    let canonical = to_cbor_vec(&decoded)
+        .map_err(|err| anyhow!("failed to canonicalize full verification receipt: {err}"))?;
+    if canonical.as_slice() != raw {
+        return Err(anyhow!("non-canonical full verification receipt"));
+    }
+    let author_leaf_id: [u8; 32] = decoded
+        .author_leaf_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("full verification receipt author_leaf_id must be 32 bytes"))?;
+    if author_leaf_id != *expected_author_leaf_id
+        || decoded.barrier_update_reason != expected_barrier_update_reason
+        || decoded.updater_leaf != expected_updater_leaf
+    {
+        return Err(anyhow!("full verification receipt fields mismatch"));
+    }
+    let payload = to_cbor_vec(&FullVerificationReceiptSignedPayload {
+        label: "cityg/full-verification-receipt-v1",
+        gid,
+        author_leaf_id: expected_author_leaf_id,
+        barrier_update_reason: expected_barrier_update_reason,
+        updater_leaf: expected_updater_leaf,
+        barrier_history_commitment,
+        global_history_attestation,
+        barrier_update,
+    })
+    .map_err(|err| anyhow!("encode full verification receipt payload: {err}"))?;
+    let public_key = dilithium5::PublicKey::from_bytes(author_pop_public_key)
+        .map_err(|_| anyhow!("invalid ML-DSA-65 POP public key"))?;
+    let signature = dilithium5::DetachedSignature::from_bytes(decoded.signature.as_slice())
+        .map_err(|_| anyhow!("invalid ML-DSA-65 receipt signature"))?;
+    dilithium5::verify_detached_signature(&signature, payload.as_slice(), &public_key)
+        .map_err(|_| anyhow!("full verification receipt signature verification failed"))
 }
 
 pub fn validate_barrier_n_max(n_max: u64) -> Result<u64> {

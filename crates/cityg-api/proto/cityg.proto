@@ -260,6 +260,10 @@ message JoinTicketResponse {
   uint64 provisioning_expires_at_ms = 39;
   optional FsForwardLeapPolicy fs_forward_leap_policy = 40;
   uint64 last_accepted_ec = 41;
+  bytes history_authority_descriptor = 42;
+  bytes current_global_history_attestation = 43;
+  bytes current_join_records_completeness_attestation = 44;
+  bytes current_revoked_leaf_indices_completeness_attestation = 45;
 }
 
 message MergeTicketRequest {
@@ -307,6 +311,8 @@ message MergeTicketResponse {
   optional HistoryCommitment current_history_commitment = 29;
   optional FsForwardLeapPolicy fs_forward_leap_policy = 30;
   uint64 last_accepted_ec = 31;
+  bytes history_authority_descriptor = 32;
+  bytes current_global_history_attestation = 33;
 }
 
 message BarrierResolveRevokedLeavesRequest {
@@ -326,6 +332,8 @@ message BarrierResolveRevokedLeavesResponse {
   optional uint32 next_page_offset = 5;
   uint32 total_entries = 6;
   bytes helper_completeness_attestation = 7;
+  bytes history_authority_descriptor = 8;
+  bytes global_history_attestation = 9;
 }
 
 message BarrierJoinLeafRecord {
@@ -352,6 +360,8 @@ message BarrierResolveJoinsSinceResponse {
   optional uint32 next_page_offset = 5;
   uint32 total_entries = 6;
   bytes helper_completeness_attestation = 7;
+  bytes history_authority_descriptor = 8;
+  bytes global_history_attestation = 9;
 }
 
 message BarrierFetchPublicTreeRequest {
@@ -372,6 +382,9 @@ message BarrierFetchPublicTreeResponse {
   uint32 entry_offset = 6;
   optional uint32 next_entry_offset = 7;
   uint32 total_entries = 8;
+  bytes helper_completeness_attestation = 9;
+  bytes history_authority_descriptor = 10;
+  bytes global_history_attestation = 11;
 }
 
 enum MergeAcceptanceStatus {
@@ -398,6 +411,8 @@ message BarrierLookupMergeAcceptanceResponse {
   optional uint64 accepted_reason = 5;
   optional bytes accepted_digest = 6;
   optional HistoryCommitment history_commitment = 7;
+  bytes history_authority_descriptor = 8;
+  bytes global_history_attestation = 9;
 }
 
 message HistoryCommitment {

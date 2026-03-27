@@ -168,7 +168,7 @@ use pqcrypto_dilithium::dilithium5;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use prost::Message;
 use reqwest::{Client, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use std::convert::TryInto;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -179,6 +179,9 @@ const ADMIN_TOKEN_HEADER: &str = "x-cityg-admin-token";
 const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
 const JOIN_PROVISIONING_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
 const MAX_BARRIER_HELPER_PAGE_ENTRIES: u32 = 512;
+const HELPER_KIND_REVOKED_LEAVES: &str = "resolve_revoked_leaves";
+const HELPER_KIND_JOINS_SINCE: &str = "resolve_joins_since";
+const HELPER_KIND_FETCH_PUBLIC_TREE: &str = "fetch_public_tree";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomAdminOperation {
@@ -709,6 +712,50 @@ impl CitygApiClient {
         let current_history_view_id = array32(&response.current_history_view_id)?;
         let current_history_commitment =
             parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
+        let history_authority =
+            parse_history_authority_descriptor_bytes(response.history_authority_descriptor.as_slice())?;
+        let current_global_history_attestation = match history_authority.as_ref() {
+            Some(authority) => {
+                let attestation = parse_global_history_attestation_bytes(
+                    response.current_global_history_attestation.as_slice(),
+                    Some(authority),
+                )?
+                .ok_or_else(|| {
+                    Error::Parse(
+                        "merge ticket missing current_global_history_attestation for history authority"
+                            .to_string(),
+                    )
+                })?;
+                if attestation.history_commitment != current_history_commitment {
+                    return Err(Error::Parse(
+                        "merge ticket current_global_history_attestation commitment mismatch"
+                            .to_string(),
+                    ));
+                }
+                if attestation.barrier_version != response.barrier_version {
+                    return Err(Error::Parse(
+                        "merge ticket current_global_history_attestation barrier_version mismatch"
+                            .to_string(),
+                    ));
+                }
+                if attestation.kem_tree_hash_after != array32(&response.kem_tree_hash_after)? {
+                    return Err(Error::Parse(
+                        "merge ticket current_global_history_attestation tree hash mismatch"
+                            .to_string(),
+                    ));
+                }
+                Some(attestation)
+            }
+            None => {
+                if !response.current_global_history_attestation.is_empty() {
+                    return Err(Error::Parse(
+                        "merge ticket carries global history attestation without authority descriptor"
+                            .to_string(),
+                    ));
+                }
+                None
+            }
+        };
         let fs_forward_leap_policy = parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
         if response.cover_leaf_index >= n_max {
             return Err(Error::Parse(format!(
@@ -744,6 +791,10 @@ impl CitygApiClient {
             cover_leaf_index: response.cover_leaf_index,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
             current_history_commitment,
+            history_authority_descriptor_bytes: response.history_authority_descriptor,
+            history_authority,
+            current_global_history_attestation_bytes: response.current_global_history_attestation,
+            current_global_history_attestation,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
@@ -982,6 +1033,7 @@ impl CitygApiClient {
         let response: JoinTicketResponse =
             self.post_proto("/v1/rooms/join_ticket", request).await?;
         ensure_profile_version(&response.profile_version)?;
+        let gid = array32(&response.gid)?;
         let n_max = validate_barrier_n_max(response.n_max)?;
         let current_history_view_id = array32(&response.current_history_view_id)?;
         let parent_root = if response.parent_root.is_empty() {
@@ -1041,6 +1093,104 @@ impl CitygApiClient {
         {
             return Err(Error::Parse(
                 "join ticket provisioning issuance is too far in the future".to_string(),
+            ));
+        }
+        let history_authority =
+            parse_history_authority_descriptor_bytes(response.history_authority_descriptor.as_slice())?;
+        if let Some(authority) = history_authority.as_ref() {
+            let attestation = parse_global_history_attestation_bytes(
+                response.current_global_history_attestation.as_slice(),
+                Some(authority),
+            )?
+            .ok_or_else(|| {
+                Error::Parse(
+                    "join ticket missing current_global_history_attestation for history authority"
+                        .to_string(),
+                )
+            })?;
+            if attestation.gid != gid {
+                return Err(Error::Parse(
+                    "join ticket current_global_history_attestation gid mismatch".to_string(),
+                ));
+            }
+            if let Some(commitment) = current_history_commitment {
+                if attestation.history_commitment != commitment {
+                    return Err(Error::Parse(
+                        "join ticket current_global_history_attestation commitment mismatch"
+                            .to_string(),
+                    ));
+                }
+            }
+            if attestation.barrier_version != response.barrier_version {
+                return Err(Error::Parse(
+                    "join ticket current_global_history_attestation barrier_version mismatch"
+                        .to_string(),
+                ));
+            }
+            if attestation.kem_tree_hash_after != array32(&response.kem_tree_hash_after)? {
+                return Err(Error::Parse(
+                    "join ticket current_global_history_attestation tree hash mismatch"
+                        .to_string(),
+                ));
+            }
+            if let Some(commitment) = current_history_commitment.as_ref() {
+                let join_attestation = parse_helper_completeness_attestation_bytes(
+                    response
+                        .current_join_records_completeness_attestation
+                        .as_slice(),
+                    authority,
+                    HELPER_KIND_JOINS_SINCE,
+                )?
+                .ok_or_else(|| {
+                    Error::Parse(
+                        "join ticket missing current_join_records_completeness_attestation"
+                            .to_string(),
+                    )
+                })?;
+                let join_records = response
+                    .current_join_records
+                    .iter()
+                    .map(|record| BarrierJoinRecord {
+                        device_pk: record.device_pk.clone(),
+                        leaf_index: record.leaf_index,
+                        ek_leaf: record.ek_leaf.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                verify_joins_since_completeness_attestation(
+                    &join_attestation,
+                    authority,
+                    commitment,
+                    response.barrier_version.saturating_sub(1),
+                    0,
+                    u32::try_from(join_records.len()).map_err(|_| {
+                        Error::Parse("join ticket current_join_records length overflow".to_string())
+                    })?,
+                    join_records.as_slice(),
+                )?;
+                let revoked_attestation = parse_helper_completeness_attestation_bytes(
+                    response
+                        .current_revoked_leaf_indices_completeness_attestation
+                        .as_slice(),
+                    authority,
+                    HELPER_KIND_REVOKED_LEAVES,
+                )?
+                .ok_or_else(|| {
+                    Error::Parse(
+                        "join ticket missing current_revoked_leaf_indices_completeness_attestation"
+                            .to_string(),
+                    )
+                })?;
+                let _ = revoked_attestation;
+            }
+        } else if !response.current_global_history_attestation.is_empty()
+            || !response.current_join_records_completeness_attestation.is_empty()
+            || !response
+                .current_revoked_leaf_indices_completeness_attestation
+                .is_empty()
+        {
+            return Err(Error::Parse(
+                "join ticket carries history extension bytes without authority descriptor"
+                    .to_string(),
             ));
         }
         if now_ms
@@ -1181,6 +1331,10 @@ impl CitygApiClient {
             cover_leaf_index: response.cover_leaf_index,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
             current_history_commitment,
+            history_authority_descriptor_bytes: Vec::new(),
+            history_authority: None,
+            current_global_history_attestation_bytes: Vec::new(),
+            current_global_history_attestation: None,
             n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
@@ -1194,6 +1348,8 @@ impl CitygApiClient {
     ) -> Result<BarrierResolvedRevokedLeaves, Error> {
         let mut page_offset = 0u32;
         let mut expected_history = None;
+        let mut expected_authority: Option<HistoryAuthorityDescriptor> = None;
+        let mut expected_global_attestation: Option<GlobalHistoryAttestation> = None;
         let mut leaf_indices = Vec::new();
 
         loop {
@@ -1216,13 +1372,66 @@ impl CitygApiClient {
                     "barrier helper pagination page too large".to_string(),
                 ));
             }
-            ensure_helper_completeness_attestation_absent(
-                "revoked leaves",
-                response.helper_completeness_attestation.as_slice(),
-            )?;
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
+            let history_authority = parse_history_authority_descriptor_bytes(
+                response.history_authority_descriptor.as_slice(),
+            )?;
+            let global_history_attestation = match history_authority.as_ref() {
+                Some(authority) => {
+                    let attestation = parse_global_history_attestation_bytes(
+                        response.global_history_attestation.as_slice(),
+                        Some(authority),
+                    )?
+                    .ok_or_else(|| {
+                        Error::Parse(
+                            "revoked leaves response missing global_history_attestation"
+                                .to_string(),
+                        )
+                    })?;
+                    if attestation.history_commitment != history_commitment {
+                        return Err(Error::Parse(
+                            "revoked leaves response global_history_attestation commitment mismatch"
+                                .to_string(),
+                        ));
+                    }
+                    Some(attestation)
+                }
+                None => {
+                    if !response.global_history_attestation.is_empty()
+                        || !response.helper_completeness_attestation.is_empty()
+                    {
+                        return Err(Error::Parse(
+                            "revoked leaves response carries history extension bytes without authority descriptor"
+                                .to_string(),
+                        ));
+                    }
+                    None
+                }
+            };
+            if let Some(authority) = history_authority.as_ref() {
+                let attestation = parse_helper_completeness_attestation_bytes(
+                    response.helper_completeness_attestation.as_slice(),
+                    authority,
+                    HELPER_KIND_REVOKED_LEAVES,
+                )?
+                .ok_or_else(|| {
+                    Error::Parse(
+                        "revoked leaves response missing helper_completeness_attestation"
+                            .to_string(),
+                    )
+                })?;
+                verify_revoked_leaves_completeness_attestation(
+                    &attestation,
+                    authority,
+                    &history_commitment,
+                    revocation_roots_hash,
+                    response.page_offset,
+                    response.total_entries,
+                    response.leaf_indices.as_slice(),
+                )?;
+            }
             let total_entries = parse_barrier_helper_total_entries(response.total_entries)?;
             ensure_barrier_helper_history_page(
                 &mut expected_history,
@@ -1230,6 +1439,26 @@ impl CitygApiClient {
                 history_commitment.clone(),
                 total_entries,
             )?;
+            match (&expected_authority, &history_authority) {
+                (Some(expected), Some(actual)) if expected != actual => {
+                    return Err(Error::Parse(
+                        "revoked leaves response history authority mismatch across pages"
+                            .to_string(),
+                    ));
+                }
+                (None, Some(actual)) => expected_authority = Some(actual.clone()),
+                _ => {}
+            }
+            match (&expected_global_attestation, &global_history_attestation) {
+                (Some(expected), Some(actual)) if expected != actual => {
+                    return Err(Error::Parse(
+                        "revoked leaves response global history attestation mismatch across pages"
+                            .to_string(),
+                    ));
+                }
+                (None, Some(actual)) => expected_global_attestation = Some(actual.clone()),
+                _ => {}
+            }
             leaf_indices.extend(response.leaf_indices);
             match response.next_page_offset {
                 Some(next_page_offset) => {
@@ -1262,6 +1491,8 @@ impl CitygApiClient {
         Ok(BarrierResolvedRevokedLeaves {
             history_view_id,
             history_commitment,
+            history_authority: expected_authority,
+            global_history_attestation: expected_global_attestation,
             leaf_indices,
         })
     }
@@ -1274,6 +1505,8 @@ impl CitygApiClient {
     ) -> Result<BarrierResolvedJoins, Error> {
         let mut page_offset = 0u32;
         let mut expected_history = None;
+        let mut expected_authority: Option<HistoryAuthorityDescriptor> = None;
+        let mut expected_global_attestation: Option<GlobalHistoryAttestation> = None;
         let mut records = Vec::new();
 
         loop {
@@ -1296,13 +1529,72 @@ impl CitygApiClient {
                     "barrier helper pagination page too large".to_string(),
                 ));
             }
-            ensure_helper_completeness_attestation_absent(
-                "joins since",
-                response.helper_completeness_attestation.as_slice(),
-            )?;
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
+            let history_authority = parse_history_authority_descriptor_bytes(
+                response.history_authority_descriptor.as_slice(),
+            )?;
+            let page_records = response
+                .records
+                .iter()
+                .map(|record| BarrierJoinRecord {
+                    device_pk: record.device_pk.clone(),
+                    leaf_index: record.leaf_index,
+                    ek_leaf: record.ek_leaf.clone(),
+                })
+                .collect::<Vec<_>>();
+            let global_history_attestation = match history_authority.as_ref() {
+                Some(authority) => {
+                    let attestation = parse_global_history_attestation_bytes(
+                        response.global_history_attestation.as_slice(),
+                        Some(authority),
+                    )?
+                    .ok_or_else(|| {
+                        Error::Parse(
+                            "joins since response missing global_history_attestation".to_string(),
+                        )
+                    })?;
+                    if attestation.history_commitment != history_commitment {
+                        return Err(Error::Parse(
+                            "joins since response global_history_attestation commitment mismatch"
+                                .to_string(),
+                        ));
+                    }
+                    let helper_attestation = parse_helper_completeness_attestation_bytes(
+                        response.helper_completeness_attestation.as_slice(),
+                        authority,
+                        HELPER_KIND_JOINS_SINCE,
+                    )?
+                    .ok_or_else(|| {
+                        Error::Parse(
+                            "joins since response missing helper_completeness_attestation"
+                                .to_string(),
+                        )
+                    })?;
+                    verify_joins_since_completeness_attestation(
+                        &helper_attestation,
+                        authority,
+                        &history_commitment,
+                        prev_barrier_version,
+                        response.page_offset,
+                        response.total_entries,
+                        page_records.as_slice(),
+                    )?;
+                    Some(attestation)
+                }
+                None => {
+                    if !response.global_history_attestation.is_empty()
+                        || !response.helper_completeness_attestation.is_empty()
+                    {
+                        return Err(Error::Parse(
+                            "joins since response carries history extension bytes without authority descriptor"
+                                .to_string(),
+                        ));
+                    }
+                    None
+                }
+            };
             let total_entries = parse_barrier_helper_total_entries(response.total_entries)?;
             ensure_barrier_helper_history_page(
                 &mut expected_history,
@@ -1310,16 +1602,26 @@ impl CitygApiClient {
                 history_commitment.clone(),
                 total_entries,
             )?;
-            records.extend(
-                response
-                    .records
-                    .into_iter()
-                    .map(|record| BarrierJoinRecord {
-                        device_pk: record.device_pk,
-                        leaf_index: record.leaf_index,
-                        ek_leaf: record.ek_leaf,
-                    }),
-            );
+            match (&expected_authority, &history_authority) {
+                (Some(expected), Some(actual)) if expected != actual => {
+                    return Err(Error::Parse(
+                        "joins since response history authority mismatch across pages".to_string(),
+                    ));
+                }
+                (None, Some(actual)) => expected_authority = Some(actual.clone()),
+                _ => {}
+            }
+            match (&expected_global_attestation, &global_history_attestation) {
+                (Some(expected), Some(actual)) if expected != actual => {
+                    return Err(Error::Parse(
+                        "joins since response global history attestation mismatch across pages"
+                            .to_string(),
+                    ));
+                }
+                (None, Some(actual)) => expected_global_attestation = Some(actual.clone()),
+                _ => {}
+            }
+            records.extend(page_records);
             match response.next_page_offset {
                 Some(next_page_offset) => {
                     if next_page_offset <= page_offset
@@ -1351,6 +1653,8 @@ impl CitygApiClient {
         Ok(BarrierResolvedJoins {
             history_view_id,
             history_commitment,
+            history_authority: expected_authority,
+            global_history_attestation: expected_global_attestation,
             records,
         })
     }
@@ -1363,6 +1667,8 @@ impl CitygApiClient {
     ) -> Result<BarrierFetchedPublicTree, Error> {
         let mut entry_offset = 0u32;
         let mut expected_history = None;
+        let mut expected_authority: Option<HistoryAuthorityDescriptor> = None;
+        let mut expected_global_attestation: Option<GlobalHistoryAttestation> = None;
         let mut expected_n_max = None;
         let mut expected_tree_hash = None;
         let mut expected_total_entries = None;
@@ -1392,6 +1698,68 @@ impl CitygApiClient {
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
+            let history_authority = parse_history_authority_descriptor_bytes(
+                response.history_authority_descriptor.as_slice(),
+            )?;
+            let response_tree_hash = array32(&response.kem_tree_hash_after)?;
+            let global_history_attestation = match history_authority.as_ref() {
+                Some(authority) => {
+                    let attestation = parse_global_history_attestation_bytes(
+                        response.global_history_attestation.as_slice(),
+                        Some(authority),
+                    )?
+                    .ok_or_else(|| {
+                        Error::Parse(
+                            "fetch public tree response missing global_history_attestation"
+                                .to_string(),
+                        )
+                    })?;
+                    if attestation.history_commitment != history_commitment {
+                        return Err(Error::Parse(
+                            "fetch public tree response global_history_attestation commitment mismatch"
+                                .to_string(),
+                        ));
+                    }
+                    if attestation.kem_tree_hash_after != response_tree_hash {
+                        return Err(Error::Parse(
+                            "fetch public tree response global_history_attestation tree hash mismatch"
+                                .to_string(),
+                        ));
+                    }
+                    let helper_attestation = parse_helper_completeness_attestation_bytes(
+                        response.helper_completeness_attestation.as_slice(),
+                        authority,
+                        HELPER_KIND_FETCH_PUBLIC_TREE,
+                    )?
+                    .ok_or_else(|| {
+                        Error::Parse(
+                            "fetch public tree response missing helper_completeness_attestation"
+                                .to_string(),
+                        )
+                    })?;
+                    verify_fetch_public_tree_completeness_attestation(
+                        &helper_attestation,
+                        authority,
+                        &history_commitment,
+                        &response_tree_hash,
+                        response.entry_offset,
+                        response.total_entries,
+                        response.pk_entries.as_slice(),
+                    )?;
+                    Some(attestation)
+                }
+                None => {
+                    if !response.global_history_attestation.is_empty()
+                        || !response.helper_completeness_attestation.is_empty()
+                    {
+                        return Err(Error::Parse(
+                            "fetch public tree response carries history extension bytes without authority descriptor"
+                                .to_string(),
+                        ));
+                    }
+                    None
+                }
+            };
             let total_entries = parse_barrier_helper_total_entries(response.total_entries)?;
             ensure_barrier_helper_history_page(
                 &mut expected_history,
@@ -1399,7 +1767,6 @@ impl CitygApiClient {
                 history_commitment.clone(),
                 total_entries,
             )?;
-            let kem_tree_hash_after = array32(&response.kem_tree_hash_after)?;
             match expected_n_max {
                 Some(expected) if expected != n_max => {
                     return Err(Error::Parse(
@@ -1410,12 +1777,12 @@ impl CitygApiClient {
                 _ => {}
             }
             match expected_tree_hash {
-                Some(expected) if expected != kem_tree_hash_after => {
+                Some(expected) if expected != response_tree_hash => {
                     return Err(Error::Parse(
                         "barrier helper pagination tree hash mismatch".to_string(),
                     ));
                 }
-                None => expected_tree_hash = Some(kem_tree_hash_after),
+                None => expected_tree_hash = Some(response_tree_hash),
                 _ => {}
             }
             let expected_tree_entries = usize::try_from(n_max)
@@ -1436,6 +1803,26 @@ impl CitygApiClient {
                 return Err(Error::Parse(
                     "barrier helper pagination total_entries does not match n_max".to_string(),
                 ));
+            }
+            match (&expected_authority, &history_authority) {
+                (Some(expected), Some(actual)) if expected != actual => {
+                    return Err(Error::Parse(
+                        "fetch public tree response history authority mismatch across pages"
+                            .to_string(),
+                    ));
+                }
+                (None, Some(actual)) => expected_authority = Some(actual.clone()),
+                _ => {}
+            }
+            match (&expected_global_attestation, &global_history_attestation) {
+                (Some(expected), Some(actual)) if expected != actual => {
+                    return Err(Error::Parse(
+                        "fetch public tree response global history attestation mismatch across pages"
+                            .to_string(),
+                    ));
+                }
+                (None, Some(actual)) => expected_global_attestation = Some(actual.clone()),
+                _ => {}
             }
             pk_entries.extend(response.pk_entries);
             match response.next_entry_offset {
@@ -1469,6 +1856,8 @@ impl CitygApiClient {
         Ok(BarrierFetchedPublicTree {
             history_view_id,
             history_commitment,
+            history_authority: expected_authority,
+            global_history_attestation: expected_global_attestation,
             tree: BarrierPublicTree {
                 n_max: expected_n_max.ok_or_else(|| {
                     Error::Parse("barrier helper pagination missing n_max".to_string())
@@ -1499,13 +1888,44 @@ impl CitygApiClient {
             .post_proto("/v1/barrier/lookup_merge_acceptance", request)
             .await?;
         let history_view_id = array32(&response.history_view_id)?;
+        let history_commitment = parse_history_commitment(history_view_id, response.history_commitment)?;
+        let history_authority =
+            parse_history_authority_descriptor_bytes(response.history_authority_descriptor.as_slice())?;
+        let global_history_attestation = match history_authority.as_ref() {
+            Some(authority) => {
+                let attestation = parse_global_history_attestation_bytes(
+                    response.global_history_attestation.as_slice(),
+                    Some(authority),
+                )?
+                .ok_or_else(|| {
+                    Error::Parse(
+                        "lookup merge acceptance missing global_history_attestation".to_string(),
+                    )
+                })?;
+                if attestation.history_commitment != history_commitment {
+                    return Err(Error::Parse(
+                        "lookup merge acceptance global_history_attestation commitment mismatch"
+                            .to_string(),
+                    ));
+                }
+                Some(attestation)
+            }
+            None => {
+                if !response.global_history_attestation.is_empty() {
+                    return Err(Error::Parse(
+                        "lookup merge acceptance carries global history attestation without authority descriptor"
+                            .to_string(),
+                    ));
+                }
+                None
+            }
+        };
         Ok(MergeAcceptanceLookup {
             status: parse_merge_acceptance_status(response.status)?,
             history_view_id,
-            history_commitment: parse_history_commitment(
-                history_view_id,
-                response.history_commitment,
-            )?,
+            history_commitment,
+            history_authority,
+            global_history_attestation,
             accepted_barrier_version: response.accepted_barrier_version,
             accepted_fs_ec: response.accepted_fs_ec,
             accepted_reason: response.accepted_reason,
@@ -1942,7 +2362,7 @@ impl CitygApiClient {
 }
 
 /// Join record returned by barrier join enumeration endpoints.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BarrierJoinRecord {
     pub device_pk: Vec<u8>,
     pub leaf_index: u32,
@@ -1954,6 +2374,8 @@ pub struct BarrierJoinRecord {
 pub struct BarrierResolvedRevokedLeaves {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
+    pub history_authority: Option<HistoryAuthorityDescriptor>,
+    pub global_history_attestation: Option<GlobalHistoryAttestation>,
     pub leaf_indices: Vec<u32>,
 }
 
@@ -1962,6 +2384,8 @@ pub struct BarrierResolvedRevokedLeaves {
 pub struct BarrierResolvedJoins {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
+    pub history_authority: Option<HistoryAuthorityDescriptor>,
+    pub global_history_attestation: Option<GlobalHistoryAttestation>,
     pub records: Vec<BarrierJoinRecord>,
 }
 
@@ -1978,6 +2402,8 @@ pub struct BarrierPublicTree {
 pub struct BarrierFetchedPublicTree {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
+    pub history_authority: Option<HistoryAuthorityDescriptor>,
+    pub global_history_attestation: Option<GlobalHistoryAttestation>,
     pub tree: BarrierPublicTree,
 }
 
@@ -2012,10 +2438,37 @@ pub struct MergeAcceptanceLookup {
     pub status: MergeAcceptanceStatus,
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
+    pub history_authority: Option<HistoryAuthorityDescriptor>,
+    pub global_history_attestation: Option<GlobalHistoryAttestation>,
     pub accepted_barrier_version: Option<u64>,
     pub accepted_fs_ec: Option<u64>,
     pub accepted_reason: Option<u64>,
     pub accepted_digest: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryAuthorityDescriptor {
+    pub scope_id: [u8; 32],
+    pub public_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalHistoryAttestation {
+    pub scope_id: [u8; 32],
+    pub gid: [u8; 32],
+    pub history_commitment: HistoryCommitment,
+    pub barrier_version: u64,
+    pub kem_tree_hash_after: [u8; 32],
+    pub parent_attestation_id: [u8; 32],
+    pub finality_kind: String,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperCompletenessAttestation {
+    pub scope_id: [u8; 32],
+    pub helper_kind: String,
+    pub signature: Vec<u8>,
 }
 
 /// Merge ticket containing all data needed to create a new epoch.
@@ -2096,8 +2549,90 @@ pub struct MergeTicket {
     pub cover_leaf_index: u64,
     pub kem_tree_hash_after: [u8; 32],
     pub current_history_commitment: HistoryCommitment,
+    pub history_authority_descriptor_bytes: Vec<u8>,
+    pub history_authority: Option<HistoryAuthorityDescriptor>,
+    pub current_global_history_attestation_bytes: Vec<u8>,
+    pub current_global_history_attestation: Option<GlobalHistoryAttestation>,
     pub n_max: u64,
     pub max_barrier_update_bytes: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HistoryAuthorityDescriptorWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize, Deserialize)]
+struct GlobalHistoryAttestationWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    String,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize, Deserialize)]
+struct HelperCompletenessAttestationWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    String,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize)]
+struct GlobalHistoryAttestationSignedPayload<'a>(
+    &'static str,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    &'a str,
+);
+
+#[derive(Serialize)]
+struct HelperCompletenessSignedPayload<'a, T> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    helper_kind: &'a str,
+    #[serde(with = "serde_bytes")]
+    history_view_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: &'a [u8; 32],
+    page_offset: u32,
+    total_entries: u32,
+    selector: T,
+}
+
+#[derive(Serialize)]
+struct RevokedLeavesSelector<'a> {
+    #[serde(with = "serde_bytes")]
+    revocation_roots_hash: &'a [u8; 32],
+    leaf_indices: &'a [u32],
+}
+
+#[derive(Serialize)]
+struct JoinsSinceSelector<'a> {
+    prev_barrier_version: u64,
+    records: &'a [BarrierJoinRecord],
+}
+
+#[derive(Serialize)]
+struct FetchPublicTreeSelector<'a> {
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: &'a [u8; 32],
+    pk_entries: &'a [Vec<u8>],
 }
 
 fn array32(bytes: &[u8]) -> Result<[u8; 32], Error> {
@@ -2128,6 +2663,261 @@ fn parse_history_commitment(
         prev_history_commitment_id: array32(&commitment.prev_history_commitment_id)?,
         history_seq: commitment.history_seq,
     })
+}
+
+fn encode_cbor_det<T: Serialize>(value: &T) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::new();
+    into_writer(value, &mut bytes)
+        .map_err(|err| Error::Parse(format!("encode deterministic cbor: {err}")))?;
+    Ok(bytes)
+}
+
+fn decode_cbor_det<T>(label: &'static str, raw: &[u8]) -> Result<T, Error>
+where
+    T: for<'de> Deserialize<'de> + Serialize,
+{
+    let decoded: T = ciborium::de::from_reader(raw)
+        .map_err(|err| Error::Parse(format!("parse {label}: {err}")))?;
+    let canonical = encode_cbor_det(&decoded)?;
+    if canonical.as_slice() != raw {
+        return Err(Error::Parse(format!("non-canonical {label}")));
+    }
+    Ok(decoded)
+}
+
+fn verify_ml_dsa_signature(message: &[u8], public_key: &[u8], signature: &[u8]) -> Result<(), Error> {
+    let pk = <dilithium5::PublicKey as pqcrypto_traits::sign::PublicKey>::from_bytes(public_key)
+        .map_err(|_| Error::Parse("invalid history authority public key".to_string()))?;
+    let sig =
+        <dilithium5::DetachedSignature as pqcrypto_traits::sign::DetachedSignature>::from_bytes(
+            signature,
+        )
+        .map_err(|_| Error::Parse("invalid history authority signature".to_string()))?;
+    dilithium5::verify_detached_signature(&sig, message, &pk)
+        .map_err(|_| Error::Parse("history authority signature verification failed".to_string()))
+}
+
+pub fn parse_history_authority_descriptor_bytes(
+    raw: &[u8],
+) -> Result<Option<HistoryAuthorityDescriptor>, Error> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let HistoryAuthorityDescriptorWire(scope_id, public_key) =
+        decode_cbor_det("history_authority_descriptor", raw)?;
+    if public_key.len() != dilithium5::public_key_bytes() {
+        return Err(Error::Parse(
+            "history_authority_descriptor public_key length mismatch".to_string(),
+        ));
+    }
+    Ok(Some(HistoryAuthorityDescriptor {
+        scope_id: array32(&scope_id)?,
+        public_key,
+    }))
+}
+
+pub fn parse_global_history_attestation_bytes(
+    raw: &[u8],
+    expected_authority: Option<&HistoryAuthorityDescriptor>,
+) -> Result<Option<GlobalHistoryAttestation>, Error> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let GlobalHistoryAttestationWire(
+        scope_id,
+        gid,
+        history_view_id,
+        history_commitment_id,
+        prev_history_commitment_id,
+        history_seq,
+        barrier_version,
+        kem_tree_hash_after,
+        parent_attestation_id,
+        finality_kind,
+        signature,
+    ) = decode_cbor_det("global_history_attestation", raw)?;
+    let scope_id = array32(&scope_id)?;
+    let gid = array32(&gid)?;
+    let history_view_id = array32(&history_view_id)?;
+    let history_commitment = HistoryCommitment {
+        history_view_id,
+        history_commitment_id: array32(&history_commitment_id)?,
+        prev_history_commitment_id: array32(&prev_history_commitment_id)?,
+        history_seq,
+    };
+    let barrier_version = barrier_version;
+    let attestation = GlobalHistoryAttestation {
+        scope_id,
+        gid,
+        history_commitment,
+        barrier_version,
+        kem_tree_hash_after: array32(&kem_tree_hash_after)?,
+        parent_attestation_id: array32(&parent_attestation_id)?,
+        finality_kind,
+        signature,
+    };
+    if let Some(authority) = expected_authority {
+        if authority.scope_id != attestation.scope_id {
+            return Err(Error::Parse(
+                "global_history_attestation scope_id mismatch".to_string(),
+            ));
+        }
+        let payload = encode_cbor_det(&GlobalHistoryAttestationSignedPayload(
+            "cityg/global-history-attestation-v1",
+            &attestation.scope_id,
+            &attestation.gid,
+            &attestation.history_commitment.history_view_id,
+            &attestation.history_commitment.history_commitment_id,
+            &attestation.history_commitment.prev_history_commitment_id,
+            attestation.history_commitment.history_seq,
+            attestation.barrier_version,
+            &attestation.kem_tree_hash_after,
+            &attestation.parent_attestation_id,
+            attestation.finality_kind.as_str(),
+        ))?;
+        verify_ml_dsa_signature(
+            payload.as_slice(),
+            authority.public_key.as_slice(),
+            attestation.signature.as_slice(),
+        )?;
+    }
+    Ok(Some(attestation))
+}
+
+fn parse_helper_completeness_attestation_bytes(
+    raw: &[u8],
+    authority: &HistoryAuthorityDescriptor,
+    helper_kind: &'static str,
+) -> Result<Option<HelperCompletenessAttestation>, Error> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let HelperCompletenessAttestationWire(scope_id, decoded_helper_kind, signature) =
+        decode_cbor_det("helper_completeness_attestation", raw)?;
+    let scope_id = array32(&scope_id)?;
+    if scope_id != authority.scope_id {
+        return Err(Error::Parse(
+            "helper_completeness_attestation scope_id mismatch".to_string(),
+        ));
+    }
+    if decoded_helper_kind != helper_kind {
+        return Err(Error::Parse(
+            "helper_completeness_attestation helper_kind mismatch".to_string(),
+        ));
+    }
+    Ok(Some(HelperCompletenessAttestation {
+        scope_id,
+        helper_kind: decoded_helper_kind,
+        signature,
+    }))
+}
+
+pub fn parse_revoked_leaves_completeness_attestation_bytes(
+    raw: &[u8],
+    authority: &HistoryAuthorityDescriptor,
+) -> Result<Option<HelperCompletenessAttestation>, Error> {
+    parse_helper_completeness_attestation_bytes(raw, authority, HELPER_KIND_REVOKED_LEAVES)
+}
+
+pub fn parse_joins_since_completeness_attestation_bytes(
+    raw: &[u8],
+    authority: &HistoryAuthorityDescriptor,
+) -> Result<Option<HelperCompletenessAttestation>, Error> {
+    parse_helper_completeness_attestation_bytes(raw, authority, HELPER_KIND_JOINS_SINCE)
+}
+
+pub fn parse_fetch_public_tree_completeness_attestation_bytes(
+    raw: &[u8],
+    authority: &HistoryAuthorityDescriptor,
+) -> Result<Option<HelperCompletenessAttestation>, Error> {
+    parse_helper_completeness_attestation_bytes(raw, authority, HELPER_KIND_FETCH_PUBLIC_TREE)
+}
+
+pub fn verify_revoked_leaves_completeness_attestation(
+    attestation: &HelperCompletenessAttestation,
+    authority: &HistoryAuthorityDescriptor,
+    history_commitment: &HistoryCommitment,
+    revocation_roots_hash: &[u8; 32],
+    page_offset: u32,
+    total_entries: u32,
+    leaf_indices: &[u32],
+) -> Result<(), Error> {
+    let payload = encode_cbor_det(&HelperCompletenessSignedPayload {
+        label: "cityg/helper-completeness-attestation-v1",
+        scope_id: &attestation.scope_id,
+        helper_kind: attestation.helper_kind.as_str(),
+        history_view_id: &history_commitment.history_view_id,
+        history_commitment_id: &history_commitment.history_commitment_id,
+        page_offset,
+        total_entries,
+        selector: RevokedLeavesSelector {
+            revocation_roots_hash,
+            leaf_indices,
+        },
+    })?;
+    verify_ml_dsa_signature(
+        payload.as_slice(),
+        authority.public_key.as_slice(),
+        attestation.signature.as_slice(),
+    )
+}
+
+pub fn verify_joins_since_completeness_attestation(
+    attestation: &HelperCompletenessAttestation,
+    authority: &HistoryAuthorityDescriptor,
+    history_commitment: &HistoryCommitment,
+    prev_barrier_version: u64,
+    page_offset: u32,
+    total_entries: u32,
+    records: &[BarrierJoinRecord],
+) -> Result<(), Error> {
+    let payload = encode_cbor_det(&HelperCompletenessSignedPayload {
+        label: "cityg/helper-completeness-attestation-v1",
+        scope_id: &attestation.scope_id,
+        helper_kind: attestation.helper_kind.as_str(),
+        history_view_id: &history_commitment.history_view_id,
+        history_commitment_id: &history_commitment.history_commitment_id,
+        page_offset,
+        total_entries,
+        selector: JoinsSinceSelector {
+            prev_barrier_version,
+            records,
+        },
+    })?;
+    verify_ml_dsa_signature(
+        payload.as_slice(),
+        authority.public_key.as_slice(),
+        attestation.signature.as_slice(),
+    )
+}
+
+pub fn verify_fetch_public_tree_completeness_attestation(
+    attestation: &HelperCompletenessAttestation,
+    authority: &HistoryAuthorityDescriptor,
+    history_commitment: &HistoryCommitment,
+    kem_tree_hash_after: &[u8; 32],
+    entry_offset: u32,
+    total_entries: u32,
+    pk_entries: &[Vec<u8>],
+) -> Result<(), Error> {
+    let payload = encode_cbor_det(&HelperCompletenessSignedPayload {
+        label: "cityg/helper-completeness-attestation-v1",
+        scope_id: &attestation.scope_id,
+        helper_kind: attestation.helper_kind.as_str(),
+        history_view_id: &history_commitment.history_view_id,
+        history_commitment_id: &history_commitment.history_commitment_id,
+        page_offset: entry_offset,
+        total_entries,
+        selector: FetchPublicTreeSelector {
+            kem_tree_hash_after,
+            pk_entries,
+        },
+    })?;
+    verify_ml_dsa_signature(
+        payload.as_slice(),
+        authority.public_key.as_slice(),
+        attestation.signature.as_slice(),
+    )
 }
 
 fn parse_fs_forward_leap_policy(
@@ -2169,18 +2959,6 @@ fn parse_merge_acceptance_status(status: i32) -> Result<MergeAcceptanceStatus, E
 fn parse_barrier_helper_total_entries(total_entries: u32) -> Result<usize, Error> {
     usize::try_from(total_entries)
         .map_err(|_| Error::Parse("barrier helper total_entries overflow".to_string()))
-}
-
-fn ensure_helper_completeness_attestation_absent(
-    label: &str,
-    attestation: &[u8],
-) -> Result<(), Error> {
-    if attestation.is_empty() {
-        return Ok(());
-    }
-    Err(Error::Parse(format!(
-        "{label} helper_completeness_attestation is reserved and must be empty in the base profile"
-    )))
 }
 
 fn ensure_barrier_helper_history_page(
@@ -2341,6 +3119,8 @@ mod tests {
             max_barrier_update_bytes: 1_048_576,
             current_history_view_id: vec![0xD1; 32],
             current_history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+            history_authority_descriptor: Vec::new(),
+            current_global_history_attestation: Vec::new(),
             fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
             last_accepted_ec: 34,
         }
@@ -2440,6 +3220,8 @@ mod tests {
                     next_page_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
                     helper_completeness_attestation: Vec::new(),
+                    history_authority_descriptor: Vec::new(),
+                    global_history_attestation: Vec::new(),
                 })
             }
             "/v1/barrier/resolve_joins_since" => {
@@ -2466,6 +3248,8 @@ mod tests {
                     next_page_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
                     helper_completeness_attestation: Vec::new(),
+                    history_authority_descriptor: Vec::new(),
+                    global_history_attestation: Vec::new(),
                 })
             }
             "/v1/barrier/fetch_public_tree" => {
@@ -2483,6 +3267,9 @@ mod tests {
                     entry_offset: request.entry_offset,
                     next_entry_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
+                    helper_completeness_attestation: Vec::new(),
+                    history_authority_descriptor: Vec::new(),
+                    global_history_attestation: Vec::new(),
                 })
             }
             "/v1/barrier/lookup_merge_acceptance" => {
@@ -2494,6 +3281,8 @@ mod tests {
                     accepted_reason: Some(1),
                     accepted_digest: Some(vec![0xDD; 32]),
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE2, 0xE1, 8)),
+                    history_authority_descriptor: Vec::new(),
+                    global_history_attestation: Vec::new(),
                 })
             }
             "/v1/send_message" => encode_proto(SendMessageResponse::default()),
@@ -3457,6 +4246,9 @@ mod tests {
                     entry_offset: 0,
                     next_entry_offset: None,
                     total_entries: 0,
+                    helper_completeness_attestation: Vec::new(),
+                    history_authority_descriptor: Vec::new(),
+                    global_history_attestation: Vec::new(),
                 })
             }),
         );
@@ -3496,6 +4288,9 @@ mod tests {
                     entry_offset: 0,
                     next_entry_offset: None,
                     total_entries: 15,
+                    helper_completeness_attestation: Vec::new(),
+                    history_authority_descriptor: Vec::new(),
+                    global_history_attestation: Vec::new(),
                 })
             }),
         );
@@ -3534,6 +4329,8 @@ mod tests {
                     next_page_offset: None,
                     total_entries: 2,
                     helper_completeness_attestation: vec![0xAA, 0xBB],
+                    history_authority_descriptor: Vec::new(),
+                    global_history_attestation: Vec::new(),
                 })
             }),
         );
@@ -3578,6 +4375,8 @@ mod tests {
                     next_page_offset: None,
                     total_entries: 1,
                     helper_completeness_attestation: vec![0xCC],
+                    history_authority_descriptor: Vec::new(),
+                    global_history_attestation: Vec::new(),
                 })
             }),
         );

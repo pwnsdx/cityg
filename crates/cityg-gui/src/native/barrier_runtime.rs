@@ -534,14 +534,46 @@ pub(super) fn validate_client_visible_activation_guards(
     session: &AppSession,
     header_map: &BTreeMap<u64, Value>,
 ) -> Result<()> {
-    if header_map.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT) {
+    let global_history_attestation = match header_map.get(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
+    {
+        Some(Value::Bytes(raw)) => Some(raw),
+        Some(_) => {
+            return Err(anyhow!(
+                "client-side activation guard failed (960.7): header[182] global_history_attestation must be bytes"
+            ));
+        }
+        None => None,
+    };
+    if !session
+        .barrier_state
+        .current_global_history_attestation_bytes
+        .is_empty()
+    {
+        let supplied = global_history_attestation.ok_or_else(|| {
+            anyhow!(
+                "client-side activation guard failed (960.7): missing header[182] global_history_attestation for authority-bound barrier state"
+            )
+        })?;
+        if supplied.as_slice()
+            != session
+                .barrier_state
+                .current_global_history_attestation_bytes
+                .as_slice()
+        {
+            return Err(anyhow!(
+                "client-side activation guard failed (960.7): header[182] global_history_attestation mismatch with local authenticated current state"
+            ));
+        }
+    } else if global_history_attestation.is_some() {
         return Err(anyhow!(
-            "client-side activation guard failed (960.7): header[181] full_verification_receipt is forbidden in the base profile"
+            "client-side activation guard failed (960.7): unexpected header[182] global_history_attestation without pinned local authority state"
         ));
     }
-    if header_map.contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION) {
+    if header_map.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
+        && global_history_attestation.is_none()
+    {
         return Err(anyhow!(
-            "client-side activation guard failed (960.7): header[182] global_history_attestation is forbidden in the base profile"
+            "client-side activation guard failed (960.7): header[181] full_verification_receipt requires header[182] global_history_attestation"
         ));
     }
     let fs_policy_version = header_policy_version(header_map, hdr::HDR_FS_POLICY_VERSION)

@@ -1,8 +1,8 @@
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
 use crate::barrier_shared::{
-    encode_history_commitment_header, require_current_state_history_commitment,
-    require_same_history_commitment,
+    encode_full_verification_receipt, encode_history_commitment_header,
+    require_current_state_history_commitment, require_same_history_commitment,
 };
 
 fn is_fs_forward_jump_group_http_error(
@@ -202,6 +202,7 @@ fn apply_local_published_barrier_merge(
     clear_current_public_tree_cache(&mut session.barrier_state);
     session.barrier_state.current_history_view_id = [0u8; 32];
     session.barrier_state.current_history_commitment = None;
+    session.barrier_state.current_global_history_attestation_bytes.clear();
 
     session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
@@ -336,8 +337,10 @@ async fn publish_revocation_merge_from_ticket(
         cover_leaf_index: revoked_cover_leaf_index,
         kem_tree_hash_after,
         current_history_commitment: ticket_history_commitment,
+        current_global_history_attestation_bytes,
         n_max,
         max_barrier_update_bytes,
+        ..
     } = ticket;
 
     let srx_inputs = if srx_cbor.is_empty() {
@@ -413,12 +416,18 @@ async fn publish_revocation_merge_from_ticket(
             "barrier merge ticket history commitment mismatch (960.9): ticket / current snapshot do not share one authenticated current-state commitment"
         ));
     }
+    let history_commitment_header =
+        encode_history_commitment_header(&barrier_tree_response.history_commitment)?;
     header.insert(
         hdr::HDR_BARRIER_HISTORY_COMMITMENT,
-        Value::Bytes(encode_history_commitment_header(
-            &barrier_tree_response.history_commitment,
-        )?),
+        Value::Bytes(history_commitment_header.clone()),
     );
+    if !current_global_history_attestation_bytes.is_empty() {
+        header.insert(
+            hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+            Value::Bytes(current_global_history_attestation_bytes.clone()),
+        );
+    }
     let join_resolution = client
         .barrier_resolve_joins_since(&room_id, barrier_version)
         .await
@@ -454,10 +463,11 @@ async fn publish_revocation_merge_from_ticket(
     blank_leaf_and_path(snapshot_pre.as_mut_slice(), revoked_leaf_node)?;
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let next_barrier_version = barrier_version.saturating_add(1);
+    let updater_leaf = cover_leaf_index_for_n_max(&leaf_id, barrier_n_max);
     let barrier_update = build_barrier_update_bytes(
         &gid,
         barrier_n_max,
-        cover_leaf_index_for_n_max(&leaf_id, barrier_n_max),
+        updater_leaf,
         next_barrier_version,
         barrier_version,
         revocation_roots_hash,
@@ -491,6 +501,22 @@ async fn publish_revocation_merge_from_ticket(
         hdr::HDR_BARRIER_UPDATE_REASON,
         Value::Integer(Integer::from(0u64)),
     );
+    if !current_global_history_attestation_bytes.is_empty() {
+        let receipt = encode_full_verification_receipt(
+            &gid,
+            &leaf_id,
+            0,
+            updater_leaf,
+            history_commitment_header.as_slice(),
+            current_global_history_attestation_bytes.as_slice(),
+            barrier_update.raw_update.as_slice(),
+            pop_secret_key.as_slice(),
+        )?;
+        header.insert(
+            hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+            Value::Bytes(receipt),
+        );
+    }
     let mut pending_barrier_state = BarrierPendingState {
         barrier_version: next_barrier_version,
         we_epoch_id: [0u8; 32],
@@ -924,8 +950,10 @@ async fn perform_barrier_merge_inner(
         cover_leaf_index,
         kem_tree_hash_after,
         current_history_commitment: ticket_history_commitment,
+        current_global_history_attestation_bytes,
         n_max,
         max_barrier_update_bytes,
+        ..
     } = ticket;
 
     if !srx_cbor.is_empty() {
@@ -1008,12 +1036,18 @@ async fn perform_barrier_merge_inner(
             "barrier merge ticket history commitment mismatch (960.9): ticket / current snapshot do not share one authenticated current-state commitment"
         ));
     }
+    let history_commitment_header =
+        encode_history_commitment_header(&barrier_tree_response.history_commitment)?;
     header.insert(
         hdr::HDR_BARRIER_HISTORY_COMMITMENT,
-        Value::Bytes(encode_history_commitment_header(
-            &barrier_tree_response.history_commitment,
-        )?),
+        Value::Bytes(history_commitment_header.clone()),
     );
+    if !current_global_history_attestation_bytes.is_empty() {
+        header.insert(
+            hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+            Value::Bytes(current_global_history_attestation_bytes.clone()),
+        );
+    }
     let join_resolution = client
         .barrier_resolve_joins_since(&room_id, barrier_version)
         .await
@@ -1083,6 +1117,22 @@ async fn perform_barrier_merge_inner(
         hdr::HDR_BARRIER_UPDATE_REASON,
         Value::Integer(Integer::from(mode.reason())),
     );
+    if !current_global_history_attestation_bytes.is_empty() {
+        let receipt = encode_full_verification_receipt(
+            &gid,
+            &leaf_id,
+            mode.reason(),
+            cover_leaf_index,
+            history_commitment_header.as_slice(),
+            current_global_history_attestation_bytes.as_slice(),
+            barrier_update.raw_update.as_slice(),
+            pop_secret_key.as_slice(),
+        )?;
+        header.insert(
+            hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+            Value::Bytes(receipt),
+        );
+    }
     let pending_barrier_state = BarrierPendingState {
         barrier_version: next_barrier_version,
         we_epoch_id: [0u8; 32],

@@ -25,8 +25,9 @@ use barrier_shared::{
     DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, apply_join_set_to_snapshot,
     apply_revoked_set_to_snapshot, barrier_path_nodes, blank_leaf_and_path,
     collect_resolution_targets, compute_barrier_pkhash, compute_barrier_tree_hash,
-    compute_revocation_roots_hash, encode_history_commitment_header, expected_barrier_tree_nodes,
-    should_retry_ticket_http_error, sibling_node, ticket_retry_delay, validate_barrier_n_max,
+    compute_revocation_roots_hash, encode_full_verification_receipt,
+    encode_history_commitment_header, expected_barrier_tree_nodes, should_retry_ticket_http_error,
+    sibling_node, ticket_retry_delay, validate_barrier_n_max,
 };
 #[cfg(test)]
 use barrier_shared::{
@@ -849,6 +850,7 @@ struct Session {
     seed_bundle_commit: [u8; 32],
     fs_fingerprint: Option<[u8; 32]>,
     join_finalize_auth_token: [u8; 32],
+    current_global_history_attestation_bytes: Vec<u8>,
     stored_header_map: BTreeMap<u64, Value>,
     #[cfg(test)]
     msg_replay_state: MsgReplayState,
@@ -1277,6 +1279,7 @@ async fn prepare_join_session_with_identity(
         seed_bundle_commit,
         fs_fingerprint,
         join_finalize_auth_token,
+        current_global_history_attestation_bytes: ticket.current_global_history_attestation.clone(),
         stored_header_map: stored.header_map.clone(),
         #[cfg(test)]
         msg_replay_state: MsgReplayState::default(),
@@ -1443,12 +1446,18 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         &revoked_resolution.history_view_id,
         &revoked_resolution.history_commitment,
     )?;
+    let history_commitment_header =
+        encode_history_commitment_header(&barrier_tree_response.history_commitment)?;
     header.insert(
         hdr::HDR_BARRIER_HISTORY_COMMITMENT,
-        Value::Bytes(encode_history_commitment_header(
-            &barrier_tree_response.history_commitment,
-        )?),
+        Value::Bytes(history_commitment_header.clone()),
     );
+    if !ticket.current_global_history_attestation_bytes.is_empty() {
+        header.insert(
+            hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+            Value::Bytes(ticket.current_global_history_attestation_bytes.clone()),
+        );
+    }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     apply_join_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
@@ -1480,6 +1489,22 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         hdr::HDR_BARRIER_UPDATE_REASON,
         Value::Integer(Integer::from(2u64)),
     );
+    if !ticket.current_global_history_attestation_bytes.is_empty() {
+        let receipt = encode_full_verification_receipt(
+            &session.gid,
+            &session.leaf_id,
+            2,
+            barrier_update.updater_leaf,
+            history_commitment_header.as_slice(),
+            ticket.current_global_history_attestation_bytes.as_slice(),
+            barrier_update.raw_update.as_slice(),
+            session.pop_secret.as_bytes(),
+        )?;
+        header.insert(
+            hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+            Value::Bytes(receipt),
+        );
+    }
 
     let parts = AnchorInstanceParts {
         gid: &session.gid,
@@ -1727,6 +1752,7 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     session.seed_commit = bundle.hp_binding.seed_commit;
     session.seed_bundle_commit = bundle.hp_binding.seed_bundle_commit;
     session.join_finalize_auth_token = [0u8; 32];
+    session.current_global_history_attestation_bytes.clear();
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
         derive_fs_fingerprint_from_fields(
             ticket.fs_policy_version.as_str(),
@@ -1888,12 +1914,18 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         &revoked_resolution.history_view_id,
         &revoked_resolution.history_commitment,
     )?;
+    let history_commitment_header =
+        encode_history_commitment_header(&barrier_tree_response.history_commitment)?;
     header.insert(
         hdr::HDR_BARRIER_HISTORY_COMMITMENT,
-        Value::Bytes(encode_history_commitment_header(
-            &barrier_tree_response.history_commitment,
-        )?),
+        Value::Bytes(history_commitment_header.clone()),
     );
+    if !ticket.current_global_history_attestation_bytes.is_empty() {
+        header.insert(
+            hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+            Value::Bytes(ticket.current_global_history_attestation_bytes.clone()),
+        );
+    }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     apply_join_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
@@ -1927,6 +1959,22 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         hdr::HDR_BARRIER_UPDATE_REASON,
         Value::Integer(Integer::from(0u64)),
     );
+    if !ticket.current_global_history_attestation_bytes.is_empty() {
+        let receipt = encode_full_verification_receipt(
+            &session.gid,
+            &session.leaf_id,
+            0,
+            barrier_update.updater_leaf,
+            history_commitment_header.as_slice(),
+            ticket.current_global_history_attestation_bytes.as_slice(),
+            barrier_update.raw_update.as_slice(),
+            session.pop_secret.as_bytes(),
+        )?;
+        header.insert(
+            hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+            Value::Bytes(receipt),
+        );
+    }
 
     let parts = AnchorInstanceParts {
         gid: &session.gid,
@@ -2988,6 +3036,7 @@ mod tests {
             seed_bundle_commit: [0xCD; 32],
             fs_fingerprint: None,
             join_finalize_auth_token: [0xCE; 32],
+            current_global_history_attestation_bytes: Vec::new(),
             stored_header_map: BTreeMap::new(),
             #[cfg(test)]
             msg_replay_state: MsgReplayState::default(),
@@ -4907,6 +4956,7 @@ mod tests {
             seed_bundle_commit: [0x99; 32],
             fs_fingerprint: None,
             join_finalize_auth_token: [0xAA; 32],
+            current_global_history_attestation_bytes: Vec::new(),
             stored_header_map: BTreeMap::new(),
             #[cfg(test)]
             msg_replay_state: MsgReplayState::default(),
