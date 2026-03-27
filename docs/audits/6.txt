@@ -286,3 +286,26 @@ Statut audit mis à jour:
 
 - **Closed**: 6.1, 6.2, 6.3, 6.5, 6.6, 6.7, 6.8
 - **Partial**: 6.4
+
+--
+
+## Commentaires Codex (2026-03-27, tranche retained historical snapshots)
+
+Nouvelle vérification après patch spec + GUI:
+
+- **Toujours partiellement fermé**: `6.4`. Le profil autorise désormais explicitement un cache local borné de snapshots publics authentifiés pour deux cas: le current committed tree, et les prédécesseurs historiques explicitement nommés déjà authentifiés localement.
+- **Durci côté GUI**: `BarrierSecretState` garde maintenant un cache mémoire borné de snapshots publics retenus, non persisté, avec séparation entre snapshot courant et snapshots historiques retenus.
+- **Réutilisation effective**: le client réutilise maintenant un snapshot courant retenu si le dedicated `current_public_tree` a été vidé mais que le même `HistoryCommitment` courant est encore authentifié, et il peut réutiliser un prédécesseur historique déjà authentifié pour le bootstrap `join_finalize` au lieu de refetch systématiquement.
+- **Borné et fail-closed**: le cache local est borné à 8 snapshots, est vidé sur les paths recovery/fault, et n’est toujours pas persisté sur disque.
+- **Toujours ouvert dans le cas général**: un état historique non déjà retenu/authentifié exige encore `FetchBarrierPublicTree(...)`, et le calcul `snapshot_pre/snapshot_post` reste whole-tree.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p cityg-gui --bin cityg-gui retained_ --features native-app`
+- `cargo test -p cityg-gui --bin cityg-gui native::tests::persisted_barrier_state_roundtrip_drops_current_public_tree_cache --features native-app -- --exact`
+- `cargo test -p cityg-gui --bin cityg-gui native::tests::epoch_sync_after_second_join_keeps_local_pcs_refresh_valid --features native-app -- --exact`
+
+Statut audit mis à jour:
+
+- **Closed**: 6.1, 6.2, 6.3, 6.5, 6.6, 6.7, 6.8
+- **Partial**: 6.4

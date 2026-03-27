@@ -384,12 +384,14 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
     session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
     session.barrier_state.current_history_view_id = ticket_history_commitment.history_view_id;
     session.barrier_state.current_history_commitment = Some(ticket_history_commitment);
-    if !session
+    if session
         .barrier_state
         .current_public_tree
         .as_ref()
         .is_some_and(|snapshot| current_public_tree_cache_matches(&session, snapshot))
     {
+        retain_authenticated_current_public_tree(&mut session)?;
+    } else {
         clear_current_public_tree_cache(&mut session.barrier_state);
     }
 

@@ -123,8 +123,8 @@ Summary:
   Proof: `docs/specs.md:229-231`, `crates/cityg-server/src/lib.rs:3143-3182`, `crates/cityg-server/src/lib.rs:10631-10680`.
 - `6.3` `Closed` — payload envelope size is bounded in spec and code.
   Proof: `docs/specs.md:563-565`, `crates/cityg-gui/src/message_crypto.rs:816-846`.
-- `6.4` `Partial` — the base profile now permits a retained authenticated current-tree fast path, and the GUI caches/reuses the current authenticated public tree for current-state FULL/updater checks, but the general case still falls back to whole-tree work for historical predecessors and uncached states.
-  Proof: `docs/specs.md:1148-1160`, `docs/specs.md:1180-1193`, `crates/cityg-gui/src/native/session_types.rs:91-93`, `crates/cityg-gui/src/native/barrier_core.rs:142-187,411-520`, `crates/cityg-gui/src/native/epoch_sync.rs:246-329`, `crates/cityg-gui/src/native/barrier_ops.rs:114-195`, `crates/cityg-gui/src/native/tests/mod.rs:198-205,379-438`.
+- `6.4` `Partial` — the base profile now permits a bounded retained-snapshot fast path for the current authenticated tree and for explicitly named historical predecessor snapshots already authenticated locally, and the GUI reuses both classes of snapshots. Uncached historical states still fall back to whole-tree work.
+  Proof: `docs/specs.md:229-236`, `docs/specs.md:1148-1160`, `docs/specs.md:1174-1197`, `crates/cityg-gui/src/native/session_types.rs`, `crates/cityg-gui/src/native/barrier_core.rs`, `crates/cityg-gui/src/native/epoch_sync.rs`, `crates/cityg-gui/src/native/barrier_runtime.rs`, `crates/cityg-gui/src/native/tests/mod.rs`.
 - `6.5` `Closed` — A/B/C now have explicit page framing, bounded page size, and client-side aggregation checks tied to one `HistoryCommitment`.
   Proof: `docs/specs.md:194-238`, `crates/cityg-api/proto/cityg.proto:303-358`, `crates/cityg-api/src/lib.rs:197,900-942,2497-2618,6326-6354`, `crates/cityg-api-client/src/lib.rs:181,1188-1464,2358-2407,2757-2869`.
 - `6.6` `Closed` — unresolved joins are now bounded by `N_max`, and resolved/revoked join activations are pruned from server state.

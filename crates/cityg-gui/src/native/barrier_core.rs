@@ -167,8 +167,124 @@ pub(super) fn current_public_tree_cache(session: &AppSession) -> Option<Arc<Barr
         .cloned()
 }
 
+const MAX_RETAINED_LOCAL_PUBLIC_TREE_SNAPSHOTS: usize = 8;
+
+fn retained_public_tree_cache_matches(
+    expected_hash: &[u8; 32],
+    expected_n_max: u64,
+    snapshot: &BarrierPublicTree,
+) -> bool {
+    snapshot.n_max == expected_n_max.max(1) && snapshot.kem_tree_hash_after == *expected_hash
+}
+
+fn retain_public_tree_snapshot(
+    state: &mut BarrierSecretState,
+    barrier_version: u64,
+    history_commitment: Option<HistoryCommitment>,
+    snapshot: Arc<BarrierPublicTree>,
+) {
+    state.retained_public_trees.retain(|entry| {
+        !retained_public_tree_cache_matches(
+            &snapshot.kem_tree_hash_after,
+            snapshot.n_max,
+            entry.snapshot.as_ref(),
+        )
+    });
+    state.retained_public_trees.insert(
+        0,
+        RetainedBarrierPublicTree {
+            barrier_version,
+            history_commitment,
+            snapshot,
+        },
+    );
+    state
+        .retained_public_trees
+        .truncate(MAX_RETAINED_LOCAL_PUBLIC_TREE_SNAPSHOTS);
+}
+
+pub(super) fn retain_authenticated_current_public_tree(session: &mut AppSession) -> Result<()> {
+    let snapshot = current_public_tree_cache(session).ok_or_else(|| {
+        anyhow!(
+            "cannot retain authenticated current public tree without a matching cached snapshot"
+        )
+    })?;
+    let history_commitment = session
+        .barrier_state
+        .current_history_commitment
+        .ok_or_else(|| {
+            anyhow!("cannot retain authenticated current public tree without HistoryCommitment")
+        })?;
+    let barrier_version = session.barrier_state.barrier_version;
+    retain_public_tree_snapshot(
+        &mut session.barrier_state,
+        barrier_version,
+        Some(history_commitment),
+        snapshot,
+    );
+    Ok(())
+}
+
+pub(super) fn retain_tree_hash_authenticated_public_tree(
+    state: &mut BarrierSecretState,
+    barrier_version: u64,
+    snapshot: Arc<BarrierPublicTree>,
+) {
+    retain_public_tree_snapshot(state, barrier_version, None, snapshot);
+}
+
+pub(super) fn retained_authenticated_current_public_tree_cache(
+    session: &AppSession,
+) -> Option<(Arc<BarrierPublicTree>, HistoryCommitment)> {
+    let current_history_commitment = session.barrier_state.current_history_commitment?;
+    session
+        .barrier_state
+        .retained_public_trees
+        .iter()
+        .find(|entry| {
+            entry.barrier_version == session.barrier_state.barrier_version
+                && entry.history_commitment == Some(current_history_commitment)
+                && retained_public_tree_cache_matches(
+                    &session.barrier_state.kem_tree_hash_after,
+                    session.barrier_state.n_max,
+                    entry.snapshot.as_ref(),
+                )
+        })
+        .map(|entry| (entry.snapshot.clone(), current_history_commitment))
+}
+
+pub(super) fn retained_public_tree_cache(
+    session: &AppSession,
+    expected_hash: &[u8; 32],
+    expected_n_max: u64,
+) -> Option<Arc<BarrierPublicTree>> {
+    current_public_tree_cache(session)
+        .filter(|snapshot| {
+            retained_public_tree_cache_matches(expected_hash, expected_n_max, snapshot)
+        })
+        .or_else(|| {
+            session
+                .barrier_state
+                .retained_public_trees
+                .iter()
+                .find(|entry| {
+                    retained_public_tree_cache_matches(
+                        expected_hash,
+                        expected_n_max,
+                        entry.snapshot.as_ref(),
+                    )
+                })
+                .map(|entry| entry.snapshot.clone())
+        })
+}
+
 pub(super) fn clear_current_public_tree_cache(state: &mut BarrierSecretState) {
     state.current_public_tree = None;
+}
+
+pub(super) fn clear_all_public_tree_caches(state: &mut BarrierSecretState) {
+    state.current_public_tree = None;
+    state.retained_public_trees.clear();
 }
 
 pub(super) fn install_current_public_tree_cache(
@@ -442,13 +558,17 @@ pub(super) async fn full_chain_check_barrier_update(
         current_public_tree_cache(session)
     {
         let current_history_commitment = session
-                .barrier_state
-                .current_history_commitment
-                .ok_or_else(|| {
-                    anyhow!(
-                        "barrier tree snapshot auth failure (960.9): missing authenticated current-state history commitment for cached current public tree"
-                    )
-                })?;
+            .barrier_state
+            .current_history_commitment
+            .ok_or_else(|| {
+                anyhow!(
+                    "barrier tree snapshot auth failure (960.9): missing authenticated current-state history commitment for cached current public tree"
+                )
+            })?;
+        ((*snapshot_prev).clone(), current_history_commitment)
+    } else if let Some((snapshot_prev, current_history_commitment)) =
+        retained_authenticated_current_public_tree_cache(session)
+    {
         ((*snapshot_prev).clone(), current_history_commitment)
     } else {
         let snapshot_prev_response = client
@@ -637,11 +757,24 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
         ));
     }
 
-    let current_snapshot_response = client
-        .barrier_fetch_public_tree(room_id, &session.barrier_state.kem_tree_hash_after)
-        .await
-        .map_err(|err| anyhow!("join_finalize bootstrap snapshot auth failure (960.9): {err}"))?;
-    if current_snapshot_response.tree.n_max != n_max {
+    let current_snapshot =
+        if let Some((snapshot, _)) = retained_authenticated_current_public_tree_cache(session) {
+            (*snapshot).clone()
+        } else {
+            let current_snapshot_response = client
+                .barrier_fetch_public_tree(room_id, &session.barrier_state.kem_tree_hash_after)
+                .await
+                .map_err(|err| {
+                    anyhow!("join_finalize bootstrap snapshot auth failure (960.9): {err}")
+                })?;
+            if current_snapshot_response.tree.n_max != n_max {
+                return Err(anyhow!(
+                    "join_finalize bootstrap snapshot auth failure (960.9): current n_max mismatch"
+                ));
+            }
+            current_snapshot_response.tree
+        };
+    if current_snapshot.n_max != n_max {
         return Err(anyhow!(
             "join_finalize bootstrap snapshot auth failure (960.9): current n_max mismatch"
         ));
@@ -649,22 +782,46 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
     validate_barrier_tree_snapshot_auth(
         &session.barrier_state.kem_tree_hash_after,
         n_max,
-        &current_snapshot_response.tree,
+        &current_snapshot,
     )?;
     // The provisioned current barrier_update bytes already bind the current
     // tree hash. After the JOIN itself is accepted, the same current tree can
     // legitimately be re-attested under a later local HistoryCommitment.
 
-    let snapshot_base_response = client
-        .barrier_fetch_public_tree(room_id, &predecessor_hash)
-        .await
-        .map_err(|err| anyhow!("join_finalize bootstrap snapshot auth failure (960.9): {err}"))?;
-    if snapshot_base_response.tree.n_max != n_max {
+    let snapshot_base = if let Some(snapshot) =
+        retained_public_tree_cache(session, &predecessor_hash, n_max)
+    {
+        (*snapshot).clone()
+    } else {
+        let snapshot_base_response = client
+            .barrier_fetch_public_tree(room_id, &predecessor_hash)
+            .await
+            .map_err(|err| {
+                anyhow!("join_finalize bootstrap snapshot auth failure (960.9): {err}")
+            })?;
+        if snapshot_base_response.tree.n_max != n_max {
+            return Err(anyhow!(
+                "join_finalize bootstrap snapshot auth failure (960.9): predecessor n_max mismatch"
+            ));
+        }
+        validate_barrier_tree_snapshot_auth(
+            &predecessor_hash,
+            n_max,
+            &snapshot_base_response.tree,
+        )?;
+        retain_tree_hash_authenticated_public_tree(
+            &mut session.barrier_state,
+            parsed.prev_barrier_version,
+            Arc::new(snapshot_base_response.tree.clone()),
+        );
+        snapshot_base_response.tree
+    };
+    if snapshot_base.n_max != n_max {
         return Err(anyhow!(
             "join_finalize bootstrap snapshot auth failure (960.9): predecessor n_max mismatch"
         ));
     }
-    validate_barrier_tree_snapshot_auth(&predecessor_hash, n_max, &snapshot_base_response.tree)?;
+    validate_barrier_tree_snapshot_auth(&predecessor_hash, n_max, &snapshot_base)?;
 
     if session.barrier_state.bootstrap_join_records.is_empty()
         && session
@@ -682,7 +839,7 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
     let revoked_leaf_indices = session.barrier_state.bootstrap_revoked_leaf_indices.clone();
 
     let parsed_for_hash = parsed.clone();
-    let snapshot_base_entries = snapshot_base_response.tree.pk_entries.clone();
+    let snapshot_base_entries = snapshot_base.pk_entries.clone();
     let (expected_before, expected_after) =
         tokio::task::spawn_blocking(move || -> Result<([u8; 32], [u8; 32])> {
             let mut snapshot_pre = snapshot_base_entries;
@@ -724,7 +881,8 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
         ));
     }
 
-    install_current_public_tree_cache(session, current_snapshot_response.tree)?;
+    install_current_public_tree_cache(session, current_snapshot)?;
+    retain_authenticated_current_public_tree(session)?;
 
     Ok(())
 }

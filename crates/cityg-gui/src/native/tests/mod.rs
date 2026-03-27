@@ -403,6 +403,7 @@ fn enter_barrier_recovery_required_sets_issue_and_clears_current_public_tree()
     let current_snapshot = sample_current_public_tree(session.barrier_state.n_max, 0x66)?;
     session.barrier_state.kem_tree_hash_after = current_snapshot.kem_tree_hash_after;
     install_current_public_tree_cache(&mut session, current_snapshot)?;
+    retain_authenticated_current_public_tree(&mut session)?;
     session.barrier_state.current_barrier_full_verified = true;
 
     enter_barrier_recovery_required(
@@ -418,6 +419,10 @@ fn enter_barrier_recovery_required_sets_issue_and_clears_current_public_tree()
     assert!(
         session.barrier_state.current_public_tree.is_none(),
         "recovery-required must clear the current public-tree cache"
+    );
+    assert!(
+        session.barrier_state.retained_public_trees.is_empty(),
+        "recovery-required must clear retained historical public-tree snapshots too"
     );
     Ok(())
 }
@@ -487,11 +492,22 @@ fn persisted_barrier_state_roundtrip_drops_current_public_tree_cache()
     let snapshot = sample_current_public_tree(8, 0x55)?;
     runtime.kem_tree_hash_after = snapshot.kem_tree_hash_after;
     runtime.current_public_tree = Some(Arc::new(snapshot));
+    runtime
+        .retained_public_trees
+        .push(RetainedBarrierPublicTree {
+            barrier_version: runtime.barrier_version,
+            history_commitment: runtime.current_history_commitment,
+            snapshot: Arc::new(sample_current_public_tree(8, 0x56)?),
+        });
 
     let roundtrip = PersistedBarrierState::from_runtime(&runtime).into_runtime()?;
     assert!(
         roundtrip.current_public_tree.is_none(),
         "persisted barrier state must not retain the large current public-tree cache"
+    );
+    assert!(
+        roundtrip.retained_public_trees.is_empty(),
+        "persisted barrier state must not retain recent public-tree snapshots"
     );
     Ok(())
 }
@@ -513,6 +529,75 @@ fn install_current_public_tree_cache_requires_matching_authenticated_hash()
         err.to_string()
             .contains("barrier tree snapshot auth failure"),
         "expected explicit snapshot auth failure: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn retained_authenticated_current_public_tree_survives_current_cache_clear()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xA15, "http://127.0.0.1:9", "room-a5", "alice")?;
+    let snapshot = sample_current_public_tree(session.barrier_state.n_max, 0x46)?;
+    session.barrier_state.kem_tree_hash_after = snapshot.kem_tree_hash_after;
+    install_current_public_tree_cache(&mut session, snapshot)?;
+    retain_authenticated_current_public_tree(&mut session)?;
+    clear_current_public_tree_cache(&mut session.barrier_state);
+
+    let (retained, commitment) = retained_authenticated_current_public_tree_cache(&session)
+        .expect("retained cache should satisfy current-state lookup");
+    assert_eq!(
+        retained.kem_tree_hash_after,
+        session.barrier_state.kem_tree_hash_after
+    );
+    assert_eq!(
+        commitment,
+        session.barrier_state.current_history_commitment.unwrap()
+    );
+    Ok(())
+}
+
+#[test]
+fn retained_public_tree_cache_matches_historical_predecessor_snapshot()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xA16, "http://127.0.0.1:9", "room-a6", "alice")?;
+    let predecessor = Arc::new(sample_current_public_tree(
+        session.barrier_state.n_max,
+        0x57,
+    )?);
+    let predecessor_version = session.barrier_state.barrier_version.saturating_sub(1);
+    retain_tree_hash_authenticated_public_tree(
+        &mut session.barrier_state,
+        predecessor_version,
+        predecessor.clone(),
+    );
+
+    let retained = retained_public_tree_cache(
+        &session,
+        &predecessor.kem_tree_hash_after,
+        predecessor.n_max,
+    )
+    .expect("historical predecessor cache should match retained snapshot");
+    assert_eq!(retained.as_ref(), predecessor.as_ref());
+    Ok(())
+}
+
+#[test]
+fn retained_public_tree_cache_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xA17, "http://127.0.0.1:9", "room-a7", "alice")?;
+    for offset in 0..16u8 {
+        let snapshot = Arc::new(sample_current_public_tree(
+            session.barrier_state.n_max,
+            offset,
+        )?);
+        retain_tree_hash_authenticated_public_tree(
+            &mut session.barrier_state,
+            u64::from(offset),
+            snapshot,
+        );
+    }
+    assert!(
+        session.barrier_state.retained_public_trees.len() <= 8,
+        "retained public-tree cache must stay bounded"
     );
     Ok(())
 }
@@ -6098,6 +6183,7 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             history_seq: 4,
         }),
         current_public_tree: None,
+        retained_public_trees: Vec::new(),
         bootstrap_history_commitment: Some(HistoryCommitment {
             history_view_id: array(0x24),
             history_commitment_id: array(0x31),

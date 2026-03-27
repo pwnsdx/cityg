@@ -421,6 +421,7 @@ impl PersistedBarrierState {
                 })
                 .transpose()?,
             current_public_tree: None,
+            retained_public_trees: Vec::new(),
             bootstrap_history_commitment: self
                 .bootstrap_history_commitment
                 .map(|commitment| {

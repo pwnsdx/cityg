@@ -91,6 +91,7 @@ pub(super) struct BarrierSecretState {
     pub(super) current_history_view_id: [u8; 32],
     pub(super) current_history_commitment: Option<HistoryCommitment>,
     pub(super) current_public_tree: Option<Arc<BarrierPublicTree>>,
+    pub(super) retained_public_trees: Vec<RetainedBarrierPublicTree>,
     pub(super) bootstrap_history_commitment: Option<HistoryCommitment>,
     pub(super) bootstrap_predecessor_kem_tree_hash_after: [u8; 32],
     pub(super) bootstrap_join_records: Vec<BarrierJoinRecord>,
@@ -120,6 +121,7 @@ impl Default for BarrierSecretState {
             current_history_view_id: [0u8; 32],
             current_history_commitment: None,
             current_public_tree: None,
+            retained_public_trees: Vec::new(),
             bootstrap_history_commitment: None,
             bootstrap_predecessor_kem_tree_hash_after: [0u8; 32],
             bootstrap_join_records: Vec::new(),
@@ -140,6 +142,13 @@ impl Default for BarrierSecretState {
             current_barrier_full_verified: false,
         }
     }
+}
+
+#[derive(Clone)]
+pub(super) struct RetainedBarrierPublicTree {
+    pub(super) barrier_version: u64,
+    pub(super) history_commitment: Option<HistoryCommitment>,
+    pub(super) snapshot: Arc<BarrierPublicTree>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
