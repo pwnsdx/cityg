@@ -2682,6 +2682,34 @@ impl CityGServer {
             .map(|state| state.descriptor.clone())
     }
 
+    pub fn join_provisioning_artifact_bytes(
+        &self,
+        bundle: &JoinTicketBundle,
+        profile_version: &str,
+        history_authority_extension: &str,
+        history_authority_descriptor: &[u8],
+        current_global_history_attestation: &[u8],
+        current_join_records_completeness_attestation: &[u8],
+        current_revoked_leaf_indices_completeness_attestation: &[u8],
+    ) -> Result<Vec<u8>, CityGError> {
+        let authority = self
+            .history_authority
+            .as_ref()
+            .ok_or(CityGError::InvalidInput(
+                "history authority unavailable for join provisioning artifact",
+            ))?;
+        encode_join_provisioning_artifact(
+            authority,
+            bundle,
+            profile_version,
+            history_authority_extension,
+            history_authority_descriptor,
+            current_global_history_attestation,
+            current_join_records_completeness_attestation,
+            current_revoked_leaf_indices_completeness_attestation,
+        )
+    }
+
     pub fn history_authority_extension_id(&self) -> &'static str {
         self.history_authority
             .as_ref()
@@ -3135,6 +3163,47 @@ struct GlobalHistoryAttestationWire(
     #[serde(with = "serde_bytes")] Vec<u8>,
 );
 
+#[derive(Serialize, Deserialize)]
+struct JoinProvisioningArtifactWire {
+    #[serde(with = "serde_bytes")]
+    scope_id: Vec<u8>,
+    history_authority_extension: String,
+    #[serde(with = "serde_bytes")]
+    gid: Vec<u8>,
+    profile_version: String,
+    #[serde(with = "serde_bytes")]
+    leaf_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    history_view_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: Vec<u8>,
+    history_seq: u64,
+    barrier_version: u64,
+    cover_leaf_index: u64,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    current_predecessor_kem_tree_hash_after: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    join_finalize_auth_token: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    provisioning_nonce: Vec<u8>,
+    provisioning_issued_at_ms: u64,
+    provisioning_expires_at_ms: u64,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+    last_accepted_ec: u64,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+}
+
 #[derive(Serialize)]
 struct GlobalHistoryAttestationSignedPayload<'a>(
     &'static str,
@@ -3149,6 +3218,58 @@ struct GlobalHistoryAttestationSignedPayload<'a>(
     #[serde(with = "serde_bytes")] &'a [u8; 32],
     &'a str,
 );
+
+#[derive(Serialize)]
+struct JoinProvisioningArtifactSignedPayload<'a> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    history_authority_extension: &'a str,
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    profile_version: &'a str,
+    #[serde(with = "serde_bytes")]
+    leaf_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_view_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: &'a [u8; 32],
+    history_seq: u64,
+    barrier_version: u64,
+    cover_leaf_index: u64,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    current_predecessor_kem_tree_hash_after: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    join_finalize_auth_token: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    provisioning_nonce: &'a [u8; 32],
+    provisioning_issued_at_ms: u64,
+    provisioning_expires_at_ms: u64,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+    last_accepted_ec: u64,
+    #[serde(with = "serde_bytes")]
+    history_authority_descriptor: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    current_global_history_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    current_join_records_completeness_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    current_revoked_leaf_indices_completeness_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    current_barrier_update: &'a [u8],
+    current_join_records: &'a [BarrierJoinLeafRecord],
+    current_revoked_leaf_indices: &'a [u32],
+}
 
 #[derive(Serialize, Deserialize)]
 struct HelperCompletenessAttestationWire(
@@ -3403,6 +3524,90 @@ fn full_verification_receipt_payload(
         barrier_update,
     })
     .map_err(CityGError::from)
+}
+
+fn encode_join_provisioning_artifact(
+    state: &HistoryAuthorityState,
+    bundle: &JoinTicketBundle,
+    profile_version: &str,
+    history_authority_extension: &str,
+    history_authority_descriptor: &[u8],
+    current_global_history_attestation: &[u8],
+    current_join_records_completeness_attestation: &[u8],
+    current_revoked_leaf_indices_completeness_attestation: &[u8],
+) -> Result<Vec<u8>, CityGError> {
+    let payload = to_cbor_vec(&JoinProvisioningArtifactSignedPayload {
+        label: "cityg/join-provisioning-artifact-v1",
+        scope_id: &state.descriptor.scope_id,
+        history_authority_extension,
+        gid: &bundle.gid,
+        profile_version,
+        leaf_id: &bundle.leaf_id,
+        history_view_id: &bundle.current_history_commitment.history_view_id,
+        history_commitment_id: &bundle.current_history_commitment.history_commitment_id,
+        prev_history_commitment_id: &bundle.current_history_commitment.prev_history_commitment_id,
+        history_seq: bundle.current_history_commitment.history_seq,
+        barrier_version: bundle.barrier_version,
+        cover_leaf_index: bundle.cover_leaf_index,
+        n_max: bundle.n_max,
+        max_barrier_update_bytes: bundle.max_barrier_update_bytes,
+        kem_tree_hash_after: &bundle.kem_tree_hash_after,
+        current_predecessor_kem_tree_hash_after: &bundle.current_predecessor_kem_tree_hash_after,
+        join_finalize_auth_token: &bundle.join_finalize_auth_token,
+        provisioning_nonce: &bundle.provisioning_nonce,
+        provisioning_issued_at_ms: bundle.provisioning_issued_at_ms,
+        provisioning_expires_at_ms: bundle.provisioning_expires_at_ms,
+        fs_forward_leap_h: bundle.fs_forward_leap_policy.h,
+        fs_forward_leap_checkpoint_interval: bundle.fs_forward_leap_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: bundle.fs_forward_leap_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: bundle.fs_forward_leap_policy.slack_first_device,
+        fs_forward_leap_slack_device: bundle.fs_forward_leap_policy.slack_device,
+        last_accepted_ec: bundle.last_accepted_ec,
+        history_authority_descriptor,
+        current_global_history_attestation,
+        current_join_records_completeness_attestation,
+        current_revoked_leaf_indices_completeness_attestation,
+        current_barrier_update: bundle.current_barrier_update.as_slice(),
+        current_join_records: bundle.current_join_records.as_slice(),
+        current_revoked_leaf_indices: bundle.current_revoked_leaf_indices.as_slice(),
+    })?;
+    let signature = sign_history_authority_message(state, payload.as_slice())?;
+    Ok(to_cbor_vec(&JoinProvisioningArtifactWire {
+        scope_id: state.descriptor.scope_id.to_vec(),
+        history_authority_extension: history_authority_extension.to_string(),
+        gid: bundle.gid.to_vec(),
+        profile_version: profile_version.to_string(),
+        leaf_id: bundle.leaf_id.to_vec(),
+        history_view_id: bundle.current_history_commitment.history_view_id.to_vec(),
+        history_commitment_id: bundle
+            .current_history_commitment
+            .history_commitment_id
+            .to_vec(),
+        prev_history_commitment_id: bundle
+            .current_history_commitment
+            .prev_history_commitment_id
+            .to_vec(),
+        history_seq: bundle.current_history_commitment.history_seq,
+        barrier_version: bundle.barrier_version,
+        cover_leaf_index: bundle.cover_leaf_index,
+        n_max: bundle.n_max,
+        max_barrier_update_bytes: bundle.max_barrier_update_bytes,
+        kem_tree_hash_after: bundle.kem_tree_hash_after.to_vec(),
+        current_predecessor_kem_tree_hash_after: bundle
+            .current_predecessor_kem_tree_hash_after
+            .to_vec(),
+        join_finalize_auth_token: bundle.join_finalize_auth_token.to_vec(),
+        provisioning_nonce: bundle.provisioning_nonce.to_vec(),
+        provisioning_issued_at_ms: bundle.provisioning_issued_at_ms,
+        provisioning_expires_at_ms: bundle.provisioning_expires_at_ms,
+        fs_forward_leap_h: bundle.fs_forward_leap_policy.h,
+        fs_forward_leap_checkpoint_interval: bundle.fs_forward_leap_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: bundle.fs_forward_leap_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: bundle.fs_forward_leap_policy.slack_first_device,
+        fs_forward_leap_slack_device: bundle.fs_forward_leap_policy.slack_device,
+        last_accepted_ec: bundle.last_accepted_ec,
+        signature,
+    })?)
 }
 
 fn encode_helper_completeness_attestation_revoked(

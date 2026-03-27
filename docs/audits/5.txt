@@ -322,3 +322,30 @@ Statut audit:
 
 - **5.7 reste Partial**, mais le provisioning porte désormais assez d’état pour rejouer localement `944.6`, `945.0`, `947.6` et certains sous-cas `947.5/947.4`;
 - le reste ouvert est toujours le même: absence d’artefact de lineage/finalité globale, pas un oubli local sur la fraîcheur ou le binding de ces champs.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche signed provisioning artifact)
+
+Nouvelle passe spec + implémentation:
+
+- `JoinTicketResponse` transporte maintenant un `provisioning_artifact` signé qui couvre explicitement les champs de provisioning consommés par le bootstrap courant;
+- cet artefact lie la fraîcheur (`nonce`, `issued_at`, `expires_at`), le `current_history_commitment`, les attestations `global-history-authority-v1`, les helpers courants A/B, le `current barrier_update`, le prédécesseur bootstrap, et les paramètres FLG courants;
+- le client API rejette fail-closed tout ticket sans `provisioning_artifact`, avec artefact expiré, ou avec artefact altéré avant de consommer un seul champ provisionné.
+
+Preuves exécutées:
+
+- `cargo test --locked -p cityg-api-client --lib join_ticket_ -- --nocapture`
+- `cargo test --locked -p cityg-api-client --lib wrappers_roundtrip_against_mock_server -- --nocapture`
+- `cargo test --locked -p cityg-api --lib join_ticket -- --nocapture`
+
+Statut audit mis à jour:
+
+- **Closed**: `5.1`, `5.2`, `5.5`, `5.7`
+- **Partial**: `5.3`, `5.8`
+- **Reclassified**: `5.4`, `5.6`
+
+Lecture consolidée:
+
+- `5.7` n’est plus honnêtement `Partial`: l’artefact de provisioning demandé par l’audit existe maintenant comme objet signé autonome côté wire/API et il est vérifié strictement côté client;
+- le reste utile de l’audit 5 porte désormais sur la finalité/canonité globale (`5.3`) et sur le manifest/policy/config global (`5.8`), pas sur le provisioning join lui-même.

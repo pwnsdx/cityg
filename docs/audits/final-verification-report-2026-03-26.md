@@ -28,8 +28,8 @@ Scope-hardening addendum (same date, later tranche):
 
 Summary:
 - Total findings reviewed: `51`
-- `Closed`: `21`
-- `Partial`: `26`
+- `Closed`: `22`
+- `Partial`: `25`
 - `Open`: `0`
 - `Reclassified`: `4`
 
@@ -98,8 +98,8 @@ Summary:
   Proof: `docs/specs.md:1115-1124`, `docs/specs.md:1296-1302`, `crates/cityg-server/src/lib.rs` (`tests::build_refresh_bundle_includes_global_history_authority_headers`), `crates/cityg-api-client/src/lib.rs`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
 - `4.7` `Partial` — current version/current tree/current JoinSet binding is much tighter now through shared `HistoryCommitment`, `header[180]`, helper-state binding, persisted client-side `current_history_commitment`, and fail-closed rejection of remote barrier bundles whose declared current state does not match that local authenticated state.
   Proof: `docs/specs.md:180-189`, `docs/specs.md:1157`, `docs/specs.md:1181-1190`, `crates/cityg-server/src/lib.rs:2396-2445,4443-4450,10749-10780`, `crates/cityg-gui/src/native/session_types.rs:50-66`, `crates/cityg-gui/src/native/persisted/barrier.rs:15-28,157-184,346-431`, `crates/cityg-gui/src/native/barrier_runtime.rs:515-595`, `crates/cityg-gui/src/native/epoch_sync.rs:40-98,335-363`, `crates/cityg-gui/src/native/join_ops.rs:220-247,423-455`, `crates/cityg-gui/src/native/barrier_ops.rs:185-195,312-320,882-905`, `crates/cityg-gui/src/bin/join_leave.rs:376-416,1432-1440,1870-1878,5746-5761`, `crates/cityg-gui/src/native/tests/mod.rs:346-381,5840-6043,8327-8384,8873-8890`.
-- `4.8` `Partial` — external history/provisioning dependencies are more constrained, but still not fully closed against a byzantine server.
-  Proof: `docs/specs.md:1455-1478`; remaining lack of global finality/canonity is still explicit at `docs/specs.md:170`.
+- `4.8` `Partial` — external history/provisioning dependencies are now materially tighter: join provisioning is a standalone signed artifact under the deployment-global history authority, but the repo still does not provide a stronger byzantine/federated finality model or commit broader policy/governance state into that same lineage.
+  Proof: `docs/specs.md:1638-1669`; remaining lack of stronger global/federated finality is still explicit at `docs/specs.md:170`.
 
 ## Audit 5
 
@@ -115,8 +115,8 @@ Summary:
   Proof: `docs/specs.md:566-572`, `crates/cityg-gui/src/native/message_auth.rs:97-156`, `crates/cityg-gui/src/native/network_messages.rs:14-50,188-203`, `crates/cityg-gui/src/native/tests/mod.rs:7606-7659,8670-8740`.
 - `5.6` `Reclassified` — opaque external proof/KDF suites remain a registry/documentation issue; not enough evidence to call the current local implementation unsafely weak from this repo alone.
   Proof: `docs/specs.md:162-163`, `docs/specs.md:1479-1484`.
-- `5.7` `Partial` — join provisioning now has nonce/issuance/expiry/current history commitment plus authenticated client-visible FLG window parameters and `last_accepted_ec`, and bootstrap verification no longer falsely rejects a same-tree later re-attestation, but it still is not a standalone globally authenticated lineage artifact.
-  Proof: `docs/specs.md:1583-1590`, `crates/cityg-api/proto/cityg.proto:202-249`, `crates/cityg-api-client/src/lib.rs:988-1039,2126-2144`, `crates/cityg-gui/src/native/join_ops.rs:210-223,421-439`, `crates/cityg-gui/src/native/barrier_core.rs:568-589`.
+- `5.7` `Closed` — join provisioning now ships as a standalone signed `provisioning_artifact` bound to the delivered current-state fields, freshness window, helper completeness material, and deployment-global history-authority attestation; clients fail closed before consuming provisioned state if the artifact is missing, stale, or tampered.
+  Proof: `docs/specs.md:1638-1669`, `crates/cityg-api/proto/cityg.proto:216-268`, `crates/cityg-server/src/lib.rs:2685-2709,3529-3708`, `crates/cityg-api/src/lib.rs:2098-2170`, `crates/cityg-api-client/src/lib.rs:1079-1251,3062-3233,5051-5147`.
 - `5.8` `Partial` — retention/fetch/config contracts are better tied to history and now have hard helper paging / replay-state bounds, but still are not backed by one signed global deployment manifest and global canonity.
   Proof: `docs/specs.md:220-238`, `docs/specs.md:618-638`, `docs/specs.md:1532`, and the remaining partial Audit 2 / Audit 3 findings.
 
@@ -151,8 +151,8 @@ Summary:
   Proof: `docs/specs.md` (S3.3 shared authenticated-view rule and S3.3.E-F), `crates/cityg-server/src/lib.rs:2644-2698,3332-3478`, `crates/cityg-api/src/lib.rs:2607-2852`, `crates/cityg-api-client/src/lib.rs:2787-3207`, `crates/cityg-api-client/tests/history_authority_extensions.rs`, `crates/cityg-gui/src/native/barrier_runtime.rs`, `crates/cityg-gui/src/bin/join_leave.rs`.
 - `7.5` `Partial` — recover-only is now explicit, persisted, and escalates to `recovery_required`, but still remains a server-imposable degraded mode until FULL is re-established locally.
   Proof: `crates/cityg-gui/src/native/barrier_runtime.rs:91-99,603-655`.
-- `7.6` `Partial` — policy/governance/provisioning are better bound to current history, but not yet to a globally canonical authenticated lineage.
-  Proof: `docs/specs.md:1455-1478`.
+- `7.6` `Partial` — provisioning is now a standalone signed artifact under the deployment-global history authority, but policy/governance state still is not committed into the same authenticated lineage strongly enough to call this fully closed.
+  Proof: `docs/specs.md:1638-1669`, `crates/cityg-api/proto/cityg.proto:216-268`, `crates/cityg-api-client/src/lib.rs:1079-1251,3062-3233`.
 - `7.7` `Partial` — fault reactions are more operationally meaningful through explicit recovery-required state, but still do not define cross-source/quarantine handling against a byzantine server.
   Proof: `crates/cityg-gui/src/native/barrier_runtime.rs:91-99,626-655`.
 
@@ -163,7 +163,7 @@ Summary:
 - Server-checkable `join_finalize` exception:
   `docs/specs.md:1155-1157`, `docs/specs.md:1467-1469`, `crates/cityg-server/src/lib.rs:4022-4085`.
 - Join provisioning freshness/binding:
-  `docs/specs.md:1455-1478`, `crates/cityg-api/proto/cityg.proto:243,248-251`, `crates/cityg-api-client/src/lib.rs:988-1038`.
+  `docs/specs.md:1638-1669`, `crates/cityg-api/proto/cityg.proto:216-268`, `crates/cityg-server/src/lib.rs:2685-2709,3529-3708`, `crates/cityg-api-client/src/lib.rs:1079-1251,3062-3233`.
 - Sender leaf binding on the message plane:
   `docs/specs.md:566-572`, `crates/cityg-gui/src/native/message_auth.rs:139-156`, `crates/cityg-gui/src/native/network_messages.rs:188-203`.
 - Hard `N_max` and payload caps:

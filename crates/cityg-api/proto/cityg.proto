@@ -265,6 +265,7 @@ message JoinTicketResponse {
   bytes current_join_records_completeness_attestation = 44;
   bytes current_revoked_leaf_indices_completeness_attestation = 45;
   string history_authority_extension = 46;
+  bytes provisioning_artifact = 47;
 }
 
 message MergeTicketRequest {

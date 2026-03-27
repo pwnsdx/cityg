@@ -470,3 +470,18 @@ Lecture consolidée:
 
 - `7.1` et `7.4` restent **Partial**, mais plus pour une raison d’optionalité du profil de base;
 - le reste non fermé est désormais limité au niveau de confiance de l’autorité elle-même: append-only de déploiement oui, modèle fédéré/non-omissif byzantin non.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche signed join provisioning under global authority)
+
+Nouvelle passe spec + implémentation:
+
+- le provisioning join n’est plus seulement “bound to current history” via plusieurs champs exposés: il est maintenant encapsulé dans un `provisioning_artifact` signé;
+- cet artefact est lui-même lié à `global-history-authority-v1`, au `current_history_commitment`, à l’attestation d’historique courante, aux attestations de complétude helper A/B, et au `current barrier_update` accepté;
+- le client refuse désormais fail-closed un provisioning absent, expiré, mal signé ou altéré avant toute consommation de state bootstrap.
+
+Lecture consolidée:
+
+- cela ferme la partie “provisioning externe / malléable” du finding 7.6;
+- `7.6` reste néanmoins **Partial** parce que la policy et la gouvernance ne sont toujours pas engagées dans la même lignée authentifiée avec la même force que le provisioning courant.

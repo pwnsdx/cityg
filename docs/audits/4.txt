@@ -537,3 +537,18 @@ Lecture consolidée:
 
 - `4.1`, `4.5` et `4.6` restent **Partial** parce que `header[181]` prouve toujours un binding d’état helper attesté, pas une preuve indépendante plus forte de FULL;
 - le reste non fermé n’est plus un oubli local de wire/profile, mais un choix de niveau de preuve protocolaire.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche signed join provisioning artifact)
+
+Nouvelle passe spec + implémentation:
+
+- le path `join_ticket` ne livre plus seulement un paquet de champs “courants” sous transport authentifié; il livre un `provisioning_artifact` signé;
+- cet artefact lie le bootstrap courant à `global-history-authority-v1`, au `current_history_commitment`, aux helpers A/B courants, au `current barrier_update`, au prédécesseur bootstrap et à la fenêtre FLG courante;
+- le client API rejette fail-closed les tickets sans artefact, expirés ou altérés avant toute consommation du state provisionné.
+
+Lecture consolidée:
+
+- cela renforce honnêtement `4.8`: la dépendance de provisioning n’est plus “complètement externe” au sens de l’audit initial;
+- `4.8` reste néanmoins **Partial** parce que la lignée globale et la policy/gouvernance complète ne sont pas encore closes contre un serveur byzantin.

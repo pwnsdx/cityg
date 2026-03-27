@@ -1086,7 +1086,8 @@ impl CitygApiClient {
                 )?,
                 "join ticket",
             )?);
-        parse_fs_forward_leap_policy(response.fs_forward_leap_policy.clone())?;
+        let fs_forward_leap_policy =
+            parse_fs_forward_leap_policy(response.fs_forward_leap_policy.clone())?;
         let current_predecessor_kem_tree_hash_after =
             if response.current_predecessor_kem_tree_hash_after.is_empty() {
                 [0u8; 32]
@@ -1184,6 +1185,14 @@ impl CitygApiClient {
                 "join ticket",
             )?;
             if let Some(commitment) = current_history_commitment.as_ref() {
+                verify_join_provisioning_artifact(
+                    response.provisioning_artifact.as_slice(),
+                    authority,
+                    history_authority_extension.expect("validated base-profile extension"),
+                    &response,
+                    commitment,
+                    &fs_forward_leap_policy,
+                )?;
                 let join_attestation = parse_helper_completeness_attestation_bytes(
                     response
                         .current_join_records_completeness_attestation
@@ -1239,6 +1248,7 @@ impl CitygApiClient {
             || !response
                 .current_revoked_leaf_indices_completeness_attestation
                 .is_empty()
+            || !response.provisioning_artifact.is_empty()
         {
             return Err(Error::Parse(
                 "join ticket carries history extension bytes without authority descriptor"
@@ -2834,6 +2844,47 @@ struct GlobalHistoryAttestationWire(
 );
 
 #[derive(Serialize, Deserialize)]
+struct JoinProvisioningArtifactWire {
+    #[serde(with = "serde_bytes")]
+    scope_id: Vec<u8>,
+    history_authority_extension: String,
+    #[serde(with = "serde_bytes")]
+    gid: Vec<u8>,
+    profile_version: String,
+    #[serde(with = "serde_bytes")]
+    leaf_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    history_view_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: Vec<u8>,
+    history_seq: u64,
+    barrier_version: u64,
+    cover_leaf_index: u64,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    current_predecessor_kem_tree_hash_after: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    join_finalize_auth_token: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    provisioning_nonce: Vec<u8>,
+    provisioning_issued_at_ms: u64,
+    provisioning_expires_at_ms: u64,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+    last_accepted_ec: u64,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
 struct HelperCompletenessAttestationWire(
     #[serde(with = "serde_bytes")] Vec<u8>,
     String,
@@ -2854,6 +2905,58 @@ struct GlobalHistoryAttestationSignedPayload<'a>(
     #[serde(with = "serde_bytes")] &'a [u8; 32],
     &'a str,
 );
+
+#[derive(Serialize)]
+struct JoinProvisioningArtifactSignedPayload<'a> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    history_authority_extension: &'a str,
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    profile_version: &'a str,
+    #[serde(with = "serde_bytes")]
+    leaf_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_view_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: &'a [u8; 32],
+    history_seq: u64,
+    barrier_version: u64,
+    cover_leaf_index: u64,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    current_predecessor_kem_tree_hash_after: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    join_finalize_auth_token: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    provisioning_nonce: &'a [u8; 32],
+    provisioning_issued_at_ms: u64,
+    provisioning_expires_at_ms: u64,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+    last_accepted_ec: u64,
+    #[serde(with = "serde_bytes")]
+    history_authority_descriptor: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    current_global_history_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    current_join_records_completeness_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    current_revoked_leaf_indices_completeness_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    current_barrier_update: &'a [u8],
+    current_join_records: &'a [BarrierJoinRecord],
+    current_revoked_leaf_indices: &'a [u32],
+}
 
 #[derive(Serialize)]
 struct HelperCompletenessSignedPayload<'a, T> {
@@ -2954,6 +3057,158 @@ fn verify_ml_dsa_signature(
         .map_err(|_| Error::Parse("invalid history authority signature".to_string()))?;
     dilithium5::verify_detached_signature(&sig, message, &pk)
         .map_err(|_| Error::Parse("history authority signature verification failed".to_string()))
+}
+
+fn verify_join_provisioning_artifact(
+    raw: &[u8],
+    authority: &HistoryAuthorityDescriptor,
+    history_authority_extension: HistoryAuthorityExtension,
+    response: &JoinTicketResponse,
+    current_history_commitment: &HistoryCommitment,
+    fs_forward_leap_policy: &FsForwardLeapPolicy,
+) -> Result<(), Error> {
+    if raw.is_empty() {
+        return Err(Error::Parse(
+            "join ticket missing provisioning_artifact".to_string(),
+        ));
+    }
+    let artifact: JoinProvisioningArtifactWire =
+        decode_cbor_det("join provisioning artifact", raw)?;
+    if array32(&artifact.scope_id)? != authority.scope_id {
+        return Err(Error::Parse(
+            "join provisioning artifact scope_id mismatch".to_string(),
+        ));
+    }
+    if artifact.history_authority_extension != history_authority_extension.as_str() {
+        return Err(Error::Parse(
+            "join provisioning artifact history_authority_extension mismatch".to_string(),
+        ));
+    }
+    if array32(&artifact.gid)? != array32(&response.gid)? {
+        return Err(Error::Parse(
+            "join provisioning artifact gid mismatch".to_string(),
+        ));
+    }
+    if artifact.profile_version != response.profile_version {
+        return Err(Error::Parse(
+            "join provisioning artifact profile_version mismatch".to_string(),
+        ));
+    }
+    if array32(&artifact.leaf_id)? != array32(&response.leaf_id)? {
+        return Err(Error::Parse(
+            "join provisioning artifact leaf_id mismatch".to_string(),
+        ));
+    }
+    if array32(&artifact.history_view_id)? != current_history_commitment.history_view_id
+        || array32(&artifact.history_commitment_id)?
+            != current_history_commitment.history_commitment_id
+        || array32(&artifact.prev_history_commitment_id)?
+            != current_history_commitment.prev_history_commitment_id
+        || artifact.history_seq != current_history_commitment.history_seq
+    {
+        return Err(Error::Parse(
+            "join provisioning artifact history_commitment mismatch".to_string(),
+        ));
+    }
+    if artifact.barrier_version != response.barrier_version
+        || artifact.cover_leaf_index != response.cover_leaf_index
+        || artifact.n_max != response.n_max
+        || artifact.max_barrier_update_bytes != response.max_barrier_update_bytes
+        || array32(&artifact.kem_tree_hash_after)? != array32(&response.kem_tree_hash_after)?
+    {
+        return Err(Error::Parse(
+            "join provisioning artifact barrier state mismatch".to_string(),
+        ));
+    }
+    let expected_predecessor = if response.current_predecessor_kem_tree_hash_after.is_empty() {
+        [0u8; 32]
+    } else {
+        array32(&response.current_predecessor_kem_tree_hash_after)?
+    };
+    if array32(&artifact.current_predecessor_kem_tree_hash_after)? != expected_predecessor {
+        return Err(Error::Parse(
+            "join provisioning artifact predecessor hash mismatch".to_string(),
+        ));
+    }
+    if array32(&artifact.join_finalize_auth_token)? != array32(&response.join_finalize_auth_token)?
+        || array32(&artifact.provisioning_nonce)? != array32(&response.provisioning_nonce)?
+        || artifact.provisioning_issued_at_ms != response.provisioning_issued_at_ms
+        || artifact.provisioning_expires_at_ms != response.provisioning_expires_at_ms
+    {
+        return Err(Error::Parse(
+            "join provisioning artifact token or expiry mismatch".to_string(),
+        ));
+    }
+    if artifact.fs_forward_leap_h != fs_forward_leap_policy.h
+        || artifact.fs_forward_leap_checkpoint_interval
+            != fs_forward_leap_policy.checkpoint_interval
+        || artifact.fs_forward_leap_slack_anchor != fs_forward_leap_policy.slack_anchor
+        || artifact.fs_forward_leap_slack_first_device != fs_forward_leap_policy.slack_first_device
+        || artifact.fs_forward_leap_slack_device != fs_forward_leap_policy.slack_device
+        || artifact.last_accepted_ec != response.last_accepted_ec
+    {
+        return Err(Error::Parse(
+            "join provisioning artifact fs policy mismatch".to_string(),
+        ));
+    }
+    let gid = array32(&response.gid)?;
+    let leaf_id = array32(&response.leaf_id)?;
+    let kem_tree_hash_after = array32(&response.kem_tree_hash_after)?;
+    let join_finalize_auth_token = array32(&response.join_finalize_auth_token)?;
+    let provisioning_nonce = array32(&response.provisioning_nonce)?;
+    let join_records = response
+        .current_join_records
+        .iter()
+        .map(|record| BarrierJoinRecord {
+            device_pk: record.device_pk.clone(),
+            leaf_index: record.leaf_index,
+            ek_leaf: record.ek_leaf.clone(),
+        })
+        .collect::<Vec<_>>();
+    let payload = encode_cbor_det(&JoinProvisioningArtifactSignedPayload {
+        label: "cityg/join-provisioning-artifact-v1",
+        scope_id: &authority.scope_id,
+        history_authority_extension: history_authority_extension.as_str(),
+        gid: &gid,
+        profile_version: response.profile_version.as_str(),
+        leaf_id: &leaf_id,
+        history_view_id: &current_history_commitment.history_view_id,
+        history_commitment_id: &current_history_commitment.history_commitment_id,
+        prev_history_commitment_id: &current_history_commitment.prev_history_commitment_id,
+        history_seq: current_history_commitment.history_seq,
+        barrier_version: response.barrier_version,
+        cover_leaf_index: response.cover_leaf_index,
+        n_max: response.n_max,
+        max_barrier_update_bytes: response.max_barrier_update_bytes,
+        kem_tree_hash_after: &kem_tree_hash_after,
+        current_predecessor_kem_tree_hash_after: &expected_predecessor,
+        join_finalize_auth_token: &join_finalize_auth_token,
+        provisioning_nonce: &provisioning_nonce,
+        provisioning_issued_at_ms: response.provisioning_issued_at_ms,
+        provisioning_expires_at_ms: response.provisioning_expires_at_ms,
+        fs_forward_leap_h: fs_forward_leap_policy.h,
+        fs_forward_leap_checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: fs_forward_leap_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: fs_forward_leap_policy.slack_first_device,
+        fs_forward_leap_slack_device: fs_forward_leap_policy.slack_device,
+        last_accepted_ec: response.last_accepted_ec,
+        history_authority_descriptor: response.history_authority_descriptor.as_slice(),
+        current_global_history_attestation: response.current_global_history_attestation.as_slice(),
+        current_join_records_completeness_attestation: response
+            .current_join_records_completeness_attestation
+            .as_slice(),
+        current_revoked_leaf_indices_completeness_attestation: response
+            .current_revoked_leaf_indices_completeness_attestation
+            .as_slice(),
+        current_barrier_update: response.current_barrier_update.as_slice(),
+        current_join_records: join_records.as_slice(),
+        current_revoked_leaf_indices: response.current_revoked_leaf_indices.as_slice(),
+    })?;
+    verify_ml_dsa_signature(
+        payload.as_slice(),
+        authority.public_key.as_slice(),
+        artifact.signature.as_slice(),
+    )
 }
 
 fn parse_history_authority_extension(
@@ -3541,6 +3796,141 @@ mod tests {
         ))
     }
 
+    fn build_test_join_provisioning_artifact(response: &JoinTicketResponse) -> Vec<u8> {
+        let current_history_commitment = response
+            .current_history_commitment
+            .clone()
+            .expect("join ticket current_history_commitment");
+        let history_commitment = HistoryCommitment {
+            history_view_id: array32(&current_history_commitment.history_view_id)
+                .expect("history_view_id"),
+            history_commitment_id: array32(&current_history_commitment.history_commitment_id)
+                .expect("history_commitment_id"),
+            prev_history_commitment_id: array32(
+                &current_history_commitment.prev_history_commitment_id,
+            )
+            .expect("prev_history_commitment_id"),
+            history_seq: current_history_commitment.history_seq,
+        };
+        let authority = build_test_history_authority(
+            history_commitment,
+            array32(&response.gid).expect("gid"),
+            response.barrier_version,
+            array32(&response.kem_tree_hash_after).expect("kem_tree_hash_after"),
+        );
+        let fs_policy = response
+            .fs_forward_leap_policy
+            .clone()
+            .expect("fs_forward_leap_policy");
+        let current_predecessor_kem_tree_hash_after =
+            if response.current_predecessor_kem_tree_hash_after.is_empty() {
+                [0u8; 32]
+            } else {
+                array32(&response.current_predecessor_kem_tree_hash_after)
+                    .expect("current_predecessor_kem_tree_hash_after")
+            };
+        let gid = array32(&response.gid).expect("gid");
+        let leaf_id = array32(&response.leaf_id).expect("leaf_id");
+        let kem_tree_hash_after =
+            array32(&response.kem_tree_hash_after).expect("kem_tree_hash_after");
+        let join_finalize_auth_token =
+            array32(&response.join_finalize_auth_token).expect("join_finalize_auth_token");
+        let provisioning_nonce = array32(&response.provisioning_nonce).expect("provisioning_nonce");
+        let join_records = response
+            .current_join_records
+            .iter()
+            .map(|record| BarrierJoinRecord {
+                device_pk: record.device_pk.clone(),
+                leaf_index: record.leaf_index,
+                ek_leaf: record.ek_leaf.clone(),
+            })
+            .collect::<Vec<_>>();
+        let payload = encode_cbor_det(&JoinProvisioningArtifactSignedPayload {
+            label: "cityg/join-provisioning-artifact-v1",
+            scope_id: &authority.descriptor.scope_id,
+            history_authority_extension: response.history_authority_extension.as_str(),
+            gid: &gid,
+            profile_version: response.profile_version.as_str(),
+            leaf_id: &leaf_id,
+            history_view_id: &history_commitment.history_view_id,
+            history_commitment_id: &history_commitment.history_commitment_id,
+            prev_history_commitment_id: &history_commitment.prev_history_commitment_id,
+            history_seq: history_commitment.history_seq,
+            barrier_version: response.barrier_version,
+            cover_leaf_index: response.cover_leaf_index,
+            n_max: response.n_max,
+            max_barrier_update_bytes: response.max_barrier_update_bytes,
+            kem_tree_hash_after: &kem_tree_hash_after,
+            current_predecessor_kem_tree_hash_after: &current_predecessor_kem_tree_hash_after,
+            join_finalize_auth_token: &join_finalize_auth_token,
+            provisioning_nonce: &provisioning_nonce,
+            provisioning_issued_at_ms: response.provisioning_issued_at_ms,
+            provisioning_expires_at_ms: response.provisioning_expires_at_ms,
+            fs_forward_leap_h: fs_policy.h,
+            fs_forward_leap_checkpoint_interval: fs_policy.checkpoint_interval,
+            fs_forward_leap_slack_anchor: fs_policy.slack_anchor,
+            fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
+            fs_forward_leap_slack_device: fs_policy.slack_device,
+            last_accepted_ec: response.last_accepted_ec,
+            history_authority_descriptor: response.history_authority_descriptor.as_slice(),
+            current_global_history_attestation: response
+                .current_global_history_attestation
+                .as_slice(),
+            current_join_records_completeness_attestation: response
+                .current_join_records_completeness_attestation
+                .as_slice(),
+            current_revoked_leaf_indices_completeness_attestation: response
+                .current_revoked_leaf_indices_completeness_attestation
+                .as_slice(),
+            current_barrier_update: response.current_barrier_update.as_slice(),
+            current_join_records: join_records.as_slice(),
+            current_revoked_leaf_indices: response.current_revoked_leaf_indices.as_slice(),
+        });
+        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
+            .as_bytes()
+            .to_vec();
+        encode_cbor_det(&JoinProvisioningArtifactWire {
+            scope_id: authority.descriptor.scope_id.to_vec(),
+            history_authority_extension: response.history_authority_extension.clone(),
+            gid: response.gid.clone(),
+            profile_version: response.profile_version.clone(),
+            leaf_id: response.leaf_id.clone(),
+            history_view_id: response.current_history_view_id.clone(),
+            history_commitment_id: current_history_commitment.history_commitment_id.clone(),
+            prev_history_commitment_id: current_history_commitment
+                .prev_history_commitment_id
+                .clone(),
+            history_seq: current_history_commitment.history_seq,
+            barrier_version: response.barrier_version,
+            cover_leaf_index: response.cover_leaf_index,
+            n_max: response.n_max,
+            max_barrier_update_bytes: response.max_barrier_update_bytes,
+            kem_tree_hash_after: response.kem_tree_hash_after.clone(),
+            current_predecessor_kem_tree_hash_after: current_predecessor_kem_tree_hash_after
+                .to_vec(),
+            join_finalize_auth_token: response.join_finalize_auth_token.clone(),
+            provisioning_nonce: response.provisioning_nonce.clone(),
+            provisioning_issued_at_ms: response.provisioning_issued_at_ms,
+            provisioning_expires_at_ms: response.provisioning_expires_at_ms,
+            fs_forward_leap_h: fs_policy.h,
+            fs_forward_leap_checkpoint_interval: fs_policy.checkpoint_interval,
+            fs_forward_leap_slack_anchor: fs_policy.slack_anchor,
+            fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
+            fs_forward_leap_slack_device: fs_policy.slack_device,
+            last_accepted_ec: response.last_accepted_ec,
+            signature,
+        })
+    }
+
+    fn finalize_join_ticket_payload(mut response: JoinTicketResponse) -> JoinTicketResponse {
+        if !response.history_authority_descriptor.is_empty()
+            && !response.history_authority_extension.is_empty()
+        {
+            response.provisioning_artifact = build_test_join_provisioning_artifact(&response);
+        }
+        response
+    }
+
     fn merge_ticket_with_history_authority_payload() -> MergeTicketResponse {
         let mut response = merge_ticket_ok_payload();
         let current_history_commitment = HistoryCommitment {
@@ -3634,7 +4024,7 @@ mod tests {
             HELPER_KIND_REVOKED_LEAVES.to_string(),
             vec![0xAB; 32],
         ));
-        JoinTicketResponse {
+        finalize_join_ticket_payload(JoinTicketResponse {
             profile_version: EXPECTED_PROFILE_VERSION.to_string(),
             gid: vec![0x41; 32],
             cat: vec![0x42; 32],
@@ -3678,7 +4068,7 @@ mod tests {
             fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
             last_accepted_ec: 21,
             ..JoinTicketResponse::default()
-        }
+        })
     }
 
     fn fs_forward_leap_policy_ok_payload() -> PbFsForwardLeapPolicy {
@@ -4457,23 +4847,11 @@ mod tests {
     async fn join_ticket_rejects_existing_group_without_current_barrier_update()
     -> Result<(), Box<dyn StdError>> {
         async fn mock_existing_group_without_barrier_update() -> impl IntoResponse {
-            encode_proto(JoinTicketResponse {
-                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
-                parent_root: vec![0x11; 32],
-                barrier_version: 2,
-                current_history_view_id: vec![0xD0; 32],
-                current_history_commitment: Some(history_commitment_ok_payload(
-                    0xD0, 0xD1, 0x00, 1,
-                )),
-                provisioning_nonce: vec![0xE6; 32],
-                provisioning_issued_at_ms: 1,
-                provisioning_expires_at_ms: u64::MAX,
-                cover_leaf_index: 0,
-                n_max: 1024,
-                max_barrier_update_bytes: 1_048_576,
-                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
-                ..JoinTicketResponse::default()
-            })
+            let mut response = join_ticket_ok_payload();
+            response.parent_root = vec![0x11; 32];
+            response.barrier_version = 2;
+            response.current_barrier_update.clear();
+            encode_proto(response)
         }
 
         let app = Router::new().route("/health", get(mock_health)).route(
@@ -4504,21 +4882,13 @@ mod tests {
     async fn join_ticket_rejects_existing_group_without_current_history_commitment()
     -> Result<(), Box<dyn StdError>> {
         async fn mock_existing_group_without_commitment() -> impl IntoResponse {
-            encode_proto(JoinTicketResponse {
-                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
-                parent_root: vec![0x11; 32],
-                barrier_version: 2,
-                current_history_view_id: vec![0xD0; 32],
-                provisioning_nonce: vec![0xE6; 32],
-                provisioning_issued_at_ms: 1,
-                provisioning_expires_at_ms: u64::MAX,
-                cover_leaf_index: 0,
-                n_max: 1024,
-                max_barrier_update_bytes: 1_048_576,
-                current_barrier_update: vec![0xAA],
-                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
-                ..JoinTicketResponse::default()
-            })
+            let mut response = join_ticket_ok_payload();
+            response.parent_root = vec![0x11; 32];
+            response.barrier_version = 2;
+            response.current_history_commitment = None;
+            response.current_barrier_update = vec![0xAA];
+            response.current_predecessor_kem_tree_hash_after = vec![0x99; 32];
+            encode_proto(response)
         }
 
         let app = Router::new().route("/health", get(mock_health)).route(
@@ -4549,24 +4919,12 @@ mod tests {
     async fn join_ticket_rejects_existing_group_without_predecessor_hash()
     -> Result<(), Box<dyn StdError>> {
         async fn mock_existing_group_without_predecessor_hash() -> impl IntoResponse {
-            encode_proto(JoinTicketResponse {
-                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
-                parent_root: vec![0x11; 32],
-                barrier_version: 2,
-                current_history_view_id: vec![0xD0; 32],
-                current_history_commitment: Some(history_commitment_ok_payload(
-                    0xD0, 0xD1, 0x00, 1,
-                )),
-                provisioning_nonce: vec![0xE6; 32],
-                provisioning_issued_at_ms: 1,
-                provisioning_expires_at_ms: u64::MAX,
-                cover_leaf_index: 0,
-                n_max: 1024,
-                max_barrier_update_bytes: 1_048_576,
-                current_barrier_update: vec![0xAA],
-                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
-                ..JoinTicketResponse::default()
-            })
+            let mut response = join_ticket_ok_payload();
+            response.parent_root = vec![0x11; 32];
+            response.barrier_version = 2;
+            response.current_barrier_update = vec![0xAA];
+            response.current_predecessor_kem_tree_hash_after.clear();
+            encode_proto(response)
         }
 
         let app = Router::new().route("/health", get(mock_health)).route(
@@ -4597,21 +4955,9 @@ mod tests {
     async fn join_ticket_rejects_missing_join_finalize_auth_token() -> Result<(), Box<dyn StdError>>
     {
         async fn mock_join_ticket_without_auth_token() -> impl IntoResponse {
-            encode_proto(JoinTicketResponse {
-                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
-                current_history_view_id: vec![0xD0; 32],
-                current_history_commitment: Some(history_commitment_ok_payload(
-                    0xD0, 0xD1, 0x00, 1,
-                )),
-                provisioning_nonce: vec![0xE6; 32],
-                provisioning_issued_at_ms: 1,
-                provisioning_expires_at_ms: u64::MAX,
-                cover_leaf_index: 0,
-                n_max: 1024,
-                max_barrier_update_bytes: 1_048_576,
-                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
-                ..JoinTicketResponse::default()
-            })
+            let mut response = join_ticket_ok_payload();
+            response.join_finalize_auth_token.clear();
+            encode_proto(response)
         }
 
         let app = Router::new().route("/health", get(mock_health)).route(
@@ -4641,21 +4987,9 @@ mod tests {
     #[tokio::test]
     async fn join_ticket_rejects_missing_provisioning_nonce() -> Result<(), Box<dyn StdError>> {
         async fn mock_join_ticket_without_provisioning_nonce() -> impl IntoResponse {
-            encode_proto(JoinTicketResponse {
-                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
-                current_history_view_id: vec![0xD0; 32],
-                current_history_commitment: Some(history_commitment_ok_payload(
-                    0xD0, 0xD1, 0x00, 1,
-                )),
-                join_finalize_auth_token: vec![0xE5; 32],
-                provisioning_issued_at_ms: 1,
-                provisioning_expires_at_ms: u64::MAX,
-                cover_leaf_index: 0,
-                n_max: 1024,
-                max_barrier_update_bytes: 1_048_576,
-                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
-                ..JoinTicketResponse::default()
-            })
+            let mut response = join_ticket_ok_payload();
+            response.provisioning_nonce.clear();
+            encode_proto(response)
         }
 
         let app = Router::new().route("/health", get(mock_health)).route(
@@ -4685,21 +5019,9 @@ mod tests {
     #[tokio::test]
     async fn join_ticket_rejects_missing_fs_forward_leap_policy() -> Result<(), Box<dyn StdError>> {
         async fn mock_join_ticket_without_fs_forward_leap_policy() -> impl IntoResponse {
-            encode_proto(JoinTicketResponse {
-                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
-                current_history_view_id: vec![0xD0; 32],
-                current_history_commitment: Some(history_commitment_ok_payload(
-                    0xD0, 0xD1, 0x00, 1,
-                )),
-                join_finalize_auth_token: vec![0xE5; 32],
-                provisioning_nonce: vec![0xE6; 32],
-                provisioning_issued_at_ms: 1,
-                provisioning_expires_at_ms: u64::MAX,
-                cover_leaf_index: 0,
-                n_max: 1024,
-                max_barrier_update_bytes: 1_048_576,
-                ..JoinTicketResponse::default()
-            })
+            let mut response = join_ticket_ok_payload();
+            response.fs_forward_leap_policy = None;
+            encode_proto(response)
         }
 
         let app = Router::new().route("/health", get(mock_health)).route(
@@ -4728,22 +5050,11 @@ mod tests {
     #[tokio::test]
     async fn join_ticket_rejects_expired_provisioning_artifact() -> Result<(), Box<dyn StdError>> {
         async fn mock_join_ticket_with_expired_provisioning() -> impl IntoResponse {
-            encode_proto(JoinTicketResponse {
-                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
-                current_history_view_id: vec![0xD0; 32],
-                current_history_commitment: Some(history_commitment_ok_payload(
-                    0xD0, 0xD1, 0x00, 1,
-                )),
-                join_finalize_auth_token: vec![0xE5; 32],
-                provisioning_nonce: vec![0xE6; 32],
-                provisioning_issued_at_ms: 1,
-                provisioning_expires_at_ms: 2,
-                cover_leaf_index: 0,
-                n_max: 1024,
-                max_barrier_update_bytes: 1_048_576,
-                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
-                ..JoinTicketResponse::default()
-            })
+            let mut response = join_ticket_ok_payload();
+            response.provisioning_issued_at_ms = 1;
+            response.provisioning_expires_at_ms = 2;
+            response.provisioning_artifact = build_test_join_provisioning_artifact(&response);
+            encode_proto(response)
         }
 
         let app = Router::new().route("/health", get(mock_health)).route(
@@ -4764,6 +5075,71 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("join ticket provisioning artifact expired"),
+            "unexpected error: {err}"
+        );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_missing_provisioning_artifact() -> Result<(), Box<dyn StdError>> {
+        async fn mock_join_ticket_without_provisioning_artifact() -> impl IntoResponse {
+            let mut response = join_ticket_ok_payload();
+            response.provisioning_artifact.clear();
+            encode_proto(response)
+        }
+
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_join_ticket_without_provisioning_artifact),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("missing provisioning_artifact must fail closed");
+        assert!(
+            err.to_string()
+                .contains("join ticket missing provisioning_artifact"),
+            "unexpected error: {err}"
+        );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_tampered_provisioning_artifact() -> Result<(), Box<dyn StdError>> {
+        async fn mock_join_ticket_with_tampered_provisioning_artifact() -> impl IntoResponse {
+            let mut response = join_ticket_ok_payload();
+            response.provisioning_expires_at_ms =
+                response.provisioning_expires_at_ms.saturating_sub(1);
+            encode_proto(response)
+        }
+
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_join_ticket_with_tampered_provisioning_artifact),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("tampered provisioning_artifact must fail closed");
+        assert!(
+            err.to_string()
+                .contains("join provisioning artifact token or expiry mismatch"),
             "unexpected error: {err}"
         );
         handle.abort();

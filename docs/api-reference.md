@@ -475,9 +475,30 @@ message JoinTicketResponse {
   bytes kem_tree_hash_after = 27;
   uint64 n_max = 28;
   uint64 max_barrier_update_bytes = 29;
+  bytes current_history_view_id = 30;
+  optional HistoryCommitment current_history_commitment = 31;
+  bytes current_barrier_update = 32;
+  bytes current_predecessor_kem_tree_hash_after = 33;
+  repeated BarrierJoinLeafRecord current_join_records = 34;
+  repeated uint32 current_revoked_leaf_indices = 35;
+  bytes join_finalize_auth_token = 36;
+  bytes provisioning_nonce = 37;
+  uint64 provisioning_issued_at_ms = 38;
+  uint64 provisioning_expires_at_ms = 39;
+  optional FsForwardLeapPolicy fs_forward_leap_policy = 40;
+  uint64 last_accepted_ec = 41;
+  bytes history_authority_descriptor = 42;
+  bytes current_global_history_attestation = 43;
+  bytes current_join_records_completeness_attestation = 44;
+  bytes current_revoked_leaf_indices_completeness_attestation = 45;
   string history_authority_extension = 46;  // "global-history-authority-v1" in the base profile
+  bytes provisioning_artifact = 47;         // Signed artifact over the delivered current-state provisioning fields
 }
 ```
+
+Base-profile notes:
+- `history_authority_extension` MUST be present and MUST equal `global-history-authority-v1` on successful responses.
+- `provisioning_artifact` MUST be non-empty and MUST be verified before a client consumes the delivered current-state provisioning fields.
 
 **Rust Client Example:**
 ```rust

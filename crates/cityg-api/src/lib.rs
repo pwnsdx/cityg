@@ -2095,6 +2095,22 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             .await?;
     }
 
+    let provisioning_artifact = {
+        let lane = state.server_for_gid(&ticket.gid);
+        let guard = lane.read().await;
+        guard
+            .join_provisioning_artifact_bytes(
+                &ticket,
+                API_PROFILE_VERSION,
+                history_authority_extension.as_str(),
+                history_authority_descriptor.as_slice(),
+                current_global_history_attestation.as_slice(),
+                current_join_records_completeness_attestation.as_slice(),
+                current_revoked_leaf_indices_completeness_attestation.as_slice(),
+            )
+            .map_err(ApiError::from)?
+    };
+
     let response = JoinTicketResponse {
         gid: ticket.gid.to_vec(),
         cat: ticket.cat.to_vec(),
@@ -2151,6 +2167,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         current_join_records_completeness_attestation,
         current_revoked_leaf_indices_completeness_attestation,
         history_authority_extension,
+        provisioning_artifact,
     };
 
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);

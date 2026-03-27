@@ -1638,6 +1638,27 @@ The initial JOIN anchor published by the joiner MUST carry `header[97]` in the S
 S12.2 Provisioning to joiner
 Join provisioning MUST deliver to the joiner as a signed and confidential provisioning artifact bound, at minimum, to `(gid, profile_version, current_history_view_id, current_history_commitment, current barrier_version, current kem_tree_hash_after, cover_leaf_index, N_max, max_barrier_update_bytes)`, and carrying a unique nonce, issuance time, and expiry. Joiners MUST reject artifacts that are stale, expired, replayed for the same join attempt, or not bound to the current `(gid, profile_version)`.
 The provisioning artifact, the provisioned `current_history_commitment`, the provisioned accepted current `barrier_update`, and any subsequent authenticated S3.3 A/B/C lookups used to justify `join_finalize` bootstrap MUST all come from one common `HistoryAuthorityScope`; otherwise the joiner MUST fail closed and remain pending.
+Base-profile wire/API requirement (normative):
+* `JoinTicketResponse` MUST carry a non-empty `provisioning_artifact`.
+* `provisioning_artifact` MUST be signed under the negotiated `history_authority_extension`.
+* That signed artifact MUST bind exactly the client-visible provisioning fields consumed for bootstrap and local activation checks, including at minimum:
+  * `history_authority_extension`
+  * `history_authority_descriptor`
+  * `current_global_history_attestation`
+  * `current_join_records_completeness_attestation`
+  * `current_revoked_leaf_indices_completeness_attestation`
+  * `current_history_view_id`
+  * `current_history_commitment`
+  * `current_barrier_update`
+  * `current_predecessor_kem_tree_hash_after`
+  * `current_join_records`
+  * `current_revoked_leaf_indices`
+  * `join_finalize_auth`
+  * `provisioning_nonce`
+  * `provisioning_issued_at_ms`
+  * `provisioning_expires_at_ms`
+  * authenticated FLG window parameters and current `last_accepted_ec`
+* Joiners MUST verify `provisioning_artifact` before consuming any provisioned current-state field.
 Join provisioning MUST deliver to the joiner:
 Barrier required fields:
 * current barrier_initialized (bool) -- for joins into an already-existing group under this profile, this MUST be true
