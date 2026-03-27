@@ -500,3 +500,25 @@ Impact audit:
 
 - `4.1` et `4.5` restent **Partial**, mais la partie “extension activée sans reçu FULL obligatoire” n’est plus ouverte dans le repo courant.
 - Le reste non fermé tient désormais surtout au fait que l’extension elle-même reste optionnelle dans le base profile.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche receipt signature verification côté client)
+
+Nouvelle passe implémentation:
+
+- le runtime GUI ne traite plus `header[181]` comme un simple marqueur de présence quand une authority extension est activée;
+- il vérifie maintenant cryptographiquement le receipt contre le `barrier_update` exact, `header[180]`, `header[182]`, le tuple `(gid, author_leaf_id, barrier_update_reason, updater_leaf)` et la clé POP auteur portée par le bundle;
+- les tests authority utilisent désormais de vrais receipts signés, avec un cas négatif de falsification;
+- un rerun `join_finalize` + smoke runtime reste vert après ce durcissement.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui validate_client_visible_activation_guards_ --features native-app -- --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::perform_join_second_member_can_send_immediately --features native-app -- --exact --nocapture`
+- `cityg-stress --plain --server-bind 127.0.0.1:18092 --server-url http://127.0.0.1:18092 --workers 1 --rounds-per-worker 2 --min-count 2 --max-count 2 --leaves-per-room 2 --watch-percent 100 --jitter-max-secs 0 --round-delay-secs 2 --message-burst-count 2 --message-burst-interval-ms 25 --capture-client-state-artifacts --api-bin /tmp/cityg-target-rerun-181/debug/cityg-api --join-leave-bin /tmp/cityg-target-rerun-181/debug/join_leave --artifact-dir /tmp/cityg-stress-smoke-181-verify-receipt --require-metrics`
+
+Impact audit:
+
+- `4.1` et `4.5` restent **Partial**, mais la partie “receipt présent sans vérification cryptographique côté client” n’est plus ouverte localement.
+- Le reste non fermé est désormais bien le mur protocolaire/global: caractère optionnel de l’extension et absence de garantie fédérée/non-equivocante au-delà du scope d’autorité négocié.

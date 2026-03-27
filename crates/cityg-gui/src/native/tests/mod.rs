@@ -7,10 +7,11 @@ use std::sync::{Arc, Once, atomic::AtomicU16};
 use tempfile::TempDir;
 use tokio::{task::JoinHandle, time::sleep};
 
-use crate::barrier_shared::encode_history_commitment_header;
+use crate::barrier_shared::{encode_full_verification_receipt, encode_history_commitment_header};
 use crate::native::app_actions::{
     CopyRoomIdAction, ShowSessionOverviewAction, TextSelectAllAction, ToggleSidebarAction,
 };
+use msphf_orchestrator::{LeafIdMode, compute_leaf_id};
 
 #[path = "client_state_props.rs"]
 mod client_state_props;
@@ -196,6 +197,22 @@ fn build_test_session(
     });
     session.barrier_state.current_barrier_full_verified = true;
     Ok(session)
+}
+
+fn install_valid_pop_identity(
+    session: &mut AppSession,
+) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
+    let leaf_id = compute_leaf_id(
+        LeafIdMode::PerGroup,
+        &session.gid,
+        "ML-DSA-65",
+        pop_public_key.as_slice(),
+    )?;
+    session.pop_public_key = pop_public_key;
+    session.pop_secret_key = pop_secret_key;
+    session.leaf_id = leaf_id;
+    Ok(leaf_id)
 }
 
 fn current_pending_activation_source(
@@ -442,6 +459,60 @@ fn build_activation_guard_header(
     header.insert(
         hdr::HDR_BARRIER_HISTORY_COMMITMENT,
         Value::Bytes(encode_history_commitment_header(commitment)?),
+    );
+    Ok(header)
+}
+
+fn build_authority_activation_guard_header(
+    session: &mut AppSession,
+    extension: HistoryAuthorityExtension,
+    attestation_bytes: Vec<u8>,
+) -> Result<BTreeMap<u64, Value>, Box<dyn std::error::Error>> {
+    let author_leaf_id = install_valid_pop_identity(session)?;
+    session.barrier_state.current_history_authority_extension = Some(extension);
+    session
+        .barrier_state
+        .current_global_history_attestation_bytes = attestation_bytes.clone();
+    session.barrier_state.n_max = 1;
+    session.barrier_state.max_barrier_update_bytes = 4096;
+    let snapshot_pre = vec![Vec::new()];
+    let kem_tree_hash_before = compute_barrier_tree_hash(1, snapshot_pre.as_slice())?;
+    let built = build_barrier_update_bytes(
+        &session.gid,
+        1,
+        0,
+        1,
+        0,
+        session.barrier_state.barrier_roots_hash,
+        kem_tree_hash_before,
+        snapshot_pre.as_slice(),
+    )?;
+    let mut header = build_activation_guard_header(session, 1, session.fs_ec, &built.raw_update)?;
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE_REASON,
+        Value::Integer(Integer::from(1u64)),
+    );
+    header.insert(
+        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+        Value::Bytes(attestation_bytes.clone()),
+    );
+    let raw_history_commitment = header
+        .get(&hdr::HDR_BARRIER_HISTORY_COMMITMENT)
+        .and_then(Value::as_bytes)
+        .ok_or("missing test barrier history commitment header")?;
+    let receipt = encode_full_verification_receipt(
+        &session.gid,
+        &author_leaf_id,
+        1,
+        0,
+        raw_history_commitment,
+        attestation_bytes.as_slice(),
+        built.raw_update.as_slice(),
+        session.pop_secret_key.as_slice(),
+    )?;
+    header.insert(
+        hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+        Value::Bytes(receipt),
     );
     Ok(header)
 }
@@ -1179,25 +1250,11 @@ fn validate_client_visible_activation_guards_rejects_global_history_attestation_
 fn validate_client_visible_activation_guards_accepts_matching_authority_headers()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xB96, "http://127.0.0.1:9", "room-b86", "bob")?;
-    session.barrier_state.current_history_authority_extension =
-        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1);
-    session
-        .barrier_state
-        .current_global_history_attestation_bytes = vec![0xAA, 0xBB, 0xCC];
-    let mut header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xE3])?;
-    header.insert(
-        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
-        Value::Bytes(
-            session
-                .barrier_state
-                .current_global_history_attestation_bytes
-                .clone(),
-        ),
-    );
-    header.insert(
-        hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
-        Value::Bytes(vec![0x10, 0x20]),
-    );
+    let header = build_authority_activation_guard_header(
+        &mut session,
+        HistoryAuthorityExtension::LocalHistoryAuthorityV1,
+        vec![0xAA, 0xBB, 0xCC],
+    )?;
     validate_client_visible_activation_guards(&session, &header)?;
     Ok(())
 }
@@ -1206,22 +1263,12 @@ fn validate_client_visible_activation_guards_accepts_matching_authority_headers(
 fn validate_client_visible_activation_guards_rejects_missing_receipt_for_local_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xB96, "http://127.0.0.1:9", "room-b86-miss", "bob")?;
-    session.barrier_state.current_history_authority_extension =
-        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1);
-    session
-        .barrier_state
-        .current_global_history_attestation_bytes = vec![0xAA, 0xBB, 0xCC];
-    let mut header =
-        build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xE3, 0x11])?;
-    header.insert(
-        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
-        Value::Bytes(
-            session
-                .barrier_state
-                .current_global_history_attestation_bytes
-                .clone(),
-        ),
-    );
+    let mut header = build_authority_activation_guard_header(
+        &mut session,
+        HistoryAuthorityExtension::LocalHistoryAuthorityV1,
+        vec![0xAA, 0xBB, 0xCC],
+    )?;
+    header.remove(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT);
     let err = validate_client_visible_activation_guards(&session, &header)
         .expect_err("authority-bound barrier state without receipt must fail");
     assert!(
@@ -1235,21 +1282,11 @@ fn validate_client_visible_activation_guards_rejects_missing_receipt_for_local_a
 fn validate_client_visible_activation_guards_accepts_matching_global_authority_headers()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xB97, "http://127.0.0.1:9", "room-b87g", "bob")?;
-    session.barrier_state.current_history_authority_extension =
-        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1);
-    session
-        .barrier_state
-        .current_global_history_attestation_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
-    let mut header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAB, 0xCD])?;
-    header.insert(
-        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
-        Value::Bytes(
-            session
-                .barrier_state
-                .current_global_history_attestation_bytes
-                .clone(),
-        ),
-    );
+    let header = build_authority_activation_guard_header(
+        &mut session,
+        HistoryAuthorityExtension::GlobalHistoryAuthorityV1,
+        vec![0xDE, 0xAD, 0xBE, 0xEF],
+    )?;
     validate_client_visible_activation_guards(&session, &header)?;
     Ok(())
 }
@@ -1258,27 +1295,42 @@ fn validate_client_visible_activation_guards_accepts_matching_global_authority_h
 fn validate_client_visible_activation_guards_rejects_missing_receipt_for_global_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xB97, "http://127.0.0.1:9", "room-b87g-miss", "bob")?;
-    session.barrier_state.current_history_authority_extension =
-        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1);
-    session
-        .barrier_state
-        .current_global_history_attestation_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
-    let mut header =
-        build_activation_guard_header(&session, 1, session.fs_ec, &[0xAB, 0xCD, 0x10])?;
-    header.insert(
-        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
-        Value::Bytes(
-            session
-                .barrier_state
-                .current_global_history_attestation_bytes
-                .clone(),
-        ),
-    );
+    let mut header = build_authority_activation_guard_header(
+        &mut session,
+        HistoryAuthorityExtension::GlobalHistoryAuthorityV1,
+        vec![0xDE, 0xAD, 0xBE, 0xEF],
+    )?;
+    header.remove(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT);
     let err = validate_client_visible_activation_guards(&session, &header)
         .expect_err("global authority-bound barrier state without receipt must fail");
     assert!(
         err.to_string().contains("960.7") && err.to_string().contains("header[181]"),
         "unexpected missing receipt error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_rejects_tampered_receipt_for_local_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB971, "http://127.0.0.1:9", "room-b87g-tamper", "bob")?;
+    let mut header = build_authority_activation_guard_header(
+        &mut session,
+        HistoryAuthorityExtension::LocalHistoryAuthorityV1,
+        vec![0xAA, 0xBB, 0xCC, 0xDD],
+    )?;
+    let receipt = header
+        .get_mut(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
+        .and_then(Value::as_bytes_mut)
+        .ok_or("missing test receipt bytes")?;
+    let last = receipt.last_mut().ok_or("empty test receipt bytes")?;
+    *last ^= 0x01;
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("tampered receipt must fail");
+    assert!(
+        err.to_string()
+            .contains("invalid header[181] full_verification_receipt"),
+        "unexpected tampered receipt error: {err}"
     );
     Ok(())
 }

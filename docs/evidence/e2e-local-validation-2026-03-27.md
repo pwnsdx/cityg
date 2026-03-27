@@ -612,3 +612,25 @@ Classify any future E2E failure as one of:
 - epoch sync/recovery
 - restart chaos
 - capacity/backpressure
+
+## Receipt-Authority Rerun (current state)
+
+Target:
+
+- revalidate fresh join plus runtime smoke after making GUI activation guards cryptographically verify `header[181]` under negotiated history-authority extensions
+
+Results:
+
+- targeted GUI authority suite: `cargo test --locked -p cityg-gui --bin cityg-gui validate_client_visible_activation_guards_ --features native-app -- --nocapture` passed (`14 passed`)
+- fresh-join path: `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::perform_join_second_member_can_send_immediately --features native-app -- --exact --nocapture` passed
+- live smoke: `/tmp/cityg-stress-smoke-181-verify-receipt/summary.txt`
+  - `workers=1`
+  - `worker_failures=0`
+  - `rounds_completed=2`
+  - `rounds_failed=0`
+  - `accept_epoch_ok=10`
+  - `refresh_conflicts=2`
+
+Notes:
+
+- the known server log line `500 invalid input: kbroad key missing` was still emitted during the targeted join test, but the join flow completed successfully and did not regress under the new receipt verification path
