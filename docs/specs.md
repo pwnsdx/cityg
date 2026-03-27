@@ -192,6 +192,8 @@ Shared authenticated-view rule (normative):
 * Any procedure that composes outputs from more than one of A)/B)/C)/D) for a single validation, activation, provisioning, or recovery decision MUST require all referenced authenticated responses/objects to validate to the same `HistoryCommitment`, unless that procedure explicitly defines a safe cross-view comparison. Missing or mismatched authenticated view binding MUST fail closed. In the FULL/updater chain-check and acceptance-correlation contexts, this failure MUST surface 960.9.
 * Historical snapshot fetches served from retained history MUST return the exact `HistoryCommitment` recorded when that snapshot became committed/fetchable, not a freshly recomputed current commitment.
 * If the deployment cannot provide authenticated completeness/finality for one requested result inside its `HistoryAuthorityScope`, it MUST return an authenticated "insufficient history / not available / pending" style outcome rather than silently omitting records and claiming success.
+* The base profile does NOT define a wire-visible proof of helper completeness/non-omission for A) or B).
+* `helper_completeness_attestation` is RESERVED for an optional extension that adds such a proof/object. In the base profile this field MUST be absent or empty; clients observing a non-empty value without an explicitly negotiated extension MUST fail closed.
 * `MAX_BARRIER_HELPER_PAGE_ENTRIES := 512`.
 * A), B), and C) are paged interfaces in the base profile. Each request MUST accept an explicit `page_offset`/`entry_offset` and `max_entries`; `max_entries == 0` means "use the profile default page size", namely `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
 * A), B), and C) MUST reject requests whose effective page size exceeds `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
@@ -203,6 +205,7 @@ Returns revoked cover leaf indices corresponding to revocation_roots_hash.
 This enumeration MUST be integrity-protected by membership/SRX state referenced by header[112]/[113].
 The authenticated response MUST carry `history_view_id`.
 The authenticated response MUST carry the corresponding `HistoryCommitment`.
+If the deployment defines a helper-completeness extension, that extension MUST bind any `helper_completeness_attestation` to `(gid, history_view_id, revocation_roots_hash, page_offset, total_entries, payload page)` and to one exact authenticated history object for that result.
 Returned indices MUST be strictly sorted, unique, `< N_max`, and therefore bounded in cardinality by `N_max`.
 
 B) ResolveJoinsSince(prev_barrier_version, page_offset?, max_entries?) -> list of JoinLeafRecord page
@@ -215,6 +218,7 @@ Activations that were never committed, were superseded before commitment, or are
 This enumeration MUST be integrity-protected by checkpoint history / membership state.
 The authenticated response MUST carry `history_view_id`.
 The authenticated response MUST carry the corresponding `HistoryCommitment`.
+If the deployment defines a helper-completeness extension, that extension MUST bind any `helper_completeness_attestation` to `(gid, history_view_id, prev_barrier_version, page_offset, total_entries, payload page)` and to one exact authenticated history object for that result.
 When later sections refer to `JoinSet` or `unresolved JoinSet`, they mean exactly this authenticated payload for the selected `history_view_id`.
 Output constraints (normative):
 * entries MUST be strictly sorted by increasing `leaf_index`,

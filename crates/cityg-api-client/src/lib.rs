@@ -1216,6 +1216,10 @@ impl CitygApiClient {
                     "barrier helper pagination page too large".to_string(),
                 ));
             }
+            ensure_helper_completeness_attestation_absent(
+                "revoked leaves",
+                response.helper_completeness_attestation.as_slice(),
+            )?;
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
@@ -1292,6 +1296,10 @@ impl CitygApiClient {
                     "barrier helper pagination page too large".to_string(),
                 ));
             }
+            ensure_helper_completeness_attestation_absent(
+                "joins since",
+                response.helper_completeness_attestation.as_slice(),
+            )?;
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
@@ -2163,6 +2171,18 @@ fn parse_barrier_helper_total_entries(total_entries: u32) -> Result<usize, Error
         .map_err(|_| Error::Parse("barrier helper total_entries overflow".to_string()))
 }
 
+fn ensure_helper_completeness_attestation_absent(
+    label: &str,
+    attestation: &[u8],
+) -> Result<(), Error> {
+    if attestation.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Parse(format!(
+        "{label} helper_completeness_attestation is reserved and must be empty in the base profile"
+    )))
+}
+
 fn ensure_barrier_helper_history_page(
     expected: &mut Option<([u8; 32], HistoryCommitment, usize)>,
     history_view_id: [u8; 32],
@@ -2419,6 +2439,7 @@ mod tests {
                     page_offset: request.page_offset,
                     next_page_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
+                    helper_completeness_attestation: Vec::new(),
                 })
             }
             "/v1/barrier/resolve_joins_since" => {
@@ -2444,6 +2465,7 @@ mod tests {
                     page_offset: request.page_offset,
                     next_page_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
+                    helper_completeness_attestation: Vec::new(),
                 })
             }
             "/v1/barrier/fetch_public_tree" => {
@@ -3491,6 +3513,90 @@ mod tests {
         assert!(matches!(
             err,
             Error::Parse(message) if message.contains("missing history_commitment")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn barrier_resolve_revoked_leaves_rejects_unexpected_completeness_attestation()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let app = Router::new().route(
+            "/v1/barrier/resolve_revoked_leaves",
+            post(|| async {
+                encode_proto(BarrierResolveRevokedLeavesResponse {
+                    leaf_indices: vec![1, 2],
+                    history_view_id: vec![0xD1; 32],
+                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    page_offset: 0,
+                    next_page_offset: None,
+                    total_entries: 2,
+                    helper_completeness_attestation: vec![0xAA, 0xBB],
+                })
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_resolve_revoked_leaves("room-1", &[0xCC; 32])
+            .await
+            .expect_err("unexpected completeness attestation must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("helper_completeness_attestation")
+                    && message.contains("base profile")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn barrier_resolve_joins_since_rejects_unexpected_completeness_attestation()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let app = Router::new().route(
+            "/v1/barrier/resolve_joins_since",
+            post(|| async {
+                encode_proto(BarrierResolveJoinsSinceResponse {
+                    records: vec![pb::BarrierJoinLeafRecord {
+                        device_pk: vec![0xAA; 32],
+                        leaf_index: 9,
+                        ek_leaf: vec![0xBB; 1184],
+                    }],
+                    history_view_id: vec![0xD1; 32],
+                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    page_offset: 0,
+                    next_page_offset: None,
+                    total_entries: 1,
+                    helper_completeness_attestation: vec![0xCC],
+                })
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_resolve_joins_since("room-1", 0)
+            .await
+            .expect_err("unexpected completeness attestation must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("helper_completeness_attestation")
+                    && message.contains("base profile")
         ));
 
         handle.abort();

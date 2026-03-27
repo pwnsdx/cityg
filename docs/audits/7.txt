@@ -366,6 +366,28 @@ Impact audit:
 
 --
 
+## Commentaires Codex (2026-03-27, tranche helper completeness reservation)
+
+Nouvelle vérification après patch spec + wire A/B:
+
+- **Toujours ouvert**: `7.4`. Le profil de base ne fournit toujours pas de preuve de complétude/non-omission pour `ResolveRevokedLeaves` / `ResolveJoinsSince`.
+- **Mais la frontière est maintenant explicite**: la spec réserve un champ wire `helper_completeness_attestation` pour une future extension, au lieu de laisser la question complètement implicite.
+- **Fail-closed dans le profil de base**: côté client API, toute réponse A/B qui porte un `helper_completeness_attestation` non vide sans extension négociée est maintenant rejetée explicitement.
+- **Pas de faux positif de “proof”**: le serveur/API de base émettent ce champ vide; cette tranche ne prétend pas résoudre l’omission byzantine, elle ferme seulement l’ambiguïté wire.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p cityg-api-client --lib barrier_resolve_revoked_leaves_rejects_unexpected_completeness_attestation`
+- `cargo test -p cityg-api-client --lib barrier_resolve_joins_since_rejects_unexpected_completeness_attestation`
+- `cargo test -p cityg-api --lib barrier_resolve_joins_since_returns_join_records`
+- `cargo test -p cityg-api --lib barrier_tree_and_revoked_leaves_endpoints_validate_inputs`
+
+Statut audit:
+
+- **Open**: 7.1, 7.4
+
+--
+
 ## Commentaires Codex (2026-03-27, tranche FLG local replay)
 
 Nouvelle passe spec + implémentation:

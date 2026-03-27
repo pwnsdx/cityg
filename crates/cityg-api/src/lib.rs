@@ -2525,6 +2525,7 @@ async fn barrier_resolve_revoked_leaves(
         page_offset,
         next_page_offset,
         total_entries,
+        helper_completeness_attestation: Vec::new(),
     };
     Ok(protobuf_response(&response))
 }
@@ -2581,6 +2582,7 @@ async fn barrier_resolve_joins_since(
         page_offset,
         next_page_offset,
         total_entries,
+        helper_completeness_attestation: Vec::new(),
     };
     Ok(protobuf_response(&response))
 }
@@ -6151,6 +6153,10 @@ mod tests {
             first.ek_leaf.is_empty() || first.ek_leaf.len() == ml_kem_public_key_bytes(),
             "ek_leaf should be absent or ML-KEM-768 size"
         );
+        assert!(
+            decoded.helper_completeness_attestation.is_empty(),
+            "base-profile joins-since response must not carry helper completeness attestation"
+        );
     }
 
     #[tokio::test]
@@ -6253,6 +6259,10 @@ mod tests {
         let revoked_decoded: BarrierResolveRevokedLeavesResponse =
             decode_proto_response(revoked_response).await;
         assert!(revoked_decoded.leaf_indices.is_empty());
+        assert!(
+            revoked_decoded.helper_completeness_attestation.is_empty(),
+            "base-profile revoked-leaves response must not carry helper completeness attestation"
+        );
 
         let mut bad_tree_body = Vec::new();
         BarrierFetchPublicTreeRequest {

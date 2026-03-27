@@ -325,6 +325,7 @@ message BarrierResolveRevokedLeavesResponse {
   uint32 page_offset = 4;
   optional uint32 next_page_offset = 5;
   uint32 total_entries = 6;
+  bytes helper_completeness_attestation = 7;
 }
 
 message BarrierJoinLeafRecord {
@@ -350,6 +351,7 @@ message BarrierResolveJoinsSinceResponse {
   uint32 page_offset = 4;
   optional uint32 next_page_offset = 5;
   uint32 total_entries = 6;
+  bytes helper_completeness_attestation = 7;
 }
 
 message BarrierFetchPublicTreeRequest {

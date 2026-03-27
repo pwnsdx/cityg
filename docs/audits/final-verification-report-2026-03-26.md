@@ -143,7 +143,7 @@ Summary:
 - `7.3` `Partial` — `ResolveJoinsSince` is now tied to an exact authenticated view and shared commitment, and the GUI persists/rechecks the current authenticated commitment before accepting a remote barrier bundle, but the whole chain is still not backed by a globally canonical target state with completeness proof.
   Proof: `docs/specs.md:180-189`, `docs/specs.md:197-213`, `crates/cityg-gui/src/native/session_types.rs:50-66`, `crates/cityg-gui/src/native/persisted/barrier.rs:15-28,157-184,346-431`, `crates/cityg-gui/src/native/barrier_runtime.rs:515-595`, `crates/cityg-gui/src/native/epoch_sync.rs:40-98,335-363`, `crates/cityg-gui/src/bin/join_leave.rs:376-416,1432-1440,1870-1878`, `crates/cityg-gui/src/native/tests/mod.rs:346-381,8327-8384`.
 - `7.4` `Open` — omission/completeness proofs for joins/revocations are still missing.
-  Proof: `docs/specs.md:183` leaves proof/object format deployment-defined; no completeness proof is mandated.
+  Proof: `docs/specs.md:194-201` still says the base profile has no wire-visible helper completeness proof; `docs/specs.md:201-222` only reserves `helper_completeness_attestation` for a future extension, and the client rejects any non-empty value in the base profile instead of treating it as a real proof.
 - `7.5` `Partial` — recover-only is now explicit, persisted, and escalates to `recovery_required`, but still remains a server-imposable degraded mode until FULL is re-established locally.
   Proof: `crates/cityg-gui/src/native/barrier_runtime.rs:91-99,603-655`.
 - `7.6` `Partial` — policy/governance/provisioning are better bound to current history, but not yet to a globally canonical authenticated lineage.
