@@ -23,9 +23,9 @@ Scope-hardening addendum (same date, later tranche):
 
 Summary:
 - Total findings reviewed: `51`
-- `Closed`: `18`
+- `Closed`: `21`
 - `Partial`: `15`
-- `Open`: `14`
+- `Open`: `11`
 - `Reclassified`: `4`
 
 ## Audit 1
@@ -88,7 +88,7 @@ Summary:
 - `4.4` `Open` — recover-only to FULL promotion is still not backed by a globally authenticated head; the circularity is reduced but not eliminated.
   Proof: `docs/specs.md:1111-1124`, `docs/specs.md:1154-1157`.
 - `4.5` `Open` — “FULL” still covers multiple meanings: local full-tree check, local current-state eligibility, and stronger active-server claims.
-  Proof: the spec narrows usage but still lacks a single wire-visible proof object for FULL status.
+  Proof: the spec narrows usage and both server and client now reject reserved `header[181]` / `header[182]` in the base profile, but there is still no single negotiated wire-visible proof object for FULL status.
 - `4.6` `Open` — the “applicable `ek_n` verification” path is still not globally anchored enough to rule out vacuous server-steered contexts.
   Proof: `docs/specs.md:1115-1124` improves bootstrap checks, but relies on local/current authenticated artifacts rather than global canonity.
 - `4.7` `Partial` — current version/current tree/current JoinSet binding is much tighter now through shared `HistoryCommitment`, `header[180]`, helper-state binding, persisted client-side `current_history_commitment`, and fail-closed rejection of remote barrier bundles whose declared current state does not match that local authenticated state.

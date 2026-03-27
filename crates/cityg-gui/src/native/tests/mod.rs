@@ -922,6 +922,42 @@ fn validate_client_visible_activation_guards_rejects_local_device_forward_jump()
 }
 
 #[test]
+fn validate_client_visible_activation_guards_rejects_full_verification_receipt_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let session = build_test_session(0xB94, "http://127.0.0.1:9", "room-b84", "bob")?;
+    let mut header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xE1])?;
+    header.insert(
+        hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+        Value::Bytes(vec![0x01]),
+    );
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("reserved full_verification_receipt header must fail");
+    assert!(
+        err.to_string().contains("960.7") && err.to_string().contains("header[181]"),
+        "unexpected reserved header error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_rejects_global_history_attestation_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let session = build_test_session(0xB95, "http://127.0.0.1:9", "room-b85", "bob")?;
+    let mut header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xE2])?;
+    header.insert(
+        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+        Value::Bytes(vec![0x02]),
+    );
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("reserved global_history_attestation header must fail");
+    assert!(
+        err.to_string().contains("960.7") && err.to_string().contains("header[182]"),
+        "unexpected reserved header error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
 fn extract_barrier_update_digest_uses_raw_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let mut header = BTreeMap::new();
     let raw = vec![0x01, 0x02, 0x03, 0x04];

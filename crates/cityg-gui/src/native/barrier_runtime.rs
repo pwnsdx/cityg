@@ -534,6 +534,16 @@ pub(super) fn validate_client_visible_activation_guards(
     session: &AppSession,
     header_map: &BTreeMap<u64, Value>,
 ) -> Result<()> {
+    if header_map.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT) {
+        return Err(anyhow!(
+            "client-side activation guard failed (960.7): header[181] full_verification_receipt is forbidden in the base profile"
+        ));
+    }
+    if header_map.contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION) {
+        return Err(anyhow!(
+            "client-side activation guard failed (960.7): header[182] global_history_attestation is forbidden in the base profile"
+        ));
+    }
     let fs_policy_version = header_policy_version(header_map, hdr::HDR_FS_POLICY_VERSION)
         .ok_or_else(|| {
             anyhow!("client-side activation guard failed (944.6): missing fs_policy_version")

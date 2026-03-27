@@ -381,3 +381,18 @@ Impact audit:
 
 - cela renforce encore `4.7` côté client/runtime;
 - cela ne ferme pas `4.1/4.4/4.5/4.6`, qui restent des sujets protocole / preuve FULL server-verifiable.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche reserved FULL/global headers on client)
+
+Nouvelle vérification après patch GUI:
+
+- **Toujours ouvert**: `4.1`, `4.4`, `4.5`, `4.6`. Cette tranche ne crée pas de preuve FULL server-verifiable.
+- **Mais le profil de base est désormais cohérent des deux côtés**: le serveur rejetait déjà `header[181]` / `header[182]`; le client GUI rejette maintenant lui aussi fail-closed tout bundle distant qui les transporte dans le profil de base.
+- **Impact concret**: un serveur/API ne peut plus tester silencieusement des pseudo-extensions `full_verification_receipt` ou `global_history_attestation` contre un client honnête du profil de base en espérant qu’il les ignore.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p cityg-gui --bin cityg-gui native::tests::validate_client_visible_activation_guards_rejects_full_verification_receipt_header --features native-app -- --exact`
+- `cargo test -p cityg-gui --bin cityg-gui native::tests::validate_client_visible_activation_guards_rejects_global_history_attestation_header --features native-app -- --exact`
