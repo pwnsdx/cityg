@@ -122,6 +122,40 @@ of the real server behavior.
 - Extended soak/load/chaos matrix: partially run, with qualified server restart,
   qualified injected client restart, and lane/head extremes validated
 
+## Receipt-Authority Rerun (current patch)
+
+This rerun was executed after hardening the history-authority extensions so that
+`header[181]` is mandatory whenever an authority-bound `barrier_update` carries
+`header[182]`.
+
+Target dir used:
+
+- `/tmp/cityg-target-rerun-181`
+
+Targeted proofs passed:
+
+- `cargo test --locked -p cityg-server tests::accept_epoch_rejects_barrier_update_missing_receipt_under_local_history_authority -- --exact --nocapture`
+- `cargo test --locked -p cityg-server tests::accept_epoch_rejects_barrier_update_missing_receipt_under_global_history_authority -- --exact --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::validate_client_visible_activation_guards_rejects_missing_receipt_for_local_authority --features native-app -- --exact --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::validate_client_visible_activation_guards_rejects_missing_receipt_for_global_authority --features native-app -- --exact --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::perform_join_second_member_can_send_immediately --features native-app -- --exact --nocapture`
+
+Live flows rerun on rebuilt binaries:
+
+- smoke:
+  - artifact dir: `/tmp/cityg-stress-smoke-181-current`
+  - result: `workers_passed=1 workers_failed=0 rounds=2/2 accept_ok=10 refresh_conflicts=2`
+- watch/concurrency:
+  - artifact dir: `/tmp/cityg-stress-flow-e-181-current`
+  - result: `workers_passed=2 workers_failed=0 rounds=8/8 accept_ok=47 refresh_conflicts=15`
+
+Conclusion:
+
+- The stricter receipt requirement did not regress fresh-join bootstrap.
+- The stricter receipt requirement did not regress the minimal smoke flow.
+- The stricter receipt requirement stayed green under the previously qualified
+  2-worker watch/burst concurrency profile.
+
 ## Extended Matrix Executed
 
 ### Flow A: baseline watch + burst

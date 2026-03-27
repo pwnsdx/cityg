@@ -1271,14 +1271,22 @@ Generic requirements on any such extension:
 * The extension MUST define who signs or authenticates the receipt and why that authenticator can distinguish FULL verification from recover-only processing.
 * A mere restatement of helper inputs, or a client self-assertion without an authenticated verifier/challenge, MUST NOT be documented as sufficient proof of FULL verification.
 
-Concrete extension defined by this document:
-* `local-history-authority-v1` is one concrete optional extension satisfying these requirements for one deployment-local `HistoryAuthorityScope`.
+Concrete extensions defined by this document:
+* `local-history-authority-v1` and `global-history-authority-v1` are two concrete optional extensions satisfying these requirements within one deployment-local or deployment-global `HistoryAuthorityScope`, respectively.
 * Under `local-history-authority-v1`, key `181` MUST carry `FullVerificationReceipt := { author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, signature:bstr }` encoded as deterministic CBOR.
 * Under `local-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_leaf, header[180], header[182], header[175])`.
 * Under `local-history-authority-v1`, the receipt MUST be signed by the author's POP signing key that is currently and uniquely bound to `author_leaf_id` in the server's authenticated membership view.
 * Under `local-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, and `updater_leaf` in key `181` match the actual author/current update being accepted.
 * Under `local-history-authority-v1`, key `181` MUST NOT appear without a matching key `182` for the same current `HistoryCommitment`; receipt validation fails closed if the attestation or commitment differs.
+* Under `local-history-authority-v1`, any accepted `barrier_update` originated under that extension MUST carry both key `181` and key `182`; a bundle carrying key `182` without key `181`, or vice versa, is malformed for this extension.
 * Under `local-history-authority-v1`, this receipt proves only that the author bound its `barrier_update` to one exact scope-local attested helper state. It does NOT upgrade that scope-local attestation into a globally canonical finality proof.
+* Under `global-history-authority-v1`, key `181` MUST carry the same `FullVerificationReceipt` object and deterministic CBOR form as above.
+* Under `global-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_leaf, header[180], header[182], header[175])`.
+* Under `global-history-authority-v1`, the receipt MUST be signed by the author's POP signing key that is currently and uniquely bound to `author_leaf_id` in the deployment-global authenticated membership view being used for acceptance.
+* Under `global-history-authority-v1`, the server MUST verify that `author_leaf_id`, `barrier_update_reason`, and `updater_leaf` in key `181` match the actual author/current update being accepted.
+* Under `global-history-authority-v1`, key `181` MUST NOT appear without a matching key `182` for the same current `HistoryCommitment`; receipt validation fails closed if the attestation or commitment differs.
+* Under `global-history-authority-v1`, any accepted `barrier_update` originated under that extension MUST carry both key `181` and key `182`; a bundle carrying key `182` without key `181`, or vice versa, is malformed for this extension.
+* Under `global-history-authority-v1`, this receipt proves only that the author bound its `barrier_update` to one exact deployment-global attested helper state. It does NOT, by itself, prove federated consensus across multiple deployments.
 
 Base-profile rule:
 * In the base profile defined by this document, key `181` MUST be absent and servers MUST reject its presence as malformed unless a deployment-specific extension explicitly enables it.
@@ -1290,6 +1298,7 @@ Key `182` is the generic wire slot for authenticated history attestations beyond
 * Under `local-history-authority-v1`, key `182` MUST carry the scope-local `GlobalHistoryAttestation` object defined in S3.3.E.
 * The client MUST verify key `182` under the negotiated `HistoryAuthorityDescriptor` and MUST require its `scope_id`, `history_view_id`, `HistoryCommitment`, `barrier_version`, and `kem_tree_hash_after` to match the helper/current-state decision it is about to make.
 * The server MUST reject key `182` if it does not exactly match the current authenticated `HistoryCommitment`, `barrier_version`, and `kem_tree_hash_after` that the server is using for acceptance.
+* When a client or server validates a `barrier_update` under `local-history-authority-v1`, key `182` MUST be accompanied by key `181`; a lone attestation is invalid.
 * When `local-history-authority-v1` is negotiated, successful A)/B)/C)/D) responses and any join/merge/provisioning current-state helper bundles used for one decision MUST all validate to the same `HistoryAuthorityDescriptor` and the same scope-local attestation lineage.
 * `local-history-authority-v1` uses `finality_kind = "local-append-only"` and therefore proves only scope-local append-only correlation. It MUST NOT be described as a globally canonical/final history proof.
 
@@ -1298,6 +1307,7 @@ Key `182` is the generic wire slot for authenticated history attestations beyond
 * Under `global-history-authority-v1`, key `182` MUST carry the deployment-global `GlobalHistoryAttestation` object defined in S3.3.F.
 * The client MUST verify key `182` under the negotiated `HistoryAuthorityDescriptor` and MUST require its `scope_id`, `history_view_id`, `HistoryCommitment`, `barrier_version`, and `kem_tree_hash_after` to match the helper/current-state decision it is about to make.
 * The server MUST reject key `182` if it does not exactly match the current authenticated `HistoryCommitment`, `barrier_version`, and `kem_tree_hash_after` that the server is using for acceptance under that deployment-global authority.
+* When a client or server validates a `barrier_update` under `global-history-authority-v1`, key `182` MUST be accompanied by key `181`; a lone attestation is invalid.
 * When `global-history-authority-v1` is negotiated, successful A)/B)/C)/D) responses and any join/merge/provisioning current-state helper bundles used for one decision MUST all validate to the same `HistoryAuthorityDescriptor` and the same deployment-global attestation lineage.
 * `global-history-authority-v1` uses `finality_kind = "global-append-only"` and therefore proves one deployment-global append-only lineage. It still does NOT, by itself, prove federated consensus across multiple independent deployments.
 * A bare client self-assertion, or a restatement of one local `HistoryCommitment`, MUST NOT be documented as sufficient global-history attestation.

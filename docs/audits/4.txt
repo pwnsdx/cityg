@@ -478,3 +478,25 @@ Lecture consolidée:
 - `4.6` n’est plus honnêtement `Open`: le chemin `ek_n` peut désormais être ancré à une attestation de head append-only à l’échelle du déploiement quand `global-history-authority-v1` est négociée.
 - `4.1/4.5` sont désormais mieux lus comme “extension concrète disponible mais non obligatoire dans le base profile”, pas comme absence totale de preuve server-verifiable.
 - Rien n’est `Closed` au-delà de `4.3`, parce que la frontière FULL/recover-only reste encore optionnelle au niveau protocolaire de base.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche receipt mandatory under history authority)
+
+Nouvelle passe spec + implémentation:
+
+- les deux extensions concrètes définies par ce document imposent maintenant explicitement `header[181]` dès qu’un `barrier_update` transporte `header[182]`;
+- le serveur normalise cette exigence même lors du chargement d’un état d’autorité persisté plus ancien;
+- le runtime GUI rejette désormais aussi fail-closed un bundle entrant qui transporte une attestation d’autorité sans receipt correspondant.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test --locked -p cityg-server tests::accept_epoch_rejects_barrier_update_missing_receipt_under_local_history_authority -- --exact --nocapture`
+- `cargo test --locked -p cityg-server tests::accept_epoch_rejects_barrier_update_missing_receipt_under_global_history_authority -- --exact --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::validate_client_visible_activation_guards_rejects_missing_receipt_for_local_authority --features native-app -- --exact --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::validate_client_visible_activation_guards_rejects_missing_receipt_for_global_authority --features native-app -- --exact --nocapture`
+
+Impact audit:
+
+- `4.1` et `4.5` restent **Partial**, mais la partie “extension activée sans reçu FULL obligatoire” n’est plus ouverte dans le repo courant.
+- Le reste non fermé tient désormais surtout au fait que l’extension elle-même reste optionnelle dans le base profile.

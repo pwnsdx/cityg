@@ -1203,6 +1203,35 @@ fn validate_client_visible_activation_guards_accepts_matching_authority_headers(
 }
 
 #[test]
+fn validate_client_visible_activation_guards_rejects_missing_receipt_for_local_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB96, "http://127.0.0.1:9", "room-b86-miss", "bob")?;
+    session.barrier_state.current_history_authority_extension =
+        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1);
+    session
+        .barrier_state
+        .current_global_history_attestation_bytes = vec![0xAA, 0xBB, 0xCC];
+    let mut header =
+        build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xE3, 0x11])?;
+    header.insert(
+        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+        Value::Bytes(
+            session
+                .barrier_state
+                .current_global_history_attestation_bytes
+                .clone(),
+        ),
+    );
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("authority-bound barrier state without receipt must fail");
+    assert!(
+        err.to_string().contains("960.7") && err.to_string().contains("header[181]"),
+        "unexpected missing receipt error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
 fn validate_client_visible_activation_guards_accepts_matching_global_authority_headers()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xB97, "http://127.0.0.1:9", "room-b87g", "bob")?;
@@ -1222,6 +1251,35 @@ fn validate_client_visible_activation_guards_accepts_matching_global_authority_h
         ),
     );
     validate_client_visible_activation_guards(&session, &header)?;
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_rejects_missing_receipt_for_global_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB97, "http://127.0.0.1:9", "room-b87g-miss", "bob")?;
+    session.barrier_state.current_history_authority_extension =
+        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1);
+    session
+        .barrier_state
+        .current_global_history_attestation_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
+    let mut header =
+        build_activation_guard_header(&session, 1, session.fs_ec, &[0xAB, 0xCD, 0x10])?;
+    header.insert(
+        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+        Value::Bytes(
+            session
+                .barrier_state
+                .current_global_history_attestation_bytes
+                .clone(),
+        ),
+    );
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("global authority-bound barrier state without receipt must fail");
+    assert!(
+        err.to_string().contains("960.7") && err.to_string().contains("header[181]"),
+        "unexpected missing receipt error: {err}"
+    );
     Ok(())
 }
 

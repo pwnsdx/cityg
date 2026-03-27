@@ -181,6 +181,10 @@ impl HistoryAuthorityMode {
         }
     }
 
+    fn requires_full_verification_receipt(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
     fn from_persisted_tag(tag: &str) -> Result<Self, CityGError> {
         match tag {
             "" | "local" => Ok(Self::Local),
@@ -211,14 +215,16 @@ impl ServerConfig {
     pub fn enable_local_history_authority(&mut self) {
         self.history_authority = Some(HistoryAuthorityConfig {
             mode: HistoryAuthorityMode::Local,
-            require_full_verification_receipt: true,
+            require_full_verification_receipt: HistoryAuthorityMode::Local
+                .requires_full_verification_receipt(),
         });
     }
 
     pub fn enable_global_history_authority(&mut self) {
         self.history_authority = Some(HistoryAuthorityConfig {
             mode: HistoryAuthorityMode::Global,
-            require_full_verification_receipt: true,
+            require_full_verification_receipt: HistoryAuthorityMode::Global
+                .requires_full_verification_receipt(),
         });
     }
 }
@@ -7214,6 +7220,31 @@ mod tests {
     }
 
     #[test]
+    fn accept_epoch_rejects_barrier_update_missing_receipt_under_global_history_authority()
+    -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x7C)?;
+        let mut server = demo_server_with_global_history_authority();
+        server.accept_epoch(&generated.bundle)?;
+
+        let (mut bundle, _pristine_bundle) =
+            build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+        bundle
+            .header_map
+            .remove(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT);
+
+        let err = server
+            .accept_epoch(&bundle)
+            .expect_err("global history authority must require full verification receipt");
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                    && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn invalid_persisted_kbroad_state_is_ignored_on_boot() -> Result<(), CityGError> {
         let _serial = super::journal_serial_guard();
         let dir = tempdir()?;
@@ -12751,8 +12782,9 @@ fn load_history_authority_state(path: &Path) -> Result<Option<HistoryAuthoritySt
     {
         return Ok(None);
     }
+    let mode = HistoryAuthorityMode::from_persisted_tag(&persisted.mode)?;
     Ok(Some(HistoryAuthorityState {
-        mode: HistoryAuthorityMode::from_persisted_tag(&persisted.mode)?,
+        mode,
         descriptor: HistoryAuthorityDescriptor {
             scope_id: decode_hex_32("history authority scope_id", &persisted.scope_id_hex)?,
             public_key: hex::decode(&persisted.public_key_hex)
@@ -12760,7 +12792,10 @@ fn load_history_authority_state(path: &Path) -> Result<Option<HistoryAuthoritySt
         },
         secret_key: hex::decode(&persisted.secret_key_hex)
             .map_err(|_| CityGError::InvalidInput("invalid history authority secret key"))?,
-        require_full_verification_receipt: persisted.require_full_verification_receipt,
+        require_full_verification_receipt: normalize_history_authority_receipt_requirement(
+            mode,
+            persisted.require_full_verification_receipt,
+        ),
     }))
 }
 
@@ -12821,8 +12856,22 @@ fn generate_history_authority_state(
             public_key,
         },
         secret_key,
-        require_full_verification_receipt,
+        require_full_verification_receipt: normalize_history_authority_receipt_requirement(
+            mode,
+            require_full_verification_receipt,
+        ),
     })
+}
+
+fn normalize_history_authority_receipt_requirement(
+    mode: HistoryAuthorityMode,
+    requested: bool,
+) -> bool {
+    if mode.requires_full_verification_receipt() {
+        true
+    } else {
+        requested
+    }
 }
 
 fn load_or_generate_history_authority_state(
@@ -12830,6 +12879,8 @@ fn load_or_generate_history_authority_state(
     mode: HistoryAuthorityMode,
     require_full_verification_receipt: bool,
 ) -> Result<HistoryAuthorityState, CityGError> {
+    let require_full_verification_receipt =
+        normalize_history_authority_receipt_requirement(mode, require_full_verification_receipt);
     if let Some(path) = path {
         if let Some(mut state) = load_history_authority_state(path)? {
             state.mode = mode;

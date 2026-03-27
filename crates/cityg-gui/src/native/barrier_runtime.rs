@@ -587,6 +587,17 @@ pub(super) fn validate_client_visible_activation_guards(
             "client-side activation guard failed (960.7): unexpected header[182] global_history_attestation without pinned local authority state"
         ));
     }
+    if global_history_attestation.is_some()
+        && session
+            .barrier_state
+            .current_history_authority_extension
+            .is_some()
+        && !header_map.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
+    {
+        return Err(anyhow!(
+            "client-side activation guard failed (960.7): missing header[181] full_verification_receipt for authority-bound barrier state"
+        ));
+    }
     if header_map.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
         && global_history_attestation.is_none()
     {
