@@ -122,6 +122,7 @@ fn apply_local_published_barrier_merge(
         pre_publish_barrier_roots_hash,
         pre_publish_kem_tree_hash_after,
         pre_publish_current_history_commitment,
+        pre_publish_current_history_authority_extension,
         pre_publish_current_global_history_attestation_bytes,
         mut forward_state_after,
         fs_forward_leap_policy,
@@ -136,6 +137,7 @@ fn apply_local_published_barrier_merge(
         pre_publish_barrier_roots_hash,
         pre_publish_kem_tree_hash_after,
         pre_publish_current_history_commitment,
+        pre_publish_current_history_authority_extension,
         pre_publish_current_global_history_attestation_bytes,
     );
     let activation_source_before_apply = capture_barrier_pending_activation_source(session);
@@ -215,6 +217,7 @@ fn apply_local_published_barrier_merge(
     clear_current_public_tree_cache(&mut session.barrier_state);
     session.barrier_state.current_history_view_id = [0u8; 32];
     session.barrier_state.current_history_commitment = None;
+    session.barrier_state.current_history_authority_extension = None;
     session
         .barrier_state
         .current_global_history_attestation_bytes
@@ -255,6 +258,27 @@ fn ensure_full_barrier_verification_for_origin(
     if !current_barrier_full_verified {
         return Err(anyhow!(
             "cannot originate barrier updates from recover-only barrier state; re-establish FULL barrier verification first"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_supported_attested_current_state_extension(
+    context: &str,
+    extension: Option<HistoryAuthorityExtension>,
+    current_global_history_attestation_bytes: &[u8],
+) -> Result<()> {
+    if current_global_history_attestation_bytes.is_empty() {
+        if extension.is_some() {
+            return Err(anyhow!(
+                "{context} carries history authority extension without current global history attestation"
+            ));
+        }
+        return Ok(());
+    }
+    if extension != Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) {
+        return Err(anyhow!(
+            "{context} carries attested current state without supported history authority extension"
         ));
     }
     Ok(())
@@ -310,6 +334,7 @@ async fn publish_revocation_merge_from_ticket(
         barrier_version: local_barrier_version,
         kem_tree_hash_after: local_kem_tree_hash_after,
         current_history_commitment: local_current_history_commitment,
+        current_history_authority_extension: local_current_history_authority_extension,
         mut forward_state,
         pop_public_key,
         pop_secret_key,
@@ -356,19 +381,28 @@ async fn publish_revocation_merge_from_ticket(
         cover_leaf_index: revoked_cover_leaf_index,
         kem_tree_hash_after,
         current_history_commitment: ticket_history_commitment,
+        history_authority_extension: ticket_history_authority_extension,
         current_global_history_attestation_bytes,
         n_max,
         max_barrier_update_bytes,
         ..
     } = ticket;
 
+    ensure_supported_attested_current_state_extension(
+        operation_label,
+        ticket_history_authority_extension,
+        current_global_history_attestation_bytes.as_slice(),
+    )?;
+
     ensure_non_regressing_authenticated_current_state(
         local_barrier_version,
         &local_kem_tree_hash_after,
         local_current_history_commitment.as_ref(),
+        local_current_history_authority_extension,
         barrier_version,
         &bytes32("kem_tree_hash_after", &kem_tree_hash_after)?,
         &ticket_history_commitment,
+        ticket_history_authority_extension,
         operation_label,
     )?;
 
@@ -565,6 +599,7 @@ async fn publish_revocation_merge_from_ticket(
             barrier_roots_hash: committed_revocation_roots_hash,
             kem_tree_hash_after: snapshot_hash,
             current_history_commitment: Some(ticket_history_commitment.clone()),
+            current_history_authority_extension: ticket_history_authority_extension,
             current_global_history_attestation_bytes: current_global_history_attestation_bytes
                 .clone(),
             fs_ec,
@@ -706,6 +741,7 @@ async fn publish_revocation_merge_from_ticket(
         pre_publish_barrier_roots_hash: committed_revocation_roots_hash,
         pre_publish_kem_tree_hash_after: snapshot_hash,
         pre_publish_current_history_commitment: ticket_history_commitment,
+        pre_publish_current_history_authority_extension: ticket_history_authority_extension,
         pre_publish_current_global_history_attestation_bytes:
             current_global_history_attestation_bytes,
         forward_state_after: forward_state,
@@ -899,6 +935,7 @@ async fn perform_barrier_merge_inner(
         barrier_version: local_barrier_version,
         kem_tree_hash_after: local_kem_tree_hash_after,
         current_history_commitment: local_current_history_commitment,
+        current_history_authority_extension: local_current_history_authority_extension,
         forward_state,
         pop_public_key,
         pop_secret_key,
@@ -991,19 +1028,28 @@ async fn perform_barrier_merge_inner(
         cover_leaf_index,
         kem_tree_hash_after,
         current_history_commitment: ticket_history_commitment,
+        history_authority_extension: ticket_history_authority_extension,
         current_global_history_attestation_bytes,
         n_max,
         max_barrier_update_bytes,
         ..
     } = ticket;
 
+    ensure_supported_attested_current_state_extension(
+        mode.label(),
+        ticket_history_authority_extension,
+        current_global_history_attestation_bytes.as_slice(),
+    )?;
+
     ensure_non_regressing_authenticated_current_state(
         local_barrier_version,
         &local_kem_tree_hash_after,
         local_current_history_commitment.as_ref(),
+        local_current_history_authority_extension,
         barrier_version,
         &bytes32("kem_tree_hash_after", &kem_tree_hash_after)?,
         &ticket_history_commitment,
+        ticket_history_authority_extension,
         mode.label(),
     )?;
 
@@ -1203,6 +1249,7 @@ async fn perform_barrier_merge_inner(
             barrier_roots_hash: committed_revocation_roots_hash,
             kem_tree_hash_after: snapshot_hash,
             current_history_commitment: Some(ticket_history_commitment.clone()),
+            current_history_authority_extension: ticket_history_authority_extension,
             current_global_history_attestation_bytes: current_global_history_attestation_bytes
                 .clone(),
             fs_ec,
@@ -1448,6 +1495,7 @@ async fn perform_barrier_merge_inner(
         pre_publish_barrier_roots_hash: committed_revocation_roots_hash,
         pre_publish_kem_tree_hash_after: snapshot_hash,
         pre_publish_current_history_commitment: ticket_history_commitment,
+        pre_publish_current_history_authority_extension: ticket_history_authority_extension,
         pre_publish_current_global_history_attestation_bytes:
             current_global_history_attestation_bytes,
         forward_state_after: prepared.forward_state_after,

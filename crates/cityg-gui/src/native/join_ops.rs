@@ -7,6 +7,20 @@ fn is_fs_forward_jump_group_http_error(
     freeze_code == Some(9476) || freeze_reason == Some("fs_forward_jump_group")
 }
 
+fn parse_join_ticket_history_authority_extension(
+    raw: &str,
+) -> Result<Option<HistoryAuthorityExtension>> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw == HistoryAuthorityExtension::LocalHistoryAuthorityV1.as_str() {
+        return Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1));
+    }
+    Err(anyhow!(
+        "join ticket carries unsupported history authority extension: {raw}"
+    ))
+}
+
 pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let JoinParams {
         server_url,
@@ -255,6 +269,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             })
         })
         .transpose()?;
+    let current_history_authority_extension =
+        parse_join_ticket_history_authority_extension(&ticket.history_authority_extension)?;
     let join_finalize_auth_token =
         bytes32("join_finalize_auth_token", &ticket.join_finalize_auth_token)?;
     let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
@@ -448,6 +464,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 &ticket.current_history_view_id,
             )?,
             current_history_commitment: current_history_commitment.clone(),
+            current_history_authority_extension,
             current_global_history_attestation_bytes: ticket
                 .current_global_history_attestation
                 .clone(),

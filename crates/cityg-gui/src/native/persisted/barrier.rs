@@ -22,6 +22,8 @@ pub(in crate::native) struct PersistedBarrierState {
     #[serde(default)]
     pub(in crate::native) current_history_commitment: Option<PersistedBarrierHistoryCommitment>,
     #[serde(default)]
+    pub(in crate::native) current_history_authority_extension: String,
+    #[serde(default)]
     pub(in crate::native) current_global_history_attestation_hex: String,
     #[serde(default)]
     pub(in crate::native) bootstrap_history_commitment: Option<PersistedBarrierHistoryCommitment>,
@@ -134,6 +136,8 @@ pub(in crate::native) struct PersistedBarrierPendingActivationSource {
     #[serde(default)]
     pub(in crate::native) current_history_commitment: Option<PersistedBarrierHistoryCommitment>,
     #[serde(default)]
+    pub(in crate::native) current_history_authority_extension: String,
+    #[serde(default)]
     pub(in crate::native) current_global_history_attestation_hex: String,
     #[serde(default)]
     pub(in crate::native) fs_ec: u64,
@@ -188,6 +192,29 @@ impl PersistedBarrierHistoryCommitment {
             )?,
             history_seq: self.history_seq,
         })
+    }
+}
+
+fn encode_history_authority_extension(extension: Option<HistoryAuthorityExtension>) -> String {
+    extension
+        .map(|extension| extension.as_str().to_string())
+        .unwrap_or_default()
+}
+
+fn decode_history_authority_extension(
+    field_name: &str,
+    raw: &str,
+) -> Result<Option<HistoryAuthorityExtension>> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    match raw {
+        "local-history-authority-v1" => {
+            Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1))
+        }
+        other => Err(anyhow!(
+            "{field_name} carries unsupported history authority extension: {other}"
+        )),
     }
 }
 
@@ -323,6 +350,9 @@ impl PersistedBarrierPendingActivationSource {
             current_history_commitment: source
                 .current_history_commitment
                 .map(PersistedBarrierHistoryCommitment::from_runtime),
+            current_history_authority_extension: encode_history_authority_extension(
+                source.current_history_authority_extension,
+            ),
             current_global_history_attestation_hex: hex_encode(
                 source.current_global_history_attestation_bytes.as_slice(),
             ),
@@ -350,6 +380,10 @@ impl PersistedBarrierPendingActivationSource {
                     )
                 })
                 .transpose()?,
+            current_history_authority_extension: decode_history_authority_extension(
+                "barrier_state.pending.activation_source.current_history_authority_extension",
+                &self.current_history_authority_extension,
+            )?,
             current_global_history_attestation_bytes: decode_hex_vec(
                 "barrier_state.pending.activation_source.current_global_history_attestation_hex",
                 &self.current_global_history_attestation_hex,
@@ -383,6 +417,9 @@ impl PersistedBarrierState {
             current_history_commitment: state
                 .current_history_commitment
                 .map(PersistedBarrierHistoryCommitment::from_runtime),
+            current_history_authority_extension: encode_history_authority_extension(
+                state.current_history_authority_extension,
+            ),
             current_global_history_attestation_hex: hex_encode(
                 state.current_global_history_attestation_bytes.as_slice(),
             ),
@@ -447,6 +484,10 @@ impl PersistedBarrierState {
                     commitment.into_runtime("barrier_state.current_history_commitment")
                 })
                 .transpose()?,
+            current_history_authority_extension: decode_history_authority_extension(
+                "barrier_state.current_history_authority_extension",
+                &self.current_history_authority_extension,
+            )?,
             current_global_history_attestation_bytes: decode_hex_vec(
                 "barrier_state.current_global_history_attestation_hex",
                 &self.current_global_history_attestation_hex,

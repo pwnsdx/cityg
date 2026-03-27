@@ -66,9 +66,11 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
         session.barrier_state.barrier_version,
         &session.barrier_state.kem_tree_hash_after,
         session.barrier_state.current_history_commitment.as_ref(),
+        session.barrier_state.current_history_authority_extension,
         ticket.barrier_version,
         &ticket_kem_tree_hash_after,
         &ticket_history_commitment,
+        ticket.history_authority_extension,
         "epoch sync merge ticket",
     )?;
     let ticket_barrier_roots_hash =
@@ -110,6 +112,7 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
             ticket_barrier_roots_hash,
             ticket_kem_tree_hash_after,
             ticket_history_commitment,
+            ticket.history_authority_extension,
             ticket.current_global_history_attestation_bytes.clone(),
         );
         return Ok(EpochSyncOutcome {
@@ -187,6 +190,7 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
                     source.barrier_roots_hash,
                     source.kem_tree_hash_after,
                     history_commitment,
+                    source.current_history_authority_extension,
                     source.current_global_history_attestation_bytes.clone(),
                 );
             } else {
@@ -195,6 +199,9 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
                 validation_session.barrier_state.kem_tree_hash_after = source.kem_tree_hash_after;
                 validation_session.barrier_state.current_history_view_id = [0u8; 32];
                 validation_session.barrier_state.current_history_commitment = None;
+                validation_session
+                    .barrier_state
+                    .current_history_authority_extension = None;
                 validation_session
                     .barrier_state
                     .current_global_history_attestation_bytes =
@@ -434,6 +441,7 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
         ticket_barrier_roots_hash,
         ticket_kem_tree_hash_after,
         ticket_history_commitment,
+        ticket.history_authority_extension,
         ticket.current_global_history_attestation_bytes.clone(),
     );
     if session

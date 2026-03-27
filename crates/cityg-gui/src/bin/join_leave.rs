@@ -38,7 +38,8 @@ use ciborium::value::{Integer, Value};
 #[cfg(test)]
 use cityg_api_client::BarrierJoinRecord;
 use cityg_api_client::{
-    CitygApiClient, Error as ApiClientError, HistoryCommitment, IdentityBinding,
+    CitygApiClient, Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment,
+    IdentityBinding,
 };
 #[cfg(test)]
 use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
@@ -123,6 +124,41 @@ fn new_api_client(server_url: &str) -> CitygApiClient {
         client = client.with_message_auth_token(token);
     }
     client
+}
+
+fn ensure_supported_attested_current_state_extension(
+    context: &str,
+    extension: Option<HistoryAuthorityExtension>,
+    current_global_history_attestation_bytes: &[u8],
+) -> Result<()> {
+    if current_global_history_attestation_bytes.is_empty() {
+        if extension.is_some() {
+            return Err(anyhow!(
+                "{context} carries history authority extension without current global history attestation"
+            ));
+        }
+        return Ok(());
+    }
+    if extension != Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) {
+        return Err(anyhow!(
+            "{context} carries attested current state without supported history authority extension"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_join_ticket_history_authority_extension(
+    raw: &str,
+) -> Result<Option<HistoryAuthorityExtension>> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw == HistoryAuthorityExtension::LocalHistoryAuthorityV1.as_str() {
+        return Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1));
+    }
+    Err(anyhow!(
+        "join ticket carries unsupported history authority extension: {raw}"
+    ))
 }
 
 fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
@@ -850,6 +886,7 @@ struct Session {
     seed_bundle_commit: [u8; 32],
     fs_fingerprint: Option<[u8; 32]>,
     join_finalize_auth_token: [u8; 32],
+    current_history_authority_extension: Option<HistoryAuthorityExtension>,
     current_global_history_attestation_bytes: Vec<u8>,
     stored_header_map: BTreeMap<u64, Value>,
     #[cfg(test)]
@@ -1255,6 +1292,13 @@ async fn prepare_join_session_with_identity(
             ticket.fs_epoch_base_ts,
         ),
     };
+    let current_history_authority_extension =
+        parse_join_ticket_history_authority_extension(&ticket.history_authority_extension)?;
+    ensure_supported_attested_current_state_extension(
+        "join ticket",
+        current_history_authority_extension,
+        ticket.current_global_history_attestation.as_slice(),
+    )?;
     let session = Session {
         server_url: server_url.to_string(),
         room_id: room_id.to_string(),
@@ -1279,6 +1323,7 @@ async fn prepare_join_session_with_identity(
         seed_bundle_commit,
         fs_fingerprint,
         join_finalize_auth_token,
+        current_history_authority_extension,
         current_global_history_attestation_bytes: ticket.current_global_history_attestation.clone(),
         stored_header_map: stored.header_map.clone(),
         #[cfg(test)]
@@ -1366,6 +1411,11 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
             "join finalize merge ticket unexpectedly contained SRX payload"
         ));
     }
+    ensure_supported_attested_current_state_extension(
+        "join finalize merge ticket",
+        ticket.history_authority_extension,
+        ticket.current_global_history_attestation_bytes.as_slice(),
+    )?;
 
     let parities = hydrate_parities(
         &ticket.parities,
@@ -1494,7 +1544,7 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
             &session.gid,
             &session.leaf_id,
             2,
-            barrier_update.updater_leaf,
+            ticket.cover_leaf_index,
             history_commitment_header.as_slice(),
             ticket.current_global_history_attestation_bytes.as_slice(),
             barrier_update.raw_update.as_slice(),
@@ -1752,6 +1802,7 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     session.seed_commit = bundle.hp_binding.seed_commit;
     session.seed_bundle_commit = bundle.hp_binding.seed_bundle_commit;
     session.join_finalize_auth_token = [0u8; 32];
+    session.current_history_authority_extension = None;
     session.current_global_history_attestation_bytes.clear();
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
         derive_fs_fingerprint_from_fields(
@@ -1802,6 +1853,11 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             }
         }
     };
+    ensure_supported_attested_current_state_extension(
+        "leave merge ticket",
+        ticket.history_authority_extension,
+        ticket.current_global_history_attestation_bytes.as_slice(),
+    )?;
     let current_fs_ec = session.fs_ec;
     let current_fs_epoch_commit = session.fs_epoch_commit;
     let current_fs_dev_prev_commit = session.fs_dev_prev_commit;
@@ -1964,7 +2020,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             &session.gid,
             &session.leaf_id,
             0,
-            barrier_update.updater_leaf,
+            ticket.cover_leaf_index,
             history_commitment_header.as_slice(),
             ticket.current_global_history_attestation_bytes.as_slice(),
             barrier_update.raw_update.as_slice(),
@@ -3036,6 +3092,7 @@ mod tests {
             seed_bundle_commit: [0xCD; 32],
             fs_fingerprint: None,
             join_finalize_auth_token: [0xCE; 32],
+            current_history_authority_extension: None,
             current_global_history_attestation_bytes: Vec::new(),
             stored_header_map: BTreeMap::new(),
             #[cfg(test)]
@@ -3157,6 +3214,11 @@ mod tests {
             cover_leaf_index: 1,
             kem_tree_hash_after: [0x0F; 32],
             current_history_commitment: sample_history_commitment(),
+            history_authority_extension: None,
+            history_authority_descriptor_bytes: Vec::new(),
+            history_authority: None,
+            current_global_history_attestation_bytes: Vec::new(),
+            current_global_history_attestation: None,
             n_max: 8,
             max_barrier_update_bytes: 64 * 1024,
         }
@@ -3224,6 +3286,12 @@ mod tests {
         fs_forward_leap_policy: Option<FsForwardLeapPolicyPb>,
         #[prost(uint64, tag = "31")]
         last_accepted_ec: u64,
+        #[prost(bytes = "vec", tag = "32")]
+        history_authority_descriptor: Vec<u8>,
+        #[prost(bytes = "vec", tag = "33")]
+        current_global_history_attestation: Vec<u8>,
+        #[prost(string, tag = "34")]
+        history_authority_extension: String,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3681,6 +3749,14 @@ mod tests {
                 slack_device: ticket.fs_forward_leap_policy.slack_device,
             }),
             last_accepted_ec: ticket.last_accepted_ec,
+            history_authority_descriptor: ticket.history_authority_descriptor_bytes.clone(),
+            current_global_history_attestation: ticket
+                .current_global_history_attestation_bytes
+                .clone(),
+            history_authority_extension: ticket
+                .history_authority_extension
+                .map(|extension| extension.as_str().to_string())
+                .unwrap_or_default(),
         }
         .encode_to_vec())
     }
@@ -4956,6 +5032,7 @@ mod tests {
             seed_bundle_commit: [0x99; 32],
             fs_fingerprint: None,
             join_finalize_auth_token: [0xAA; 32],
+            current_history_authority_extension: None,
             current_global_history_attestation_bytes: Vec::new(),
             stored_header_map: BTreeMap::new(),
             #[cfg(test)]
@@ -5932,6 +6009,10 @@ mod tests {
         assert_eq!(
             decoded.current_history_commitment,
             ticket.current_history_commitment
+        );
+        assert_eq!(
+            decoded.history_authority_extension,
+            ticket.history_authority_extension
         );
 
         handle.abort();

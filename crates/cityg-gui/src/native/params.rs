@@ -15,6 +15,7 @@ pub(super) struct LeaveRequest {
     pub(super) barrier_version: u64,
     pub(super) kem_tree_hash_after: [u8; 32],
     pub(super) current_history_commitment: Option<HistoryCommitment>,
+    pub(super) current_history_authority_extension: Option<HistoryAuthorityExtension>,
     pub(super) forward_state: ForwardSecrecyState,
     pub(super) pop_public_key: Vec<u8>,
     pub(super) pop_secret_key: Vec<u8>,
@@ -107,6 +108,9 @@ impl LeaveRequest {
             barrier_version: session.barrier_state.barrier_version,
             kem_tree_hash_after: session.barrier_state.kem_tree_hash_after,
             current_history_commitment: session.barrier_state.current_history_commitment,
+            current_history_authority_extension: session
+                .barrier_state
+                .current_history_authority_extension,
             forward_state: session.forward_state.clone(),
             pop_public_key: session.pop_public_key.clone(),
             pop_secret_key: session.pop_secret_key.clone(),

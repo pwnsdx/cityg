@@ -509,6 +509,9 @@ pub(super) fn capture_barrier_pending_activation_source(
         barrier_roots_hash: session.barrier_state.barrier_roots_hash,
         kem_tree_hash_after: session.barrier_state.kem_tree_hash_after,
         current_history_commitment: session.barrier_state.current_history_commitment,
+        current_history_authority_extension: session
+            .barrier_state
+            .current_history_authority_extension,
         current_global_history_attestation_bytes: session
             .barrier_state
             .current_global_history_attestation_bytes
@@ -555,6 +558,13 @@ pub(super) fn validate_client_visible_activation_guards(
         .current_global_history_attestation_bytes
         .is_empty()
     {
+        if session.barrier_state.current_history_authority_extension
+            != Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1)
+        {
+            return Err(anyhow!(
+                "client-side activation guard failed (960.7): unsupported or missing history authority extension for local attested current state"
+            ));
+        }
         let supplied = global_history_attestation.ok_or_else(|| {
             anyhow!(
                 "client-side activation guard failed (960.7): missing header[182] global_history_attestation for authority-bound barrier state"

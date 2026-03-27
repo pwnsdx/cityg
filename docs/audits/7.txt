@@ -425,6 +425,7 @@ Lecture consolidée:
 
 - `7.4` n’est plus honnêtement `Open`: l’extension locale définit désormais de vraies attestations signées de complétude helper pour A/B/C, et le client les vérifie positivement. Ce point reste seulement **Partial** parce qu’il ne s’agit pas encore d’une preuve byzantine globale de non-omission.
 - Le contrat wire est aussi plus net: le client refuse désormais des bytes d’attestation/descripteur/helper-completeness sans identifiant `history_authority_extension` explicite.
+- Le runtime GUI et `join_leave` pinnen maintenant cet identifiant d’extension dans leur état local lorsqu’ils conservent une attestation courante; cela enlève l’ambiguïté locale “bytes présents / extension absente ou divergente” sans changer le statut global.
 - `7.1` reste le mur principal: la canonité/finalité globale de l’historique n’est toujours pas fermée.
 
 Référence de synthèse: `docs/audits/final-verification-report-2026-03-26.md`.

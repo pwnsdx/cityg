@@ -426,6 +426,7 @@ Lecture consolidée:
 
 - `4.1` et `4.5` ne sont plus honnêtement `Open`: il existe maintenant une famille d’objets wire explicites (`header[181]`, `header[182]`, `HistoryAuthorityDescriptor`) qui rendent la frontière FULL/updater vérifiable dans un scope local quand l’extension est activée.
 - Cette famille d’objets est maintenant négociée explicitement sur les réponses API via `history_authority_extension`, au lieu d’être seulement inférée par présence de descripteurs/attestations.
+- Le runtime GUI et le binaire `join_leave` pinnen désormais aussi explicitement `history_authority_extension` dans leur état local courant/persisté quand un `current_global_history_attestation` est présent; ils fail-close si les bytes d’attestation et l’identifiant d’extension divergent.
 - `4.4` et `4.6` restent ouverts parce qu’ils demandent encore une ré-promotion FULL et une canonité de head qui tiennent face à un serveur byzantin au-delà d’un unique scope local.
 
 Référence de synthèse: `docs/audits/final-verification-report-2026-03-26.md`.

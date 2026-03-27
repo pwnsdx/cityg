@@ -237,6 +237,7 @@ fn install_authenticated_current_state_clears_full_verified_on_public_state_chan
             prev_history_commitment_id: [0x52; 32],
             history_seq: 7,
         },
+        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1),
         vec![0xA1, 0x02],
     );
 
@@ -267,6 +268,7 @@ fn install_authenticated_current_state_preserves_full_verified_for_same_public_s
             prev_history_commitment_id: [0x62; 32],
             history_seq: 8,
         },
+        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1),
         vec![0xB1, 0x03],
     );
 
@@ -295,9 +297,11 @@ fn non_regressing_authenticated_current_state_rejects_barrier_version_rollback()
         session.barrier_state.barrier_version,
         &session.barrier_state.kem_tree_hash_after,
         Some(&current),
+        session.barrier_state.current_history_authority_extension,
         session.barrier_state.barrier_version.saturating_sub(1),
         &session.barrier_state.kem_tree_hash_after,
         &current,
+        session.barrier_state.current_history_authority_extension,
         "merge ticket",
     )
     .expect_err("barrier_version rollback must fail closed");
@@ -320,9 +324,11 @@ fn non_regressing_authenticated_current_state_rejects_history_seq_rollback() {
         session.barrier_state.barrier_version,
         &session.barrier_state.kem_tree_hash_after,
         session.barrier_state.current_history_commitment.as_ref(),
+        session.barrier_state.current_history_authority_extension,
         session.barrier_state.barrier_version,
         &session.barrier_state.kem_tree_hash_after,
         &advertised,
+        session.barrier_state.current_history_authority_extension,
         "epoch sync merge ticket",
     )
     .expect_err("history_seq rollback must fail closed");
@@ -345,14 +351,45 @@ fn non_regressing_authenticated_current_state_rejects_same_seq_conflict() {
         session.barrier_state.barrier_version,
         &session.barrier_state.kem_tree_hash_after,
         session.barrier_state.current_history_commitment.as_ref(),
+        session.barrier_state.current_history_authority_extension,
         session.barrier_state.barrier_version,
         &session.barrier_state.kem_tree_hash_after,
         &advertised,
+        session.barrier_state.current_history_authority_extension,
         "merge ticket",
     )
     .expect_err("same-seq conflicting commitment must fail closed");
     assert!(
         err.to_string().contains("history commitment conflicts"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn non_regressing_authenticated_current_state_rejects_extension_conflict() {
+    let mut session = build_test_session(0xB404, "http://127.0.0.1:9", "room-rollback-d", "alice")
+        .expect("build test session");
+    session.barrier_state.current_history_authority_extension =
+        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1);
+    let advertised = session
+        .barrier_state
+        .current_history_commitment
+        .expect("current history commitment");
+    let err = ensure_non_regressing_authenticated_current_state(
+        session.barrier_state.barrier_version,
+        &session.barrier_state.kem_tree_hash_after,
+        session.barrier_state.current_history_commitment.as_ref(),
+        session.barrier_state.current_history_authority_extension,
+        session.barrier_state.barrier_version,
+        &session.barrier_state.kem_tree_hash_after,
+        &advertised,
+        None,
+        "merge ticket",
+    )
+    .expect_err("same-state extension conflict must fail closed");
+    assert!(
+        err.to_string()
+            .contains("history authority extension conflicts"),
         "unexpected error: {err}"
     );
 }
@@ -582,6 +619,9 @@ fn persisted_barrier_state_roundtrip_preserves_current_history_commitment()
             prev_history_commitment_id: [0x21; 32],
             history_seq: 9,
         }),
+        current_history_authority_extension: Some(
+            HistoryAuthorityExtension::LocalHistoryAuthorityV1,
+        ),
         current_public_tree: None,
         bootstrap_history_commitment: Some(HistoryCommitment {
             history_view_id: [0x22; 32],
@@ -605,6 +645,10 @@ fn persisted_barrier_state_roundtrip_preserves_current_history_commitment()
         runtime.current_history_commitment
     );
     assert_eq!(
+        roundtrip.current_history_authority_extension,
+        runtime.current_history_authority_extension
+    );
+    assert_eq!(
         roundtrip.bootstrap_history_commitment,
         runtime.bootstrap_history_commitment
     );
@@ -625,6 +669,9 @@ fn persisted_barrier_state_roundtrip_drops_current_public_tree_cache()
             prev_history_commitment_id: [0x21; 32],
             history_seq: 9,
         }),
+        current_history_authority_extension: Some(
+            HistoryAuthorityExtension::LocalHistoryAuthorityV1,
+        ),
         kem_tree_hash_after: [0x33; 32],
         max_barrier_update_bytes: DEFAULT_MAX_BARRIER_UPDATE_BYTES,
         n_max: 8,
@@ -1102,6 +1149,8 @@ fn validate_client_visible_activation_guards_rejects_global_history_attestation_
 fn validate_client_visible_activation_guards_accepts_matching_authority_headers()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xB96, "http://127.0.0.1:9", "room-b86", "bob")?;
+    session.barrier_state.current_history_authority_extension =
+        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1);
     session
         .barrier_state
         .current_global_history_attestation_bytes = vec![0xAA, 0xBB, 0xCC];
@@ -1120,6 +1169,32 @@ fn validate_client_visible_activation_guards_accepts_matching_authority_headers(
         Value::Bytes(vec![0x10, 0x20]),
     );
     validate_client_visible_activation_guards(&session, &header)?;
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_rejects_attested_state_without_extension()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB97, "http://127.0.0.1:9", "room-b87", "bob")?;
+    session
+        .barrier_state
+        .current_global_history_attestation_bytes = vec![0xAA, 0xBB, 0xCC];
+    let mut header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xE4])?;
+    header.insert(
+        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+        Value::Bytes(
+            session
+                .barrier_state
+                .current_global_history_attestation_bytes
+                .clone(),
+        ),
+    );
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("attested local state without extension must fail");
+    assert!(
+        err.to_string().contains("history authority extension"),
+        "unexpected error: {err}"
+    );
     Ok(())
 }
 
@@ -6384,6 +6459,9 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             prev_history_commitment_id: array(0x2F),
             history_seq: 4,
         }),
+        current_history_authority_extension: Some(
+            HistoryAuthorityExtension::LocalHistoryAuthorityV1,
+        ),
         current_global_history_attestation_bytes: Vec::new(),
         current_public_tree: None,
         retained_public_trees: Vec::new(),
@@ -6434,6 +6512,9 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
                     prev_history_commitment_id: [0u8; 32],
                     history_seq: 7,
                 }),
+                current_history_authority_extension: Some(
+                    HistoryAuthorityExtension::LocalHistoryAuthorityV1,
+                ),
                 current_global_history_attestation_bytes: vec![0xAA, 0xBB, 0xCC],
                 fs_ec: 17,
                 fs_dev_prev_commit: array(0x13),

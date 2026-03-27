@@ -291,9 +291,11 @@ pub(super) fn ensure_non_regressing_authenticated_current_state(
     local_barrier_version: u64,
     local_kem_tree_hash_after: &[u8; 32],
     local_history_commitment: Option<&HistoryCommitment>,
+    local_history_authority_extension: Option<HistoryAuthorityExtension>,
     advertised_barrier_version: u64,
     advertised_kem_tree_hash_after: &[u8; 32],
     advertised_history_commitment: &HistoryCommitment,
+    advertised_history_authority_extension: Option<HistoryAuthorityExtension>,
     context: &str,
 ) -> Result<()> {
     if advertised_barrier_version < local_barrier_version {
@@ -328,6 +330,11 @@ pub(super) fn ensure_non_regressing_authenticated_current_state(
                 "{context} current kem_tree_hash_after conflicts with locally authenticated current history commitment (960.9)"
             ));
         }
+        if advertised_history_authority_extension != local_history_authority_extension {
+            return Err(anyhow!(
+                "{context} history authority extension conflicts with locally authenticated state (960.9)"
+            ));
+        }
     }
 
     Ok(())
@@ -352,6 +359,7 @@ pub(super) fn install_authenticated_current_state(
     barrier_roots_hash: [u8; 32],
     kem_tree_hash_after: [u8; 32],
     history_commitment: HistoryCommitment,
+    history_authority_extension: Option<HistoryAuthorityExtension>,
     global_history_attestation_bytes: Vec<u8>,
 ) {
     let authenticated_public_state_changed = session.barrier_state.barrier_version
@@ -363,6 +371,7 @@ pub(super) fn install_authenticated_current_state(
     session.barrier_state.kem_tree_hash_after = kem_tree_hash_after;
     session.barrier_state.current_history_view_id = history_commitment.history_view_id;
     session.barrier_state.current_history_commitment = Some(history_commitment);
+    session.barrier_state.current_history_authority_extension = history_authority_extension;
     session
         .barrier_state
         .current_global_history_attestation_bytes = global_history_attestation_bytes;
@@ -785,6 +794,7 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
         .barrier_state
         .bootstrap_history_commitment
         .ok_or_else(|| anyhow!("join_finalize bootstrap missing current_history_commitment"))?;
+    let expected_extension = session.barrier_state.current_history_authority_extension;
     let current_commitment = session
         .barrier_state
         .current_history_commitment
@@ -797,6 +807,21 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
         .bootstrap_predecessor_kem_tree_hash_after;
     require_same_history_commitment(current_commitment, &expected_commitment)
         .map_err(|_| anyhow!("join_finalize bootstrap current_history_commitment mismatch"))?;
+    if session
+        .barrier_state
+        .current_global_history_attestation_bytes
+        .is_empty()
+    {
+        if expected_extension.is_some() {
+            return Err(anyhow!(
+                "join_finalize bootstrap missing current global history attestation bytes for authority-bound current state"
+            ));
+        }
+    } else if expected_extension != Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) {
+        return Err(anyhow!(
+            "join_finalize bootstrap uses unsupported or missing history authority extension for attested current state"
+        ));
+    }
     if predecessor_hash == [0u8; 32] {
         return Err(anyhow!(
             "join_finalize bootstrap missing predecessor committed kem_tree_hash_after"
