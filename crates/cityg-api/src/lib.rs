@@ -3681,7 +3681,7 @@ pub async fn run_with_addr(addr: SocketAddr) -> anyhow::Result<()> {
 
 fn server_from_config(cfg: &cityg_config::CityGConfig) -> CityGServer {
     let mut server_cfg = ServerConfig::new();
-    server_cfg.enable_local_history_authority();
+    server_cfg.enable_global_history_authority();
     server_cfg.h_max = Some(cfg.protocol.max_concurrent_heads);
     server_cfg.window_ttl = Some(Duration::from_secs(cfg.server.window_ttl_secs));
     server_cfg.state_path = cfg.server.state_path.clone();
@@ -6455,11 +6455,11 @@ mod tests {
         );
         assert!(
             !decoded.global_history_attestation.is_empty(),
-            "joins-since response should carry global history attestation under local authority"
+            "joins-since response should carry global history attestation under base-profile global authority"
         );
         assert!(
             !decoded.helper_completeness_attestation.is_empty(),
-            "joins-since response should carry helper completeness attestation under local authority"
+            "joins-since response should carry helper completeness attestation under base-profile global authority"
         );
     }
 
@@ -6577,11 +6577,11 @@ mod tests {
         );
         assert!(
             !revoked_decoded.global_history_attestation.is_empty(),
-            "revoked-leaves response should carry global history attestation under local authority"
+            "revoked-leaves response should carry global history attestation under base-profile global authority"
         );
         assert!(
             !revoked_decoded.helper_completeness_attestation.is_empty(),
-            "revoked-leaves response should carry helper completeness attestation under local authority"
+            "revoked-leaves response should carry helper completeness attestation under base-profile global authority"
         );
 
         let mut bad_tree_body = Vec::new();
@@ -6660,11 +6660,11 @@ mod tests {
         );
         assert!(
             !tree_decoded.global_history_attestation.is_empty(),
-            "fetch-public-tree response should carry global history attestation under local authority"
+            "fetch-public-tree response should carry global history attestation under base-profile global authority"
         );
         assert!(
             !tree_decoded.helper_completeness_attestation.is_empty(),
-            "fetch-public-tree response should carry helper completeness attestation under local authority"
+            "fetch-public-tree response should carry helper completeness attestation under base-profile global authority"
         );
         assert_eq!(
             tree_decoded.global_history_attestation, revoked_decoded.global_history_attestation,

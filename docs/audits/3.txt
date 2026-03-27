@@ -376,3 +376,18 @@ Lecture consolidée:
 
 - `3.1/3.2/3.5` ne sont plus honnêtement `Open`: il existe désormais une vraie lignée append-only authentifiée à l’échelle du déploiement, pas seulement une corrélation locale par serveur/scope.
 - Ils ne sont pas `Closed` pour autant, parce que le profil de base ne rend toujours pas cette extension obligatoire et que `global-history-authority-v1` ne prétend pas fournir un consensus fédéré inter-déploiements.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche base-profile global authority)
+
+Nouvelle passe spec + implémentation:
+
+- le profil de base n’est plus ambigu sur ce point: `global-history-authority-v1` est désormais requis sur les paths join/merge/provisioning/helper/lookup du profil de base;
+- l’API de base instancie maintenant directement cette authority globale de déploiement, et le client fail-close sur toute réponse base-profile vide ou `local-history-authority-v1`;
+- ça ferme le sous-gap “extension globale définie mais encore optionnelle dans le base profile”.
+
+Lecture consolidée:
+
+- `3.1`, `3.2` et `3.5` restent **Partial**, mais la partie “pas exigée par le profil de base” n’est plus vraie;
+- le reste non fermé est désormais bien le plafond fédéré/byzantin: non-equivocation inter-déploiements et finalité plus forte qu’un append-only de déploiement.

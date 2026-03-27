@@ -522,3 +522,18 @@ Impact audit:
 
 - `4.1` et `4.5` restent **Partial**, mais la partie “receipt présent sans vérification cryptographique côté client” n’est plus ouverte localement.
 - Le reste non fermé est désormais bien le mur protocolaire/global: caractère optionnel de l’extension et absence de garantie fédérée/non-equivocante au-delà du scope d’autorité négocié.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche base-profile global authority)
+
+Nouvelle passe spec + implémentation:
+
+- le profil de base exige maintenant `global-history-authority-v1` sur les réponses courantes join/merge/helper/lookup, et l’API serveur de base émet cette authority par défaut;
+- le client API et les chemins de join GUI refusent désormais explicitement les réponses base-profile vides ou `local-history-authority-v1`;
+- la séparation FULL/recover-only reste **Partial**, mais le sous-gap “authority globale encore optionnelle dans le base profile” est fermé.
+
+Lecture consolidée:
+
+- `4.1`, `4.5` et `4.6` restent **Partial** parce que `header[181]` prouve toujours un binding d’état helper attesté, pas une preuve indépendante plus forte de FULL;
+- le reste non fermé n’est plus un oubli local de wire/profile, mais un choix de niveau de preuve protocolaire.

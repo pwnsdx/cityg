@@ -197,14 +197,13 @@ Shared authenticated-view rule (normative):
 * Any procedure that composes outputs from more than one of A)/B)/C)/D) for a single validation, activation, provisioning, or recovery decision MUST require all referenced authenticated responses/objects to validate to the same `HistoryCommitment`, unless that procedure explicitly defines a safe cross-view comparison. Missing or mismatched authenticated view binding MUST fail closed. In the FULL/updater chain-check and acceptance-correlation contexts, this failure MUST surface 960.9.
 * Historical snapshot fetches served from retained history MUST return the exact `HistoryCommitment` recorded when that snapshot became committed/fetchable, not a freshly recomputed current commitment.
 * If the deployment cannot provide authenticated completeness/finality for one requested result inside its `HistoryAuthorityScope`, it MUST return an authenticated "insufficient history / not available / pending" style outcome rather than silently omitting records and claiming success.
-* The base profile does NOT define a wire-visible proof of helper completeness/non-omission for A) or B).
-* `helper_completeness_attestation` is RESERVED for an optional extension that adds such a proof/object. In the base profile this field MUST be absent or empty; clients observing a non-empty value without an explicitly negotiated extension MUST fail closed.
-* This document defines two optional history-authority extensions in S3.3.E-F and S11.11.4-S11.11.5: `local-history-authority-v1` and `global-history-authority-v1`. When either extension is negotiated, A), B), and C) MUST carry non-empty `helper_completeness_attestation` values verified under one negotiated `HistoryAuthorityDescriptor`.
+* The base profile REQUIRES `global-history-authority-v1` on join/merge/provisioning/helper/lookup surfaces that carry authenticated current-state or helper objects.
+* Therefore A), B), and C) MUST carry non-empty `helper_completeness_attestation` values verified under one negotiated `HistoryAuthorityDescriptor`.
+* `local-history-authority-v1` remains defined as a non-base optional extension for explicitly scope-local deployments and tests; clients enforcing the base profile MUST reject it on base-profile API/wire paths.
 * API/wire surfaces that carry `HistoryAuthorityDescriptor`, `global_history_attestation`, `current_global_history_attestation`, or `helper_completeness_attestation` MUST also carry an explicit extension identifier string `history_authority_extension`.
-* In the base profile, `history_authority_extension` MUST be absent or the empty string.
-* When `local-history-authority-v1` is negotiated, `history_authority_extension` MUST equal exactly `"local-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
-* When `global-history-authority-v1` is negotiated, `history_authority_extension` MUST equal exactly `"global-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
-* Clients MUST fail closed if extension-defined objects are present while `history_authority_extension` is absent/empty, if `history_authority_extension` names an unsupported extension, or if pages of one logical A)/B)/C) result drift across different `history_authority_extension` values.
+* In the base profile, `history_authority_extension` MUST equal exactly `"global-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
+* When `local-history-authority-v1` is explicitly negotiated outside the base profile, `history_authority_extension` MUST equal exactly `"local-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
+* Clients MUST fail closed if extension-defined objects are present while `history_authority_extension` is absent/empty, if `history_authority_extension` names an unsupported extension, if a base-profile path carries `"local-history-authority-v1"`, or if pages of one logical A)/B)/C) result drift across different `history_authority_extension` values.
 * `MAX_BARRIER_HELPER_PAGE_ENTRIES := 512`.
 * A), B), and C) are paged interfaces in the base profile. Each request MUST accept an explicit `page_offset`/`entry_offset` and `max_entries`; `max_entries == 0` means "use the profile default page size", namely `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
 * A), B), and C) MUST reject requests whose effective page size exceeds `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
@@ -285,8 +284,8 @@ Requirements on that extension:
 * When this extension is negotiated, any join/merge/provisioning artifact that carries current-state helper payloads for a client decision SHOULD also carry the same `HistoryAuthorityDescriptor` and matching scope-local attestation objects for those helper payloads.
 * This extension proves append-only correlation, current-state binding, and helper-page completeness only inside one `HistoryAuthorityScope`. It does NOT, by itself, prove non-equivocation across multiple servers, independent witnesses, or any stronger globally canonical finality.
 
-F) Optional global history authority extension (not part of base profile)
-Deployments MAY negotiate `global-history-authority-v1`, a deployment-global extension that lifts one whole deployment onto one authenticated append-only history authority. It is stronger than `local-history-authority-v1` because it defines one deployment-global attested lineage, but it still does NOT claim federated cross-deployment consensus.
+F) Deployment-global history authority (REQUIRED in base profile)
+The base profile REQUIRES `global-history-authority-v1`, a deployment-global extension that lifts one whole deployment onto one authenticated append-only history authority. It is stronger than `local-history-authority-v1` because it defines one deployment-global attested lineage, but it still does NOT claim federated cross-deployment consensus.
 Requirements on that extension:
 * Successful join/merge/provisioning/helper/lookup responses carrying objects from this extension MUST carry `history_authority_extension == "global-history-authority-v1"`.
 * One negotiated `HistoryAuthorityDescriptor` object MUST identify the deployment-global history authority and its public verification key.
@@ -445,8 +444,8 @@ Key 175: barrier_update (bstr; optional; only when permitted by S10.4, S10.4A, S
 Key 178: barrier_update_reason (uint; required iff key 175 is present)
 Key 179: join_finalize_auth (bstr32; required iff key 178 == 2; opaque server-issued capability for reason-2 join_finalize)
 Key 180: barrier_history_commitment (bstr; required iff key 175 is present; CBOR_det(HistoryCommitment) for the authenticated current-state snapshot_base/A/B view used to construct the barrier_update)
-Key 181: barrier_full_verification_receipt (bstr; optional only under an explicitly negotiated extension such as `local-history-authority-v1`; FORBIDDEN in the base profile)
-Key 182: barrier_global_history_attestation (bstr; optional only under an explicitly negotiated extension such as `local-history-authority-v1` or a stronger global-history extension; FORBIDDEN in the base profile)
+Key 181: barrier_full_verification_receipt (bstr; REQUIRED iff key 175 is present in the base profile; optional only for explicitly negotiated non-base variants such as `local-history-authority-v1`)
+Key 182: barrier_global_history_attestation (bstr; REQUIRED iff key 175 is present in the base profile; optional only for explicitly negotiated non-base variants such as `local-history-authority-v1`)
 
 S4.2.4 Merge/checkpoint keys (merge-only set)
 130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148
@@ -470,8 +469,8 @@ Additional presence rule (normative):
 * key 178 MUST be present if and only if key 175 is present.
 * key 179 MUST be present if and only if key 178 == 2; it MUST be absent for merge reasons 0/1 and on all non-MERGE anchors.
 * key 180 MUST be present if and only if key 175 is present; it MUST be absent on anchors without barrier_update.
-* key 181 MUST be absent unless a deployment-specific FULL-verification-receipt extension is explicitly negotiated for this profile.
-* key 182 MUST be absent unless a deployment-specific history-attestation extension is explicitly negotiated for this profile.
+* In the base profile, keys 181 and 182 MUST both be present if and only if key 175 is present.
+* Outside the base profile, key 181 or key 182 MUST be absent unless an explicitly negotiated history-authority extension enables them.
 
 S4.4 Size limits (normative; deployments MAY tighten)
 Max bytes per header field (unless otherwise specified by type):
@@ -481,8 +480,8 @@ Max bytes per header field (unless otherwise specified by type):
 * header[122] max 1048576
 * header[177] MUST be exactly 1184 bytes
 * header[179] MUST be exactly 32 bytes
-* header[181] is extension-defined and therefore has no base-profile size semantics; in the base profile it MUST be absent
-* header[182] is extension-defined and therefore has no base-profile size semantics; in the base profile it MUST be absent
+* header[181] is extension-defined and therefore has no universal size semantic beyond deterministic CBOR of the negotiated receipt object
+* header[182] is extension-defined and therefore has no universal size semantic beyond deterministic CBOR of the negotiated attestation object
 
 BarrierUpdate size policy (normative)
 * Deployment MUST define max_barrier_update_bytes (a positive integer).
@@ -1258,12 +1257,12 @@ Additional restriction (normative):
 * Exception: a newly joined client with `pending_barrier_recovery == true` MAY originate reason 2 (`join_finalize`), and no other barrier-update reason, after satisfying the S11.11.1 join_finalize bootstrap exception. Until then, and for all other reasons, the restriction above remains absolute.
 * A client originating reason 2 MUST carry the exact provisioned `header[179] join_finalize_auth` value from S12.2. Clients MUST NOT reuse a cleared or zero value.
 * Any client originating a `barrier_update`, including reason 2 under the bootstrap exception, MUST carry `header[180]` equal to the authenticated current-state `HistoryCommitment` used for the A/B/current-snapshot checks that justified origination.
-* `current_barrier_full_verified` is a client-local safety predicate, not a wire-visible proof in the base profile.
+* `current_barrier_full_verified` remains a client-local safety predicate even in the base profile.
 * `header[180]` proves only that the author claims one authenticated current-state `HistoryCommitment` for its helper inputs; it does NOT, by itself, prove to the server that the author actually executed S11.11.2 correctly.
-* Therefore, in the base profile, the recover-only vs FULL distinction is enforced by honest-client behavior plus the server checks explicitly stated in S11.12. A deployment that requires server-verifiable proof of FULL verification MUST define an additional profile extension / receipt and MUST NOT claim that `header[180]` alone provides that guarantee.
+* In the base profile, `header[181]` + `header[182]` make that helper-state binding wire-visible and server-checkable within `global-history-authority-v1`, but they still do NOT, by themselves, prove federated consensus or any stronger cross-deployment finality than S3.3.F defines.
 
-S11.11.4 Optional FULL-verification-receipt extension (not part of base profile)
-If a deployment requires the server to verify that a client actually completed FULL verification before originating some or all `barrier_update` reasons, it MUST define an explicit extension bound to key `181`.
+S11.11.4 FULL-verification receipt
+In the base profile, key `181` is bound to `global-history-authority-v1`. Additional non-base deployments MAY define stronger receipts, but they MUST satisfy the generic requirements below.
 Generic requirements on any such extension:
 * The extension MUST define negotiation / profile identification so both client and server know that key `181` is in use.
 * The receipt carried in key `181` MUST be cryptographically bound, at minimum, to `(gid, HistoryAuthorityScope, current HistoryCommitment, current barrier_version, current kem_tree_hash_after, author leaf_id, barrier_update_reason, header[180])`.
@@ -1272,7 +1271,7 @@ Generic requirements on any such extension:
 * A mere restatement of helper inputs, or a client self-assertion without an authenticated verifier/challenge, MUST NOT be documented as sufficient proof of FULL verification.
 
 Concrete extensions defined by this document:
-* `local-history-authority-v1` and `global-history-authority-v1` are two concrete optional extensions satisfying these requirements within one deployment-local or deployment-global `HistoryAuthorityScope`, respectively.
+* `local-history-authority-v1` and `global-history-authority-v1` are two concrete extensions satisfying these requirements within one deployment-local or deployment-global `HistoryAuthorityScope`, respectively.
 * Under `local-history-authority-v1`, key `181` MUST carry `FullVerificationReceipt := { author_leaf_id:bstr32, barrier_update_reason:uint, updater_leaf:uint, signature:bstr }` encoded as deterministic CBOR.
 * Under `local-history-authority-v1`, the signed receipt payload MUST bind exactly `(gid, author_leaf_id, barrier_update_reason, updater_leaf, header[180], header[182], header[175])`.
 * Under `local-history-authority-v1`, the receipt MUST be signed by the author's POP signing key that is currently and uniquely bound to `author_leaf_id` in the server's authenticated membership view.
@@ -1289,10 +1288,10 @@ Concrete extensions defined by this document:
 * Under `global-history-authority-v1`, this receipt proves only that the author bound its `barrier_update` to one exact deployment-global attested helper state. It does NOT, by itself, prove federated consensus across multiple deployments.
 
 Base-profile rule:
-* In the base profile defined by this document, key `181` MUST be absent and servers MUST reject its presence as malformed unless a deployment-specific extension explicitly enables it.
+* In the base profile defined by this document, key `181` MUST carry the `global-history-authority-v1` receipt whenever key `175` is present, and servers MUST reject its absence or mismatch as malformed.
 
-S11.11.5 Optional global-history-attestation extension (not part of base profile)
-Key `182` is the generic wire slot for authenticated history attestations beyond the bare base profile. Two cases exist:
+S11.11.5 Global-history attestation
+Key `182` is the generic wire slot for authenticated history attestations. Two cases exist:
 
 1. `local-history-authority-v1` (defined by this document, not part of the base profile):
 * Under `local-history-authority-v1`, key `182` MUST carry the scope-local `GlobalHistoryAttestation` object defined in S3.3.E.
@@ -1302,8 +1301,8 @@ Key `182` is the generic wire slot for authenticated history attestations beyond
 * When `local-history-authority-v1` is negotiated, successful A)/B)/C)/D) responses and any join/merge/provisioning current-state helper bundles used for one decision MUST all validate to the same `HistoryAuthorityDescriptor` and the same scope-local attestation lineage.
 * `local-history-authority-v1` uses `finality_kind = "local-append-only"` and therefore proves only scope-local append-only correlation. It MUST NOT be described as a globally canonical/final history proof.
 
-2. `global-history-authority-v1` or another stronger globally canonical/final-history extension:
-* If a deployment requires globally canonical/final history beyond one local `HistoryAuthorityScope`, it MUST negotiate `global-history-authority-v1` or an extension at least as strong.
+2. Base profile `global-history-authority-v1` or another stronger globally canonical/final-history extension:
+* The base profile requires `global-history-authority-v1`. A deployment that requires stronger globally canonical/final history than that deployment-global authority provides MUST negotiate an extension at least as strong.
 * Under `global-history-authority-v1`, key `182` MUST carry the deployment-global `GlobalHistoryAttestation` object defined in S3.3.F.
 * The client MUST verify key `182` under the negotiated `HistoryAuthorityDescriptor` and MUST require its `scope_id`, `history_view_id`, `HistoryCommitment`, `barrier_version`, and `kem_tree_hash_after` to match the helper/current-state decision it is about to make.
 * The server MUST reject key `182` if it does not exactly match the current authenticated `HistoryCommitment`, `barrier_version`, and `kem_tree_hash_after` that the server is using for acceptance under that deployment-global authority.
@@ -1313,7 +1312,7 @@ Key `182` is the generic wire slot for authenticated history attestations beyond
 * A bare client self-assertion, or a restatement of one local `HistoryCommitment`, MUST NOT be documented as sufficient global-history attestation.
 
 Base-profile rule:
-* In the base profile defined by this document, key `182` MUST be absent and servers MUST reject its presence as malformed unless a deployment-specific extension explicitly enables it.
+* In the base profile defined by this document, key `182` MUST carry the `global-history-authority-v1` attestation whenever key `175` is present, and servers MUST reject its absence or mismatch as malformed.
 
 S11.12 Server-side validation of barrier_update (normative; MUST)
 
@@ -1326,9 +1325,9 @@ A) Gating
 * If header[178] == 2 and header[179] is absent or not exactly 32 bytes: reject 960.1.
 * If header[178] != 2 and header[179] is present: reject 960.7.
 * If header[180] is absent, not a bstr, or not valid CBOR_det(HistoryCommitment): reject 960.7.
-* If header[181] is present in the base profile: reject 960.7.
-* If header[182] is present in the base profile: reject 960.7.
-* If a deployment-specific history-authority extension is enabled, later steps MUST validate keys `181` / `182` exactly per that negotiated extension and MUST fail closed on any mismatch against `(header[175], header[178], header[180], gid, current authenticated state)`.
+* If header[175] is present and header[181] is absent in the base profile: reject 960.7.
+* If header[175] is present and header[182] is absent in the base profile: reject 960.7.
+* Later steps MUST validate keys `181` / `182` exactly per the negotiated history-authority extension and MUST fail closed on any mismatch against `(header[175], header[178], header[180], gid, current authenticated state)`.
 * If barrier_initialized == true and pending_revocations == false and header[178] == 0: reject 960.5 barrier_proactive_forbidden.
 * If barrier_initialized == true and pending_revocations == true and header[178] != 0: reject 960.13.
 * If header[178] == 1, later steps MUST enforce S10.4B.

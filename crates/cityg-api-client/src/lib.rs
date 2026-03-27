@@ -716,11 +716,15 @@ impl CitygApiClient {
         let current_history_view_id = array32(&response.current_history_view_id)?;
         let current_history_commitment =
             parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
-        let history_authority_extension = parse_history_authority_extension(
-            response.history_authority_extension.as_str(),
-            !response.history_authority_descriptor.is_empty()
-                || !response.current_global_history_attestation.is_empty(),
-        )?;
+        let history_authority_extension =
+            Some(require_base_profile_global_history_authority_extension(
+                parse_history_authority_extension(
+                    response.history_authority_extension.as_str(),
+                    !response.history_authority_descriptor.is_empty()
+                        || !response.current_global_history_attestation.is_empty(),
+                )?,
+                "merge ticket",
+            )?);
         let history_authority = parse_history_authority_descriptor_bytes(
             response.history_authority_descriptor.as_slice(),
         )?;
@@ -1067,17 +1071,21 @@ impl CitygApiClient {
             .clone()
             .map(|commitment| parse_history_commitment(current_history_view_id, Some(commitment)))
             .transpose()?;
-        let history_authority_extension = parse_history_authority_extension(
-            response.history_authority_extension.as_str(),
-            !response.history_authority_descriptor.is_empty()
-                || !response.current_global_history_attestation.is_empty()
-                || !response
-                    .current_join_records_completeness_attestation
-                    .is_empty()
-                || !response
-                    .current_revoked_leaf_indices_completeness_attestation
-                    .is_empty(),
-        )?;
+        let history_authority_extension =
+            Some(require_base_profile_global_history_authority_extension(
+                parse_history_authority_extension(
+                    response.history_authority_extension.as_str(),
+                    !response.history_authority_descriptor.is_empty()
+                        || !response.current_global_history_attestation.is_empty()
+                        || !response
+                            .current_join_records_completeness_attestation
+                            .is_empty()
+                        || !response
+                            .current_revoked_leaf_indices_completeness_attestation
+                            .is_empty(),
+                )?,
+                "join ticket",
+            )?);
         parse_fs_forward_leap_policy(response.fs_forward_leap_policy.clone())?;
         let current_predecessor_kem_tree_hash_after =
             if response.current_predecessor_kem_tree_hash_after.is_empty() {
@@ -1340,11 +1348,15 @@ impl CitygApiClient {
         let current_history_view_id = array32(&response.current_history_view_id)?;
         let current_history_commitment =
             parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
-        let history_authority_extension = parse_history_authority_extension(
-            response.history_authority_extension.as_str(),
-            !response.history_authority_descriptor.is_empty()
-                || !response.current_global_history_attestation.is_empty(),
-        )?;
+        let history_authority_extension =
+            Some(require_base_profile_global_history_authority_extension(
+                parse_history_authority_extension(
+                    response.history_authority_extension.as_str(),
+                    !response.history_authority_descriptor.is_empty()
+                        || !response.current_global_history_attestation.is_empty(),
+                )?,
+                "merge ticket",
+            )?);
         let history_authority = parse_history_authority_descriptor_bytes(
             response.history_authority_descriptor.as_slice(),
         )?;
@@ -1481,12 +1493,16 @@ impl CitygApiClient {
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
-            let history_authority_extension = parse_history_authority_extension(
-                response.history_authority_extension.as_str(),
-                !response.history_authority_descriptor.is_empty()
-                    || !response.global_history_attestation.is_empty()
-                    || !response.helper_completeness_attestation.is_empty(),
-            )?;
+            let history_authority_extension =
+                Some(require_base_profile_global_history_authority_extension(
+                    parse_history_authority_extension(
+                        response.history_authority_extension.as_str(),
+                        !response.history_authority_descriptor.is_empty()
+                            || !response.global_history_attestation.is_empty()
+                            || !response.helper_completeness_attestation.is_empty(),
+                    )?,
+                    "revoked leaves response",
+                )?);
             let history_authority = parse_history_authority_descriptor_bytes(
                 response.history_authority_descriptor.as_slice(),
             )?;
@@ -1666,12 +1682,16 @@ impl CitygApiClient {
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
-            let history_authority_extension = parse_history_authority_extension(
-                response.history_authority_extension.as_str(),
-                !response.history_authority_descriptor.is_empty()
-                    || !response.global_history_attestation.is_empty()
-                    || !response.helper_completeness_attestation.is_empty(),
-            )?;
+            let history_authority_extension =
+                Some(require_base_profile_global_history_authority_extension(
+                    parse_history_authority_extension(
+                        response.history_authority_extension.as_str(),
+                        !response.history_authority_descriptor.is_empty()
+                            || !response.global_history_attestation.is_empty()
+                            || !response.helper_completeness_attestation.is_empty(),
+                    )?,
+                    "joins since response",
+                )?);
             let history_authority = parse_history_authority_descriptor_bytes(
                 response.history_authority_descriptor.as_slice(),
             )?;
@@ -1860,12 +1880,16 @@ impl CitygApiClient {
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
-            let history_authority_extension = parse_history_authority_extension(
-                response.history_authority_extension.as_str(),
-                !response.history_authority_descriptor.is_empty()
-                    || !response.global_history_attestation.is_empty()
-                    || !response.helper_completeness_attestation.is_empty(),
-            )?;
+            let history_authority_extension =
+                Some(require_base_profile_global_history_authority_extension(
+                    parse_history_authority_extension(
+                        response.history_authority_extension.as_str(),
+                        !response.history_authority_descriptor.is_empty()
+                            || !response.global_history_attestation.is_empty()
+                            || !response.helper_completeness_attestation.is_empty(),
+                    )?,
+                    "fetch public tree response",
+                )?);
             let history_authority = parse_history_authority_descriptor_bytes(
                 response.history_authority_descriptor.as_slice(),
             )?;
@@ -2079,11 +2103,15 @@ impl CitygApiClient {
         let history_view_id = array32(&response.history_view_id)?;
         let history_commitment =
             parse_history_commitment(history_view_id, response.history_commitment)?;
-        let history_authority_extension = parse_history_authority_extension(
-            response.history_authority_extension.as_str(),
-            !response.history_authority_descriptor.is_empty()
-                || !response.global_history_attestation.is_empty(),
-        )?;
+        let history_authority_extension =
+            Some(require_base_profile_global_history_authority_extension(
+                parse_history_authority_extension(
+                    response.history_authority_extension.as_str(),
+                    !response.history_authority_descriptor.is_empty()
+                        || !response.global_history_attestation.is_empty(),
+                )?,
+                "lookup merge acceptance",
+            )?);
         let history_authority = parse_history_authority_descriptor_bytes(
             response.history_authority_descriptor.as_slice(),
         )?;
@@ -2955,6 +2983,23 @@ fn parse_history_authority_extension(
     }
 }
 
+fn require_base_profile_global_history_authority_extension(
+    extension: Option<HistoryAuthorityExtension>,
+    context: &str,
+) -> Result<HistoryAuthorityExtension, Error> {
+    match extension {
+        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1) => {
+            Ok(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
+        }
+        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) => Err(Error::Parse(format!(
+            "{context} must carry global-history-authority-v1 in the base profile"
+        ))),
+        None => Err(Error::Parse(format!(
+            "{context} missing required global-history-authority-v1 in the base profile"
+        ))),
+    }
+}
+
 fn require_history_authority_descriptor_for_extension(
     extension: Option<HistoryAuthorityExtension>,
     authority: &Option<HistoryAuthorityDescriptor>,
@@ -3379,7 +3424,7 @@ mod tests {
     };
     use pqcrypto_dilithium::dilithium5;
     use prost::Message;
-    use std::{error::Error as StdError, net::SocketAddr};
+    use std::{error::Error as StdError, net::SocketAddr, sync::OnceLock};
     use tokio::net::TcpListener;
 
     fn encode_proto<T: Message>(msg: T) -> Vec<u8> {
@@ -3392,18 +3437,36 @@ mod tests {
         bytes
     }
 
-    fn merge_ticket_with_history_authority_payload(
-        extension_id: &str,
-        finality_kind: &str,
-    ) -> MergeTicketResponse {
-        let mut response = merge_ticket_ok_payload();
-        let current_history_commitment = HistoryCommitment {
-            history_view_id: [0xD1; 32],
-            history_commitment_id: [0xE1; 32],
-            prev_history_commitment_id: [0x00; 32],
-            history_seq: 7,
-        };
-        let (public_key, secret_key) = dilithium5::keypair();
+    struct TestHistoryAuthority {
+        descriptor: HistoryAuthorityDescriptor,
+        descriptor_bytes: Vec<u8>,
+        secret_key: dilithium5::SecretKey,
+        attestation_bytes: Vec<u8>,
+    }
+
+    fn test_history_authority_keypair() -> (&'static [u8], &'static [u8]) {
+        static KEYPAIR: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
+        let (public_key, secret_key) = KEYPAIR.get_or_init(|| {
+            let (public_key, secret_key) = dilithium5::keypair();
+            (
+                public_key.as_bytes().to_vec(),
+                secret_key.as_bytes().to_vec(),
+            )
+        });
+        (public_key.as_slice(), secret_key.as_slice())
+    }
+
+    fn build_test_history_authority(
+        history_commitment: HistoryCommitment,
+        gid: [u8; 32],
+        barrier_version: u64,
+        kem_tree_hash_after: [u8; 32],
+    ) -> TestHistoryAuthority {
+        let (public_key_bytes, secret_key_bytes) = test_history_authority_keypair();
+        let public_key = dilithium5::PublicKey::from_bytes(public_key_bytes)
+            .expect("test history authority public key");
+        let secret_key = dilithium5::SecretKey::from_bytes(secret_key_bytes)
+            .expect("test history authority secret key");
         let descriptor = HistoryAuthorityDescriptor {
             scope_id: [0xA1; 32],
             public_key: public_key.as_bytes().to_vec(),
@@ -3412,20 +3475,19 @@ mod tests {
             descriptor.scope_id.to_vec(),
             descriptor.public_key.clone(),
         ));
-        let gid = [0x41; 32];
         let parent_attestation_id = [0u8; 32];
         let payload = encode_cbor_det(&GlobalHistoryAttestationSignedPayload(
             "cityg/global-history-attestation-v1",
             &descriptor.scope_id,
             &gid,
-            &current_history_commitment.history_view_id,
-            &current_history_commitment.history_commitment_id,
-            &current_history_commitment.prev_history_commitment_id,
-            current_history_commitment.history_seq,
-            response.barrier_version,
-            &[0x09; 32],
+            &history_commitment.history_view_id,
+            &history_commitment.history_commitment_id,
+            &history_commitment.prev_history_commitment_id,
+            history_commitment.history_seq,
+            barrier_version,
+            &kem_tree_hash_after,
             &parent_attestation_id,
-            finality_kind,
+            GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
         ));
         let signature = dilithium5::detached_sign(payload.as_slice(), &secret_key)
             .as_bytes()
@@ -3433,27 +3495,82 @@ mod tests {
         let attestation_bytes = encode_cbor_det(&GlobalHistoryAttestationWire(
             descriptor.scope_id.to_vec(),
             gid.to_vec(),
-            current_history_commitment.history_view_id.to_vec(),
-            current_history_commitment.history_commitment_id.to_vec(),
-            current_history_commitment
-                .prev_history_commitment_id
-                .to_vec(),
-            current_history_commitment.history_seq,
-            response.barrier_version,
-            vec![0x09; 32],
+            history_commitment.history_view_id.to_vec(),
+            history_commitment.history_commitment_id.to_vec(),
+            history_commitment.prev_history_commitment_id.to_vec(),
+            history_commitment.history_seq,
+            barrier_version,
+            kem_tree_hash_after.to_vec(),
             parent_attestation_id.to_vec(),
-            finality_kind.to_string(),
+            GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND.to_string(),
             signature,
         ));
+        TestHistoryAuthority {
+            descriptor,
+            descriptor_bytes,
+            secret_key,
+            attestation_bytes,
+        }
+    }
+
+    fn build_test_helper_completeness_attestation<T: serde::Serialize>(
+        authority: &TestHistoryAuthority,
+        helper_kind: &'static str,
+        history_commitment: &HistoryCommitment,
+        page_offset: u32,
+        total_entries: u32,
+        selector: T,
+    ) -> Vec<u8> {
+        let payload = encode_cbor_det(&HelperCompletenessSignedPayload {
+            label: "cityg/helper-completeness-attestation-v1",
+            scope_id: &authority.descriptor.scope_id,
+            helper_kind,
+            history_view_id: &history_commitment.history_view_id,
+            history_commitment_id: &history_commitment.history_commitment_id,
+            page_offset,
+            total_entries,
+            selector,
+        });
+        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
+            .as_bytes()
+            .to_vec();
+        encode_cbor_det(&HelperCompletenessAttestationWire(
+            authority.descriptor.scope_id.to_vec(),
+            helper_kind.to_string(),
+            signature,
+        ))
+    }
+
+    fn merge_ticket_with_history_authority_payload() -> MergeTicketResponse {
+        let mut response = merge_ticket_ok_payload();
+        let current_history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(
+            current_history_commitment,
+            [0x41; 32],
+            response.barrier_version,
+            [0x09; 32],
+        );
         response.current_history_commitment =
             Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7));
-        response.history_authority_extension = extension_id.to_string();
-        response.history_authority_descriptor = descriptor_bytes;
-        response.current_global_history_attestation = attestation_bytes;
+        response.history_authority_extension = GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string();
+        response.history_authority_descriptor = authority.descriptor_bytes;
+        response.current_global_history_attestation = authority.attestation_bytes;
         response
     }
 
     fn merge_ticket_ok_payload() -> MergeTicketResponse {
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 0, [0x09; 32]);
         MergeTicketResponse {
             we_epoch_id: vec![0x01; 32],
             pivot_parity_cbor: Vec::new(),
@@ -3483,20 +3600,67 @@ mod tests {
             max_barrier_update_bytes: 1_048_576,
             current_history_view_id: vec![0xD1; 32],
             current_history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
-            history_authority_extension: String::new(),
-            history_authority_descriptor: Vec::new(),
-            current_global_history_attestation: Vec::new(),
+            history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
+            history_authority_descriptor: authority.descriptor_bytes,
+            current_global_history_attestation: authority.attestation_bytes,
             fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
             last_accepted_ec: 34,
         }
     }
 
     fn join_ticket_ok_payload() -> JoinTicketResponse {
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD0; 32],
+            history_commitment_id: [0xD1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 1,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 0, [0xCC; 32]);
+        let join_records = Vec::<BarrierJoinRecord>::new();
+        let revoked_leaf_indices = Vec::<u32>::new();
+        let join_helper_attestation = build_test_helper_completeness_attestation(
+            &authority,
+            HELPER_KIND_JOINS_SINCE,
+            &history_commitment,
+            0,
+            0,
+            JoinsSinceSelector {
+                prev_barrier_version: 0,
+                records: join_records.as_slice(),
+            },
+        );
+        let revoked_helper_attestation = encode_cbor_det(&HelperCompletenessAttestationWire(
+            authority.descriptor.scope_id.to_vec(),
+            HELPER_KIND_REVOKED_LEAVES.to_string(),
+            vec![0xAB; 32],
+        ));
         JoinTicketResponse {
             profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+            gid: vec![0x41; 32],
+            cat: vec![0x42; 32],
+            parent_root: Vec::new(),
+            revoked_root: vec![0x00; 32],
+            revoked_since_root: vec![0x00; 32],
+            tswe_salt_hash: vec![0x43; 32],
+            join_delta_root: vec![0x00; 32],
+            leaf_id: vec![0x44; 32],
+            pox_r_commit: vec![0x45; 32],
+            witness_cbor: Vec::new(),
+            srx_cbor: Vec::new(),
+            msphf_crs_id: "rlwe-crs-v1".to_string(),
+            msphf_params_id: "rlwe-hps2048509".to_string(),
+            proof_mode: "smallwood".to_string(),
+            vrf_id: "lb-vrf-v1".to_string(),
+            policy_version: "v0".to_string(),
+            fs_policy_version: "7".to_string(),
+            fs_epoch_base_ts: 0,
+            kbroad_public: vec![0x46; 32],
+            bootstrap_public: vec![0x47; 32],
+            kbroad_generation: 0,
+            barrier_version: 0,
             current_history_view_id: vec![0xD0; 32],
             current_history_commitment: Some(history_commitment_ok_payload(0xD0, 0xD1, 0x00, 1)),
-            history_authority_extension: String::new(),
+            history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
             join_finalize_auth_token: vec![0xE5; 32],
             provisioning_nonce: vec![0xE6; 32],
             provisioning_issued_at_ms: 1,
@@ -3504,6 +3668,13 @@ mod tests {
             cover_leaf_index: 0,
             n_max: 1024,
             max_barrier_update_bytes: 1_048_576,
+            kem_tree_hash_after: vec![0xCC; 32],
+            history_authority_descriptor: authority.descriptor_bytes,
+            current_global_history_attestation: authority.attestation_bytes,
+            current_join_records: Vec::new(),
+            current_revoked_leaf_indices: revoked_leaf_indices,
+            current_join_records_completeness_attestation: join_helper_attestation,
+            current_revoked_leaf_indices_completeness_attestation: revoked_helper_attestation,
             fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
             last_accepted_ec: 21,
             ..JoinTicketResponse::default()
@@ -3567,28 +3738,50 @@ mod tests {
             "/v1/rooms/list_admins" => encode_proto(ListRoomAdminsResponse {
                 admin_pop_public_keys: vec![vec![0xA1; 32], vec![0xB2; 32]],
             }),
-            "/v1/rooms/expel_member_ticket" => encode_proto(merge_ticket_ok_payload()),
+            "/v1/rooms/expel_member_ticket" => {
+                encode_proto(merge_ticket_with_history_authority_payload())
+            }
             "/v1/members" => encode_proto(MembersResponse::default()),
             "/v1/members/search" => encode_proto(SearchMembersResponse::default()),
             "/v1/rooms/join_ticket" => encode_proto(join_ticket_ok_payload()),
-            "/v1/rooms/merge_ticket" => encode_proto(merge_ticket_ok_payload()),
+            "/v1/rooms/merge_ticket" => encode_proto(merge_ticket_with_history_authority_payload()),
             "/v1/accept_epoch" => encode_proto(AcceptEpochResponse::default()),
             "/v1/barrier/resolve_revoked_leaves" => {
                 let request = BarrierResolveRevokedLeavesRequest::decode(body)
                     .unwrap_or_else(|_| BarrierResolveRevokedLeavesRequest::default());
                 let all = vec![1u32, 7u32];
                 let (start, end, next_page_offset) = page_bounds(request.page_offset, all.len(), 1);
+                let history_commitment = HistoryCommitment {
+                    history_view_id: [0xD1; 32],
+                    history_commitment_id: [0xE1; 32],
+                    prev_history_commitment_id: [0x00; 32],
+                    history_seq: 7,
+                };
+                let authority =
+                    build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+                let page_leaf_indices = all[start..end].to_vec();
+                let helper_completeness_attestation = build_test_helper_completeness_attestation(
+                    &authority,
+                    HELPER_KIND_REVOKED_LEAVES,
+                    &history_commitment,
+                    request.page_offset,
+                    u32::try_from(all.len()).unwrap_or(u32::MAX),
+                    RevokedLeavesSelector {
+                        revocation_roots_hash: &[0xCC; 32],
+                        leaf_indices: page_leaf_indices.as_slice(),
+                    },
+                );
                 encode_proto(BarrierResolveRevokedLeavesResponse {
-                    leaf_indices: all[start..end].to_vec(),
+                    leaf_indices: page_leaf_indices,
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
-                    history_authority_extension: String::new(),
+                    history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
                     page_offset: request.page_offset,
                     next_page_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
-                    helper_completeness_attestation: Vec::new(),
-                    history_authority_descriptor: Vec::new(),
-                    global_history_attestation: Vec::new(),
+                    helper_completeness_attestation,
+                    history_authority_descriptor: authority.descriptor_bytes,
+                    global_history_attestation: authority.attestation_bytes,
                 })
             }
             "/v1/barrier/resolve_joins_since" => {
@@ -3607,17 +3800,45 @@ mod tests {
                     },
                 ];
                 let (start, end, next_page_offset) = page_bounds(request.page_offset, all.len(), 1);
+                let history_commitment = HistoryCommitment {
+                    history_view_id: [0xD1; 32],
+                    history_commitment_id: [0xE1; 32],
+                    prev_history_commitment_id: [0x00; 32],
+                    history_seq: 7,
+                };
+                let authority =
+                    build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+                let page_records = all[start..end].to_vec();
+                let signed_records = page_records
+                    .iter()
+                    .map(|record| BarrierJoinRecord {
+                        device_pk: record.device_pk.clone(),
+                        leaf_index: record.leaf_index,
+                        ek_leaf: record.ek_leaf.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let helper_completeness_attestation = build_test_helper_completeness_attestation(
+                    &authority,
+                    HELPER_KIND_JOINS_SINCE,
+                    &history_commitment,
+                    request.page_offset,
+                    u32::try_from(all.len()).unwrap_or(u32::MAX),
+                    JoinsSinceSelector {
+                        prev_barrier_version: request.prev_barrier_version,
+                        records: signed_records.as_slice(),
+                    },
+                );
                 encode_proto(BarrierResolveJoinsSinceResponse {
-                    records: all[start..end].to_vec(),
+                    records: page_records,
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
-                    history_authority_extension: String::new(),
+                    history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
                     page_offset: request.page_offset,
                     next_page_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
-                    helper_completeness_attestation: Vec::new(),
-                    history_authority_descriptor: Vec::new(),
-                    global_history_attestation: Vec::new(),
+                    helper_completeness_attestation,
+                    history_authority_descriptor: authority.descriptor_bytes,
+                    global_history_attestation: authority.attestation_bytes,
                 })
             }
             "/v1/barrier/fetch_public_tree" => {
@@ -3626,22 +3847,50 @@ mod tests {
                 let all = vec![Vec::new(); 15];
                 let (start, end, next_entry_offset) =
                     page_bounds(request.entry_offset, all.len(), 7);
+                let history_commitment = HistoryCommitment {
+                    history_view_id: [0xD1; 32],
+                    history_commitment_id: [0xE1; 32],
+                    prev_history_commitment_id: [0x00; 32],
+                    history_seq: 7,
+                };
+                let authority =
+                    build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+                let page_entries = all[start..end].to_vec();
+                let helper_completeness_attestation = build_test_helper_completeness_attestation(
+                    &authority,
+                    HELPER_KIND_FETCH_PUBLIC_TREE,
+                    &history_commitment,
+                    request.entry_offset,
+                    u32::try_from(all.len()).unwrap_or(u32::MAX),
+                    FetchPublicTreeSelector {
+                        kem_tree_hash_after: &[0xCC; 32],
+                        pk_entries: page_entries.as_slice(),
+                    },
+                );
                 encode_proto(BarrierFetchPublicTreeResponse {
                     n_max: 8,
                     kem_tree_hash_after: vec![0xCC; 32],
-                    pk_entries: all[start..end].to_vec(),
+                    pk_entries: page_entries,
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
-                    history_authority_extension: String::new(),
+                    history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
                     entry_offset: request.entry_offset,
                     next_entry_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
-                    helper_completeness_attestation: Vec::new(),
-                    history_authority_descriptor: Vec::new(),
-                    global_history_attestation: Vec::new(),
+                    helper_completeness_attestation,
+                    history_authority_descriptor: authority.descriptor_bytes,
+                    global_history_attestation: authority.attestation_bytes,
                 })
             }
             "/v1/barrier/lookup_merge_acceptance" => {
+                let history_commitment = HistoryCommitment {
+                    history_view_id: [0xD1; 32],
+                    history_commitment_id: [0xE2; 32],
+                    prev_history_commitment_id: [0xE1; 32],
+                    history_seq: 8,
+                };
+                let authority =
+                    build_test_history_authority(history_commitment, [0x41; 32], 11, [0xCC; 32]);
                 encode_proto(BarrierLookupMergeAcceptanceResponse {
                     status: PbMergeAcceptanceStatus::Accepted as i32,
                     history_view_id: vec![0xD1; 32],
@@ -3650,9 +3899,9 @@ mod tests {
                     accepted_reason: Some(1),
                     accepted_digest: Some(vec![0xDD; 32]),
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE2, 0xE1, 8)),
-                    history_authority_extension: String::new(),
-                    history_authority_descriptor: Vec::new(),
-                    global_history_attestation: Vec::new(),
+                    history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
+                    history_authority_descriptor: authority.descriptor_bytes,
+                    global_history_attestation: authority.attestation_bytes,
                 })
             }
             "/v1/send_message" => encode_proto(SendMessageResponse::default()),
@@ -4590,31 +4839,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_ticket_refresh_preserves_history_authority_attestation()
+    async fn merge_ticket_refresh_rejects_local_history_authority_in_base_profile()
     -> Result<(), Box<dyn StdError>> {
-        let payload = merge_ticket_with_history_authority_payload(
-            LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
-            LOCAL_HISTORY_ATTESTATION_FINALITY_KIND,
-        );
+        let mut payload = merge_ticket_with_history_authority_payload();
+        payload.history_authority_extension = LOCAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string();
         let (base_url, handle) = start_merge_ticket_server(payload).await?;
         let client = CitygApiClient::new(base_url);
-        let ticket = client.merge_ticket_refresh("room-1", &[0x01; 32]).await?;
-        assert_eq!(
-            ticket.history_authority_extension,
-            Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1)
-        );
-        assert!(ticket.history_authority.is_some());
-        assert!(!ticket.history_authority_descriptor_bytes.is_empty());
-        let attestation = ticket
-            .current_global_history_attestation
-            .ok_or("missing parsed global history attestation")?;
-        assert_eq!(
-            attestation.history_commitment,
-            ticket.current_history_commitment
-        );
-        assert_eq!(attestation.barrier_version, ticket.barrier_version);
-        assert_eq!(attestation.kem_tree_hash_after, ticket.kem_tree_hash_after);
-        assert!(!ticket.current_global_history_attestation_bytes.is_empty());
+        let err = client
+            .merge_ticket_refresh("room-1", &[0x01; 32])
+            .await
+            .expect_err("local history authority must be rejected on base-profile merge_ticket");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("global-history-authority-v1")
+                    && message.contains("base profile")
+        ));
         handle.abort();
         Ok(())
     }
@@ -4622,10 +4862,7 @@ mod tests {
     #[tokio::test]
     async fn merge_ticket_refresh_accepts_global_history_authority_attestation()
     -> Result<(), Box<dyn StdError>> {
-        let payload = merge_ticket_with_history_authority_payload(
-            GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
-            GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
-        );
+        let payload = merge_ticket_with_history_authority_payload();
         let (base_url, handle) = start_merge_ticket_server(payload).await?;
         let client = CitygApiClient::new(base_url);
         let ticket = client.merge_ticket_refresh("room-1", &[0x01; 32]).await?;
@@ -4697,23 +4934,39 @@ mod tests {
     #[tokio::test]
     async fn barrier_fetch_public_tree_rejects_invalid_n_max() -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
         let app = Router::new().route(
             "/v1/barrier/fetch_public_tree",
-            post(|| async {
-                encode_proto(BarrierFetchPublicTreeResponse {
-                    n_max: MAX_BARRIER_N_MAX * 2,
-                    kem_tree_hash_after: vec![0xCC; 32],
-                    pk_entries: Vec::new(),
-                    history_view_id: vec![0xD1; 32],
-                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
-                    history_authority_extension: String::new(),
-                    entry_offset: 0,
-                    next_entry_offset: None,
-                    total_entries: 0,
-                    helper_completeness_attestation: Vec::new(),
-                    history_authority_descriptor: Vec::new(),
-                    global_history_attestation: Vec::new(),
-                })
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                async move {
+                    encode_proto(BarrierFetchPublicTreeResponse {
+                        n_max: MAX_BARRIER_N_MAX * 2,
+                        kem_tree_hash_after: vec![0xCC; 32],
+                        pk_entries: Vec::new(),
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE1, 0x00, 7,
+                        )),
+                        history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        entry_offset: 0,
+                        next_entry_offset: None,
+                        total_entries: 0,
+                        helper_completeness_attestation: Vec::new(),
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                    })
+                }
             }),
         );
         let addr: SocketAddr = listener.local_addr()?;
@@ -4740,23 +4993,37 @@ mod tests {
     async fn barrier_fetch_public_tree_rejects_missing_history_commitment()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
         let app = Router::new().route(
             "/v1/barrier/fetch_public_tree",
-            post(|| async {
-                encode_proto(BarrierFetchPublicTreeResponse {
-                    n_max: 8,
-                    kem_tree_hash_after: vec![0xCC; 32],
-                    pk_entries: vec![Vec::new(); 15],
-                    history_view_id: vec![0xD1; 32],
-                    history_commitment: None,
-                    history_authority_extension: String::new(),
-                    entry_offset: 0,
-                    next_entry_offset: None,
-                    total_entries: 15,
-                    helper_completeness_attestation: Vec::new(),
-                    history_authority_descriptor: Vec::new(),
-                    global_history_attestation: Vec::new(),
-                })
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                async move {
+                    encode_proto(BarrierFetchPublicTreeResponse {
+                        n_max: 8,
+                        kem_tree_hash_after: vec![0xCC; 32],
+                        pk_entries: vec![Vec::new(); 15],
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: None,
+                        history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        entry_offset: 0,
+                        next_entry_offset: None,
+                        total_entries: 15,
+                        helper_completeness_attestation: Vec::new(),
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                    })
+                }
             }),
         );
         let addr: SocketAddr = listener.local_addr()?;
@@ -4783,21 +5050,37 @@ mod tests {
     async fn barrier_resolve_revoked_leaves_rejects_unexpected_completeness_attestation()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
         let app = Router::new().route(
             "/v1/barrier/resolve_revoked_leaves",
-            post(|| async {
-                encode_proto(BarrierResolveRevokedLeavesResponse {
-                    leaf_indices: vec![1, 2],
-                    history_view_id: vec![0xD1; 32],
-                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
-                    history_authority_extension: String::new(),
-                    page_offset: 0,
-                    next_page_offset: None,
-                    total_entries: 2,
-                    helper_completeness_attestation: vec![0xAA, 0xBB],
-                    history_authority_descriptor: Vec::new(),
-                    global_history_attestation: Vec::new(),
-                })
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                async move {
+                    encode_proto(BarrierResolveRevokedLeavesResponse {
+                        leaf_indices: vec![1, 2],
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE1, 0x00, 7,
+                        )),
+                        history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        page_offset: 0,
+                        next_page_offset: None,
+                        total_entries: 2,
+                        helper_completeness_attestation: vec![0xAA, 0xBB],
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                    })
+                }
             }),
         );
         let addr: SocketAddr = listener.local_addr()?;
@@ -4813,9 +5096,7 @@ mod tests {
             .expect_err("unexpected completeness attestation must fail closed");
         assert!(matches!(
             err,
-            Error::Parse(message)
-                if message.contains("helper_completeness_attestation")
-                    && message.contains("base profile")
+            Error::Parse(message) if message.contains("helper_completeness_attestation")
         ));
 
         handle.abort();
@@ -4826,25 +5107,41 @@ mod tests {
     async fn barrier_resolve_joins_since_rejects_unexpected_completeness_attestation()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
         let app = Router::new().route(
             "/v1/barrier/resolve_joins_since",
-            post(|| async {
-                encode_proto(BarrierResolveJoinsSinceResponse {
-                    records: vec![pb::BarrierJoinLeafRecord {
-                        device_pk: vec![0xAA; 32],
-                        leaf_index: 9,
-                        ek_leaf: vec![0xBB; 1184],
-                    }],
-                    history_view_id: vec![0xD1; 32],
-                    history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
-                    history_authority_extension: String::new(),
-                    page_offset: 0,
-                    next_page_offset: None,
-                    total_entries: 1,
-                    helper_completeness_attestation: vec![0xCC],
-                    history_authority_descriptor: Vec::new(),
-                    global_history_attestation: Vec::new(),
-                })
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                async move {
+                    encode_proto(BarrierResolveJoinsSinceResponse {
+                        records: vec![pb::BarrierJoinLeafRecord {
+                            device_pk: vec![0xAA; 32],
+                            leaf_index: 9,
+                            ek_leaf: vec![0xBB; 1184],
+                        }],
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE1, 0x00, 7,
+                        )),
+                        history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        page_offset: 0,
+                        next_page_offset: None,
+                        total_entries: 1,
+                        helper_completeness_attestation: vec![0xCC],
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                    })
+                }
             }),
         );
         let addr: SocketAddr = listener.local_addr()?;
@@ -4860,9 +5157,7 @@ mod tests {
             .expect_err("unexpected completeness attestation must fail closed");
         assert!(matches!(
             err,
-            Error::Parse(message)
-                if message.contains("helper_completeness_attestation")
-                    && message.contains("base profile")
+            Error::Parse(message) if message.contains("helper_completeness_attestation")
         ));
 
         handle.abort();

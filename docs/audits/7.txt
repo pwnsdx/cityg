@@ -455,3 +455,18 @@ Lecture consolidée:
 
 - `7.1` n’est plus honnêtement `Open`: une authentification de snapshot peut désormais se rattacher à une lignée canonique de déploiement, au-delà d’un simple snapshot local.
 - `7.4` reste `Partial`, pas `Closed`, parce que la preuve de non-omission reste optionnelle via extension et ne prétend toujours pas fournir un modèle byzantin fédéré au-delà du déploiement.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche base-profile global authority)
+
+Nouvelle passe spec + implémentation:
+
+- la base profile ne laisse plus A/B/C/current-state en mode “extension si dispo”: `global-history-authority-v1` est désormais obligatoire sur ces paths;
+- le client API fail-close sur toute réponse helper/join/merge/lookup base-profile sans authority globale explicite;
+- cela ferme le sous-gap “global-history-authority-v1 existe mais reste seulement optionnelle pour les flows normaux”.
+
+Lecture consolidée:
+
+- `7.1` et `7.4` restent **Partial**, mais plus pour une raison d’optionalité du profil de base;
+- le reste non fermé est désormais limité au niveau de confiance de l’autorité elle-même: append-only de déploiement oui, modèle fédéré/non-omissif byzantin non.

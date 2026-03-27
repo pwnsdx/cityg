@@ -475,7 +475,7 @@ message JoinTicketResponse {
   bytes kem_tree_hash_after = 27;
   uint64 n_max = 28;
   uint64 max_barrier_update_bytes = 29;
-  string history_authority_extension = 46;  // Empty in base profile; "local-history-authority-v1" when that extension is negotiated
+  string history_authority_extension = 46;  // "global-history-authority-v1" in the base profile
 }
 ```
 
@@ -558,14 +558,14 @@ message MergeTicketResponse {
   bytes kem_tree_hash_after = 25;
   uint64 n_max = 26;
   uint64 max_barrier_update_bytes = 27;
-  string history_authority_extension = 34;  // Empty in base profile; "local-history-authority-v1" when that extension is negotiated
+  string history_authority_extension = 34;  // "global-history-authority-v1" in the base profile
 }
 ```
 
-When present, `history_authority_extension` names the exact optional history-authority extension
-that governs any accompanying `history_authority_descriptor`,
-`current_global_history_attestation`, or helper-completeness objects. Base-profile responses leave
-this field empty.
+`history_authority_extension` names the exact negotiated history-authority extension that governs
+any accompanying `history_authority_descriptor`,
+`current_global_history_attestation`, or helper-completeness objects. In the base profile this
+field MUST equal `"global-history-authority-v1"`.
 
 **Rust Client Example:**
 ```rust

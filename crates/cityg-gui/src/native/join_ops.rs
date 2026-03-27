@@ -24,6 +24,23 @@ fn parse_join_ticket_history_authority_extension(
     ))
 }
 
+fn require_base_profile_global_history_authority_extension(
+    extension: Option<HistoryAuthorityExtension>,
+    context: &str,
+) -> Result<HistoryAuthorityExtension> {
+    match extension {
+        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1) => {
+            Ok(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
+        }
+        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) => Err(anyhow!(
+            "{context} must carry global-history-authority-v1 in the base profile"
+        )),
+        None => Err(anyhow!(
+            "{context} missing required global-history-authority-v1 in the base profile"
+        )),
+    }
+}
+
 pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let JoinParams {
         server_url,
@@ -273,7 +290,10 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         })
         .transpose()?;
     let current_history_authority_extension =
-        parse_join_ticket_history_authority_extension(&ticket.history_authority_extension)?;
+        Some(require_base_profile_global_history_authority_extension(
+            parse_join_ticket_history_authority_extension(&ticket.history_authority_extension)?,
+            "join ticket",
+        )?);
     let join_finalize_auth_token =
         bytes32("join_finalize_auth_token", &ticket.join_finalize_auth_token)?;
     let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {

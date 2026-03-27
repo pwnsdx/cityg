@@ -147,6 +147,23 @@ fn ensure_supported_attested_current_state_extension(
     Ok(())
 }
 
+fn require_base_profile_global_history_authority_extension(
+    extension: Option<HistoryAuthorityExtension>,
+    context: &str,
+) -> Result<HistoryAuthorityExtension> {
+    match extension {
+        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1) => {
+            Ok(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
+        }
+        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) => Err(anyhow!(
+            "{context} must carry global-history-authority-v1 in the base profile"
+        )),
+        None => Err(anyhow!(
+            "{context} missing required global-history-authority-v1 in the base profile"
+        )),
+    }
+}
+
 fn parse_join_ticket_history_authority_extension(
     raw: &str,
 ) -> Result<Option<HistoryAuthorityExtension>> {
@@ -1296,7 +1313,10 @@ async fn prepare_join_session_with_identity(
         ),
     };
     let current_history_authority_extension =
-        parse_join_ticket_history_authority_extension(&ticket.history_authority_extension)?;
+        Some(require_base_profile_global_history_authority_extension(
+            parse_join_ticket_history_authority_extension(&ticket.history_authority_extension)?,
+            "join ticket",
+        )?);
     ensure_supported_attested_current_state_extension(
         "join ticket",
         current_history_authority_extension,
