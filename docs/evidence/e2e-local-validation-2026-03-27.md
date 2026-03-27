@@ -231,6 +231,23 @@ Artifacts:
 
 - `/tmp/cityg-stress-flow-e`
 
+### Flow B: same-room leave -> empty room -> rejoin with stable identity
+
+Validated via targeted `join_leave` integration test rather than `cityg-stress`,
+because the current stress harness still retries on fresh room IDs per round:
+
+```text
+cargo test --locked -p cityg-gui --bin join_leave \
+  tests::rejoin_with_same_identity_succeeds_after_room_becomes_empty \
+  -- --exact --nocapture
+```
+
+Observed:
+
+- both members leave and the room becomes empty
+- the same persistent room identity can rejoin successfully
+- the rejoined member keeps the same `pop_public_key` and `leaf_id`
+
 ### Flow G: lanes / heads midline
 
 Passed on the documented `4/4` topology:
@@ -242,6 +259,63 @@ L4/H4: workers_passed=2 workers_failed=0 rounds=6/6 accept_ok=35 refresh_conflic
 Artifacts:
 
 - `/tmp/cityg-stress-flow-g-l4-h4`
+
+### Flow G: lanes / heads remaining midpoint
+
+Passed on the remaining `2/2` topology:
+
+```text
+L2/H2: workers_passed=2 workers_failed=0 rounds=4/4 accept_ok=22 refresh_conflicts=3
+```
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-g-l2-h2`
+
+### Flow C: proactive PCS refresh -> epoch sync -> send/fetch stable
+
+Validated via targeted GUI runtime test:
+
+```text
+cargo test --locked -p cityg-gui --bin cityg-gui --features native-app \
+  native::tests::epoch_sync_after_second_join_keeps_local_pcs_refresh_valid \
+  -- --exact --nocapture
+```
+
+Observed:
+
+- the flow passes end-to-end
+- a transient `500 invalid input: kbroad key missing` is logged during the test,
+  but the scenario recovers and the assertion remains green
+
+### Flow D: accepted merge -> interruption -> restart -> history lookup recovery
+
+Validated via targeted GUI/runtime recovery tests:
+
+```text
+cargo test --locked -p cityg-gui --bin cityg-gui --features native-app \
+  native::tests::join_finalize_fault_injection_after_publish_recovers_via_epoch_sync \
+  -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui --features native-app \
+  native::tests::pending_join_finalize_history_lookup_404_after_newer_version_requires_recovery \
+  -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui --features native-app \
+  native::tests::pending_barrier_history_lookup_discards_superseded_locator \
+  -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui --features native-app \
+  native::tests::pending_barrier_history_lookup_discards_final_rejected_locator \
+  -- --exact --nocapture
+```
+
+Observed:
+
+- post-publish join-finalize fault injection recovers through epoch sync
+- `404` after a newer committed version escalates to recovery-required as expected
+- authenticated `superseded` and `final_rejected` locators discard stale pending
+  state cleanly
 
 ## Next E2E Matrix
 
@@ -278,6 +352,8 @@ target/debug/cityg-stress --plain \
 Goal:
 
 - validate leave-path churn and UI-visible membership convergence
+- targeted same-room rejoin semantics are already covered by
+  `tests::rejoin_with_same_identity_succeeds_after_room_becomes_empty`
 
 Current limitation:
 
@@ -311,6 +387,8 @@ target/debug/cityg-stress --plain \
 Goal:
 
 - validate that refresh conflicts stay bounded and no client remains stuck
+- targeted runtime coverage already exists via
+  `native::tests::epoch_sync_after_second_join_keeps_local_pcs_refresh_valid`
 
 Command:
 
@@ -324,6 +402,9 @@ cargo test --locked -p cityg-gui --bin cityg-gui --features native-app \
 Goal:
 
 - validate pending merge recovery under restart/interruption
+- targeted recovery semantics are already covered by
+  `native::tests::join_finalize_fault_injection_after_publish_recovers_via_epoch_sync`
+  plus the `native::tests::*history_lookup*` cases above
 
 Command:
 
@@ -401,7 +482,7 @@ Goal:
 Matrix:
 
 - done: `CITYG_SERVER_GROUP_LANES=1`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=1`
-- next: `CITYG_SERVER_GROUP_LANES=2`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=2`
+- done: `CITYG_SERVER_GROUP_LANES=2`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=2`
 - done: `CITYG_SERVER_GROUP_LANES=4`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=4`
 - done: `CITYG_SERVER_GROUP_LANES=8`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=8`
 
