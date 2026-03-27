@@ -316,6 +316,7 @@ message MergeTicketResponse {
   bytes history_authority_descriptor = 32;
   bytes current_global_history_attestation = 33;
   string history_authority_extension = 34;
+  bytes merge_ticket_artifact = 35;
 }
 
 message BarrierResolveRevokedLeavesRequest {

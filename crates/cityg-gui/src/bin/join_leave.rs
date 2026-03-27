@@ -3205,6 +3205,7 @@ mod tests {
 
     fn sample_merge_ticket() -> cityg_api_client::MergeTicket {
         cityg_api_client::MergeTicket {
+            author_leaf_id: [0x55; 32],
             we_epoch_id: [0x04; 32],
             parities: vec![sample_pivot_parity()],
             witness_cbor: vec![0xA1, 0x01, 0x02],
@@ -3242,6 +3243,7 @@ mod tests {
             history_authority: None,
             current_global_history_attestation_bytes: Vec::new(),
             current_global_history_attestation: None,
+            merge_ticket_artifact_bytes: Vec::new(),
             n_max: 8,
             max_barrier_update_bytes: 64 * 1024,
         }
@@ -3315,6 +3317,8 @@ mod tests {
         current_global_history_attestation: Vec<u8>,
         #[prost(string, tag = "34")]
         history_authority_extension: String,
+        #[prost(bytes = "vec", tag = "35")]
+        merge_ticket_artifact: Vec<u8>,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3780,6 +3784,7 @@ mod tests {
                 .history_authority_extension
                 .map(|extension| extension.as_str().to_string())
                 .unwrap_or_default(),
+            merge_ticket_artifact: ticket.merge_ticket_artifact_bytes.clone(),
         }
         .encode_to_vec())
     }
@@ -6018,7 +6023,8 @@ mod tests {
 
     #[tokio::test]
     async fn mock_merge_ticket_roundtrips_current_history_commitment() -> Result<()> {
-        let ticket = sample_merge_ticket();
+        let fixture = capture_leave_fixture().await?;
+        let ticket = fixture.ticket;
         let state = LeaveMockState::new([(
             "/v1/rooms/merge_ticket",
             vec![MockResponse::proto_bytes(encode_merge_ticket(&ticket)?)],
@@ -6027,7 +6033,7 @@ mod tests {
 
         let client = new_api_client(&server_url);
         let decoded = client
-            .merge_ticket(&hex::encode([0x44; 32]), &[0x55; 32])
+            .merge_ticket(&hex::encode([0x44; 32]), &ticket.author_leaf_id)
             .await?;
         assert_eq!(
             decoded.current_history_commitment,

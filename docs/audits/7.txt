@@ -485,3 +485,18 @@ Lecture consolidée:
 
 - cela ferme la partie “provisioning externe / malléable” du finding 7.6;
 - `7.6` reste néanmoins **Partial** parce que la policy et la gouvernance ne sont toujours pas engagées dans la même lignée authentifiée avec la même force que le provisioning courant.
+
+--
+
+## Commentaires Codex (2026-03-28, tranche signed merge ticket artifact)
+
+Nouvelle passe spec + implémentation:
+
+- le current-state/helper state servi par `merge_ticket` / `expel_member_ticket` n’est plus seulement véhiculé par des champs libres de réponse: il est maintenant encapsulé dans un `merge_ticket_artifact` signé;
+- cet artefact est lié à `global-history-authority-v1`, au `current_history_commitment`, à l’attestation d’historique courante, à `we_epoch_id`, aux pivots/parités et aux paramètres FLG consommés avant décision locale;
+- le client refuse désormais fail-closed tout merge ticket sans cet artefact ou avec artefact incohérent.
+
+Lecture consolidée:
+
+- cela ferme la partie “merge/current-state malléable hors attestation dédiée” du finding 7.6;
+- `7.6` reste néanmoins **Partial** parce que la policy/gouvernance complète n’est toujours pas engagée dans une même lignée authentifiée avec le même niveau de garantie.

@@ -349,3 +349,18 @@ Lecture consolidée:
 
 - `5.7` n’est plus honnêtement `Partial`: l’artefact de provisioning demandé par l’audit existe maintenant comme objet signé autonome côté wire/API et il est vérifié strictement côté client;
 - le reste utile de l’audit 5 porte désormais sur la finalité/canonité globale (`5.3`) et sur le manifest/policy/config global (`5.8`), pas sur le provisioning join lui-même.
+
+--
+
+## Commentaires Codex (2026-03-28, tranche signed merge ticket artifact)
+
+Nouvelle passe spec + implémentation:
+
+- `MergeTicketResponse` transporte maintenant un `merge_ticket_artifact` signé qui couvre explicitement les champs de current-state/helper consommés avant un publish reason 0/1;
+- cet artefact lie `history_authority_extension`, `current_history_commitment`, l’attestation d’historique courante, `we_epoch_id`, les pivots/parités, la fenêtre FLG, et les roots/suite ids visibles côté client;
+- le client API rejette fail-closed les tickets sans artefact ou avec artefact altéré avant toute consommation de ce state.
+
+Lecture consolidée:
+
+- cela réduit encore la malléabilité locale des contrats helper/config sur le path merge;
+- `5.8` reste néanmoins **Partial** parce qu’il manque toujours un manifest global unique signé pour la policy/config de déploiement, au-delà des artefacts join/merge individuels.

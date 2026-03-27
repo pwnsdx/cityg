@@ -579,7 +579,14 @@ message MergeTicketResponse {
   bytes kem_tree_hash_after = 25;
   uint64 n_max = 26;
   uint64 max_barrier_update_bytes = 27;
+  bytes current_history_view_id = 28;
+  HistoryCommitment current_history_commitment = 29;
+  FsForwardLeapPolicy fs_forward_leap_policy = 30;
+  uint64 last_accepted_ec = 31;
+  bytes history_authority_descriptor = 32;
+  bytes current_global_history_attestation = 33;
   string history_authority_extension = 34;  // "global-history-authority-v1" in the base profile
+  bytes merge_ticket_artifact = 35;
 }
 ```
 
@@ -587,6 +594,11 @@ message MergeTicketResponse {
 any accompanying `history_authority_descriptor`,
 `current_global_history_attestation`, or helper-completeness objects. In the base profile this
 field MUST equal `"global-history-authority-v1"`.
+`merge_ticket_artifact` MUST be present and MUST be verified before the client consumes any
+delivered current-state/helper field from the merge/expel ticket. In the base profile, that
+artifact is signed under the negotiated history-authority extension and binds the current
+`HistoryCommitment`, current attestation, FLG window, and merge-authoring helper state carried by
+the response.
 
 **Rust Client Example:**
 ```rust

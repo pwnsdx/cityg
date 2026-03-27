@@ -1659,6 +1659,27 @@ Base-profile wire/API requirement (normative):
   * `provisioning_expires_at_ms`
   * authenticated FLG window parameters and current `last_accepted_ec`
 * Joiners MUST verify `provisioning_artifact` before consuming any provisioned current-state field.
+Base-profile wire/API requirement for merge/current-state helper tickets (normative):
+* Successful `MergeTicketResponse` and `expel_member_ticket` responses that carry authenticated current-state/helper objects MUST carry a non-empty `merge_ticket_artifact`.
+* `merge_ticket_artifact` MUST be signed under the negotiated `history_authority_extension`.
+* That signed artifact MUST bind exactly the client-visible current-state/helper fields consumed before originating reason 0/1 updates or local activation checks, including at minimum:
+  * `history_authority_extension`
+  * `history_authority_descriptor`
+  * `current_global_history_attestation`
+  * `current_history_view_id`
+  * `current_history_commitment`
+  * `barrier_version`
+  * `cover_leaf_index`
+  * `n_max`
+  * `max_barrier_update_bytes`
+  * `kem_tree_hash_after`
+  * authenticated FLG window parameters and current `last_accepted_ec`
+  * `we_epoch_id`
+  * `pivot_parity_cbor`
+  * `witness_cbor`
+  * `srx_cbor`
+  * the accepted current-state roots / suite identifiers consumed by local merge or expel authoring checks
+* Clients MUST verify `merge_ticket_artifact` before consuming any delivered current-state/helper field from a merge/expel ticket.
 Join provisioning MUST deliver to the joiner:
 Barrier required fields:
 * current barrier_initialized (bool) -- for joins into an already-existing group under this profile, this MUST be true

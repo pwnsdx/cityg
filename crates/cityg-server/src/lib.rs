@@ -2710,6 +2710,32 @@ impl CityGServer {
         )
     }
 
+    pub fn merge_ticket_artifact_bytes(
+        &self,
+        bundle: &MergeTicketBundle,
+        profile_version: &str,
+        history_authority_extension: &str,
+        history_authority_descriptor: &[u8],
+        current_global_history_attestation: &[u8],
+        pivot_parity_cbor: &[Vec<u8>],
+    ) -> Result<Vec<u8>, CityGError> {
+        let authority = self
+            .history_authority
+            .as_ref()
+            .ok_or(CityGError::InvalidInput(
+                "history authority unavailable for merge ticket artifact",
+            ))?;
+        encode_merge_ticket_artifact(
+            authority,
+            bundle,
+            profile_version,
+            history_authority_extension,
+            history_authority_descriptor,
+            current_global_history_attestation,
+            pivot_parity_cbor,
+        )
+    }
+
     pub fn history_authority_extension_id(&self) -> &'static str {
         self.history_authority
             .as_ref()
@@ -3204,6 +3230,74 @@ struct JoinProvisioningArtifactWire {
     signature: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct MergeTicketArtifactWire {
+    #[serde(with = "serde_bytes")]
+    scope_id: Vec<u8>,
+    history_authority_extension: String,
+    profile_version: String,
+    #[serde(with = "serde_bytes")]
+    gid: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    leaf_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    history_view_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: Vec<u8>,
+    history_seq: u64,
+    barrier_version: u64,
+    cover_leaf_index: u64,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: Vec<u8>,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+    last_accepted_ec: u64,
+    #[serde(with = "serde_bytes")]
+    history_authority_descriptor: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    current_global_history_attestation: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    we_epoch_id: Vec<u8>,
+    pivot_parity_cbor: Vec<Vec<u8>>,
+    #[serde(with = "serde_bytes")]
+    witness_cbor: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    srx_cbor: Vec<u8>,
+    proof_mode: String,
+    vrf_id: String,
+    policy_version: String,
+    #[serde(with = "serde_bytes")]
+    cat: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    parent_root: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    join_delta_root: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    revoked_since_root: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    revoked_root: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    tswe_salt_hash: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pox_r_commit: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    kbroad_public: Vec<u8>,
+    msphf_crs_id: String,
+    msphf_params_id: String,
+    fs_policy_version: String,
+    fs_epoch_base_ts: u64,
+    kbroad_generation: u64,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+}
+
 #[derive(Serialize)]
 struct GlobalHistoryAttestationSignedPayload<'a>(
     &'static str,
@@ -3269,6 +3363,73 @@ struct JoinProvisioningArtifactSignedPayload<'a> {
     current_barrier_update: &'a [u8],
     current_join_records: &'a [BarrierJoinLeafRecord],
     current_revoked_leaf_indices: &'a [u32],
+}
+
+#[derive(Serialize)]
+struct MergeTicketArtifactSignedPayload<'a> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    history_authority_extension: &'a str,
+    profile_version: &'a str,
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    leaf_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_view_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: &'a [u8; 32],
+    history_seq: u64,
+    barrier_version: u64,
+    cover_leaf_index: u64,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: &'a [u8; 32],
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+    last_accepted_ec: u64,
+    #[serde(with = "serde_bytes")]
+    history_authority_descriptor: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    current_global_history_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    we_epoch_id: &'a [u8; 32],
+    pivot_parity_cbor: &'a [Vec<u8>],
+    #[serde(with = "serde_bytes")]
+    witness_cbor: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    srx_cbor: &'a [u8],
+    proof_mode: &'a str,
+    vrf_id: &'a str,
+    policy_version: &'a str,
+    #[serde(with = "serde_bytes")]
+    cat: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    parent_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    join_delta_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    revoked_since_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    revoked_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    tswe_salt_hash: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    pox_r_commit: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    kbroad_public: &'a [u8],
+    msphf_crs_id: &'a str,
+    msphf_params_id: &'a str,
+    fs_policy_version: &'a str,
+    fs_epoch_base_ts: u64,
+    kbroad_generation: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -3606,6 +3767,114 @@ fn encode_join_provisioning_artifact(
         fs_forward_leap_slack_first_device: bundle.fs_forward_leap_policy.slack_first_device,
         fs_forward_leap_slack_device: bundle.fs_forward_leap_policy.slack_device,
         last_accepted_ec: bundle.last_accepted_ec,
+        signature,
+    })?)
+}
+
+fn encode_merge_ticket_artifact(
+    state: &HistoryAuthorityState,
+    bundle: &MergeTicketBundle,
+    profile_version: &str,
+    history_authority_extension: &str,
+    history_authority_descriptor: &[u8],
+    current_global_history_attestation: &[u8],
+    pivot_parity_cbor: &[Vec<u8>],
+) -> Result<Vec<u8>, CityGError> {
+    let payload = to_cbor_vec(&MergeTicketArtifactSignedPayload {
+        label: "cityg/merge-ticket-artifact-v1",
+        scope_id: &state.descriptor.scope_id,
+        history_authority_extension,
+        profile_version,
+        gid: &bundle.gid,
+        leaf_id: &bundle.leaf_id,
+        history_view_id: &bundle.current_history_commitment.history_view_id,
+        history_commitment_id: &bundle.current_history_commitment.history_commitment_id,
+        prev_history_commitment_id: &bundle.current_history_commitment.prev_history_commitment_id,
+        history_seq: bundle.current_history_commitment.history_seq,
+        barrier_version: bundle.barrier_version,
+        cover_leaf_index: bundle.cover_leaf_index,
+        n_max: bundle.n_max,
+        max_barrier_update_bytes: bundle.max_barrier_update_bytes,
+        kem_tree_hash_after: &bundle.kem_tree_hash_after,
+        fs_forward_leap_h: bundle.fs_forward_leap_policy.h,
+        fs_forward_leap_checkpoint_interval: bundle.fs_forward_leap_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: bundle.fs_forward_leap_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: bundle.fs_forward_leap_policy.slack_first_device,
+        fs_forward_leap_slack_device: bundle.fs_forward_leap_policy.slack_device,
+        last_accepted_ec: bundle.last_accepted_ec,
+        history_authority_descriptor,
+        current_global_history_attestation,
+        we_epoch_id: &bundle.pivot_we_epoch_id,
+        pivot_parity_cbor,
+        witness_cbor: bundle.witness_cbor.as_slice(),
+        srx_cbor: bundle.srx_cbor.as_slice(),
+        proof_mode: bundle.proof_mode.as_str(),
+        vrf_id: bundle.vrf_id.as_str(),
+        policy_version: bundle.policy_version.as_str(),
+        cat: &bundle.cat,
+        parent_root: &bundle.parent_root,
+        join_delta_root: &bundle.join_delta_root,
+        revoked_since_root: &bundle.revoked_since_root,
+        revoked_root: &bundle.revoked_root,
+        tswe_salt_hash: &bundle.tswe_salt_hash,
+        pox_r_commit: &bundle.pox_r_commit,
+        kbroad_public: bundle.kbroad_public.as_slice(),
+        msphf_crs_id: bundle.msphf_crs_id.as_str(),
+        msphf_params_id: bundle.msphf_params_id.as_str(),
+        fs_policy_version: bundle.fs_policy_version.as_str(),
+        fs_epoch_base_ts: bundle.fs_epoch_base_ts,
+        kbroad_generation: bundle.kbroad_generation,
+    })?;
+    let signature = sign_history_authority_message(state, payload.as_slice())?;
+    Ok(to_cbor_vec(&MergeTicketArtifactWire {
+        scope_id: state.descriptor.scope_id.to_vec(),
+        history_authority_extension: history_authority_extension.to_string(),
+        profile_version: profile_version.to_string(),
+        gid: bundle.gid.to_vec(),
+        leaf_id: bundle.leaf_id.to_vec(),
+        history_view_id: bundle.current_history_commitment.history_view_id.to_vec(),
+        history_commitment_id: bundle
+            .current_history_commitment
+            .history_commitment_id
+            .to_vec(),
+        prev_history_commitment_id: bundle
+            .current_history_commitment
+            .prev_history_commitment_id
+            .to_vec(),
+        history_seq: bundle.current_history_commitment.history_seq,
+        barrier_version: bundle.barrier_version,
+        cover_leaf_index: bundle.cover_leaf_index,
+        n_max: bundle.n_max,
+        max_barrier_update_bytes: bundle.max_barrier_update_bytes,
+        kem_tree_hash_after: bundle.kem_tree_hash_after.to_vec(),
+        fs_forward_leap_h: bundle.fs_forward_leap_policy.h,
+        fs_forward_leap_checkpoint_interval: bundle.fs_forward_leap_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: bundle.fs_forward_leap_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: bundle.fs_forward_leap_policy.slack_first_device,
+        fs_forward_leap_slack_device: bundle.fs_forward_leap_policy.slack_device,
+        last_accepted_ec: bundle.last_accepted_ec,
+        history_authority_descriptor: history_authority_descriptor.to_vec(),
+        current_global_history_attestation: current_global_history_attestation.to_vec(),
+        we_epoch_id: bundle.pivot_we_epoch_id.to_vec(),
+        pivot_parity_cbor: pivot_parity_cbor.to_vec(),
+        witness_cbor: bundle.witness_cbor.clone(),
+        srx_cbor: bundle.srx_cbor.clone(),
+        proof_mode: bundle.proof_mode.clone(),
+        vrf_id: bundle.vrf_id.clone(),
+        policy_version: bundle.policy_version.clone(),
+        cat: bundle.cat.to_vec(),
+        parent_root: bundle.parent_root.to_vec(),
+        join_delta_root: bundle.join_delta_root.to_vec(),
+        revoked_since_root: bundle.revoked_since_root.to_vec(),
+        revoked_root: bundle.revoked_root.to_vec(),
+        tswe_salt_hash: bundle.tswe_salt_hash.to_vec(),
+        pox_r_commit: bundle.pox_r_commit.to_vec(),
+        kbroad_public: bundle.kbroad_public.clone(),
+        msphf_crs_id: bundle.msphf_crs_id.clone(),
+        msphf_params_id: bundle.msphf_params_id.clone(),
+        fs_policy_version: bundle.fs_policy_version.clone(),
+        fs_epoch_base_ts: bundle.fs_epoch_base_ts,
+        kbroad_generation: bundle.kbroad_generation,
         signature,
     })?)
 }

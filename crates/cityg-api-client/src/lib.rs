@@ -714,8 +714,10 @@ impl CitygApiClient {
         let pox_r_commit = array32(&response.pox_r_commit)?;
         let n_max = validate_barrier_n_max(response.n_max)?;
         let current_history_view_id = array32(&response.current_history_view_id)?;
-        let current_history_commitment =
-            parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
+        let current_history_commitment = parse_history_commitment(
+            current_history_view_id,
+            response.current_history_commitment.clone(),
+        )?;
         let history_authority_extension =
             Some(require_base_profile_global_history_authority_extension(
                 parse_history_authority_extension(
@@ -787,8 +789,28 @@ impl CitygApiClient {
                 response.cover_leaf_index, n_max
             )));
         }
+        if let (Some(authority), Some(attestation)) = (
+            history_authority.as_ref(),
+            current_global_history_attestation.as_ref(),
+        ) {
+            verify_merge_ticket_artifact(
+                response.merge_ticket_artifact.as_slice(),
+                authority,
+                history_authority_extension.expect("validated base-profile extension"),
+                author_leaf_id,
+                &response,
+                &current_history_commitment,
+                attestation,
+                &fs_forward_leap_policy,
+            )?;
+        } else if !response.merge_ticket_artifact.is_empty() {
+            return Err(Error::Parse(
+                "merge ticket carries merge_ticket_artifact without history authority".to_string(),
+            ));
+        }
 
         Ok(MergeTicket {
+            author_leaf_id: *author_leaf_id,
             we_epoch_id,
             parities,
             witness_cbor: response.witness_cbor,
@@ -820,6 +842,7 @@ impl CitygApiClient {
             history_authority,
             current_global_history_attestation_bytes: response.current_global_history_attestation,
             current_global_history_attestation,
+            merge_ticket_artifact_bytes: response.merge_ticket_artifact,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
@@ -1356,8 +1379,10 @@ impl CitygApiClient {
         let pox_r_commit = array32(&response.pox_r_commit)?;
         let n_max = validate_barrier_n_max(response.n_max)?;
         let current_history_view_id = array32(&response.current_history_view_id)?;
-        let current_history_commitment =
-            parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
+        let current_history_commitment = parse_history_commitment(
+            current_history_view_id,
+            response.current_history_commitment.clone(),
+        )?;
         let history_authority_extension =
             Some(require_base_profile_global_history_authority_extension(
                 parse_history_authority_extension(
@@ -1429,8 +1454,28 @@ impl CitygApiClient {
                 response.cover_leaf_index, n_max
             )));
         }
+        if let (Some(authority), Some(attestation)) = (
+            history_authority.as_ref(),
+            current_global_history_attestation.as_ref(),
+        ) {
+            verify_merge_ticket_artifact(
+                response.merge_ticket_artifact.as_slice(),
+                authority,
+                history_authority_extension.expect("validated base-profile extension"),
+                leaf_id,
+                &response,
+                &current_history_commitment,
+                attestation,
+                &fs_forward_leap_policy,
+            )?;
+        } else if !response.merge_ticket_artifact.is_empty() {
+            return Err(Error::Parse(
+                "merge ticket carries merge_ticket_artifact without history authority".to_string(),
+            ));
+        }
 
         Ok(MergeTicket {
+            author_leaf_id: *leaf_id,
             we_epoch_id,
             parities,
             witness_cbor: response.witness_cbor,
@@ -1462,6 +1507,7 @@ impl CitygApiClient {
             history_authority,
             current_global_history_attestation_bytes: response.current_global_history_attestation,
             current_global_history_attestation,
+            merge_ticket_artifact_bytes: response.merge_ticket_artifact,
             n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
@@ -2787,6 +2833,7 @@ impl MergeTicketIntent {
 /// - `kbroad_generation`: Monotonic room KBROAD generation
 #[derive(Debug, Clone)]
 pub struct MergeTicket {
+    pub author_leaf_id: [u8; 32],
     pub we_epoch_id: [u8; 32],
     pub parities: Vec<PivotParity>,
     pub witness_cbor: Vec<u8>,
@@ -2818,6 +2865,7 @@ pub struct MergeTicket {
     pub history_authority: Option<HistoryAuthorityDescriptor>,
     pub current_global_history_attestation_bytes: Vec<u8>,
     pub current_global_history_attestation: Option<GlobalHistoryAttestation>,
+    pub merge_ticket_artifact_bytes: Vec<u8>,
     pub n_max: u64,
     pub max_barrier_update_bytes: u64,
 }
@@ -2880,6 +2928,74 @@ struct JoinProvisioningArtifactWire {
     fs_forward_leap_slack_first_device: u64,
     fs_forward_leap_slack_device: u64,
     last_accepted_ec: u64,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MergeTicketArtifactWire {
+    #[serde(with = "serde_bytes")]
+    scope_id: Vec<u8>,
+    history_authority_extension: String,
+    profile_version: String,
+    #[serde(with = "serde_bytes")]
+    gid: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    leaf_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    history_view_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: Vec<u8>,
+    history_seq: u64,
+    barrier_version: u64,
+    cover_leaf_index: u64,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: Vec<u8>,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+    last_accepted_ec: u64,
+    #[serde(with = "serde_bytes")]
+    history_authority_descriptor: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    current_global_history_attestation: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    we_epoch_id: Vec<u8>,
+    pivot_parity_cbor: Vec<Vec<u8>>,
+    #[serde(with = "serde_bytes")]
+    witness_cbor: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    srx_cbor: Vec<u8>,
+    proof_mode: String,
+    vrf_id: String,
+    policy_version: String,
+    #[serde(with = "serde_bytes")]
+    cat: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    parent_root: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    join_delta_root: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    revoked_since_root: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    revoked_root: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    tswe_salt_hash: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pox_r_commit: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    kbroad_public: Vec<u8>,
+    msphf_crs_id: String,
+    msphf_params_id: String,
+    fs_policy_version: String,
+    fs_epoch_base_ts: u64,
+    kbroad_generation: u64,
     #[serde(with = "serde_bytes")]
     signature: Vec<u8>,
 }
@@ -2956,6 +3072,73 @@ struct JoinProvisioningArtifactSignedPayload<'a> {
     current_barrier_update: &'a [u8],
     current_join_records: &'a [BarrierJoinRecord],
     current_revoked_leaf_indices: &'a [u32],
+}
+
+#[derive(Serialize)]
+struct MergeTicketArtifactSignedPayload<'a> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    history_authority_extension: &'a str,
+    profile_version: &'a str,
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    leaf_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_view_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: &'a [u8; 32],
+    history_seq: u64,
+    barrier_version: u64,
+    cover_leaf_index: u64,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: &'a [u8; 32],
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+    last_accepted_ec: u64,
+    #[serde(with = "serde_bytes")]
+    history_authority_descriptor: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    current_global_history_attestation: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    we_epoch_id: &'a [u8; 32],
+    pivot_parity_cbor: &'a [Vec<u8>],
+    #[serde(with = "serde_bytes")]
+    witness_cbor: &'a [u8],
+    #[serde(with = "serde_bytes")]
+    srx_cbor: &'a [u8],
+    proof_mode: &'a str,
+    vrf_id: &'a str,
+    policy_version: &'a str,
+    #[serde(with = "serde_bytes")]
+    cat: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    parent_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    join_delta_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    revoked_since_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    revoked_root: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    tswe_salt_hash: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    pox_r_commit: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    kbroad_public: &'a [u8],
+    msphf_crs_id: &'a str,
+    msphf_params_id: &'a str,
+    fs_policy_version: &'a str,
+    fs_epoch_base_ts: u64,
+    kbroad_generation: u64,
 }
 
 #[derive(Serialize)]
@@ -3203,6 +3386,171 @@ fn verify_join_provisioning_artifact(
         current_barrier_update: response.current_barrier_update.as_slice(),
         current_join_records: join_records.as_slice(),
         current_revoked_leaf_indices: response.current_revoked_leaf_indices.as_slice(),
+    })?;
+    verify_ml_dsa_signature(
+        payload.as_slice(),
+        authority.public_key.as_slice(),
+        artifact.signature.as_slice(),
+    )
+}
+
+fn verify_merge_ticket_artifact(
+    raw: &[u8],
+    authority: &HistoryAuthorityDescriptor,
+    history_authority_extension: HistoryAuthorityExtension,
+    requested_leaf_id: &[u8; 32],
+    response: &MergeTicketResponse,
+    current_history_commitment: &HistoryCommitment,
+    current_global_history_attestation: &GlobalHistoryAttestation,
+    fs_forward_leap_policy: &FsForwardLeapPolicy,
+) -> Result<(), Error> {
+    if raw.is_empty() {
+        return Err(Error::Parse(
+            "merge ticket missing merge_ticket_artifact".to_string(),
+        ));
+    }
+    let artifact: MergeTicketArtifactWire = decode_cbor_det("merge ticket artifact", raw)?;
+    if array32(&artifact.scope_id)? != authority.scope_id {
+        return Err(Error::Parse(
+            "merge ticket artifact scope_id mismatch".to_string(),
+        ));
+    }
+    if artifact.history_authority_extension != history_authority_extension.as_str() {
+        return Err(Error::Parse(
+            "merge ticket artifact history_authority_extension mismatch".to_string(),
+        ));
+    }
+    if artifact.profile_version != response.profile_version {
+        return Err(Error::Parse(
+            "merge ticket artifact profile_version mismatch".to_string(),
+        ));
+    }
+    if array32(&artifact.gid)? != current_global_history_attestation.gid {
+        return Err(Error::Parse(
+            "merge ticket artifact gid mismatch".to_string(),
+        ));
+    }
+    if array32(&artifact.leaf_id)? != *requested_leaf_id {
+        return Err(Error::Parse(
+            "merge ticket artifact leaf_id mismatch".to_string(),
+        ));
+    }
+    if array32(&artifact.history_view_id)? != current_history_commitment.history_view_id
+        || array32(&artifact.history_commitment_id)?
+            != current_history_commitment.history_commitment_id
+        || array32(&artifact.prev_history_commitment_id)?
+            != current_history_commitment.prev_history_commitment_id
+        || artifact.history_seq != current_history_commitment.history_seq
+    {
+        return Err(Error::Parse(
+            "merge ticket artifact history_commitment mismatch".to_string(),
+        ));
+    }
+    if artifact.barrier_version != response.barrier_version
+        || artifact.cover_leaf_index != response.cover_leaf_index
+        || artifact.n_max != response.n_max
+        || artifact.max_barrier_update_bytes != response.max_barrier_update_bytes
+        || array32(&artifact.kem_tree_hash_after)? != array32(&response.kem_tree_hash_after)?
+    {
+        return Err(Error::Parse(
+            "merge ticket artifact barrier state mismatch".to_string(),
+        ));
+    }
+    if artifact.fs_forward_leap_h != fs_forward_leap_policy.h
+        || artifact.fs_forward_leap_checkpoint_interval
+            != fs_forward_leap_policy.checkpoint_interval
+        || artifact.fs_forward_leap_slack_anchor != fs_forward_leap_policy.slack_anchor
+        || artifact.fs_forward_leap_slack_first_device != fs_forward_leap_policy.slack_first_device
+        || artifact.fs_forward_leap_slack_device != fs_forward_leap_policy.slack_device
+        || artifact.last_accepted_ec != response.last_accepted_ec
+    {
+        return Err(Error::Parse(
+            "merge ticket artifact fs policy mismatch".to_string(),
+        ));
+    }
+    if artifact.history_authority_descriptor != response.history_authority_descriptor
+        || artifact.current_global_history_attestation
+            != response.current_global_history_attestation
+        || artifact.we_epoch_id != response.we_epoch_id
+        || artifact.pivot_parity_cbor != response.pivot_parity_cbor
+        || artifact.witness_cbor != response.witness_cbor
+        || artifact.srx_cbor != response.srx_cbor
+        || artifact.proof_mode != response.proof_mode
+        || artifact.vrf_id != response.vrf_id
+        || artifact.policy_version != response.policy_version
+        || artifact.cat != response.cat
+        || artifact.parent_root != response.parent_root
+        || artifact.join_delta_root != response.join_delta_root
+        || artifact.revoked_since_root != response.revoked_since_root
+        || artifact.revoked_root != response.revoked_root
+        || artifact.tswe_salt_hash != response.tswe_salt_hash
+        || artifact.pox_r_commit != response.pox_r_commit
+        || artifact.kbroad_public != response.kbroad_public
+        || artifact.msphf_crs_id != response.msphf_crs_id
+        || artifact.msphf_params_id != response.msphf_params_id
+        || artifact.fs_policy_version != response.fs_policy_version
+        || artifact.fs_epoch_base_ts != response.fs_epoch_base_ts
+        || artifact.kbroad_generation != response.kbroad_generation
+    {
+        return Err(Error::Parse(
+            "merge ticket artifact response field mismatch".to_string(),
+        ));
+    }
+    let gid = current_global_history_attestation.gid;
+    let leaf_id = array32(&artifact.leaf_id)?;
+    let we_epoch_id = array32(&response.we_epoch_id)?;
+    let kem_tree_hash_after = array32(&response.kem_tree_hash_after)?;
+    let cat = array32(&response.cat)?;
+    let parent_root = array32(&response.parent_root)?;
+    let join_delta_root = array32(&response.join_delta_root)?;
+    let revoked_since_root = array32(&response.revoked_since_root)?;
+    let revoked_root = array32(&response.revoked_root)?;
+    let tswe_salt_hash = array32(&response.tswe_salt_hash)?;
+    let pox_r_commit = array32(&response.pox_r_commit)?;
+    let payload = encode_cbor_det(&MergeTicketArtifactSignedPayload {
+        label: "cityg/merge-ticket-artifact-v1",
+        scope_id: &authority.scope_id,
+        history_authority_extension: history_authority_extension.as_str(),
+        profile_version: response.profile_version.as_str(),
+        gid: &gid,
+        leaf_id: &leaf_id,
+        history_view_id: &current_history_commitment.history_view_id,
+        history_commitment_id: &current_history_commitment.history_commitment_id,
+        prev_history_commitment_id: &current_history_commitment.prev_history_commitment_id,
+        history_seq: current_history_commitment.history_seq,
+        barrier_version: response.barrier_version,
+        cover_leaf_index: response.cover_leaf_index,
+        n_max: response.n_max,
+        max_barrier_update_bytes: response.max_barrier_update_bytes,
+        kem_tree_hash_after: &kem_tree_hash_after,
+        fs_forward_leap_h: fs_forward_leap_policy.h,
+        fs_forward_leap_checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: fs_forward_leap_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: fs_forward_leap_policy.slack_first_device,
+        fs_forward_leap_slack_device: fs_forward_leap_policy.slack_device,
+        last_accepted_ec: response.last_accepted_ec,
+        history_authority_descriptor: response.history_authority_descriptor.as_slice(),
+        current_global_history_attestation: response.current_global_history_attestation.as_slice(),
+        we_epoch_id: &we_epoch_id,
+        pivot_parity_cbor: response.pivot_parity_cbor.as_slice(),
+        witness_cbor: response.witness_cbor.as_slice(),
+        srx_cbor: response.srx_cbor.as_slice(),
+        proof_mode: response.proof_mode.as_str(),
+        vrf_id: response.vrf_id.as_str(),
+        policy_version: response.policy_version.as_str(),
+        cat: &cat,
+        parent_root: &parent_root,
+        join_delta_root: &join_delta_root,
+        revoked_since_root: &revoked_since_root,
+        revoked_root: &revoked_root,
+        tswe_salt_hash: &tswe_salt_hash,
+        pox_r_commit: &pox_r_commit,
+        kbroad_public: response.kbroad_public.as_slice(),
+        msphf_crs_id: response.msphf_crs_id.as_str(),
+        msphf_params_id: response.msphf_params_id.as_str(),
+        fs_policy_version: response.fs_policy_version.as_str(),
+        fs_epoch_base_ts: response.fs_epoch_base_ts,
+        kbroad_generation: response.kbroad_generation,
     })?;
     verify_ml_dsa_signature(
         payload.as_slice(),
@@ -3931,6 +4279,152 @@ mod tests {
         response
     }
 
+    fn build_test_merge_ticket_artifact(response: &MergeTicketResponse) -> Vec<u8> {
+        let current_history_commitment = response
+            .current_history_commitment
+            .clone()
+            .expect("merge ticket current_history_commitment");
+        let history_commitment = HistoryCommitment {
+            history_view_id: array32(&current_history_commitment.history_view_id)
+                .expect("history_view_id"),
+            history_commitment_id: array32(&current_history_commitment.history_commitment_id)
+                .expect("history_commitment_id"),
+            prev_history_commitment_id: array32(
+                &current_history_commitment.prev_history_commitment_id,
+            )
+            .expect("prev_history_commitment_id"),
+            history_seq: current_history_commitment.history_seq,
+        };
+        let authority = build_test_history_authority(
+            history_commitment.clone(),
+            [0x41; 32],
+            response.barrier_version,
+            array32(&response.kem_tree_hash_after).expect("kem_tree_hash_after"),
+        );
+        let gid = [0x41; 32];
+        let leaf_id = [0x01; 32];
+        let fs_policy = response
+            .fs_forward_leap_policy
+            .clone()
+            .expect("merge ticket fs_forward_leap_policy");
+        let we_epoch_id = array32(&response.we_epoch_id).expect("we_epoch_id");
+        let cat = array32(&response.cat).expect("cat");
+        let parent_root = array32(&response.parent_root).expect("parent_root");
+        let join_delta_root = array32(&response.join_delta_root).expect("join_delta_root");
+        let revoked_since_root = array32(&response.revoked_since_root).expect("revoked_since_root");
+        let revoked_root = array32(&response.revoked_root).expect("revoked_root");
+        let tswe_salt_hash = array32(&response.tswe_salt_hash).expect("tswe_salt_hash");
+        let pox_r_commit = array32(&response.pox_r_commit).expect("pox_r_commit");
+        let kem_tree_hash_after =
+            array32(&response.kem_tree_hash_after).expect("kem_tree_hash_after");
+        let payload = encode_cbor_det(&MergeTicketArtifactSignedPayload {
+            label: "cityg/merge-ticket-artifact-v1",
+            scope_id: &authority.descriptor.scope_id,
+            history_authority_extension: response.history_authority_extension.as_str(),
+            profile_version: response.profile_version.as_str(),
+            gid: &gid,
+            leaf_id: &leaf_id,
+            history_view_id: &history_commitment.history_view_id,
+            history_commitment_id: &history_commitment.history_commitment_id,
+            prev_history_commitment_id: &history_commitment.prev_history_commitment_id,
+            history_seq: history_commitment.history_seq,
+            barrier_version: response.barrier_version,
+            cover_leaf_index: response.cover_leaf_index,
+            n_max: response.n_max,
+            max_barrier_update_bytes: response.max_barrier_update_bytes,
+            kem_tree_hash_after: &kem_tree_hash_after,
+            fs_forward_leap_h: fs_policy.h,
+            fs_forward_leap_checkpoint_interval: fs_policy.checkpoint_interval,
+            fs_forward_leap_slack_anchor: fs_policy.slack_anchor,
+            fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
+            fs_forward_leap_slack_device: fs_policy.slack_device,
+            last_accepted_ec: response.last_accepted_ec,
+            history_authority_descriptor: response.history_authority_descriptor.as_slice(),
+            current_global_history_attestation: response
+                .current_global_history_attestation
+                .as_slice(),
+            we_epoch_id: &we_epoch_id,
+            pivot_parity_cbor: response.pivot_parity_cbor.as_slice(),
+            witness_cbor: response.witness_cbor.as_slice(),
+            srx_cbor: response.srx_cbor.as_slice(),
+            proof_mode: response.proof_mode.as_str(),
+            vrf_id: response.vrf_id.as_str(),
+            policy_version: response.policy_version.as_str(),
+            cat: &cat,
+            parent_root: &parent_root,
+            join_delta_root: &join_delta_root,
+            revoked_since_root: &revoked_since_root,
+            revoked_root: &revoked_root,
+            tswe_salt_hash: &tswe_salt_hash,
+            pox_r_commit: &pox_r_commit,
+            kbroad_public: response.kbroad_public.as_slice(),
+            msphf_crs_id: response.msphf_crs_id.as_str(),
+            msphf_params_id: response.msphf_params_id.as_str(),
+            fs_policy_version: response.fs_policy_version.as_str(),
+            fs_epoch_base_ts: response.fs_epoch_base_ts,
+            kbroad_generation: response.kbroad_generation,
+        });
+        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
+            .as_bytes()
+            .to_vec();
+        encode_cbor_det(&MergeTicketArtifactWire {
+            scope_id: authority.descriptor.scope_id.to_vec(),
+            history_authority_extension: response.history_authority_extension.clone(),
+            profile_version: response.profile_version.clone(),
+            gid: gid.to_vec(),
+            leaf_id: leaf_id.to_vec(),
+            history_view_id: response.current_history_view_id.clone(),
+            history_commitment_id: current_history_commitment.history_commitment_id.clone(),
+            prev_history_commitment_id: current_history_commitment
+                .prev_history_commitment_id
+                .clone(),
+            history_seq: current_history_commitment.history_seq,
+            barrier_version: response.barrier_version,
+            cover_leaf_index: response.cover_leaf_index,
+            n_max: response.n_max,
+            max_barrier_update_bytes: response.max_barrier_update_bytes,
+            kem_tree_hash_after: response.kem_tree_hash_after.clone(),
+            fs_forward_leap_h: fs_policy.h,
+            fs_forward_leap_checkpoint_interval: fs_policy.checkpoint_interval,
+            fs_forward_leap_slack_anchor: fs_policy.slack_anchor,
+            fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
+            fs_forward_leap_slack_device: fs_policy.slack_device,
+            last_accepted_ec: response.last_accepted_ec,
+            history_authority_descriptor: response.history_authority_descriptor.clone(),
+            current_global_history_attestation: response.current_global_history_attestation.clone(),
+            we_epoch_id: response.we_epoch_id.clone(),
+            pivot_parity_cbor: response.pivot_parity_cbor.clone(),
+            witness_cbor: response.witness_cbor.clone(),
+            srx_cbor: response.srx_cbor.clone(),
+            proof_mode: response.proof_mode.clone(),
+            vrf_id: response.vrf_id.clone(),
+            policy_version: response.policy_version.clone(),
+            cat: response.cat.clone(),
+            parent_root: response.parent_root.clone(),
+            join_delta_root: response.join_delta_root.clone(),
+            revoked_since_root: response.revoked_since_root.clone(),
+            revoked_root: response.revoked_root.clone(),
+            tswe_salt_hash: response.tswe_salt_hash.clone(),
+            pox_r_commit: response.pox_r_commit.clone(),
+            kbroad_public: response.kbroad_public.clone(),
+            msphf_crs_id: response.msphf_crs_id.clone(),
+            msphf_params_id: response.msphf_params_id.clone(),
+            fs_policy_version: response.fs_policy_version.clone(),
+            fs_epoch_base_ts: response.fs_epoch_base_ts,
+            kbroad_generation: response.kbroad_generation,
+            signature,
+        })
+    }
+
+    fn finalize_merge_ticket_payload(mut response: MergeTicketResponse) -> MergeTicketResponse {
+        if !response.history_authority_descriptor.is_empty()
+            && !response.history_authority_extension.is_empty()
+        {
+            response.merge_ticket_artifact = build_test_merge_ticket_artifact(&response);
+        }
+        response
+    }
+
     fn merge_ticket_with_history_authority_payload() -> MergeTicketResponse {
         let mut response = merge_ticket_ok_payload();
         let current_history_commitment = HistoryCommitment {
@@ -3950,7 +4444,7 @@ mod tests {
         response.history_authority_extension = GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string();
         response.history_authority_descriptor = authority.descriptor_bytes;
         response.current_global_history_attestation = authority.attestation_bytes;
-        response
+        finalize_merge_ticket_payload(response)
     }
 
     fn merge_ticket_ok_payload() -> MergeTicketResponse {
@@ -3961,7 +4455,7 @@ mod tests {
             history_seq: 7,
         };
         let authority = build_test_history_authority(history_commitment, [0x41; 32], 0, [0x09; 32]);
-        MergeTicketResponse {
+        finalize_merge_ticket_payload(MergeTicketResponse {
             we_epoch_id: vec![0x01; 32],
             pivot_parity_cbor: Vec::new(),
             witness_cbor: Vec::new(),
@@ -3995,7 +4489,8 @@ mod tests {
             current_global_history_attestation: authority.attestation_bytes,
             fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
             last_accepted_ec: 34,
-        }
+            ..MergeTicketResponse::default()
+        })
     }
 
     fn join_ticket_ok_payload() -> JoinTicketResponse {
@@ -5253,6 +5748,48 @@ mod tests {
             attestation.finality_kind,
             GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND
         );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_rejects_missing_merge_ticket_artifact() -> Result<(), Box<dyn StdError>> {
+        let mut payload = merge_ticket_ok_payload();
+        payload.merge_ticket_artifact.clear();
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("missing merge_ticket_artifact must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("missing merge_ticket_artifact")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_rejects_tampered_merge_ticket_artifact() -> Result<(), Box<dyn StdError>>
+    {
+        let mut payload = merge_ticket_ok_payload();
+        let last = payload
+            .merge_ticket_artifact
+            .last_mut()
+            .expect("merge ticket artifact bytes");
+        *last ^= 0x01;
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("tampered merge_ticket_artifact must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("history authority signature verification failed")
+        ));
         handle.abort();
         Ok(())
     }

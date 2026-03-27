@@ -1418,6 +1418,7 @@ fn encode_merge_ticket_response(
     history_authority_descriptor: Vec<u8>,
     current_global_history_attestation: Vec<u8>,
     history_authority_extension: String,
+    merge_ticket_artifact: Vec<u8>,
 ) -> Result<Vec<u8>, ApiError> {
     let MergeTicketBundle {
         gid: _,
@@ -1492,6 +1493,7 @@ fn encode_merge_ticket_response(
         history_authority_descriptor,
         current_global_history_attestation,
         history_authority_extension,
+        merge_ticket_artifact,
     };
 
     let mut response_bytes = Vec::new();
@@ -2465,6 +2467,7 @@ async fn expel_member_ticket(
         history_authority_descriptor,
         current_global_history_attestation,
         history_authority_extension,
+        merge_ticket_artifact,
     ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
@@ -2491,11 +2494,27 @@ async fn expel_member_ticket(
                 &bundle.kem_tree_hash_after,
             )
             .map_err(ApiError::from)?;
+        let pivot_parity_cbor = bundle
+            .parities
+            .iter()
+            .map(pivot_parity_to_cbor)
+            .collect::<Result<Vec<_>, _>>()?;
+        let merge_ticket_artifact = guard
+            .merge_ticket_artifact_bytes(
+                &bundle,
+                API_PROFILE_VERSION,
+                guard.history_authority_extension_id(),
+                history_authority_descriptor.as_slice(),
+                current_global_history_attestation.as_slice(),
+                pivot_parity_cbor.as_slice(),
+            )
+            .map_err(ApiError::from)?;
         (
             bundle,
             history_authority_descriptor,
             current_global_history_attestation,
             guard.history_authority_extension_id().to_string(),
+            merge_ticket_artifact,
         )
     };
 
@@ -2504,6 +2523,7 @@ async fn expel_member_ticket(
         history_authority_descriptor,
         current_global_history_attestation,
         history_authority_extension,
+        merge_ticket_artifact,
     )?))
 }
 
@@ -2562,6 +2582,7 @@ async fn merge_ticket(
         history_authority_descriptor,
         current_global_history_attestation,
         history_authority_extension,
+        merge_ticket_artifact,
     ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
@@ -2592,11 +2613,27 @@ async fn merge_ticket(
                 &bundle.kem_tree_hash_after,
             )
             .map_err(ApiError::from)?;
+        let pivot_parity_cbor = bundle
+            .parities
+            .iter()
+            .map(pivot_parity_to_cbor)
+            .collect::<Result<Vec<_>, _>>()?;
+        let merge_ticket_artifact = guard
+            .merge_ticket_artifact_bytes(
+                &bundle,
+                API_PROFILE_VERSION,
+                guard.history_authority_extension_id(),
+                history_authority_descriptor.as_slice(),
+                current_global_history_attestation.as_slice(),
+                pivot_parity_cbor.as_slice(),
+            )
+            .map_err(ApiError::from)?;
         (
             bundle,
             history_authority_descriptor,
             current_global_history_attestation,
             guard.history_authority_extension_id().to_string(),
+            merge_ticket_artifact,
         )
     };
 
@@ -2605,6 +2642,7 @@ async fn merge_ticket(
         history_authority_descriptor,
         current_global_history_attestation,
         history_authority_extension,
+        merge_ticket_artifact,
     )?;
     if intent == MergeTicketIntent::Leave {
         state
@@ -6175,6 +6213,7 @@ mod tests {
         assert_eq!(decoded.kem_tree_hash_after.len(), 32);
         assert_eq!(decoded.current_history_view_id.len(), 32);
         assert!(decoded.current_history_commitment.is_some());
+        assert!(!decoded.merge_ticket_artifact.is_empty());
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);
         let expected_cover_leaf_index = u64::from(u32::from_be_bytes(
@@ -6206,6 +6245,7 @@ mod tests {
         assert_eq!(refresh_decoded.srx_cbor, Vec::<u8>::new());
         assert_eq!(refresh_decoded.current_history_view_id.len(), 32);
         assert!(refresh_decoded.current_history_commitment.is_some());
+        assert!(!refresh_decoded.merge_ticket_artifact.is_empty());
         assert_eq!(refresh_decoded.join_delta_root, vec![0u8; 32]);
         assert_eq!(
             refresh_decoded.revoked_since_root,

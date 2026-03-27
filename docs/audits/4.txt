@@ -552,3 +552,18 @@ Lecture consolidée:
 
 - cela renforce honnêtement `4.8`: la dépendance de provisioning n’est plus “complètement externe” au sens de l’audit initial;
 - `4.8` reste néanmoins **Partial** parce que la lignée globale et la policy/gouvernance complète ne sont pas encore closes contre un serveur byzantin.
+
+--
+
+## Commentaires Codex (2026-03-28, tranche signed merge ticket artifact)
+
+Nouvelle passe spec + implémentation:
+
+- le path `merge_ticket` / `expel_member_ticket` ne livre plus seulement un paquet de champs “courants” sous transport authentifié; il livre un `merge_ticket_artifact` signé;
+- cet artefact lie la vue courante de merge à `global-history-authority-v1`, au `current_history_commitment`, à l’attestation d’historique courante, à `we_epoch_id`, aux pivots/parités, à la fenêtre FLG courante et aux roots/suite ids consommés avant authoring;
+- le client API refuse désormais fail-closed un merge ticket sans artefact ou avec artefact altéré avant toute consommation du state courant helper.
+
+Lecture consolidée:
+
+- cela renforce encore `4.8`: les dépendances de current-state utilisées avant authoring merge/expel ne sont plus “externes” au sens faible du finding initial;
+- `4.8` reste néanmoins **Partial** parce que la finalité/gouvernance globale et le niveau de preuve byzantin dépassent encore ce que ce nouvel artefact local ferme.
