@@ -1464,7 +1464,8 @@ impl CityGServer {
         if self.roster.kbroad_rotation_required(bundle.gid()) {
             return Err(CityGError::InvalidInput(KBROAD_ROTATION_REQUIRED_ERR));
         }
-        let (outcome, staged_ctx, staged_receiver, staged_roster) = self.stage_bundle(bundle)?;
+        let (outcome, staged_ctx, staged_receiver, staged_roster) =
+            self.stage_bundle(bundle, self.replaying)?;
         #[allow(clippy::collapsible_if)]
         if !self.replaying {
             if let Some(journal) = &mut self.journal {
@@ -1485,6 +1486,7 @@ impl CityGServer {
     fn stage_bundle(
         &mut self,
         bundle: &ClientEpochBundle,
+        replaying: bool,
     ) -> Result<(ServerOutcome, AcceptanceContext, ReceiverCache, GroupRoster), CityGError> {
         let mut staged_ctx = self.ctx.clone();
         staged_ctx.set_pending_capss_witness(Some(bundle.capss_witness.clone()));
@@ -1496,6 +1498,7 @@ impl CityGServer {
             &mut staged_receiver,
             &mut staged_roster,
             bundle,
+            replaying,
         ) {
             Ok(outcome) => Ok((outcome, staged_ctx, staged_receiver, staged_roster)),
             Err(err) => {
@@ -1510,14 +1513,18 @@ impl CityGServer {
         receiver: &mut ReceiverCache,
         roster: &mut GroupRoster,
         bundle: &ClientEpochBundle,
+        replaying: bool,
     ) -> Result<ServerOutcome, CityGError> {
-        let state_before = {
+        let mut state_before = {
             let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
             if bundle.header_map.contains_key(&hdr::HDR_BARRIER_UPDATE) {
                 let _ = ensure_current_history_commitment(bundle.gid(), state)?;
             }
             state.clone()
         };
+        if replaying {
+            rehydrate_replay_join_finalize_auth(&mut state_before, &bundle.header_map)?;
+        }
         let delta = bundle.membership_delta()?;
         ensure_distinct_active_cover_leaf_indices(&state_before)?;
         ensure_join_cover_leaf_indices_available(&state_before, delta.joined.as_slice())?;
@@ -2104,7 +2111,7 @@ impl CityGServer {
         let replay_result = (|| -> Result<(), CityGError> {
             for entry in entries {
                 let bundle = ClientEpochBundle::from_cbor(&entry)?;
-                let (_, ctx, receiver, roster) = self.stage_bundle(&bundle)?;
+                let (_, ctx, receiver, roster) = self.stage_bundle(&bundle, true)?;
                 self.commit_staged(ctx, receiver, roster);
             }
             Ok(())
@@ -3979,6 +3986,54 @@ fn verify_barrier_update_pairs_and_targets(
     Ok(())
 }
 
+fn rehydrate_replay_join_finalize_auth(
+    state_before: &mut GroupState,
+    header: &BTreeMap<u64, Value>,
+) -> Result<(), CityGError> {
+    if !matches!(parse_barrier_update_reason(header)?, Some(2)) {
+        return Ok(());
+    }
+    let Some(token) = parse_join_finalize_auth_token(header)? else {
+        return Ok(());
+    };
+    let Some(parsed) = parse_barrier_update(header, state_before.n_max)? else {
+        return Ok(());
+    };
+    let Some(author_pop_pk) = header.get(&hdr::HDR_POP_PK).and_then(Value::as_bytes) else {
+        return Ok(());
+    };
+    let mut matching_leafs = state_before
+        .leaf_device_pk
+        .iter()
+        .filter(|(_, device_pk)| device_pk.as_slice() == author_pop_pk)
+        .map(|(leaf_id, _)| *leaf_id);
+    let Some(author_leaf_id) = matching_leafs.next() else {
+        return Ok(());
+    };
+    if matching_leafs.next().is_some() {
+        return Ok(());
+    }
+    let expected_cover_leaf_index =
+        u64::from(cover_leaf_index(&author_leaf_id, state_before.n_max));
+    if expected_cover_leaf_index != parsed.updater_leaf {
+        return Ok(());
+    }
+    let cover_leaf_index = u32::try_from(expected_cover_leaf_index)
+        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+    // Journal replay does not reconstruct server-issued join-ticket side effects.
+    // Rehydrate the accepted join_finalize capability from the already-admitted
+    // author binding so historical reason-2 merges validate exactly once on replay.
+    state_before
+        .pending_join_finalize_auth
+        .entry(author_leaf_id)
+        .or_insert(JoinFinalizeAuthRecord {
+            leaf_id: author_leaf_id,
+            cover_leaf_index,
+            token,
+        });
+    Ok(())
+}
+
 fn validate_barrier_update_against_roster(
     state_before: &GroupState,
     header: &BTreeMap<u64, Value>,
@@ -4603,6 +4658,7 @@ mod tests {
         pop_secret_key: MlDsaSecretKey,
         vrf_secret_key: Vec<u8>,
         vrf_public_key: Vec<u8>,
+        join_finalize_auth_token: [u8; 32],
     }
 
     fn build_genesis_member_bundle(label_seed: u8) -> Result<GeneratedMemberBundle, CityGError> {
@@ -4702,6 +4758,7 @@ mod tests {
             pop_secret_key,
             vrf_secret_key,
             vrf_public_key,
+            join_finalize_auth_token: [0u8; 32],
         })
     }
 
@@ -4711,12 +4768,12 @@ mod tests {
         leaf
     }
 
-    fn build_join_bundle_from_server_ticket(
+    fn build_join_member_from_server_ticket(
         server: &mut CityGServer,
         gid: &[u8; 32],
         label_seed: u8,
         disable_autonomic_evolve: bool,
-    ) -> Result<ClientEpochBundle, CityGError> {
+    ) -> Result<GeneratedMemberBundle, CityGError> {
         let (pop_pk, pop_sk) = ml_dsa_keypair();
         let pop_public_key = pop_pk.as_bytes().to_vec();
         let pop_secret_key = pop_sk;
@@ -4790,7 +4847,7 @@ mod tests {
             Some(ticket.witness_cbor.as_slice())
         };
 
-        if disable_autonomic_evolve {
+        let bundle = if disable_autonomic_evolve {
             CityGClient::generate_epoch_without_evolve(
                 header,
                 parts,
@@ -4805,7 +4862,34 @@ mod tests {
             cityg_client::CityGError::Acceptance(err) => CityGError::Acceptance(err),
             cityg_client::CityGError::InvalidInput(message) => CityGError::InvalidInput(message),
             _ => CityGError::InvalidInput("client generation failed"),
+        })?;
+
+        Ok(GeneratedMemberBundle {
+            bundle,
+            leaf_id,
+            pop_public_key,
+            pop_secret_key,
+            vrf_secret_key,
+            vrf_public_key,
+            join_finalize_auth_token: ticket.join_finalize_auth_token,
         })
+    }
+
+    fn build_join_bundle_from_server_ticket(
+        server: &mut CityGServer,
+        gid: &[u8; 32],
+        label_seed: u8,
+        disable_autonomic_evolve: bool,
+    ) -> Result<ClientEpochBundle, CityGError> {
+        Ok(
+            build_join_member_from_server_ticket(
+                server,
+                gid,
+                label_seed,
+                disable_autonomic_evolve,
+            )?
+            .bundle,
+        )
     }
 
     fn hydrate_parities(
@@ -5155,6 +5239,14 @@ mod tests {
                 server.current_history_commitment(&gid)?,
             )?),
         );
+        if barrier_update_reason == 2 {
+            if generated.join_finalize_auth_token != [0u8; 32] {
+                header.insert(
+                    hdr::HDR_JOIN_FINALIZE_AUTH,
+                    Value::Bytes(generated.join_finalize_auth_token.to_vec()),
+                );
+            }
+        }
 
         let parts = AnchorInstanceParts {
             gid: &gid,
@@ -9761,6 +9853,131 @@ mod tests {
         );
         assert_eq!(expected_alice_device_state.last_pcs_refresh_ec, None);
         assert_eq!(expected_bob_device_state.last_pcs_refresh_ec, None);
+        Ok(())
+    }
+
+    #[test]
+    fn replay_rehydrates_missing_join_finalize_auth_for_bound_author() -> Result<(), CityGError> {
+        let mut state = super::GroupState {
+            n_max: 4,
+            ..super::GroupState::default()
+        };
+        state.barrier_initialized = true;
+        state.barrier_version = 1;
+        state.barrier_pk_entries = super::build_all_blank_pk_entries(state.n_max)?;
+        let leaf = cityg_client::demo::demo_member_leaf("replay-join-finalize-author");
+        let pop_pk = vec![0xA7; 32];
+        let join_finalize_auth_token = [0xE7; 32];
+        state.leaf_device_pk.insert(leaf, pop_pk.clone());
+        let join_ek = vec![0xA5; 1184];
+        let delta = cityg_client::MembershipDelta {
+            joined: vec![leaf],
+            revoked: Vec::new(),
+        };
+        let updater_leaf = super::cover_leaf_index(&leaf, state.n_max);
+        let leaf_base = usize::try_from(state.n_max.saturating_sub(1))
+            .map_err(|_| CityGError::InvalidInput("leaf base overflow"))?;
+        let leaf_node = leaf_base
+            + usize::try_from(updater_leaf)
+                .map_err(|_| CityGError::InvalidInput("leaf index overflow"))?;
+        let sibling_node = super::sibling_node(leaf_node)
+            .ok_or(CityGError::InvalidInput("invalid updater leaf node"))?;
+        let parent_node = (leaf_node - 1) / 2;
+        let path_nodes = vec![leaf_node as u64, parent_node as u64, 0];
+        let target_ek = vec![0x91; 1184];
+        state.barrier_pk_entries[sibling_node] = target_ek.clone();
+        state.kem_tree_hash_after =
+            super::compute_barrier_tree_hash(state.n_max, state.barrier_pk_entries.as_slice())?;
+
+        let mut snapshot_pre = state.barrier_pk_entries.clone();
+        snapshot_pre[leaf_node] = join_ek.clone();
+        super::blank_internal_path_from_leaf(snapshot_pre.as_mut_slice(), leaf_node);
+        let kem_before = super::compute_barrier_tree_hash(state.n_max, snapshot_pre.as_slice())?;
+
+        let mut snapshot_post = snapshot_pre.clone();
+        let ek_root = vec![0x11; 1184];
+        let ek_parent = vec![0x22; 1184];
+        snapshot_post[0] = ek_root.clone();
+        snapshot_post[parent_node] = ek_parent.clone();
+        let kem_after = super::compute_barrier_tree_hash(state.n_max, snapshot_post.as_slice())?;
+
+        let target_pkhash = super::compute_barrier_pkhash(target_ek.as_slice())?;
+        let cover_payload = super::KemTreeCoverPayloadWire(
+            u64::from(updater_leaf),
+            path_nodes,
+            None,
+            vec![super::NodeCiphertextWire(
+                parent_node as u64,
+                sibling_node as u64,
+                target_pkhash[..16].to_vec(),
+                vec![0x33; 1088],
+                vec![0x44; 48],
+            )],
+            vec![
+                super::NewPublicKeyWire(0, ek_root),
+                super::NewPublicKeyWire(parent_node as u64, ek_parent),
+            ],
+        );
+        let revocation_roots_hash = super::compute_revocation_roots_hash(&[0u8; 32], &[0u8; 32])?;
+        state.barrier_roots_hash = revocation_roots_hash;
+        let barrier_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            2,
+            1,
+            state.n_max,
+            revocation_roots_hash.to_vec(),
+            kem_before.to_vec(),
+            kem_after.to_vec(),
+            super::to_cbor_vec(&cover_payload)?,
+        );
+
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(super::to_cbor_vec(&barrier_update)?),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(2u64)),
+        );
+        header.insert(hdr::HDR_REVOKED_SINCE_ROOT, Value::Bytes(vec![0u8; 32]));
+        header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(vec![0u8; 32]));
+        header.insert(hdr::HDR_BARRIER_LEAF_PK, Value::Bytes(join_ek));
+        header.insert(hdr::HDR_POP_PK, Value::Bytes(pop_pk));
+        header.insert(
+            hdr::HDR_JOIN_FINALIZE_AUTH,
+            Value::Bytes(join_finalize_auth_token.to_vec()),
+        );
+
+        let err = match super::validate_barrier_update_against_roster(&state, &header, &delta) {
+            Ok(_) => {
+                return Err(CityGError::InvalidInput(
+                    "missing pending join_finalize auth must fail live validation",
+                ));
+            }
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                    && freeze.reason == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
+        ));
+
+        super::rehydrate_replay_join_finalize_auth(&mut state, &header)?;
+        let record =
+            state
+                .pending_join_finalize_auth
+                .get(&leaf)
+                .ok_or(CityGError::InvalidInput(
+                    "replay rehydration must synthesize pending join_finalize auth",
+                ))?;
+        assert_eq!(record.token, join_finalize_auth_token);
+        assert_eq!(record.cover_leaf_index, updater_leaf);
+        assert!(
+            super::validate_barrier_update_against_roster(&state, &header, &delta)?.is_some(),
+            "rehydrated replay state must validate the historical reason-2 merge"
+        );
         Ok(())
     }
 

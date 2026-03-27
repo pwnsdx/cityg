@@ -213,6 +213,31 @@ Artifacts:
 
 - `/tmp/cityg-stress-flow-f-combined`
 
+### Flow F (combined) rerun after replay recovery hardening
+
+Reran the same combined chaos scenario with a rebuilt `cityg-api` carrying the
+server-side replay fix for historical `reason=2` `join_finalize` bundles:
+
+```text
+workers_passed=1 workers_failed=0 rounds=1/1 restarts=1 accept_ok=0 refresh_conflicts=0
+```
+
+Observed:
+
+- `client-restarts.log` is present
+- `events.log` still shows both `client-restart-injected` and `server restart #1`
+- `server.log` is now clean: no `barrier_updater_invalid`, no `state recovery failed`
+- the targeted lane replays used for repro also restart cleanly and answer
+  `/health/detailed`:
+  - `/tmp/cityg-repro-lane00.log`
+  - `/tmp/cityg-repro-lane00-health.json`
+  - `/tmp/cityg-repro-lane02.log`
+  - `/tmp/cityg-repro-lane02-health.json`
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-f-combined-replayfix`
+
 ### Flow G: lanes / heads extremes
 
 Passed on both tested extremes:
