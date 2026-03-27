@@ -25,8 +25,8 @@ Scope-hardening addendum (same date, later tranche):
 Summary:
 - Total findings reviewed: `51`
 - `Closed`: `21`
-- `Partial`: `19`
-- `Open`: `7`
+- `Partial`: `20`
+- `Open`: `6`
 - `Reclassified`: `4`
 
 ## Audit 1
@@ -86,8 +86,8 @@ Summary:
   Proof: `docs/specs.md:1155-1174`, `docs/specs.md:1579-1583`, `crates/msphf-orchestrator/src/accept/mod.rs:1884-1949`, `crates/cityg-server/src/lib.rs:2381-2438,4022-4085,10705-10735`, `crates/cityg-gui/src/native/barrier_core.rs:568-589`, `crates/cityg-gui/src/native/tests/mod.rs:8589-8658,9070-9130`.
 - `4.3` `Closed` — provenance that the current barrier state is not FULL-verified is now persisted and surfaced.
   Proof: `docs/specs.md:458-465`, `crates/cityg-gui/src/native/session_types.rs:72-99`, `crates/cityg-gui/src/native/persisted/barrier.rs:56-57,334-405`.
-- `4.4` `Open` — recover-only to FULL promotion is still not backed by a globally authenticated head; the circularity is reduced but not eliminated.
-  Proof: `docs/specs.md:1111-1124`, `docs/specs.md:1154-1157`.
+- `4.4` `Partial` — recover-only to FULL promotion is still not backed by a globally authenticated head, but the client now clears `current_barrier_full_verified` whenever a later authenticated helper/ticket/sync artifact changes the stored public barrier state without same-decision FULL verification.
+  Proof: `docs/specs.md:526-535`, `crates/cityg-gui/src/native/barrier_core.rs`, `crates/cityg-gui/src/native/tests/mod.rs`.
 - `4.5` `Partial` — “FULL” still spans multiple meanings globally, but the optional local-history-authority extension now defines one negotiated wire-visible proof object family (`header[181]` receipt + `header[182]` scope-local attestation) for scope-local FULL/updater eligibility.
   Proof: `docs/specs.md` (S3.3.E, S4.2.3, S11.11.4-S11.11.5), `crates/cityg-server/src/lib.rs:3206-3331,4644-4731`, `crates/cityg-gui/src/native/barrier_runtime.rs`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
 - `4.6` `Open` — the “applicable `ek_n` verification” path is still not globally anchored enough to rule out vacuous server-steered contexts.

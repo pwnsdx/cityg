@@ -354,6 +354,10 @@ pub(super) fn install_authenticated_current_state(
     history_commitment: HistoryCommitment,
     global_history_attestation_bytes: Vec<u8>,
 ) {
+    let authenticated_public_state_changed = session.barrier_state.barrier_version
+        != barrier_version
+        || session.barrier_state.barrier_roots_hash != barrier_roots_hash
+        || session.barrier_state.kem_tree_hash_after != kem_tree_hash_after;
     session.barrier_state.barrier_version = barrier_version;
     session.barrier_state.barrier_roots_hash = barrier_roots_hash;
     session.barrier_state.kem_tree_hash_after = kem_tree_hash_after;
@@ -369,6 +373,9 @@ pub(super) fn install_authenticated_current_state(
         .is_some_and(|snapshot| current_public_tree_cache_matches(session, snapshot))
     {
         clear_current_public_tree_cache(&mut session.barrier_state);
+    }
+    if authenticated_public_state_changed {
+        session.barrier_state.current_barrier_full_verified = false;
     }
 }
 

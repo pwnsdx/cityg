@@ -531,6 +531,7 @@ Barrier secret state:
 * pending_barrier_recovery : bool -- true for a newly joined client until it has successfully derived `K_barrier` via S11.13/S12.3
 Normative note:
 * `pending_barrier_recovery == false` by itself MUST NOT be interpreted as FULL verification. Clients MUST persist `current_barrier_full_verified` (or an equivalent crash-safe marker) across restart.
+* If a later authenticated helper / provisioning / merge-ticket / epoch-sync artifact changes the stored `(barrier_version, barrier_roots_hash, kem_tree_hash_after)` without the client completing S11.11.2 FULL verification for that exact new stored state as part of the same crash-safe decision, the client MUST set `current_barrier_full_verified := false`.
 
 Updater-local pending activation state:
 * If the client has published a local barrier_update that is not yet correlated/activated, it MUST persist the pending_* fields required by S11.14.1, including pending_barrier_version, pending_we_epoch_id (or equivalent stable merge identifier), pending_fs_ec, pending_revocation_roots_hash, pending_kem_tree_hash_after, pending_K_barrier_new, pending_barrier_update_reason, pending_K_fs_after_pcs (if any), pending_barrier_update_digest, and pending_on_path_key_material.

@@ -429,3 +429,23 @@ Lecture consolidée:
 - `4.4` et `4.6` restent ouverts parce qu’ils demandent encore une ré-promotion FULL et une canonité de head qui tiennent face à un serveur byzantin au-delà d’un unique scope local.
 
 Référence de synthèse: `docs/audits/final-verification-report-2026-03-26.md`.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche FULL-marker invalidation)
+
+Nouvelle passe implémentation:
+
+- `current_barrier_full_verified` est maintenant explicitement traité comme attaché au triplet public exact `(barrier_version, barrier_roots_hash, kem_tree_hash_after)`;
+- quand un helper/ticket/epoch-sync installe un nouvel état authentifié courant avec un triplet différent sans avoir effectué la FULL verification dans la même décision crash-safe, le GUI rabaisse maintenant ce marqueur à `false`;
+- la même-tree re-attestation sous un `HistoryCommitment` plus récent ne casse en revanche pas le marqueur local si le triplet public ne change pas.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui install_authenticated_current_state_clears_full_verified_on_public_state_change --features native-app -- --exact`
+- `cargo test --locked -p cityg-gui --bin cityg-gui install_authenticated_current_state_preserves_full_verified_for_same_public_state --features native-app -- --exact`
+
+Impact audit:
+
+- `4.4` passe honnêtement de **Open** à **Partial**.
+- Le besoin d’un head global canonique reste inchangé, mais le client ne garde plus indûment un statut FULL après remplacement helper-driven de l’état public courant.

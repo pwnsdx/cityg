@@ -217,6 +217,72 @@ fn sample_current_public_tree(n_max: u64, fill: u8) -> Result<BarrierPublicTree>
 }
 
 #[test]
+fn install_authenticated_current_state_clears_full_verified_on_public_state_change() {
+    let mut session =
+        build_test_session(0xB3A1, "http://127.0.0.1:9", "room-auth-state-a", "alice")
+            .expect("build test session");
+    session.barrier_state.barrier_version = 4;
+    session.barrier_state.barrier_roots_hash = [0x44; 32];
+    session.barrier_state.kem_tree_hash_after = [0x45; 32];
+    session.barrier_state.current_barrier_full_verified = true;
+
+    install_authenticated_current_state(
+        &mut session,
+        5,
+        [0x54; 32],
+        [0x55; 32],
+        HistoryCommitment {
+            history_view_id: [0x61; 32],
+            history_commitment_id: [0x62; 32],
+            prev_history_commitment_id: [0x52; 32],
+            history_seq: 7,
+        },
+        vec![0xA1, 0x02],
+    );
+
+    assert!(
+        !session.barrier_state.current_barrier_full_verified,
+        "FULL marker must clear when authenticated public state changes"
+    );
+}
+
+#[test]
+fn install_authenticated_current_state_preserves_full_verified_for_same_public_state() {
+    let mut session =
+        build_test_session(0xB3A2, "http://127.0.0.1:9", "room-auth-state-b", "alice")
+            .expect("build test session");
+    session.barrier_state.barrier_version = 4;
+    session.barrier_state.barrier_roots_hash = [0x44; 32];
+    session.barrier_state.kem_tree_hash_after = [0x45; 32];
+    session.barrier_state.current_barrier_full_verified = true;
+
+    install_authenticated_current_state(
+        &mut session,
+        4,
+        [0x44; 32],
+        [0x45; 32],
+        HistoryCommitment {
+            history_view_id: [0x71; 32],
+            history_commitment_id: [0x72; 32],
+            prev_history_commitment_id: [0x62; 32],
+            history_seq: 8,
+        },
+        vec![0xB1, 0x03],
+    );
+
+    assert!(
+        session.barrier_state.current_barrier_full_verified,
+        "FULL marker should survive a same-tree re-attestation"
+    );
+    assert_eq!(
+        session
+            .barrier_state
+            .current_global_history_attestation_bytes,
+        vec![0xB1, 0x03]
+    );
+}
+
+#[test]
 fn non_regressing_authenticated_current_state_rejects_barrier_version_rollback() {
     let mut session = build_test_session(0xB401, "http://127.0.0.1:9", "room-rollback-a", "alice")
         .expect("build test session");
