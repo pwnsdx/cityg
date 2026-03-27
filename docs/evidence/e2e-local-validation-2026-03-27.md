@@ -116,7 +116,54 @@ of the real server behavior.
 - Phase 0: passed
 - Phase 1: passed
 - Phase 2 smoke: passed on rebuilt candidate binaries
-- Extended soak/load/chaos matrix: not run yet
+- Extended soak/load/chaos matrix: partially run
+
+## Extended Matrix Executed
+
+### Flow A: baseline watch + burst
+
+Passed:
+
+```text
+workers_passed=1 workers_failed=0 rounds=3/3 capacity=skipped accept_ok=12 refresh_conflicts=0
+```
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-a`
+
+### Flow F: short restart-chaos command
+
+Passed functionally, but did **not** exercise the timers:
+
+- run finished in ~20s
+- `restart-every-secs=45` never fired
+- `client-restart-every-secs=20` never fired because each individual `join_leave`
+  child exited in less than 20s
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-f`
+
+### Flow F (qualified): prolonged restart-chaos
+
+Passed and did exercise managed server restart:
+
+```text
+workers_passed=1 workers_failed=0 rounds=21/50 restarts=1 accept_ok=42 refresh_conflicts=14
+```
+
+Observed:
+
+- one managed server restart occurred and was absorbed cleanly
+- health/metrics polling resumed after restart
+- no worker failed and no round was stranded
+- no `client-restarts.log` was produced because no individual `join_leave` child
+  lived longer than the 20s client restart timer
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-f-restarts`
 
 ## Next E2E Matrix
 
@@ -152,7 +199,14 @@ target/debug/cityg-stress --plain \
 
 Goal:
 
-- validate leave/rejoin churn and UI-visible membership convergence
+- validate leave-path churn and UI-visible membership convergence
+
+Current limitation:
+
+- the command below uses fresh room IDs per round, so it does **not** prove a
+  same-room rejoin after leave
+- a real same-room rejoin flow needs either manual `join_leave` orchestration or
+  a small `cityg-stress` harness extension
 
 Command:
 
@@ -231,15 +285,18 @@ target/debug/cityg-stress --plain \
 Goal:
 
 - validate readiness, replay, and client recovery after server restart
+- note: this flow does not currently validate injected client restarts unless a
+  single `join_leave` round is made long-lived enough to cross the client timer
 
 Command:
 
 ```bash
 target/debug/cityg-stress --plain \
-  --server-bind 127.0.0.1:18084 \
-  --server-url http://127.0.0.1:18084 \
+  --server-bind 127.0.0.1:18086 \
+  --server-url http://127.0.0.1:18086 \
   --workers 1 \
-  --rounds-per-worker 6 \
+  --rounds-per-worker 50 \
+  --duration-secs 75 \
   --min-count 2 \
   --max-count 2 \
   --leaves-per-room 2 \
@@ -251,7 +308,7 @@ target/debug/cityg-stress --plain \
   --message-burst-interval-ms 25 \
   --api-bin /Users/admin/Desktop/Repositories/cityg/target/debug/cityg-api \
   --join-leave-bin /Users/admin/Desktop/Repositories/cityg/target/debug/join_leave \
-  --artifact-dir /tmp/cityg-stress-flow-f \
+  --artifact-dir /tmp/cityg-stress-flow-f-restarts \
   --require-metrics
 ```
 
