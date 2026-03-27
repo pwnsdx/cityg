@@ -450,3 +450,31 @@ Impact audit:
 
 - `4.4` passe honnêtement de **Open** à **Partial**.
 - Le besoin d’un head global canonique reste inchangé, mais le client ne garde plus indûment un statut FULL après remplacement helper-driven de l’état public courant.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche global-history-authority-v1)
+
+Nouvelle passe spec + implémentation:
+
+- `global-history-authority-v1` est maintenant une extension concrète, pas seulement réservée, avec attestation courante de déploiement et sémantique `global-append-only`;
+- le serveur peut émettre et vérifier `header[181]` / `header[182]` sous cette extension comme objets attachés à une même lignée d’autorité globale de déploiement;
+- le client et les runtimes GUI acceptent maintenant explicitement cette extension négociée, au lieu de n’accepter qu’une variante purement locale.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test --locked -p cityg-server tests::build_refresh_bundle_includes_global_history_authority_headers -- --exact --nocapture`
+- `cargo test --locked -p cityg-api-client tests::merge_ticket_refresh_accepts_global_history_authority_attestation -- --exact --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::persisted_barrier_state_roundtrip_preserves_global_history_authority_extension --features native-app -- --exact --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::validate_client_visible_activation_guards_accepts_matching_global_authority_headers --features native-app -- --exact --nocapture`
+
+Statut audit mis à jour:
+
+- **Partial**: `4.1`, `4.2`, `4.4`, `4.5`, `4.6`, `4.7`, `4.8`
+- **Closed**: `4.3`
+
+Lecture consolidée:
+
+- `4.6` n’est plus honnêtement `Open`: le chemin `ek_n` peut désormais être ancré à une attestation de head append-only à l’échelle du déploiement quand `global-history-authority-v1` est négociée.
+- `4.1/4.5` sont désormais mieux lus comme “extension concrète disponible mais non obligatoire dans le base profile”, pas comme absence totale de preuve server-verifiable.
+- Rien n’est `Closed` au-delà de `4.3`, parce que la frontière FULL/recover-only reste encore optionnelle au niveau protocolaire de base.

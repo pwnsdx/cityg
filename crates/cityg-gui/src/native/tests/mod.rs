@@ -656,6 +656,36 @@ fn persisted_barrier_state_roundtrip_preserves_current_history_commitment()
 }
 
 #[test]
+fn persisted_barrier_state_roundtrip_preserves_global_history_authority_extension()
+-> Result<(), Box<dyn std::error::Error>> {
+    let runtime = BarrierSecretState {
+        barrier_initialized: true,
+        barrier_version: 7,
+        barrier_roots_hash: [0x11; 32],
+        current_history_view_id: [0x12; 32],
+        current_history_commitment: Some(HistoryCommitment {
+            history_view_id: [0x12; 32],
+            history_commitment_id: [0x13; 32],
+            prev_history_commitment_id: [0x14; 32],
+            history_seq: 10,
+        }),
+        current_history_authority_extension: Some(
+            HistoryAuthorityExtension::GlobalHistoryAuthorityV1,
+        ),
+        current_global_history_attestation_bytes: vec![0xAA, 0xBB, 0xCC],
+        ..BarrierSecretState::default()
+    };
+
+    let persisted = PersistedBarrierState::from_runtime(&runtime);
+    let roundtrip = persisted.into_runtime()?;
+    assert_eq!(
+        roundtrip.current_history_authority_extension,
+        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
+    );
+    Ok(())
+}
+
+#[test]
 fn persisted_barrier_state_roundtrip_drops_current_public_tree_cache()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime = BarrierSecretState {
@@ -1167,6 +1197,29 @@ fn validate_client_visible_activation_guards_accepts_matching_authority_headers(
     header.insert(
         hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
         Value::Bytes(vec![0x10, 0x20]),
+    );
+    validate_client_visible_activation_guards(&session, &header)?;
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_accepts_matching_global_authority_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB97, "http://127.0.0.1:9", "room-b87g", "bob")?;
+    session.barrier_state.current_history_authority_extension =
+        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1);
+    session
+        .barrier_state
+        .current_global_history_attestation_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
+    let mut header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAB, 0xCD])?;
+    header.insert(
+        hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+        Value::Bytes(
+            session
+                .barrier_state
+                .current_global_history_attestation_bytes
+                .clone(),
+        ),
     );
     validate_client_visible_activation_guards(&session, &header)?;
     Ok(())

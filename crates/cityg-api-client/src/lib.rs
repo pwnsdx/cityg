@@ -185,6 +185,7 @@ const HELPER_KIND_FETCH_PUBLIC_TREE: &str = "fetch_public_tree";
 const LOCAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "local-history-authority-v1";
 const GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "global-history-authority-v1";
 const LOCAL_HISTORY_ATTESTATION_FINALITY_KIND: &str = "local-append-only";
+const GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND: &str = "global-append-only";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomAdminOperation {
@@ -2665,12 +2666,14 @@ pub struct HistoryAuthorityDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryAuthorityExtension {
     LocalHistoryAuthorityV1,
+    GlobalHistoryAuthorityV1,
 }
 
 impl HistoryAuthorityExtension {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LocalHistoryAuthorityV1 => "local-history-authority-v1",
+            Self::GlobalHistoryAuthorityV1 => "global-history-authority-v1",
         }
     }
 }
@@ -2943,10 +2946,9 @@ fn parse_history_authority_extension(
         LOCAL_HISTORY_AUTHORITY_EXTENSION_ID => {
             Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1))
         }
-        GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID => Err(Error::Parse(
-            "history authority extension global-history-authority-v1 is reserved but not implemented by this client"
-                .to_string(),
-        )),
+        GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID => {
+            Ok(Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1))
+        }
         other => Err(Error::Parse(format!(
             "unsupported history authority extension: {other}"
         ))),
@@ -2971,12 +2973,22 @@ fn validate_local_history_attestation_kind(
     attestation: &GlobalHistoryAttestation,
     context: &str,
 ) -> Result<(), Error> {
-    if extension == Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1)
-        && attestation.finality_kind != LOCAL_HISTORY_ATTESTATION_FINALITY_KIND
-    {
-        return Err(Error::Parse(format!(
-            "{context} global_history_attestation finality_kind mismatch"
-        )));
+    match extension {
+        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1)
+            if attestation.finality_kind != LOCAL_HISTORY_ATTESTATION_FINALITY_KIND =>
+        {
+            return Err(Error::Parse(format!(
+                "{context} global_history_attestation finality_kind mismatch"
+            )));
+        }
+        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
+            if attestation.finality_kind != GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND =>
+        {
+            return Err(Error::Parse(format!(
+                "{context} global_history_attestation finality_kind mismatch"
+            )));
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -3380,7 +3392,10 @@ mod tests {
         bytes
     }
 
-    fn merge_ticket_with_history_authority_payload() -> MergeTicketResponse {
+    fn merge_ticket_with_history_authority_payload(
+        extension_id: &str,
+        finality_kind: &str,
+    ) -> MergeTicketResponse {
         let mut response = merge_ticket_ok_payload();
         let current_history_commitment = HistoryCommitment {
             history_view_id: [0xD1; 32],
@@ -3399,7 +3414,6 @@ mod tests {
         ));
         let gid = [0x41; 32];
         let parent_attestation_id = [0u8; 32];
-        let finality_kind = "local-append-only".to_string();
         let payload = encode_cbor_det(&GlobalHistoryAttestationSignedPayload(
             "cityg/global-history-attestation-v1",
             &descriptor.scope_id,
@@ -3411,7 +3425,7 @@ mod tests {
             response.barrier_version,
             &[0x09; 32],
             &parent_attestation_id,
-            finality_kind.as_str(),
+            finality_kind,
         ));
         let signature = dilithium5::detached_sign(payload.as_slice(), &secret_key)
             .as_bytes()
@@ -3428,12 +3442,12 @@ mod tests {
             response.barrier_version,
             vec![0x09; 32],
             parent_attestation_id.to_vec(),
-            finality_kind,
+            finality_kind.to_string(),
             signature,
         ));
         response.current_history_commitment =
             Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7));
-        response.history_authority_extension = LOCAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string();
+        response.history_authority_extension = extension_id.to_string();
         response.history_authority_descriptor = descriptor_bytes;
         response.current_global_history_attestation = attestation_bytes;
         response
@@ -3957,7 +3971,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_history_authority_extension_accepts_empty_and_local_extension() -> Result<(), String> {
+    fn parse_history_authority_extension_accepts_empty_local_and_global_extensions()
+    -> Result<(), String> {
         assert_eq!(
             parse_history_authority_extension("", false).map_err(|err| err.to_string())?,
             None
@@ -3966,6 +3981,11 @@ mod tests {
             parse_history_authority_extension(LOCAL_HISTORY_AUTHORITY_EXTENSION_ID, true)
                 .map_err(|err| err.to_string())?,
             Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1)
+        );
+        assert_eq!(
+            parse_history_authority_extension(GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID, true)
+                .map_err(|err| err.to_string())?,
+            Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
         );
         Ok(())
     }
@@ -3985,15 +4005,6 @@ mod tests {
         assert!(matches!(
             err,
             Error::Parse(message) if message.contains("unsupported history authority extension")
-        ));
-
-        let err = parse_history_authority_extension(GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID, false)
-            .expect_err("reserved global extension id must fail closed until implemented");
-        assert!(matches!(
-            err,
-            Error::Parse(message)
-                if message.contains("reserved")
-                    && message.contains(GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID)
         ));
     }
 
@@ -4581,7 +4592,10 @@ mod tests {
     #[tokio::test]
     async fn merge_ticket_refresh_preserves_history_authority_attestation()
     -> Result<(), Box<dyn StdError>> {
-        let payload = merge_ticket_with_history_authority_payload();
+        let payload = merge_ticket_with_history_authority_payload(
+            LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            LOCAL_HISTORY_ATTESTATION_FINALITY_KIND,
+        );
         let (base_url, handle) = start_merge_ticket_server(payload).await?;
         let client = CitygApiClient::new(base_url);
         let ticket = client.merge_ticket_refresh("room-1", &[0x01; 32]).await?;
@@ -4601,6 +4615,31 @@ mod tests {
         assert_eq!(attestation.barrier_version, ticket.barrier_version);
         assert_eq!(attestation.kem_tree_hash_after, ticket.kem_tree_hash_after);
         assert!(!ticket.current_global_history_attestation_bytes.is_empty());
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_refresh_accepts_global_history_authority_attestation()
+    -> Result<(), Box<dyn StdError>> {
+        let payload = merge_ticket_with_history_authority_payload(
+            GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
+        );
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let ticket = client.merge_ticket_refresh("room-1", &[0x01; 32]).await?;
+        assert_eq!(
+            ticket.history_authority_extension,
+            Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
+        );
+        let attestation = ticket
+            .current_global_history_attestation
+            .ok_or("missing parsed global history attestation")?;
+        assert_eq!(
+            attestation.finality_kind,
+            GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND
+        );
         handle.abort();
         Ok(())
     }

@@ -276,9 +276,9 @@ fn ensure_supported_attested_current_state_extension(
         }
         return Ok(());
     }
-    if extension != Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) {
+    if extension.is_none() {
         return Err(anyhow!(
-            "{context} carries attested current state without supported history authority extension"
+            "{context} carries attested current state without negotiated history authority extension"
         ));
     }
     Ok(())

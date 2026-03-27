@@ -558,8 +558,10 @@ pub(super) fn validate_client_visible_activation_guards(
         .current_global_history_attestation_bytes
         .is_empty()
     {
-        if session.barrier_state.current_history_authority_extension
-            != Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1)
+        if session
+            .barrier_state
+            .current_history_authority_extension
+            .is_none()
         {
             return Err(anyhow!(
                 "client-side activation guard failed (960.7): unsupported or missing history authority extension for local attested current state"

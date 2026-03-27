@@ -429,3 +429,29 @@ Lecture consolidée:
 - `7.1` reste le mur principal: la canonité/finalité globale de l’historique n’est toujours pas fermée.
 
 Référence de synthèse: `docs/audits/final-verification-report-2026-03-26.md`.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche global-history-authority-v1)
+
+Nouvelle passe spec + implémentation:
+
+- `global-history-authority-v1` fournit maintenant une vraie lignée append-only à l’échelle du déploiement pour `header[182]`, A/B/C et `LookupMergeAcceptance`;
+- les preuves de complétude helper ne sont plus seulement locales: elles peuvent être négociées et vérifiées sous cette autorité globale de déploiement;
+- le client parse/vérifie cette extension, et le runtime GUI sait désormais conserver/pinner explicitement son identifiant lorsqu’une attestation courante est présente.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test --locked -p cityg-server tests::build_refresh_bundle_includes_global_history_authority_headers -- --exact --nocapture`
+- `cargo test --locked -p cityg-api-client tests::merge_ticket_refresh_accepts_global_history_authority_attestation -- --exact --nocapture`
+- `cargo test --locked -p cityg-api-client --test history_authority_extensions -- --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::persisted_barrier_state_roundtrip_preserves_global_history_authority_extension --features native-app -- --exact --nocapture`
+
+Statut audit mis à jour:
+
+- **Partial**: `7.1`, `7.2`, `7.3`, `7.4`, `7.5`, `7.6`, `7.7`
+
+Lecture consolidée:
+
+- `7.1` n’est plus honnêtement `Open`: une authentification de snapshot peut désormais se rattacher à une lignée canonique de déploiement, au-delà d’un simple snapshot local.
+- `7.4` reste `Partial`, pas `Closed`, parce que la preuve de non-omission reste optionnelle via extension et ne prétend toujours pas fournir un modèle byzantin fédéré au-delà du déploiement.

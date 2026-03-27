@@ -139,9 +139,9 @@ fn ensure_supported_attested_current_state_extension(
         }
         return Ok(());
     }
-    if extension != Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) {
+    if extension.is_none() {
         return Err(anyhow!(
-            "{context} carries attested current state without supported history authority extension"
+            "{context} carries attested current state without negotiated history authority extension"
         ));
     }
     Ok(())
@@ -155,6 +155,9 @@ fn parse_join_ticket_history_authority_extension(
     }
     if raw == HistoryAuthorityExtension::LocalHistoryAuthorityV1.as_str() {
         return Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1));
+    }
+    if raw == HistoryAuthorityExtension::GlobalHistoryAuthorityV1.as_str() {
+        return Ok(Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1));
     }
     Err(anyhow!(
         "join ticket carries unsupported history authority extension: {raw}"

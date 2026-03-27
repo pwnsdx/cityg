@@ -16,6 +16,9 @@ fn parse_join_ticket_history_authority_extension(
     if raw == HistoryAuthorityExtension::LocalHistoryAuthorityV1.as_str() {
         return Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1));
     }
+    if raw == HistoryAuthorityExtension::GlobalHistoryAuthorityV1.as_str() {
+        return Ok(Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1));
+    }
     Err(anyhow!(
         "join ticket carries unsupported history authority extension: {raw}"
     ))

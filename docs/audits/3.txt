@@ -349,3 +349,30 @@ Lecture consolidée:
 
 - `3.6` n’est plus honnêtement `Open`: on a désormais une vraie détection locale de régression d’état authentifié, persistée et appliquée sur les chemins helper-state courants.
 - `3.6` n’est pas `Closed` pour autant, parce qu’il manque toujours un objet global de finalité/canonité empêchant les forks/rollbacks inter-autorités ou un rollback de stockage hors de la seule vue locale déjà authentifiée.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche global-history-authority-v1)
+
+Nouvelle passe spec + implémentation:
+
+- la spec ne se contente plus de réserver un futur header global: `global-history-authority-v1` est maintenant défini comme extension concrète d’autorité append-only à l’échelle d’un déploiement complet;
+- serveur/API/client négocient maintenant explicitement cette extension via `history_authority_extension`, et l’attestation courante exige `finality_kind == "global-append-only"`;
+- les helpers A/B/C, `LookupMergeAcceptance`, `header[181]` et `header[182]` peuvent désormais tous se rattacher à une même lignée authentifiée de déploiement, au lieu d’un simple scope local;
+- les tests couvrent l’émission serveur des headers sous cette extension puis le parsing/vérification client de l’attestation et des preuves de complétude.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test --locked -p cityg-server tests::build_refresh_bundle_includes_global_history_authority_headers -- --exact --nocapture`
+- `cargo test --locked -p cityg-api-client tests::parse_history_authority_extension_accepts_empty_local_and_global_extensions -- --exact --nocapture`
+- `cargo test --locked -p cityg-api-client tests::merge_ticket_refresh_accepts_global_history_authority_attestation -- --exact --nocapture`
+- `cargo test --locked -p cityg-api-client --test history_authority_extensions -- --nocapture`
+
+Statut audit mis à jour:
+
+- **Partial**: `3.1`, `3.2`, `3.3`, `3.4`, `3.5`, `3.6`, `3.7`
+
+Lecture consolidée:
+
+- `3.1/3.2/3.5` ne sont plus honnêtement `Open`: il existe désormais une vraie lignée append-only authentifiée à l’échelle du déploiement, pas seulement une corrélation locale par serveur/scope.
+- Ils ne sont pas `Closed` pour autant, parce que le profil de base ne rend toujours pas cette extension obligatoire et que `global-history-authority-v1` ne prétend pas fournir un consensus fédéré inter-déploiements.

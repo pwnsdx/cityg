@@ -212,6 +212,9 @@ fn decode_history_authority_extension(
         "local-history-authority-v1" => {
             Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1))
         }
+        "global-history-authority-v1" => {
+            Ok(Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1))
+        }
         other => Err(anyhow!(
             "{field_name} carries unsupported history authority extension: {other}"
         )),

@@ -18,15 +18,17 @@ Scope-hardening addendum (same date, later tranche):
 - `docs/specs.md` now explicitly defines `HistoryAuthorityScope` and states that authenticated acceptance/finality is scoped to one such authority, not to an implicit global/federated consensus object.
 - `docs/specs.md` now also states explicitly that `current_barrier_full_verified` is a client-local predicate and that `header[180]` proves helper-state coherence, not FULL verification to the server.
 - `docs/specs.md` now defines one concrete optional deployment-local extension, `local-history-authority-v1`, which carries a scope-local `HistoryAuthorityDescriptor`, helper completeness attestations for A/B/C, a scope-local attested `header[182]`, and a server-verifiable `header[181]` receipt bound to that attestation.
+- `docs/specs.md` now also defines one concrete optional deployment-global extension, `global-history-authority-v1`, which carries a deployment-global `HistoryAuthorityDescriptor`, deployment-global helper completeness attestations for A/B/C, a deployment-global attested `header[182]`, and a deployment-global interpretation of `LookupMergeAcceptance`.
 - The wire/API contract now also carries an explicit `history_authority_extension` identifier on join/merge/helper/lookup responses; the base profile keeps it empty, and clients fail closed if extension-defined objects appear without that explicit identifier.
 - `docs/specs.md` and the server still reject `header[181]` / `header[182]` in the base profile unless such an extension is explicitly enabled.
-- As a result, some previously listed `Open` items are now better interpreted as `extension required / intentionally out of base profile`, not as latent contradictions inside the base profile text. The per-item matrix below remains a conservative baseline unless otherwise noted in a later audit comment.
+- The server/API/client now negotiate and verify both concrete extensions end-to-end. Positive proof anchors include `tests::build_refresh_bundle_includes_global_history_authority_headers` in `crates/cityg-server/src/lib.rs` and `parses_and_verifies_history_authority_extensions` plus `merge_ticket_refresh_accepts_global_history_authority_attestation` in `crates/cityg-api-client`.
+- As a result, the previously remaining `Open` items now move honestly to `Partial`: the repo/spec define concrete local and deployment-global authority extensions, but the base profile still does not make them mandatory and `global-history-authority-v1` still stops at deployment-global append-only rather than federated cross-deployment consensus.
 
 Summary:
 - Total findings reviewed: `51`
 - `Closed`: `21`
-- `Partial`: `20`
-- `Open`: `6`
+- `Partial`: `26`
+- `Open`: `0`
 - `Reclassified`: `4`
 
 ## Audit 1
@@ -63,16 +65,16 @@ Summary:
 
 ## Audit 3
 
-- `3.1` `Open` — activation still does not require a globally final, non-equivocable history object.
-  Proof: `docs/specs.md:1420-1434` improves local correlation, but `docs/specs.md:170` explicitly says `HistoryCommitment` is not a global consensus object.
-- `3.2` `Open` — supersession/fork is still not defined as a globally canonical authenticated lineage.
-  Proof: `docs/specs.md:165-170`, `docs/specs.md:225-233`.
+- `3.1` `Partial` — the base profile still does not require a globally final, non-equivocable history object, but `global-history-authority-v1` now defines and implements one deployment-global append-only attestation lineage for activation decisions.
+  Proof: `docs/specs.md:289-301`, `docs/specs.md:1296-1302`, `crates/cityg-server/src/lib.rs` (`tests::build_refresh_bundle_includes_global_history_authority_headers`), `crates/cityg-api-client/src/lib.rs`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
+- `3.2` `Partial` — supersession/fork is now defined against one deployment-global authenticated lineage when `global-history-authority-v1` is negotiated, but that lineage is still optional and not federated across deployments.
+  Proof: `docs/specs.md:289-301`, `docs/specs.md:1296-1302`, `crates/cityg-server/src/lib.rs:6384-6399`, `crates/cityg-api-client/src/lib.rs:2082-2133`.
 - `3.3` `Partial` — restart correlation is now monotone locally through `LookupMergeAcceptance`, but only for a single server-local history.
   Proof: `docs/specs.md:1420-1434`, `crates/cityg-server/src/lib.rs:6384-6399`, `crates/cityg-gui/src/native/barrier_runtime.rs:594-655`.
 - `3.4` `Partial` — the base profile still relies on honest-client local gating, but the optional `local-history-authority-v1` extension now provides a concrete server-verifiable FULL-verification receipt within one deployment-local scope.
-  Proof: `docs/specs.md` (S3.3.E, S11.11.4-S11.11.5), `crates/cityg-server/src/lib.rs:2618-2698,4613-4731`, `crates/cityg-api/src/lib.rs:2033-2078,2607-2852`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
-- `3.5` `Open` — “must ensure current state is covered” still lacks a globally authenticated head/finality mechanism.
-  Proof: `docs/specs.md:170`, `docs/specs.md:180-189`, `docs/specs.md:1427-1434`.
+  Proof: `docs/specs.md` (S3.3.E-F, S11.11.4-S11.11.5), `crates/cityg-server/src/lib.rs:2618-2698,4613-4731`, `crates/cityg-api/src/lib.rs:2033-2078,2607-2852`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
+- `3.5` `Partial` — “must ensure current state is covered” is now concretely expressible under one deployment-global authenticated head/finality lineage via `global-history-authority-v1`, but not yet as a mandatory base-profile property or federated consensus proof.
+  Proof: `docs/specs.md:289-301`, `docs/specs.md:1296-1302`, `crates/cityg-server/src/lib.rs` (`tests::build_refresh_bundle_includes_global_history_authority_headers`), `crates/cityg-api-client/src/lib.rs:1458-2047`.
 - `3.6` `Partial` — crash is handled and the client now fail-closes on locally authenticated current-state regressions (`barrier_version`, `history_seq`, same-seq commitment conflicts), but storage rollback/fork detection is still not normatively closed against a byzantine/global history split.
   Proof: `docs/specs.md:188-194`, `crates/cityg-gui/src/native/barrier_core.rs:290-338`, `crates/cityg-gui/src/native/barrier_ops.rs:294-360,874-985`, `crates/cityg-gui/src/native/epoch_sync.rs:62-73`, `crates/cityg-gui/src/native/tests/mod.rs:219-292`.
 - `3.7` `Partial` — the spec now explicitly forbids best-effort `K_fs` advancement across an unauthenticated `pcs_refresh` boundary in catch-up/version-gap mode, and the GUI enters `recovery_required` instead of attempting best-effort recovery when the currently observed gap bundle is itself `reason=1`; broader future/gap ordering remains unspecified.
@@ -80,18 +82,18 @@ Summary:
 
 ## Audit 4
 
-- `4.1` `Partial` — the base profile still relies mostly on honest-client enforcement, but `local-history-authority-v1` now makes updater eligibility server-checkable inside one deployment-local scope through `header[181]` + `header[182]`.
-  Proof: `docs/specs.md` (S3.3.E, S11.11.4-S11.11.5), `crates/cityg-server/src/lib.rs:4644-4731,7025-7059`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
+- `4.1` `Partial` — the base profile still relies mostly on honest-client enforcement, but the negotiated history-authority extensions now make updater eligibility server-checkable inside one deployment-local or deployment-global scope through `header[181]` + `header[182]`.
+  Proof: `docs/specs.md` (S3.3.E-F, S11.11.4-S11.11.5), `crates/cityg-server/src/lib.rs:4644-4731,7025-7059`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
 - `4.2` `Partial` — `join_finalize` is now server-checkable via `header[179] join_finalize_auth`, and the end-to-end path now accepts the reserved helper headers and tolerates later same-tree re-attestation during bootstrap, but it still does not prove full public-state verification to the server.
   Proof: `docs/specs.md:1155-1174`, `docs/specs.md:1579-1583`, `crates/msphf-orchestrator/src/accept/mod.rs:1884-1949`, `crates/cityg-server/src/lib.rs:2381-2438,4022-4085,10705-10735`, `crates/cityg-gui/src/native/barrier_core.rs:568-589`, `crates/cityg-gui/src/native/tests/mod.rs:8589-8658,9070-9130`.
 - `4.3` `Closed` — provenance that the current barrier state is not FULL-verified is now persisted and surfaced.
   Proof: `docs/specs.md:458-465`, `crates/cityg-gui/src/native/session_types.rs:72-99`, `crates/cityg-gui/src/native/persisted/barrier.rs:56-57,334-405`.
 - `4.4` `Partial` — recover-only to FULL promotion is still not backed by a globally authenticated head, but the client now clears `current_barrier_full_verified` whenever a later authenticated helper/ticket/sync artifact changes the stored public barrier state without same-decision FULL verification.
   Proof: `docs/specs.md:526-535`, `crates/cityg-gui/src/native/barrier_core.rs`, `crates/cityg-gui/src/native/tests/mod.rs`.
-- `4.5` `Partial` — “FULL” still spans multiple meanings globally, but the optional local-history-authority extension now defines one negotiated wire-visible proof object family (`header[181]` receipt + `header[182]` scope-local attestation) for scope-local FULL/updater eligibility, and local runtimes now pin the negotiated `history_authority_extension` alongside retained attested current-state bytes instead of treating those bytes as self-describing.
-  Proof: `docs/specs.md` (S3.3.E, S4.2.3, S11.11.4-S11.11.5), `crates/cityg-server/src/lib.rs:3206-3331,4644-4731`, `crates/cityg-gui/src/native/barrier_runtime.rs`, `crates/cityg-gui/src/native/persisted/barrier.rs`, `crates/cityg-gui/src/bin/join_leave.rs`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
-- `4.6` `Open` — the “applicable `ek_n` verification” path is still not globally anchored enough to rule out vacuous server-steered contexts.
-  Proof: `docs/specs.md:1115-1124` improves bootstrap checks, but relies on local/current authenticated artifacts rather than global canonity.
+- `4.5` `Partial` — “FULL” still spans multiple meanings globally, but the optional history-authority extensions now define negotiated wire-visible proof object families (`header[181]` receipt + `header[182]` attestation) for deployment-local and deployment-global FULL/updater eligibility, and local runtimes pin the negotiated `history_authority_extension` alongside retained attested current-state bytes instead of treating those bytes as self-describing.
+  Proof: `docs/specs.md` (S3.3.E-F, S4.2.3, S11.11.4-S11.11.5), `crates/cityg-server/src/lib.rs:3206-3331,4644-4731`, `crates/cityg-gui/src/native/barrier_runtime.rs`, `crates/cityg-gui/src/native/persisted/barrier.rs`, `crates/cityg-gui/src/bin/join_leave.rs`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
+- `4.6` `Partial` — the “applicable `ek_n` verification” path is now anchorable to one deployment-global attested current state when `global-history-authority-v1` is negotiated, but that guarantee remains optional and does not claim federated non-equivocation.
+  Proof: `docs/specs.md:1115-1124`, `docs/specs.md:1296-1302`, `crates/cityg-server/src/lib.rs` (`tests::build_refresh_bundle_includes_global_history_authority_headers`), `crates/cityg-api-client/src/lib.rs`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
 - `4.7` `Partial` — current version/current tree/current JoinSet binding is much tighter now through shared `HistoryCommitment`, `header[180]`, helper-state binding, persisted client-side `current_history_commitment`, and fail-closed rejection of remote barrier bundles whose declared current state does not match that local authenticated state.
   Proof: `docs/specs.md:180-189`, `docs/specs.md:1157`, `docs/specs.md:1181-1190`, `crates/cityg-server/src/lib.rs:2396-2445,4443-4450,10749-10780`, `crates/cityg-gui/src/native/session_types.rs:50-66`, `crates/cityg-gui/src/native/persisted/barrier.rs:15-28,157-184,346-431`, `crates/cityg-gui/src/native/barrier_runtime.rs:515-595`, `crates/cityg-gui/src/native/epoch_sync.rs:40-98,335-363`, `crates/cityg-gui/src/native/join_ops.rs:220-247,423-455`, `crates/cityg-gui/src/native/barrier_ops.rs:185-195,312-320,882-905`, `crates/cityg-gui/src/bin/join_leave.rs:376-416,1432-1440,1870-1878,5746-5761`, `crates/cityg-gui/src/native/tests/mod.rs:346-381,5840-6043,8327-8384,8873-8890`.
 - `4.8` `Partial` — external history/provisioning dependencies are more constrained, but still not fully closed against a byzantine server.
@@ -114,7 +116,7 @@ Summary:
 - `5.7` `Partial` — join provisioning now has nonce/issuance/expiry/current history commitment plus authenticated client-visible FLG window parameters and `last_accepted_ec`, and bootstrap verification no longer falsely rejects a same-tree later re-attestation, but it still is not a standalone globally authenticated lineage artifact.
   Proof: `docs/specs.md:1583-1590`, `crates/cityg-api/proto/cityg.proto:202-249`, `crates/cityg-api-client/src/lib.rs:988-1039,2126-2144`, `crates/cityg-gui/src/native/join_ops.rs:210-223,421-439`, `crates/cityg-gui/src/native/barrier_core.rs:568-589`.
 - `5.8` `Partial` — retention/fetch/config contracts are better tied to history and now have hard helper paging / replay-state bounds, but still are not backed by one signed global deployment manifest and global canonity.
-  Proof: `docs/specs.md:220-238`, `docs/specs.md:618-638`, `docs/specs.md:1532`, and the remaining open Audit 2 / Audit 3 findings.
+  Proof: `docs/specs.md:220-238`, `docs/specs.md:618-638`, `docs/specs.md:1532`, and the remaining partial Audit 2 / Audit 3 findings.
 
 ## Audit 6
 
@@ -137,14 +139,14 @@ Summary:
 
 ## Audit 7
 
-- `7.1` `Open` — snapshot authentication is still not a proof of globally canonical history.
-  Proof: `docs/specs.md:165-170`, `docs/specs.md:215-223`.
+- `7.1` `Partial` — snapshot authentication alone in the base profile is still not a proof of globally canonical history, but `global-history-authority-v1` now defines and implements one deployment-global append-only attestation lineage that upgrades snapshots/helper results/current-state decisions beyond a merely local server view.
+  Proof: `docs/specs.md:289-301`, `docs/specs.md:1296-1302`, `crates/cityg-server/src/lib.rs` (`tests::build_refresh_bundle_includes_global_history_authority_headers`), `crates/cityg-api-client/tests/history_authority_extensions.rs`.
 - `7.2` `Partial` — clients now replay a larger mandatory client-visible subset of activation invariants before committing recovered or locally pending barrier state: `fs_policy_version`, `fs_epoch_base_ts`, `fs_dev_chain_bind`, local device continuity, group forward-jump bounds, and the locally provable `new-device` / `local-device` FLG subcases. They still do not replay the full server-side S10 policy surface for remote known-device state or broader governance/rate-limit checks.
   Proof: `docs/specs.md:1491-1507`, `docs/specs.md:1583-1590`, `crates/cityg-gui/src/native/barrier_runtime.rs:520-600,680-710`, `crates/cityg-gui/src/native/join_ops.rs:210-223,421-439`, `crates/cityg-gui/src/native/epoch_sync.rs:65-95,183-186`, `crates/cityg-gui/src/native/tests/mod.rs:423-431,684-735,8448-8501`.
 - `7.3` `Partial` — `ResolveJoinsSince` is now tied to an exact authenticated view and shared commitment, and the GUI persists/rechecks the current authenticated commitment before accepting a remote barrier bundle, but the whole chain is still not backed by a globally canonical target state with completeness proof.
   Proof: `docs/specs.md:180-189`, `docs/specs.md:197-213`, `crates/cityg-gui/src/native/session_types.rs:50-66`, `crates/cityg-gui/src/native/persisted/barrier.rs:15-28,157-184,346-431`, `crates/cityg-gui/src/native/barrier_runtime.rs:515-595`, `crates/cityg-gui/src/native/epoch_sync.rs:40-98,335-363`, `crates/cityg-gui/src/bin/join_leave.rs:376-416,1432-1440,1870-1878`, `crates/cityg-gui/src/native/tests/mod.rs:346-381,8327-8384`.
-- `7.4` `Partial` — the base profile still lacks a mandatory non-omission proof, but `local-history-authority-v1` now defines and implements signed helper completeness attestations for A/B/C within one deployment-local scope, the client positively verifies them when that extension is present, and local runtimes now pin the extension id whenever they retain current global-history attestation bytes.
-  Proof: `docs/specs.md` (S3.3 shared authenticated-view rule and S3.3.E), `crates/cityg-server/src/lib.rs:2644-2698,3332-3421`, `crates/cityg-api/src/lib.rs:2607-2852`, `crates/cityg-api-client/src/lib.rs:2787-2894`, `crates/cityg-api-client/tests/history_authority_extensions.rs`, `crates/cityg-gui/src/native/barrier_runtime.rs`, `crates/cityg-gui/src/bin/join_leave.rs`.
+- `7.4` `Partial` — the base profile still lacks a mandatory non-omission proof, but the concrete history-authority extensions now define and implement signed helper completeness attestations for A/B/C within one deployment-local or deployment-global scope, the client positively verifies them when those extensions are present, and local runtimes pin the negotiated extension id whenever they retain current history attestation bytes.
+  Proof: `docs/specs.md` (S3.3 shared authenticated-view rule and S3.3.E-F), `crates/cityg-server/src/lib.rs:2644-2698,3332-3478`, `crates/cityg-api/src/lib.rs:2607-2852`, `crates/cityg-api-client/src/lib.rs:2787-3207`, `crates/cityg-api-client/tests/history_authority_extensions.rs`, `crates/cityg-gui/src/native/barrier_runtime.rs`, `crates/cityg-gui/src/bin/join_leave.rs`.
 - `7.5` `Partial` — recover-only is now explicit, persisted, and escalates to `recovery_required`, but still remains a server-imposable degraded mode until FULL is re-established locally.
   Proof: `crates/cityg-gui/src/native/barrier_runtime.rs:91-99,603-655`.
 - `7.6` `Partial` — policy/governance/provisioning are better bound to current history, but not yet to a globally canonical authenticated lineage.
@@ -177,7 +179,7 @@ Summary:
 
 ## Highest-priority remaining work
 
-1. Add a globally canonical, append-only, authenticated history/finality object, not just a server-local `HistoryCommitment`.
-2. Decide whether FULL/recover-only remains only an honest-client rule in the base profile or whether the new local-history-authority receipt pattern should become mandatory / globally standardized.
-3. Generalize completeness proofs for `ResolveJoinsSince` / `ResolveRevokedLeaves` beyond the new optional local-history-authority scope so they become mandatory or globally canonical rather than deployment-local.
-4. Extend the new retained-current-tree fast path into a bounded-cost general path for historical predecessors too, instead of relying on whole-tree work whenever the required predecessor snapshot is not the locally cached current one.
+1. Decide whether `global-history-authority-v1` should remain optional or become mandatory for deployments that claim globally canonical/final history inside one deployment.
+2. If stronger guarantees are required, define a federated / multi-witness non-equivocation layer on top of `global-history-authority-v1` instead of continuing to imply it informally.
+3. Decide whether the `header[181]` FULL-verification receipt pattern should become mandatory whenever a history-authority extension is enabled, rather than remaining deployment-optional.
+4. Extend the retained-snapshot fast path into a bounded-cost general path for historical predecessors too, instead of relying on whole-tree work whenever the required predecessor snapshot is not already retained/authenticated locally.

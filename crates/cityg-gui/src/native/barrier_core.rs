@@ -817,7 +817,7 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
                 "join_finalize bootstrap missing current global history attestation bytes for authority-bound current state"
             ));
         }
-    } else if expected_extension != Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) {
+    } else if expected_extension.is_none() {
         return Err(anyhow!(
             "join_finalize bootstrap uses unsupported or missing history authority extension for attested current state"
         ));

@@ -149,9 +149,47 @@ pub struct HistoryAuthorityConfig {
 pub enum HistoryAuthorityMode {
     Disabled,
     Local,
+    Global,
 }
 
 pub const LOCAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "local-history-authority-v1";
+pub const GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "global-history-authority-v1";
+const LOCAL_HISTORY_ATTESTATION_FINALITY_KIND: &str = "local-append-only";
+const GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND: &str = "global-append-only";
+
+impl HistoryAuthorityMode {
+    fn extension_id(self) -> &'static str {
+        match self {
+            Self::Disabled => "",
+            Self::Local => LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            Self::Global => GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+        }
+    }
+
+    fn finality_kind(self) -> &'static str {
+        match self {
+            Self::Disabled | Self::Local => LOCAL_HISTORY_ATTESTATION_FINALITY_KIND,
+            Self::Global => GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
+        }
+    }
+
+    fn persisted_tag(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Local => "local",
+            Self::Global => "global",
+        }
+    }
+
+    fn from_persisted_tag(tag: &str) -> Result<Self, CityGError> {
+        match tag {
+            "" | "local" => Ok(Self::Local),
+            "global" => Ok(Self::Global),
+            "disabled" => Ok(Self::Disabled),
+            _ => Err(CityGError::InvalidInput("invalid history authority mode")),
+        }
+    }
+}
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -173,6 +211,13 @@ impl ServerConfig {
     pub fn enable_local_history_authority(&mut self) {
         self.history_authority = Some(HistoryAuthorityConfig {
             mode: HistoryAuthorityMode::Local,
+            require_full_verification_receipt: true,
+        });
+    }
+
+    pub fn enable_global_history_authority(&mut self) {
+        self.history_authority = Some(HistoryAuthorityConfig {
+            mode: HistoryAuthorityMode::Global,
             require_full_verification_receipt: true,
         });
     }
@@ -353,6 +398,7 @@ pub struct HistoryAuthorityDescriptor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HistoryAuthorityState {
+    mode: HistoryAuthorityMode,
     descriptor: HistoryAuthorityDescriptor,
     secret_key: Vec<u8>,
     require_full_verification_receipt: bool,
@@ -956,9 +1002,15 @@ impl CityGServer {
             })
             .filter(|state| !state.is_empty());
         let history_authority = match config.history_authority.as_ref() {
-            Some(authority) if authority.mode == HistoryAuthorityMode::Local => {
+            Some(authority)
+                if matches!(
+                    authority.mode,
+                    HistoryAuthorityMode::Local | HistoryAuthorityMode::Global
+                ) =>
+            {
                 match load_or_generate_history_authority_state(
                     history_authority_path.as_deref(),
+                    authority.mode,
                     authority.require_full_verification_receipt,
                 ) {
                     Ok(state) => Some(state),
@@ -2625,11 +2677,10 @@ impl CityGServer {
     }
 
     pub fn history_authority_extension_id(&self) -> &'static str {
-        if self.history_authority.is_some() {
-            LOCAL_HISTORY_AUTHORITY_EXTENSION_ID
-        } else {
-            ""
-        }
+        self.history_authority
+            .as_ref()
+            .map(|authority| authority.mode.extension_id())
+            .unwrap_or("")
     }
 
     pub fn history_authority_requires_full_verification_receipt(&self) -> bool {
@@ -3234,7 +3285,7 @@ fn encode_global_history_attestation(
         gid,
         &history_commitment.prev_history_commitment_id,
     )?;
-    let finality_kind = "local-append-only".to_string();
+    let finality_kind = state.mode.finality_kind().to_string();
     let payload = to_cbor_vec(&GlobalHistoryAttestationSignedPayload(
         "cityg/global-history-attestation-v1",
         &state.descriptor.scope_id,
@@ -5246,13 +5297,17 @@ pub struct ServerOutcome {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        CityGError, CityGServer, PersistedBarrierPublicTreeSnapshot, PersistedKbroadRoomState,
-        ServerConfig, compute_barrier_tree_hash,
+        CityGError, CityGServer, GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND,
+        GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID, GlobalHistoryAttestationSignedPayload,
+        PersistedBarrierPublicTreeSnapshot, PersistedKbroadRoomState, ServerConfig,
+        compute_barrier_tree_hash, global_history_parent_attestation_id,
+        parse_global_history_attestation, verify_history_authority_signature,
     };
     use ciborium::value::{Integer, Value};
     use cityg_client::{CityGClient, ClientEpochBundle, witness};
     use msphf_core::hash::h_l;
     use msphf_core::merkle::canonical_set_root;
+    use msphf_core::serde_utils::to_cbor_vec;
     use msphf_orchestrator::lb;
     use msphf_orchestrator::{
         AcceptanceOptions, AnchorInstanceParts, BootstrapPolicy, DEFAULT_POLICY_VERSION,
@@ -5289,6 +5344,12 @@ mod tests {
     fn demo_server_with_local_history_authority() -> CityGServer {
         let mut config = demo_acceptance_config();
         config.enable_local_history_authority();
+        CityGServer::new(config)
+    }
+
+    fn demo_server_with_global_history_authority() -> CityGServer {
+        let mut config = demo_acceptance_config();
+        config.enable_global_history_authority();
         CityGServer::new(config)
     }
 
@@ -7059,6 +7120,71 @@ mod tests {
                 .header_map
                 .contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn build_refresh_bundle_includes_global_history_authority_headers() -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x7B)?;
+        let mut server = demo_server_with_global_history_authority();
+        server.accept_epoch(&generated.bundle)?;
+
+        assert_eq!(
+            server.history_authority_extension_id(),
+            GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID
+        );
+        let (bundle, _pristine_bundle) =
+            build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+        assert!(
+            bundle
+                .header_map
+                .contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
+        );
+        assert!(
+            bundle
+                .header_map
+                .contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
+        );
+        let raw_attestation = bundle
+            .header_map
+            .get(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
+            .and_then(Value::as_bytes)
+            .ok_or(CityGError::InvalidInput("missing history attestation"))?;
+        let (
+            descriptor,
+            gid,
+            history_commitment,
+            barrier_version,
+            kem_tree_hash_after,
+            _,
+            finality_kind,
+            signature,
+        ) = parse_global_history_attestation(raw_attestation.as_slice())?;
+        let payload = to_cbor_vec(&GlobalHistoryAttestationSignedPayload(
+            "cityg/global-history-attestation-v1",
+            &descriptor.scope_id,
+            &gid,
+            &history_commitment.history_view_id,
+            &history_commitment.history_commitment_id,
+            &history_commitment.prev_history_commitment_id,
+            history_commitment.history_seq,
+            barrier_version,
+            &kem_tree_hash_after,
+            &global_history_parent_attestation_id(
+                &descriptor.scope_id,
+                &gid,
+                &history_commitment.prev_history_commitment_id,
+            )?,
+            finality_kind.as_str(),
+        ))?;
+        let stored_descriptor =
+            server
+                .history_authority_descriptor()
+                .ok_or(CityGError::InvalidInput(
+                    "missing history authority descriptor",
+                ))?;
+        verify_history_authority_signature(&stored_descriptor, payload.as_slice(), &signature)?;
+        assert_eq!(finality_kind, GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND);
         Ok(())
     }
 
@@ -12592,6 +12718,8 @@ struct PersistedHistoryCommitment {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct PersistedHistoryAuthorityState {
     #[serde(default)]
+    mode: String,
+    #[serde(default)]
     scope_id_hex: String,
     #[serde(default)]
     public_key_hex: String,
@@ -12624,6 +12752,7 @@ fn load_history_authority_state(path: &Path) -> Result<Option<HistoryAuthoritySt
         return Ok(None);
     }
     Ok(Some(HistoryAuthorityState {
+        mode: HistoryAuthorityMode::from_persisted_tag(&persisted.mode)?,
         descriptor: HistoryAuthorityDescriptor {
             scope_id: decode_hex_32("history authority scope_id", &persisted.scope_id_hex)?,
             public_key: hex::decode(&persisted.public_key_hex)
@@ -12646,6 +12775,7 @@ fn persist_history_authority_state(
         }
     }
     let persisted = PersistedHistoryAuthorityState {
+        mode: state.mode.persisted_tag().to_string(),
         scope_id_hex: hex::encode(state.descriptor.scope_id),
         public_key_hex: hex::encode(&state.descriptor.public_key),
         secret_key_hex: hex::encode(&state.secret_key),
@@ -12678,12 +12808,14 @@ fn derive_history_authority_scope_id(public_key: &[u8]) -> Result<[u8; 32], City
 }
 
 fn generate_history_authority_state(
+    mode: HistoryAuthorityMode,
     require_full_verification_receipt: bool,
 ) -> Result<HistoryAuthorityState, CityGError> {
     let (public_key, secret_key) = dilithium5::keypair();
     let public_key = public_key.as_bytes().to_vec();
     let secret_key = secret_key.as_bytes().to_vec();
     Ok(HistoryAuthorityState {
+        mode,
         descriptor: HistoryAuthorityDescriptor {
             scope_id: derive_history_authority_scope_id(public_key.as_slice())?,
             public_key,
@@ -12695,19 +12827,21 @@ fn generate_history_authority_state(
 
 fn load_or_generate_history_authority_state(
     path: Option<&Path>,
+    mode: HistoryAuthorityMode,
     require_full_verification_receipt: bool,
 ) -> Result<HistoryAuthorityState, CityGError> {
     if let Some(path) = path {
         if let Some(mut state) = load_history_authority_state(path)? {
+            state.mode = mode;
             state.require_full_verification_receipt = require_full_verification_receipt;
             persist_history_authority_state(path, &state)?;
             return Ok(state);
         }
-        let state = generate_history_authority_state(require_full_verification_receipt)?;
+        let state = generate_history_authority_state(mode, require_full_verification_receipt)?;
         persist_history_authority_state(path, &state)?;
         return Ok(state);
     }
-    generate_history_authority_state(require_full_verification_receipt)
+    generate_history_authority_state(mode, require_full_verification_receipt)
 }
 
 fn decode_hex_32(label: &'static str, value: &str) -> Result<[u8; 32], CityGError> {
