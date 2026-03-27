@@ -24,8 +24,8 @@ Scope-hardening addendum (same date, later tranche):
 Summary:
 - Total findings reviewed: `51`
 - `Closed`: `18`
-- `Partial`: `13`
-- `Open`: `16`
+- `Partial`: `15`
+- `Open`: `14`
 - `Reclassified`: `4`
 
 ## Audit 1
@@ -74,8 +74,8 @@ Summary:
   Proof: `docs/specs.md:170`, `docs/specs.md:180-189`, `docs/specs.md:1427-1434`.
 - `3.6` `Open` — crash is handled, but storage rollback/fork detection is still not normatively closed.
   Proof: `docs/specs.md:1429-1434`; no equivalent rollback-resistant head requirement exists.
-- `3.7` `Open` — FS/PCS reorder handling is still not fully specified as a client state machine with future/gap rules.
-  Proof: no normative state machine was added for delayed `pcs_refresh` anchor order.
+- `3.7` `Partial` — the spec now explicitly forbids best-effort `K_fs` advancement across an unauthenticated `pcs_refresh` boundary in catch-up/version-gap mode, and the GUI enters `recovery_required` instead of attempting best-effort recovery when the currently observed gap bundle is itself `reason=1`; broader future/gap ordering remains unspecified.
+  Proof: `docs/specs.md:1382-1384`, `crates/cityg-gui/src/native/epoch_sync.rs:257-276`, `crates/cityg-gui/src/native/barrier_runtime.rs:82-104`, `crates/cityg-gui/src/native/tests/mod.rs:379-432`.
 
 ## Audit 4
 
@@ -123,8 +123,8 @@ Summary:
   Proof: `docs/specs.md:229-231`, `crates/cityg-server/src/lib.rs:3143-3182`, `crates/cityg-server/src/lib.rs:10631-10680`.
 - `6.3` `Closed` — payload envelope size is bounded in spec and code.
   Proof: `docs/specs.md:563-565`, `crates/cityg-gui/src/message_crypto.rs:816-846`.
-- `6.4` `Open` — FULL chain-check still fundamentally needs whole-tree work in the general case.
-  Proof: `docs/specs.md:1093-1104`, `docs/specs.md:1117-1122`.
+- `6.4` `Partial` — the base profile now permits a retained authenticated current-tree fast path, and the GUI caches/reuses the current authenticated public tree for current-state FULL/updater checks, but the general case still falls back to whole-tree work for historical predecessors and uncached states.
+  Proof: `docs/specs.md:1148-1160`, `docs/specs.md:1180-1193`, `crates/cityg-gui/src/native/session_types.rs:91-93`, `crates/cityg-gui/src/native/barrier_core.rs:142-187,411-520`, `crates/cityg-gui/src/native/epoch_sync.rs:246-329`, `crates/cityg-gui/src/native/barrier_ops.rs:114-195`, `crates/cityg-gui/src/native/tests/mod.rs:198-205,379-438`.
 - `6.5` `Closed` — A/B/C now have explicit page framing, bounded page size, and client-side aggregation checks tied to one `HistoryCommitment`.
   Proof: `docs/specs.md:194-238`, `crates/cityg-api/proto/cityg.proto:303-358`, `crates/cityg-api/src/lib.rs:197,900-942,2497-2618,6326-6354`, `crates/cityg-api-client/src/lib.rs:181,1188-1464,2358-2407,2757-2869`.
 - `6.6` `Closed` — unresolved joins are now bounded by `N_max`, and resolved/revoked join activations are pruned from server state.
@@ -179,4 +179,4 @@ Summary:
 1. Add a globally canonical, append-only, authenticated history/finality object, not just a server-local `HistoryCommitment`.
 2. Decide whether FULL/recover-only is only an honest-client rule or must become a server-verifiable protocol property.
 3. Add completeness proofs or equivalent fail-closed semantics for `ResolveJoinsSince` / `ResolveRevokedLeaves`.
-4. Decide whether to add a bounded-cost authenticated-cache / proof path for FULL verification, instead of relying on whole-tree work in the general case.
+4. Extend the new retained-current-tree fast path into a bounded-cost general path for historical predecessors too, instead of relying on whole-tree work whenever the required predecessor snapshot is not the locally cached current one.

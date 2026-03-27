@@ -256,6 +256,26 @@ Preuve consolidée et références exactes: `docs/audits/final-verification-repo
 
 --
 
+## Commentaires Codex (2026-03-27, tranche FS/PCS gap fail-closed)
+
+Nouvelle vérification après patch spec + GUI:
+
+- **Partiellement fermé**: `3.7`. La spec interdit maintenant explicitement au client de franchir en best-effort une frontière `pcs_refresh` non authentifiée lorsqu’il est déjà en catch-up/version-gap.
+- **Fermé localement sur le cas le plus dangereux**: le runtime GUI n’essaie plus de faire un best-effort recovery quand le bundle actuellement observé dans un version gap est lui-même `reason=1 (pcs_refresh)`. Il entre désormais directement en `recovery_required/insufficient_authenticated_history`.
+- **Toujours ouvert au sens large**: le protocole n’a toujours pas de machine d’ordre complète pour tous les cas `future / gap / duplicate / stale` au voisinage de plusieurs anchors acceptés, ni de lineage global authentifié permettant de reconstruire canoniquement `K_fs` après réordonnancement complexe.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p cityg-gui --bin cityg-gui enter_barrier_recovery_required_sets_issue_and_clears_current_public_tree --features native-app`
+- `cargo test -p cityg-gui --bin cityg-gui pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs --features native-app`
+
+Statut audit mis à jour:
+
+- **Partial**: 3.3, 3.7
+- **Open**: 3.1, 3.2, 3.4, 3.5, 3.6
+
+--
+
 ## Commentaires Codex (2026-03-26, tranche scope-hardening)
 
 Nouvelle clarification de spec:

@@ -420,6 +420,7 @@ impl PersistedBarrierState {
                     commitment.into_runtime("barrier_state.current_history_commitment")
                 })
                 .transpose()?,
+            current_public_tree: None,
             bootstrap_history_commitment: self
                 .bootstrap_history_commitment
                 .map(|commitment| {

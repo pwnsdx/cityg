@@ -114,6 +114,13 @@ pub(super) struct BarrierUpdateBuildResult {
     pub(super) kem_tree_hash_after: [u8; 32],
     pub(super) k_barrier_new: Zeroizing<[u8; 32]>,
     pub(super) on_path_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
+    pub(super) snapshot_post: Arc<BarrierPublicTree>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct FullChainCheckResult {
+    pub(super) expected_before: [u8; 32],
+    pub(super) snapshot_post: Arc<BarrierPublicTree>,
 }
 
 pub(super) fn compute_barrier_update_digest(raw_update: &[u8]) -> Result<[u8; 32]> {
@@ -140,6 +147,40 @@ pub(super) fn validate_barrier_tree_snapshot_auth(
             "barrier tree snapshot auth failure (960.9): tree hash mismatch"
         ));
     }
+    Ok(())
+}
+
+pub(super) fn current_public_tree_cache_matches(
+    session: &AppSession,
+    snapshot: &BarrierPublicTree,
+) -> bool {
+    snapshot.n_max == session.barrier_state.n_max.max(1)
+        && snapshot.kem_tree_hash_after == session.barrier_state.kem_tree_hash_after
+}
+
+pub(super) fn current_public_tree_cache(session: &AppSession) -> Option<Arc<BarrierPublicTree>> {
+    session
+        .barrier_state
+        .current_public_tree
+        .as_ref()
+        .filter(|snapshot| current_public_tree_cache_matches(session, snapshot))
+        .cloned()
+}
+
+pub(super) fn clear_current_public_tree_cache(state: &mut BarrierSecretState) {
+    state.current_public_tree = None;
+}
+
+pub(super) fn install_current_public_tree_cache(
+    session: &mut AppSession,
+    snapshot: BarrierPublicTree,
+) -> Result<()> {
+    validate_barrier_tree_snapshot_auth(
+        &session.barrier_state.kem_tree_hash_after,
+        session.barrier_state.n_max.max(1),
+        &snapshot,
+    )?;
+    session.barrier_state.current_public_tree = Some(Arc::new(snapshot));
     Ok(())
 }
 
@@ -370,11 +411,11 @@ pub(super) fn parse_barrier_update_for_recover(
 pub(super) async fn full_chain_check_barrier_update(
     client: &CitygApiClient,
     room_id: &str,
-    session: &AppSession,
+    session: &mut AppSession,
     header_map: &BTreeMap<u64, Value>,
     raw_update: &[u8],
     max_barrier_update_bytes: usize,
-) -> Result<[u8; 32]> {
+) -> Result<FullChainCheckResult> {
     let n_max = session.barrier_state.n_max.max(1);
     let parsed = parse_barrier_update_for_recover(raw_update, n_max, max_barrier_update_bytes)
         .map_err(|err| anyhow!("barrier full chain-check prevalidation failed (960.7): {err}"))?;
@@ -397,18 +438,33 @@ pub(super) async fn full_chain_check_barrier_update(
     }
 
     let h_prev = session.barrier_state.kem_tree_hash_after;
-    let snapshot_prev_response = client
-        .barrier_fetch_public_tree(room_id, &h_prev)
-        .await
-        .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
-    let snapshot_prev = snapshot_prev_response.tree;
-    if snapshot_prev.n_max != n_max {
-        return Err(anyhow!(
-            "barrier tree snapshot auth failure (960.9): n_max mismatch (expected {n_max}, got {})",
-            snapshot_prev.n_max
-        ));
-    }
-    validate_barrier_tree_snapshot_auth(&h_prev, n_max, &snapshot_prev)?;
+    let (snapshot_prev, snapshot_prev_history_commitment) = if let Some(snapshot_prev) =
+        current_public_tree_cache(session)
+    {
+        let current_history_commitment = session
+                .barrier_state
+                .current_history_commitment
+                .ok_or_else(|| {
+                    anyhow!(
+                        "barrier tree snapshot auth failure (960.9): missing authenticated current-state history commitment for cached current public tree"
+                    )
+                })?;
+        ((*snapshot_prev).clone(), current_history_commitment)
+    } else {
+        let snapshot_prev_response = client
+            .barrier_fetch_public_tree(room_id, &h_prev)
+            .await
+            .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
+        let snapshot_prev = snapshot_prev_response.tree;
+        if snapshot_prev.n_max != n_max {
+            return Err(anyhow!(
+                "barrier tree snapshot auth failure (960.9): n_max mismatch (expected {n_max}, got {})",
+                snapshot_prev.n_max
+            ));
+        }
+        validate_barrier_tree_snapshot_auth(&h_prev, n_max, &snapshot_prev)?;
+        (snapshot_prev, snapshot_prev_response.history_commitment)
+    };
 
     let revoked_since_root =
         header_bytes32(header_map, hdr::HDR_REVOKED_SINCE_ROOT).ok_or_else(|| {
@@ -434,7 +490,7 @@ pub(super) async fn full_chain_check_barrier_update(
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
     if require_current_state_history_commitment(
-        &snapshot_prev_response.history_commitment,
+        &snapshot_prev_history_commitment,
         &join_resolution.history_commitment,
         &revoked_resolution.history_commitment,
     )
@@ -465,8 +521,8 @@ pub(super) async fn full_chain_check_barrier_update(
 
     let parsed_for_hash = parsed.clone();
     let snapshot_prev_entries = snapshot_prev.pk_entries.clone();
-    let (expected_before, expected_after) =
-        tokio::task::spawn_blocking(move || -> Result<([u8; 32], [u8; 32])> {
+    let (expected_before, expected_after, snapshot_post) =
+        tokio::task::spawn_blocking(move || -> Result<([u8; 32], [u8; 32], BarrierPublicTree)> {
             let mut snapshot_pre = snapshot_prev_entries;
             apply_join_set_to_snapshot(
                 snapshot_pre.as_mut_slice(),
@@ -491,7 +547,15 @@ pub(super) async fn full_chain_check_barrier_update(
             }
             let expected_after = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
 
-            Ok((expected_before, expected_after))
+            Ok((
+                expected_before,
+                expected_after,
+                BarrierPublicTree {
+                    n_max,
+                    kem_tree_hash_after: expected_after,
+                    pk_entries: snapshot_post,
+                },
+            ))
         })
         .await
         .map_err(|err| anyhow!("barrier full chain-check worker join failure (960.8): {err}"))??;
@@ -507,13 +571,16 @@ pub(super) async fn full_chain_check_barrier_update(
         ));
     }
 
-    Ok(expected_before)
+    Ok(FullChainCheckResult {
+        expected_before,
+        snapshot_post: Arc::new(snapshot_post),
+    })
 }
 
 pub(super) async fn verify_join_finalize_bootstrap_current_state(
     client: &CitygApiClient,
     room_id: &str,
-    session: &AppSession,
+    session: &mut AppSession,
 ) -> Result<()> {
     let expected_commitment = session
         .barrier_state
@@ -656,6 +723,8 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
             "join_finalize bootstrap hash-chain failure (960.8): kem_tree_hash_after mismatch"
         ));
     }
+
+    install_current_public_tree_cache(session, current_snapshot_response.tree)?;
 
     Ok(())
 }

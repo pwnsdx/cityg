@@ -72,6 +72,7 @@ pub(super) fn apply_recovered_barrier_state(
     if let Some(k_fs_after_pcs) = k_fs_after_pcs {
         apply_forward_state_k_fs(session, *k_fs_after_pcs);
     }
+    clear_current_public_tree_cache(&mut session.barrier_state);
     session.barrier_state.barrier_recovery_pending = false;
     session.barrier_state.barrier_recovery_issue = None;
     session.barrier_state.current_barrier_full_verified = current_barrier_full_verified;
@@ -83,8 +84,23 @@ pub(super) fn enter_barrier_recovery_pending(session: &mut AppSession) -> Result
     session.barrier_state.barrier_initialized = true;
     session.barrier_state.barrier_roots_hash =
         compute_revocation_roots_hash(&session.revoked_since_root, &session.revoked_root)?;
+    clear_current_public_tree_cache(&mut session.barrier_state);
     session.barrier_state.barrier_recovery_pending = true;
     session.barrier_state.barrier_recovery_issue = None;
+    session.barrier_state.current_barrier_full_verified = false;
+    Ok(())
+}
+
+pub(super) fn enter_barrier_recovery_required(
+    session: &mut AppSession,
+    issue: BarrierRecoveryIssue,
+) -> Result<()> {
+    session.barrier_state.barrier_initialized = true;
+    session.barrier_state.barrier_roots_hash =
+        compute_revocation_roots_hash(&session.revoked_since_root, &session.revoked_root)?;
+    clear_current_public_tree_cache(&mut session.barrier_state);
+    session.barrier_state.barrier_recovery_pending = true;
+    session.barrier_state.barrier_recovery_issue = Some(issue);
     session.barrier_state.current_barrier_full_verified = false;
     Ok(())
 }
@@ -93,6 +109,7 @@ fn mark_barrier_recovery_required(
     session: &mut AppSession,
     issue: BarrierRecoveryIssue,
 ) -> PendingBarrierHistoryOutcome {
+    clear_current_public_tree_cache(&mut session.barrier_state);
     session.barrier_state.barrier_recovery_pending = true;
     session.barrier_state.barrier_recovery_issue = Some(issue);
     session.barrier_state.current_barrier_full_verified = false;
@@ -707,6 +724,7 @@ pub(super) fn apply_pending_barrier_activation_with_source(
         session.barrier_state.barrier_roots_hash = revocation_roots_hash;
         session.barrier_state.k_barrier = k_barrier_new;
         session.barrier_state.kem_tree_hash_after = kem_tree_hash_after;
+        clear_current_public_tree_cache(&mut session.barrier_state);
         session.last_accepted_ec = session.last_accepted_ec.max(fs_ec);
         for (node, material) in on_path_key_material {
             session.barrier_state.dk_nodes.insert(node, material);
@@ -1031,5 +1049,10 @@ pub(super) fn build_barrier_update_bytes(
         kem_tree_hash_after,
         k_barrier_new: Zeroizing::new(k_barrier_new),
         on_path_key_material,
+        snapshot_post: Arc::new(BarrierPublicTree {
+            n_max,
+            kem_tree_hash_after,
+            pk_entries: snapshot_post,
+        }),
     })
 }

@@ -204,6 +204,18 @@ fn current_pending_activation_source(
     Some(capture_barrier_pending_activation_source(session))
 }
 
+fn sample_current_public_tree(n_max: u64, fill: u8) -> Result<BarrierPublicTree> {
+    let n_max = validate_barrier_n_max(n_max)?;
+    let node_count = expected_barrier_tree_nodes(n_max)?;
+    let pk_entries = vec![vec![fill; kyber768::public_key_bytes()]; node_count];
+    let kem_tree_hash_after = compute_barrier_tree_hash(n_max, pk_entries.as_slice())?;
+    Ok(BarrierPublicTree {
+        n_max,
+        kem_tree_hash_after,
+        pk_entries,
+    })
+}
+
 fn build_activation_guard_header(
     session: &AppSession,
     barrier_version: u64,
@@ -336,6 +348,9 @@ fn pending_barrier_activation_applies_on_digest_match() -> Result<(), Box<dyn st
 fn pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xA12, "http://127.0.0.1:9", "room-a2", "alice")?;
+    let current_snapshot = sample_current_public_tree(session.barrier_state.n_max, 0x54)?;
+    session.barrier_state.kem_tree_hash_after = current_snapshot.kem_tree_hash_after;
+    install_current_public_tree_cache(&mut session, current_snapshot)?;
     let original_fs = session.forward_state.snapshot().k_fs;
     session.barrier_state.barrier_recovery_pending = true;
     session.barrier_state.pending = Some(BarrierPendingState {
@@ -364,6 +379,10 @@ fn pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs()
     assert_eq!(session.barrier_state.barrier_roots_hash, [0x35; 32]);
     assert_eq!(session.barrier_state.kem_tree_hash_after, [0x45; 32]);
     assert_eq!(*session.barrier_state.k_barrier, [0x56; 32]);
+    assert!(
+        session.barrier_state.current_public_tree.is_none(),
+        "activation must clear the previous current public-tree cache until a matching authenticated snapshot is reinstalled"
+    );
     assert_eq!(
         session.forward_state.snapshot().k_fs,
         original_fs,
@@ -373,6 +392,32 @@ fn pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs()
         session.forward_state.snapshot().fs_ec,
         77,
         "join_finalize should preserve K_fs while advancing the local device snapshot"
+    );
+    Ok(())
+}
+
+#[test]
+fn enter_barrier_recovery_required_sets_issue_and_clears_current_public_tree()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xA15, "http://127.0.0.1:9", "room-a5", "alice")?;
+    let current_snapshot = sample_current_public_tree(session.barrier_state.n_max, 0x66)?;
+    session.barrier_state.kem_tree_hash_after = current_snapshot.kem_tree_hash_after;
+    install_current_public_tree_cache(&mut session, current_snapshot)?;
+    session.barrier_state.current_barrier_full_verified = true;
+
+    enter_barrier_recovery_required(
+        &mut session,
+        BarrierRecoveryIssue::InsufficientAuthenticatedHistory,
+    )?;
+    assert!(session.barrier_state.barrier_recovery_pending);
+    assert_eq!(
+        session.barrier_state.barrier_recovery_issue,
+        Some(BarrierRecoveryIssue::InsufficientAuthenticatedHistory)
+    );
+    assert!(!session.barrier_state.current_barrier_full_verified);
+    assert!(
+        session.barrier_state.current_public_tree.is_none(),
+        "recovery-required must clear the current public-tree cache"
     );
     Ok(())
 }
@@ -391,6 +436,7 @@ fn persisted_barrier_state_roundtrip_preserves_current_history_commitment()
             prev_history_commitment_id: [0x21; 32],
             history_seq: 9,
         }),
+        current_public_tree: None,
         bootstrap_history_commitment: Some(HistoryCommitment {
             history_view_id: [0x22; 32],
             history_commitment_id: [0x20; 32],
@@ -415,6 +461,58 @@ fn persisted_barrier_state_roundtrip_preserves_current_history_commitment()
     assert_eq!(
         roundtrip.bootstrap_history_commitment,
         runtime.bootstrap_history_commitment
+    );
+    Ok(())
+}
+
+#[test]
+fn persisted_barrier_state_roundtrip_drops_current_public_tree_cache()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut runtime = BarrierSecretState {
+        barrier_initialized: true,
+        barrier_version: 7,
+        barrier_roots_hash: [0x11; 32],
+        current_history_view_id: [0x22; 32],
+        current_history_commitment: Some(HistoryCommitment {
+            history_view_id: [0x22; 32],
+            history_commitment_id: [0x23; 32],
+            prev_history_commitment_id: [0x21; 32],
+            history_seq: 9,
+        }),
+        kem_tree_hash_after: [0x33; 32],
+        max_barrier_update_bytes: DEFAULT_MAX_BARRIER_UPDATE_BYTES,
+        n_max: 8,
+        ..BarrierSecretState::default()
+    };
+    let snapshot = sample_current_public_tree(8, 0x55)?;
+    runtime.kem_tree_hash_after = snapshot.kem_tree_hash_after;
+    runtime.current_public_tree = Some(Arc::new(snapshot));
+
+    let roundtrip = PersistedBarrierState::from_runtime(&runtime).into_runtime()?;
+    assert!(
+        roundtrip.current_public_tree.is_none(),
+        "persisted barrier state must not retain the large current public-tree cache"
+    );
+    Ok(())
+}
+
+#[test]
+fn install_current_public_tree_cache_requires_matching_authenticated_hash()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xA14, "http://127.0.0.1:9", "room-a4", "alice")?;
+    let snapshot = sample_current_public_tree(session.barrier_state.n_max, 0x44)?;
+    session.barrier_state.kem_tree_hash_after = snapshot.kem_tree_hash_after;
+    install_current_public_tree_cache(&mut session, snapshot)?;
+    assert!(session.barrier_state.current_public_tree.is_some());
+
+    let mut bad_snapshot = sample_current_public_tree(session.barrier_state.n_max, 0x45)?;
+    bad_snapshot.kem_tree_hash_after = [0xEE; 32];
+    let err = install_current_public_tree_cache(&mut session, bad_snapshot)
+        .expect_err("mismatched current public-tree cache must fail");
+    assert!(
+        err.to_string()
+            .contains("barrier tree snapshot auth failure"),
+        "expected explicit snapshot auth failure: {err}"
     );
     Ok(())
 }
@@ -5999,6 +6097,7 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
             prev_history_commitment_id: array(0x2F),
             history_seq: 4,
         }),
+        current_public_tree: None,
         bootstrap_history_commitment: Some(HistoryCommitment {
             history_view_id: array(0x24),
             history_commitment_id: array(0x31),

@@ -121,6 +121,7 @@ fn apply_local_published_barrier_merge(
         mut forward_state_after,
         fs_forward_leap_policy,
         last_accepted_ec,
+        current_public_tree,
     } = published;
     session.fs_forward_leap_policy = fs_forward_leap_policy;
     session.last_accepted_ec = session.last_accepted_ec.max(last_accepted_ec);
@@ -192,6 +193,7 @@ fn apply_local_published_barrier_merge(
             "accepted local refresh bundle did not match persisted pending barrier state"
         ));
     }
+    install_current_public_tree_cache(session, (*current_public_tree).clone())?;
     // The accepted local publish advances the authenticated current state, but
     // the post-accept HistoryCommitment is only available from a subsequent
     // helper lookup / merge ticket refresh.
@@ -266,7 +268,7 @@ async fn ensure_join_finalize_bootstrap_verified(request: &LeaveRequest) -> Resu
     }
 
     let client = new_api_client(&request.server_url);
-    verify_join_finalize_bootstrap_current_state(&client, &request.room_id, &session).await?;
+    verify_join_finalize_bootstrap_current_state(&client, &request.room_id, &mut session).await?;
     session.barrier_state.current_barrier_full_verified = true;
     session.barrier_state.barrier_recovery_issue = None;
     clear_join_finalize_bootstrap_artifact(&mut session.barrier_state);
@@ -648,6 +650,7 @@ async fn publish_revocation_merge_from_ticket(
             slack_device: fs_forward_leap_policy.slack_device,
         },
         last_accepted_ec,
+        current_public_tree: barrier_update.snapshot_post.clone(),
     })
 }
 
@@ -1343,5 +1346,6 @@ async fn perform_barrier_merge_inner(
             slack_device: fs_forward_leap_policy.slack_device,
         },
         last_accepted_ec,
+        current_public_tree: barrier_update.snapshot_post.clone(),
     })
 }

@@ -265,3 +265,24 @@ Statut audit mis à jour:
 
 - **Closed**: 6.1, 6.2, 6.3, 6.5, 6.6, 6.7, 6.8
 - **Open**: 6.4
+
+--
+
+## Commentaires Codex (2026-03-27, tranche current-tree cache)
+
+Nouvelle vérification après patch spec + GUI:
+
+- **Partiellement fermé**: `6.4`. Le profil autorise maintenant explicitement un fast-path basé sur un snapshot public courant authentifié et retenu localement, au lieu d’exiger un refetch systématique de `FetchBarrierPublicTree(H_prev)` quand `H_prev` est exactement l’état courant déjà authentifié du client.
+- **Implémenté côté GUI**: le client conserve désormais un cache en mémoire du current public tree authentifié, l’invalide dès qu’un changement de hash/version le rend stale, ne le persiste pas sur disque, et le réutilise pour les chain-checks FULL/updater du current state.
+- **Toujours ouvert dans le cas général**: les prédécesseurs historiques non courants, les états non cachés, et le calcul `snapshot_pre/snapshot_post` restent whole-tree. Cette tranche réduit le coût du cas courant; elle ne supprime pas le coût général du protocole.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test -p cityg-gui --bin cityg-gui install_current_public_tree_cache_requires_matching_authenticated_hash --features native-app`
+- `cargo test -p cityg-gui --bin cityg-gui persisted_barrier_state_roundtrip_drops_current_public_tree_cache --features native-app`
+- `cargo test -p cityg-gui --bin cityg-gui pending_join_finalize_activation_advances_barrier_without_reseeding_k_fs --features native-app`
+
+Statut audit mis à jour:
+
+- **Closed**: 6.1, 6.2, 6.3, 6.5, 6.6, 6.7, 6.8
+- **Partial**: 6.4

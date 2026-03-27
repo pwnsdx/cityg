@@ -1150,9 +1150,10 @@ Before constructing any barrier_update, the updater MUST:
   * if barrier_initialized == false (genesis updater), H_prev is the TreeHash(root_node) of the all-blank tree of size N_max.
   * This value is deterministic and MUST be computed locally without fetching from the server.
 * Non-genesis:
-  * fetch pk_entries_prev := FetchBarrierPublicTree(H_prev).
-  * Compute TreeHash(root_node) over pk_entries_prev per S11.4 and require it equals H_prev.
-  * Because this updater flow uses the locally stored current committed tree as `snapshot_base`, the authenticated `HistoryCommitment` returned with `pk_entries_prev` MUST equal the authenticated current-state `HistoryCommitment` used for `ResolveJoinsSince(...)` and `ResolveRevokedLeaves(...)`; mismatch -> 960.9.
+  * Fetch `pk_entries_prev := FetchBarrierPublicTree(H_prev)`, OR use a locally retained authenticated current public-tree snapshot for the same `(gid, barrier_version, H_prev, N_max)` if the client previously authenticated and retained that exact current committed tree while on the same current committed state.
+  * In either case, compute `TreeHash(root_node)` over `pk_entries_prev` per S11.4 and require it equals `H_prev`.
+  * If `pk_entries_prev` came from `FetchBarrierPublicTree(H_prev)`, the authenticated `HistoryCommitment` returned with `pk_entries_prev` MUST equal the authenticated current-state `HistoryCommitment` used for `ResolveJoinsSince(...)` and `ResolveRevokedLeaves(...)`; mismatch -> 960.9.
+  * If `pk_entries_prev` came from a locally retained authenticated current snapshot, the client MUST already hold the authenticated current-state `HistoryCommitment` for that same current committed state locally, and the A/B responses used for this origination MUST validate to that same local current-state `HistoryCommitment`; otherwise the retained-snapshot fast path is forbidden and the client MUST refetch.
   * If the deployment exposes a merge-ticket helper/API for this current state, that helper MUST also identify the same current-state `HistoryCommitment`; clients MUST reject the helper result if the fetched current snapshot/A/B responses do not match it.
   * The emitted MERGE anchor MUST carry that exact current-state `HistoryCommitment` as `header[180]`.
   * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
@@ -1181,9 +1182,11 @@ If this check fails, the updater MUST abort barrier_update creation, MUST NOT si
 S11.11.2 FULL clients MUST chain-check (CRITICAL)
 A FULL-verifying client processing a barrier_update MUST:
 * Let H_prev := client's locally stored kem_tree_hash_after.
-* Fetch pk_entries_prev := FetchBarrierPublicTree(H_prev), record its authenticated `HistoryCommitment := hc_tree`, and verify it hashes to H_prev per S11.4; failure -> 960.9.
+* Fetch `pk_entries_prev := FetchBarrierPublicTree(H_prev)`, OR use a locally retained authenticated current public-tree snapshot for the same `(gid, barrier_version, H_prev, N_max)` if the client already authenticated and retained that exact current committed tree for the same current committed state.
+* If `pk_entries_prev` came from `FetchBarrierPublicTree(H_prev)`, record its authenticated `HistoryCommitment := hc_tree`; if it came from a locally retained authenticated current snapshot, set `hc_tree :=` the client's locally stored authenticated current-state `HistoryCommitment`. In either case, verify `TreeHash(pk_entries_prev) == H_prev`; failure -> 960.9.
 * H_prev MAY refer to a historical committed tree snapshot; the server MUST support this per S3.3.C and S5.1.
 * If `H_prev` is the immediate predecessor committed tree of the current accepted barrier state within the same `HistoryAuthorityScope`, `FetchBarrierPublicTree(H_prev)` MUST return that predecessor tree authenticated under the current-state `HistoryCommitment` used by A/B for the current committed state.
+* The retained-snapshot fast path above applies only to the client's current committed tree. Historical predecessor snapshots other than the current committed tree still require S3.3.C fetch/authentication unless an extension defines an equivalent authenticated cache proof.
 * Obtain `RevokedLeafSet := ResolveRevokedLeaves(revocation_roots_hash)` and `JoinSet := ResolveJoinsSince(BU.prev_barrier_version)` and record their authenticated view identifiers `hv_revoked` and `hv_join`.
 * Require `hv_revoked == hv_join`; mismatch or missing authenticated current-state view binding -> 960.9.
 * In this FULL-client flow, `H_prev` is the client's locally stored current committed tree, so `hc_tree` MUST equal the current-state `HistoryCommitment` authenticated by A/B; mismatch -> 960.9.
@@ -1377,6 +1380,7 @@ Clients MUST enforce:
   * if local `barrier_roots_hash == BU.revocation_roots_hash` AND `CP.updater_leaf NOT IN JoinLeafSet_local`, then `header[178] MUST equal 1`,
   * except for the genesis-local case above, where `header[178] MUST equal 0`.
 * Clients MUST reject stale, duplicate, or gap barrier updates that do not satisfy the local version-adjacency rules above.
+* If a client is operating in a catch-up path outside this exact-adjacency recover rule because it has already learned that the current accepted head is newer than `local barrier_version + 1`, it MUST NOT best-effort apply or reseed `K_fs` across an unauthenticated `pcs_refresh` boundary. At minimum, if the currently observed accepted bundle itself carries `header[178] == 1`, the client MUST enter `recovery_required` or an equivalent non-active buffered state unless authenticated history proves the ordering and completeness of the intervening accepted lineage.
 Failure -> reject barrier_update locally with 960.7.
 
 S11.13.4 Recover derivation (normative)

@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub(super) struct AppSession {
@@ -89,6 +90,7 @@ pub(super) struct BarrierSecretState {
     pub(super) barrier_roots_hash: [u8; 32],
     pub(super) current_history_view_id: [u8; 32],
     pub(super) current_history_commitment: Option<HistoryCommitment>,
+    pub(super) current_public_tree: Option<Arc<BarrierPublicTree>>,
     pub(super) bootstrap_history_commitment: Option<HistoryCommitment>,
     pub(super) bootstrap_predecessor_kem_tree_hash_after: [u8; 32],
     pub(super) bootstrap_join_records: Vec<BarrierJoinRecord>,
@@ -117,6 +119,7 @@ impl Default for BarrierSecretState {
             barrier_roots_hash: [0u8; 32],
             current_history_view_id: [0u8; 32],
             current_history_commitment: None,
+            current_public_tree: None,
             bootstrap_history_commitment: None,
             bootstrap_predecessor_kem_tree_hash_after: [0u8; 32],
             bootstrap_join_records: Vec::new(),
@@ -207,6 +210,7 @@ pub(super) struct PublishedBarrierMerge {
     pub(super) forward_state_after: ForwardSecrecyState,
     pub(super) fs_forward_leap_policy: FsForwardLeapPolicy,
     pub(super) last_accepted_ec: u64,
+    pub(super) current_public_tree: Arc<BarrierPublicTree>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

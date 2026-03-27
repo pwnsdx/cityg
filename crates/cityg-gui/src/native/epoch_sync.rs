@@ -97,6 +97,14 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
         session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
         session.barrier_state.current_history_view_id = ticket_history_commitment.history_view_id;
         session.barrier_state.current_history_commitment = Some(ticket_history_commitment);
+        if !session
+            .barrier_state
+            .current_public_tree
+            .as_ref()
+            .is_some_and(|snapshot| current_public_tree_cache_matches(&session, snapshot))
+        {
+            clear_current_public_tree_cache(&mut session.barrier_state);
+        }
         return Ok(EpochSyncOutcome {
             session,
             changed: barrier_changed
@@ -235,10 +243,11 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
             Some(_) => return Err(anyhow!("header barrier_update must be bytes")),
             None => return Err(anyhow!("missing barrier_update bytes")),
         };
+        let room_id = session.room_id.clone();
         let chain_check_result = full_chain_check_barrier_update(
             &client,
-            &session.room_id,
-            &session,
+            room_id.as_str(),
+            &mut session,
             &bundle.header_map,
             raw_update,
             ticket_max_barrier_update_bytes,
@@ -249,77 +258,91 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
             err.to_string()
                 .contains("local barrier version progression mismatch")
         });
+        let gap_barrier_update_reason =
+            header_u64(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON);
 
         if is_version_gap {
-            // The local barrier state is behind by 2+ versions.  Full
-            // chain-check is impossible (we missed intermediate updates), so
-            // attempt a best-effort recovery using the leaf KEM key which
-            // remains valid across barrier versions.
-            warn!(
-                local_barrier_version = session.barrier_state.barrier_version,
-                ticket_barrier_version = ticket.barrier_version,
-                "barrier version gap detected; attempting best-effort recovery"
-            );
-            match try_recover_barrier_best_effort(
-                &session,
-                &bundle.header_map,
-                &session.we_epoch_id,
-                session.fs_ec,
-                ticket_max_barrier_update_bytes,
-            ) {
-                Ok(Some(recovered)) => {
-                    if recovered.kem_tree_hash_after != ticket_kem_tree_hash_after {
-                        return Err(anyhow!(
-                            "barrier recover hash-chain mismatch: recovered hash does not match merge ticket"
-                        ));
+            if gap_barrier_update_reason == Some(1) {
+                warn!(
+                    local_barrier_version = session.barrier_state.barrier_version,
+                    ticket_barrier_version = ticket.barrier_version,
+                    "barrier version gap crosses an unauthenticated pcs_refresh boundary; entering recovery-required state"
+                );
+                enter_barrier_recovery_required(
+                    &mut session,
+                    BarrierRecoveryIssue::InsufficientAuthenticatedHistory,
+                )?;
+            } else {
+                // The local barrier state is behind by 2+ versions.  Full
+                // chain-check is impossible (we missed intermediate updates), so
+                // attempt a best-effort recovery using the leaf KEM key which
+                // remains valid across barrier versions.
+                warn!(
+                    local_barrier_version = session.barrier_state.barrier_version,
+                    ticket_barrier_version = ticket.barrier_version,
+                    "barrier version gap detected; attempting best-effort recovery"
+                );
+                match try_recover_barrier_best_effort(
+                    &session,
+                    &bundle.header_map,
+                    &session.we_epoch_id,
+                    session.fs_ec,
+                    ticket_max_barrier_update_bytes,
+                ) {
+                    Ok(Some(recovered)) => {
+                        if recovered.kem_tree_hash_after != ticket_kem_tree_hash_after {
+                            return Err(anyhow!(
+                                "barrier recover hash-chain mismatch: recovered hash does not match merge ticket"
+                            ));
+                        }
+                        info!(
+                            "best-effort barrier recovery succeeded; caught up to barrier version {}",
+                            ticket.barrier_version
+                        );
+                        apply_recovered_barrier_state(&mut session, recovered, false)?;
                     }
-                    info!(
-                        "best-effort barrier recovery succeeded; caught up to barrier version {}",
-                        ticket.barrier_version
-                    );
-                    apply_recovered_barrier_state(&mut session, recovered, false)?;
-                }
-                Ok(None) => {
-                    // Cannot decrypt the current barrier update (our path was
-                    // not targeted. Accept the ticket's barrier version and
-                    // wait for the next barrier update that targets our leaf.
-                    warn!(
-                        "best-effort barrier recovery produced no match; entering barrier_recovery_pending"
-                    );
-                    enter_barrier_recovery_pending(&mut session)?;
-                }
-                Err(err)
-                    if err
-                        .to_string()
-                        .contains("candidate unwrap/decrypt failure (960.7)") =>
-                {
-                    // We found a candidate update on our path, but local
-                    // internal node secrets are too stale to unwrap it.
-                    // Preserve the accepted public state and wait for a future
-                    // barrier update that targets our leaf directly.
-                    warn!(
-                        detail = %err,
-                        "best-effort barrier recovery could not decrypt candidate; entering barrier_recovery_pending"
-                    );
-                    enter_barrier_recovery_pending(&mut session)?;
-                }
-                Err(err) => {
-                    let detail = err.to_string();
-                    if detail.contains("960.") {
-                        return Err(anyhow!("barrier recover failed: {detail}"));
+                    Ok(None) => {
+                        // Cannot decrypt the current barrier update (our path was
+                        // not targeted. Accept the ticket's barrier version and
+                        // wait for the next barrier update that targets our leaf.
+                        warn!(
+                            "best-effort barrier recovery produced no match; entering barrier_recovery_pending"
+                        );
+                        enter_barrier_recovery_pending(&mut session)?;
                     }
-                    return Err(anyhow!("barrier recover failed (960.7): {detail}"));
+                    Err(err)
+                        if err
+                            .to_string()
+                            .contains("candidate unwrap/decrypt failure (960.7)") =>
+                    {
+                        // We found a candidate update on our path, but local
+                        // internal node secrets are too stale to unwrap it.
+                        // Preserve the accepted public state and wait for a future
+                        // barrier update that targets our leaf directly.
+                        warn!(
+                            detail = %err,
+                            "best-effort barrier recovery could not decrypt candidate; entering barrier_recovery_pending"
+                        );
+                        enter_barrier_recovery_pending(&mut session)?;
+                    }
+                    Err(err) => {
+                        let detail = err.to_string();
+                        if detail.contains("960.") {
+                            return Err(anyhow!("barrier recover failed: {detail}"));
+                        }
+                        return Err(anyhow!("barrier recover failed (960.7): {detail}"));
+                    }
                 }
             }
         } else {
-            let expected_before_hash = chain_check_result?;
+            let chain_check_result = chain_check_result?;
             match try_recover_barrier_from_header_with_expected_before(
                 &session,
                 &bundle.header_map,
                 &session.we_epoch_id,
                 session.fs_ec,
                 ticket_max_barrier_update_bytes,
-                Some(expected_before_hash),
+                Some(chain_check_result.expected_before),
             ) {
                 Ok(Some(recovered)) => {
                     if recovered.kem_tree_hash_after != ticket_kem_tree_hash_after {
@@ -328,6 +351,10 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
                         ));
                     }
                     apply_recovered_barrier_state(&mut session, recovered, true)?;
+                    install_current_public_tree_cache(
+                        &mut session,
+                        (*chain_check_result.snapshot_post).clone(),
+                    )?;
                 }
                 Ok(None) => {
                     return Err(anyhow!(
@@ -355,6 +382,14 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
     session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
     session.barrier_state.current_history_view_id = ticket_history_commitment.history_view_id;
     session.barrier_state.current_history_commitment = Some(ticket_history_commitment);
+    if !session
+        .barrier_state
+        .current_public_tree
+        .as_ref()
+        .is_some_and(|snapshot| current_public_tree_cache_matches(&session, snapshot))
+    {
+        clear_current_public_tree_cache(&mut session.barrier_state);
+    }
 
     session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
