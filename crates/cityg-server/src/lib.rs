@@ -151,6 +151,8 @@ pub enum HistoryAuthorityMode {
     Local,
 }
 
+pub const LOCAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "local-history-authority-v1";
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self::new()
@@ -2338,7 +2340,10 @@ impl CityGServer {
     }
 
     pub fn barrier_version(&self, gid: &[u8]) -> Option<u64> {
-        self.roster.groups.get(gid).map(|state| state.barrier_version)
+        self.roster
+            .groups
+            .get(gid)
+            .map(|state| state.barrier_version)
     }
 
     pub fn barrier_n_max(&self, gid: &[u8]) -> Option<u64> {
@@ -2524,7 +2529,9 @@ impl CityGServer {
         let pk_entries_view = build_pk_entries_view(state)?;
         let current_hash = compute_barrier_tree_hash(n_max, pk_entries_view.as_ref())?;
         let current_predecessor_hash = state.current_accepted_barrier_predecessor_hash;
-        let (pk_entries, barrier_version, history_commitment) = if current_hash == *kem_tree_hash_after {
+        let (pk_entries, barrier_version, history_commitment) = if current_hash
+            == *kem_tree_hash_after
+        {
             let pk_entries = match pk_entries_view {
                 Cow::Borrowed(entries) => entries.to_vec(),
                 Cow::Owned(entries) => entries,
@@ -2612,7 +2619,17 @@ impl CityGServer {
     }
 
     pub fn history_authority_descriptor(&self) -> Option<HistoryAuthorityDescriptor> {
-        self.history_authority.as_ref().map(|state| state.descriptor.clone())
+        self.history_authority
+            .as_ref()
+            .map(|state| state.descriptor.clone())
+    }
+
+    pub fn history_authority_extension_id(&self) -> &'static str {
+        if self.history_authority.is_some() {
+            LOCAL_HISTORY_AUTHORITY_EXTENSION_ID
+        } else {
+            ""
+        }
     }
 
     pub fn history_authority_requires_full_verification_receipt(&self) -> bool {
@@ -3154,7 +3171,9 @@ fn encode_history_authority_descriptor(
     ))?)
 }
 
-fn history_authority_secret_key(state: &HistoryAuthorityState) -> Result<dilithium5::SecretKey, CityGError> {
+fn history_authority_secret_key(
+    state: &HistoryAuthorityState,
+) -> Result<dilithium5::SecretKey, CityGError> {
     dilithium5::SecretKey::from_bytes(&state.secret_key)
         .map_err(|_| CityGError::InvalidInput("invalid history authority secret key"))
 }
@@ -4683,7 +4702,8 @@ fn validate_history_authority_headers(
         ));
     }
 
-    let Some(Value::Bytes(raw_history_commitment)) = header.get(&hdr::HDR_BARRIER_HISTORY_COMMITMENT)
+    let Some(Value::Bytes(raw_history_commitment)) =
+        header.get(&hdr::HDR_BARRIER_HISTORY_COMMITMENT)
     else {
         return Err(CityGError::InvalidInput("barrier_update malformed"));
     };
@@ -4697,7 +4717,8 @@ fn validate_history_authority_headers(
 
     let parsed = parse_barrier_update(header, state_before.n_max)?
         .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
-    let barrier_reason = barrier_reason.ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+    let barrier_reason =
+        barrier_reason.ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
 
     let raw_receipt = match header.get(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT) {
         Some(Value::Bytes(raw)) => Some(raw.as_slice()),
@@ -6019,8 +6040,9 @@ mod tests {
                 Some(Value::Bytes(raw)) => raw.clone(),
                 _ => return Err(CityGError::InvalidInput("barrier_update malformed")),
             };
-            let parsed_barrier_update = super::parse_barrier_update(&refresh_bundle.header_map, ticket.n_max)?
-                .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+            let parsed_barrier_update =
+                super::parse_barrier_update(&refresh_bundle.header_map, ticket.n_max)?
+                    .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
             let global_history_attestation = super::encode_global_history_attestation(
                 authority,
                 &gid,
@@ -6041,12 +6063,10 @@ mod tests {
                 global_history_attestation.as_slice(),
                 raw_barrier_update.as_slice(),
             )?;
-            let receipt_signature = dilithium5::detached_sign(
-                receipt_payload.as_slice(),
-                &generated.pop_secret_key,
-            )
-            .as_bytes()
-            .to_vec();
+            let receipt_signature =
+                dilithium5::detached_sign(receipt_payload.as_slice(), &generated.pop_secret_key)
+                    .as_bytes()
+                    .to_vec();
             refresh_bundle.header_map.insert(
                 hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
                 Value::Bytes(super::encode_full_verification_receipt(
@@ -7029,12 +7049,16 @@ mod tests {
 
         let (bundle, _pristine_bundle) =
             build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
-        assert!(bundle
-            .header_map
-            .contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION));
-        assert!(bundle
-            .header_map
-            .contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT));
+        assert!(
+            bundle
+                .header_map
+                .contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
+        );
+        assert!(
+            bundle
+                .header_map
+                .contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
+        );
         Ok(())
     }
 
@@ -12646,7 +12670,11 @@ fn persist_history_authority_state(
 fn derive_history_authority_scope_id(public_key: &[u8]) -> Result<[u8; 32], CityGError> {
     #[derive(Serialize)]
     struct ScopePreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
-    h_l("barrier/history-authority/scope", &ScopePreimage(public_key)).map_err(CityGError::from)
+    h_l(
+        "barrier/history-authority/scope",
+        &ScopePreimage(public_key),
+    )
+    .map_err(CityGError::from)
 }
 
 fn generate_history_authority_state(

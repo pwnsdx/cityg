@@ -195,6 +195,10 @@ Shared authenticated-view rule (normative):
 * The base profile does NOT define a wire-visible proof of helper completeness/non-omission for A) or B).
 * `helper_completeness_attestation` is RESERVED for an optional extension that adds such a proof/object. In the base profile this field MUST be absent or empty; clients observing a non-empty value without an explicitly negotiated extension MUST fail closed.
 * This document also defines one optional deployment-local extension, `local-history-authority-v1`, in S3.3.E and S11.11.4-S11.11.5. When that extension is negotiated, A), B), and C) MUST carry non-empty `helper_completeness_attestation` values verified under one negotiated `HistoryAuthorityDescriptor`.
+* API/wire surfaces that carry `HistoryAuthorityDescriptor`, `global_history_attestation`, `current_global_history_attestation`, or `helper_completeness_attestation` MUST also carry an explicit extension identifier string `history_authority_extension`.
+* In the base profile, `history_authority_extension` MUST be absent or the empty string.
+* When `local-history-authority-v1` is negotiated, `history_authority_extension` MUST equal exactly `"local-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
+* Clients MUST fail closed if extension-defined objects are present while `history_authority_extension` is absent/empty, if `history_authority_extension` names an unsupported extension, or if pages of one logical A)/B)/C) result drift across different `history_authority_extension` values.
 * `MAX_BARRIER_HELPER_PAGE_ENTRIES := 512`.
 * A), B), and C) are paged interfaces in the base profile. Each request MUST accept an explicit `page_offset`/`entry_offset` and `max_entries`; `max_entries == 0` means "use the profile default page size", namely `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
 * A), B), and C) MUST reject requests whose effective page size exceeds `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
@@ -264,6 +268,7 @@ Requirements on that extension:
 * `HistoryAuthorityDescriptor := [scope_id:bstr32, public_key:bstr]`.
 * The signature suite for `public_key` MUST be fixed by the negotiated extension. The current implementation uses ML-DSA-87 / Dilithium5 for this scope-local authority.
 * When this extension is negotiated, every successful A), B), C), and D) response consumed for one decision MUST carry the same non-empty `history_authority_descriptor`, and clients MUST reject descriptor drift across those responses.
+* When this extension is negotiated, every successful join/merge/provisioning/helper/lookup response carrying extension-defined objects MUST also carry `history_authority_extension == "local-history-authority-v1"`.
 * When this extension is negotiated, key `182` and the API fields named `global_history_attestation` / `current_global_history_attestation` carry a scope-local `GlobalHistoryAttestation` object rather than a federated/global consensus proof.
 * Under `local-history-authority-v1`, `GlobalHistoryAttestation := [scope_id:bstr32, gid:bstr32, history_view_id:bstr32, history_commitment_id:bstr32, prev_history_commitment_id:bstr32, history_seq:uint, barrier_version:uint, kem_tree_hash_after:bstr32, parent_attestation_id:bstr32, finality_kind:tstr, signature:bstr]`.
 * Under `local-history-authority-v1`, `finality_kind` MUST be exactly `"local-append-only"`.

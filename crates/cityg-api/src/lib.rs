@@ -1417,6 +1417,7 @@ fn encode_merge_ticket_response(
     bundle: MergeTicketBundle,
     history_authority_descriptor: Vec<u8>,
     current_global_history_attestation: Vec<u8>,
+    history_authority_extension: String,
 ) -> Result<Vec<u8>, ApiError> {
     let MergeTicketBundle {
         gid: _,
@@ -1490,6 +1491,7 @@ fn encode_merge_ticket_response(
         last_accepted_ec,
         history_authority_descriptor,
         current_global_history_attestation,
+        history_authority_extension,
     };
 
     let mut response_bytes = Vec::new();
@@ -1999,6 +2001,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         current_global_history_attestation,
         current_join_records_completeness_attestation,
         current_revoked_leaf_indices_completeness_attestation,
+        history_authority_extension,
     ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
@@ -2078,6 +2081,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             current_global_history_attestation,
             current_join_records_completeness_attestation,
             current_revoked_leaf_indices_completeness_attestation,
+            guard.history_authority_extension_id().to_string(),
         )
     };
 
@@ -2146,6 +2150,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         current_global_history_attestation,
         current_join_records_completeness_attestation,
         current_revoked_leaf_indices_completeness_attestation,
+        history_authority_extension,
     };
 
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);
@@ -2438,7 +2443,12 @@ async fn expel_member_ticket(
     )
     .await?;
 
-    let (bundle, history_authority_descriptor, current_global_history_attestation) = {
+    let (
+        bundle,
+        history_authority_descriptor,
+        current_global_history_attestation,
+        history_authority_extension,
+    ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         let bundle = guard
@@ -2468,6 +2478,7 @@ async fn expel_member_ticket(
             bundle,
             history_authority_descriptor,
             current_global_history_attestation,
+            guard.history_authority_extension_id().to_string(),
         )
     };
 
@@ -2475,6 +2486,7 @@ async fn expel_member_ticket(
         bundle,
         history_authority_descriptor,
         current_global_history_attestation,
+        history_authority_extension,
     )?))
 }
 
@@ -2528,7 +2540,12 @@ async fn merge_ticket(
         return Ok(protobuf_response_bytes(cached));
     }
 
-    let (bundle, history_authority_descriptor, current_global_history_attestation) = {
+    let (
+        bundle,
+        history_authority_descriptor,
+        current_global_history_attestation,
+        history_authority_extension,
+    ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         let bundle = match intent {
@@ -2562,6 +2579,7 @@ async fn merge_ticket(
             bundle,
             history_authority_descriptor,
             current_global_history_attestation,
+            guard.history_authority_extension_id().to_string(),
         )
     };
 
@@ -2569,6 +2587,7 @@ async fn merge_ticket(
         bundle,
         history_authority_descriptor,
         current_global_history_attestation,
+        history_authority_extension,
     )?;
     if intent == MergeTicketIntent::Leave {
         state
@@ -2604,7 +2623,13 @@ async fn barrier_resolve_revoked_leaves(
     let mut revocation_roots_hash = [0u8; 32];
     revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
 
-    let (resolved, history_authority_descriptor, global_history_attestation, helper_completeness_attestation) = {
+    let (
+        resolved,
+        history_authority_descriptor,
+        global_history_attestation,
+        helper_completeness_attestation,
+        history_authority_extension,
+    ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         let resolved = guard
@@ -2647,6 +2672,7 @@ async fn barrier_resolve_revoked_leaves(
             history_authority_descriptor,
             global_history_attestation,
             helper_completeness_attestation,
+            guard.history_authority_extension_id().to_string(),
         )
     };
     let (leaf_indices, page_offset, next_page_offset, total_entries) =
@@ -2666,6 +2692,7 @@ async fn barrier_resolve_revoked_leaves(
         helper_completeness_attestation,
         history_authority_descriptor,
         global_history_attestation,
+        history_authority_extension,
     };
     Ok(protobuf_response(&response))
 }
@@ -2688,7 +2715,13 @@ async fn barrier_resolve_joins_since(
     )
     .await?;
 
-    let (resolved, history_authority_descriptor, global_history_attestation, helper_completeness_attestation) = {
+    let (
+        resolved,
+        history_authority_descriptor,
+        global_history_attestation,
+        helper_completeness_attestation,
+        history_authority_extension,
+    ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         let resolved = guard
@@ -2731,6 +2764,7 @@ async fn barrier_resolve_joins_since(
             history_authority_descriptor,
             global_history_attestation,
             helper_completeness_attestation,
+            guard.history_authority_extension_id().to_string(),
         )
     };
     let (records_page, page_offset, next_page_offset, total_entries) =
@@ -2763,6 +2797,7 @@ async fn barrier_resolve_joins_since(
         helper_completeness_attestation,
         history_authority_descriptor,
         global_history_attestation,
+        history_authority_extension,
     };
     Ok(protobuf_response(&response))
 }
@@ -2792,7 +2827,13 @@ async fn barrier_fetch_public_tree(
     let mut kem_tree_hash_after = [0u8; 32];
     kem_tree_hash_after.copy_from_slice(&request.kem_tree_hash_after);
 
-    let (snapshot, history_authority_descriptor, global_history_attestation, helper_completeness_attestation) = {
+    let (
+        snapshot,
+        history_authority_descriptor,
+        global_history_attestation,
+        helper_completeness_attestation,
+        history_authority_extension,
+    ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         let snapshot = guard
@@ -2829,6 +2870,7 @@ async fn barrier_fetch_public_tree(
             history_authority_descriptor,
             global_history_attestation,
             helper_completeness_attestation,
+            guard.history_authority_extension_id().to_string(),
         )
     };
     let (pk_entries, entry_offset, next_entry_offset, total_entries) =
@@ -2850,6 +2892,7 @@ async fn barrier_fetch_public_tree(
         helper_completeness_attestation,
         history_authority_descriptor,
         global_history_attestation,
+        history_authority_extension,
     };
     Ok(protobuf_response(&response))
 }
@@ -2887,7 +2930,12 @@ async fn barrier_lookup_merge_acceptance(
     let mut pending_we_epoch_id = [0u8; 32];
     pending_we_epoch_id.copy_from_slice(&request.pending_we_epoch_id);
 
-    let (record, history_authority_descriptor, global_history_attestation) = {
+    let (
+        record,
+        history_authority_descriptor,
+        global_history_attestation,
+        history_authority_extension,
+    ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         let record = match guard.lookup_merge_acceptance(
@@ -2917,7 +2965,12 @@ async fn barrier_lookup_merge_acceptance(
                 &kem_tree_hash_after,
             )
             .map_err(ApiError::from)?;
-        (record, history_authority_descriptor, global_history_attestation)
+        (
+            record,
+            history_authority_descriptor,
+            global_history_attestation,
+            guard.history_authority_extension_id().to_string(),
+        )
     };
 
     let response = BarrierLookupMergeAcceptanceResponse {
@@ -2937,6 +2990,7 @@ async fn barrier_lookup_merge_acceptance(
         history_commitment: Some(pb_history_commitment(record.history_commitment)),
         history_authority_descriptor,
         global_history_attestation,
+        history_authority_extension,
     };
     Ok(protobuf_response(&response))
 }
@@ -6415,7 +6469,12 @@ mod tests {
         let headers = message_auth_headers();
         let alice = demo_bundle("alice").expect("alice demo bundle");
 
-        let (revocation_roots_hash, kem_tree_hash_after, n_max, expected_history_authority_descriptor) = {
+        let (
+            revocation_roots_hash,
+            kem_tree_hash_after,
+            n_max,
+            expected_history_authority_descriptor,
+        ) = {
             let mut guard = state.server.write().await;
             guard.accept_epoch(&alice).expect("accept alice");
             (
@@ -6608,8 +6667,7 @@ mod tests {
             "fetch-public-tree response should carry helper completeness attestation under local authority"
         );
         assert_eq!(
-            tree_decoded.global_history_attestation,
-            revoked_decoded.global_history_attestation,
+            tree_decoded.global_history_attestation, revoked_decoded.global_history_attestation,
             "current-state helper endpoints should agree on the current global history attestation"
         );
 

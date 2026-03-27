@@ -182,6 +182,8 @@ const MAX_BARRIER_HELPER_PAGE_ENTRIES: u32 = 512;
 const HELPER_KIND_REVOKED_LEAVES: &str = "resolve_revoked_leaves";
 const HELPER_KIND_JOINS_SINCE: &str = "resolve_joins_since";
 const HELPER_KIND_FETCH_PUBLIC_TREE: &str = "fetch_public_tree";
+const LOCAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "local-history-authority-v1";
+const LOCAL_HISTORY_ATTESTATION_FINALITY_KIND: &str = "local-append-only";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomAdminOperation {
@@ -712,8 +714,19 @@ impl CitygApiClient {
         let current_history_view_id = array32(&response.current_history_view_id)?;
         let current_history_commitment =
             parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
-        let history_authority =
-            parse_history_authority_descriptor_bytes(response.history_authority_descriptor.as_slice())?;
+        let history_authority_extension = parse_history_authority_extension(
+            response.history_authority_extension.as_str(),
+            !response.history_authority_descriptor.is_empty()
+                || !response.current_global_history_attestation.is_empty(),
+        )?;
+        let history_authority = parse_history_authority_descriptor_bytes(
+            response.history_authority_descriptor.as_slice(),
+        )?;
+        require_history_authority_descriptor_for_extension(
+            history_authority_extension,
+            &history_authority,
+            "merge ticket",
+        )?;
         let current_global_history_attestation = match history_authority.as_ref() {
             Some(authority) => {
                 let attestation = parse_global_history_attestation_bytes(
@@ -744,6 +757,11 @@ impl CitygApiClient {
                             .to_string(),
                     ));
                 }
+                validate_local_history_attestation_kind(
+                    history_authority_extension,
+                    &attestation,
+                    "merge ticket",
+                )?;
                 Some(attestation)
             }
             None => {
@@ -791,6 +809,7 @@ impl CitygApiClient {
             cover_leaf_index: response.cover_leaf_index,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
             current_history_commitment,
+            history_authority_extension,
             history_authority_descriptor_bytes: response.history_authority_descriptor,
             history_authority,
             current_global_history_attestation_bytes: response.current_global_history_attestation,
@@ -1046,6 +1065,17 @@ impl CitygApiClient {
             .clone()
             .map(|commitment| parse_history_commitment(current_history_view_id, Some(commitment)))
             .transpose()?;
+        let history_authority_extension = parse_history_authority_extension(
+            response.history_authority_extension.as_str(),
+            !response.history_authority_descriptor.is_empty()
+                || !response.current_global_history_attestation.is_empty()
+                || !response
+                    .current_join_records_completeness_attestation
+                    .is_empty()
+                || !response
+                    .current_revoked_leaf_indices_completeness_attestation
+                    .is_empty(),
+        )?;
         parse_fs_forward_leap_policy(response.fs_forward_leap_policy.clone())?;
         let current_predecessor_kem_tree_hash_after =
             if response.current_predecessor_kem_tree_hash_after.is_empty() {
@@ -1095,8 +1125,14 @@ impl CitygApiClient {
                 "join ticket provisioning issuance is too far in the future".to_string(),
             ));
         }
-        let history_authority =
-            parse_history_authority_descriptor_bytes(response.history_authority_descriptor.as_slice())?;
+        let history_authority = parse_history_authority_descriptor_bytes(
+            response.history_authority_descriptor.as_slice(),
+        )?;
+        require_history_authority_descriptor_for_extension(
+            history_authority_extension,
+            &history_authority,
+            "join ticket",
+        )?;
         if let Some(authority) = history_authority.as_ref() {
             let attestation = parse_global_history_attestation_bytes(
                 response.current_global_history_attestation.as_slice(),
@@ -1129,10 +1165,14 @@ impl CitygApiClient {
             }
             if attestation.kem_tree_hash_after != array32(&response.kem_tree_hash_after)? {
                 return Err(Error::Parse(
-                    "join ticket current_global_history_attestation tree hash mismatch"
-                        .to_string(),
+                    "join ticket current_global_history_attestation tree hash mismatch".to_string(),
                 ));
             }
+            validate_local_history_attestation_kind(
+                history_authority_extension,
+                &attestation,
+                "join ticket",
+            )?;
             if let Some(commitment) = current_history_commitment.as_ref() {
                 let join_attestation = parse_helper_completeness_attestation_bytes(
                     response
@@ -1183,7 +1223,9 @@ impl CitygApiClient {
                 let _ = revoked_attestation;
             }
         } else if !response.current_global_history_attestation.is_empty()
-            || !response.current_join_records_completeness_attestation.is_empty()
+            || !response
+                .current_join_records_completeness_attestation
+                .is_empty()
             || !response
                 .current_revoked_leaf_indices_completeness_attestation
                 .is_empty()
@@ -1331,6 +1373,7 @@ impl CitygApiClient {
             cover_leaf_index: response.cover_leaf_index,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
             current_history_commitment,
+            history_authority_extension: None,
             history_authority_descriptor_bytes: Vec::new(),
             history_authority: None,
             current_global_history_attestation_bytes: Vec::new(),
@@ -1348,6 +1391,7 @@ impl CitygApiClient {
     ) -> Result<BarrierResolvedRevokedLeaves, Error> {
         let mut page_offset = 0u32;
         let mut expected_history = None;
+        let mut expected_extension: Option<HistoryAuthorityExtension> = None;
         let mut expected_authority: Option<HistoryAuthorityDescriptor> = None;
         let mut expected_global_attestation: Option<GlobalHistoryAttestation> = None;
         let mut leaf_indices = Vec::new();
@@ -1375,8 +1419,19 @@ impl CitygApiClient {
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
+            let history_authority_extension = parse_history_authority_extension(
+                response.history_authority_extension.as_str(),
+                !response.history_authority_descriptor.is_empty()
+                    || !response.global_history_attestation.is_empty()
+                    || !response.helper_completeness_attestation.is_empty(),
+            )?;
             let history_authority = parse_history_authority_descriptor_bytes(
                 response.history_authority_descriptor.as_slice(),
+            )?;
+            require_history_authority_descriptor_for_extension(
+                history_authority_extension,
+                &history_authority,
+                "revoked leaves response",
             )?;
             let global_history_attestation = match history_authority.as_ref() {
                 Some(authority) => {
@@ -1396,6 +1451,11 @@ impl CitygApiClient {
                                 .to_string(),
                         ));
                     }
+                    validate_local_history_attestation_kind(
+                        history_authority_extension,
+                        &attestation,
+                        "revoked leaves response",
+                    )?;
                     Some(attestation)
                 }
                 None => {
@@ -1439,6 +1499,16 @@ impl CitygApiClient {
                 history_commitment.clone(),
                 total_entries,
             )?;
+            match (expected_extension, history_authority_extension) {
+                (Some(expected), Some(actual)) if expected != actual => {
+                    return Err(Error::Parse(
+                        "revoked leaves response history authority extension mismatch across pages"
+                            .to_string(),
+                    ));
+                }
+                (None, Some(actual)) => expected_extension = Some(actual),
+                _ => {}
+            }
             match (&expected_authority, &history_authority) {
                 (Some(expected), Some(actual)) if expected != actual => {
                     return Err(Error::Parse(
@@ -1491,6 +1561,7 @@ impl CitygApiClient {
         Ok(BarrierResolvedRevokedLeaves {
             history_view_id,
             history_commitment,
+            history_authority_extension: expected_extension,
             history_authority: expected_authority,
             global_history_attestation: expected_global_attestation,
             leaf_indices,
@@ -1505,6 +1576,7 @@ impl CitygApiClient {
     ) -> Result<BarrierResolvedJoins, Error> {
         let mut page_offset = 0u32;
         let mut expected_history = None;
+        let mut expected_extension: Option<HistoryAuthorityExtension> = None;
         let mut expected_authority: Option<HistoryAuthorityDescriptor> = None;
         let mut expected_global_attestation: Option<GlobalHistoryAttestation> = None;
         let mut records = Vec::new();
@@ -1532,8 +1604,19 @@ impl CitygApiClient {
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
+            let history_authority_extension = parse_history_authority_extension(
+                response.history_authority_extension.as_str(),
+                !response.history_authority_descriptor.is_empty()
+                    || !response.global_history_attestation.is_empty()
+                    || !response.helper_completeness_attestation.is_empty(),
+            )?;
             let history_authority = parse_history_authority_descriptor_bytes(
                 response.history_authority_descriptor.as_slice(),
+            )?;
+            require_history_authority_descriptor_for_extension(
+                history_authority_extension,
+                &history_authority,
+                "joins since response",
             )?;
             let page_records = response
                 .records
@@ -1561,6 +1644,11 @@ impl CitygApiClient {
                                 .to_string(),
                         ));
                     }
+                    validate_local_history_attestation_kind(
+                        history_authority_extension,
+                        &attestation,
+                        "joins since response",
+                    )?;
                     let helper_attestation = parse_helper_completeness_attestation_bytes(
                         response.helper_completeness_attestation.as_slice(),
                         authority,
@@ -1602,6 +1690,16 @@ impl CitygApiClient {
                 history_commitment.clone(),
                 total_entries,
             )?;
+            match (expected_extension, history_authority_extension) {
+                (Some(expected), Some(actual)) if expected != actual => {
+                    return Err(Error::Parse(
+                        "joins since response history authority extension mismatch across pages"
+                            .to_string(),
+                    ));
+                }
+                (None, Some(actual)) => expected_extension = Some(actual),
+                _ => {}
+            }
             match (&expected_authority, &history_authority) {
                 (Some(expected), Some(actual)) if expected != actual => {
                     return Err(Error::Parse(
@@ -1653,6 +1751,7 @@ impl CitygApiClient {
         Ok(BarrierResolvedJoins {
             history_view_id,
             history_commitment,
+            history_authority_extension: expected_extension,
             history_authority: expected_authority,
             global_history_attestation: expected_global_attestation,
             records,
@@ -1667,6 +1766,7 @@ impl CitygApiClient {
     ) -> Result<BarrierFetchedPublicTree, Error> {
         let mut entry_offset = 0u32;
         let mut expected_history = None;
+        let mut expected_extension: Option<HistoryAuthorityExtension> = None;
         let mut expected_authority: Option<HistoryAuthorityDescriptor> = None;
         let mut expected_global_attestation: Option<GlobalHistoryAttestation> = None;
         let mut expected_n_max = None;
@@ -1698,8 +1798,19 @@ impl CitygApiClient {
             let history_view_id = array32(&response.history_view_id)?;
             let history_commitment =
                 parse_history_commitment(history_view_id, response.history_commitment)?;
+            let history_authority_extension = parse_history_authority_extension(
+                response.history_authority_extension.as_str(),
+                !response.history_authority_descriptor.is_empty()
+                    || !response.global_history_attestation.is_empty()
+                    || !response.helper_completeness_attestation.is_empty(),
+            )?;
             let history_authority = parse_history_authority_descriptor_bytes(
                 response.history_authority_descriptor.as_slice(),
+            )?;
+            require_history_authority_descriptor_for_extension(
+                history_authority_extension,
+                &history_authority,
+                "fetch public tree response",
             )?;
             let response_tree_hash = array32(&response.kem_tree_hash_after)?;
             let global_history_attestation = match history_authority.as_ref() {
@@ -1726,6 +1837,11 @@ impl CitygApiClient {
                                 .to_string(),
                         ));
                     }
+                    validate_local_history_attestation_kind(
+                        history_authority_extension,
+                        &attestation,
+                        "fetch public tree response",
+                    )?;
                     let helper_attestation = parse_helper_completeness_attestation_bytes(
                         response.helper_completeness_attestation.as_slice(),
                         authority,
@@ -1767,6 +1883,16 @@ impl CitygApiClient {
                 history_commitment.clone(),
                 total_entries,
             )?;
+            match (expected_extension, history_authority_extension) {
+                (Some(expected), Some(actual)) if expected != actual => {
+                    return Err(Error::Parse(
+                        "fetch public tree response history authority extension mismatch across pages"
+                            .to_string(),
+                    ));
+                }
+                (None, Some(actual)) => expected_extension = Some(actual),
+                _ => {}
+            }
             match expected_n_max {
                 Some(expected) if expected != n_max => {
                     return Err(Error::Parse(
@@ -1856,6 +1982,7 @@ impl CitygApiClient {
         Ok(BarrierFetchedPublicTree {
             history_view_id,
             history_commitment,
+            history_authority_extension: expected_extension,
             history_authority: expected_authority,
             global_history_attestation: expected_global_attestation,
             tree: BarrierPublicTree {
@@ -1888,9 +2015,21 @@ impl CitygApiClient {
             .post_proto("/v1/barrier/lookup_merge_acceptance", request)
             .await?;
         let history_view_id = array32(&response.history_view_id)?;
-        let history_commitment = parse_history_commitment(history_view_id, response.history_commitment)?;
-        let history_authority =
-            parse_history_authority_descriptor_bytes(response.history_authority_descriptor.as_slice())?;
+        let history_commitment =
+            parse_history_commitment(history_view_id, response.history_commitment)?;
+        let history_authority_extension = parse_history_authority_extension(
+            response.history_authority_extension.as_str(),
+            !response.history_authority_descriptor.is_empty()
+                || !response.global_history_attestation.is_empty(),
+        )?;
+        let history_authority = parse_history_authority_descriptor_bytes(
+            response.history_authority_descriptor.as_slice(),
+        )?;
+        require_history_authority_descriptor_for_extension(
+            history_authority_extension,
+            &history_authority,
+            "lookup merge acceptance",
+        )?;
         let global_history_attestation = match history_authority.as_ref() {
             Some(authority) => {
                 let attestation = parse_global_history_attestation_bytes(
@@ -1908,6 +2047,11 @@ impl CitygApiClient {
                             .to_string(),
                     ));
                 }
+                validate_local_history_attestation_kind(
+                    history_authority_extension,
+                    &attestation,
+                    "lookup merge acceptance",
+                )?;
                 Some(attestation)
             }
             None => {
@@ -1924,6 +2068,7 @@ impl CitygApiClient {
             status: parse_merge_acceptance_status(response.status)?,
             history_view_id,
             history_commitment,
+            history_authority_extension,
             history_authority,
             global_history_attestation,
             accepted_barrier_version: response.accepted_barrier_version,
@@ -2374,6 +2519,7 @@ pub struct BarrierJoinRecord {
 pub struct BarrierResolvedRevokedLeaves {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
+    pub history_authority_extension: Option<HistoryAuthorityExtension>,
     pub history_authority: Option<HistoryAuthorityDescriptor>,
     pub global_history_attestation: Option<GlobalHistoryAttestation>,
     pub leaf_indices: Vec<u32>,
@@ -2384,6 +2530,7 @@ pub struct BarrierResolvedRevokedLeaves {
 pub struct BarrierResolvedJoins {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
+    pub history_authority_extension: Option<HistoryAuthorityExtension>,
     pub history_authority: Option<HistoryAuthorityDescriptor>,
     pub global_history_attestation: Option<GlobalHistoryAttestation>,
     pub records: Vec<BarrierJoinRecord>,
@@ -2402,6 +2549,7 @@ pub struct BarrierPublicTree {
 pub struct BarrierFetchedPublicTree {
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
+    pub history_authority_extension: Option<HistoryAuthorityExtension>,
     pub history_authority: Option<HistoryAuthorityDescriptor>,
     pub global_history_attestation: Option<GlobalHistoryAttestation>,
     pub tree: BarrierPublicTree,
@@ -2438,6 +2586,7 @@ pub struct MergeAcceptanceLookup {
     pub status: MergeAcceptanceStatus,
     pub history_view_id: [u8; 32],
     pub history_commitment: HistoryCommitment,
+    pub history_authority_extension: Option<HistoryAuthorityExtension>,
     pub history_authority: Option<HistoryAuthorityDescriptor>,
     pub global_history_attestation: Option<GlobalHistoryAttestation>,
     pub accepted_barrier_version: Option<u64>,
@@ -2450,6 +2599,19 @@ pub struct MergeAcceptanceLookup {
 pub struct HistoryAuthorityDescriptor {
     pub scope_id: [u8; 32],
     pub public_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryAuthorityExtension {
+    LocalHistoryAuthorityV1,
+}
+
+impl HistoryAuthorityExtension {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalHistoryAuthorityV1 => "local-history-authority-v1",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2549,6 +2711,7 @@ pub struct MergeTicket {
     pub cover_leaf_index: u64,
     pub kem_tree_hash_after: [u8; 32],
     pub current_history_commitment: HistoryCommitment,
+    pub history_authority_extension: Option<HistoryAuthorityExtension>,
     pub history_authority_descriptor_bytes: Vec<u8>,
     pub history_authority: Option<HistoryAuthorityDescriptor>,
     pub current_global_history_attestation_bytes: Vec<u8>,
@@ -2685,7 +2848,11 @@ where
     Ok(decoded)
 }
 
-fn verify_ml_dsa_signature(message: &[u8], public_key: &[u8], signature: &[u8]) -> Result<(), Error> {
+fn verify_ml_dsa_signature(
+    message: &[u8],
+    public_key: &[u8],
+    signature: &[u8],
+) -> Result<(), Error> {
     let pk = <dilithium5::PublicKey as pqcrypto_traits::sign::PublicKey>::from_bytes(public_key)
         .map_err(|_| Error::Parse("invalid history authority public key".to_string()))?;
     let sig =
@@ -2695,6 +2862,58 @@ fn verify_ml_dsa_signature(message: &[u8], public_key: &[u8], signature: &[u8]) 
         .map_err(|_| Error::Parse("invalid history authority signature".to_string()))?;
     dilithium5::verify_detached_signature(&sig, message, &pk)
         .map_err(|_| Error::Parse("history authority signature verification failed".to_string()))
+}
+
+fn parse_history_authority_extension(
+    raw: &str,
+    carries_extension_bytes: bool,
+) -> Result<Option<HistoryAuthorityExtension>, Error> {
+    if raw.is_empty() {
+        if carries_extension_bytes {
+            return Err(Error::Parse(
+                "history authority extension bytes present without negotiated extension"
+                    .to_string(),
+            ));
+        }
+        return Ok(None);
+    }
+
+    match raw {
+        LOCAL_HISTORY_AUTHORITY_EXTENSION_ID => {
+            Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1))
+        }
+        other => Err(Error::Parse(format!(
+            "unsupported history authority extension: {other}"
+        ))),
+    }
+}
+
+fn require_history_authority_descriptor_for_extension(
+    extension: Option<HistoryAuthorityExtension>,
+    authority: &Option<HistoryAuthorityDescriptor>,
+    context: &str,
+) -> Result<(), Error> {
+    if extension.is_some() && authority.is_none() {
+        return Err(Error::Parse(format!(
+            "{context} carries history authority extension without authority descriptor"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_local_history_attestation_kind(
+    extension: Option<HistoryAuthorityExtension>,
+    attestation: &GlobalHistoryAttestation,
+    context: &str,
+) -> Result<(), Error> {
+    if extension == Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1)
+        && attestation.finality_kind != LOCAL_HISTORY_ATTESTATION_FINALITY_KIND
+    {
+        return Err(Error::Parse(format!(
+            "{context} global_history_attestation finality_kind mismatch"
+        )));
+    }
+    Ok(())
 }
 
 pub fn parse_history_authority_descriptor_bytes(
@@ -3119,6 +3338,7 @@ mod tests {
             max_barrier_update_bytes: 1_048_576,
             current_history_view_id: vec![0xD1; 32],
             current_history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+            history_authority_extension: String::new(),
             history_authority_descriptor: Vec::new(),
             current_global_history_attestation: Vec::new(),
             fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
@@ -3131,6 +3351,7 @@ mod tests {
             profile_version: EXPECTED_PROFILE_VERSION.to_string(),
             current_history_view_id: vec![0xD0; 32],
             current_history_commitment: Some(history_commitment_ok_payload(0xD0, 0xD1, 0x00, 1)),
+            history_authority_extension: String::new(),
             join_finalize_auth_token: vec![0xE5; 32],
             provisioning_nonce: vec![0xE6; 32],
             provisioning_issued_at_ms: 1,
@@ -3216,6 +3437,7 @@ mod tests {
                     leaf_indices: all[start..end].to_vec(),
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    history_authority_extension: String::new(),
                     page_offset: request.page_offset,
                     next_page_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
@@ -3244,6 +3466,7 @@ mod tests {
                     records: all[start..end].to_vec(),
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    history_authority_extension: String::new(),
                     page_offset: request.page_offset,
                     next_page_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
@@ -3264,6 +3487,7 @@ mod tests {
                     pk_entries: all[start..end].to_vec(),
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    history_authority_extension: String::new(),
                     entry_offset: request.entry_offset,
                     next_entry_offset,
                     total_entries: u32::try_from(all.len()).unwrap_or(u32::MAX),
@@ -3281,6 +3505,7 @@ mod tests {
                     accepted_reason: Some(1),
                     accepted_digest: Some(vec![0xDD; 32]),
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE2, 0xE1, 8)),
+                    history_authority_extension: String::new(),
                     history_authority_descriptor: Vec::new(),
                     global_history_attestation: Vec::new(),
                 })
@@ -3598,6 +3823,38 @@ mod tests {
         assert!(
             matches!(err, Error::Parse(message) if message.contains("profile_version mismatch"))
         );
+    }
+
+    #[test]
+    fn parse_history_authority_extension_accepts_empty_and_local_extension() -> Result<(), String> {
+        assert_eq!(
+            parse_history_authority_extension("", false).map_err(|err| err.to_string())?,
+            None
+        );
+        assert_eq!(
+            parse_history_authority_extension(LOCAL_HISTORY_AUTHORITY_EXTENSION_ID, true)
+                .map_err(|err| err.to_string())?,
+            Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_history_authority_extension_rejects_unnegotiated_and_unknown_extensions() {
+        let err = parse_history_authority_extension("", true)
+            .expect_err("extension bytes without negotiation must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("extension bytes present without negotiated extension")
+        ));
+
+        let err = parse_history_authority_extension("unknown-extension-v1", false)
+            .expect_err("unknown extension id must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("unsupported history authority extension")
+        ));
     }
 
     #[test]
@@ -4243,6 +4500,7 @@ mod tests {
                     pk_entries: Vec::new(),
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    history_authority_extension: String::new(),
                     entry_offset: 0,
                     next_entry_offset: None,
                     total_entries: 0,
@@ -4285,6 +4543,7 @@ mod tests {
                     pk_entries: vec![Vec::new(); 15],
                     history_view_id: vec![0xD1; 32],
                     history_commitment: None,
+                    history_authority_extension: String::new(),
                     entry_offset: 0,
                     next_entry_offset: None,
                     total_entries: 15,
@@ -4325,6 +4584,7 @@ mod tests {
                     leaf_indices: vec![1, 2],
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    history_authority_extension: String::new(),
                     page_offset: 0,
                     next_page_offset: None,
                     total_entries: 2,
@@ -4371,6 +4631,7 @@ mod tests {
                     }],
                     history_view_id: vec![0xD1; 32],
                     history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+                    history_authority_extension: String::new(),
                     page_offset: 0,
                     next_page_offset: None,
                     total_entries: 1,

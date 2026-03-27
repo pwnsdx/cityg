@@ -264,6 +264,7 @@ message JoinTicketResponse {
   bytes current_global_history_attestation = 43;
   bytes current_join_records_completeness_attestation = 44;
   bytes current_revoked_leaf_indices_completeness_attestation = 45;
+  string history_authority_extension = 46;
 }
 
 message MergeTicketRequest {
@@ -313,6 +314,7 @@ message MergeTicketResponse {
   uint64 last_accepted_ec = 31;
   bytes history_authority_descriptor = 32;
   bytes current_global_history_attestation = 33;
+  string history_authority_extension = 34;
 }
 
 message BarrierResolveRevokedLeavesRequest {
@@ -334,6 +336,7 @@ message BarrierResolveRevokedLeavesResponse {
   bytes helper_completeness_attestation = 7;
   bytes history_authority_descriptor = 8;
   bytes global_history_attestation = 9;
+  string history_authority_extension = 10;
 }
 
 message BarrierJoinLeafRecord {
@@ -362,6 +365,7 @@ message BarrierResolveJoinsSinceResponse {
   bytes helper_completeness_attestation = 7;
   bytes history_authority_descriptor = 8;
   bytes global_history_attestation = 9;
+  string history_authority_extension = 10;
 }
 
 message BarrierFetchPublicTreeRequest {
@@ -385,6 +389,7 @@ message BarrierFetchPublicTreeResponse {
   bytes helper_completeness_attestation = 9;
   bytes history_authority_descriptor = 10;
   bytes global_history_attestation = 11;
+  string history_authority_extension = 12;
 }
 
 enum MergeAcceptanceStatus {
@@ -413,6 +418,7 @@ message BarrierLookupMergeAcceptanceResponse {
   optional HistoryCommitment history_commitment = 7;
   bytes history_authority_descriptor = 8;
   bytes global_history_attestation = 9;
+  string history_authority_extension = 10;
 }
 
 message HistoryCommitment {

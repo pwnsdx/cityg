@@ -18,6 +18,7 @@ Scope-hardening addendum (same date, later tranche):
 - `docs/specs.md` now explicitly defines `HistoryAuthorityScope` and states that authenticated acceptance/finality is scoped to one such authority, not to an implicit global/federated consensus object.
 - `docs/specs.md` now also states explicitly that `current_barrier_full_verified` is a client-local predicate and that `header[180]` proves helper-state coherence, not FULL verification to the server.
 - `docs/specs.md` now defines one concrete optional deployment-local extension, `local-history-authority-v1`, which carries a scope-local `HistoryAuthorityDescriptor`, helper completeness attestations for A/B/C, a scope-local attested `header[182]`, and a server-verifiable `header[181]` receipt bound to that attestation.
+- The wire/API contract now also carries an explicit `history_authority_extension` identifier on join/merge/helper/lookup responses; the base profile keeps it empty, and clients fail closed if extension-defined objects appear without that explicit identifier.
 - `docs/specs.md` and the server still reject `header[181]` / `header[182]` in the base profile unless such an extension is explicitly enabled.
 - As a result, some previously listed `Open` items are now better interpreted as `extension required / intentionally out of base profile`, not as latent contradictions inside the base profile text. The per-item matrix below remains a conservative baseline unless otherwise noted in a later audit comment.
 

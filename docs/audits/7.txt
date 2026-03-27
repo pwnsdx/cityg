@@ -424,6 +424,7 @@ Re-vérification finale après formalisation de `local-history-authority-v1`:
 Lecture consolidée:
 
 - `7.4` n’est plus honnêtement `Open`: l’extension locale définit désormais de vraies attestations signées de complétude helper pour A/B/C, et le client les vérifie positivement. Ce point reste seulement **Partial** parce qu’il ne s’agit pas encore d’une preuve byzantine globale de non-omission.
+- Le contrat wire est aussi plus net: le client refuse désormais des bytes d’attestation/descripteur/helper-completeness sans identifiant `history_authority_extension` explicite.
 - `7.1` reste le mur principal: la canonité/finalité globale de l’historique n’est toujours pas fermée.
 
 Référence de synthèse: `docs/audits/final-verification-report-2026-03-26.md`.
