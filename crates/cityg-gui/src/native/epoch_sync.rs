@@ -64,6 +64,14 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
     }
     let previous_we_epoch_id = session.we_epoch_id;
     let activation_source_before_sync = capture_barrier_pending_activation_source(&session);
+    session.fs_forward_leap_policy = FsForwardLeapPolicy {
+        h: ticket.fs_forward_leap_policy.h,
+        checkpoint_interval: ticket.fs_forward_leap_policy.checkpoint_interval,
+        slack_anchor: ticket.fs_forward_leap_policy.slack_anchor,
+        slack_first_device: ticket.fs_forward_leap_policy.slack_first_device,
+        slack_device: ticket.fs_forward_leap_policy.slack_device,
+    };
+    session.last_accepted_ec = session.last_accepted_ec.max(ticket.last_accepted_ec);
     session.barrier_state.max_barrier_update_bytes = ticket_max_barrier_update_bytes_u64;
     session.barrier_state.n_max = ticket_n_max;
     session.barrier_state.cover_leaf_index = ticket.cover_leaf_index;
@@ -84,6 +92,7 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
     }
 
     if ticket.we_epoch_id == session.we_epoch_id {
+        session.last_accepted_ec = session.last_accepted_ec.max(ticket.last_accepted_ec);
         session.barrier_state.barrier_version = ticket.barrier_version;
         session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
         session.barrier_state.current_history_view_id = ticket_history_commitment.history_view_id;
@@ -174,6 +183,7 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
 
     if let Some(fs_ec) = header_u64(&bundle.header_map, hdr::HDR_FS_EC) {
         session.fs_ec = fs_ec;
+        session.last_accepted_ec = session.last_accepted_ec.max(fs_ec);
     }
     if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT) {
         session.fs_epoch_commit = commit;

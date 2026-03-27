@@ -40,10 +40,46 @@ pub(super) struct AppSession {
     pub(super) msphf_params_id: String,
     pub(super) fs_policy_version: String,
     pub(super) fs_epoch_base_ts: u64,
+    pub(super) fs_forward_leap_policy: FsForwardLeapPolicy,
+    pub(super) last_accepted_ec: u64,
     pub(super) last_fetch_timestamp_ms: Option<u64>,
     pub(super) msg_replay_state: MsgReplayState,
     pub(super) capss_witness: Vec<u8>,
     pub(super) barrier_state: BarrierSecretState,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct FsForwardLeapPolicy {
+    pub(super) h: u64,
+    pub(super) checkpoint_interval: u64,
+    pub(super) slack_anchor: u64,
+    pub(super) slack_first_device: u64,
+    pub(super) slack_device: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FsForwardLeapCaps {
+    pub(super) anchor_max: u64,
+    pub(super) first_device_max: u64,
+    pub(super) device_max: u64,
+}
+
+impl FsForwardLeapPolicy {
+    pub(super) fn caps(self) -> Result<FsForwardLeapCaps> {
+        if self.h == 0 || self.checkpoint_interval == 0 || self.checkpoint_interval < self.h {
+            return Err(anyhow!(
+                "invalid fs forward-leap policy window ({}, {})",
+                self.h,
+                self.checkpoint_interval
+            ));
+        }
+        let window_periods = self.checkpoint_interval.div_ceil(self.h);
+        Ok(FsForwardLeapCaps {
+            anchor_max: window_periods.saturating_add(self.slack_anchor),
+            first_device_max: window_periods.saturating_add(self.slack_first_device),
+            device_max: window_periods.saturating_add(self.slack_device),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -169,6 +205,8 @@ pub(super) struct PublishedBarrierMerge {
     pub(super) bundle: ClientEpochBundle,
     pub(super) pending_barrier_state: BarrierPendingState,
     pub(super) forward_state_after: ForwardSecrecyState,
+    pub(super) fs_forward_leap_policy: FsForwardLeapPolicy,
+    pub(super) last_accepted_ec: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -110,8 +110,8 @@ Summary:
   Proof: `docs/specs.md:566-572`, `crates/cityg-gui/src/native/message_auth.rs:97-156`, `crates/cityg-gui/src/native/network_messages.rs:14-50,188-203`, `crates/cityg-gui/src/native/tests/mod.rs:7606-7659,8670-8740`.
 - `5.6` `Reclassified` — opaque external proof/KDF suites remain a registry/documentation issue; not enough evidence to call the current local implementation unsafely weak from this repo alone.
   Proof: `docs/specs.md:162-163`, `docs/specs.md:1479-1484`.
-- `5.7` `Partial` — join provisioning now has nonce/issuance/expiry/current history commitment, and bootstrap verification no longer falsely rejects a same-tree later re-attestation, but it still is not a standalone globally authenticated lineage artifact.
-  Proof: `docs/specs.md:1455-1478`, `docs/specs.md:1579-1583`, `crates/cityg-api/proto/cityg.proto:243,248-251`, `crates/cityg-api-client/src/lib.rs:988-1038`, `crates/cityg-gui/src/native/barrier_core.rs:568-589`.
+- `5.7` `Partial` — join provisioning now has nonce/issuance/expiry/current history commitment plus authenticated client-visible FLG window parameters and `last_accepted_ec`, and bootstrap verification no longer falsely rejects a same-tree later re-attestation, but it still is not a standalone globally authenticated lineage artifact.
+  Proof: `docs/specs.md:1583-1590`, `crates/cityg-api/proto/cityg.proto:202-249`, `crates/cityg-api-client/src/lib.rs:988-1039,2126-2144`, `crates/cityg-gui/src/native/join_ops.rs:210-223,421-439`, `crates/cityg-gui/src/native/barrier_core.rs:568-589`.
 - `5.8` `Partial` — retention/fetch/config contracts are better tied to history and now have hard helper paging / replay-state bounds, but still are not backed by one signed global deployment manifest and global canonity.
   Proof: `docs/specs.md:220-238`, `docs/specs.md:618-638`, `docs/specs.md:1532`, and the remaining open Audit 2 / Audit 3 findings.
 
@@ -138,8 +138,8 @@ Summary:
 
 - `7.1` `Open` — snapshot authentication is still not a proof of globally canonical history.
   Proof: `docs/specs.md:165-170`, `docs/specs.md:215-223`.
-- `7.2` `Partial` — clients now replay a mandatory client-visible subset of activation invariants before committing recovered or locally pending barrier state, but they still do not replay the full server-side S10 policy surface.
-  Proof: `docs/specs.md:1168-1174`, `docs/specs.md:1470-1496`, `crates/cityg-gui/src/native/barrier_runtime.rs:486-655`, `crates/cityg-gui/src/native/epoch_sync.rs:65-206`, `crates/cityg-gui/src/native/barrier_ops.rs:107-171`, `crates/cityg-gui/src/native/tests/mod.rs:250-592,6200-6260,7184-7321`.
+- `7.2` `Partial` — clients now replay a larger mandatory client-visible subset of activation invariants before committing recovered or locally pending barrier state: `fs_policy_version`, `fs_epoch_base_ts`, `fs_dev_chain_bind`, local device continuity, group forward-jump bounds, and the locally provable `new-device` / `local-device` FLG subcases. They still do not replay the full server-side S10 policy surface for remote known-device state or broader governance/rate-limit checks.
+  Proof: `docs/specs.md:1491-1507`, `docs/specs.md:1583-1590`, `crates/cityg-gui/src/native/barrier_runtime.rs:520-600,680-710`, `crates/cityg-gui/src/native/join_ops.rs:210-223,421-439`, `crates/cityg-gui/src/native/epoch_sync.rs:65-95,183-186`, `crates/cityg-gui/src/native/tests/mod.rs:423-431,684-735,8448-8501`.
 - `7.3` `Partial` — `ResolveJoinsSince` is now tied to an exact authenticated view and shared commitment, and the GUI persists/rechecks the current authenticated commitment before accepting a remote barrier bundle, but the whole chain is still not backed by a globally canonical target state with completeness proof.
   Proof: `docs/specs.md:180-189`, `docs/specs.md:197-213`, `crates/cityg-gui/src/native/session_types.rs:50-66`, `crates/cityg-gui/src/native/persisted/barrier.rs:15-28,157-184,346-431`, `crates/cityg-gui/src/native/barrier_runtime.rs:515-595`, `crates/cityg-gui/src/native/epoch_sync.rs:40-98,335-363`, `crates/cityg-gui/src/bin/join_leave.rs:376-416,1432-1440,1870-1878`, `crates/cityg-gui/src/native/tests/mod.rs:346-381,8327-8384`.
 - `7.4` `Open` — omission/completeness proofs for joins/revocations are still missing.

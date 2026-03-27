@@ -7,6 +7,7 @@ use std::sync::{Arc, Once, atomic::AtomicU16};
 use tempfile::TempDir;
 use tokio::{task::JoinHandle, time::sleep};
 
+use crate::barrier_shared::encode_history_commitment_header;
 use crate::native::app_actions::{
     CopyRoomIdAction, ShowSessionOverviewAction, TextSelectAllAction, ToggleSidebarAction,
 };
@@ -164,6 +165,14 @@ fn build_test_session(
         msphf_params_id: "rlwe-params/mock".to_string(),
         fs_policy_version: "7".to_string(),
         fs_epoch_base_ts: 42,
+        fs_forward_leap_policy: FsForwardLeapPolicy {
+            h: 300,
+            checkpoint_interval: 3600,
+            slack_anchor: 0,
+            slack_first_device: 0,
+            slack_device: 4,
+        },
+        last_accepted_ec: 17,
         last_fetch_timestamp_ms: Some(1_234_567),
         msg_replay_state: MsgReplayState::default(),
         capss_witness: capss_witness_bytes,
@@ -178,6 +187,13 @@ fn build_test_session(
     session.barrier_state.barrier_initialized = true;
     session.barrier_state.barrier_roots_hash =
         compute_revocation_roots_hash(&session.revoked_since_root, &session.revoked_root)?;
+    session.barrier_state.current_history_view_id = [0x31; 32];
+    session.barrier_state.current_history_commitment = Some(HistoryCommitment {
+        history_view_id: [0x31; 32],
+        history_commitment_id: [0x32; 32],
+        prev_history_commitment_id: [0x00; 32],
+        history_seq: 1,
+    });
     session.barrier_state.current_barrier_full_verified = true;
     Ok(session)
 }
@@ -213,6 +229,12 @@ fn build_activation_guard_header(
         Value::Integer(Integer::from(session.fs_epoch_base_ts)),
     );
     header.insert(
+        hdr::HDR_FS_POLICY_VERSION,
+        Value::Integer(Integer::from(
+            session.fs_policy_version.parse::<u64>().unwrap_or(0),
+        )),
+    );
+    header.insert(
         hdr::HDR_FS_DEV_PREV_COMMIT,
         Value::Bytes(session.fs_dev_prev_commit.to_vec()),
     );
@@ -222,6 +244,15 @@ fn build_activation_guard_header(
         Value::Integer(Integer::from(barrier_version)),
     );
     header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(raw_update.to_vec()));
+    let commitment = session
+        .barrier_state
+        .current_history_commitment
+        .as_ref()
+        .ok_or("test session missing current_history_commitment")?;
+    header.insert(
+        hdr::HDR_BARRIER_HISTORY_COMMITMENT,
+        Value::Bytes(encode_history_commitment_header(commitment)?),
+    );
     Ok(header)
 }
 
@@ -385,6 +416,19 @@ fn persisted_barrier_state_roundtrip_preserves_current_history_commitment()
         roundtrip.bootstrap_history_commitment,
         runtime.bootstrap_history_commitment
     );
+    Ok(())
+}
+
+#[test]
+fn persisted_session_roundtrip_preserves_fs_forward_leap_policy_and_last_accepted_ec()
+-> Result<(), Box<dyn std::error::Error>> {
+    let session = build_test_session(0xA13, "http://127.0.0.1:9", "room-a3", "alice")?;
+    let roundtrip = PersistedSession::from_session(&session).into_app_session()?;
+    assert_eq!(
+        roundtrip.fs_forward_leap_policy,
+        session.fs_forward_leap_policy
+    );
+    assert_eq!(roundtrip.last_accepted_ec, session.last_accepted_ec);
     Ok(())
 }
 
@@ -629,6 +673,67 @@ fn validate_client_visible_activation_guards_rejects_fs_epoch_base_ts_mismatch()
     assert!(
         err.to_string().contains("945.0"),
         "unexpected fs_epoch_base_ts error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_rejects_group_forward_jump()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB91, "http://127.0.0.1:9", "room-b81", "bob")?;
+    session.last_accepted_ec = 10;
+    let mut header =
+        build_activation_guard_header(&session, 1, session.last_accepted_ec + 20, &[0xAA, 0xDE])?;
+    header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0x55; 48]));
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("group forward jump beyond local policy window must fail");
+    assert!(
+        err.to_string().contains("947.6"),
+        "unexpected group forward-jump error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_rejects_new_device_forward_jump()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB92, "http://127.0.0.1:9", "room-b82", "bob")?;
+    session.last_accepted_ec = 10;
+    session.fs_forward_leap_policy.slack_anchor = 16;
+    let mut header =
+        build_activation_guard_header(&session, 1, session.last_accepted_ec + 15, &[0xAA, 0xDF])?;
+    header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0x44; 48]));
+    header.insert(hdr::HDR_FS_DEV_PREV_COMMIT, Value::Bytes(vec![0u8; 32]));
+    let fs_dev_commit = compute_fs_dev_commit_v2(
+        &[0x44; 48],
+        session.last_accepted_ec + 15,
+        &[0u8; 32],
+        1,
+        &compute_barrier_update_digest(&[0xAA, 0xDF])?,
+    )?;
+    header.insert(hdr::HDR_FS_DEV_COMMIT, Value::Bytes(fs_dev_commit.to_vec()));
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("new device forward jump beyond local first-device window must fail");
+    assert!(
+        err.to_string().contains("947.5"),
+        "unexpected new-device forward-jump error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_rejects_local_device_forward_jump()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB93, "http://127.0.0.1:9", "room-b83", "bob")?;
+    session.fs_ec = 12;
+    session.last_accepted_ec = 12;
+    session.fs_forward_leap_policy.slack_anchor = 16;
+    let header = build_activation_guard_header(&session, 1, session.fs_ec + 20, &[0xAA, 0xE0])?;
+    let err = validate_client_visible_activation_guards(&session, &header)
+        .expect_err("local device forward jump beyond local device window must fail");
+    assert!(
+        err.to_string().contains("947.4"),
+        "unexpected local-device forward-jump error: {err}"
     );
     Ok(())
 }
@@ -5847,6 +5952,14 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         msphf_params_id: "rlwe-params/mock".to_string(),
         fs_policy_version: "7".to_string(),
         fs_epoch_base_ts: 42,
+        fs_forward_leap_policy: FsForwardLeapPolicy {
+            h: 300,
+            checkpoint_interval: 3600,
+            slack_anchor: 0,
+            slack_first_device: 0,
+            slack_device: 4,
+        },
+        last_accepted_ec: 17,
         last_fetch_timestamp_ms: Some(1_234_567),
         msg_replay_state: MsgReplayState::default(),
         capss_witness: capss_witness_bytes.clone(),
@@ -6008,10 +6121,20 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(loaded.fs_policy_version, session.fs_policy_version);
     assert_eq!(loaded.fs_epoch_base_ts, session.fs_epoch_base_ts);
     assert_eq!(
+        loaded.fs_forward_leap_policy,
+        session.fs_forward_leap_policy
+    );
+    assert_eq!(loaded.last_accepted_ec, session.last_accepted_ec);
+    assert_eq!(
         loaded.last_fetch_timestamp_ms,
         session.last_fetch_timestamp_ms
     );
-    assert_eq!(loaded.msg_replay_state, session.msg_replay_state);
+    assert!(
+        PersistedMsgReplayState::from_runtime(&loaded.msg_replay_state).semantically_equivalent(
+            &PersistedMsgReplayState::from_runtime(&session.msg_replay_state)
+        ),
+        "message replay persistence should preserve tuple/context/msg-index semantics"
+    );
 
     assert_eq!(
         loaded.forward_state.snapshot(),
@@ -8445,6 +8568,68 @@ async fn epoch_sync_rejects_barrier_bundle_history_commitment_mismatch()
 }
 
 #[tokio::test]
+async fn epoch_sync_rejects_barrier_bundle_fs_policy_version_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+
+    let port = next_test_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let room_id = hex_encode([0x7Fu8; 32]);
+
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?;
+    }
+
+    let mut mismatched = alice.clone();
+    mismatched.fs_policy_version = "999".to_string();
+    let sync_result = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+        perform_epoch_sync(mismatched).await
+    };
+    let err = match sync_result {
+        Ok(_) => {
+            return Err(anyhow!(
+                "epoch sync should fail when fs_policy_version diverges from the persisted client policy"
+            )
+            .into());
+        }
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("client-side activation guard failed (944.6): fs_policy_version mismatch"),
+        "expected explicit fs_policy_version mismatch error: {err}"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn perform_join_succeeds_with_bootstrap_disabled() -> Result<(), Box<dyn std::error::Error>> {
     let _env_lock = ENV_VAR_LOCK
         .lock()
@@ -10844,6 +11029,14 @@ fn session_removal_after_persistence() -> Result<(), Box<dyn std::error::Error>>
         msphf_params_id: "rlwe-params/mock".to_string(),
         fs_policy_version: "7".to_string(),
         fs_epoch_base_ts: 42,
+        fs_forward_leap_policy: FsForwardLeapPolicy {
+            h: 300,
+            checkpoint_interval: 3600,
+            slack_anchor: 0,
+            slack_first_device: 0,
+            slack_device: 4,
+        },
+        last_accepted_ec: 17,
         last_fetch_timestamp_ms: Some(1_234_567),
         msg_replay_state: MsgReplayState::default(),
         capss_witness: capss_witness_bytes,

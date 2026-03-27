@@ -152,15 +152,15 @@ use pb::{
     BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
     BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest, BootstrapRoomResponse,
     ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
-    FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest, GetBundleResponse,
-    GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse,
-    HistoryCommitment as PbHistoryCommitment, JoinTicketRequest, JoinTicketResponse,
-    ListRoomAdminsRequest, ListRoomAdminsResponse, MembersRequest, MembersResponse,
-    MergeAcceptanceStatus as PbMergeAcceptanceStatus, MergeTicketIntent as PbMergeTicketIntent,
-    MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
-    RoomAdminMutationRequest, RoomAdminMutationResponse, RotateRoomKbroadRequest,
-    RotateRoomKbroadResponse, SearchMembersRequest, SearchMembersResponse, SendMessageRequest,
-    SendMessageResponse,
+    FetchMessagesRequest, FetchMessagesResponse, FsForwardLeapPolicy as PbFsForwardLeapPolicy,
+    GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetTelemetryResponse,
+    GetWindowRequest, GetWindowResponse, HistoryCommitment as PbHistoryCommitment,
+    JoinTicketRequest, JoinTicketResponse, ListRoomAdminsRequest, ListRoomAdminsResponse,
+    MembersRequest, MembersResponse, MergeAcceptanceStatus as PbMergeAcceptanceStatus,
+    MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
+    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminMutationResponse,
+    RotateRoomKbroadRequest, RotateRoomKbroadResponse, SearchMembersRequest, SearchMembersResponse,
+    SendMessageRequest, SendMessageResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -709,6 +709,7 @@ impl CitygApiClient {
         let current_history_view_id = array32(&response.current_history_view_id)?;
         let current_history_commitment =
             parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
+        let fs_forward_leap_policy = parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
         if response.cover_leaf_index >= n_max {
             return Err(Error::Parse(format!(
                 "merge ticket cover_leaf_index out of range: {} >= {}",
@@ -736,6 +737,8 @@ impl CitygApiClient {
             msphf_params_id: response.msphf_params_id,
             fs_policy_version: response.fs_policy_version,
             fs_epoch_base_ts: response.fs_epoch_base_ts,
+            fs_forward_leap_policy,
+            last_accepted_ec: response.last_accepted_ec,
             kbroad_generation: response.kbroad_generation,
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
@@ -991,6 +994,7 @@ impl CitygApiClient {
             .clone()
             .map(|commitment| parse_history_commitment(current_history_view_id, Some(commitment)))
             .transpose()?;
+        parse_fs_forward_leap_policy(response.fs_forward_leap_policy.clone())?;
         let current_predecessor_kem_tree_hash_after =
             if response.current_predecessor_kem_tree_hash_after.is_empty() {
                 [0u8; 32]
@@ -1142,6 +1146,7 @@ impl CitygApiClient {
         let current_history_view_id = array32(&response.current_history_view_id)?;
         let current_history_commitment =
             parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
+        let fs_forward_leap_policy = parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
         if response.cover_leaf_index >= n_max {
             return Err(Error::Parse(format!(
                 "merge ticket cover_leaf_index out of range: {} >= {}",
@@ -1169,6 +1174,8 @@ impl CitygApiClient {
             msphf_params_id: response.msphf_params_id,
             fs_policy_version: response.fs_policy_version,
             fs_epoch_base_ts: response.fs_epoch_base_ts,
+            fs_forward_leap_policy,
+            last_accepted_ec: response.last_accepted_ec,
             kbroad_generation: response.kbroad_generation,
             barrier_version: response.barrier_version,
             cover_leaf_index: response.cover_leaf_index,
@@ -1976,6 +1983,15 @@ pub struct HistoryCommitment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsForwardLeapPolicy {
+    pub h: u64,
+    pub checkpoint_interval: u64,
+    pub slack_anchor: u64,
+    pub slack_first_device: u64,
+    pub slack_device: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeAcceptanceStatus {
     Pending,
     Accepted,
@@ -2065,6 +2081,8 @@ pub struct MergeTicket {
     pub msphf_params_id: String,
     pub fs_policy_version: String,
     pub fs_epoch_base_ts: u64,
+    pub fs_forward_leap_policy: FsForwardLeapPolicy,
+    pub last_accepted_ec: u64,
     pub kbroad_generation: u64,
     pub barrier_version: u64,
     pub cover_leaf_index: u64,
@@ -2101,6 +2119,30 @@ fn parse_history_commitment(
         history_commitment_id: array32(&commitment.history_commitment_id)?,
         prev_history_commitment_id: array32(&commitment.prev_history_commitment_id)?,
         history_seq: commitment.history_seq,
+    })
+}
+
+fn parse_fs_forward_leap_policy(
+    policy: Option<PbFsForwardLeapPolicy>,
+) -> Result<FsForwardLeapPolicy, Error> {
+    let policy =
+        policy.ok_or_else(|| Error::Parse("missing fs_forward_leap_policy".to_string()))?;
+    if policy.h == 0 {
+        return Err(Error::Parse(
+            "fs_forward_leap_policy.h must be > 0".to_string(),
+        ));
+    }
+    if policy.checkpoint_interval < policy.h {
+        return Err(Error::Parse(
+            "fs_forward_leap_policy.checkpoint_interval must be >= h".to_string(),
+        ));
+    }
+    Ok(FsForwardLeapPolicy {
+        h: policy.h,
+        checkpoint_interval: policy.checkpoint_interval,
+        slack_anchor: policy.slack_anchor,
+        slack_first_device: policy.slack_first_device,
+        slack_device: policy.slack_device,
     })
 }
 
@@ -2235,11 +2277,11 @@ mod tests {
         BarrierLookupMergeAcceptanceResponse, BarrierResolveJoinsSinceRequest,
         BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
         BarrierResolveRevokedLeavesResponse, BootstrapRoomResponse, ConfigureWindowResponse,
-        FetchMessagesResponse, GetBundleResponse, GetTelemetryResponse, GetWindowResponse,
-        HistoryCommitment as PbHistoryCommitment, JoinTicketResponse, MembersResponse,
-        MergeAcceptanceStatus as PbMergeAcceptanceStatus, MergeTicketResponse,
-        RefreshPivotResponse, RotateRoomKbroadResponse, SearchMembersResponse, SeedHeadResponse,
-        SendMessageResponse,
+        FetchMessagesResponse, FsForwardLeapPolicy as PbFsForwardLeapPolicy, GetBundleResponse,
+        GetTelemetryResponse, GetWindowResponse, HistoryCommitment as PbHistoryCommitment,
+        JoinTicketResponse, MembersResponse, MergeAcceptanceStatus as PbMergeAcceptanceStatus,
+        MergeTicketResponse, RefreshPivotResponse, RotateRoomKbroadResponse, SearchMembersResponse,
+        SeedHeadResponse, SendMessageResponse,
     };
     use prost::Message;
     use std::{error::Error as StdError, net::SocketAddr};
@@ -2279,6 +2321,8 @@ mod tests {
             max_barrier_update_bytes: 1_048_576,
             current_history_view_id: vec![0xD1; 32],
             current_history_commitment: Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7)),
+            fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
+            last_accepted_ec: 34,
         }
     }
 
@@ -2294,7 +2338,19 @@ mod tests {
             cover_leaf_index: 0,
             n_max: 1024,
             max_barrier_update_bytes: 1_048_576,
+            fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
+            last_accepted_ec: 21,
             ..JoinTicketResponse::default()
+        }
+    }
+
+    fn fs_forward_leap_policy_ok_payload() -> PbFsForwardLeapPolicy {
+        PbFsForwardLeapPolicy {
+            h: 300,
+            checkpoint_interval: 3600,
+            slack_anchor: 0,
+            slack_first_device: 0,
+            slack_device: 4,
         }
     }
 
@@ -2871,6 +2927,9 @@ mod tests {
         );
         assert_eq!(merge.n_max, 1024);
         assert_eq!(merge.max_barrier_update_bytes, 1_048_576);
+        assert_eq!(merge.last_accepted_ec, 34);
+        assert_eq!(merge.fs_forward_leap_policy.h, 300);
+        assert_eq!(merge.fs_forward_leap_policy.checkpoint_interval, 3600);
         let refresh_merge = client.merge_ticket_refresh("room-1", &[0x01; 32]).await?;
         assert_eq!(refresh_merge.we_epoch_id, [0x01; 32]);
         let refresh_with_intent = client
@@ -2944,6 +3003,7 @@ mod tests {
                 cover_leaf_index: 0,
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
+                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
                 ..JoinTicketResponse::default()
             })
         }
@@ -2988,6 +3048,7 @@ mod tests {
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
                 current_barrier_update: vec![0xAA],
+                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
                 ..JoinTicketResponse::default()
             })
         }
@@ -3035,6 +3096,7 @@ mod tests {
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
                 current_barrier_update: vec![0xAA],
+                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
                 ..JoinTicketResponse::default()
             })
         }
@@ -3079,6 +3141,7 @@ mod tests {
                 cover_leaf_index: 0,
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
+                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
                 ..JoinTicketResponse::default()
             })
         }
@@ -3122,6 +3185,7 @@ mod tests {
                 cover_leaf_index: 0,
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
+                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
                 ..JoinTicketResponse::default()
             })
         }
@@ -3151,6 +3215,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_ticket_rejects_missing_fs_forward_leap_policy() -> Result<(), Box<dyn StdError>> {
+        async fn mock_join_ticket_without_fs_forward_leap_policy() -> impl IntoResponse {
+            encode_proto(JoinTicketResponse {
+                profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                current_history_view_id: vec![0xD0; 32],
+                current_history_commitment: Some(history_commitment_ok_payload(
+                    0xD0, 0xD1, 0x00, 1,
+                )),
+                join_finalize_auth_token: vec![0xE5; 32],
+                provisioning_nonce: vec![0xE6; 32],
+                provisioning_issued_at_ms: 1,
+                provisioning_expires_at_ms: u64::MAX,
+                cover_leaf_index: 0,
+                n_max: 1024,
+                max_barrier_update_bytes: 1_048_576,
+                ..JoinTicketResponse::default()
+            })
+        }
+
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_join_ticket_without_fs_forward_leap_policy),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("missing fs_forward_leap_policy must fail closed");
+        assert!(
+            err.to_string().contains("missing fs_forward_leap_policy"),
+            "unexpected error: {err}"
+        );
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn join_ticket_rejects_expired_provisioning_artifact() -> Result<(), Box<dyn StdError>> {
         async fn mock_join_ticket_with_expired_provisioning() -> impl IntoResponse {
             encode_proto(JoinTicketResponse {
@@ -3166,6 +3273,7 @@ mod tests {
                 cover_leaf_index: 0,
                 n_max: 1024,
                 max_barrier_update_bytes: 1_048_576,
+                fs_forward_leap_policy: Some(fs_forward_leap_policy_ok_payload()),
                 ..JoinTicketResponse::default()
             })
         }

@@ -36,6 +36,15 @@ message IdentityBinding {
   bytes signature = 3;        // ML-DSA-65 signature over CBOR([alias, pop_public_key])
 }
 
+message FsForwardLeapPolicy {
+  reserved 1000 to 1999;
+  uint64 h = 1;
+  uint64 checkpoint_interval = 2;
+  uint64 slack_anchor = 3;
+  uint64 slack_first_device = 4;
+  uint64 slack_device = 5;
+}
+
 message Member {
   reserved 1000 to 1999;
   bytes leaf_id = 1;
@@ -249,6 +258,8 @@ message JoinTicketResponse {
   bytes provisioning_nonce = 37;
   uint64 provisioning_issued_at_ms = 38;
   uint64 provisioning_expires_at_ms = 39;
+  optional FsForwardLeapPolicy fs_forward_leap_policy = 40;
+  uint64 last_accepted_ec = 41;
 }
 
 message MergeTicketRequest {
@@ -294,6 +305,8 @@ message MergeTicketResponse {
   uint64 max_barrier_update_bytes = 27;
   bytes current_history_view_id = 28;
   optional HistoryCommitment current_history_commitment = 29;
+  optional FsForwardLeapPolicy fs_forward_leap_policy = 30;
+  uint64 last_accepted_ec = 31;
 }
 
 message BarrierResolveRevokedLeavesRequest {

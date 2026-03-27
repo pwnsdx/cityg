@@ -307,3 +307,18 @@ Nouvelle passe spec + implémentation:
 - côté serveur, `FetchBarrierPublicTree(current hash)` préfère désormais l’état courant et son commitment courant, ce qui supprime une ambiguïté locale entre snapshot historique retenu et snapshot courant.
 
 Statut audit: **COMPLETED**, avec meilleure cohérence locale entre artefact de provisioning, helper fetch et bootstrap courant; la question d’un artefact de lineage globalement canonique reste ouverte.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche FLG provisioning carry-through)
+
+Nouvelle passe spec + implémentation:
+
+- le provisioning join transporte maintenant aussi les paramètres authentifiés de fenêtre FLG `(H, checkpoint_interval, S_anchor, S_first, S_device)` et le `last_accepted_ec` courant;
+- le client API rejette fail-closed un artefact de provisioning sans ces champs ou avec fenêtre invalide;
+- le GUI persiste ensuite ces valeurs dans la session pour rejouer localement une partie plus forte des garde-fous d’activation.
+
+Statut audit:
+
+- **5.7 reste Partial**, mais le provisioning porte désormais assez d’état pour rejouer localement `944.6`, `945.0`, `947.6` et certains sous-cas `947.5/947.4`;
+- le reste ouvert est toujours le même: absence d’artefact de lineage/finalité globale, pas un oubli local sur la fraîcheur ou le binding de ces champs.

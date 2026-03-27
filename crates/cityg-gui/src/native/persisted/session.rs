@@ -26,6 +26,10 @@ pub(in crate::native) struct PersistedSession {
     pub(in crate::native) msphf_params_id: String,
     pub(in crate::native) fs_policy_version: String,
     pub(in crate::native) fs_epoch_base_ts: u64,
+    #[serde(default)]
+    pub(in crate::native) fs_forward_leap_policy: FsForwardLeapPolicy,
+    #[serde(default)]
+    pub(in crate::native) last_accepted_ec: u64,
     pub(in crate::native) kbroad_public_hex: String,
     pub(in crate::native) bootstrap_public_hex: String,
     pub(in crate::native) pop_public_hex: String,
@@ -64,7 +68,7 @@ impl PersistedSession {
             .as_millis() as u64;
 
         Self {
-            version: 12,
+            version: 13,
             server_url: session.server_url.clone(),
             room_id: session.room_id.clone(),
             alias: session.alias.clone(),
@@ -87,6 +91,8 @@ impl PersistedSession {
             msphf_params_id: session.msphf_params_id.clone(),
             fs_policy_version: session.fs_policy_version.clone(),
             fs_epoch_base_ts: session.fs_epoch_base_ts,
+            fs_forward_leap_policy: session.fs_forward_leap_policy,
+            last_accepted_ec: session.last_accepted_ec,
             kbroad_public_hex: hex_encode(&session.kbroad_public),
             bootstrap_public_hex: hex_encode(&session.bootstrap_public),
             pop_public_hex: hex_encode(&session.pop_public_key),
@@ -143,6 +149,8 @@ impl PersistedSession {
             msphf_params_id,
             fs_policy_version,
             fs_epoch_base_ts,
+            fs_forward_leap_policy,
+            last_accepted_ec,
             kbroad_public_hex,
             bootstrap_public_hex,
             pop_public_hex,
@@ -172,10 +180,11 @@ impl PersistedSession {
             || version == 9
             || version == 10
             || version == 11
-            || version == 12)
+            || version == 12
+            || version == 13)
         {
             return Err(anyhow!(
-                "unsupported session file version {version} (expected 4, 5, 6, 7, 8, 9, 10, 11, or 12 with ML-DSA-65 authentication)"
+                "unsupported session file version {version} (expected 4, 5, 6, 7, 8, 9, 10, 11, 12, or 13 with ML-DSA-65 authentication)"
             ));
         }
 
@@ -274,6 +283,8 @@ impl PersistedSession {
             msphf_params_id,
             fs_policy_version,
             fs_epoch_base_ts,
+            fs_forward_leap_policy,
+            last_accepted_ec,
             last_fetch_timestamp_ms,
             msg_replay_state,
             capss_witness,

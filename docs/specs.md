@@ -1497,6 +1497,14 @@ Upon observing acceptance of the merge carrying this barrier_update, or after `L
 * Require the observed accepted `header[141]` to equal `pending_fs_ec`.
 * Require the observed accepted `header[178]` to equal `pending_barrier_update_reason`.
 * Require the client's current locally persisted pre-activation source state to equal `pending_activation_source`; if not, the updater MUST enter `recovery_required/history_inconsistent` and MUST NOT activate.
+* Before local activation, clients MUST replay the client-visible subset of S10 using locally persisted state and the authenticated helper/provisioning values carried for that current state. At minimum this subset MUST reject:
+  * unsupported/mismatched `fs_policy_version` (944.6),
+  * mismatched `fs_epoch_base_ts` (945.0),
+  * invalid `fs_dev_chain_bind` / local device continuity (947.2 / 947.0),
+  * group forward jumps beyond the carried `last_accepted_ec + D_anchor_max` window (947.6),
+  * new-device forward jumps beyond the carried `last_accepted_ec + D_first_device` window when `header[152] == ZERO32` (947.5),
+  * local-device forward jumps beyond the persisted `stored_last_ec + D_device_max` window when the activating bundle is authored by the same local device (947.4).
+* The helper/provisioning artifact used for these local checks MUST therefore carry the current FLG window parameters `(H, checkpoint_interval, S_anchor, S_first, S_device)` or an equivalent authenticated derivation of `(D_anchor_max, D_first_device, D_device_max)`, together with the current group `last_accepted_ec`.
 * If match: activate -- update local state:
   * barrier_initialized := true
   * barrier_version := pending_barrier_version
@@ -1577,6 +1585,8 @@ FS-hybrid required fields:
 * Joiners MUST NOT locally sample an unrelated fresh `K_fs` for an already-existing group, because PCS reseed in S6.6 requires all honest clients to evolve from the same pre-refresh `K_fs`.
 * group fs_epoch_base_ts (T_base; uint64)
 * fs_policy_version (uint)
+* authenticated FLG policy window parameters `(H, checkpoint_interval, S_anchor, S_first, S_device)` or equivalent authenticated derived caps `(D_anchor_max, D_first_device, D_device_max)`
+* authenticated current group `last_accepted_ec`
 * any suite identifiers required to verify proofs (Smallwood/VRF/SRX profiles)
 Eligibility note (normative):
 * A just-provisioned joiner into an already-existing group MUST be able to invoke S3.3.A/B and `FetchBarrierPublicTree(current kem_tree_hash_after)` for the provisioned current committed barrier state immediately after provisioning.

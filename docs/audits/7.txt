@@ -363,3 +363,18 @@ Impact audit:
 
 - cela renforce `7.3` sur la cohérence locale client entre helper context et bundle reçu;
 - cela ne change pas l’ouverture de `7.1/7.4`, qui restent bloqués sur l’absence de canonité/finalité/completeness proof globale.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche FLG local replay)
+
+Nouvelle passe spec + implémentation:
+
+- le client GUI persiste désormais aussi la fenêtre FLG authentifiée et le `last_accepted_ec` courant issus du provisioning / merge ticket;
+- avant activation locale, il rejoue maintenant en plus `947.6` (groupe) et, quand l’état local suffit, `947.5` (new-device) et `947.4` (local-device), en plus de `944.6`, `945.0` et `947.2`;
+- des tests ciblés couvrent ces trois rejets et la persistance des nouveaux champs de session.
+
+Statut audit:
+
+- **7.2 reste Partial**, mais le sous-ensemble client-visible rejoué localement est désormais plus proche de S10 qu’avant;
+- le reste ouvert n’a pas changé: impossible de rejouer intégralement les cas “known remote device” ou de transformer cela en preuve contre un serveur byzantin sans objet global/finality supplémentaire.

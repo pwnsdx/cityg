@@ -44,7 +44,8 @@ use pb::{
     BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
     BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest, BootstrapRoomResponse, ChatMessage,
     ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
-    FetchMessagesRequest, FetchMessagesResponse, FreezeStat, GetBundleRequest, GetBundleResponse,
+    FetchMessagesRequest, FetchMessagesResponse, FreezeStat,
+    FsForwardLeapPolicy as PbFsForwardLeapPolicy, GetBundleRequest, GetBundleResponse,
     GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse,
     HistoryCommitment as PbHistoryCommitment, IdentityBinding, JoinTicketRequest,
     JoinTicketResponse, ListRoomAdminsRequest, ListRoomAdminsResponse, Member, MembersRequest,
@@ -65,7 +66,7 @@ use unicode_normalization::UnicodeNormalization;
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_server::{
     BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord, CityGServer,
-    HistoryCommitment as ServerHistoryCommitment,
+    FsForwardLeapPolicy as ServerFsForwardLeapPolicy, HistoryCommitment as ServerHistoryCommitment,
     MergeAcceptanceStatus as ServerMergeAcceptanceStatus, MergeTicketBundle, ServerConfig,
     ServerOutcome,
 };
@@ -895,6 +896,16 @@ fn pb_history_commitment(commitment: ServerHistoryCommitment) -> PbHistoryCommit
     }
 }
 
+fn pb_fs_forward_leap_policy(policy: ServerFsForwardLeapPolicy) -> PbFsForwardLeapPolicy {
+    PbFsForwardLeapPolicy {
+        h: policy.h,
+        checkpoint_interval: policy.checkpoint_interval,
+        slack_anchor: policy.slack_anchor,
+        slack_first_device: policy.slack_first_device,
+        slack_device: policy.slack_device,
+    }
+}
+
 fn paginate_barrier_helper_slice<T: Clone>(
     items: &[T],
     page_offset: u32,
@@ -1431,6 +1442,8 @@ fn encode_merge_ticket_response(bundle: MergeTicketBundle) -> Result<Vec<u8>, Ap
         kem_tree_hash_after,
         current_history_view_id,
         current_history_commitment,
+        fs_forward_leap_policy,
+        last_accepted_ec,
         n_max,
         max_barrier_update_bytes,
     } = bundle;
@@ -1469,6 +1482,8 @@ fn encode_merge_ticket_response(bundle: MergeTicketBundle) -> Result<Vec<u8>, Ap
         max_barrier_update_bytes,
         current_history_view_id: current_history_view_id.to_vec(),
         current_history_commitment: Some(pb_history_commitment(current_history_commitment)),
+        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
+        last_accepted_ec,
     };
 
     let mut response_bytes = Vec::new();
@@ -2067,6 +2082,8 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         provisioning_nonce: ticket.provisioning_nonce.to_vec(),
         provisioning_issued_at_ms: ticket.provisioning_issued_at_ms,
         provisioning_expires_at_ms: ticket.provisioning_expires_at_ms,
+        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(ticket.fs_forward_leap_policy)),
+        last_accepted_ec: ticket.last_accepted_ec,
     };
 
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);

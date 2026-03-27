@@ -119,7 +119,11 @@ fn apply_local_published_barrier_merge(
         bundle,
         pending_barrier_state,
         mut forward_state_after,
+        fs_forward_leap_policy,
+        last_accepted_ec,
     } = published;
+    session.fs_forward_leap_policy = fs_forward_leap_policy;
+    session.last_accepted_ec = session.last_accepted_ec.max(last_accepted_ec);
     let activation_source_before_apply = capture_barrier_pending_activation_source(session);
     let has_barrier_update = matches!(
         bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE),
@@ -143,6 +147,7 @@ fn apply_local_published_barrier_merge(
     }
     if let Some(fs_ec) = header_u64(&bundle.header_map, hdr::HDR_FS_EC) {
         session.fs_ec = fs_ec;
+        session.last_accepted_ec = session.last_accepted_ec.max(fs_ec);
     }
     if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT) {
         session.fs_epoch_commit = commit;
@@ -319,6 +324,8 @@ async fn publish_revocation_merge_from_ticket(
         msphf_params_id,
         fs_policy_version,
         fs_epoch_base_ts,
+        fs_forward_leap_policy,
+        last_accepted_ec,
         kbroad_generation: _,
         barrier_version,
         cover_leaf_index: revoked_cover_leaf_index,
@@ -633,6 +640,14 @@ async fn publish_revocation_merge_from_ticket(
         bundle,
         pending_barrier_state,
         forward_state_after: forward_state,
+        fs_forward_leap_policy: FsForwardLeapPolicy {
+            h: fs_forward_leap_policy.h,
+            checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
+            slack_anchor: fs_forward_leap_policy.slack_anchor,
+            slack_first_device: fs_forward_leap_policy.slack_first_device,
+            slack_device: fs_forward_leap_policy.slack_device,
+        },
+        last_accepted_ec,
     })
 }
 
@@ -896,6 +911,8 @@ async fn perform_barrier_merge_inner(
         msphf_params_id,
         fs_policy_version,
         fs_epoch_base_ts,
+        fs_forward_leap_policy,
+        last_accepted_ec,
         kbroad_generation: _,
         barrier_version,
         cover_leaf_index,
@@ -1318,5 +1335,13 @@ async fn perform_barrier_merge_inner(
         bundle: prepared.bundle,
         pending_barrier_state: prepared.pending_barrier_state,
         forward_state_after: prepared.forward_state_after,
+        fs_forward_leap_policy: FsForwardLeapPolicy {
+            h: fs_forward_leap_policy.h,
+            checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
+            slack_anchor: fs_forward_leap_policy.slack_anchor,
+            slack_first_device: fs_forward_leap_policy.slack_first_device,
+            slack_device: fs_forward_leap_policy.slack_device,
+        },
+        last_accepted_ec,
     })
 }

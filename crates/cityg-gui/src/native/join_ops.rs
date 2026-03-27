@@ -208,6 +208,17 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         ticket.fs_policy_version
     };
     let fs_epoch_base_ts = ticket.fs_epoch_base_ts;
+    let fs_forward_leap_policy = ticket
+        .fs_forward_leap_policy
+        .as_ref()
+        .ok_or_else(|| anyhow!("join ticket missing fs_forward_leap_policy"))?;
+    if fs_forward_leap_policy.h == 0
+        || fs_forward_leap_policy.checkpoint_interval < fs_forward_leap_policy.h
+    {
+        return Err(anyhow!(
+            "join ticket carries invalid fs_forward_leap_policy window"
+        ));
+    }
     let kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
     let current_predecessor_kem_tree_hash_after =
         if ticket.current_predecessor_kem_tree_hash_after.is_empty() {
@@ -417,6 +428,14 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         msphf_params_id,
         fs_policy_version,
         fs_epoch_base_ts,
+        fs_forward_leap_policy: FsForwardLeapPolicy {
+            h: fs_forward_leap_policy.h,
+            checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
+            slack_anchor: fs_forward_leap_policy.slack_anchor,
+            slack_first_device: fs_forward_leap_policy.slack_first_device,
+            slack_device: fs_forward_leap_policy.slack_device,
+        },
+        last_accepted_ec: ticket.last_accepted_ec.max(fs_ec),
         last_fetch_timestamp_ms: None,
         msg_replay_state: MsgReplayState::default(),
         capss_witness: capss_witness_bytes,

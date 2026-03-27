@@ -3068,6 +3068,14 @@ mod tests {
             msphf_params_id: "params-v1".to_string(),
             fs_policy_version: "fs-v1".to_string(),
             fs_epoch_base_ts: 1_717_171_717,
+            fs_forward_leap_policy: cityg_api_client::FsForwardLeapPolicy {
+                h: 300,
+                checkpoint_interval: 3600,
+                slack_anchor: 0,
+                slack_first_device: 0,
+                slack_device: 4,
+            },
+            last_accepted_ec: 17,
             kbroad_generation: 3,
             barrier_version: 9,
             cover_leaf_index: 1,
@@ -3136,6 +3144,10 @@ mod tests {
         current_history_view_id: Vec<u8>,
         #[prost(message, optional, tag = "29")]
         current_history_commitment: Option<HistoryCommitmentPb>,
+        #[prost(message, optional, tag = "30")]
+        fs_forward_leap_policy: Option<FsForwardLeapPolicyPb>,
+        #[prost(uint64, tag = "31")]
+        last_accepted_ec: u64,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3148,6 +3160,20 @@ mod tests {
         prev_history_commitment_id: Vec<u8>,
         #[prost(uint64, tag = "4")]
         history_seq: u64,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct FsForwardLeapPolicyPb {
+        #[prost(uint64, tag = "1")]
+        h: u64,
+        #[prost(uint64, tag = "2")]
+        checkpoint_interval: u64,
+        #[prost(uint64, tag = "3")]
+        slack_anchor: u64,
+        #[prost(uint64, tag = "4")]
+        slack_first_device: u64,
+        #[prost(uint64, tag = "5")]
+        slack_device: u64,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3571,6 +3597,14 @@ mod tests {
             current_history_commitment: Some(encode_history_commitment(
                 &ticket.current_history_commitment,
             )),
+            fs_forward_leap_policy: Some(FsForwardLeapPolicyPb {
+                h: ticket.fs_forward_leap_policy.h,
+                checkpoint_interval: ticket.fs_forward_leap_policy.checkpoint_interval,
+                slack_anchor: ticket.fs_forward_leap_policy.slack_anchor,
+                slack_first_device: ticket.fs_forward_leap_policy.slack_first_device,
+                slack_device: ticket.fs_forward_leap_policy.slack_device,
+            }),
+            last_accepted_ec: ticket.last_accepted_ec,
         }
         .encode_to_vec())
     }

@@ -281,10 +281,23 @@ pub struct JoinTicketBundle {
     pub provisioning_issued_at_ms: u64,
     /// Expiry time for this join provisioning artifact.
     pub provisioning_expires_at_ms: u64,
+    /// Forward-Leap Guard policy window parameters for client-visible replay checks.
+    pub fs_forward_leap_policy: FsForwardLeapPolicy,
+    /// Current group-level last accepted forward-secrecy epoch counter.
+    pub last_accepted_ec: u64,
     /// Fixed barrier tree capacity.
     pub n_max: u64,
     /// Deployment-wide barrier update size limit.
     pub max_barrier_update_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsForwardLeapPolicy {
+    pub h: u64,
+    pub checkpoint_interval: u64,
+    pub slack_anchor: u64,
+    pub slack_first_device: u64,
+    pub slack_device: u64,
 }
 
 /// Server-local append-only authenticated history commitment.
@@ -364,6 +377,8 @@ pub struct MergeTicketBundle {
     pub kem_tree_hash_after: [u8; 32],
     pub current_history_view_id: [u8; 32],
     pub current_history_commitment: HistoryCommitment,
+    pub fs_forward_leap_policy: FsForwardLeapPolicy,
+    pub last_accepted_ec: u64,
     pub n_max: u64,
     pub max_barrier_update_bytes: u64,
 }
@@ -1076,6 +1091,13 @@ impl CityGServer {
         let provisioning_issued_at_ms = current_timestamp_ms();
         let provisioning_expires_at_ms =
             provisioning_issued_at_ms.saturating_add(JOIN_PROVISIONING_TTL_MS);
+        let fs_forward_leap_policy = FsForwardLeapPolicy {
+            h: self.acceptance_options.fs_policy_config.h,
+            checkpoint_interval: self.acceptance_options.fs_policy_config.checkpoint_interval,
+            slack_anchor: self.acceptance_options.fs_policy_config.slack_anchor,
+            slack_first_device: self.acceptance_options.fs_policy_config.slack_first_device,
+            slack_device: self.acceptance_options.fs_policy_config.slack_device,
+        };
         {
             let state = self.roster.groups.entry(gid.to_vec()).or_default();
             state.pending_join_finalize_auth.insert(
@@ -1115,6 +1137,8 @@ impl CityGServer {
             provisioning_nonce,
             provisioning_issued_at_ms,
             provisioning_expires_at_ms,
+            fs_forward_leap_policy,
+            last_accepted_ec: barrier_state.last_accepted_ec,
             n_max: barrier_n_max,
             max_barrier_update_bytes,
         })
@@ -1390,6 +1414,13 @@ impl CityGServer {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "7".to_string());
         let fs_epoch_base_ts = self.ctx.fs_base_ts().unwrap_or(0);
+        let fs_forward_leap_policy = FsForwardLeapPolicy {
+            h: self.acceptance_options.fs_policy_config.h,
+            checkpoint_interval: self.acceptance_options.fs_policy_config.checkpoint_interval,
+            slack_anchor: self.acceptance_options.fs_policy_config.slack_anchor,
+            slack_first_device: self.acceptance_options.fs_policy_config.slack_first_device,
+            slack_device: self.acceptance_options.fs_policy_config.slack_device,
+        };
 
         Ok(MergeTicketBundle {
             gid: *gid,
@@ -1419,6 +1450,8 @@ impl CityGServer {
             kem_tree_hash_after: barrier_state.kem_tree_hash_after,
             current_history_view_id: current_history_commitment.history_view_id,
             current_history_commitment,
+            fs_forward_leap_policy,
+            last_accepted_ec: barrier_state.last_accepted_ec,
             n_max: barrier_n_max,
             max_barrier_update_bytes,
         })

@@ -517,6 +517,15 @@ pub(super) fn validate_client_visible_activation_guards(
     session: &AppSession,
     header_map: &BTreeMap<u64, Value>,
 ) -> Result<()> {
+    let fs_policy_version = header_policy_version(header_map, hdr::HDR_FS_POLICY_VERSION)
+        .ok_or_else(|| {
+            anyhow!("client-side activation guard failed (944.6): missing fs_policy_version")
+        })?;
+    if !session.fs_policy_version.is_empty() && fs_policy_version != session.fs_policy_version {
+        return Err(anyhow!(
+            "client-side activation guard failed (944.6): fs_policy_version mismatch"
+        ));
+    }
     let fs_epoch_base_ts = header_u64(header_map, hdr::HDR_FS_EPOCH_BASE_TS).ok_or_else(|| {
         anyhow!("client-side activation guard failed (945.0): missing fs_epoch_base_ts")
     })?;
@@ -545,6 +554,31 @@ pub(super) fn validate_client_visible_activation_guards(
         anyhow!("client-side activation guard failed (947.2): missing barrier_version")
     })?;
     let barrier_update_digest = extract_barrier_update_digest(header_map)?.unwrap_or([0u8; 32]);
+    let fs_caps = session.fs_forward_leap_policy.caps().map_err(|_| {
+        anyhow!("client-side activation guard failed (948.0): invalid local fs policy window")
+    })?;
+    if fs_ec > session.last_accepted_ec.saturating_add(fs_caps.anchor_max) {
+        return Err(anyhow!(
+            "client-side activation guard failed (947.6): fs_ec exceeds local group forward-jump window"
+        ));
+    }
+    if fs_dev_prev_commit == [0u8; 32] {
+        if fs_ec
+            > session
+                .last_accepted_ec
+                .saturating_add(fs_caps.first_device_max)
+        {
+            return Err(anyhow!(
+                "client-side activation guard failed (947.5): new-device fs_ec exceeds local first-device forward-jump window"
+            ));
+        }
+    } else if author_device_pk == session.pop_public_key.as_slice()
+        && fs_ec > session.fs_ec.saturating_add(fs_caps.device_max)
+    {
+        return Err(anyhow!(
+            "client-side activation guard failed (947.4): local device fs_ec exceeds local device forward-jump window"
+        ));
+    }
     let expected_fs_dev_commit = compute_fs_dev_commit_v2(
         author_device_pk,
         fs_ec,
@@ -657,6 +691,7 @@ pub(super) fn apply_pending_barrier_activation_with_source(
         validate_pending_activation_source_state(current_source, &pending)?;
         let BarrierPendingState {
             barrier_version,
+            fs_ec,
             k_barrier_new,
             kem_tree_hash_after,
             k_fs_after_pcs,
@@ -672,6 +707,7 @@ pub(super) fn apply_pending_barrier_activation_with_source(
         session.barrier_state.barrier_roots_hash = revocation_roots_hash;
         session.barrier_state.k_barrier = k_barrier_new;
         session.barrier_state.kem_tree_hash_after = kem_tree_hash_after;
+        session.last_accepted_ec = session.last_accepted_ec.max(fs_ec);
         for (node, material) in on_path_key_material {
             session.barrier_state.dk_nodes.insert(node, material);
         }

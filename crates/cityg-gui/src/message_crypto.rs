@@ -107,7 +107,7 @@ impl MsgReplayState {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Debug, PartialEq, Eq)]
 pub(crate) struct PersistedMsgReplayState {
     #[serde(default)]
     tuple_tag_hex: String,
@@ -119,7 +119,7 @@ pub(crate) struct PersistedMsgReplayState {
     next_seen_order: u64,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Debug, PartialEq, Eq)]
 struct PersistedMsgReplayTupleState {
     #[serde(default)]
     tuple_tag_hex: String,
@@ -129,6 +129,16 @@ struct PersistedMsgReplayTupleState {
     seen_msg_indices: Vec<u64>,
     #[serde(default)]
     last_seen_order: u64,
+}
+
+impl PersistedMsgReplayTupleState {
+    fn semantic_key(&self) -> (&str, &str, &Vec<u64>) {
+        (
+            self.tuple_tag_hex.as_str(),
+            self.context_id_hex.as_str(),
+            &self.seen_msg_indices,
+        )
+    }
 }
 
 impl PersistedMsgReplayState {
@@ -194,6 +204,21 @@ impl PersistedMsgReplayState {
                 .unwrap_or(0),
         );
         Ok(runtime)
+    }
+
+    pub(crate) fn semantically_equivalent(&self, other: &Self) -> bool {
+        self.tuple_tag_hex == other.tuple_tag_hex
+            && self.seen_msg_indices == other.seen_msg_indices
+            && self
+                .tuples
+                .iter()
+                .map(PersistedMsgReplayTupleState::semantic_key)
+                .collect::<Vec<_>>()
+                == other
+                    .tuples
+                    .iter()
+                    .map(PersistedMsgReplayTupleState::semantic_key)
+                    .collect::<Vec<_>>()
     }
 }
 
