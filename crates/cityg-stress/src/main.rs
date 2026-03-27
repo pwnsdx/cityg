@@ -1049,10 +1049,12 @@ async fn run_worker(
                     worker_log: &worker_log,
                     worker_id,
                     round,
+                    attempt_index: attempt,
                     room_id: &room_id,
                     count,
                     watch_mode,
                     leave_order: &leave_order,
+                    inject_client_restart: config.client_restart_every_secs > 0 && attempt == 1,
                 },
             )
             .await;
@@ -1247,10 +1249,12 @@ struct WorkerRoundAttempt<'a> {
     worker_log: &'a Path,
     worker_id: usize,
     round: usize,
+    attempt_index: usize,
     room_id: &'a str,
     count: usize,
     watch_mode: bool,
     leave_order: &'a str,
+    inject_client_restart: bool,
 }
 
 async fn run_worker_round_attempt(
@@ -1281,12 +1285,16 @@ async fn run_worker_round_attempt(
 
     let log_file = open_append(attempt.worker_log)?;
     let err_file = log_file.try_clone().context("clone worker log file")?;
-    let alias_base = format!("stress-w{}-r{}", attempt.worker_id, attempt.round);
+    let alias_base = format!(
+        "stress-w{}-r{}-a{}",
+        attempt.worker_id, attempt.round, attempt.attempt_index
+    );
     let session_artifact_dir = config.capture_client_state_artifacts.then(|| {
         config.artifact_dir.join(format!(
-            "worker-{worker:02}-round-{round:03}-client-state",
+            "worker-{worker:02}-round-{round:03}-attempt-{attempt:02}-client-state",
             worker = attempt.worker_id,
-            round = attempt.round
+            round = attempt.round,
+            attempt = attempt.attempt_index,
         ))
     });
     let mut command = Command::new(&config.join_leave_bin);
@@ -1320,7 +1328,7 @@ async fn run_worker_round_attempt(
     let mut child = command
         .spawn()
         .with_context(|| format!("run {}", config.join_leave_bin.display()))?;
-    let status = if config.client_restart_every_secs > 0 {
+    let status = if attempt.inject_client_restart && config.client_restart_every_secs > 0 {
         tokio::select! {
             status = child.wait() => {
                 status.with_context(|| format!("run {}", config.join_leave_bin.display()))?

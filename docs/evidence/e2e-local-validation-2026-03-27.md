@@ -9,7 +9,8 @@ candidate binaries on `2026-03-27`.
 - Validate fast API/GUI regression flows
 - Validate the client-state hardening gate
 - Validate one real `cityg-stress` smoke run pinned to rebuilt binaries
-- Define the next extended E2E matrix to run after the smoke baseline
+- Validate targeted restart-chaos and lane/head topology flows
+- Leave only the remaining churn/history-specific flows for the next pass
 
 ## Environment
 
@@ -28,6 +29,8 @@ native GUI/test flows do not fail spuriously on the default host thread stack.
 - `/Users/admin/Desktop/Repositories/cityg/target/debug/cityg-api`
 - `/Users/admin/Desktop/Repositories/cityg/target/debug/join_leave`
 - `/Users/admin/Desktop/Repositories/cityg/target/debug/cityg-stress`
+- `/tmp/cityg-target-client-restart/debug/cityg-stress` for the dedicated
+  client-restart and lane/head validation reruns
 
 ## Phase 0: Runtime Baseline
 
@@ -116,7 +119,8 @@ of the real server behavior.
 - Phase 0: passed
 - Phase 1: passed
 - Phase 2 smoke: passed on rebuilt candidate binaries
-- Extended soak/load/chaos matrix: partially run
+- Extended soak/load/chaos matrix: partially run, with qualified server restart,
+  qualified injected client restart, and lane/head extremes validated
 
 ## Extended Matrix Executed
 
@@ -164,6 +168,80 @@ Observed:
 Artifacts:
 
 - `/tmp/cityg-stress-flow-f-restarts`
+
+### Flow F (qualified): injected client restart with successful retry
+
+Passed and did exercise a real `client-restart-injected` kill followed by a
+successful retry on a fresh room:
+
+```text
+workers_passed=1 workers_failed=0 rounds=1/1 restarts=0 accept_ok=9 refresh_conflicts=2
+```
+
+Observed:
+
+- `client-restarts.log` is present
+- attempt 1 was killed at the configured 20s boundary
+- `cityg-stress` retried the same logical round on a fresh room
+- attempt 2 completed successfully without a second injected kill
+- retry-specific alias bases and client-state directories prevented false TOFU
+  collisions across attempts
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-client-restart`
+
+### Flow G: lanes / heads extremes
+
+Passed on both tested extremes:
+
+```text
+L1/H1: workers_passed=2 workers_failed=0 rounds=4/4 accept_ok=23 refresh_conflicts=3
+L8/H8: workers_passed=2 workers_failed=0 rounds=4/4 accept_ok=19 refresh_conflicts=3
+```
+
+Observed:
+
+- `CITYG_SERVER_GROUP_LANES=1`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=1` stayed
+  green under short churn + watch traffic
+- `CITYG_SERVER_GROUP_LANES=8`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=8` also
+  stayed green under the same workload
+- no readiness regressions or worker failures appeared at either topology
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-g-l1-h1`
+- `/tmp/cityg-stress-flow-g-l8-h8`
+
+### Flow E: two-worker watch + burst
+
+Passed:
+
+```text
+workers_passed=2 workers_failed=0 rounds=8/8 accept_ok=46 refresh_conflicts=14
+```
+
+Observed:
+
+- two concurrent workers stayed green in watch mode
+- short message bursts were delivered without worker failure
+- refresh conflicts remained recoverable and did not strand the rounds
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-e`
+
+### Flow G: lanes / heads midline
+
+Passed on the documented `4/4` topology:
+
+```text
+L4/H4: workers_passed=2 workers_failed=0 rounds=6/6 accept_ok=35 refresh_conflicts=6
+```
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-g-l4-h4`
 
 ## Next E2E Matrix
 
@@ -285,8 +363,10 @@ target/debug/cityg-stress --plain \
 Goal:
 
 - validate readiness, replay, and client recovery after server restart
-- note: this flow does not currently validate injected client restarts unless a
-  single `join_leave` round is made long-lived enough to cross the client timer
+- this server-restart variant is already qualified in
+  `/tmp/cityg-stress-flow-f-restarts`
+- injected client restart is now qualified separately in
+  `/tmp/cityg-stress-flow-client-restart`
 
 Command:
 
@@ -320,10 +400,10 @@ Goal:
 
 Matrix:
 
-- `CITYG_SERVER_GROUP_LANES=1`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=1`
-- `CITYG_SERVER_GROUP_LANES=2`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=2`
-- `CITYG_SERVER_GROUP_LANES=4`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=4`
-- `CITYG_SERVER_GROUP_LANES=8`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=8`
+- done: `CITYG_SERVER_GROUP_LANES=1`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=1`
+- next: `CITYG_SERVER_GROUP_LANES=2`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=2`
+- done: `CITYG_SERVER_GROUP_LANES=4`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=4`
+- done: `CITYG_SERVER_GROUP_LANES=8`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=8`
 
 Template:
 
