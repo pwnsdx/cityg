@@ -25,13 +25,13 @@ use barrier_shared::{
     DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, apply_join_set_to_snapshot,
     apply_revoked_set_to_snapshot, barrier_path_nodes, blank_leaf_and_path,
     collect_resolution_targets, compute_barrier_pkhash, compute_barrier_tree_hash,
-    compute_revocation_roots_hash, expected_barrier_tree_nodes, should_retry_ticket_http_error,
-    sibling_node, ticket_retry_delay, validate_barrier_n_max,
+    compute_revocation_roots_hash, encode_history_commitment_header, expected_barrier_tree_nodes,
+    should_retry_ticket_http_error, sibling_node, ticket_retry_delay, validate_barrier_n_max,
 };
 #[cfg(test)]
 use barrier_shared::{
     TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS, TICKET_RETRY_MAX_DELAY_MS,
-    blank_internal_path_from_leaf,
+    blank_internal_path_from_leaf, decode_history_commitment_header,
 };
 use ciborium::value::{Integer, Value};
 #[cfg(test)]
@@ -848,6 +848,7 @@ struct Session {
     seed_commit: [u8; 32],
     seed_bundle_commit: [u8; 32],
     fs_fingerprint: Option<[u8; 32]>,
+    join_finalize_auth_token: [u8; 32],
     stored_header_map: BTreeMap<u64, Value>,
     #[cfg(test)]
     msg_replay_state: MsgReplayState,
@@ -1090,6 +1091,8 @@ async fn prepare_join_session_with_identity(
     let revoked_root = bytes32("revoked_root", &ticket.revoked_root)?;
     let leaf_id = bytes32("leaf_id", &ticket.leaf_id)?;
     let pox_r_commit = bytes32("pox_r_commit", &ticket.pox_r_commit)?;
+    let join_finalize_auth_token =
+        bytes32("join_finalize_auth_token", &ticket.join_finalize_auth_token)?;
 
     let kbroad_public = if ticket.kbroad_public.is_empty() {
         return Err(anyhow!("server returned empty KBROAD key"));
@@ -1273,6 +1276,7 @@ async fn prepare_join_session_with_identity(
         seed_commit,
         seed_bundle_commit,
         fs_fingerprint,
+        join_finalize_auth_token,
         stored_header_map: stored.header_map.clone(),
         #[cfg(test)]
         msg_replay_state: MsgReplayState::default(),
@@ -1375,6 +1379,15 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         hdr::HDR_KBROAD_PUB,
         Value::Bytes(ticket.kbroad_public.clone()),
     );
+    if session.join_finalize_auth_token == [0u8; 32] {
+        return Err(anyhow!(
+            "join finalize requires a non-zero server-issued join_finalize_auth_token"
+        ));
+    }
+    header.insert(
+        hdr::HDR_JOIN_FINALIZE_AUTH,
+        Value::Bytes(session.join_finalize_auth_token.to_vec()),
+    );
 
     let cat = bytes32("cat", &ticket.cat)?;
     let pox_r_commit = bytes32("pox_r_commit", &ticket.pox_r_commit)?;
@@ -1430,6 +1443,12 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         &revoked_resolution.history_view_id,
         &revoked_resolution.history_commitment,
     )?;
+    header.insert(
+        hdr::HDR_BARRIER_HISTORY_COMMITMENT,
+        Value::Bytes(encode_history_commitment_header(
+            &barrier_tree_response.history_commitment,
+        )?),
+    );
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     apply_join_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
@@ -1707,6 +1726,7 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     session.seed_ctx_hash = bundle.hp_binding.seed_ctx_hash;
     session.seed_commit = bundle.hp_binding.seed_commit;
     session.seed_bundle_commit = bundle.hp_binding.seed_bundle_commit;
+    session.join_finalize_auth_token = [0u8; 32];
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
         derive_fs_fingerprint_from_fields(
             ticket.fs_policy_version.as_str(),
@@ -1868,6 +1888,12 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         &revoked_resolution.history_view_id,
         &revoked_resolution.history_commitment,
     )?;
+    header.insert(
+        hdr::HDR_BARRIER_HISTORY_COMMITMENT,
+        Value::Bytes(encode_history_commitment_header(
+            &barrier_tree_response.history_commitment,
+        )?),
+    );
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     apply_join_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
@@ -2961,6 +2987,7 @@ mod tests {
             seed_commit: [0xBC; 32],
             seed_bundle_commit: [0xCD; 32],
             fs_fingerprint: None,
+            join_finalize_auth_token: [0xCE; 32],
             stored_header_map: BTreeMap::new(),
             #[cfg(test)]
             msg_replay_state: MsgReplayState::default(),
@@ -3621,19 +3648,57 @@ mod tests {
     fn encode_barrier_tree_snapshot(
         tree: &cityg_api_client::BarrierPublicTree,
         history_commitment: &HistoryCommitment,
+        entry_offset: u32,
+        next_entry_offset: Option<u32>,
+        pk_entries: Vec<Vec<u8>>,
     ) -> Vec<u8> {
         let total_entries = u32::try_from(tree.pk_entries.len()).expect("tree entries fit in u32");
         BarrierFetchPublicTreeResponsePb {
             n_max: tree.n_max,
             kem_tree_hash_after: tree.kem_tree_hash_after.to_vec(),
-            pk_entries: tree.pk_entries.clone(),
+            pk_entries,
             history_view_id: history_commitment.history_view_id.to_vec(),
             history_commitment: Some(encode_history_commitment(history_commitment)),
-            entry_offset: 0,
-            next_entry_offset: None,
+            entry_offset,
+            next_entry_offset,
             total_entries,
         }
         .encode_to_vec()
+    }
+
+    fn encode_barrier_tree_snapshot_pages(
+        tree: &cityg_api_client::BarrierPublicTree,
+        history_commitment: &HistoryCommitment,
+    ) -> Vec<MockResponse> {
+        const MOCK_BARRIER_HELPER_PAGE_LIMIT: usize = 512;
+
+        let total_entries = tree.pk_entries.len();
+        if total_entries <= MOCK_BARRIER_HELPER_PAGE_LIMIT {
+            return vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                tree,
+                history_commitment,
+                0,
+                None,
+                tree.pk_entries.clone(),
+            ))];
+        }
+
+        let mut responses = Vec::new();
+        let mut offset = 0usize;
+        while offset < total_entries {
+            let end = (offset + MOCK_BARRIER_HELPER_PAGE_LIMIT).min(total_entries);
+            let next_entry_offset = (end < total_entries)
+                .then(|| u32::try_from(end).expect("paginated tree entry offset fits in u32"));
+            responses.push(MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                tree,
+                history_commitment,
+                u32::try_from(offset).expect("paginated tree entry offset fits in u32"),
+                next_entry_offset,
+                tree.pk_entries[offset..end].to_vec(),
+            )));
+            offset = end;
+        }
+        responses
     }
 
     fn encode_join_records(
@@ -4841,6 +4906,7 @@ mod tests {
             seed_commit: [0x88; 32],
             seed_bundle_commit: [0x99; 32],
             fs_fingerprint: None,
+            join_finalize_auth_token: [0xAA; 32],
             stored_header_map: BTreeMap::new(),
             #[cfg(test)]
             msg_replay_state: MsgReplayState::default(),
@@ -5064,6 +5130,24 @@ mod tests {
                 "stored join-finalize bundle missing barrier_update_reason"
             ))?;
         assert_eq!(reason, 2);
+        let join_finalize_auth = stored
+            .header_map
+            .get(&hdr::HDR_JOIN_FINALIZE_AUTH)
+            .and_then(Value::as_bytes)
+            .ok_or(anyhow!(
+                "stored join-finalize bundle missing join_finalize_auth"
+            ))?;
+        assert_eq!(join_finalize_auth.len(), 32);
+        let history_commitment = stored
+            .header_map
+            .get(&hdr::HDR_BARRIER_HISTORY_COMMITMENT)
+            .and_then(Value::as_bytes)
+            .ok_or(anyhow!(
+                "stored join-finalize bundle missing barrier history commitment"
+            ))?;
+        let decoded_history = decode_history_commitment_header(history_commitment)?;
+        assert_ne!(decoded_history.history_view_id, [0u8; 32]);
+        assert_ne!(decoded_history.history_commitment_id, [0u8; 32]);
 
         handle.abort();
         let _ = handle.await;
@@ -5099,6 +5183,24 @@ mod tests {
                 "stored second join-finalize bundle missing barrier_update_reason"
             ))?;
         assert_eq!(reason, 2);
+        let join_finalize_auth = stored
+            .header_map
+            .get(&hdr::HDR_JOIN_FINALIZE_AUTH)
+            .and_then(Value::as_bytes)
+            .ok_or(anyhow!(
+                "stored second join-finalize bundle missing join_finalize_auth"
+            ))?;
+        assert_eq!(join_finalize_auth.len(), 32);
+        let history_commitment = stored
+            .header_map
+            .get(&hdr::HDR_BARRIER_HISTORY_COMMITMENT)
+            .and_then(Value::as_bytes)
+            .ok_or(anyhow!(
+                "stored second join-finalize bundle missing barrier history commitment"
+            ))?;
+        let decoded_history = decode_history_commitment_header(history_commitment)?;
+        assert_ne!(decoded_history.history_view_id, [0u8; 32]);
+        assert_ne!(decoded_history.history_commitment_id, [0u8; 32]);
 
         handle.abort();
         let _ = handle.await;
@@ -5157,10 +5259,10 @@ mod tests {
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                encode_barrier_tree_snapshot_pages(
                     &fixture.barrier_tree_snapshot,
                     &fixture.ticket.current_history_commitment,
-                ))],
+                ),
             ),
             (
                 "/v1/barrier/resolve_joins_since",
@@ -5226,10 +5328,10 @@ mod tests {
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                encode_barrier_tree_snapshot_pages(
                     &fixture.barrier_tree_snapshot,
                     &ticket.current_history_commitment,
-                ))],
+                ),
             ),
             (
                 "/v1/barrier/resolve_joins_since",
@@ -5624,10 +5726,10 @@ mod tests {
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                encode_barrier_tree_snapshot_pages(
                     &fixture.barrier_tree_snapshot,
                     &bad_ticket.current_history_commitment,
-                ))],
+                ),
             ),
         ]);
         let (server_url, handle) = start_leave_mock_server(state.clone()).await?;
@@ -5664,10 +5766,10 @@ mod tests {
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                encode_barrier_tree_snapshot_pages(
                     &bad_snapshot,
                     &bad_ticket.current_history_commitment,
-                ))],
+                ),
             ),
         ]);
         let (server_url, handle) = start_leave_mock_server(state).await?;
@@ -5707,10 +5809,10 @@ mod tests {
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                encode_barrier_tree_snapshot_pages(
                     &fixture.barrier_tree_snapshot,
                     &adjusted_ticket.current_history_commitment,
-                ))],
+                ),
             ),
             (
                 "/v1/barrier/resolve_joins_since",
@@ -5799,10 +5901,10 @@ mod tests {
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
+                encode_barrier_tree_snapshot_pages(
                     &fixture.barrier_tree_snapshot,
                     &fixture.ticket.current_history_commitment,
-                ))],
+                ),
             ),
             (
                 "/v1/barrier/resolve_joins_since",

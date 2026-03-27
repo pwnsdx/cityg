@@ -196,7 +196,10 @@ fn apply_local_published_barrier_merge(
     install_current_public_tree_cache(session, (*current_public_tree).clone())?;
     // The accepted local publish advances the authenticated current state, but
     // the post-accept HistoryCommitment is only available from a subsequent
-    // helper lookup / merge ticket refresh.
+    // helper lookup / merge ticket refresh. Drop the current-tree cache at the
+    // same time so later full-chain checks cannot reuse a snapshot without an
+    // authenticated current-state commitment.
+    clear_current_public_tree_cache(&mut session.barrier_state);
     session.barrier_state.current_history_view_id = [0u8; 32];
     session.barrier_state.current_history_commitment = None;
 

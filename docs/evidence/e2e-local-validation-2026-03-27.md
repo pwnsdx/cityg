@@ -1,0 +1,302 @@
+# Local E2E Validation 2026-03-27
+
+This note records the local end-to-end validation run executed against the current
+candidate binaries on `2026-03-27`.
+
+## Scope
+
+- Validate real `cityg-api` startup/readiness outside tests
+- Validate fast API/GUI regression flows
+- Validate the client-state hardening gate
+- Validate one real `cityg-stress` smoke run pinned to rebuilt binaries
+- Define the next extended E2E matrix to run after the smoke baseline
+
+## Environment
+
+Run all commands from:
+
+```bash
+cd /Users/admin/Desktop/Repositories/cityg
+source ./scripts/cargo_repo_env.sh
+```
+
+`cargo_repo_env.sh` now also exports a repo-local `RUST_MIN_STACK` floor so the
+native GUI/test flows do not fail spuriously on the default host thread stack.
+
+## Candidate Binaries
+
+- `/Users/admin/Desktop/Repositories/cityg/target/debug/cityg-api`
+- `/Users/admin/Desktop/Repositories/cityg/target/debug/join_leave`
+- `/Users/admin/Desktop/Repositories/cityg/target/debug/cityg-stress`
+
+## Phase 0: Runtime Baseline
+
+Validated:
+
+- rebuilt `cityg-api`
+- process listens on the requested socket
+- `/health/detailed` returns healthy
+
+Artifacts:
+
+- `/tmp/cityg-phase0-server.log`
+- `/tmp/cityg-phase0-health.json`
+- `/tmp/cityg-phase0-lsof.txt`
+
+## Phase 1: Fast Regression Flows
+
+Passed:
+
+- `cargo test --locked -p cityg-api --test integration end_to_end_demo_flow -- --exact`
+- `cargo test --locked -p cityg-gui --bin cityg-gui --features native-app native::tests::perform_join_second_member_can_send_immediately -- --exact`
+- `cargo test --locked -p cityg-gui --bin cityg-gui --features native-app native::tests::send_fetch_and_members_roundtrip -- --exact`
+- `cargo test --locked -p cityg-gui --bin cityg-gui --features native-app native::tests::epoch_sync_after_second_join_keeps_local_pcs_refresh_valid -- --exact`
+- `cargo test --locked -p cityg-gui --bin cityg-gui --features native-app native::tests::join_finalize_fault_injection_after_publish_recovers_via_epoch_sync -- --exact`
+- `./scripts/verify_client_state_hardening.sh`
+
+Fixes required during this phase:
+
+1. GUI local publish path was leaving a cached current public tree alive after
+   clearing the authenticated current history commitment.
+2. GUI epoch sync was installing the post-snapshot public tree before updating
+   `barrier_version` / `kem_tree_hash_after`.
+3. The client-state manifest referenced a stale GUI test symbol.
+
+## Phase 2: Smoke
+
+First smoke attempt failed in `join/bootstrap`:
+
+- `join_leave --watch` emitted a `barrier_update` without the required
+  `HDR_JOIN_FINALIZE_AUTH` and `HDR_BARRIER_HISTORY_COMMITMENT` headers
+- `cityg-stress` retried on fresh rooms, but reused the same alias base within
+  the worker round, leading to expected TOFU alias collisions after the first
+  failed attempt
+
+Artifacts from the failed run:
+
+- `/tmp/cityg-stress-smoke-20260327`
+
+Fix applied:
+
+- `join_leave` now emits the same join-finalize / barrier-history headers as the
+  main GUI runtime
+
+Second smoke attempt passed:
+
+```text
+workers_passed=1 workers_failed=0 rounds=2/2 capacity=skipped accept_ok=10 refresh_conflicts=2
+```
+
+Artifacts from the passing run:
+
+- `/tmp/cityg-stress-smoke-20260327-r2`
+
+Important files in the artifact directory:
+
+- `summary.txt`
+- `events.log`
+- `server.log`
+- `initial-health.json`
+- `final-health.json`
+- `initial-metrics.txt`
+- `final-metrics.txt`
+- `worker-01.log`
+- `worker-01.status`
+- `worker-*-client-state/`
+
+## Additional Test-Harness Cleanup
+
+`join_leave` mock tests had fallen behind the helper pagination contract. The
+test-only `FetchBarrierPublicTree` encoder now paginates snapshots larger than
+the helper page limit, so the leave-path regression tests remain representative
+of the real server behavior.
+
+## Result
+
+- Phase 0: passed
+- Phase 1: passed
+- Phase 2 smoke: passed on rebuilt candidate binaries
+- Extended soak/load/chaos matrix: not run yet
+
+## Next E2E Matrix
+
+Run these next, in order.
+
+### Flow A: Bootstrap -> first join -> second join -> bidirectional send/fetch
+
+Goal:
+
+- re-confirm the baseline watch flow and message burst path on rebuilt binaries
+
+Command:
+
+```bash
+target/debug/cityg-stress --plain \
+  --server-bind 127.0.0.1:18081 \
+  --server-url http://127.0.0.1:18081 \
+  --workers 1 \
+  --rounds-per-worker 3 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 0 \
+  --watch-percent 100 \
+  --message-burst-count 4 \
+  --message-burst-interval-ms 25 \
+  --api-bin /Users/admin/Desktop/Repositories/cityg/target/debug/cityg-api \
+  --join-leave-bin /Users/admin/Desktop/Repositories/cityg/target/debug/join_leave \
+  --artifact-dir /tmp/cityg-stress-flow-a \
+  --require-metrics
+```
+
+### Flow B: second member leaves -> members/window sync -> rejoin -> send again
+
+Goal:
+
+- validate leave/rejoin churn and UI-visible membership convergence
+
+Command:
+
+```bash
+target/debug/cityg-stress --plain \
+  --server-bind 127.0.0.1:18082 \
+  --server-url http://127.0.0.1:18082 \
+  --workers 1 \
+  --rounds-per-worker 3 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 1 \
+  --watch-percent 100 \
+  --message-burst-count 2 \
+  --message-burst-interval-ms 25 \
+  --api-bin /Users/admin/Desktop/Repositories/cityg/target/debug/cityg-api \
+  --join-leave-bin /Users/admin/Desktop/Repositories/cityg/target/debug/join_leave \
+  --artifact-dir /tmp/cityg-stress-flow-b \
+  --require-metrics
+```
+
+### Flow C: proactive PCS refresh -> epoch sync -> send/fetch stable
+
+Goal:
+
+- validate that refresh conflicts stay bounded and no client remains stuck
+
+Command:
+
+```bash
+cargo test --locked -p cityg-gui --bin cityg-gui --features native-app \
+  native::tests::epoch_sync_after_second_join_keeps_local_pcs_refresh_valid -- --exact
+```
+
+### Flow D: accepted merge -> interruption -> restart -> history lookup recovery
+
+Goal:
+
+- validate pending merge recovery under restart/interruption
+
+Command:
+
+```bash
+cargo test --locked -p cityg-gui --bin cityg-gui --features native-app \
+  native::tests::join_finalize_fault_injection_after_publish_recovers_via_epoch_sync -- --exact
+```
+
+### Flow E: watch mode with burst > 1
+
+Goal:
+
+- stress message ordering and notification delivery under watch mode
+
+Command:
+
+```bash
+target/debug/cityg-stress --plain \
+  --server-bind 127.0.0.1:18083 \
+  --server-url http://127.0.0.1:18083 \
+  --workers 2 \
+  --rounds-per-worker 4 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --message-burst-count 6 \
+  --message-burst-interval-ms 10 \
+  --api-bin /Users/admin/Desktop/Repositories/cityg/target/debug/cityg-api \
+  --join-leave-bin /Users/admin/Desktop/Repositories/cityg/target/debug/join_leave \
+  --artifact-dir /tmp/cityg-stress-flow-e \
+  --require-metrics
+```
+
+### Flow F: managed server restart during active watch traffic
+
+Goal:
+
+- validate readiness, replay, and client recovery after server restart
+
+Command:
+
+```bash
+target/debug/cityg-stress --plain \
+  --server-bind 127.0.0.1:18084 \
+  --server-url http://127.0.0.1:18084 \
+  --workers 1 \
+  --rounds-per-worker 6 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --restart-every-secs 45 \
+  --client-restart-every-secs 20 \
+  --capture-client-state-artifacts \
+  --message-burst-count 2 \
+  --message-burst-interval-ms 25 \
+  --api-bin /Users/admin/Desktop/Repositories/cityg/target/debug/cityg-api \
+  --join-leave-bin /Users/admin/Desktop/Repositories/cityg/target/debug/join_leave \
+  --artifact-dir /tmp/cityg-stress-flow-f \
+  --require-metrics
+```
+
+### Flow G: lanes / heads variants
+
+Goal:
+
+- detect regressions under lane/head topology changes
+
+Matrix:
+
+- `CITYG_SERVER_GROUP_LANES=1`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=1`
+- `CITYG_SERVER_GROUP_LANES=2`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=2`
+- `CITYG_SERVER_GROUP_LANES=4`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=4`
+- `CITYG_SERVER_GROUP_LANES=8`, `CITYG_STRESS_MAX_CONCURRENT_HEADS=8`
+
+Template:
+
+```bash
+CITYG_SERVER_GROUP_LANES=4 \
+CITYG_STRESS_MAX_CONCURRENT_HEADS=4 \
+target/debug/cityg-stress --plain \
+  --server-bind 127.0.0.1:18085 \
+  --server-url http://127.0.0.1:18085 \
+  --workers 2 \
+  --rounds-per-worker 3 \
+  --min-count 2 \
+  --max-count 3 \
+  --leaves-per-room 1 \
+  --watch-percent 100 \
+  --message-burst-count 2 \
+  --message-burst-interval-ms 25 \
+  --api-bin /Users/admin/Desktop/Repositories/cityg/target/debug/cityg-api \
+  --join-leave-bin /Users/admin/Desktop/Repositories/cityg/target/debug/join_leave \
+  --artifact-dir /tmp/cityg-stress-flow-g-l4-h4 \
+  --require-metrics
+```
+
+## Failure Classification
+
+Classify any future E2E failure as one of:
+
+- startup/readiness
+- join/bootstrap
+- send/fetch
+- epoch sync/recovery
+- restart chaos
+- capacity/backpressure

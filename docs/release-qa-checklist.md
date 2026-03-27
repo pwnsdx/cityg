@@ -6,6 +6,9 @@ For longer-running staging validation, see `/Users/admin/Desktop/Repositories/ci
 
 ## 1. Build and Unit/Integration Tests
 
+Run these from a shell that sourced `/Users/admin/Desktop/Repositories/cityg/scripts/cargo_repo_env.sh`
+so the repo-local Cargo environment and native-app test stack floor are active.
+
 - [ ] `cargo test -p cityg-server`
 - [ ] `cargo test -p cityg-api`
 - [ ] `cargo test -p cityg-gui --features native-app`

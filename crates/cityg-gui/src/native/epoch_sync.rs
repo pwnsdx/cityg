@@ -351,6 +351,8 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
                         ));
                     }
                     apply_recovered_barrier_state(&mut session, recovered, true)?;
+                    session.barrier_state.barrier_version = ticket.barrier_version;
+                    session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
                     install_current_public_tree_cache(
                         &mut session,
                         (*chain_check_result.snapshot_post).clone(),

@@ -27,6 +27,16 @@ A candidate build is considered pre-production ready only if all of the followin
 
 ## Prerequisites
 
+Prefer running the commands below after sourcing the repo-local Cargo environment:
+
+```bash
+cd /Users/admin/Desktop/Repositories/cityg
+source ./scripts/cargo_repo_env.sh
+```
+
+This pins Cargo to the repo-local cache/home and applies the native-app test
+stack floor used by the validation scripts.
+
 - built binaries:
   - `cargo build -p cityg-api`
   - `cargo build -p cityg-gui --features native-app --bin join_leave`

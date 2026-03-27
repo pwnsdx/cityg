@@ -56,8 +56,8 @@
         },
         {
           "crate": "cityg-gui",
-          "test": "tests::pending_join_finalize_history_lookup_discards_after_newer_version_404",
-          "expectation": "Authenticated non-acceptance after a newer version does not mark the session recovered."
+          "test": "tests::pending_join_finalize_history_lookup_404_after_newer_version_requires_recovery",
+          "expectation": "Authenticated non-acceptance after a newer version does not mark the session recovered and forces recovery_required."
         }
       ]
     },
