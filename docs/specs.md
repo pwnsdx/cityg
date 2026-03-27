@@ -285,8 +285,9 @@ Requirements on that extension:
 * This extension proves append-only correlation, current-state binding, and helper-page completeness only inside one `HistoryAuthorityScope`. It does NOT, by itself, prove non-equivocation across multiple servers, independent witnesses, or any stronger globally canonical finality.
 
 F) Optional global history authority extension (not part of base profile)
-Deployments that require canonity/finality stronger than one local `HistoryAuthorityScope` MUST define an explicit extension that lifts A)/B)/C)/D), provisioning, and activation onto one authenticated global history authority.
+Deployments that require canonity/finality stronger than one local `HistoryAuthorityScope` MUST define an explicit extension that lifts A)/B)/C)/D), provisioning, and activation onto one authenticated global history authority. This document reserves the extension identifier string `global-history-authority-v1` for that purpose.
 Requirements on that extension:
+* Successful join/merge/provisioning/helper/lookup responses carrying objects from this extension MUST carry `history_authority_extension == "global-history-authority-v1"`.
 * The extension MUST define one authenticated `GlobalHistoryAttestation` object naming the globally canonical history step used for a decision.
 * `GlobalHistoryAttestation` MUST bind, at minimum, `(gid, global_history_authority_id, HistoryAuthorityScope, history_view_id, HistoryCommitment.history_commitment_id, parent_global_attestation_id, global_history_seq, finality_kind)`.
 * The extension MUST define how A)/B)/C)/D) responses prove completeness/non-omission for one exact `GlobalHistoryAttestation`.
@@ -1286,8 +1287,9 @@ Key `182` is the generic wire slot for authenticated history attestations beyond
 * When `local-history-authority-v1` is negotiated, successful A)/B)/C)/D) responses and any join/merge/provisioning current-state helper bundles used for one decision MUST all validate to the same `HistoryAuthorityDescriptor` and the same scope-local attestation lineage.
 * `local-history-authority-v1` uses `finality_kind = "local-append-only"` and therefore proves only scope-local append-only correlation. It MUST NOT be described as a globally canonical/final history proof.
 
-2. Any stronger globally canonical/final-history extension:
+2. `global-history-authority-v1` or another stronger globally canonical/final-history extension:
 * If a deployment requires globally canonical/final history beyond one local `HistoryAuthorityScope`, it MUST define an explicit extension bound to key `182` and to the S3.3 optional global history authority extension above.
+* This document reserves `history_authority_extension == "global-history-authority-v1"` for that purpose. Deployments using that name MUST satisfy all bullets below.
 * That extension MUST define negotiation / profile identification so both client and server know that key `182` is in use.
 * The attestation carried in key `182`, or referenced by it, MUST bind at minimum `(gid, global_history_authority_id, HistoryAuthorityScope, history_view_id, HistoryCommitment.history_commitment_id, barrier_version, barrier_update_reason, header[180])`.
 * That extension MUST define whether the attestation states "committed", "final", or another monotone finality level, and MUST define the allowed activation/cleanup decisions for each level.

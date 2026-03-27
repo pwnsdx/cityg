@@ -183,6 +183,7 @@ const HELPER_KIND_REVOKED_LEAVES: &str = "resolve_revoked_leaves";
 const HELPER_KIND_JOINS_SINCE: &str = "resolve_joins_since";
 const HELPER_KIND_FETCH_PUBLIC_TREE: &str = "fetch_public_tree";
 const LOCAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "local-history-authority-v1";
+const GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID: &str = "global-history-authority-v1";
 const LOCAL_HISTORY_ATTESTATION_FINALITY_KIND: &str = "local-append-only";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2942,6 +2943,10 @@ fn parse_history_authority_extension(
         LOCAL_HISTORY_AUTHORITY_EXTENSION_ID => {
             Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1))
         }
+        GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID => Err(Error::Parse(
+            "history authority extension global-history-authority-v1 is reserved but not implemented by this client"
+                .to_string(),
+        )),
         other => Err(Error::Parse(format!(
             "unsupported history authority extension: {other}"
         ))),
@@ -3980,6 +3985,15 @@ mod tests {
         assert!(matches!(
             err,
             Error::Parse(message) if message.contains("unsupported history authority extension")
+        ));
+
+        let err = parse_history_authority_extension(GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID, false)
+            .expect_err("reserved global extension id must fail closed until implemented");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("reserved")
+                    && message.contains(GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID)
         ));
     }
 
