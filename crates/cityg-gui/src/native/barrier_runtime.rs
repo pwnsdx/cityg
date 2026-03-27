@@ -534,7 +534,8 @@ pub(super) fn validate_client_visible_activation_guards(
     session: &AppSession,
     header_map: &BTreeMap<u64, Value>,
 ) -> Result<()> {
-    let global_history_attestation = match header_map.get(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
+    let global_history_attestation = match header_map
+        .get(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
     {
         Some(Value::Bytes(raw)) => Some(raw),
         Some(_) => {

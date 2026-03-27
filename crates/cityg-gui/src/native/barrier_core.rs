@@ -287,6 +287,52 @@ pub(super) fn clear_all_public_tree_caches(state: &mut BarrierSecretState) {
     state.retained_public_trees.clear();
 }
 
+pub(super) fn ensure_non_regressing_authenticated_current_state(
+    local_barrier_version: u64,
+    local_kem_tree_hash_after: &[u8; 32],
+    local_history_commitment: Option<&HistoryCommitment>,
+    advertised_barrier_version: u64,
+    advertised_kem_tree_hash_after: &[u8; 32],
+    advertised_history_commitment: &HistoryCommitment,
+    context: &str,
+) -> Result<()> {
+    if advertised_barrier_version < local_barrier_version {
+        return Err(anyhow!(
+            "{context} current barrier_version regressed below locally authenticated state (960.9)"
+        ));
+    }
+
+    let Some(local_history_commitment) = local_history_commitment else {
+        return Ok(());
+    };
+
+    if advertised_history_commitment.history_seq < local_history_commitment.history_seq {
+        return Err(anyhow!(
+            "{context} current history commitment regressed below locally authenticated state (960.9)"
+        ));
+    }
+
+    if advertised_history_commitment.history_seq == local_history_commitment.history_seq {
+        if advertised_history_commitment != local_history_commitment {
+            return Err(anyhow!(
+                "{context} current history commitment conflicts with locally authenticated state (960.9)"
+            ));
+        }
+        if advertised_barrier_version != local_barrier_version {
+            return Err(anyhow!(
+                "{context} current barrier_version conflicts with locally authenticated current history commitment (960.9)"
+            ));
+        }
+        if advertised_kem_tree_hash_after != local_kem_tree_hash_after {
+            return Err(anyhow!(
+                "{context} current kem_tree_hash_after conflicts with locally authenticated current history commitment (960.9)"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) fn install_current_public_tree_cache(
     session: &mut AppSession,
     snapshot: BarrierPublicTree,

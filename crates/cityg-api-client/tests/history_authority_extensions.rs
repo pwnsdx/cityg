@@ -3,12 +3,11 @@ use std::error::Error as StdError;
 use cityg_api_client::{
     BarrierJoinRecord, GlobalHistoryAttestation, HelperCompletenessAttestation,
     HistoryAuthorityDescriptor, HistoryCommitment,
-    parse_fetch_public_tree_completeness_attestation_bytes,
-    parse_global_history_attestation_bytes, parse_history_authority_descriptor_bytes,
-    parse_joins_since_completeness_attestation_bytes,
+    parse_fetch_public_tree_completeness_attestation_bytes, parse_global_history_attestation_bytes,
+    parse_history_authority_descriptor_bytes, parse_joins_since_completeness_attestation_bytes,
     parse_revoked_leaves_completeness_attestation_bytes,
-    verify_fetch_public_tree_completeness_attestation,
-    verify_joins_since_completeness_attestation, verify_revoked_leaves_completeness_attestation,
+    verify_fetch_public_tree_completeness_attestation, verify_joins_since_completeness_attestation,
+    verify_revoked_leaves_completeness_attestation,
 };
 use pqcrypto_dilithium::dilithium5;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
@@ -232,11 +231,9 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
         7,
         &[0xCF; 32],
     );
-    let parsed_attestation = parse_global_history_attestation_bytes(
-        &global_attestation_bytes,
-        Some(&authority),
-    )?
-    .expect("global attestation should parse");
+    let parsed_attestation =
+        parse_global_history_attestation_bytes(&global_attestation_bytes, Some(&authority))?
+            .expect("global attestation should parse");
     assert_eq!(parsed_attestation, expected_attestation);
 
     let revoked_bytes = sign_helper_completeness_attestation(
@@ -251,11 +248,9 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
             leaf_indices: &[1, 7],
         },
     );
-    let revoked_attestation = parse_revoked_leaves_completeness_attestation_bytes(
-        &revoked_bytes,
-        &authority,
-    )?
-    .expect("revoked helper attestation should parse");
+    let revoked_attestation =
+        parse_revoked_leaves_completeness_attestation_bytes(&revoked_bytes, &authority)?
+            .expect("revoked helper attestation should parse");
     assert_eq!(
         revoked_attestation,
         HelperCompletenessAttestation {
@@ -291,11 +286,9 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
             records: std::slice::from_ref(&join_record),
         },
     );
-    let joins_attestation = parse_joins_since_completeness_attestation_bytes(
-        &joins_bytes,
-        &authority,
-    )?
-    .expect("joins helper attestation should parse");
+    let joins_attestation =
+        parse_joins_since_completeness_attestation_bytes(&joins_bytes, &authority)?
+            .expect("joins helper attestation should parse");
     verify_joins_since_completeness_attestation(
         &joins_attestation,
         &authority,
@@ -319,11 +312,9 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
             pk_entries: pk_entries.as_slice(),
         },
     );
-    let tree_attestation = parse_fetch_public_tree_completeness_attestation_bytes(
-        &tree_bytes,
-        &authority,
-    )?
-    .expect("tree helper attestation should parse");
+    let tree_attestation =
+        parse_fetch_public_tree_completeness_attestation_bytes(&tree_bytes, &authority)?
+            .expect("tree helper attestation should parse");
     verify_fetch_public_tree_completeness_attestation(
         &tree_attestation,
         &authority,

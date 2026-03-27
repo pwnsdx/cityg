@@ -73,8 +73,8 @@ Summary:
   Proof: `docs/specs.md` (S3.3.E, S11.11.4-S11.11.5), `crates/cityg-server/src/lib.rs:2618-2698,4613-4731`, `crates/cityg-api/src/lib.rs:2033-2078,2607-2852`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
 - `3.5` `Open` — “must ensure current state is covered” still lacks a globally authenticated head/finality mechanism.
   Proof: `docs/specs.md:170`, `docs/specs.md:180-189`, `docs/specs.md:1427-1434`.
-- `3.6` `Open` — crash is handled, but storage rollback/fork detection is still not normatively closed.
-  Proof: `docs/specs.md:1429-1434`; no equivalent rollback-resistant head requirement exists.
+- `3.6` `Partial` — crash is handled and the client now fail-closes on locally authenticated current-state regressions (`barrier_version`, `history_seq`, same-seq commitment conflicts), but storage rollback/fork detection is still not normatively closed against a byzantine/global history split.
+  Proof: `docs/specs.md:188-194`, `crates/cityg-gui/src/native/barrier_core.rs:290-338`, `crates/cityg-gui/src/native/barrier_ops.rs:294-360,874-985`, `crates/cityg-gui/src/native/epoch_sync.rs:62-73`, `crates/cityg-gui/src/native/tests/mod.rs:219-292`.
 - `3.7` `Partial` — the spec now explicitly forbids best-effort `K_fs` advancement across an unauthenticated `pcs_refresh` boundary in catch-up/version-gap mode, and the GUI enters `recovery_required` instead of attempting best-effort recovery when the currently observed gap bundle is itself `reason=1`; broader future/gap ordering remains unspecified.
   Proof: `docs/specs.md:1382-1384`, `crates/cityg-gui/src/native/epoch_sync.rs:257-276`, `crates/cityg-gui/src/native/barrier_runtime.rs:82-104`, `crates/cityg-gui/src/native/tests/mod.rs:379-432`.
 

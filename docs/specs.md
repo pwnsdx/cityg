@@ -188,6 +188,11 @@ Shared authenticated-view rule (normative):
 * The returned `HistoryCommitment.history_view_id` MUST equal the top-level `history_view_id`.
 * For responses computed against current state rather than a historical snapshot, the server MUST first advance/persist the current `HistoryCommitment` if the current committed state differs from the last emitted `HistoryCommitment`.
 * `history_seq` MUST strictly increase whenever the server locally appends a new committed history/checkpoint/barrier state for that `gid`; `history_commitment_id` MUST be unique for each such step.
+* A client that has already persisted an authenticated current state for one `HistoryAuthorityScope` MUST fail closed if a later join/merge/provisioning/helper current-state artifact for that same scope claims:
+  * a lower `barrier_version`,
+  * a lower `history_seq`,
+  * or the same `history_seq` with a different `history_commitment_id`.
+* If the same `HistoryCommitment` is presented again, `barrier_version` and `kem_tree_hash_after` MUST remain consistent with that previously authenticated local current state.
 * Later sections may write `Resolve...(...)` / `Lookup...(...)` as shorthand for the payload component only; callers MUST also validate the accompanying `history_view_id`, `HistoryCommitment`, and authenticated proof/object per this section.
 * Any procedure that composes outputs from more than one of A)/B)/C)/D) for a single validation, activation, provisioning, or recovery decision MUST require all referenced authenticated responses/objects to validate to the same `HistoryCommitment`, unless that procedure explicitly defines a safe cross-view comparison. Missing or mismatched authenticated view binding MUST fail closed. In the FULL/updater chain-check and acceptance-correlation contexts, this failure MUST surface 960.9.
 * Historical snapshot fetches served from retained history MUST return the exact `HistoryCommitment` recorded when that snapshot became committed/fetchable, not a freshly recomputed current commitment.

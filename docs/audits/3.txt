@@ -325,3 +325,27 @@ Lecture consolidée:
 - `3.1/3.2/3.5/3.6` restent ouverts parce qu’ils demandent toujours une canonité/finalité **globale** de l’historique, pas juste une append-only chain locale par serveur/scope.
 
 Référence de synthèse: `docs/audits/final-verification-report-2026-03-26.md`.
+
+--
+
+## Commentaires Codex (2026-03-27, tranche rollback local authenticated-current-state)
+
+Nouvelle passe spec + implémentation:
+
+- la spec impose maintenant qu’un client qui a déjà persisté un état courant authentifié échoue en fail-closed si un artefact courant ultérieur pour le même `HistoryAuthorityScope` revendique un `barrier_version` plus bas, un `history_seq` plus bas, ou le même `history_seq` avec un autre `history_commitment_id`;
+- le runtime GUI applique ce garde-fou avant `epoch_sync` et avant consommation des `merge_ticket` de publish, en comparant le `HistoryCommitment`/`barrier_version`/`kem_tree_hash_after` annoncés avec l’état courant authentifié local;
+- trois tests unitaires dédiés couvrent maintenant les rejets de régression `barrier_version`, `history_seq`, et conflit same-seq.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui non_regressing_authenticated_current_state_ --features native-app -- --nocapture`
+
+Statut audit mis à jour:
+
+- **Partial**: `3.3`, `3.4`, `3.6`, `3.7`
+- **Open**: `3.1`, `3.2`, `3.5`
+
+Lecture consolidée:
+
+- `3.6` n’est plus honnêtement `Open`: on a désormais une vraie détection locale de régression d’état authentifié, persistée et appliquée sur les chemins helper-state courants.
+- `3.6` n’est pas `Closed` pour autant, parce qu’il manque toujours un objet global de finalité/canonité empêchant les forks/rollbacks inter-autorités ou un rollback de stockage hors de la seule vue locale déjà authentifiée.

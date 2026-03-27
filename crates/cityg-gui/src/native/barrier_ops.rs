@@ -202,7 +202,10 @@ fn apply_local_published_barrier_merge(
     clear_current_public_tree_cache(&mut session.barrier_state);
     session.barrier_state.current_history_view_id = [0u8; 32];
     session.barrier_state.current_history_commitment = None;
-    session.barrier_state.current_global_history_attestation_bytes.clear();
+    session
+        .barrier_state
+        .current_global_history_attestation_bytes
+        .clear();
 
     session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
@@ -291,6 +294,9 @@ async fn publish_revocation_merge_from_ticket(
         room_id,
         gid,
         leaf_id,
+        barrier_version: local_barrier_version,
+        kem_tree_hash_after: local_kem_tree_hash_after,
+        current_history_commitment: local_current_history_commitment,
         mut forward_state,
         pop_public_key,
         pop_secret_key,
@@ -342,6 +348,16 @@ async fn publish_revocation_merge_from_ticket(
         max_barrier_update_bytes,
         ..
     } = ticket;
+
+    ensure_non_regressing_authenticated_current_state(
+        local_barrier_version,
+        &local_kem_tree_hash_after,
+        local_current_history_commitment.as_ref(),
+        barrier_version,
+        &bytes32("kem_tree_hash_after", &kem_tree_hash_after)?,
+        &ticket_history_commitment,
+        operation_label,
+    )?;
 
     let srx_inputs = if srx_cbor.is_empty() {
         return Err(anyhow!(
@@ -858,6 +874,9 @@ async fn perform_barrier_merge_inner(
         room_id,
         gid,
         leaf_id,
+        barrier_version: local_barrier_version,
+        kem_tree_hash_after: local_kem_tree_hash_after,
+        current_history_commitment: local_current_history_commitment,
         forward_state,
         pop_public_key,
         pop_secret_key,
@@ -955,6 +974,16 @@ async fn perform_barrier_merge_inner(
         max_barrier_update_bytes,
         ..
     } = ticket;
+
+    ensure_non_regressing_authenticated_current_state(
+        local_barrier_version,
+        &local_kem_tree_hash_after,
+        local_current_history_commitment.as_ref(),
+        barrier_version,
+        &bytes32("kem_tree_hash_after", &kem_tree_hash_after)?,
+        &ticket_history_commitment,
+        mode.label(),
+    )?;
 
     if !srx_cbor.is_empty() {
         return Err(anyhow!(

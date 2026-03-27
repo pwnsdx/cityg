@@ -216,6 +216,81 @@ fn sample_current_public_tree(n_max: u64, fill: u8) -> Result<BarrierPublicTree>
     })
 }
 
+#[test]
+fn non_regressing_authenticated_current_state_rejects_barrier_version_rollback() {
+    let mut session = build_test_session(0xB401, "http://127.0.0.1:9", "room-rollback-a", "alice")
+        .expect("build test session");
+    session.barrier_state.barrier_version = 2;
+    let current = session
+        .barrier_state
+        .current_history_commitment
+        .expect("current history commitment");
+    let err = ensure_non_regressing_authenticated_current_state(
+        session.barrier_state.barrier_version,
+        &session.barrier_state.kem_tree_hash_after,
+        Some(&current),
+        session.barrier_state.barrier_version.saturating_sub(1),
+        &session.barrier_state.kem_tree_hash_after,
+        &current,
+        "merge ticket",
+    )
+    .expect_err("barrier_version rollback must fail closed");
+    assert!(
+        err.to_string().contains("barrier_version regressed"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn non_regressing_authenticated_current_state_rejects_history_seq_rollback() {
+    let session = build_test_session(0xB402, "http://127.0.0.1:9", "room-rollback-b", "alice")
+        .expect("build test session");
+    let mut advertised = session
+        .barrier_state
+        .current_history_commitment
+        .expect("current history commitment");
+    advertised.history_seq = advertised.history_seq.saturating_sub(1);
+    let err = ensure_non_regressing_authenticated_current_state(
+        session.barrier_state.barrier_version,
+        &session.barrier_state.kem_tree_hash_after,
+        session.barrier_state.current_history_commitment.as_ref(),
+        session.barrier_state.barrier_version,
+        &session.barrier_state.kem_tree_hash_after,
+        &advertised,
+        "epoch sync merge ticket",
+    )
+    .expect_err("history_seq rollback must fail closed");
+    assert!(
+        err.to_string().contains("history commitment regressed"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn non_regressing_authenticated_current_state_rejects_same_seq_conflict() {
+    let session = build_test_session(0xB403, "http://127.0.0.1:9", "room-rollback-c", "alice")
+        .expect("build test session");
+    let mut advertised = session
+        .barrier_state
+        .current_history_commitment
+        .expect("current history commitment");
+    advertised.history_commitment_id = [0xEE; 32];
+    let err = ensure_non_regressing_authenticated_current_state(
+        session.barrier_state.barrier_version,
+        &session.barrier_state.kem_tree_hash_after,
+        session.barrier_state.current_history_commitment.as_ref(),
+        session.barrier_state.barrier_version,
+        &session.barrier_state.kem_tree_hash_after,
+        &advertised,
+        "merge ticket",
+    )
+    .expect_err("same-seq conflicting commitment must fail closed");
+    assert!(
+        err.to_string().contains("history commitment conflicts"),
+        "unexpected error: {err}"
+    );
+}
+
 fn build_activation_guard_header(
     session: &AppSession,
     barrier_version: u64,
@@ -961,11 +1036,18 @@ fn validate_client_visible_activation_guards_rejects_global_history_attestation_
 fn validate_client_visible_activation_guards_accepts_matching_authority_headers()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xB96, "http://127.0.0.1:9", "room-b86", "bob")?;
-    session.barrier_state.current_global_history_attestation_bytes = vec![0xAA, 0xBB, 0xCC];
+    session
+        .barrier_state
+        .current_global_history_attestation_bytes = vec![0xAA, 0xBB, 0xCC];
     let mut header = build_activation_guard_header(&session, 1, session.fs_ec, &[0xAA, 0xE3])?;
     header.insert(
         hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
-        Value::Bytes(session.barrier_state.current_global_history_attestation_bytes.clone()),
+        Value::Bytes(
+            session
+                .barrier_state
+                .current_global_history_attestation_bytes
+                .clone(),
+        ),
     );
     header.insert(
         hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,

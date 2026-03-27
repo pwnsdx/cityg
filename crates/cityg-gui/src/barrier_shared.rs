@@ -7,9 +7,7 @@ use cityg_api_client::{BarrierJoinRecord, HistoryCommitment};
 use msphf_core::{hash::h_l, serde_utils::to_cbor_vec};
 use msphf_orchestrator::hdr;
 use pqcrypto_dilithium::dilithium5;
-use pqcrypto_traits::sign::{
-    DetachedSignature as _, PublicKey as _, SecretKey as _,
-};
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use rand::{RngExt, rng};
 use serde::{Deserialize, Serialize};
 
