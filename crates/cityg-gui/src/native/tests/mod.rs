@@ -6362,6 +6362,13 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
                 barrier_version: 5,
                 barrier_roots_hash: array(0x20),
                 kem_tree_hash_after: array(0x22),
+                current_history_commitment: Some(HistoryCommitment {
+                    history_view_id: array(0x51),
+                    history_commitment_id: array(0x52),
+                    prev_history_commitment_id: [0u8; 32],
+                    history_seq: 7,
+                }),
+                current_global_history_attestation_bytes: vec![0xAA, 0xBB, 0xCC],
                 fs_ec: 17,
                 fs_dev_prev_commit: array(0x13),
             }),

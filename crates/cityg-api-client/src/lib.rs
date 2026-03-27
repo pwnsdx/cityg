@@ -1338,6 +1338,66 @@ impl CitygApiClient {
         let current_history_view_id = array32(&response.current_history_view_id)?;
         let current_history_commitment =
             parse_history_commitment(current_history_view_id, response.current_history_commitment)?;
+        let history_authority_extension = parse_history_authority_extension(
+            response.history_authority_extension.as_str(),
+            !response.history_authority_descriptor.is_empty()
+                || !response.current_global_history_attestation.is_empty(),
+        )?;
+        let history_authority = parse_history_authority_descriptor_bytes(
+            response.history_authority_descriptor.as_slice(),
+        )?;
+        require_history_authority_descriptor_for_extension(
+            history_authority_extension,
+            &history_authority,
+            "merge ticket",
+        )?;
+        let current_global_history_attestation = match history_authority.as_ref() {
+            Some(authority) => {
+                let attestation = parse_global_history_attestation_bytes(
+                    response.current_global_history_attestation.as_slice(),
+                    Some(authority),
+                )?
+                .ok_or_else(|| {
+                    Error::Parse(
+                        "merge ticket missing current_global_history_attestation for history authority"
+                            .to_string(),
+                    )
+                })?;
+                if attestation.history_commitment != current_history_commitment {
+                    return Err(Error::Parse(
+                        "merge ticket current_global_history_attestation commitment mismatch"
+                            .to_string(),
+                    ));
+                }
+                if attestation.barrier_version != response.barrier_version {
+                    return Err(Error::Parse(
+                        "merge ticket current_global_history_attestation barrier_version mismatch"
+                            .to_string(),
+                    ));
+                }
+                if attestation.kem_tree_hash_after != array32(&response.kem_tree_hash_after)? {
+                    return Err(Error::Parse(
+                        "merge ticket current_global_history_attestation tree hash mismatch"
+                            .to_string(),
+                    ));
+                }
+                validate_local_history_attestation_kind(
+                    history_authority_extension,
+                    &attestation,
+                    "merge ticket",
+                )?;
+                Some(attestation)
+            }
+            None => {
+                if !response.current_global_history_attestation.is_empty() {
+                    return Err(Error::Parse(
+                        "merge ticket carries global history attestation without authority descriptor"
+                            .to_string(),
+                    ));
+                }
+                None
+            }
+        };
         let fs_forward_leap_policy = parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
         if response.cover_leaf_index >= n_max {
             return Err(Error::Parse(format!(
@@ -1373,11 +1433,11 @@ impl CitygApiClient {
             cover_leaf_index: response.cover_leaf_index,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
             current_history_commitment,
-            history_authority_extension: None,
-            history_authority_descriptor_bytes: Vec::new(),
-            history_authority: None,
-            current_global_history_attestation_bytes: Vec::new(),
-            current_global_history_attestation: None,
+            history_authority_extension,
+            history_authority_descriptor_bytes: response.history_authority_descriptor,
+            history_authority,
+            current_global_history_attestation_bytes: response.current_global_history_attestation,
+            current_global_history_attestation,
             n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
@@ -3300,12 +3360,78 @@ mod tests {
         MergeTicketResponse, RefreshPivotResponse, RotateRoomKbroadResponse, SearchMembersResponse,
         SeedHeadResponse, SendMessageResponse,
     };
+    use pqcrypto_dilithium::dilithium5;
     use prost::Message;
     use std::{error::Error as StdError, net::SocketAddr};
     use tokio::net::TcpListener;
 
     fn encode_proto<T: Message>(msg: T) -> Vec<u8> {
         msg.encode_to_vec()
+    }
+
+    fn encode_cbor_det<T: serde::Serialize>(value: &T) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(value, &mut bytes).expect("deterministic cbor encoding");
+        bytes
+    }
+
+    fn merge_ticket_with_history_authority_payload() -> MergeTicketResponse {
+        let mut response = merge_ticket_ok_payload();
+        let current_history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let (public_key, secret_key) = dilithium5::keypair();
+        let descriptor = HistoryAuthorityDescriptor {
+            scope_id: [0xA1; 32],
+            public_key: public_key.as_bytes().to_vec(),
+        };
+        let descriptor_bytes = encode_cbor_det(&HistoryAuthorityDescriptorWire(
+            descriptor.scope_id.to_vec(),
+            descriptor.public_key.clone(),
+        ));
+        let gid = [0x41; 32];
+        let parent_attestation_id = [0u8; 32];
+        let finality_kind = "local-append-only".to_string();
+        let payload = encode_cbor_det(&GlobalHistoryAttestationSignedPayload(
+            "cityg/global-history-attestation-v1",
+            &descriptor.scope_id,
+            &gid,
+            &current_history_commitment.history_view_id,
+            &current_history_commitment.history_commitment_id,
+            &current_history_commitment.prev_history_commitment_id,
+            current_history_commitment.history_seq,
+            response.barrier_version,
+            &[0x09; 32],
+            &parent_attestation_id,
+            finality_kind.as_str(),
+        ));
+        let signature = dilithium5::detached_sign(payload.as_slice(), &secret_key)
+            .as_bytes()
+            .to_vec();
+        let attestation_bytes = encode_cbor_det(&GlobalHistoryAttestationWire(
+            descriptor.scope_id.to_vec(),
+            gid.to_vec(),
+            current_history_commitment.history_view_id.to_vec(),
+            current_history_commitment.history_commitment_id.to_vec(),
+            current_history_commitment
+                .prev_history_commitment_id
+                .to_vec(),
+            current_history_commitment.history_seq,
+            response.barrier_version,
+            vec![0x09; 32],
+            parent_attestation_id.to_vec(),
+            finality_kind,
+            signature,
+        ));
+        response.current_history_commitment =
+            Some(history_commitment_ok_payload(0xD1, 0xE1, 0x00, 7));
+        response.history_authority_extension = LOCAL_HISTORY_AUTHORITY_EXTENSION_ID.to_string();
+        response.history_authority_descriptor = descriptor_bytes;
+        response.current_global_history_attestation = attestation_bytes;
+        response
     }
 
     fn merge_ticket_ok_payload() -> MergeTicketResponse {
@@ -4434,6 +4560,33 @@ mod tests {
             err,
             Error::Parse(message) if message.contains("invalid 32-byte field")
         ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_refresh_preserves_history_authority_attestation()
+    -> Result<(), Box<dyn StdError>> {
+        let payload = merge_ticket_with_history_authority_payload();
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let ticket = client.merge_ticket_refresh("room-1", &[0x01; 32]).await?;
+        assert_eq!(
+            ticket.history_authority_extension,
+            Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1)
+        );
+        assert!(ticket.history_authority.is_some());
+        assert!(!ticket.history_authority_descriptor_bytes.is_empty());
+        let attestation = ticket
+            .current_global_history_attestation
+            .ok_or("missing parsed global history attestation")?;
+        assert_eq!(
+            attestation.history_commitment,
+            ticket.current_history_commitment
+        );
+        assert_eq!(attestation.barrier_version, ticket.barrier_version);
+        assert_eq!(attestation.kem_tree_hash_after, ticket.kem_tree_hash_after);
+        assert!(!ticket.current_global_history_attestation_bytes.is_empty());
         handle.abort();
         Ok(())
     }

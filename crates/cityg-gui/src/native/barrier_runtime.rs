@@ -508,6 +508,11 @@ pub(super) fn capture_barrier_pending_activation_source(
         barrier_version: session.barrier_state.barrier_version,
         barrier_roots_hash: session.barrier_state.barrier_roots_hash,
         kem_tree_hash_after: session.barrier_state.kem_tree_hash_after,
+        current_history_commitment: session.barrier_state.current_history_commitment,
+        current_global_history_attestation_bytes: session
+            .barrier_state
+            .current_global_history_attestation_bytes
+            .clone(),
         fs_ec: session.fs_ec,
         fs_dev_prev_commit: session.fs_dev_prev_commit,
     }
@@ -849,8 +854,13 @@ pub(super) async fn apply_pending_barrier_activation_from_history(
                         BarrierRecoveryIssue::ContradictoryAuthenticatedHistory,
                     ));
                 };
-                if apply_pending_barrier_activation(
+                let activation_source = pending
+                    .activation_source
+                    .clone()
+                    .unwrap_or_else(|| capture_barrier_pending_activation_source(session));
+                if apply_pending_barrier_activation_with_source(
                     session,
+                    &activation_source,
                     observed_barrier_version,
                     lookup.accepted_fs_ec,
                     lookup.accepted_reason,

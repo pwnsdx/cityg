@@ -71,6 +71,8 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
         &ticket_history_commitment,
         "epoch sync merge ticket",
     )?;
+    let ticket_barrier_roots_hash =
+        compute_revocation_roots_hash(&ticket.revoked_since_root, &ticket.revoked_root)?;
     let previous_we_epoch_id = session.we_epoch_id;
     let activation_source_before_sync = capture_barrier_pending_activation_source(&session);
     session.fs_forward_leap_policy = FsForwardLeapPolicy {
@@ -102,22 +104,14 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
 
     if ticket.we_epoch_id == session.we_epoch_id {
         session.last_accepted_ec = session.last_accepted_ec.max(ticket.last_accepted_ec);
-        session.barrier_state.barrier_version = ticket.barrier_version;
-        session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
-        session.barrier_state.current_history_view_id = ticket_history_commitment.history_view_id;
-        session.barrier_state.current_history_commitment = Some(ticket_history_commitment);
-        session
-            .barrier_state
-            .current_global_history_attestation_bytes =
-            ticket.current_global_history_attestation_bytes.clone();
-        if !session
-            .barrier_state
-            .current_public_tree
-            .as_ref()
-            .is_some_and(|snapshot| current_public_tree_cache_matches(&session, snapshot))
-        {
-            clear_current_public_tree_cache(&mut session.barrier_state);
-        }
+        install_authenticated_current_state(
+            &mut session,
+            ticket.barrier_version,
+            ticket_barrier_roots_hash,
+            ticket_kem_tree_hash_after,
+            ticket_history_commitment,
+            ticket.current_global_history_attestation_bytes.clone(),
+        );
         return Ok(EpochSyncOutcome {
             session,
             changed: barrier_changed
@@ -171,7 +165,50 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
         ));
     }
     if has_barrier_update {
-        validate_client_visible_activation_guards(&session, &bundle.header_map)?;
+        let bundle_digest = extract_barrier_update_digest(&bundle.header_map)?;
+        let pending_bundle_match = session
+            .barrier_state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| {
+                bundle_digest == Some(pending.barrier_update_digest)
+                    || bundle.we_epoch_id == pending.we_epoch_id
+            });
+        let mut validation_session = session.clone();
+        if bundle_authored_by_local_device(&session, &bundle.header_map)
+            && let Some(pending) = session.barrier_state.pending.as_ref()
+            && pending_bundle_match
+            && let Some(source) = pending.activation_source.as_ref()
+        {
+            if let Some(history_commitment) = source.current_history_commitment {
+                install_authenticated_current_state(
+                    &mut validation_session,
+                    source.barrier_version,
+                    source.barrier_roots_hash,
+                    source.kem_tree_hash_after,
+                    history_commitment,
+                    source.current_global_history_attestation_bytes.clone(),
+                );
+            } else {
+                validation_session.barrier_state.barrier_version = source.barrier_version;
+                validation_session.barrier_state.barrier_roots_hash = source.barrier_roots_hash;
+                validation_session.barrier_state.kem_tree_hash_after = source.kem_tree_hash_after;
+                validation_session.barrier_state.current_history_view_id = [0u8; 32];
+                validation_session.barrier_state.current_history_commitment = None;
+                validation_session
+                    .barrier_state
+                    .current_global_history_attestation_bytes =
+                    source.current_global_history_attestation_bytes.clone();
+            }
+        }
+        if pending_bundle_match
+            || !matches!(
+                pending_history_outcome,
+                PendingBarrierHistoryOutcome::Activated(_)
+            )
+        {
+            validate_client_visible_activation_guards(&validation_session, &bundle.header_map)?;
+        }
     }
 
     let defer_epoch_derivation = uses_barrier_hp_envelope && has_barrier_update;
@@ -364,8 +401,6 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
                         ));
                     }
                     apply_recovered_barrier_state(&mut session, recovered, true)?;
-                    session.barrier_state.barrier_version = ticket.barrier_version;
-                    session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
                     install_current_public_tree_cache(
                         &mut session,
                         (*chain_check_result.snapshot_post).clone(),
@@ -393,14 +428,14 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
             .context("failed to derive epoch key during sync from recovered barrier state")?;
         session.epoch_key = epoch_key;
     }
-    session.barrier_state.barrier_version = ticket.barrier_version;
-    session.barrier_state.kem_tree_hash_after = ticket_kem_tree_hash_after;
-    session.barrier_state.current_history_view_id = ticket_history_commitment.history_view_id;
-    session.barrier_state.current_history_commitment = Some(ticket_history_commitment);
-    session
-        .barrier_state
-        .current_global_history_attestation_bytes =
-        ticket.current_global_history_attestation_bytes.clone();
+    install_authenticated_current_state(
+        &mut session,
+        ticket.barrier_version,
+        ticket_barrier_roots_hash,
+        ticket_kem_tree_hash_after,
+        ticket_history_commitment,
+        ticket.current_global_history_attestation_bytes.clone(),
+    );
     if session
         .barrier_state
         .current_public_tree

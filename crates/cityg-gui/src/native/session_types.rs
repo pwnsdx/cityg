@@ -187,11 +187,13 @@ impl Drop for BarrierNodeKeyMaterial {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub(super) struct BarrierPendingActivationSource {
     pub(super) barrier_version: u64,
     pub(super) barrier_roots_hash: [u8; 32],
     pub(super) kem_tree_hash_after: [u8; 32],
+    pub(super) current_history_commitment: Option<HistoryCommitment>,
+    pub(super) current_global_history_attestation_bytes: Vec<u8>,
     pub(super) fs_ec: u64,
     pub(super) fs_dev_prev_commit: [u8; 32],
 }
@@ -218,6 +220,11 @@ pub(super) struct BarrierPendingState {
 pub(super) struct PublishedBarrierMerge {
     pub(super) bundle: ClientEpochBundle,
     pub(super) pending_barrier_state: BarrierPendingState,
+    pub(super) pre_publish_barrier_version: u64,
+    pub(super) pre_publish_barrier_roots_hash: [u8; 32],
+    pub(super) pre_publish_kem_tree_hash_after: [u8; 32],
+    pub(super) pre_publish_current_history_commitment: HistoryCommitment,
+    pub(super) pre_publish_current_global_history_attestation_bytes: Vec<u8>,
     pub(super) forward_state_after: ForwardSecrecyState,
     pub(super) fs_forward_leap_policy: FsForwardLeapPolicy,
     pub(super) last_accepted_ec: u64,

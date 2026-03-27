@@ -132,6 +132,10 @@ pub(in crate::native) struct PersistedBarrierPendingActivationSource {
     #[serde(default)]
     pub(in crate::native) kem_tree_hash_after_hex: String,
     #[serde(default)]
+    pub(in crate::native) current_history_commitment: Option<PersistedBarrierHistoryCommitment>,
+    #[serde(default)]
+    pub(in crate::native) current_global_history_attestation_hex: String,
+    #[serde(default)]
     pub(in crate::native) fs_ec: u64,
     #[serde(default)]
     pub(in crate::native) fs_dev_prev_commit_hex: String,
@@ -316,6 +320,12 @@ impl PersistedBarrierPendingActivationSource {
             barrier_version: source.barrier_version,
             barrier_roots_hash_hex: hex_encode(source.barrier_roots_hash),
             kem_tree_hash_after_hex: hex_encode(source.kem_tree_hash_after),
+            current_history_commitment: source
+                .current_history_commitment
+                .map(PersistedBarrierHistoryCommitment::from_runtime),
+            current_global_history_attestation_hex: hex_encode(
+                source.current_global_history_attestation_bytes.as_slice(),
+            ),
             fs_ec: source.fs_ec,
             fs_dev_prev_commit_hex: hex_encode(source.fs_dev_prev_commit),
         }
@@ -331,6 +341,18 @@ impl PersistedBarrierPendingActivationSource {
             kem_tree_hash_after: decode_hex32_or_zero(
                 "barrier_state.pending.activation_source.kem_tree_hash_after_hex",
                 &self.kem_tree_hash_after_hex,
+            )?,
+            current_history_commitment: self
+                .current_history_commitment
+                .map(|commitment| {
+                    commitment.into_runtime(
+                        "barrier_state.pending.activation_source.current_history_commitment",
+                    )
+                })
+                .transpose()?,
+            current_global_history_attestation_bytes: decode_hex_vec(
+                "barrier_state.pending.activation_source.current_global_history_attestation_hex",
+                &self.current_global_history_attestation_hex,
             )?,
             fs_ec: self.fs_ec,
             fs_dev_prev_commit: decode_hex32_or_zero(

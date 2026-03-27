@@ -346,6 +346,32 @@ pub(super) fn install_current_public_tree_cache(
     Ok(())
 }
 
+pub(super) fn install_authenticated_current_state(
+    session: &mut AppSession,
+    barrier_version: u64,
+    barrier_roots_hash: [u8; 32],
+    kem_tree_hash_after: [u8; 32],
+    history_commitment: HistoryCommitment,
+    global_history_attestation_bytes: Vec<u8>,
+) {
+    session.barrier_state.barrier_version = barrier_version;
+    session.barrier_state.barrier_roots_hash = barrier_roots_hash;
+    session.barrier_state.kem_tree_hash_after = kem_tree_hash_after;
+    session.barrier_state.current_history_view_id = history_commitment.history_view_id;
+    session.barrier_state.current_history_commitment = Some(history_commitment);
+    session
+        .barrier_state
+        .current_global_history_attestation_bytes = global_history_attestation_bytes;
+    if !session
+        .barrier_state
+        .current_public_tree
+        .as_ref()
+        .is_some_and(|snapshot| current_public_tree_cache_matches(session, snapshot))
+    {
+        clear_current_public_tree_cache(&mut session.barrier_state);
+    }
+}
+
 pub(super) fn expected_same_rrh_barrier_reason(
     join_records: &[BarrierJoinRecord],
     updater_leaf: u64,

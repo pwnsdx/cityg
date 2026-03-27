@@ -118,6 +118,11 @@ fn apply_local_published_barrier_merge(
     let PublishedBarrierMerge {
         bundle,
         pending_barrier_state,
+        pre_publish_barrier_version,
+        pre_publish_barrier_roots_hash,
+        pre_publish_kem_tree_hash_after,
+        pre_publish_current_history_commitment,
+        pre_publish_current_global_history_attestation_bytes,
         mut forward_state_after,
         fs_forward_leap_policy,
         last_accepted_ec,
@@ -125,6 +130,14 @@ fn apply_local_published_barrier_merge(
     } = published;
     session.fs_forward_leap_policy = fs_forward_leap_policy;
     session.last_accepted_ec = session.last_accepted_ec.max(last_accepted_ec);
+    install_authenticated_current_state(
+        session,
+        pre_publish_barrier_version,
+        pre_publish_barrier_roots_hash,
+        pre_publish_kem_tree_hash_after,
+        pre_publish_current_history_commitment,
+        pre_publish_current_global_history_attestation_bytes,
+    );
     let activation_source_before_apply = capture_barrier_pending_activation_source(session);
     let has_barrier_update = matches!(
         bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE),
@@ -551,6 +564,9 @@ async fn publish_revocation_merge_from_ticket(
             barrier_version,
             barrier_roots_hash: committed_revocation_roots_hash,
             kem_tree_hash_after: snapshot_hash,
+            current_history_commitment: Some(ticket_history_commitment.clone()),
+            current_global_history_attestation_bytes: current_global_history_attestation_bytes
+                .clone(),
             fs_ec,
             fs_dev_prev_commit,
         }),
@@ -686,6 +702,12 @@ async fn publish_revocation_merge_from_ticket(
     Ok(PublishedBarrierMerge {
         bundle,
         pending_barrier_state,
+        pre_publish_barrier_version: barrier_version,
+        pre_publish_barrier_roots_hash: committed_revocation_roots_hash,
+        pre_publish_kem_tree_hash_after: snapshot_hash,
+        pre_publish_current_history_commitment: ticket_history_commitment,
+        pre_publish_current_global_history_attestation_bytes:
+            current_global_history_attestation_bytes,
         forward_state_after: forward_state,
         fs_forward_leap_policy: FsForwardLeapPolicy {
             h: fs_forward_leap_policy.h,
@@ -1180,6 +1202,9 @@ async fn perform_barrier_merge_inner(
             barrier_version,
             barrier_roots_hash: committed_revocation_roots_hash,
             kem_tree_hash_after: snapshot_hash,
+            current_history_commitment: Some(ticket_history_commitment.clone()),
+            current_global_history_attestation_bytes: current_global_history_attestation_bytes
+                .clone(),
             fs_ec,
             fs_dev_prev_commit,
         }),
@@ -1419,6 +1444,12 @@ async fn perform_barrier_merge_inner(
     Ok(PublishedBarrierMerge {
         bundle: prepared.bundle,
         pending_barrier_state: prepared.pending_barrier_state,
+        pre_publish_barrier_version: barrier_version,
+        pre_publish_barrier_roots_hash: committed_revocation_roots_hash,
+        pre_publish_kem_tree_hash_after: snapshot_hash,
+        pre_publish_current_history_commitment: ticket_history_commitment,
+        pre_publish_current_global_history_attestation_bytes:
+            current_global_history_attestation_bytes,
         forward_state_after: prepared.forward_state_after,
         fs_forward_leap_policy: FsForwardLeapPolicy {
             h: fs_forward_leap_policy.h,
