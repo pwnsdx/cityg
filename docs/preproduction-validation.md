@@ -248,6 +248,8 @@ Notes:
 - use `--plain` when running in CI or when stdout is not a real terminal
 - `--message-burst-count` and `--message-burst-interval-ms` turn each room round into a real message storm instead of a single dummy payload
 - `--client-restart-every-secs` injects managed harness restarts so restart handling is exercised during churn campaigns
+- `--reuse-room-per-worker` keeps one stable room ID per worker and is useful for
+  validating empty-room rejoin flows across multiple rounds
 - `--capture-client-state-artifacts` exports anonymized per-session state snapshots for audit/review
 - pass `--api-bin` and `--join-leave-bin` when you want to pin the run to explicitly-built candidate binaries
 - with persisted state and restart-chaos, prefer the default `--server-ready-timeout-secs 180` or a larger override; replay on large journals can exceed `120s`
@@ -269,6 +271,30 @@ cargo run -p cityg-stress -- \
 ```
 
 This variant keeps the same membership churn but adds repeated message sends during each round, which is a better approximation of active rooms than the default single-message path.
+
+Same-room leave/rejoin variant:
+
+```bash
+cargo run -p cityg-stress -- \
+  --plain \
+  --server-bind 127.0.0.1:18082 \
+  --server-url http://127.0.0.1:18082 \
+  --workers 1 \
+  --rounds-per-worker 2 \
+  --min-count 2 \
+  --max-count 2 \
+  --leaves-per-room 2 \
+  --watch-percent 100 \
+  --jitter-max-secs 0 \
+  --round-delay-secs 1 \
+  --message-burst-count 2 \
+  --message-burst-interval-ms 25 \
+  --reuse-room-per-worker
+```
+
+This run proves that a room can be emptied and then reused on the next round
+without allocating a fresh room ID. Do not combine it with managed restart
+chaos; `--reuse-room-per-worker` intentionally rejects that combination.
 
 Suggested method:
 

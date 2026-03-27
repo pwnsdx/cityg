@@ -101,6 +101,8 @@ struct Cli {
     client_restart_every_secs: u64,
     #[arg(long, env = "CITYG_STRESS_CAPTURE_CLIENT_STATE_ARTIFACTS", action = ArgAction::SetTrue)]
     capture_client_state_artifacts: bool,
+    #[arg(long, env = "CITYG_STRESS_REUSE_ROOM_PER_WORKER", action = ArgAction::SetTrue)]
+    reuse_room_per_worker: bool,
     #[arg(long, env = "CITYG_STRESS_WINDOW_TTL_SECS", default_value_t = DEFAULT_WINDOW_TTL_SECS)]
     window_ttl_secs: u64,
     #[arg(long, env = "CITYG_STRESS_MAX_CONCURRENT_HEADS", default_value_t = DEFAULT_MAX_CONCURRENT_HEADS)]
@@ -150,6 +152,7 @@ struct Config {
     restart_every_secs: u64,
     client_restart_every_secs: u64,
     capture_client_state_artifacts: bool,
+    reuse_room_per_worker: bool,
     window_ttl_secs: u64,
     max_concurrent_heads: u64,
     poll_interval: Duration,
@@ -508,6 +511,13 @@ impl Config {
         if cli.watch_percent > 100 {
             return Err(anyhow!("watch-percent must be between 0 and 100"));
         }
+        if cli.reuse_room_per_worker
+            && (cli.restart_every_secs > 0 || cli.client_restart_every_secs > 0)
+        {
+            return Err(anyhow!(
+                "reuse-room-per-worker is incompatible with managed restart chaos"
+            ));
+        }
         let repo_root = repo_root()?;
         let server_url = cli
             .server_url
@@ -558,6 +568,7 @@ impl Config {
             restart_every_secs: cli.restart_every_secs,
             client_restart_every_secs: cli.client_restart_every_secs,
             capture_client_state_artifacts: cli.capture_client_state_artifacts,
+            reuse_room_per_worker: cli.reuse_room_per_worker,
             window_ttl_secs: cli.window_ttl_secs,
             max_concurrent_heads: cli.max_concurrent_heads,
             poll_interval: Duration::from_millis(cli.poll_interval_ms),
@@ -1003,6 +1014,7 @@ async fn run_worker(
     let worker_status = config
         .artifact_dir
         .join(format!("worker-{worker_id:02}.status"));
+    let reused_room_id = config.reuse_room_per_worker.then(random_room_id);
 
     'rounds: for round in 1..=config.rounds_per_worker {
         if *stop_rx.borrow() {
@@ -1031,7 +1043,7 @@ async fn run_worker(
             if *stop_rx.borrow() {
                 break 'rounds;
             }
-            let room_id = random_room_id();
+            let room_id = reused_room_id.clone().unwrap_or_else(random_room_id);
             let round_started_at = Instant::now();
             let _ = event_tx.send(AppEvent::WorkerRoundStarted {
                 worker_id,
@@ -1051,6 +1063,7 @@ async fn run_worker(
                     round,
                     attempt_index: attempt,
                     room_id: &room_id,
+                    bootstrap_room: !config.reuse_room_per_worker || round == 1,
                     count,
                     watch_mode,
                     leave_order: &leave_order,
@@ -1251,6 +1264,7 @@ struct WorkerRoundAttempt<'a> {
     round: usize,
     attempt_index: usize,
     room_id: &'a str,
+    bootstrap_room: bool,
     count: usize,
     watch_mode: bool,
     leave_order: &'a str,
@@ -1262,19 +1276,21 @@ async fn run_worker_round_attempt(
     config: &Config,
     attempt: WorkerRoundAttempt<'_>,
 ) -> Result<()> {
-    api_client
-        .bootstrap_room_as_admin(attempt.room_id, demo::kbroad_public(), {
-            let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
-            build_room_admin_proof(
-                RoomAdminOperation::Bootstrap,
-                attempt.room_id,
-                demo::kbroad_public(),
-                &pop_public_key,
-                &pop_secret_key,
-            )?
-        })
-        .await
-        .with_context(|| format!("bootstrap room {}", attempt.room_id))?;
+    if attempt.bootstrap_room {
+        api_client
+            .bootstrap_room_as_admin(attempt.room_id, demo::kbroad_public(), {
+                let (pop_public_key, pop_secret_key) = generate_room_admin_keypair();
+                build_room_admin_proof(
+                    RoomAdminOperation::Bootstrap,
+                    attempt.room_id,
+                    demo::kbroad_public(),
+                    &pop_public_key,
+                    &pop_secret_key,
+                )?
+            })
+            .await
+            .with_context(|| format!("bootstrap room {}", attempt.room_id))?;
+    }
 
     if config.jitter_max_secs > 0 {
         let jitter = rng().random_range(0..=config.jitter_max_secs);

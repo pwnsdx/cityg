@@ -191,6 +191,28 @@ Artifacts:
 
 - `/tmp/cityg-stress-flow-client-restart`
 
+### Flow F (combined): client restart plus managed server restart in one round
+
+Passed functionally under combined chaos:
+
+```text
+workers_passed=1 workers_failed=0 rounds=1/1 restarts=1 accept_ok=0 refresh_conflicts=0
+```
+
+Observed:
+
+- attempt 1 was killed by the managed client restart timer
+- the retry on a fresh room survived a managed server restart and still
+  completed successfully
+- `events.log` shows both `client-restart-injected` and `server restart #1`
+- `server.log` also emitted `state recovery failed: ... barrier_updater_invalid`
+  during restart replay, so this path is functionally green but still merits a
+  follow-up review of replay/recovery strictness
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-f-combined`
+
 ### Flow G: lanes / heads extremes
 
 Passed on both tested extremes:
@@ -233,8 +255,7 @@ Artifacts:
 
 ### Flow B: same-room leave -> empty room -> rejoin with stable identity
 
-Validated via targeted `join_leave` integration test rather than `cityg-stress`,
-because the current stress harness still retries on fresh room IDs per round:
+Validated in two layers:
 
 ```text
 cargo test --locked -p cityg-gui --bin join_leave \
@@ -242,11 +263,23 @@ cargo test --locked -p cityg-gui --bin join_leave \
   -- --exact --nocapture
 ```
 
+and live via `cityg-stress --reuse-room-per-worker`:
+
+```text
+workers_passed=1 workers_failed=0 rounds=2/2 accept_ok=11 refresh_conflicts=3
+```
+
 Observed:
 
 - both members leave and the room becomes empty
 - the same persistent room identity can rejoin successfully
 - the rejoined member keeps the same `pop_public_key` and `leaf_id`
+- the live stress run reuses the exact same `room_id` across rounds and
+  successfully rejoins/sends again after the room is emptied
+
+Artifacts:
+
+- `/tmp/cityg-stress-flow-b-reuse-room`
 
 ### Flow G: lanes / heads midline
 
@@ -317,9 +350,14 @@ Observed:
 - authenticated `superseded` and `final_rejected` locators discard stale pending
   state cleanly
 
-## Next E2E Matrix
+## Remaining E2E Matrix
 
-Run these next, in order.
+The baseline local matrix is now largely qualified. What remains is mostly:
+
+- longer soak/load coverage
+- explicit investigation of the replay warning seen in
+  `/tmp/cityg-stress-flow-f-combined/server.log`
+- optional richer same-room identity persistence in `cityg-stress` itself
 
 ### Flow A: Bootstrap -> first join -> second join -> bidirectional send/fetch
 
@@ -352,33 +390,30 @@ target/debug/cityg-stress --plain \
 Goal:
 
 - validate leave-path churn and UI-visible membership convergence
-- targeted same-room rejoin semantics are already covered by
+- same-room rejoin is now covered live via `--reuse-room-per-worker`
+- stable-identity rejoin remains covered by
   `tests::rejoin_with_same_identity_succeeds_after_room_becomes_empty`
-
-Current limitation:
-
-- the command below uses fresh room IDs per round, so it does **not** prove a
-  same-room rejoin after leave
-- a real same-room rejoin flow needs either manual `join_leave` orchestration or
-  a small `cityg-stress` harness extension
 
 Command:
 
 ```bash
-target/debug/cityg-stress --plain \
+/tmp/cityg-target-client-restart/debug/cityg-stress --plain \
   --server-bind 127.0.0.1:18082 \
   --server-url http://127.0.0.1:18082 \
   --workers 1 \
-  --rounds-per-worker 3 \
+  --rounds-per-worker 2 \
   --min-count 2 \
   --max-count 2 \
-  --leaves-per-room 1 \
+  --leaves-per-room 2 \
   --watch-percent 100 \
+  --jitter-max-secs 0 \
+  --round-delay-secs 1 \
   --message-burst-count 2 \
   --message-burst-interval-ms 25 \
+  --reuse-room-per-worker \
   --api-bin /Users/admin/Desktop/Repositories/cityg/target/debug/cityg-api \
   --join-leave-bin /Users/admin/Desktop/Repositories/cityg/target/debug/join_leave \
-  --artifact-dir /tmp/cityg-stress-flow-b \
+  --artifact-dir /tmp/cityg-stress-flow-b-reuse-room \
   --require-metrics
 ```
 
