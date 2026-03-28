@@ -500,3 +500,18 @@ Lecture consolidée:
 
 - cela ferme la partie “merge/current-state malléable hors attestation dédiée” du finding 7.6;
 - `7.6` reste néanmoins **Partial** parce que la policy/gouvernance complète n’est toujours pas engagée dans une même lignée authentifiée avec le même niveau de garantie.
+
+--
+
+## Commentaires Codex (2026-03-28, tranche signed deployment profile manifest)
+
+Nouvelle passe spec + implémentation:
+
+- join et merge portent maintenant un `deployment_profile_manifest` signé en plus des artefacts de current-state;
+- ce manifest engage les paramètres de profile/config visibles côté client (`n_max`, `max_barrier_update_bytes`, fenêtre FLG, `(gid, profile_version)`) sous la même authority négociée;
+- le client refuse fail-closed tout ticket join/merge dont ce manifest manque ou est altéré.
+
+Lecture consolidée:
+
+- cela ferme la partie “config/policy livrée sans objet signé dédié” du finding 7.6;
+- `7.6` reste néanmoins **Partial** parce que la policy/gouvernance complète et la lignée byzantine plus forte dépassent encore ce que ce manifest local ferme.

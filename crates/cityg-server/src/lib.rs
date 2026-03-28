@@ -2736,6 +2736,32 @@ impl CityGServer {
         )
     }
 
+    pub fn deployment_profile_manifest_bytes(
+        &self,
+        gid: &[u8; 32],
+        profile_version: &str,
+        history_authority_extension: &str,
+        n_max: u64,
+        max_barrier_update_bytes: u64,
+        fs_forward_leap_policy: FsForwardLeapPolicy,
+    ) -> Result<Vec<u8>, CityGError> {
+        let authority = self
+            .history_authority
+            .as_ref()
+            .ok_or(CityGError::InvalidInput(
+                "history authority unavailable for deployment profile manifest",
+            ))?;
+        encode_deployment_profile_manifest(
+            authority,
+            gid,
+            profile_version,
+            history_authority_extension,
+            n_max,
+            max_barrier_update_bytes,
+            fs_forward_leap_policy,
+        )
+    }
+
     pub fn history_authority_extension_id(&self) -> &'static str {
         self.history_authority
             .as_ref()
@@ -3298,6 +3324,25 @@ struct MergeTicketArtifactWire {
     signature: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct DeploymentProfileManifestWire {
+    #[serde(with = "serde_bytes")]
+    scope_id: Vec<u8>,
+    history_authority_extension: String,
+    #[serde(with = "serde_bytes")]
+    gid: Vec<u8>,
+    profile_version: String,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+}
+
 #[derive(Serialize)]
 struct GlobalHistoryAttestationSignedPayload<'a>(
     &'static str,
@@ -3430,6 +3475,24 @@ struct MergeTicketArtifactSignedPayload<'a> {
     fs_policy_version: &'a str,
     fs_epoch_base_ts: u64,
     kbroad_generation: u64,
+}
+
+#[derive(Serialize)]
+struct DeploymentProfileManifestSignedPayload<'a> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    history_authority_extension: &'a str,
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    profile_version: &'a str,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -3875,6 +3938,46 @@ fn encode_merge_ticket_artifact(
         fs_policy_version: bundle.fs_policy_version.clone(),
         fs_epoch_base_ts: bundle.fs_epoch_base_ts,
         kbroad_generation: bundle.kbroad_generation,
+        signature,
+    })?)
+}
+
+fn encode_deployment_profile_manifest(
+    state: &HistoryAuthorityState,
+    gid: &[u8; 32],
+    profile_version: &str,
+    history_authority_extension: &str,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    fs_forward_leap_policy: FsForwardLeapPolicy,
+) -> Result<Vec<u8>, CityGError> {
+    let payload = to_cbor_vec(&DeploymentProfileManifestSignedPayload {
+        label: "cityg/deployment-profile-manifest-v1",
+        scope_id: &state.descriptor.scope_id,
+        history_authority_extension,
+        gid,
+        profile_version,
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_h: fs_forward_leap_policy.h,
+        fs_forward_leap_checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: fs_forward_leap_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: fs_forward_leap_policy.slack_first_device,
+        fs_forward_leap_slack_device: fs_forward_leap_policy.slack_device,
+    })?;
+    let signature = sign_history_authority_message(state, payload.as_slice())?;
+    Ok(to_cbor_vec(&DeploymentProfileManifestWire {
+        scope_id: state.descriptor.scope_id.to_vec(),
+        history_authority_extension: history_authority_extension.to_string(),
+        gid: gid.to_vec(),
+        profile_version: profile_version.to_string(),
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_h: fs_forward_leap_policy.h,
+        fs_forward_leap_checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: fs_forward_leap_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: fs_forward_leap_policy.slack_first_device,
+        fs_forward_leap_slack_device: fs_forward_leap_policy.slack_device,
         signature,
     })?)
 }

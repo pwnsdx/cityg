@@ -1419,6 +1419,7 @@ fn encode_merge_ticket_response(
     current_global_history_attestation: Vec<u8>,
     history_authority_extension: String,
     merge_ticket_artifact: Vec<u8>,
+    deployment_profile_manifest: Vec<u8>,
 ) -> Result<Vec<u8>, ApiError> {
     let MergeTicketBundle {
         gid: _,
@@ -1494,6 +1495,7 @@ fn encode_merge_ticket_response(
         current_global_history_attestation,
         history_authority_extension,
         merge_ticket_artifact,
+        deployment_profile_manifest,
     };
 
     let mut response_bytes = Vec::new();
@@ -2112,6 +2114,20 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             )
             .map_err(ApiError::from)?
     };
+    let deployment_profile_manifest = {
+        let lane = state.server_for_gid(&ticket.gid);
+        let guard = lane.read().await;
+        guard
+            .deployment_profile_manifest_bytes(
+                &ticket.gid,
+                API_PROFILE_VERSION,
+                history_authority_extension.as_str(),
+                ticket.n_max,
+                ticket.max_barrier_update_bytes,
+                ticket.fs_forward_leap_policy,
+            )
+            .map_err(ApiError::from)?
+    };
 
     let response = JoinTicketResponse {
         gid: ticket.gid.to_vec(),
@@ -2170,6 +2186,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
         current_revoked_leaf_indices_completeness_attestation,
         history_authority_extension,
         provisioning_artifact,
+        deployment_profile_manifest,
     };
 
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);
@@ -2468,6 +2485,7 @@ async fn expel_member_ticket(
         current_global_history_attestation,
         history_authority_extension,
         merge_ticket_artifact,
+        deployment_profile_manifest,
     ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
@@ -2509,12 +2527,23 @@ async fn expel_member_ticket(
                 pivot_parity_cbor.as_slice(),
             )
             .map_err(ApiError::from)?;
+        let deployment_profile_manifest = guard
+            .deployment_profile_manifest_bytes(
+                &gid,
+                API_PROFILE_VERSION,
+                guard.history_authority_extension_id(),
+                bundle.n_max,
+                bundle.max_barrier_update_bytes,
+                bundle.fs_forward_leap_policy,
+            )
+            .map_err(ApiError::from)?;
         (
             bundle,
             history_authority_descriptor,
             current_global_history_attestation,
             guard.history_authority_extension_id().to_string(),
             merge_ticket_artifact,
+            deployment_profile_manifest,
         )
     };
 
@@ -2524,6 +2553,7 @@ async fn expel_member_ticket(
         current_global_history_attestation,
         history_authority_extension,
         merge_ticket_artifact,
+        deployment_profile_manifest,
     )?))
 }
 
@@ -2583,6 +2613,7 @@ async fn merge_ticket(
         current_global_history_attestation,
         history_authority_extension,
         merge_ticket_artifact,
+        deployment_profile_manifest,
     ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
@@ -2628,12 +2659,23 @@ async fn merge_ticket(
                 pivot_parity_cbor.as_slice(),
             )
             .map_err(ApiError::from)?;
+        let deployment_profile_manifest = guard
+            .deployment_profile_manifest_bytes(
+                &gid,
+                API_PROFILE_VERSION,
+                guard.history_authority_extension_id(),
+                bundle.n_max,
+                bundle.max_barrier_update_bytes,
+                bundle.fs_forward_leap_policy,
+            )
+            .map_err(ApiError::from)?;
         (
             bundle,
             history_authority_descriptor,
             current_global_history_attestation,
             guard.history_authority_extension_id().to_string(),
             merge_ticket_artifact,
+            deployment_profile_manifest,
         )
     };
 
@@ -2643,6 +2685,7 @@ async fn merge_ticket(
         current_global_history_attestation,
         history_authority_extension,
         merge_ticket_artifact,
+        deployment_profile_manifest,
     )?;
     if intent == MergeTicketIntent::Leave {
         state
@@ -5519,6 +5562,8 @@ mod tests {
         assert_eq!(decoded.kem_tree_hash_after.len(), 32);
         assert_eq!(decoded.provisioning_nonce.len(), 32);
         assert!(decoded.provisioning_expires_at_ms >= decoded.provisioning_issued_at_ms);
+        assert!(!decoded.provisioning_artifact.is_empty());
+        assert!(!decoded.deployment_profile_manifest.is_empty());
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);
     }
@@ -6214,6 +6259,7 @@ mod tests {
         assert_eq!(decoded.current_history_view_id.len(), 32);
         assert!(decoded.current_history_commitment.is_some());
         assert!(!decoded.merge_ticket_artifact.is_empty());
+        assert!(!decoded.deployment_profile_manifest.is_empty());
         assert!(decoded.n_max.is_power_of_two());
         assert!(decoded.max_barrier_update_bytes > 0);
         let expected_cover_leaf_index = u64::from(u32::from_be_bytes(
@@ -6246,6 +6292,7 @@ mod tests {
         assert_eq!(refresh_decoded.current_history_view_id.len(), 32);
         assert!(refresh_decoded.current_history_commitment.is_some());
         assert!(!refresh_decoded.merge_ticket_artifact.is_empty());
+        assert!(!refresh_decoded.deployment_profile_manifest.is_empty());
         assert_eq!(refresh_decoded.join_delta_root, vec![0u8; 32]);
         assert_eq!(
             refresh_decoded.revoked_since_root,

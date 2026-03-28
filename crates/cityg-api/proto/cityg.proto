@@ -266,6 +266,7 @@ message JoinTicketResponse {
   bytes current_revoked_leaf_indices_completeness_attestation = 45;
   string history_authority_extension = 46;
   bytes provisioning_artifact = 47;
+  bytes deployment_profile_manifest = 48;
 }
 
 message MergeTicketRequest {
@@ -317,6 +318,7 @@ message MergeTicketResponse {
   bytes current_global_history_attestation = 33;
   string history_authority_extension = 34;
   bytes merge_ticket_artifact = 35;
+  bytes deployment_profile_manifest = 36;
 }
 
 message BarrierResolveRevokedLeavesRequest {

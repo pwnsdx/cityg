@@ -3244,6 +3244,7 @@ mod tests {
             current_global_history_attestation_bytes: Vec::new(),
             current_global_history_attestation: None,
             merge_ticket_artifact_bytes: Vec::new(),
+            deployment_profile_manifest_bytes: Vec::new(),
             n_max: 8,
             max_barrier_update_bytes: 64 * 1024,
         }
@@ -3319,6 +3320,8 @@ mod tests {
         history_authority_extension: String,
         #[prost(bytes = "vec", tag = "35")]
         merge_ticket_artifact: Vec<u8>,
+        #[prost(bytes = "vec", tag = "36")]
+        deployment_profile_manifest: Vec<u8>,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3785,6 +3788,7 @@ mod tests {
                 .map(|extension| extension.as_str().to_string())
                 .unwrap_or_default(),
             merge_ticket_artifact: ticket.merge_ticket_artifact_bytes.clone(),
+            deployment_profile_manifest: ticket.deployment_profile_manifest_bytes.clone(),
         }
         .encode_to_vec())
     }

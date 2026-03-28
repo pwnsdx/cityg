@@ -493,12 +493,16 @@ message JoinTicketResponse {
   bytes current_revoked_leaf_indices_completeness_attestation = 45;
   string history_authority_extension = 46;  // "global-history-authority-v1" in the base profile
   bytes provisioning_artifact = 47;         // Signed artifact over the delivered current-state provisioning fields
+  bytes deployment_profile_manifest = 48;   // Signed artifact over delivered profile/config fields
 }
 ```
 
 Base-profile notes:
 - `history_authority_extension` MUST be present and MUST equal `global-history-authority-v1` on successful responses.
 - `provisioning_artifact` MUST be non-empty and MUST be verified before a client consumes the delivered current-state provisioning fields.
+- `deployment_profile_manifest` MUST be non-empty and MUST be verified before a client consumes
+  delivered profile/config fields such as `n_max`, `max_barrier_update_bytes`, and the FLG
+  window parameters.
 
 **Rust Client Example:**
 ```rust
@@ -587,6 +591,7 @@ message MergeTicketResponse {
   bytes current_global_history_attestation = 33;
   string history_authority_extension = 34;  // "global-history-authority-v1" in the base profile
   bytes merge_ticket_artifact = 35;
+  bytes deployment_profile_manifest = 36;
 }
 ```
 
@@ -599,6 +604,10 @@ delivered current-state/helper field from the merge/expel ticket. In the base pr
 artifact is signed under the negotiated history-authority extension and binds the current
 `HistoryCommitment`, current attestation, FLG window, and merge-authoring helper state carried by
 the response.
+`deployment_profile_manifest` MUST also be present and verified before the client consumes the
+delivered profile/config fields from the response. In the base profile it binds `(gid,
+profile_version)`, `n_max`, `max_barrier_update_bytes`, and the FLG window under the negotiated
+history-authority extension.
 
 **Rust Client Example:**
 ```rust

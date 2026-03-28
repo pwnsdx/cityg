@@ -364,3 +364,18 @@ Lecture consolidée:
 
 - cela réduit encore la malléabilité locale des contrats helper/config sur le path merge;
 - `5.8` reste néanmoins **Partial** parce qu’il manque toujours un manifest global unique signé pour la policy/config de déploiement, au-delà des artefacts join/merge individuels.
+
+--
+
+## Commentaires Codex (2026-03-28, tranche signed deployment profile manifest)
+
+Nouvelle passe spec + implémentation:
+
+- `JoinTicketResponse` et `MergeTicketResponse` transportent maintenant un `deployment_profile_manifest` signé;
+- ce manifest lie explicitement `history_authority_extension`, `(gid, profile_version)`, `n_max`, `max_barrier_update_bytes` et la fenêtre FLG visible côté client;
+- le client API le vérifie fail-closed avant de consommer ces champs de config/policy.
+
+Lecture consolidée:
+
+- cela réduit encore la malléabilité locale des paramètres de profile/config livrés sur join/merge;
+- `5.8` reste néanmoins **Partial** parce qu’on n’a toujours pas un manifest global unique couvrant l’ensemble du déploiement et de ses flows helpers/histoire, ni une canonité globale plus forte.

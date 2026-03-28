@@ -793,6 +793,17 @@ impl CitygApiClient {
             history_authority.as_ref(),
             current_global_history_attestation.as_ref(),
         ) {
+            verify_deployment_profile_manifest(
+                response.deployment_profile_manifest.as_slice(),
+                authority,
+                history_authority_extension.expect("validated base-profile extension"),
+                &attestation.gid,
+                response.profile_version.as_str(),
+                response.n_max,
+                response.max_barrier_update_bytes,
+                &fs_forward_leap_policy,
+                "merge ticket",
+            )?;
             verify_merge_ticket_artifact(
                 response.merge_ticket_artifact.as_slice(),
                 authority,
@@ -803,7 +814,9 @@ impl CitygApiClient {
                 attestation,
                 &fs_forward_leap_policy,
             )?;
-        } else if !response.merge_ticket_artifact.is_empty() {
+        } else if !response.merge_ticket_artifact.is_empty()
+            || !response.deployment_profile_manifest.is_empty()
+        {
             return Err(Error::Parse(
                 "merge ticket carries merge_ticket_artifact without history authority".to_string(),
             ));
@@ -843,6 +856,7 @@ impl CitygApiClient {
             current_global_history_attestation_bytes: response.current_global_history_attestation,
             current_global_history_attestation,
             merge_ticket_artifact_bytes: response.merge_ticket_artifact,
+            deployment_profile_manifest_bytes: response.deployment_profile_manifest,
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
@@ -1208,6 +1222,17 @@ impl CitygApiClient {
                 "join ticket",
             )?;
             if let Some(commitment) = current_history_commitment.as_ref() {
+                verify_deployment_profile_manifest(
+                    response.deployment_profile_manifest.as_slice(),
+                    authority,
+                    history_authority_extension.expect("validated base-profile extension"),
+                    &gid,
+                    response.profile_version.as_str(),
+                    response.n_max,
+                    response.max_barrier_update_bytes,
+                    &fs_forward_leap_policy,
+                    "join ticket",
+                )?;
                 verify_join_provisioning_artifact(
                     response.provisioning_artifact.as_slice(),
                     authority,
@@ -1271,6 +1296,7 @@ impl CitygApiClient {
             || !response
                 .current_revoked_leaf_indices_completeness_attestation
                 .is_empty()
+            || !response.deployment_profile_manifest.is_empty()
             || !response.provisioning_artifact.is_empty()
         {
             return Err(Error::Parse(
@@ -1458,6 +1484,17 @@ impl CitygApiClient {
             history_authority.as_ref(),
             current_global_history_attestation.as_ref(),
         ) {
+            verify_deployment_profile_manifest(
+                response.deployment_profile_manifest.as_slice(),
+                authority,
+                history_authority_extension.expect("validated base-profile extension"),
+                &attestation.gid,
+                response.profile_version.as_str(),
+                response.n_max,
+                response.max_barrier_update_bytes,
+                &fs_forward_leap_policy,
+                "merge ticket",
+            )?;
             verify_merge_ticket_artifact(
                 response.merge_ticket_artifact.as_slice(),
                 authority,
@@ -1468,7 +1505,9 @@ impl CitygApiClient {
                 attestation,
                 &fs_forward_leap_policy,
             )?;
-        } else if !response.merge_ticket_artifact.is_empty() {
+        } else if !response.merge_ticket_artifact.is_empty()
+            || !response.deployment_profile_manifest.is_empty()
+        {
             return Err(Error::Parse(
                 "merge ticket carries merge_ticket_artifact without history authority".to_string(),
             ));
@@ -1508,6 +1547,7 @@ impl CitygApiClient {
             current_global_history_attestation_bytes: response.current_global_history_attestation,
             current_global_history_attestation,
             merge_ticket_artifact_bytes: response.merge_ticket_artifact,
+            deployment_profile_manifest_bytes: response.deployment_profile_manifest,
             n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
@@ -2866,6 +2906,7 @@ pub struct MergeTicket {
     pub current_global_history_attestation_bytes: Vec<u8>,
     pub current_global_history_attestation: Option<GlobalHistoryAttestation>,
     pub merge_ticket_artifact_bytes: Vec<u8>,
+    pub deployment_profile_manifest_bytes: Vec<u8>,
     pub n_max: u64,
     pub max_barrier_update_bytes: u64,
 }
@@ -2996,6 +3037,25 @@ struct MergeTicketArtifactWire {
     fs_policy_version: String,
     fs_epoch_base_ts: u64,
     kbroad_generation: u64,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DeploymentProfileManifestWire {
+    #[serde(with = "serde_bytes")]
+    scope_id: Vec<u8>,
+    history_authority_extension: String,
+    #[serde(with = "serde_bytes")]
+    gid: Vec<u8>,
+    profile_version: String,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
     #[serde(with = "serde_bytes")]
     signature: Vec<u8>,
 }
@@ -3139,6 +3199,24 @@ struct MergeTicketArtifactSignedPayload<'a> {
     fs_policy_version: &'a str,
     fs_epoch_base_ts: u64,
     kbroad_generation: u64,
+}
+
+#[derive(Serialize)]
+struct DeploymentProfileManifestSignedPayload<'a> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    history_authority_extension: &'a str,
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    profile_version: &'a str,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
 }
 
 #[derive(Serialize)]
@@ -3556,6 +3634,81 @@ fn verify_merge_ticket_artifact(
         payload.as_slice(),
         authority.public_key.as_slice(),
         artifact.signature.as_slice(),
+    )
+}
+
+fn verify_deployment_profile_manifest(
+    raw: &[u8],
+    authority: &HistoryAuthorityDescriptor,
+    history_authority_extension: HistoryAuthorityExtension,
+    gid: &[u8; 32],
+    profile_version: &str,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    fs_forward_leap_policy: &FsForwardLeapPolicy,
+    context: &'static str,
+) -> Result<(), Error> {
+    if raw.is_empty() {
+        return Err(Error::Parse(format!(
+            "{context} missing deployment_profile_manifest"
+        )));
+    }
+    let manifest: DeploymentProfileManifestWire =
+        decode_cbor_det("deployment profile manifest", raw)?;
+    if array32(&manifest.scope_id)? != authority.scope_id {
+        return Err(Error::Parse(format!(
+            "{context} deployment_profile_manifest scope_id mismatch"
+        )));
+    }
+    if manifest.history_authority_extension != history_authority_extension.as_str() {
+        return Err(Error::Parse(format!(
+            "{context} deployment_profile_manifest history_authority_extension mismatch"
+        )));
+    }
+    if array32(&manifest.gid)? != *gid {
+        return Err(Error::Parse(format!(
+            "{context} deployment_profile_manifest gid mismatch"
+        )));
+    }
+    if manifest.profile_version != profile_version {
+        return Err(Error::Parse(format!(
+            "{context} deployment_profile_manifest profile_version mismatch"
+        )));
+    }
+    if manifest.n_max != n_max || manifest.max_barrier_update_bytes != max_barrier_update_bytes {
+        return Err(Error::Parse(format!(
+            "{context} deployment_profile_manifest barrier config mismatch"
+        )));
+    }
+    if manifest.fs_forward_leap_h != fs_forward_leap_policy.h
+        || manifest.fs_forward_leap_checkpoint_interval
+            != fs_forward_leap_policy.checkpoint_interval
+        || manifest.fs_forward_leap_slack_anchor != fs_forward_leap_policy.slack_anchor
+        || manifest.fs_forward_leap_slack_first_device != fs_forward_leap_policy.slack_first_device
+        || manifest.fs_forward_leap_slack_device != fs_forward_leap_policy.slack_device
+    {
+        return Err(Error::Parse(format!(
+            "{context} deployment_profile_manifest fs policy mismatch"
+        )));
+    }
+    let payload = encode_cbor_det(&DeploymentProfileManifestSignedPayload {
+        label: "cityg/deployment-profile-manifest-v1",
+        scope_id: &authority.scope_id,
+        history_authority_extension: history_authority_extension.as_str(),
+        gid,
+        profile_version,
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_h: fs_forward_leap_policy.h,
+        fs_forward_leap_checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: fs_forward_leap_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: fs_forward_leap_policy.slack_first_device,
+        fs_forward_leap_slack_device: fs_forward_leap_policy.slack_device,
+    })?;
+    verify_ml_dsa_signature(
+        payload.as_slice(),
+        authority.public_key.as_slice(),
+        manifest.signature.as_slice(),
     )
 }
 
@@ -4270,10 +4423,71 @@ mod tests {
         })
     }
 
+    fn build_test_deployment_profile_manifest_for_join(response: &JoinTicketResponse) -> Vec<u8> {
+        let current_history_commitment = response
+            .current_history_commitment
+            .clone()
+            .expect("join ticket current_history_commitment");
+        let authority = build_test_history_authority(
+            HistoryCommitment {
+                history_view_id: array32(&current_history_commitment.history_view_id)
+                    .expect("history_view_id"),
+                history_commitment_id: array32(&current_history_commitment.history_commitment_id)
+                    .expect("history_commitment_id"),
+                prev_history_commitment_id: array32(
+                    &current_history_commitment.prev_history_commitment_id,
+                )
+                .expect("prev_history_commitment_id"),
+                history_seq: current_history_commitment.history_seq,
+            },
+            array32(&response.gid).expect("gid"),
+            response.barrier_version,
+            array32(&response.kem_tree_hash_after).expect("kem_tree_hash_after"),
+        );
+        let fs_policy = response
+            .fs_forward_leap_policy
+            .clone()
+            .expect("fs_forward_leap_policy");
+        let gid = array32(&response.gid).expect("gid");
+        let payload = encode_cbor_det(&DeploymentProfileManifestSignedPayload {
+            label: "cityg/deployment-profile-manifest-v1",
+            scope_id: &authority.descriptor.scope_id,
+            history_authority_extension: response.history_authority_extension.as_str(),
+            gid: &gid,
+            profile_version: response.profile_version.as_str(),
+            n_max: response.n_max,
+            max_barrier_update_bytes: response.max_barrier_update_bytes,
+            fs_forward_leap_h: fs_policy.h,
+            fs_forward_leap_checkpoint_interval: fs_policy.checkpoint_interval,
+            fs_forward_leap_slack_anchor: fs_policy.slack_anchor,
+            fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
+            fs_forward_leap_slack_device: fs_policy.slack_device,
+        });
+        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
+            .as_bytes()
+            .to_vec();
+        encode_cbor_det(&DeploymentProfileManifestWire {
+            scope_id: authority.descriptor.scope_id.to_vec(),
+            history_authority_extension: response.history_authority_extension.clone(),
+            gid: response.gid.clone(),
+            profile_version: response.profile_version.clone(),
+            n_max: response.n_max,
+            max_barrier_update_bytes: response.max_barrier_update_bytes,
+            fs_forward_leap_h: fs_policy.h,
+            fs_forward_leap_checkpoint_interval: fs_policy.checkpoint_interval,
+            fs_forward_leap_slack_anchor: fs_policy.slack_anchor,
+            fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
+            fs_forward_leap_slack_device: fs_policy.slack_device,
+            signature,
+        })
+    }
+
     fn finalize_join_ticket_payload(mut response: JoinTicketResponse) -> JoinTicketResponse {
         if !response.history_authority_descriptor.is_empty()
             && !response.history_authority_extension.is_empty()
         {
+            response.deployment_profile_manifest =
+                build_test_deployment_profile_manifest_for_join(&response);
             response.provisioning_artifact = build_test_join_provisioning_artifact(&response);
         }
         response
@@ -4416,10 +4630,71 @@ mod tests {
         })
     }
 
+    fn build_test_deployment_profile_manifest_for_merge(response: &MergeTicketResponse) -> Vec<u8> {
+        let current_history_commitment = response
+            .current_history_commitment
+            .clone()
+            .expect("merge ticket current_history_commitment");
+        let authority = build_test_history_authority(
+            HistoryCommitment {
+                history_view_id: array32(&current_history_commitment.history_view_id)
+                    .expect("history_view_id"),
+                history_commitment_id: array32(&current_history_commitment.history_commitment_id)
+                    .expect("history_commitment_id"),
+                prev_history_commitment_id: array32(
+                    &current_history_commitment.prev_history_commitment_id,
+                )
+                .expect("prev_history_commitment_id"),
+                history_seq: current_history_commitment.history_seq,
+            },
+            [0x41; 32],
+            response.barrier_version,
+            array32(&response.kem_tree_hash_after).expect("kem_tree_hash_after"),
+        );
+        let fs_policy = response
+            .fs_forward_leap_policy
+            .clone()
+            .expect("merge ticket fs_forward_leap_policy");
+        let gid = [0x41; 32];
+        let payload = encode_cbor_det(&DeploymentProfileManifestSignedPayload {
+            label: "cityg/deployment-profile-manifest-v1",
+            scope_id: &authority.descriptor.scope_id,
+            history_authority_extension: response.history_authority_extension.as_str(),
+            gid: &gid,
+            profile_version: response.profile_version.as_str(),
+            n_max: response.n_max,
+            max_barrier_update_bytes: response.max_barrier_update_bytes,
+            fs_forward_leap_h: fs_policy.h,
+            fs_forward_leap_checkpoint_interval: fs_policy.checkpoint_interval,
+            fs_forward_leap_slack_anchor: fs_policy.slack_anchor,
+            fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
+            fs_forward_leap_slack_device: fs_policy.slack_device,
+        });
+        let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
+            .as_bytes()
+            .to_vec();
+        encode_cbor_det(&DeploymentProfileManifestWire {
+            scope_id: authority.descriptor.scope_id.to_vec(),
+            history_authority_extension: response.history_authority_extension.clone(),
+            gid: gid.to_vec(),
+            profile_version: response.profile_version.clone(),
+            n_max: response.n_max,
+            max_barrier_update_bytes: response.max_barrier_update_bytes,
+            fs_forward_leap_h: fs_policy.h,
+            fs_forward_leap_checkpoint_interval: fs_policy.checkpoint_interval,
+            fs_forward_leap_slack_anchor: fs_policy.slack_anchor,
+            fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
+            fs_forward_leap_slack_device: fs_policy.slack_device,
+            signature,
+        })
+    }
+
     fn finalize_merge_ticket_payload(mut response: MergeTicketResponse) -> MergeTicketResponse {
         if !response.history_authority_descriptor.is_empty()
             && !response.history_authority_extension.is_empty()
         {
+            response.deployment_profile_manifest =
+                build_test_deployment_profile_manifest_for_merge(&response);
             response.merge_ticket_artifact = build_test_merge_ticket_artifact(&response);
         }
         response
@@ -5609,6 +5884,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_ticket_rejects_missing_deployment_profile_manifest()
+    -> Result<(), Box<dyn StdError>> {
+        async fn mock_join_ticket_without_deployment_profile_manifest() -> impl IntoResponse {
+            let mut response = join_ticket_ok_payload();
+            response.deployment_profile_manifest.clear();
+            encode_proto(response)
+        }
+
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_join_ticket_without_deployment_profile_manifest),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("missing deployment_profile_manifest must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("missing deployment_profile_manifest")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_ticket_rejects_tampered_deployment_profile_manifest()
+    -> Result<(), Box<dyn StdError>> {
+        async fn mock_join_ticket_with_tampered_deployment_profile_manifest() -> impl IntoResponse {
+            let mut response = join_ticket_ok_payload();
+            let last = response
+                .deployment_profile_manifest
+                .last_mut()
+                .expect("deployment profile manifest bytes");
+            *last ^= 0x01;
+            encode_proto(response)
+        }
+
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_join_ticket_with_tampered_deployment_profile_manifest),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("tampered deployment_profile_manifest must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("history authority signature verification failed")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn join_ticket_rejects_tampered_provisioning_artifact() -> Result<(), Box<dyn StdError>> {
         async fn mock_join_ticket_with_tampered_provisioning_artifact() -> impl IntoResponse {
             let mut response = join_ticket_ok_payload();
@@ -5765,6 +6109,49 @@ mod tests {
         assert!(matches!(
             err,
             Error::Parse(message) if message.contains("missing merge_ticket_artifact")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_rejects_missing_deployment_profile_manifest()
+    -> Result<(), Box<dyn StdError>> {
+        let mut payload = merge_ticket_ok_payload();
+        payload.deployment_profile_manifest.clear();
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("missing deployment_profile_manifest must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("missing deployment_profile_manifest")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_rejects_tampered_deployment_profile_manifest()
+    -> Result<(), Box<dyn StdError>> {
+        let mut payload = merge_ticket_ok_payload();
+        let last = payload
+            .deployment_profile_manifest
+            .last_mut()
+            .expect("deployment profile manifest bytes");
+        *last ^= 0x01;
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("tampered deployment_profile_manifest must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("history authority signature verification failed")
         ));
         handle.abort();
         Ok(())

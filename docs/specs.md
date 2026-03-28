@@ -1680,6 +1680,16 @@ Base-profile wire/API requirement for merge/current-state helper tickets (normat
   * `srx_cbor`
   * the accepted current-state roots / suite identifiers consumed by local merge or expel authoring checks
 * Clients MUST verify `merge_ticket_artifact` before consuming any delivered current-state/helper field from a merge/expel ticket.
+Base-profile wire/API requirement for join/merge profile/config delivery (normative):
+* Successful `JoinTicketResponse`, `MergeTicketResponse`, and `expel_member_ticket` responses that carry client-consumed profile/config fields MUST carry a non-empty `deployment_profile_manifest`.
+* `deployment_profile_manifest` MUST be signed under the negotiated `history_authority_extension`.
+* That signed manifest MUST bind at minimum:
+  * `history_authority_extension`
+  * `(gid, profile_version)`
+  * `n_max`
+  * `max_barrier_update_bytes`
+  * authenticated FLG window parameters `(H, checkpoint_interval, S_anchor, S_first, S_device)`
+* Clients MUST verify `deployment_profile_manifest` before consuming those delivered profile/config fields.
 Join provisioning MUST deliver to the joiner:
 Barrier required fields:
 * current barrier_initialized (bool) -- for joins into an already-existing group under this profile, this MUST be true

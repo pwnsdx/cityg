@@ -117,8 +117,8 @@ Summary:
   Proof: `docs/specs.md:162-163`, `docs/specs.md:1479-1484`.
 - `5.7` `Closed` — join provisioning now ships as a standalone signed `provisioning_artifact` bound to the delivered current-state fields, freshness window, helper completeness material, and deployment-global history-authority attestation; clients fail closed before consuming provisioned state if the artifact is missing, stale, or tampered.
   Proof: `docs/specs.md:1638-1669`, `crates/cityg-api/proto/cityg.proto:216-268`, `crates/cityg-server/src/lib.rs:2685-2709,3529-3708`, `crates/cityg-api/src/lib.rs:2098-2170`, `crates/cityg-api-client/src/lib.rs:1079-1251,3062-3233,5051-5147`.
-- `5.8` `Partial` — retention/fetch/config contracts are better tied to history and current join/merge helper state is now signed as standalone provisioning / merge-ticket artifacts, but the profile still is not backed by one signed global deployment manifest and global canonity.
-  Proof: `docs/specs.md:220-238`, `docs/specs.md:618-638`, `docs/specs.md:1532`, and the remaining partial Audit 2 / Audit 3 findings.
+- `5.8` `Partial` — retention/fetch/config contracts are better tied to history: join/merge now also carry a signed `deployment_profile_manifest` for client-consumed profile/config fields, and current join/merge helper state is signed as standalone provisioning / merge-ticket artifacts. This still is not one globally canonical deployment manifest across all flows, nor global canonity.
+  Proof: `docs/specs.md:220-238`, `docs/specs.md:618-638`, `docs/specs.md:1638-1708`, `crates/cityg-api/proto/cityg.proto:216-314`, `crates/cityg-server/src/lib.rs:2713-2750,3921-3974`, `crates/cityg-api/src/lib.rs:2102-2190,2520-2556,2652-2688`, `crates/cityg-api-client/src/lib.rs:1162-1299,1487-1552,3640-3715`; and the remaining partial Audit 2 / Audit 3 findings.
 
 ## Audit 6
 
@@ -151,8 +151,8 @@ Summary:
   Proof: `docs/specs.md` (S3.3 shared authenticated-view rule and S3.3.E-F), `crates/cityg-server/src/lib.rs:2644-2698,3332-3478`, `crates/cityg-api/src/lib.rs:2607-2852`, `crates/cityg-api-client/src/lib.rs:2787-3207`, `crates/cityg-api-client/tests/history_authority_extensions.rs`, `crates/cityg-gui/src/native/barrier_runtime.rs`, `crates/cityg-gui/src/bin/join_leave.rs`.
 - `7.5` `Partial` — recover-only is now explicit, persisted, and escalates to `recovery_required`, but still remains a server-imposable degraded mode until FULL is re-established locally.
   Proof: `crates/cityg-gui/src/native/barrier_runtime.rs:91-99,603-655`.
-- `7.6` `Partial` — provisioning and merge/current-state ticket material are now standalone signed artifacts under the deployment-global history authority, but policy/governance state still is not committed into the same authenticated lineage strongly enough to call this fully closed.
-  Proof: `docs/specs.md:1638-1690`, `crates/cityg-api/proto/cityg.proto:216-268,278-313`, `crates/cityg-api-client/src/lib.rs:1079-1251,1346-1569,3062-3233,3235-3671`.
+- `7.6` `Partial` — provisioning and merge/current-state ticket material are now standalone signed artifacts under the deployment-global history authority, and join/merge also carry a signed `deployment_profile_manifest` for client-consumed config fields. Policy/governance state still is not committed into the same authenticated lineage strongly enough to call this fully closed.
+  Proof: `docs/specs.md:1638-1708`, `crates/cityg-api/proto/cityg.proto:216-314`, `crates/cityg-api-client/src/lib.rs:1079-1299,1346-1569,3062-3233,3235-3715`.
 - `7.7` `Partial` — fault reactions are more operationally meaningful through explicit recovery-required state, but still do not define cross-source/quarantine handling against a byzantine server.
   Proof: `crates/cityg-gui/src/native/barrier_runtime.rs:91-99,626-655`.
 
