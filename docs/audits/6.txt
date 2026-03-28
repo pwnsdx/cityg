@@ -333,3 +333,79 @@ Dernière relecture spec + implémentation:
 Statut audit final:
 
 - **Closed**: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8
+
+--
+
+GPT 5.4 Pro Analysis:
+
+According to a document from 2026-03-28, oui: **dans le périmètre précis de mon audit initial “resource exhaustion / DoS par coût”**, les changements apportés satisfont désormais l’audit. Ma relecture de la spec actuelle arrive au même constat que la note de clôture jointe: les huit points du lot DoS sont maintenant **fermés dans le scope courant**.  
+
+Le verdict court est celui-ci :
+
+* **Oui pour la spec actuelle** : les coûts qui étaient auparavant **non bornés** sont maintenant bornés normativement.
+* **La fermeture ne veut pas dire “coût nul”** : certains chemins restent chers, surtout le whole-tree path historique, mais ils sont désormais **bornés**, paginés, et encadrés par des caps explicites. Pour l’audit DoS initial, c’est suffisant.  
+
+### Vérification point par point contre mon audit initial
+
+**1) `N_max` non borné**
+**Corrigé.**
+La spec impose maintenant un plafond dur de profil : `MAX_BARRIER_N_MAX := 65_536`, et les groupes au-delà sont out-of-profile. En plus, `S5.1` exige qu’un `N_max_max` fini soit défini et enforced. C’était la racine du multiplicateur universel CPU/RAM/I/O ; elle est maintenant bornée.  
+
+**2) Rétention historique publique non bornée**
+**Corrigé.**
+La spec définit maintenant une fenêtre de rétention explicite pour les snapshots d’arbres publics : `MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS := 256`, avec possibilité de retirement au-delà, mais seulement via une réponse authentifiée “retired / not available”, pas via substitution silencieuse. Elle borne aussi le cache local à `MAX_RETAINED_LOCAL_PUBLIC_TREE_SNAPSHOTS := 8`. Le problème n’est donc plus “croissance disque infinie imposée par la conformité”.  
+
+**3) `PayloadEnvelope.ct_payload` sans plafond**
+**Corrigé.**
+La spec fixe désormais `MAX_CT_PAYLOAD_BYTES := 1048576` et `MAX_PAYLOAD_ENVELOPE_BYTES := 1048640`, avec obligation de rejet si `ct_payload` ou l’enveloppe sérialisée dépassent ces bornes. C’était l’un des trous DoS les plus directs ; il est fermé.  
+
+**4) FULL chain-check whole-tree coûteux**
+**Corrigé au sens DoS, par bornage plutôt que suppression.**
+Le chemin whole-tree existe toujours pour un prédécesseur historique non déjà retenu localement, mais la spec borne désormais explicitement ce pire cas à :
+
+* un seul `pk_entries` de taille `(2*N_max-1)`,
+* plus des helpers A/B paginés et bornés,
+* avec `N_max <= MAX_BARRIER_N_MAX`,
+* et un fast-path local borné pour les snapshots déjà authentifiés.
+  Autrement dit, ce n’est plus un coût ouvert/indéfini ; c’est un coût potentiellement élevé mais **normativement borné**. C’est exactement la nuance que je ferais ici.  
+
+**5) Interfaces A/B/C à réponses coûteuses, sans pagination**
+**Corrigé.**
+Les trois interfaces sont maintenant paginées, avec `MAX_BARRIER_HELPER_PAGE_ENTRIES := 512`, offsets explicites, total_entries, cohérence de page/authenticated view obligatoire, et fail-closed sur gaps/overlaps/drift. Le coût par réponse n’est plus libre.  
+
+**6) Accumulation de `JoinSet` puis “détonation” par un merge**
+**Corrigé pour l’angle exhaustion.**
+La spec borne maintenant l’`unresolved JoinSet` à **au plus un record par leaf active**, donc au plus `N_max`, et impose au serveur de pruner/compacter l’historique d’activation pour que `ResolveJoinsSince(...)` ne dépende plus d’un backlog historique non borné. Je note une nuance : elle n’introduit pas le `MAX_UNRESOLVED_JOINS_PER_BARRIER_VERSION` idéal que j’avais proposé, et `join_finalize` reste hors des rate-limits PCS. Mais pour mon audit initial, le point critique était l’absence de borne exploitable ; cette absence n’existe plus. Le coût est maintenant borné par `N_max`, lui-même borné.  
+
+**7) Anti-replay crash-safe = write amplification sans bornes ni GC**
+**Corrigé.**
+La spec définit maintenant :
+
+* `MAX_MSGS_PER_TUPLE := 4096`,
+* `MAX_REPLAY_TUPLES_PER_CONTEXT := N_max`,
+* collectability obligatoire des tuples obsolètes,
+* pruning obligatoire avant release de nouveaux payloads,
+* batching crash-safe explicitement autorisé tant qu’aucun message n’est relâché avant durabilité du batch.
+  C’est précisément le genre de garde-fous qui manquait.  
+
+**8) CBOR_det exprimé comme algorithme coûteux unique**
+**Corrigé.**
+`S1.3` ne force plus seulement parse + re-encode + compare comme unique méthode conforme. La spec garde cette méthode comme référence, mais autorise désormais “any equivalent verification method”, y compris parser-level ou single-pass canonicality validation. Donc le coût n’est plus normativement figé à une double passe + rematérialisation. 
+
+### Ce que je retiens comme nuance importante
+
+La seule vraie nuance que je garderais, si on veut être rigoureux, est celle-ci :
+
+* le profil **autorise encore** un chemin `whole-tree` pour un prédécesseur historique non retenu localement ;
+* `join_finalize` **reste exempt** des rate-limits PCS ;
+  mais ces deux points ne sont plus des **vecteurs non bornés** d’exhaustion au sens de mon audit initial. Ils relèvent désormais d’un **coût borné de profil**, pas d’un trou DoS structurel sans garde-fous.  
+
+### Conclusion
+
+Ma réponse est donc : **oui, les changements satisfont l’audit initial DoS/resource-exhaustion**.
+
+Formulation précise :
+
+* **Tous les findings initiaux sont désormais fermés dans le scope de la spec actuelle**.
+* **La fermeture repose surtout sur l’ajout de bornes normatives** : caps de taille, caps de cardinalité, pagination, fenêtre de rétention, cache borné, GC/pruning, et reformulation des obligations CBOR.
+* **Le rapport joint va dans le même sens** et marque le lot DoS `6.1` à `6.8` comme fermé après la passe finale de cohérence.  

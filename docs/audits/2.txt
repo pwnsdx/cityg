@@ -312,3 +312,40 @@ Statut audit final:
 
 - **Closed**: 2.1, 2.2, 2.4, 2.6
 - **Reclassified**: 2.3, 2.5
+
+--
+
+GPT 5.4 Pro Analysis:
+
+According to a document from 2026-03-23, ma vérification est: **oui en grande partie, mais pas totalement si je réapplique strictement mon audit initial comme audit de binding crypto spec-only**. La version actuelle ferme clairement `2.1`, `2.4` et `2.6`, traite `2.2` de façon substantielle, mais `2.3` est surtout **reclassé** plutôt que textuellement corrigé, et `2.5` est **fortement durci sans être entièrement fermé par le seul binding cryptographique**. Le rapport de vérification du 2026-03-26 est plus optimiste et considère le scope courant comme fermé; ma lecture reste un peu plus stricte sur deux points.  
+
+**`2.1 — header[99]` après déchiffrement de `header[97]`: fermé.**
+Le texte dit maintenant explicitement qu’après tout déchiffrement réussi de `header[97]`, l’implémentation **MUST recompute** `H_L("msphf/hp/commit", [BarrierHpPlaintext])` et exiger l’égalité exacte avec `header[99]` avant tout parsing/usage de `HpArtifact`. Le KAT négatif correspondant est aussi exigé. C’est exactement le renforcement que je demandais.   
+
+**`2.2 — version binding / no mixing`: substantiellement fermé, avec une réserve de pureté.**
+`bind_fs` inclut désormais `profile_version`, donc la vérification ZK-VRF dépend explicitement du profil. En plus, les surfaces join/merge/helper/lookup qui livrent du profile/config doivent maintenant transporter un `deployment_profile_manifest` signé qui bind au minimum `(gid, profile_version)`, et le client doit le vérifier avant consommation. Donc, dans le **modèle d’exécution courant du base profile**, le mix-and-match inter-version est bien mieux verrouillé. Ma seule réserve: l’ancre elle-même n’est toujours pas auto-descriptive via un champ `profile_version` obligatoire dans le header registry; la fermeture se fait par `bind_fs` + manifest signé, pas par un champ d’ancre dédié.  
+
+**`2.3 — bind_fs ne bind pas explicitement gid/weid`: pas réellement fermé dans le texte; plutôt reclassé.**
+Le tuple `bind_fs` contient toujours `xk_hash`, pas `gid` ni `weid` directement. Et `xk_hash` reste défini comme “opaque here”. Donc, si mon exigence initiale était “binding direct ou obligation textuelle explicite que `xk_hash` commite exactement `gid/weid`”, cette exigence n’est pas satisfaite par la spec seule. Je comprends pourquoi le rapport le requalifie: le profil actuel suppose que `xk_hash` porte déjà le contexte utile. Mais **textuellement**, la latitude que je pointais n’a pas disparu.  
+
+**`2.4 — gid dans les KDF barrier/HP`: fermé.**
+Là, le correctif est net. La forme `barrier-recovery` dérive `hp_salt` avec `[gid, barrier_version, xk_hash]`. Côté barrier tree, `path_secret` monte avec `H_L("barrier/tree/path", [gid, parent_node])`, et `K_barrier_new` se dérive avec `H_L("barrier/derive/salt", [gid, v_new, RRH])`. C’est bien la séparation de contexte room/gid que je demandais.   
+
+**`2.5 — recover-only / activation d’un état pas entièrement bindé`: durci, mais pas totalement fermé au sens crypto-binding pur.**
+Le texte est beaucoup meilleur qu’avant: un client recover-only doit traiter le `barrier_update` comme non fiable pour la correction du public tree au-delà de son recovery local; il **MUST NOT** originer `barrier_update`/`pcs_refresh` avant FULL verification; il doit persister `current_barrier_full_verified`; et un état appris via recover-only doit marquer ce booléen à `false`. En catch-up, il y a aussi un fail-closed explicite sur les `pcs_refresh` non ordonnés.   
+Mais le **binding cryptographique** du wrap de recovery reste inchangé dans son cœur: l’AAD de recovery est toujours `CBOR_det([gid, v_new, revocation_roots_hash, CP.updater_leaf, s, t, pkhash_t])`. Elle ne bind toujours pas `BU.prev_barrier_version`, `BU.kem_tree_hash_before`, `BU.kem_tree_hash_after`, `BU.tree_size`, ni un digest du `cover_payload` complet. Autrement dit, le trou est aujourd’hui compensé surtout par la machine d’état, les chain-checks et les artefacts d’historique, pas par un binding AEAD plus riche. Je le classerais donc **partiellement satisfait / requalifié**, pas “fermée cryptographiquement”.  
+
+**`2.6 — sender identity / leaf identity`: fermé.**
+La spec exige maintenant qu’un transport in-profile porte une identité de device authentifiée et une membership view authentifiée suffisante pour dériver `leaf_id`; le receiver doit vérifier que `sender_leaf_id` correspond à la `leaf_id` courante du sender authentifié; et la spec interdit explicitement de réassigner la même `leaf_id` à une autre clé publique device dans le même `gid`. C’est exactement le renforcement qui manquait contre la confusion/replay cross-device.  
+
+**Point important en plus:** la distinction `author-local` / `barrier-recovery`, qui faisait partie de mes priorités absolues, est maintenant explicitement portée par `element 1` de `BarrierHpEnvelope`, et un MERGE destiné à rester peer-recoverable **MUST** utiliser `barrier-recovery form`. Donc ce sous-risque-là est bien fermé dans la spec actuelle.  
+
+Mon verdict final est donc:
+
+* **Fermés:** `2.1`, `2.4`, `2.6`, plus le discriminateur `author-local` / `barrier-recovery`.
+* **Fermé de manière suffisante dans le modèle courant:** `2.2`.
+* **Pas réellement “fixé” au sens strict de mon audit initial:** `2.3`.
+* **Fortement mitigé mais pas fermé par le seul binding crypto:** `2.5`. 
+
+Donc, si ta question est “est-ce que les changements répondent matériellement à l’audit initial ?”, ma réponse est **oui, largement**.
+Si ta question est “est-ce que chaque finding initial est maintenant fermé exactement selon la barre crypto-binding stricte que j’avais posée ?”, ma réponse est **non, pas à 100 %**: il reste surtout `2.3` et, plus subtilement, `2.5`.

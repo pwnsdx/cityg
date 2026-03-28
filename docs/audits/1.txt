@@ -408,3 +408,43 @@ Statut audit mis à jour:
 
 - **Closed**: 1.1, 1.2, 1.3, 1.4, 1.6, 1.7
 - **Reclassified**: 1.5
+
+
+--
+
+GPT 5.4 Pro Analysis:
+
+According to a document from 2026-03-23, ma relecture **strictement spec-level** conclut que les changements satisfont **6 de mes 7 findings initiaux**. Donc: **oui, presque entièrement, mais pas totalement**. Le seul point que je ne considère **pas soldé** dans `docs/specs.md` est celui du **“closed-world registry / merge profile”**. 
+
+Mon verdict, point par point:
+
+1. **Bootstrap `join_finalize`** — **fermé**.
+   La spec introduit maintenant un **contexte bootstrap distinct**: elle dit explicitement que, pour cette exception, `H_prev` **n’est pas** le `kem_tree_hash_after` courant du joiner, définit `BU_current` et `H_prev_bootstrap`, impose l’authentification du snapshot prédécesseur, et interdit de traiter le hash courant provisionné comme racine de confiance suffisante. C’est précisément la correction normative qui manquait dans mon finding initial. 
+
+2. **`header[97]` sans discriminateur wire entre `author-local` et `barrier-recovery`** — **fermé**.
+   Le wire transporte maintenant explicitement `hp_context` en élément 1, limité à `"author-local"` ou `"barrier-recovery"`, et la spec dit qu’un MERGE destiné à rester peer-recoverable après acceptation/persistance **MUST** porter la forme `barrier-recovery`. Le trou d’interop que j’avais pointé n’existe plus dans le texte actuel. 
+
+3. **Formes CBOR non closes / longueurs exactes absentes** — **fermé**.
+   `BarrierUpdate`, `KemTreeCoverPayload`, `NodeCiphertext` et chaque entrée de `new_public_keys` ont désormais des **longueurs exactes normatives**, plus des règles de canonicalisation/duplication explicites. Là aussi, le point est corrigé au niveau spec. 
+
+4. **`ResolveJoinsSince()` / `unresolved JoinSet` sous-définis** — **fermé pour le finding initial**.
+   La spec dit maintenant que `ResolveJoinsSince(prev_barrier_version)` renvoie exactement les activations qui ont été **committed after** `prev_barrier_version`, qui **remain active** au `history_view_id` sélectionné, que les activations superseded/non actives ne doivent pas être retournées, et que, quand le texte parle de `JoinSet` ou `unresolved JoinSet`, il désigne **exactement ce payload authentifié**. S11.6 ajoute en plus l’exigence de **même `HistoryCommitment`** pour `RevokedLeafSet`, `JoinSet` et `snapshot_base`. Pour l’ambiguïté que j’avais soulevée dans l’audit initial, c’est suffisamment fermé. 
+
+5. **“Closed-world registry” / “merge profile”** — **pas fermé**.
+   Oui, la spec a progressé: elle énumère maintenant explicitement l’ensemble des merge/checkpoint keys (`130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148`), et elle ajoute quelques règles de présence supplémentaires pour `178/179/180/181/182`. Mais **S4.3 dit toujours** qu’un MERGE “**MUST include merge/checkpoint keys as required by merge profile**”, alors que ce **merge profile n’est toujours pas défini dans `docs/specs.md`**. En lecture littérale d’implémenteur, la présence exacte des clés merge/checkpoint reste donc **non testable à partir de ce seul document**. Mon finding initial est donc **réduit**, mais **pas soldé**. 
+
+6. **Conflit `960.11` vs `960.13`** — **fermé**.
+   La partition est maintenant claire:
+   `960.11` pour le cas “revocation change => MERGE/barrier_update requis mais absent / mauvais type / mauvaise version”,
+   `960.13` pour le cas “`header[175]` présent mais `header[178] != 0` alors que des revocations sont pendantes”. Les KAT négatifs reflètent la même séparation. 
+
+7. **Position ambiguë de `msg_index` dans `PayloadEnvelope`** — **fermé**.
+   La spec impose maintenant `PayloadEnvelope` comme array de longueur exacte 3 et indexe explicitement `PayloadEnvelope[0]`, `PayloadEnvelope[1]`, `PayloadEnvelope[2]`. L’ambiguïté wire a disparu. 
+
+**Conclusion nette**
+Si la question est: **“les changements ferment-ils les contradictions critiques de mon audit initial ?”**, la réponse est **oui, presque toutes**.
+Si la question est: **“mon audit initial est-il entièrement satisfait sans reliquat spec-level ?”**, la réponse est **non**: il reste **un point ouvert**, le **finding 5** sur le `merge profile`, parce que le document dépend toujours d’une exigence normative qu’il ne définit pas lui-même. 
+
+À noter: le `final-verification-report-2026-03-26.md` fourni va plus loin et **reclasse** ce point 5 en problème de packaging/documentation plutôt qu’en défaut local. Je **ne reprends pas ce reclassement** en revue strictement spec-level, car le texte autonome de `docs/specs.md` n’est toujours pas autosuffisant sur ce point.
+
+La formulation minimale qui manque encore pour solder complètement l’audit initial est simple: **définir dans `docs/specs.md` le “merge profile” lui-même**, ou remplacer cette référence par une règle autoportée de présence exacte des clés merge/checkpoint.

@@ -552,3 +552,44 @@ Statut audit final:
 
 - **Closed**: 7.2, 7.3, 7.4
 - **Reclassified**: 7.1, 7.5, 7.6, 7.7
+
+--
+
+GPT 5.4 Pro Analysis:
+
+According to a document from 2026-03-28, après relecture de la spec courante [specs.md](sandbox:/mnt/data/specs.md), ma réponse est: **oui en grande partie dans le scope actuel du profil de base, mais non si tu entends “satisfait” au sens fort de mon audit initial**. Le texte a à la fois fermé plusieurs gaps concrets et **réduit explicitement la portée** de certaines promesses à une `HistoryAuthorityScope` / une autorité d’historique globale au déploiement. 
+
+Mon verdict, point par point, sur l’audit “serveur malveillant / byzantin” initial :
+
+1. **Canonité de l’historique accepté** — **pas entièrement fermé, mais correctement re-scopé**.
+   La spec impose maintenant une `HistoryAuthorityScope`, un `HistoryCommitment` commun entre A/B/C/D, une monotonie locale `history_seq`, et rend `global-history-authority-v1` obligatoire dans le profil de base. Mais elle dit aussi explicitement que `HistoryCommitment` n’est **pas** un objet de consensus global/fédéré, et que `global-history-authority-v1` ne donne qu’une lignée append-only **à l’échelle du déploiement**, pas une canonité inter-déploiements ou multi-witness. Donc le point fort de mon finding initial n’est pas “résolu”; il est **borné et honnêtement déclaré hors scope**.   
+
+2. **Les invariants critiques vivaient trop côté serveur** — **corrigé pour le sous-ensemble client-visible, pas au-delà**.
+   Avant activation locale, le client doit maintenant rejouer un sous-ensemble normatif de S10: version/policy FS, `fs_epoch_base_ts`, continuité device-chain, et bornes FLG (`947.6`, `947.5`, `947.4`) à partir d’artefacts authentifiés. En revanche, la spec dit aussi noir sur blanc que cela **ne remplace pas** les checks serveur de gouvernance/autorisation/rate-limit non dérivables localement. Donc ce finding est **matériellement fermé pour la partie dérivable**, mais pas transformé en symétrie totale client/serveur.  
+
+3. **`ResolveJoinsSince(prev_barrier_version)` n’était pas assez lié à un état-cible** — **fermé dans le scope actuel**.
+   `ResolveJoinsSince` est maintenant défini comme “exactement les activations commitées après `prev_barrier_version` qui restent actives au `history_view_id` sélectionné”, il transporte `history_view_id` + `HistoryCommitment`, et S11.6 exige que `JoinSet`, `RevokedLeafSet` et `snapshot_base` soient sous le même `HistoryCommitment`. Cela ferme le steering opportuniste “same prev version, different effective target state” à l’intérieur d’une même autorité d’historique.  
+
+4. **L’omission joins/revocations n’était pas fail-closed** — **fermée dans le scope actuel**.
+   Le profil de base exige désormais des `helper_completeness_attestation` non vides sur A/B/C, une cohérence stricte d’extension/authority, et impose qu’en cas d’impossibilité de prouver complétude/finalité, le serveur retourne un résultat authentifié “insufficient history / not available / pending” au lieu d’omettre silencieusement des enregistrements. Là encore, c’est une vraie fermeture **dans une `HistoryAuthorityScope`**; pas une preuve byzantine globale contre une autorité d’historique elle-même compromise.  
+
+5. **Le mode recover-only restait un downgrade imposable** — **pas supprimé; rendu explicite et mieux contenu**.
+   La spec garde bien un mode recover-only: elle interdit alors reason 0/1, `pcs_refresh`, et le rôle d’updater général, impose `current_barrier_full_verified := false` quand l’état n’a pas été FULL-vérifié, et force des états fail-closed comme `recovery_required/insufficient_authenticated_history` dans certains gaps d’historique. Mais elle dit aussi explicitement que le profil de base **ne remote-atteste pas** la distinction FULL vs recover-only, et permet encore dans certains cas l’activation d’un état récupéré avec `current_barrier_full_verified := false`. Donc mon finding initial n’est pas “faux”; il est devenu **une tradeoff documentée**, pas une fermeture complète.   
+
+6. **Policy / governance / provisioning étaient hors de la lignée authentifiée** — **provisioning/config oui, gouvernance large non**.
+   Le texte a clairement progressé: `provisioning_artifact`, `merge_ticket_artifact` et `deployment_profile_manifest` doivent maintenant signer les champs visibles côté client pour provisioning/current-state/helper/profile/config, y compris `history_authority_extension`, `current_history_commitment`, `max_barrier_update_bytes`, `n_max`, paramètres FLG, etc. En revanche, la spec précise aussi que ses artefacts signés ne committent **que** les champs explicitement nommés, et **pas** la gouvernance/admin state au sens large sauf extension ou autre document normatif. Donc le finding est **largement fermé pour les metadata client-consumées**, mais **pas** pour la boundary gouvernance/policy complète qui motivait la version la plus forte de l’audit.   
+
+7. **Les diagnostics de faute n’étaient pas assez actionnables** — **amélioré, pas totalement fermé**.
+   Il y a maintenant une vraie machine locale fail-closed: `recovery_required/history_inconsistent`, `barrier_recovery_pending`, rétention obligatoire de `pending_*` tant que `LookupMergeAcceptance` n’a pas tranché, interdiction de best-effort reseed en catch-up insuffisamment ordonné, et désactivation de `payload send/fetch` tant que l’historique authentifié reste insuffisant. C’est bien mieux que le simple “log un 960.9 et continue”. En revanche, je ne vois toujours pas de règle normative imposant quarantaine du serveur, arbitrage multi-source, ou comparaison hors bande. Donc je classerais ce point comme **fortement amélioré mais pas totalement satisfait**.   
+
+Le point additionnel le plus important par rapport à mon audit initial est que l’exception `join_finalize` n’est plus seulement “locale au client”: elle est désormais server-checkable via `join_finalize_auth` (`header[179]`), et l’origination/activation est liée à `header[180]` et, dans le profil de base actuel, à `header[181]/[182]` sous `global-history-authority-v1`. Cela ferme une vraie partie du trou opérationnel côté bootstrap.  
+
+**Bottom line:**
+Je ne dirais pas “tous les changements satisfont mon audit initial” sans nuance. Je dirais plutôt :
+
+* **satisfaits dans le profil de base actuel** : les anciens gaps sur la cohérence A/B/C/D, le pinning au même `HistoryCommitment`, la sémantique de `ResolveJoinsSince`, l’anti-omission helpers, et une partie substantielle des checks client avant activation ;
+* **narrowed / re-scoped plutôt que vraiment fermés** : la canonité byzantine forte, le downgrade recover-only, la frontière gouvernance/policy large, et l’action opérationnelle contre un serveur fautif.
+
+Autrement dit, **oui si la promesse est désormais “résistance locale/fail-closed à l’intérieur d’une autorité d’historique append-only globale au déploiement”**; **non si la promesse reste “protection complète contre un serveur/déploiement byzantin au sens fort de l’audit initial”**. Cette lecture est d’ailleurs cohérente avec le rapport de vérification, qui classe 7.2/7.3/7.4 comme fermés et 7.1/7.5/7.6/7.7 comme reclassés dans le scope courant. 
+
+J’ai aussi recoupé avec le [rapport de vérification](sandbox:/mnt/data/final-verification-report-2026-03-26.md).

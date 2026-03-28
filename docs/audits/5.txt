@@ -411,3 +411,43 @@ Statut audit final:
 
 - **Closed**: 5.1, 5.2, 5.3, 5.5, 5.7, 5.8
 - **Reclassified**: 5.4, 5.6
+
+--
+
+GPT 5.4 Pro Analysis
+
+According to a document from 2026-03-23, ma vérification donne ce verdict : **oui, les changements satisfont l’essentiel de mon audit initial, mais pas au sens “`docs/specs.md` devient autosuffisant pour tout”**. En pratique, je considère maintenant **fermés dans le scope du base profile** les findings sur la vue historique commune, la sémantique de `JoinSet`, la corrélation d’acceptation/restart, le binding `sender_leaf_id`, le provisioning de join, et la distribution/configuration/retention. En revanche, je ne considère **pas fermés par ce seul fichier** les points sur la gouvernance/autorisation room-admin et sur les sous-systèmes crypto/preuves encore laissés externes et opaques.
+
+Mon point par point :
+
+* **5.1 — FULL chain-check / vue historique commune : fermé dans le scope courant.**
+  La spec impose désormais un `history_view_id`, un `HistoryCommitment`, une `HistoryAuthorityScope`, la non-mixité de scope, et surtout l’obligation que toute décision composant A/B/C/D valide le **même** `HistoryCommitment`, faute de quoi l’implémentation doit fail-close. Elle rend aussi obligatoires les attestations de complétude helper dans le base profile.
+
+* **5.2 — Sémantique de `JoinSet` : fermée.**
+  `ResolveJoinsSince` est maintenant défini comme l’ensemble exact des activations commitées après `prev_barrier_version` qui restent actives au `history_view_id` sélectionné, avec exclusion explicite des activations non commitées, supersédées ou inactives. Le texte fixe aussi que `JoinSet` / `unresolved JoinSet` renvoient exactement à ce payload authentifié.
+
+* **5.3 — API d’acceptance-history / finality pour crash-restart : fermée dans un scope local de déploiement.**
+  La spec définit désormais `LookupMergeAcceptance(merge_locator)` avec `status ∈ {accepted, superseded, pending, final_rejected}`, un `merge_locator` injectif, et S11.14.3/S11.14.4 impose son usage pour décider acceptation, supersession ou conservation de `pending_*`. C’est exactement l’API normative qui manquait dans mon audit initial. La limite restante est explicitement bornée à un `HistoryAuthorityScope`, pas à une canonité fédérée.
+
+* **5.5 — Binding `sender_leaf_id` : fermé.**
+  Le texte exige maintenant qu’un transport in-profile porte une identité d’émetteur authentifiée et une vue de membership authentifiée, qu’il vérifie `sender_leaf_id` contre la `leaf_id` courante de ce device, et que `leaf_id(device_pk)` soit injective dans un `gid` et non réattribuable à un autre `device_pk`. C’est précisément la fermeture que je demandais.
+
+* **5.7 — Provisioning de join : fermé dans le scope courant.**
+  Le provisioning transporte désormais un artefact signé, des champs de fraîcheur (`nonce`, `issued_at`, `expires_at`), le `current_history_commitment`, le prédécesseur bootstrap, les `JoinSet` / `RevokedLeafSet` authentifiés, `join_finalize_auth`, le `current barrier_update` accepté et le matériel d’historique nécessaire au bootstrap `join_finalize`; le client doit rejeter les artefacts stales ou mal formés.
+
+* **5.8 — Retention/fetch et configuration : fermé dans le scope courant.**
+  La spec borne `N_max`, borne la rétention des snapshots publics (`MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS`), définit l’issue authentifiée “retired / not available”, et impose un `deployment_profile_manifest` signé sur join/merge/helper/lookup, avec vérification fail-closed et cohérence inter-pages. Là aussi, c’est la correction que j’attendais.
+
+Ce que je **ne** valide **pas** comme “fermé par `docs/specs.md` seul” :
+
+* **5.4 — Gouvernance / autorisation room-admin : pas fermé, mais reclassé par clarification de périmètre.**
+  Le document continue de dire que la gouvernance room-scoped et l’operator authorization sont spécifiées ailleurs, et il dit explicitement que les artefacts signés définis ici ne couvrent pas, à eux seuls, l’état admin/gouvernance plus large. Donc le problème n’est plus une promesse implicite trompeuse ; en revanche, la propriété n’est toujours pas garantie par ce texte seul.
+
+* **5.6 — Oracles / proof APIs opaques : pas fermé, mais reclassé par clarification de périmètre.**
+  `xk_hash` et `E_k` restent “opaque here”, et la spec maintient une liste de sous-systèmes externes “assumed to exist”, dont MSPHF/ME-OR, Smallwood, SRX/Smallwood-v1, ZK-VRF et l’anchor authentication. Là encore, le document est plus honnête qu’avant sur ce qu’il garantit réellement, mais il ne re-spécifie pas ces oracles.
+
+La réserve importante est donc celle-ci : la spec a maintenant **resserré et explicité son domaine de garantie**. Son “active-server resistance” est défini à l’intérieur d’une **`HistoryAuthorityScope` authentifiée** et non comme une canonité/finalité fédérée globale. Si ton critère est “corriger les trous dangereux internes au base profile”, je réponds **oui**. Si ton critère est “faire de `docs/specs.md` un document autosuffisant pour gouvernance, preuves externes et finalité multi-sources”, je réponds **non**.
+
+Faisable à retenir en une ligne : **6 findings sur 8 sont vraiment satisfaits dans le scope actuel ; 2 ne sont pas fermés mais explicitement reclassés hors du cœur de ce profil.**
+
+Fichiers relus : [spec actuelle](sandbox:/mnt/data/specs.md), [audit 5](sandbox:/mnt/data/5.txt), [rapport final](sandbox:/mnt/data/final-verification-report-2026-03-26.md).

@@ -423,3 +423,40 @@ Statut audit final:
 
 - **Closed**: 3.3, 3.5, 3.6, 3.7
 - **Reclassified**: 3.1, 3.2, 3.4
+
+--
+
+GPT 5.4 Pro Analysis:
+
+According to a document from 2026-03-23, ma vérification indépendante est : **pas entièrement**. Les changements ferment bien une grande partie de la **machine d’état locale**, mais ils ne satisfont mon audit initial que si on **re-scoppe** le problème à une seule `HistoryAuthorityScope` append-only par déploiement. Le rapport final va d’ailleurs dans ce sens : il clôt plusieurs points “dans le scope actuel du base profile”, alors que la spec précise elle-même que l’“active-server resistance” et l’acceptance/finality sont bornées à un `HistoryAuthorityScope` et **ne sont pas** une finalité/canonicité byzantine globale.   
+
+Mon verdict point par point sur **mon audit initial** :
+
+1. **Activation prématurée / finality sur simple acceptance** : **partiellement satisfait**.
+   La spec ajoute un vrai ancrage local : `HistoryCommitment`, obligation de même `HistoryAuthorityScope`, même `HistoryCommitment` entre A/B/C/D, `pending_activation_source`, revalidation locale du sous-ensemble S10 avant activation, et fail-closed en `recovery_required/history_inconsistent` si la lignée ou la source divergent. Ça ferme bien le bug local “j’active malgré une tête courante qui a bougé”. En revanche, l’activation reste fondée sur un `accepted`/`final_rejected` **scopé à une seule autorité d’historique**, pas sur une finalité byzantine forte ; donc ma critique initiale n’est pas totalement éteinte au sens fort.   
+
+2. **Supersession / fork / stale-history lineage** : **partiellement satisfait**.
+   Oui, la spec corrige le mélange d’artefacts : A/B/C/D doivent partager le même `HistoryCommitment`, `ResolveJoinsSince` est maintenant défini pour le `history_view_id` sélectionné, et les claims de lignée incompatibles forcent `recovery_required/history_inconsistent`. Mais la spec dit aussi explicitement que cet append-only est celui d’une **autorité de déploiement**, pas une non-equivocation byzantine globale ; si l’autorité elle-même équivoque, on n’a pas fermé ma question initiale au sens le plus fort.    
+
+3. **Restart correlation pouvant provoquer un rollback local** : **satisfait**.
+   C’est le point le mieux corrigé. `pending_activation_source` est maintenant persisté, et S11.14.2 exige que l’état local courant pré-activation soit exactement ce `pending_activation_source`; sinon, pas d’activation et passage en `recovery_required/history_inconsistent`. Du coup, la clause S11.14.4 “apply acceptance correlation even if current barrier_version is already greater” ne permet plus, à elle seule, un rollback local naïf.   
+
+4. **Recover-only qui peut activer un état public non FULL-vérifié** : **non satisfait**.
+   La spec rend maintenant ce comportement **explicite** et le marque proprement : après best-effort recovery, le client peut activer via S11.13.7 mais doit mettre `current_barrier_full_verified := false`; le joiner peut aussi sortir de `pending_barrier_recovery` et reprendre send/decrypt après recovery, tout en restant interdit d’updater général / reason 0 / reason 1 tant qu’il n’a pas FULL-vérifié l’état courant. Donc l’ambiguïté a disparu, mais le choix de conception que je critiquais — “état actif sans FULL verification du public state” — reste présent.   
+
+5. **“Le client MUST ensure que l’état courant est couvert” sans vraie tête authentifiée/fraîche** : **partiellement satisfait**.
+   Les artefacts de provisioning et helper sont désormais signés, liés à `current_history_commitment`, `gid`, `profile_version`, `current barrier_version`, etc., et les clients doivent fail-closed sur régression `barrier_version/history_seq` ou mismatch de `HistoryCommitment`. Cela ferme bien le mix-and-match local. En revanche, ça ne donne toujours pas une preuve qu’une autorité byzantine **ne retient pas** un head plus récent ; la spec définit explicitement l’active-server resistance comme locale à une `HistoryAuthorityScope`. Donc ma critique “freshness face à un serveur qui omet” reste seulement partiellement fermée.   
+
+6. **Rollback de stockage (pas juste crash atomicity)** : **non satisfait**.
+   Je vois bien une interdiction du state rollback-prone pour le `msg_index` sender et une obligation de crash-safe anti-replay côté receiver, mais je ne vois pas dans les sections de restart/activation un équivalent normatif pour la **barrier state machine** elle-même : pas de rollback detector persistant, pas d’exigence de stockage rollback-resistant liée au `HistoryCommitment`, pas de règle “si snapshot restore, interdiction de traiter barrier_update/payload tant qu’on n’a pas re-synchronisé”. Donc mon finding sur le rollback local reste ouvert.  
+
+7. **Refresh / PCS / réordonnancement autour de `K_fs`** : **satisfait**.
+   Ici la spec a nettement progressé : catch-up mode défini, interdiction de best-effort apply un `pcs_refresh` si la lignée intermédiaire n’est pas authentifiée, interdiction de reseed `K_fs` dans ce cas, maintien en `barrier_recovery_pending`/`recovery_required` avec payload send/fetch désactivé si l’ordre reste insuffisant, et replay local des bornes FLG/`last_accepted_ec` avant activation updater. C’est précisément le type de machine d’application client des refresh boundaries qui manquait dans mon audit initial.   
+
+**Conclusion courte :**
+
+* **Fermés par les changements** : restart correlation / rollback local de pending activation, refresh-reordering autour de `pcs_refresh`, mélange A/B/C/D sur vues différentes, sémantique de `JoinSet` beaucoup plus nette.  
+* **Encore seulement partiellement fermés** : activation/finality, supersession/fork, stale-history freshness — parce que la clôture vaut **dans une autorité d’historique unique**, pas contre une autorité byzantine qui équivoque ou retient l’histoire.  
+* **Encore ouverts selon mon bar initial** : recover-only peut toujours devenir “actif” sans FULL verification du public state, et le rollback de stockage de la barrier state machine n’est pas traité aussi explicitement que le crash.  
+
+Donc ma réponse à ta question est : **les changements satisfont largement le rapport de cohérence “base-profile scope”, mais ils ne satisfont pas complètement mon audit initial si on garde la question originale au niveau “serveur byzantin / réseau adversarial” sans re-scoper la confiance à une autorité d’historique append-only unique.**  
