@@ -17,6 +17,7 @@ Verification method:
 - Correlated each point against the current spec and implementation.
 - Verified live repo hygiene with `git status --short` clean, `git diff --check` clean, and `cargo metadata --locked --format-version 1 --no-deps` succeeding under `scripts/cargo_repo_env.sh`.
 - Used existing targeted tests as proof anchors where they exist.
+- Final proof policy for this report: every `Closed` or `Reclassified` item below is anchored to at least one concrete code and/or test location in the current repo, not only to `docs/specs.md`.
 
 Scope-hardening addendum (same date, later tranche):
 - `docs/specs.md` now explicitly defines `HistoryAuthorityScope` and states that authenticated acceptance/finality is scoped to one such authority, not to an implicit global/federated consensus object.
@@ -44,28 +45,28 @@ Current-scope interpretation:
 ## Audit 1
 
 - `1.1` `Closed` — bootstrap `join_finalize` no longer depends on a circular `H_prev`.
-  Proof: `docs/specs.md:1111-1124` defines `H_prev_bootstrap` from the authenticated predecessor of `BU_current`.
+  Proof: `docs/specs.md:1111-1124` defines `H_prev_bootstrap` from the authenticated predecessor of `BU_current`; `crates/cityg-gui/src/native/barrier_core.rs:810-998` enforces bootstrap verification against the authenticated predecessor/current bundle pair; `crates/cityg-gui/src/native/tests/mod.rs:9070-9130` covers self-finalize bootstrap without circular local trust.
 - `1.2` `Closed` — `header[97]` now carries an explicit wire discriminator between `author-local` and `barrier-recovery`.
   Proof: `docs/specs.md:271-303`, `crates/msphf-orchestrator/src/lib.rs:737-845`, `crates/msphf-orchestrator/src/accept/stages.rs:210-244,714-736`.
 - `1.3` `Closed` — exact CBOR array lengths are now normative and testable.
-  Proof: `docs/specs.md:574-579`, `docs/specs.md:907-926`.
+  Proof: `docs/specs.md:574-579`, `docs/specs.md:907-926`, `crates/cityg-gui/src/bin/join_leave.rs:207-303,4002-4035`.
 - `1.4` `Closed` — `ResolveJoinsSince` / `JoinSet` semantics are now explicit for the selected authenticated view.
-  Proof: `docs/specs.md:197-213`.
+  Proof: `docs/specs.md:197-213`, `crates/cityg-server/src/lib.rs:2519-2586,11955-12074`, `crates/cityg-api/src/lib.rs:2828-2930`.
 - `1.5` `Reclassified` — “closed-world registry / merge profile” remains a documentation packaging problem, not a local implementation defect closed in this pass.
-  Proof: no local wire or server patch changes this; the spec still spans multiple normative areas.
+  Proof: the current implementation remains intentionally split across `crates/msphf-orchestrator/src/hdr.rs:1-60`, `crates/cityg-api/proto/cityg.proto:1-444`, and `crates/cityg-server/src/lib.rs`; there is still no single local “closed-world registry” object to patch, so this remains a packaging/documentation issue rather than a repo-local defect.
 - `1.6` `Closed` — `960.11` vs `960.13` conflict is resolved by explicit partitioning.
-  Proof: `docs/specs.md:754-758`, `docs/specs.md:1167-1184`, `docs/specs.md:1601-1624`.
+  Proof: `docs/specs.md:754-758`, `docs/specs.md:1167-1184`, `docs/specs.md:1601-1624`, `crates/msphf-orchestrator/src/accept/errors.rs:206-217`.
 - `1.7` `Closed` — `PayloadEnvelope.msg_index` position is explicit.
-  Proof: `docs/specs.md:557-579`.
+  Proof: `docs/specs.md:557-579`, `crates/cityg-gui/src/message_crypto.rs:323-327,465-467,497-506`.
 
 ## Audit 2
 
 - `2.1` `Closed` — `header[99]` must be recomputed after HP decryption before using `header[97]`.
-  Proof: `docs/specs.md:309-323`; KAT coverage in `docs/specs.md:1643-1650`.
+  Proof: `docs/specs.md:309-323`; KAT coverage in `docs/specs.md:1643-1650`; code/test anchors in `crates/msphf-orchestrator/src/lib.rs:843-933,4045-4101,7100-7126` and `crates/msphf-orchestrator/src/accept/stages.rs:715-748`.
 - `2.2` `Closed` — `profile_version` is now explicitly bound into `bind_fs` and therefore into ZK-VRF proof verification.
   Proof: `docs/specs.md:683-698`, `crates/msphf-orchestrator/src/proofs/zk_vrf/mod.rs:23-36`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:123-157`, `crates/msphf-orchestrator/src/lib.rs:121,3009-3023`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:455-466`.
 - `2.3` `Reclassified` — the “missing `gid/weid` in bind_fs” claim is too strong as stated because `xk_hash` already carries handshake context; the remaining gap is documentary, not a confirmed local defect.
-  Proof: `docs/specs.md:162`, `docs/specs.md:279-313`, `docs/specs.md:642-656`.
+  Proof: `docs/specs.md:162`, `docs/specs.md:279-313`, `docs/specs.md:642-656`, `crates/msphf-core/src/instance.rs:58`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:140-157`.
 - `2.4` `Closed` — barrier/HP KDFs now bind `gid` directly in the spec and in the concrete barrier/HP derivation helpers.
   Proof: `docs/specs.md:324-338`, `docs/specs.md:1072-1127`, `docs/specs.md:1390-1402`, `docs/specs.md:1716-1731`, `crates/msphf-orchestrator/src/lib.rs:698-845`, `crates/cityg-gui/src/barrier_shared.rs:47-55`, `crates/cityg-gui/src/native/barrier_core.rs:33-39,689-706`, `crates/cityg-gui/src/native/tests/mod.rs:1484-1539`, `crates/cityg-client/src/lib.rs:699-705,718-735`, `crates/msphf-orchestrator/tests/end_to_end.rs:954-988`.
 - `2.5` `Reclassified` — the remaining ask for remote distinction between locally FULL and locally recover-only execution is now explicitly outside the base profile. The current profile intentionally guarantees helper-state/authority binding plus local origination restrictions, not remote attestation of the client's internal verification path.
@@ -76,7 +77,7 @@ Current-scope interpretation:
 ## Audit 3
 
 - `3.1` `Reclassified` — the remaining ask for federated or cross-deployment non-equivocation is now explicitly outside the base profile. The current spec intentionally stops at one deployment-global append-only authority.
-  Proof: `docs/specs.md:288-306`, `docs/specs.md:1261-1265`, `docs/specs.md:1296-1302`.
+  Proof: `docs/specs.md:288-306`, `docs/specs.md:1261-1265`, `docs/specs.md:1296-1302`, `crates/cityg-server/src/lib.rs:156,2782-2784`, `crates/cityg-api-client/src/lib.rs:186,3883-3895`.
 - `3.2` `Reclassified` — supersession/fork is now fully defined against the deployment-global authority that the base profile actually requires. The leftover “across deployments” requirement is a stronger future profile, not a defect of the current one.
   Proof: `docs/specs.md:288-306`, `docs/specs.md:1296-1302`, `crates/cityg-server/src/lib.rs:6384-6399`, `crates/cityg-api-client/src/lib.rs:2082-2133`.
 - `3.3` `Closed` — restart correlation is now tied to one authenticated deployment-global lineage through `LookupMergeAcceptance` plus the mandatory authority extension.
@@ -112,17 +113,17 @@ Current-scope interpretation:
 ## Audit 5
 
 - `5.1` `Closed` — A/B/C/D now require a shared `history_view_id` plus shared `HistoryCommitment`.
-  Proof: `docs/specs.md:180-189`.
+  Proof: `docs/specs.md:180-189`, `crates/cityg-api-client/src/lib.rs:3411-3421,4203-4227`, `crates/cityg-server/src/lib.rs:388-425,2441-2478`.
 - `5.2` `Closed` — `JoinSet` semantics are now exact for the selected committed view.
-  Proof: `docs/specs.md:197-213`.
+  Proof: `docs/specs.md:197-213`, `crates/cityg-server/src/lib.rs:2519-2586,12034-12074`, `crates/cityg-api/src/lib.rs:2828-2930`.
 - `5.3` `Closed` — `LookupMergeAcceptance` is now the normative history/finality lookup for the deployment-global authority actually defined by the base profile.
   Proof: `docs/specs.md:258-264`, `docs/specs.md:1420-1434`, `crates/cityg-server/src/lib.rs:6384-6399`, `crates/cityg-api-client/src/lib.rs:2327-2331`.
 - `5.4` `Reclassified` — room-admin authorization remains a multi-doc normative boundary, not a local defect of this file alone.
-  Proof: this was intentionally scoped outside `docs/specs.md`.
+  Proof: this remains intentionally outside `docs/specs.md`; the current repo-local implementation surfaces instead sign and verify current-state/history artifacts in `crates/cityg-server/src/lib.rs:2702-2775,3770-3988` and `crates/cityg-api-client/src/lib.rs:3467-3838`, without pretending that this file alone defines room-admin governance.
 - `5.5` `Closed` — sender identity is no longer optional in practice on the message plane, and the concrete send path now signs with the same persisted sender device key family that receivers bind back to `sender_leaf_id`.
   Proof: `docs/specs.md:566-572`, `crates/cityg-gui/src/native/message_auth.rs:97-156`, `crates/cityg-gui/src/native/network_messages.rs:14-50,188-203`, `crates/cityg-gui/src/native/tests/mod.rs:7606-7659,8670-8740`.
 - `5.6` `Reclassified` — opaque external proof/KDF suites remain a registry/documentation issue; not enough evidence to call the current local implementation unsafely weak from this repo alone.
-  Proof: `docs/specs.md:162-163`, `docs/specs.md:1479-1484`.
+  Proof: `docs/specs.md:162-163`, `docs/specs.md:1479-1484`, plus the concrete suite implementations currently live in dedicated codepaths such as `crates/msphf-orchestrator/src/proofs/zk_vrf/*`, `crates/msphf-orchestrator/src/proofs/capss.rs`, and `crates/msphf-rlwe/src/lib.rs`; nothing in this repo shows a confirmed local weakening beyond the registry/documentation boundary already called out.
 - `5.7` `Closed` — join provisioning now ships as a standalone signed `provisioning_artifact` bound to the delivered current-state fields, freshness window, helper completeness material, and deployment-global history-authority attestation; clients fail closed before consuming provisioned state if the artifact is missing, stale, or tampered.
   Proof: `docs/specs.md:1638-1669`, `crates/cityg-api/proto/cityg.proto:216-268`, `crates/cityg-server/src/lib.rs:2685-2709,3529-3708`, `crates/cityg-api/src/lib.rs:2098-2170`, `crates/cityg-api-client/src/lib.rs:1079-1251,3062-3233,5051-5147`.
 - `5.8` `Closed` — retention/fetch/config delivery is now tied to one authenticated deployment-profile manifest across join, merge, expel, helper A/B/C, and merge-acceptance lookup responses. Clients fail closed if the manifest is missing, tampered, or differs across helper pages.
@@ -145,12 +146,12 @@ Current-scope interpretation:
 - `6.7` `Closed` — anti-replay durability cost is now normatively bounded per tuple/context, obsolete tuples are collectable, batching is explicitly allowed, and the GUI persists replay state before releasing fetched messages.
   Proof: `docs/specs.md:616-638`, `crates/cityg-gui/src/message_crypto.rs:9-120`, `crates/cityg-gui/src/native/network_messages.rs:85-118,147-149,225`, `crates/cityg-gui/src/native/session_fetch.rs:111-175`, `crates/cityg-gui/src/native/tests/mod.rs:2702-2753`.
 - `6.8` `Closed` — CBOR determinism is now a rejection property, not one mandated re-encode algorithm.
-  Proof: `docs/specs.md:83-92`.
+  Proof: `docs/specs.md:83-92`, `crates/cityg-api-client/src/lib.rs:3428-3443`, `crates/cityg-gui/src/native/barrier_core.rs:412-421`, `crates/cityg-gui/src/message_crypto.rs:499-501,897-946`.
 
 ## Audit 7
 
 - `7.1` `Reclassified` — the remaining federated/global-history ask is now explicitly outside the base profile. The current base profile intentionally promises one deployment-global append-only authority, not cross-deployment consensus.
-  Proof: `docs/specs.md:288-306`, `docs/specs.md:1180-1182`, `docs/specs.md:1296-1302`.
+  Proof: `docs/specs.md:288-306`, `docs/specs.md:1180-1182`, `docs/specs.md:1296-1302`, `crates/cityg-server/src/lib.rs:156,2782-2784`, `crates/cityg-api-client/src/lib.rs:186,3883-3895`.
 - `7.2` `Closed` — the spec now defines the exact client-visible replay subset for activation, and explicitly distinguishes it from broader server-only S10 checks.
   Proof: `docs/specs.md:1491-1508`, `docs/specs.md:1583-1591`, `crates/cityg-gui/src/native/barrier_runtime.rs:520-600,680-710`, `crates/cityg-gui/src/native/tests/mod.rs:423-431,684-735,8448-8501`.
 - `7.3` `Closed` — `ResolveJoinsSince` / current-state acceptance are now tied to one exact authenticated view, one exact `HistoryCommitment`, and one exact pinned current-state decision.
