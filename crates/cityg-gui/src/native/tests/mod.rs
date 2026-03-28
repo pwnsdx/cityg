@@ -1354,6 +1354,89 @@ fn validate_client_visible_activation_guards_rejects_tampered_receipt_for_local_
 }
 
 #[test]
+fn epoch_sync_validation_uses_ticket_attestation_when_local_state_is_unpinned()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session =
+        build_test_session(0xB973, "http://127.0.0.1:9", "room-b87g-ticket-seed", "bob")?;
+    let ticket_attestation = vec![0xA1, 0xB2, 0xC3, 0xD4];
+    let header = build_authority_activation_guard_header(
+        &mut session,
+        HistoryAuthorityExtension::GlobalHistoryAuthorityV1,
+        ticket_attestation.clone(),
+    )?;
+    let commitment = session
+        .barrier_state
+        .current_history_commitment
+        .clone()
+        .ok_or("test session missing current history commitment")?;
+    let mut validation_session = session.clone();
+    validation_session
+        .barrier_state
+        .current_history_authority_extension = None;
+    validation_session
+        .barrier_state
+        .current_global_history_attestation_bytes
+        .clear();
+    seed_epoch_sync_validation_session_from_ticket_if_unpinned(
+        &mut validation_session,
+        session.barrier_state.barrier_version,
+        session.barrier_state.barrier_roots_hash,
+        session.barrier_state.kem_tree_hash_after,
+        &commitment,
+        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1),
+        ticket_attestation.as_slice(),
+    );
+    validate_client_visible_activation_guards(&validation_session, &header)?;
+    Ok(())
+}
+
+#[test]
+fn epoch_sync_validation_rejects_bundle_attestation_mismatch_with_authenticated_ticket_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(
+        0xB974,
+        "http://127.0.0.1:9",
+        "room-b87g-ticket-mismatch",
+        "bob",
+    )?;
+    let header = build_authority_activation_guard_header(
+        &mut session,
+        HistoryAuthorityExtension::GlobalHistoryAuthorityV1,
+        vec![0xDE, 0xAD, 0xBE, 0xEF],
+    )?;
+    let commitment = session
+        .barrier_state
+        .current_history_commitment
+        .clone()
+        .ok_or("test session missing current history commitment")?;
+    let mut validation_session = session.clone();
+    validation_session
+        .barrier_state
+        .current_history_authority_extension = None;
+    validation_session
+        .barrier_state
+        .current_global_history_attestation_bytes
+        .clear();
+    seed_epoch_sync_validation_session_from_ticket_if_unpinned(
+        &mut validation_session,
+        session.barrier_state.barrier_version,
+        session.barrier_state.barrier_roots_hash,
+        session.barrier_state.kem_tree_hash_after,
+        &commitment,
+        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1),
+        &[0xAA, 0xBB, 0xCC, 0xDD],
+    );
+    let err = validate_client_visible_activation_guards(&validation_session, &header)
+        .expect_err("bundle attestation that disagrees with authenticated ticket state must fail");
+    assert!(
+        err.to_string()
+            .contains("header[182] global_history_attestation mismatch"),
+        "unexpected ticket/header attestation mismatch error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
 fn validate_client_visible_activation_guards_rejects_attested_state_without_extension()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(0xB97, "http://127.0.0.1:9", "room-b87", "bob")?;

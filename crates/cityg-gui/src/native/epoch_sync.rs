@@ -1,5 +1,36 @@
 use super::*;
 
+pub(super) fn seed_epoch_sync_validation_session_from_ticket_if_unpinned(
+    validation_session: &mut AppSession,
+    ticket_barrier_version: u64,
+    ticket_barrier_roots_hash: [u8; 32],
+    ticket_kem_tree_hash_after: [u8; 32],
+    ticket_history_commitment: &HistoryCommitment,
+    ticket_history_authority_extension: Option<HistoryAuthorityExtension>,
+    ticket_current_global_history_attestation_bytes: &[u8],
+) {
+    if !validation_session
+        .barrier_state
+        .current_global_history_attestation_bytes
+        .is_empty()
+    {
+        return;
+    }
+    if ticket_current_global_history_attestation_bytes.is_empty() {
+        return;
+    }
+
+    install_authenticated_current_state(
+        validation_session,
+        ticket_barrier_version,
+        ticket_barrier_roots_hash,
+        ticket_kem_tree_hash_after,
+        ticket_history_commitment.clone(),
+        ticket_history_authority_extension,
+        ticket_current_global_history_attestation_bytes.to_vec(),
+    );
+}
+
 pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome> {
     let client = new_api_client(&session.server_url);
     let mut retry_attempt = 0u32;
@@ -208,6 +239,15 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
                     source.current_global_history_attestation_bytes.clone();
             }
         }
+        seed_epoch_sync_validation_session_from_ticket_if_unpinned(
+            &mut validation_session,
+            ticket.barrier_version,
+            ticket_barrier_roots_hash,
+            ticket_kem_tree_hash_after,
+            &ticket_history_commitment,
+            ticket.history_authority_extension,
+            ticket.current_global_history_attestation_bytes.as_slice(),
+        );
         if pending_bundle_match
             || !matches!(
                 pending_history_outcome,
