@@ -1122,7 +1122,7 @@ Freeze codes indicate why an epoch was rejected during validation.
 | **5** | Parent not in window | Parent root not found | Wait for parent or use merge ticket |
 | **6** | VRF verification failed | VRF proof invalid | Check VRF configuration |
 | **7** | Duplicate epoch ID | Epoch already exists | Generate new epoch (don't replay) |
-| **8** | Invalid proof mode | Unsupported proof system | Use "smallwood" proof mode |
+| **8** | Invalid proof mode | Unsupported proof system | Use `lin+zkvrf` proof mode |
 | **9** | Revocation conflict | Member was revoked | Member cannot create epochs |
 | **10** | TTL expired | Epoch too old | Submit within TTL window |
 | **11** | Window full | h_max exceeded | Wait for eviction or increase h_max |

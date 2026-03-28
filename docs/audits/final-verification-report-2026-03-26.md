@@ -39,10 +39,10 @@ Scope-hardening addendum (same date, later tranche):
 
 Summary:
 - Total findings reviewed: `51`
-- `Closed`: `40`
+- `Closed`: `42`
 - `Partial`: `0`
 - `Open`: `0`
-- `Reclassified`: `11`
+- `Reclassified`: `9`
 
 Current-scope interpretation:
 - No finding remains `Partial` or `Open` within the current base-profile scope implemented by this repo.
@@ -124,12 +124,12 @@ Current-scope interpretation:
   Proof: `docs/specs.md:197-213`, `crates/cityg-server/src/lib.rs:2519-2586,12034-12074`, `crates/cityg-api/src/lib.rs:2828-2930`.
 - `5.3` `Closed` — `LookupMergeAcceptance` is now the normative history/finality lookup for the deployment-global authority actually defined by the base profile.
   Proof: `docs/specs.md:258-264`, `docs/specs.md:1420-1434`, `crates/cityg-server/src/lib.rs:6384-6399`, `crates/cityg-api-client/src/lib.rs:2327-2331`.
-- `5.4` `Reclassified` — room-admin authorization remains a multi-doc normative boundary, not a local defect of this file alone.
-  Proof: this remains intentionally outside `docs/specs.md`; the current repo-local implementation surfaces instead sign and verify current-state/history artifacts in `crates/cityg-server/src/lib.rs:2702-2775,3770-3988` and `crates/cityg-api-client/src/lib.rs:3467-3838`, without pretending that this file alone defines room-admin governance.
+- `5.4` `Closed` — the current profile now normatively fixes the room-admin proof registry, signed message shape, replay key, authorization principal, and no-token-fallback behavior in `docs/specs.md` itself, matching the existing API/server implementation.
+  Proof: `docs/specs.md:28-63`, `crates/cityg-api-client/src/lib.rs:200-307`, `crates/cityg-api/src/lib.rs:1324-1412,2224-2470`, `crates/cityg-server/src/lib.rs:568-572,809-967,13015-13025`.
 - `5.5` `Closed` — sender identity is no longer optional in practice on the message plane, and the concrete send path now signs with the same persisted sender device key family that receivers bind back to `sender_leaf_id`.
   Proof: `docs/specs.md:566-572`, `crates/cityg-gui/src/native/message_auth.rs:97-156`, `crates/cityg-gui/src/native/network_messages.rs:14-50,188-203`, `crates/cityg-gui/src/native/tests/mod.rs:7606-7659,8670-8740`.
-- `5.6` `Reclassified` — opaque external proof/KDF suites remain a registry/documentation issue; not enough evidence to call the current local implementation unsafely weak from this repo alone.
-  Proof: `docs/specs.md:162-163`, `docs/specs.md:1479-1484`, plus the concrete suite implementations currently live in dedicated codepaths such as `crates/msphf-orchestrator/src/proofs/zk_vrf/*`, `crates/msphf-orchestrator/src/proofs/capss.rs`, and `crates/msphf-rlwe/src/lib.rs`; nothing in this repo shows a confirmed local weakening beyond the registry/documentation boundary already called out.
+- `5.6` `Closed` — the base profile now fixes the exact client-consumed proof/suite registry in `docs/specs.md`, and base-profile clients reject join/merge tickets that drift from those exact identifiers.
+  Proof: `docs/specs.md:65-75`, `docs/api-reference.md:1125`, `crates/cityg-api-client/src/lib.rs:310-314,1114-1121,1398-1405,4280-4313,4957-4968,5017-5028,6337-6375`, `crates/msphf-orchestrator/src/lib.rs:125-126`, `crates/msphf-core/src/params.rs:15-17`.
 - `5.7` `Closed` — join provisioning now ships as a standalone signed `provisioning_artifact` bound to the delivered current-state fields, freshness window, helper completeness material, and deployment-global history-authority attestation; clients fail closed before consuming provisioned state if the artifact is missing, stale, or tampered.
   Proof: `docs/specs.md:1638-1669`, `crates/cityg-api/proto/cityg.proto:216-268`, `crates/cityg-server/src/lib.rs:2685-2709,3529-3708`, `crates/cityg-api/src/lib.rs:2098-2170`, `crates/cityg-api-client/src/lib.rs:1079-1251,3062-3233,5051-5147`.
 - `5.8` `Closed` — retention/fetch/config delivery is now tied to one authenticated deployment-profile manifest across join, merge, expel, helper A/B/C, and merge-acceptance lookup responses. Clients fail closed if the manifest is missing, tampered, or differs across helper pages.

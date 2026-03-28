@@ -404,13 +404,15 @@ Lecture consolidée:
 Dernière relecture spec + implémentation:
 
 - `5.3` n’est plus honnêtement un `Partial` dans le scope du profil courant. La spec et le code définissent désormais un `LookupMergeAcceptance` normatif, lié à `global-history-authority-v1`, au `HistoryCommitment` courant, et à une lignée append-only de déploiement explicitement bornée.
+- `5.4` n’est plus honnêtement un `Reclassified` non plus. `docs/specs.md` fixe maintenant elle-même le registre `RoomAdminOperation`, la forme exacte du `RoomAdminProof`, son message signé, sa clé de replay et l’absence de fallback `x-cityg-admin-token` sur les endpoints room-scoped; cela correspond déjà aux vérifications API/serveur du repo.
+- `5.6` n’est plus honnêtement un `Reclassified` non plus. La spec fixe désormais le registre exact des suite IDs consommés par les tickets/artifacts du base profile, et le client rejette fail-closed les tickets join/merge hors de ce registre au lieu d’accepter des strings arbitraires signées par un déploiement faible.
 - `5.8` n’est plus honnêtement un `Partial` non plus. Join, merge, expel, helpers A/B/C et lookup D transportent maintenant tous un `deployment_profile_manifest` signé, et le client refuse toute divergence inter-pages ou inter-paths avant consommation du state/helper/config livré.
 - Le reste éventuel n’est plus un gap local spec/code; c’est le sujet plus large, explicitement reclassé ailleurs, d’une autorité fédérée ou d’une finalité plus forte que la lignée append-only de déploiement.
 
 Statut audit final:
 
-- **Closed**: 5.1, 5.2, 5.3, 5.5, 5.7, 5.8
-- **Reclassified**: 5.4, 5.6
+- **Closed**: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8
+- **Reclassified**: none
 
 --
 

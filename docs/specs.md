@@ -23,33 +23,65 @@ This profile specifies:
 * PRS barrier (K_barrier) with cold-path KEM-Tree Cover for post-revocation secrecy,
 * join provisioning requirements required by PRS barrier and FS-hybrid acceptance.
 
-CONTROL-PLANE GOVERNANCE NOTE (informative)
+CONTROL-PLANE GOVERNANCE (normative subset for `v0.1.4`)
 This unified spec is the normative source for the cryptographic/profile
-behavior above. Room-scoped governance and operator authorization are specified
-separately in [`api-reference.md`](./api-reference.md) and
-[`room-admin-governance-redesign.md`](./room-admin-governance-redesign.md).
+behavior above. The room-scoped governance subset actually consumed by the
+current wire/API profile is fixed here and matched by the current API/server
+implementation; [`api-reference.md`](./api-reference.md) and
+[`room-admin-governance-redesign.md`](./room-admin-governance-redesign.md) are
+explanatory companions, not separate sources of truth for the subset below.
 
-Current implementation behavior for the room control plane:
+Room-scoped governance rules for the current profile:
 * room bootstrap/governance uses room-scoped signed admin proofs tied to a
-  persistent room identity,
+  persistent room identity (`RoomAdminProof`), not aliases,
 * the creator becomes the initial room admin on the first successful room
   claim/bootstrap,
 * room-admin lifecycle operations are `grant_admin`, `revoke_admin`, and
   `list_admins`, and room-admin member expulsion is exposed as a
   room-admin-authorized MERGE/revocation transition,
-* those room-governance operations are authenticated by room-admin proofs
-  rather than legacy tokens,
-* alias text is never an authorization principal,
-* there is no legacy admin-token fallback for room-scoped endpoints,
+* there is no legacy `x-cityg-admin-token` fallback for room-scoped endpoints,
 * KBROAD maintenance is automatic/server-managed in normal join/merge ticket
   flows rather than a manual client precondition.
 
-External subsystems assumed to exist with normative interfaces (not re-specified here):
-* membership representation and verification (including cover_leaf_index mapping),
-* MSPHF / ME-OR and its witness/NP language,
-* Smallwood FS proof system and SRX/Smallwood-v1 proof system (verification APIs),
-* ZK-VRF verification API,
-* anchor authentication (signatures/suites per deployment), but MUST cover the canonical header map including fs_dev_commit and barrier fields.
+Room admin proof registry for `v0.1.4`:
+* `RoomAdminProof := { pop_public_key:bstr, signature:bstr }`.
+* The only in-profile signature suite for `RoomAdminProof` is ML-DSA-87 /
+  Dilithium5.
+* The signed message MUST be `CBOR_det((operation:tstr, room_id:tstr, payload:bstr))`.
+* `operation` is a closed-world registry in this profile:
+  * `bootstrap_room_v1`
+  * `rotate_room_kbroad_v1`
+  * `grant_room_admin_v1`
+  * `revoke_room_admin_v1`
+  * `list_room_admins_v1`
+  * `expel_room_member_v1`
+* `payload` semantics are fixed as follows:
+  * for `bootstrap_room_v1` and `rotate_room_kbroad_v1`: `payload == kbroad_public`
+  * for `grant_room_admin_v1` and `revoke_room_admin_v1`: `payload == target_pop_public_key`
+  * for `list_room_admins_v1`: `payload == EMPTY`
+  * for `expel_room_member_v1`: `payload == CBOR_det((author_leaf_id:bstr32, target_leaf_id:bstr32))`
+* The replay key for one proof is `H_L("room-admin/replay-key", [pop_public_key, signature])`.
+* The server MUST reject replay of one previously accepted room-admin proof for
+  the same room.
+* Authorization principal for room-scoped governance is exactly
+  `pop_public_key`; alias text is never an authorization principal.
+* The server MUST reject a room-admin proof whose signing identity is not
+  currently authorized for the requested room-scoped operation.
+
+External proof / suite registry fixed by this profile:
+* membership representation and verification (including `cover_leaf_index`
+  mapping) remain external, but their consumed outputs are fixed by the fields
+  named in this document,
+* the in-profile generated ticket / provisioning suite identifiers are fixed to:
+  * `proof_mode == "lin+zkvrf"`
+  * `vrf_id == "lb-vrf/v1"`
+  * `msphf_crs_id == "rlwe-merkle/v1"`
+  * `msphf_params_id == "rlwe-params/mock"`
+* the in-profile room-admin and history-authority signature suite is
+  ML-DSA-87 / Dilithium5,
+* any join/merge/provisioning artifact or ticket carrying different values for
+  those closed-world suite identifiers is out of profile for `v0.1.4` and MUST
+  be rejected by base-profile clients.
 
 S0. NORMATIVE LANGUAGE
 The key words "MUST", "MUST NOT", "REQUIRED", "SHOULD", "SHOULD NOT", "MAY" are to be interpreted as described in RFC 2119 and RFC 8174 when, and only when, they appear in all capitals.

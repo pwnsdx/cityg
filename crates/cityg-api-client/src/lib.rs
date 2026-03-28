@@ -308,6 +308,10 @@ pub fn build_room_admin_leaf_pair_proof(
     )
 }
 const EXPECTED_PROFILE_VERSION: &str = "v0.1.4";
+const EXPECTED_PROOF_MODE: &str = "lin+zkvrf";
+const EXPECTED_VRF_ID: &str = "lb-vrf/v1";
+const EXPECTED_MSPHF_CRS_ID: &str = "rlwe-merkle/v1";
+const EXPECTED_MSPHF_PARAMS_ID: &str = "rlwe-params/mock";
 const MAX_BARRIER_N_MAX: u64 = 65_536;
 
 /// HTTP client for the City-G API server.
@@ -1098,6 +1102,13 @@ impl CitygApiClient {
         let response: JoinTicketResponse =
             self.post_proto("/v1/rooms/join_ticket", request).await?;
         ensure_profile_version(&response.profile_version)?;
+        ensure_profile_suite_registry(
+            "join ticket",
+            response.proof_mode.as_str(),
+            response.vrf_id.as_str(),
+            response.msphf_crs_id.as_str(),
+            response.msphf_params_id.as_str(),
+        )?;
         let gid = array32(&response.gid)?;
         let n_max = validate_barrier_n_max(response.n_max)?;
         let current_history_view_id = array32(&response.current_history_view_id)?;
@@ -1392,6 +1403,13 @@ impl CitygApiClient {
         let response: MergeTicketResponse =
             self.post_proto("/v1/rooms/merge_ticket", request).await?;
         ensure_profile_version(&response.profile_version)?;
+        ensure_profile_suite_registry(
+            "merge ticket",
+            response.proof_mode.as_str(),
+            response.vrf_id.as_str(),
+            response.msphf_crs_id.as_str(),
+            response.msphf_params_id.as_str(),
+        )?;
 
         let we_epoch_id = array32(&response.we_epoch_id)?;
         let mut parities = Vec::with_capacity(response.pivot_parity_cbor.len());
@@ -2992,7 +3010,7 @@ impl MergeTicketIntent {
 /// - `parities`: Fresh pivot parities from the server
 /// - `witness_cbor`: CBOR-encoded Merkle witness to parent root
 /// - `srx_cbor`: CBOR-encoded server randomness extension
-/// - `proof_mode`: Proof system identifier (e.g., "smallwood")
+/// - `proof_mode`: Proof system identifier (base profile: `lin+zkvrf`)
 /// - `vrf_id`: VRF configuration identifier
 /// - `policy_version`: Protocol policy version
 /// - `cat`: Combined authentication tag (32 bytes)
@@ -4273,6 +4291,36 @@ fn ensure_profile_version(version: &str) -> Result<(), Error> {
     )))
 }
 
+fn ensure_profile_suite_registry(
+    context: &str,
+    proof_mode: &str,
+    vrf_id: &str,
+    msphf_crs_id: &str,
+    msphf_params_id: &str,
+) -> Result<(), Error> {
+    if proof_mode != EXPECTED_PROOF_MODE {
+        return Err(Error::Parse(format!(
+            "{context} proof_mode mismatch: expected {EXPECTED_PROOF_MODE}, got {proof_mode}"
+        )));
+    }
+    if vrf_id != EXPECTED_VRF_ID {
+        return Err(Error::Parse(format!(
+            "{context} vrf_id mismatch: expected {EXPECTED_VRF_ID}, got {vrf_id}"
+        )));
+    }
+    if msphf_crs_id != EXPECTED_MSPHF_CRS_ID {
+        return Err(Error::Parse(format!(
+            "{context} msphf_crs_id mismatch: expected {EXPECTED_MSPHF_CRS_ID}, got {msphf_crs_id}"
+        )));
+    }
+    if msphf_params_id != EXPECTED_MSPHF_PARAMS_ID {
+        return Err(Error::Parse(format!(
+            "{context} msphf_params_id mismatch: expected {EXPECTED_MSPHF_PARAMS_ID}, got {msphf_params_id}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_barrier_n_max(n_max: u64) -> Result<u64, Error> {
     if n_max == 0 || !n_max.is_power_of_two() {
         return Err(Error::Parse(
@@ -4948,8 +4996,8 @@ mod tests {
             pivot_parity_cbor: Vec::new(),
             witness_cbor: Vec::new(),
             srx_cbor: Vec::new(),
-            proof_mode: "smallwood".to_string(),
-            vrf_id: "lb-vrf-v1".to_string(),
+            proof_mode: EXPECTED_PROOF_MODE.to_string(),
+            vrf_id: EXPECTED_VRF_ID.to_string(),
             policy_version: "v0".to_string(),
             cat: vec![0x02; 32],
             parent_root: vec![0x03; 32],
@@ -4959,8 +5007,8 @@ mod tests {
             tswe_salt_hash: vec![0x05; 32],
             pox_r_commit: vec![0x06; 32],
             kbroad_public: vec![0x07; 32],
-            msphf_crs_id: "rlwe-crs-v1".to_string(),
-            msphf_params_id: "rlwe-hps2048509".to_string(),
+            msphf_crs_id: EXPECTED_MSPHF_CRS_ID.to_string(),
+            msphf_params_id: EXPECTED_MSPHF_PARAMS_ID.to_string(),
             fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 0,
             kbroad_generation: 0,
@@ -5020,10 +5068,10 @@ mod tests {
             pox_r_commit: vec![0x45; 32],
             witness_cbor: Vec::new(),
             srx_cbor: Vec::new(),
-            msphf_crs_id: "rlwe-crs-v1".to_string(),
-            msphf_params_id: "rlwe-hps2048509".to_string(),
-            proof_mode: "smallwood".to_string(),
-            vrf_id: "lb-vrf-v1".to_string(),
+            msphf_crs_id: EXPECTED_MSPHF_CRS_ID.to_string(),
+            msphf_params_id: EXPECTED_MSPHF_PARAMS_ID.to_string(),
+            proof_mode: EXPECTED_PROOF_MODE.to_string(),
+            vrf_id: EXPECTED_VRF_ID.to_string(),
             policy_version: "v0".to_string(),
             fs_policy_version: "7".to_string(),
             fs_epoch_base_ts: 0,
@@ -6290,6 +6338,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_ticket_rejects_out_of_profile_suite_ids() -> Result<(), Box<dyn StdError>> {
+        async fn mock_join_ticket_with_bad_suite_ids() -> impl IntoResponse {
+            let mut response = join_ticket_ok_payload();
+            response.proof_mode = "smallwood".to_string();
+            encode_proto(response)
+        }
+
+        let app = Router::new().route("/health", get(mock_health)).route(
+            "/v1/rooms/join_ticket",
+            post(mock_join_ticket_with_bad_suite_ids),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = CitygApiClient::new(base);
+        let err = client
+            .join_ticket("room-1", "alice", None)
+            .await
+            .expect_err("out-of-profile suite ids must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("join ticket proof_mode mismatch")
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn merge_ticket_rejects_profile_version_mismatch() -> Result<(), Box<dyn StdError>> {
         let (base_url, handle) = start_profile_mismatch_server().await?;
         let client = CitygApiClient::new(base_url);
@@ -6318,6 +6397,24 @@ mod tests {
                 freeze_code: Some(404),
                 ..
             }
+        ));
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_ticket_rejects_out_of_profile_suite_ids() -> Result<(), Box<dyn StdError>> {
+        let mut payload = merge_ticket_ok_payload();
+        payload.vrf_id = "lb-vrf-v1".to_string();
+        let (base_url, handle) = start_merge_ticket_server(payload).await?;
+        let client = CitygApiClient::new(base_url);
+        let err = client
+            .merge_ticket("room-1", &[0x01; 32])
+            .await
+            .expect_err("out-of-profile suite ids must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("merge ticket vrf_id mismatch")
         ));
         handle.abort();
         Ok(())
