@@ -26,6 +26,7 @@ lcov.info
 *.bak
 *.log
 /.cargo-home/
+/.cargo-target/
 /.home/
 
 # Whitepaper (LaTeX temporary artifacts)

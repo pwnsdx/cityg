@@ -6,6 +6,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+export CITYG_CARGO_TARGET_SLOT="${CITYG_CARGO_TARGET_SLOT:-security-review}"
 source "$REPO_ROOT/scripts/cargo_repo_env.sh"
 
 echo "[1/5] cargo test -p cityg-server"

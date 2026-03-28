@@ -13,6 +13,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+export CITYG_CARGO_TARGET_SLOT="${CITYG_CARGO_TARGET_SLOT:-verify-no-secrets}"
 source "$REPO_ROOT/scripts/cargo_repo_env.sh"
 
 echo "═══════════════════════════════════════════════════════════"

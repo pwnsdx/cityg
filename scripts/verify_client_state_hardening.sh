@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+export CITYG_CARGO_TARGET_SLOT="${CITYG_CARGO_TARGET_SLOT:-client-state}"
 source "$(pwd)/scripts/cargo_repo_env.sh"
 
 cargo test --locked -p cityg-gui --features native-app native::tests::persist_session_fault_injection_truncates_session_file_after_write -- --exact

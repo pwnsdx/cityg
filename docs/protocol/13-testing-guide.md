@@ -81,6 +81,9 @@ crates/
 
 **Note**: `cargo test --all` pass/fail status is the authoritative signal; exact counts grow over time. Use `cargo test --all -- --list | rg ': test$' | wc -l` for the current test count in your checkout.
 
+> [!TIP]
+> Source [`../../scripts/cargo_repo_env.sh`](../../scripts/cargo_repo_env.sh) before local Rust runs. The repo now defaults to a repo-local `CARGO_TARGET_DIR` slot (`.cargo-target/manual`) instead of the legacy shared `target/`, which avoids most "Blocking waiting for file lock on build directory" stalls. If you intentionally want concurrent long-running suites, give each shell/script its own slot, for example `export CITYG_CARGO_TARGET_SLOT=gui-a` before sourcing the helper.
+
 ---
 
 ## 3. Unit Tests
