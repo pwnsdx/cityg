@@ -1931,6 +1931,7 @@ fn is_known_header_key(key: u64, is_merge: bool) -> bool {
             | HDR_BARRIER_HISTORY_COMMITMENT
             | HDR_BARRIER_FULL_VERIFICATION_RECEIPT
             | HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION
+            | HDR_BARRIER_FULL_VERIFICATION_WITNESS
             | HDR_VRF_MASK_A
             | HDR_VRF_MASK_B
             | HDR_VRF_PUBLIC_KEY

@@ -34,15 +34,16 @@ Scope-hardening addendum (same date, later tranche):
 - `docs/specs.md`, the API server, the API client, and the GUI join paths now treat `header[181]` / `header[182]` as base-profile-required companions for authority-bound `barrier_update` decisions, not as forbidden extension-only headers.
 - Within both concrete extensions defined by this document, `header[181]` is now mandatory whenever `header[182]` is present on a `barrier_update`; the server normalizes this requirement even when recovering persisted authority state, and GUI activation guards reject authority-bound bundles that carry an attestation without a matching receipt.
 - GUI activation guards now also cryptographically verify `header[181]` against the exact `barrier_update`, `header[180]`, `header[182]`, `(gid, author_leaf_id, barrier_update_reason, updater_leaf)` tuple and the author POP public key, instead of treating `header[181]` as a presence-only token on the receive path.
+- The base profile now also requires `header[183]` on `reason in {0,1}` MERGE anchors under `global-history-authority-v1`. That witness is issued only after the server/history authority replays the exact candidate `barrier_update` against the authenticated current tree, authenticated A/B helper outputs, and the authenticated deployment-profile manifest for that same committed state.
 - The server/API/client now negotiate and verify both concrete extensions end-to-end. Positive proof anchors include `tests::build_refresh_bundle_includes_global_history_authority_headers` in `crates/cityg-server/src/lib.rs` and `parses_and_verifies_history_authority_extensions` plus `merge_ticket_refresh_accepts_global_history_authority_attestation` in `crates/cityg-api-client`.
 - As a result, the repo/spec now line up on one clear base-profile story: deployment-global append-only authority is in scope, stronger federated/non-equivocation semantics are future-profile work, and no finding remains `Open` or `Partial` in the current base-profile scope.
 
 Summary:
 - Total findings reviewed: `51`
-- `Closed`: `42`
+- `Closed`: `43`
 - `Partial`: `0`
 - `Open`: `0`
-- `Reclassified`: `9`
+- `Reclassified`: `8`
 
 Current-scope interpretation:
 - No finding remains `Partial` or `Open` within the current base-profile scope implemented by this repo.
@@ -88,8 +89,8 @@ Current-scope interpretation:
   Proof: `docs/specs.md:288-306`, `docs/specs.md:1296-1302`, `crates/cityg-server/src/lib.rs:6384-6399`, `crates/cityg-api-client/src/lib.rs:2082-2133`.
 - `3.3` `Closed` — restart correlation is now tied to one authenticated deployment-global lineage through `LookupMergeAcceptance` plus the mandatory authority extension.
   Proof: `docs/specs.md:258-264`, `docs/specs.md:288-306`, `docs/specs.md:1420-1434`, `crates/cityg-server/src/lib.rs:6384-6399`, `crates/cityg-gui/src/native/barrier_runtime.rs:594-655`.
-- `3.4` `Reclassified` — the current base profile now defines the exact server-verifiable receipt it wants. A stronger independently witnessed FULL proof is future profile work, not a mismatch between current spec and code.
-  Proof: `docs/specs.md:302-306`, `docs/specs.md:1259-1288`, `crates/cityg-server/src/lib.rs:4613-4731`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
+- `3.4` `Reclassified` — the current base profile still allows a degraded `recover-only` local state with `current_barrier_full_verified := false`; what is now closed is only the authoring boundary for `reason in {0,1}`. The broader ask to forbid any active degraded local state remains a stricter profile choice, not a mismatch with the current spec and code.
+  Proof: `docs/specs.md:302-306`, `docs/specs.md:1260-1288`, `docs/specs.md:1528-1558`, `crates/cityg-gui/src/native/barrier_runtime.rs:57-82,285-297`, `crates/cityg-gui/src/native/tests/mod.rs:219-292`.
 - `3.5` `Closed` — “current state must be covered” is now a concrete base-profile invariant under the deployment-global authority actually defined by the spec.
   Proof: `docs/specs.md:288-306`, `docs/specs.md:1195-1198`, `docs/specs.md:1259-1265`, `crates/cityg-server/src/lib.rs`, `crates/cityg-api-client/src/lib.rs:1458-2047`.
 - `3.6` `Closed` — within the current deployment-global scope, authenticated current-state regression and rollback/fork conflicts are fail-closed in both spec and client runtime.
@@ -99,8 +100,8 @@ Current-scope interpretation:
 
 ## Audit 4
 
-- `4.1` `Reclassified` — the current base profile now states unambiguously that `header[181]`/`header[182]` provide server-checkable authority-bound helper-state binding, not remote attestation of the client's internal FULL-vs-recover-only execution path. The stronger ask is future-profile work, not a mismatch between current spec and code.
-  Proof: `docs/specs.md:300-306`, `docs/specs.md:1270-1283`, `crates/cityg-server/src/lib.rs:4644-4731,7025-7059,7192-7234`, `crates/cityg-gui/src/native/barrier_runtime.rs:545-621`, `crates/cityg-gui/src/native/tests/mod.rs:1177-1328`.
+- `4.1` `Closed` — the base profile now enforces a truly server-verifiable authoring boundary for `reason in {0,1}` by requiring `header[183] FullVerificationWitness`, issued only after the server/history authority replays the exact candidate `barrier_update` against the authenticated current tree, authenticated A/B helper results, and the authenticated deployment-profile manifest for that same committed state. The protocol no longer relies only on a local “honest client” FULL claim for those reasons.
+  Proof: `docs/specs.md:323-341`, `docs/specs.md:1329-1367`, `docs/specs.md:1390-1398`, `crates/cityg-server/src/lib.rs:3014-3061,5810-5979,6410-6528,8602-8714`, `crates/cityg-api/src/lib.rs:2733-2878`, `crates/cityg-api-client/src/lib.rs:1394-1460,3737-3849`, `crates/cityg-gui/src/native/barrier_ops.rs:602-625,1303-1326`, `crates/cityg-gui/src/native/tests/mod.rs:9585-9621,9664-9709`.
 - `4.2` `Closed` — `join_finalize` is now server-checkable via `header[179] join_finalize_auth`, and the bootstrap exception is explicitly separate from the stronger FULL predicate.
   Proof: `docs/specs.md:1155-1174`, `docs/specs.md:1579-1583`, `crates/msphf-orchestrator/src/accept/mod.rs:1884-1949`, `crates/cityg-server/src/lib.rs:2381-2438,4022-4085,10705-10735`, `crates/cityg-gui/src/native/barrier_core.rs:568-589`, `crates/cityg-gui/src/native/tests/mod.rs:8589-8658,9070-9130`.
 - `4.3` `Closed` — provenance that the current barrier state is not FULL-verified is now persisted and surfaced.
@@ -164,8 +165,8 @@ Current-scope interpretation:
   Proof: `docs/specs.md:180-199`, `docs/specs.md:197-213`, `crates/cityg-gui/src/native/session_types.rs:50-66`, `crates/cityg-gui/src/native/persisted/barrier.rs:15-28,157-184,346-431`, `crates/cityg-gui/src/native/barrier_runtime.rs:515-595`, `crates/cityg-gui/src/native/epoch_sync.rs:40-98,335-363`, `crates/cityg-gui/src/native/tests/mod.rs:346-381,8327-8384`.
 - `7.4` `Closed` — helper completeness/non-omission is now a mandatory signed base-profile property inside the deployment-global authority that the spec actually defines.
   Proof: `docs/specs.md:200-206`, `docs/specs.md:217-231`, `docs/specs.md:294-300`, `crates/cityg-server/src/lib.rs:2644-2698,3332-3478`, `crates/cityg-api/src/lib.rs:2607-2852`, `crates/cityg-api-client/src/lib.rs:2787-3207`, `crates/cityg-api-client/tests/history_authority_extensions.rs`.
-- `7.5` `Reclassified` — recover-only remains an explicit degraded availability mode, but that is now a documented fail-closed safety tradeoff rather than an unspoken protocol hole.
-  Proof: `docs/specs.md:302-306`, `docs/specs.md:1248-1265`, `crates/cityg-gui/src/native/barrier_runtime.rs:91-99,603-655`.
+- `7.5` `Reclassified` — recover-only remains an explicit degraded availability mode, but the dangerous authoring actions for `reason in {0,1}` are no longer only “honest-client enforced”: the base profile now requires a server-issued key `183` witness for those reasons. The remaining downgrade concern is the documented local availability tradeoff, not silent authoring escalation.
+  Proof: `docs/specs.md:302-306`, `docs/specs.md:1248-1265`, `docs/specs.md:1329-1367`, `crates/cityg-server/src/lib.rs:3014-3061,5810-5979`, `crates/cityg-gui/src/native/barrier_runtime.rs:91-99,603-655`.
 - `7.6` `Reclassified` — provisioning/current-state/config fields are now signed exactly where the current base profile says they should be; the remaining governance-lineage ask is a broader profile/documentation decision.
   Proof: `docs/specs.md:302-305`, `docs/specs.md:1638-1710`, `crates/cityg-api/proto/cityg.proto:216-429`, `crates/cityg-api-client/src/lib.rs:1079-1299,1346-1569,1592-2267,3062-3233,3235-3715`.
 - `7.7` `Reclassified` — the base profile now clearly defines fail-closed local recovery states (`barrier_recovery_pending`, `recovery_required`) but intentionally leaves cross-source arbitration/quarantine to deployment policy rather than pretending to specify it here.
@@ -177,6 +178,8 @@ Current-scope interpretation:
   `docs/specs.md:180-189`, `crates/cityg-server/src/lib.rs:2574-2599`, `crates/cityg-server/src/lib.rs:10363-10395`.
 - Server-checkable `join_finalize` exception:
   `docs/specs.md:1155-1157`, `docs/specs.md:1467-1469`, `crates/cityg-server/src/lib.rs:4022-4085`.
+- Server-verifiable `reason in {0,1}` authoring witness:
+  `docs/specs.md:1329-1367`, `crates/cityg-server/src/lib.rs:3014-3061,5810-5979,6410-6528`, `crates/cityg-api/src/lib.rs:2733-2878`, `crates/cityg-gui/src/native/barrier_ops.rs:602-625,1303-1326`.
 - Join provisioning freshness/binding:
   `docs/specs.md:1638-1669`, `crates/cityg-api/proto/cityg.proto:216-268`, `crates/cityg-server/src/lib.rs:2685-2709,3529-3708`, `crates/cityg-api-client/src/lib.rs:1079-1251,3062-3233`.
 - Sender leaf binding on the message plane:
@@ -198,6 +201,6 @@ Current-scope interpretation:
 
 The current base profile is now explicit on the remaining scope boundaries:
 
-1. `header[181]` stays an exact attested-helper/current-state binding in this profile. A future stronger profile MAY define independent remote attestation of the client's FULL-verification path (for example under a reserved identifier such as `witnessed-full-verification-v1`), but that is not part of the current base profile.
+1. `header[181]` stays the exact author POP binding to one attested helper/current-state decision, while `header[183]` is the current base-profile server-issued witness for `reason in {0,1}` authoring eligibility. A future stronger profile MAY still define independently witnessed remote attestation of the client's internal FULL-verification path (for example under a reserved identifier such as `witnessed-full-verification-v1`), but that stronger claim is not required by the current base profile.
 2. `global-history-authority-v1` is intentionally deployment-global append-only in this profile. A future stronger profile MAY add federated / multi-witness non-equivocation or stronger finality (for example under a reserved identifier such as `federated-history-authority-v1`), but that is not part of the current base profile.
 3. `local-history-authority-v1` is now treated as legacy/test-only non-base compatibility, not as an alternative production base-profile target.

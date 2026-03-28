@@ -380,7 +380,9 @@ async fn publish_revocation_merge_from_ticket(
         kem_tree_hash_after,
         current_history_commitment: ticket_history_commitment,
         history_authority_extension: ticket_history_authority_extension,
+        history_authority,
         current_global_history_attestation_bytes,
+        deployment_profile_manifest_bytes,
         n_max,
         max_barrier_update_bytes,
         ..
@@ -586,6 +588,41 @@ async fn publish_revocation_merge_from_ticket(
         header.insert(
             hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
             Value::Bytes(receipt),
+        );
+        let history_authority = history_authority.as_ref().ok_or_else(|| {
+            anyhow!(
+                "{operation_label} merge ticket missing history_authority descriptor for full verification witness"
+            )
+        })?;
+        let history_authority_extension = ticket_history_authority_extension.ok_or_else(|| {
+            anyhow!(
+                "{operation_label} merge ticket missing history_authority_extension for full verification witness"
+            )
+        })?;
+        let full_verification_witness = client
+            .barrier_issue_full_verification_witness(
+                &room_id,
+                &leaf_id,
+                0,
+                barrier_update.raw_update.as_slice(),
+                barrier_n_max,
+                &ticket_history_commitment,
+                history_authority_extension,
+                history_authority,
+                current_global_history_attestation_bytes.as_slice(),
+                barrier_version,
+                &snapshot_hash,
+                barrier_version,
+                join_resolution.records.as_slice(),
+                &committed_revocation_roots_hash,
+                revoked_resolution.leaf_indices.as_slice(),
+                deployment_profile_manifest_bytes.as_slice(),
+            )
+            .await
+            .context("issue full verification witness for leave/expel merge")?;
+        header.insert(
+            hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+            Value::Bytes(full_verification_witness),
         );
     }
     let mut pending_barrier_state = BarrierPendingState {
@@ -1042,7 +1079,9 @@ async fn perform_barrier_merge_inner(
         kem_tree_hash_after,
         current_history_commitment: ticket_history_commitment,
         history_authority_extension: ticket_history_authority_extension,
+        history_authority,
         current_global_history_attestation_bytes,
+        deployment_profile_manifest_bytes,
         n_max,
         max_barrier_update_bytes,
         ..
@@ -1247,6 +1286,46 @@ async fn perform_barrier_merge_inner(
             hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
             Value::Bytes(receipt),
         );
+        if mode.reason() == 0 || mode.reason() == 1 {
+            let history_authority = history_authority.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "{} merge ticket missing history_authority descriptor for full verification witness",
+                    mode.label()
+                )
+            })?;
+            let history_authority_extension =
+                ticket_history_authority_extension.ok_or_else(|| {
+                    anyhow!(
+                        "{} merge ticket missing history_authority_extension for full verification witness",
+                        mode.label()
+                    )
+                })?;
+            let full_verification_witness = client
+                .barrier_issue_full_verification_witness(
+                    &room_id,
+                    &leaf_id,
+                    mode.reason(),
+                    barrier_update.raw_update.as_slice(),
+                    barrier_n_max,
+                    &ticket_history_commitment,
+                    history_authority_extension,
+                    history_authority,
+                    current_global_history_attestation_bytes.as_slice(),
+                    barrier_version,
+                    &snapshot_hash,
+                    barrier_version,
+                    join_resolution.records.as_slice(),
+                    &committed_revocation_roots_hash,
+                    revoked_resolution.leaf_indices.as_slice(),
+                    deployment_profile_manifest_bytes.as_slice(),
+                )
+                .await
+                .with_context(|| format!("issue full verification witness for {}", mode.label()))?;
+            header.insert(
+                hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+                Value::Bytes(full_verification_witness),
+            );
+        }
     }
     let pending_barrier_state = BarrierPendingState {
         barrier_version: next_barrier_version,

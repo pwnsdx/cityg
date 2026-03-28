@@ -460,3 +460,21 @@ Mon verdict point par point sur **mon audit initial** :
 * **Encore ouverts selon mon bar initial** : recover-only peut toujours devenir “actif” sans FULL verification du public state, et le rollback de stockage de la barrier state machine n’est pas traité aussi explicitement que le crash.  
 
 Donc ma réponse à ta question est : **les changements satisfont largement le rapport de cohérence “base-profile scope”, mais ils ne satisfont pas complètement mon audit initial si on garde la question originale au niveau “serveur byzantin / réseau adversarial” sans re-scoper la confiance à une autorité d’historique append-only unique.**  
+
+--
+
+## Commentaires Codex (2026-03-29, witness follow-up)
+
+Nouvelle passe protocolaire:
+
+- Le profil de base exige maintenant `header[183]` pour `reason in {0,1}` sous `global-history-authority-v1`, et ce witness est émis seulement après replay serveur de la candidate `barrier_update` contre l’état courant authentifié.
+- Cela ferme la frontière **authoring/updater** qui restait encore trop proche d’une obligation locale dans les anciennes tranches.
+
+Limite restante inchangée pour cet audit:
+
+- `3.4` ne devient pas pour autant un “fermé” au sens fort de mon texte initial: le profil courant garde explicitement un état local dégradé `recover-only` / `current_barrier_full_verified := false` pour disponibilité locale. Le witness ferme l’authoring `reason 0/1`, pas l’existence même d’un état actif localement récupéré sans FULL public-state verification.
+
+Statut audit final canonique:
+
+- **Closed**: 3.3, 3.5, 3.6, 3.7
+- **Reclassified**: 3.1, 3.2, 3.4

@@ -39,12 +39,13 @@ use futures::{SinkExt, StreamExt};
 use hex::FromHex;
 use pb::{
     AcceptEpochRequest, AcceptEpochResponse, BarrierFetchPublicTreeRequest,
-    BarrierFetchPublicTreeResponse, BarrierJoinLeafRecord, BarrierLookupMergeAcceptanceRequest,
-    BarrierLookupMergeAcceptanceResponse, BarrierResolveJoinsSinceRequest,
-    BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
-    BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest, BootstrapRoomResponse, ChatMessage,
-    ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
-    FetchMessagesRequest, FetchMessagesResponse, FreezeStat,
+    BarrierFetchPublicTreeResponse, BarrierIssueFullVerificationWitnessRequest,
+    BarrierIssueFullVerificationWitnessResponse, BarrierJoinLeafRecord,
+    BarrierLookupMergeAcceptanceRequest, BarrierLookupMergeAcceptanceResponse,
+    BarrierResolveJoinsSinceRequest, BarrierResolveJoinsSinceResponse,
+    BarrierResolveRevokedLeavesRequest, BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest,
+    BootstrapRoomResponse, ChatMessage, ConfigureWindowRequest, ConfigureWindowResponse,
+    ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse, FreezeStat,
     FsForwardLeapPolicy as PbFsForwardLeapPolicy, GetBundleRequest, GetBundleResponse,
     GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse,
     HistoryCommitment as PbHistoryCommitment, IdentityBinding, JoinTicketRequest,
@@ -894,6 +895,34 @@ fn pb_history_commitment(commitment: ServerHistoryCommitment) -> PbHistoryCommit
         prev_history_commitment_id: commitment.prev_history_commitment_id.to_vec(),
         history_seq: commitment.history_seq,
     }
+}
+
+fn parse_pb_history_commitment(
+    commitment: Option<PbHistoryCommitment>,
+) -> Result<ServerHistoryCommitment, ApiError> {
+    let commitment = commitment.ok_or(ApiError::InvalidRequest(
+        "current_history_commitment must be provided",
+    ))?;
+    if commitment.history_view_id.len() != 32
+        || commitment.history_commitment_id.len() != 32
+        || commitment.prev_history_commitment_id.len() != 32
+    {
+        return Err(ApiError::InvalidRequest(
+            "current_history_commitment fields must be 32 bytes",
+        ));
+    }
+    let mut history_view_id = [0u8; 32];
+    history_view_id.copy_from_slice(&commitment.history_view_id);
+    let mut history_commitment_id = [0u8; 32];
+    history_commitment_id.copy_from_slice(&commitment.history_commitment_id);
+    let mut prev_history_commitment_id = [0u8; 32];
+    prev_history_commitment_id.copy_from_slice(&commitment.prev_history_commitment_id);
+    Ok(ServerHistoryCommitment {
+        history_view_id,
+        history_commitment_id,
+        prev_history_commitment_id,
+        history_seq: commitment.history_seq,
+    })
 }
 
 fn pb_fs_forward_leap_policy(policy: ServerFsForwardLeapPolicy) -> PbFsForwardLeapPolicy {
@@ -2701,6 +2730,156 @@ async fn merge_ticket(
     Ok(protobuf_response_bytes(response_bytes))
 }
 
+async fn barrier_issue_full_verification_witness(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
+    let request = BarrierIssueFullVerificationWitnessRequest::decode(body)?;
+    if request.room_id.is_empty() {
+        return Err(ApiError::InvalidRequest("room_id must be provided"));
+    }
+    if request.author_leaf_id.len() != 32 {
+        return Err(ApiError::InvalidRequest("author_leaf_id must be 32 bytes"));
+    }
+    if request.current_global_history_attestation.is_empty() {
+        return Err(ApiError::InvalidRequest(
+            "current_global_history_attestation must be provided",
+        ));
+    }
+    if request.deployment_profile_manifest.is_empty() {
+        return Err(ApiError::InvalidRequest(
+            "deployment_profile_manifest must be provided",
+        ));
+    }
+    if request.barrier_update_reason != 0 && request.barrier_update_reason != 1 {
+        return Err(ApiError::InvalidRequest(
+            "barrier_update_reason must be 0 or 1 for full verification witness",
+        ));
+    }
+    if request.revocation_roots_hash.len() != 32 {
+        return Err(ApiError::InvalidRequest(
+            "revocation_roots_hash must be 32 bytes",
+        ));
+    }
+    let gid = parse_gid(&request.room_id)?;
+    enforce_expensive_rate_limit(
+        &state,
+        "barrier_issue_full_verification_witness",
+        message_scoped_rate_limit_key(&headers, &gid),
+    )
+    .await?;
+    let current_history_commitment =
+        parse_pb_history_commitment(request.current_history_commitment)?;
+    let mut author_leaf_id = [0u8; 32];
+    author_leaf_id.copy_from_slice(&request.author_leaf_id);
+    let mut revocation_roots_hash = [0u8; 32];
+    revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
+
+    let witness = {
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
+        let bundle = if request.barrier_update_reason == 0 {
+            guard.build_merge_ticket(&gid, &author_leaf_id)
+        } else {
+            guard.build_merge_ticket_for_refresh(&gid, &author_leaf_id)
+        }
+        .map_err(ApiError::from)?;
+        if bundle.current_history_commitment != current_history_commitment {
+            return Err(ApiError::InvalidRequest(
+                "current_history_commitment mismatch with authenticated current state",
+            ));
+        }
+        if request.joins_prev_barrier_version != bundle.barrier_version {
+            return Err(ApiError::InvalidRequest(
+                "joins_prev_barrier_version mismatch with authenticated current state",
+            ));
+        }
+        let expected_attestation = guard
+            .global_history_attestation_bytes(
+                &gid,
+                &bundle.current_history_commitment,
+                bundle.barrier_version,
+                &bundle.kem_tree_hash_after,
+            )
+            .map_err(ApiError::from)?;
+        if request.current_global_history_attestation.as_slice() != expected_attestation.as_slice()
+        {
+            return Err(ApiError::InvalidRequest(
+                "current_global_history_attestation mismatch with authenticated current state",
+            ));
+        }
+        let expected_manifest = guard
+            .deployment_profile_manifest_bytes(
+                &gid,
+                API_PROFILE_VERSION,
+                guard.history_authority_extension_id(),
+                bundle.n_max,
+                bundle.max_barrier_update_bytes,
+                bundle.fs_forward_leap_policy,
+            )
+            .map_err(ApiError::from)?;
+        if request.deployment_profile_manifest.as_slice() != expected_manifest.as_slice() {
+            return Err(ApiError::InvalidRequest(
+                "deployment_profile_manifest mismatch with authenticated current state",
+            ));
+        }
+        let resolved_joins = guard
+            .resolve_joins_since(&gid, request.joins_prev_barrier_version)
+            .map_err(map_barrier_helper_error)?;
+        let requested_join_records: Vec<ServerBarrierJoinLeafRecord> = request
+            .join_records
+            .iter()
+            .map(|record| ServerBarrierJoinLeafRecord {
+                device_pk: record.device_pk.clone(),
+                leaf_index: record.leaf_index,
+                ek_leaf: record.ek_leaf.clone(),
+            })
+            .collect();
+        if resolved_joins.history_commitment != bundle.current_history_commitment
+            || requested_join_records != resolved_joins.records
+        {
+            return Err(ApiError::InvalidRequest(
+                "join helper data mismatch with authenticated current state",
+            ));
+        }
+        let resolved_revoked = guard
+            .resolve_revoked_leaf_indices(&gid, &revocation_roots_hash)
+            .map_err(map_barrier_helper_error)?;
+        if resolved_revoked.history_commitment != bundle.current_history_commitment
+            || request.revoked_leaf_indices != resolved_revoked.leaf_indices
+        {
+            return Err(ApiError::InvalidRequest(
+                "revoked helper data mismatch with authenticated current state",
+            ));
+        }
+        guard
+            .full_verification_witness_bytes(
+                &gid,
+                &bundle.current_history_commitment,
+                bundle.barrier_version,
+                &bundle.kem_tree_hash_after,
+                &author_leaf_id,
+                request.barrier_update_reason,
+                bundle.cover_leaf_index,
+                request.barrier_update.as_slice(),
+                request.joins_prev_barrier_version,
+                requested_join_records.as_slice(),
+                &revocation_roots_hash,
+                request.revoked_leaf_indices.as_slice(),
+                request.deployment_profile_manifest.as_slice(),
+            )
+            .map_err(ApiError::from)?
+    };
+
+    Ok(protobuf_response(
+        &BarrierIssueFullVerificationWitnessResponse {
+            full_verification_witness: witness,
+        },
+    ))
+}
+
 async fn barrier_resolve_revoked_leaves(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -4103,6 +4282,10 @@ pub async fn run_with_config(
         .route(
             "/v1/barrier/fetch_public_tree",
             post(barrier_fetch_public_tree),
+        )
+        .route(
+            "/v1/barrier/issue_full_verification_witness",
+            post(barrier_issue_full_verification_witness),
         )
         .route(
             "/v1/barrier/lookup_merge_acceptance",

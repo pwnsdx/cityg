@@ -624,6 +624,51 @@ Barrier helper/current-state note:
 - Clients MUST verify `deployment_profile_manifest` before consuming those delivered helper/current
   profile/config fields, and MUST fail closed if paginated helper pages disagree on the manifest.
 
+#### `POST /v1/barrier/issue_full_verification_witness`
+
+Requests a base-profile `header[183]` witness for one exact `reason in {0,1}` `barrier_update`
+candidate under `global-history-authority-v1`.
+
+**Protobuf Request:** `BarrierIssueFullVerificationWitnessRequest`
+```protobuf
+message BarrierIssueFullVerificationWitnessRequest {
+  string room_id = 1;
+  bytes author_leaf_id = 2;
+  uint64 barrier_update_reason = 3;        // MUST be 0 or 1
+  bytes barrier_update = 4;                // Exact header[175] bytes to publish
+  uint64 n_max = 5;
+  HistoryCommitment current_history_commitment = 6;
+  string history_authority_extension = 7;  // "global-history-authority-v1" in the base profile
+  bytes history_authority_descriptor = 8;
+  bytes current_global_history_attestation = 9;
+  uint64 barrier_version = 10;
+  bytes kem_tree_hash_after = 11;
+  uint64 joins_prev_barrier_version = 12;
+  repeated BarrierJoinRecord join_records = 13;
+  bytes revocation_roots_hash = 14;
+  repeated uint32 revoked_leaf_indices = 15;
+  bytes deployment_profile_manifest = 16;
+}
+```
+
+**Protobuf Response:** `BarrierIssueFullVerificationWitnessResponse`
+```protobuf
+message BarrierIssueFullVerificationWitnessResponse {
+  bytes full_verification_witness = 1;
+}
+```
+
+Base-profile notes:
+- This endpoint is only defined for `reason in {0,1}` and only for
+  `history_authority_extension == "global-history-authority-v1"`.
+- The server MUST issue `full_verification_witness` only after replaying the exact authoring
+  decision against the authenticated current public tree, authenticated A/B helper results, and the
+  authenticated `deployment_profile_manifest` for that same current committed state.
+- Clients MUST attach the returned bytes verbatim as `header[183]` on the subsequent MERGE anchor.
+- Acceptors MUST reject any `reason in {0,1}` `barrier_update` that omits `header[183]` or whose
+  witness does not match the published `header[175]`, `header[180]`, `header[181]`, `header[182]`,
+  helper digests, or current authenticated state.
+
 **Rust Client Example:**
 ```rust
 let ticket = client.merge_ticket("my-room", &leaf_id).await?;

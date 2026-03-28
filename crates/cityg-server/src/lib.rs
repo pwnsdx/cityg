@@ -76,7 +76,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use ciborium::value::Value;
+use ciborium::value::{Integer, Value};
 use cityg_client::witness;
 use cityg_client::{CityGError, ClientEpochBundle, GroupMembership, MembershipDelta};
 use msphf_core::merkle::canonical_set_root;
@@ -183,6 +183,10 @@ impl HistoryAuthorityMode {
 
     fn requires_full_verification_receipt(self) -> bool {
         !matches!(self, Self::Disabled)
+    }
+
+    fn requires_full_verification_witness(self) -> bool {
+        matches!(self, Self::Global)
     }
 
     fn from_persisted_tag(tag: &str) -> Result<Self, CityGError> {
@@ -3005,6 +3009,71 @@ impl CityGServer {
             pk_entries,
         )
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn full_verification_witness_bytes(
+        &self,
+        gid: &[u8; 32],
+        history_commitment: &HistoryCommitment,
+        barrier_version: u64,
+        kem_tree_hash_after: &[u8; 32],
+        author_leaf_id: &[u8; 32],
+        barrier_update_reason: u64,
+        updater_leaf: u64,
+        barrier_update: &[u8],
+        joins_prev_barrier_version: u64,
+        join_records: &[BarrierJoinLeafRecord],
+        revocation_roots_hash: &[u8; 32],
+        revoked_leaf_indices: &[u32],
+        deployment_profile_manifest: &[u8],
+    ) -> Result<Vec<u8>, CityGError> {
+        let authority = self
+            .history_authority
+            .as_ref()
+            .ok_or(CityGError::InvalidInput(
+                "history authority unavailable for full verification witness",
+            ))?;
+        let state = self
+            .roster
+            .groups
+            .get(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        if state.current_history_commitment != *history_commitment
+            || state.barrier_version != barrier_version
+            || state.kem_tree_hash_after != *kem_tree_hash_after
+        {
+            return Err(CityGError::InvalidInput(
+                "full verification witness state mismatch",
+            ));
+        }
+        validate_full_verification_witness_candidate(
+            state,
+            history_commitment,
+            author_leaf_id,
+            barrier_update_reason,
+            barrier_update,
+            joins_prev_barrier_version,
+            join_records,
+            revocation_roots_hash,
+            revoked_leaf_indices,
+        )?;
+        encode_full_verification_witness(
+            authority,
+            gid,
+            history_commitment,
+            barrier_version,
+            kem_tree_hash_after,
+            author_leaf_id,
+            barrier_update_reason,
+            updater_leaf,
+            barrier_update,
+            joins_prev_barrier_version,
+            join_records,
+            revocation_roots_hash,
+            revoked_leaf_indices,
+            deployment_profile_manifest,
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -3715,6 +3784,71 @@ struct FullVerificationReceiptSignedPayload<'a> {
     barrier_update: &'a [u8],
 }
 
+#[derive(Serialize, Deserialize)]
+struct FullVerificationWitnessWire {
+    #[serde(with = "serde_bytes")]
+    scope_id: Vec<u8>,
+    history_authority_extension: String,
+    #[serde(with = "serde_bytes")]
+    gid: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    history_view_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: Vec<u8>,
+    history_seq: u64,
+    barrier_version: u64,
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    author_leaf_id: Vec<u8>,
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    #[serde(with = "serde_bytes")]
+    barrier_update_digest: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    joins_digest: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    revoked_digest: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    deployment_profile_manifest_digest: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct FullVerificationWitnessSignedPayload<'a> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    history_authority_extension: &'a str,
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_view_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    history_commitment_id: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    prev_history_commitment_id: &'a [u8; 32],
+    history_seq: u64,
+    barrier_version: u64,
+    #[serde(with = "serde_bytes")]
+    kem_tree_hash_after: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    author_leaf_id: &'a [u8; 32],
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    #[serde(with = "serde_bytes")]
+    barrier_update_digest: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    joins_digest: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    revoked_digest: &'a [u8; 32],
+    #[serde(with = "serde_bytes")]
+    deployment_profile_manifest_digest: &'a [u8; 32],
+}
+
 fn encode_history_authority_descriptor(
     descriptor: &HistoryAuthorityDescriptor,
 ) -> Result<Vec<u8>, CityGError> {
@@ -3741,7 +3875,6 @@ fn sign_history_authority_message(
         .to_vec())
 }
 
-#[cfg(test)]
 fn verify_history_authority_signature(
     descriptor: &HistoryAuthorityDescriptor,
     payload: &[u8],
@@ -3902,6 +4035,142 @@ fn full_verification_receipt_payload(
         barrier_update,
     })
     .map_err(CityGError::from)
+}
+
+fn compute_full_verification_barrier_update_digest(
+    barrier_update: &[u8],
+) -> Result<[u8; 32], CityGError> {
+    #[derive(Serialize)]
+    struct Preimage<'a> {
+        #[serde(with = "serde_bytes")]
+        barrier_update: &'a [u8],
+    }
+    h_l(
+        "cityg/full-verification-witness/barrier-update",
+        &Preimage { barrier_update },
+    )
+    .map_err(CityGError::from)
+}
+
+fn compute_full_verification_joins_digest(
+    prev_barrier_version: u64,
+    records: &[BarrierJoinLeafRecord],
+) -> Result<[u8; 32], CityGError> {
+    #[derive(Serialize)]
+    struct Preimage<'a> {
+        prev_barrier_version: u64,
+        records: &'a [BarrierJoinLeafRecord],
+    }
+    h_l(
+        "cityg/full-verification-witness/joins",
+        &Preimage {
+            prev_barrier_version,
+            records,
+        },
+    )
+    .map_err(CityGError::from)
+}
+
+fn compute_full_verification_revoked_digest(
+    revocation_roots_hash: &[u8; 32],
+    leaf_indices: &[u32],
+) -> Result<[u8; 32], CityGError> {
+    #[derive(Serialize)]
+    struct Preimage<'a> {
+        #[serde(with = "serde_bytes")]
+        revocation_roots_hash: &'a [u8; 32],
+        leaf_indices: &'a [u32],
+    }
+    h_l(
+        "cityg/full-verification-witness/revoked",
+        &Preimage {
+            revocation_roots_hash,
+            leaf_indices,
+        },
+    )
+    .map_err(CityGError::from)
+}
+
+fn compute_full_verification_deployment_profile_manifest_digest(
+    deployment_profile_manifest: &[u8],
+) -> Result<[u8; 32], CityGError> {
+    #[derive(Serialize)]
+    struct Preimage<'a> {
+        #[serde(with = "serde_bytes")]
+        deployment_profile_manifest: &'a [u8],
+    }
+    h_l(
+        "cityg/full-verification-witness/deployment-profile-manifest",
+        &Preimage {
+            deployment_profile_manifest,
+        },
+    )
+    .map_err(CityGError::from)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_full_verification_witness(
+    state: &HistoryAuthorityState,
+    gid: &[u8; 32],
+    history_commitment: &HistoryCommitment,
+    barrier_version: u64,
+    kem_tree_hash_after: &[u8; 32],
+    author_leaf_id: &[u8; 32],
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    barrier_update: &[u8],
+    joins_prev_barrier_version: u64,
+    join_records: &[BarrierJoinLeafRecord],
+    revocation_roots_hash: &[u8; 32],
+    revoked_leaf_indices: &[u32],
+    deployment_profile_manifest: &[u8],
+) -> Result<Vec<u8>, CityGError> {
+    let barrier_update_digest = compute_full_verification_barrier_update_digest(barrier_update)?;
+    let joins_digest =
+        compute_full_verification_joins_digest(joins_prev_barrier_version, join_records)?;
+    let revoked_digest =
+        compute_full_verification_revoked_digest(revocation_roots_hash, revoked_leaf_indices)?;
+    let deployment_profile_manifest_digest =
+        compute_full_verification_deployment_profile_manifest_digest(deployment_profile_manifest)?;
+    let payload = to_cbor_vec(&FullVerificationWitnessSignedPayload {
+        label: "cityg/full-verification-witness-v1",
+        scope_id: &state.descriptor.scope_id,
+        history_authority_extension: state.mode.extension_id(),
+        gid,
+        history_view_id: &history_commitment.history_view_id,
+        history_commitment_id: &history_commitment.history_commitment_id,
+        prev_history_commitment_id: &history_commitment.prev_history_commitment_id,
+        history_seq: history_commitment.history_seq,
+        barrier_version,
+        kem_tree_hash_after,
+        author_leaf_id,
+        barrier_update_reason,
+        updater_leaf,
+        barrier_update_digest: &barrier_update_digest,
+        joins_digest: &joins_digest,
+        revoked_digest: &revoked_digest,
+        deployment_profile_manifest_digest: &deployment_profile_manifest_digest,
+    })?;
+    let signature = sign_history_authority_message(state, payload.as_slice())?;
+    Ok(to_cbor_vec(&FullVerificationWitnessWire {
+        scope_id: state.descriptor.scope_id.to_vec(),
+        history_authority_extension: state.mode.extension_id().to_string(),
+        gid: gid.to_vec(),
+        history_view_id: history_commitment.history_view_id.to_vec(),
+        history_commitment_id: history_commitment.history_commitment_id.to_vec(),
+        prev_history_commitment_id: history_commitment.prev_history_commitment_id.to_vec(),
+        history_seq: history_commitment.history_seq,
+        barrier_version,
+        kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+        author_leaf_id: author_leaf_id.to_vec(),
+        barrier_update_reason,
+        updater_leaf,
+        barrier_update_digest: barrier_update_digest.to_vec(),
+        joins_digest: joins_digest.to_vec(),
+        revoked_digest: revoked_digest.to_vec(),
+        deployment_profile_manifest_digest: deployment_profile_manifest_digest.to_vec(),
+        signature,
+    })?)
 }
 
 fn encode_join_provisioning_artifact(
@@ -5507,6 +5776,10 @@ fn parse_full_verification_receipt(
     ))
 }
 
+fn parse_full_verification_witness(raw: &[u8]) -> Result<FullVerificationWitnessWire, CityGError> {
+    parse_deterministic_cbor::<FullVerificationWitnessWire>(raw)
+}
+
 fn unique_author_leaf_for_pop_pk(
     state_before: &GroupState,
     author_pop_pk: &[u8],
@@ -5534,15 +5807,16 @@ fn validate_history_authority_headers(
     let barrier_reason = parse_barrier_update_reason(header)?;
     let has_receipt = header.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT);
     let has_attestation = header.contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION);
+    let has_witness = header.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS);
     if barrier_reason.is_none() {
-        if has_receipt || has_attestation {
+        if has_receipt || has_attestation || has_witness {
             return Err(CityGError::InvalidInput("barrier_update malformed"));
         }
         return Ok(());
     }
 
     let Some(authority) = history_authority else {
-        if has_receipt || has_attestation {
+        if has_receipt || has_attestation || has_witness {
             return Err(CityGError::InvalidInput("barrier_update malformed"));
         }
         return Ok(());
@@ -5591,7 +5865,21 @@ fn validate_history_authority_headers(
         Some(_) => return Err(CityGError::InvalidInput("barrier_update malformed")),
         None => None,
     };
+    let raw_witness = match header.get(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS) {
+        Some(Value::Bytes(raw)) => Some(raw.as_slice()),
+        Some(_) => return Err(CityGError::InvalidInput("barrier_update malformed")),
+        None => None,
+    };
     if authority.require_full_verification_receipt && raw_receipt.is_none() {
+        return Err(freeze_barrier_updater_invalid_error());
+    }
+    if has_witness && barrier_reason != 0 && barrier_reason != 1 {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+    if authority.mode.requires_full_verification_witness()
+        && (barrier_reason == 0 || barrier_reason == 1)
+        && raw_witness.is_none()
+    {
         return Err(freeze_barrier_updater_invalid_error());
     }
     if let Some(raw_receipt) = raw_receipt {
@@ -5618,6 +5906,75 @@ fn validate_history_authority_headers(
             .map_err(|_| freeze_barrier_updater_invalid_error())?;
         dilithium5::verify_detached_signature(&signature, payload.as_slice(), &author_pop_pk)
             .map_err(|_| freeze_barrier_updater_invalid_error())?;
+    }
+    if let Some(raw_witness) = raw_witness {
+        let witness = parse_full_verification_witness(raw_witness)?;
+        let witness_scope_id = vec_to_32(witness.scope_id.clone())?;
+        let witness_gid = vec_to_32(witness.gid.clone())?;
+        let witness_history_view_id = vec_to_32(witness.history_view_id.clone())?;
+        let witness_history_commitment_id = vec_to_32(witness.history_commitment_id.clone())?;
+        let witness_prev_history_commitment_id =
+            vec_to_32(witness.prev_history_commitment_id.clone())?;
+        let witness_kem_tree_hash_after = vec_to_32(witness.kem_tree_hash_after.clone())?;
+        let witness_author_leaf_id = vec_to_32(witness.author_leaf_id.clone())?;
+        let witness_barrier_update_digest = vec_to_32(witness.barrier_update_digest.clone())?;
+        let witness_joins_digest = vec_to_32(witness.joins_digest.clone())?;
+        let witness_revoked_digest = vec_to_32(witness.revoked_digest.clone())?;
+        let witness_manifest_digest =
+            vec_to_32(witness.deployment_profile_manifest_digest.clone())?;
+        let barrier_update_digest =
+            compute_full_verification_barrier_update_digest(raw_barrier_update)?;
+        if witness_scope_id != authority.descriptor.scope_id
+            || witness.history_authority_extension != authority.mode.extension_id()
+            || witness_gid != *gid
+            || witness_history_view_id != state_before.current_history_commitment.history_view_id
+            || witness_history_commitment_id
+                != state_before
+                    .current_history_commitment
+                    .history_commitment_id
+            || witness_prev_history_commitment_id
+                != state_before
+                    .current_history_commitment
+                    .prev_history_commitment_id
+            || witness.history_seq != state_before.current_history_commitment.history_seq
+            || witness.barrier_version != state_before.barrier_version
+            || witness_kem_tree_hash_after != state_before.kem_tree_hash_after
+            || witness_author_leaf_id != author_leaf_id
+            || witness.barrier_update_reason != barrier_reason
+            || witness.updater_leaf != parsed.updater_leaf
+            || witness_barrier_update_digest != barrier_update_digest
+        {
+            return Err(freeze_barrier_updater_invalid_error());
+        }
+        let payload = to_cbor_vec(&FullVerificationWitnessSignedPayload {
+            label: "cityg/full-verification-witness-v1",
+            scope_id: &authority.descriptor.scope_id,
+            history_authority_extension: authority.mode.extension_id(),
+            gid,
+            history_view_id: &state_before.current_history_commitment.history_view_id,
+            history_commitment_id: &state_before
+                .current_history_commitment
+                .history_commitment_id,
+            prev_history_commitment_id: &state_before
+                .current_history_commitment
+                .prev_history_commitment_id,
+            history_seq: state_before.current_history_commitment.history_seq,
+            barrier_version: state_before.barrier_version,
+            kem_tree_hash_after: &state_before.kem_tree_hash_after,
+            author_leaf_id: &author_leaf_id,
+            barrier_update_reason: barrier_reason,
+            updater_leaf: parsed.updater_leaf,
+            barrier_update_digest: &barrier_update_digest,
+            joins_digest: &witness_joins_digest,
+            revoked_digest: &witness_revoked_digest,
+            deployment_profile_manifest_digest: &witness_manifest_digest,
+        })?;
+        verify_history_authority_signature(
+            &authority.descriptor,
+            payload.as_slice(),
+            witness.signature.as_slice(),
+        )
+        .map_err(|_| freeze_barrier_updater_invalid_error())?;
     }
 
     Ok(())
@@ -6002,6 +6359,148 @@ fn validate_barrier_update_against_roster(
         }))
     })();
     validation.map_err(map_barrier_update_validation_error)
+}
+
+fn apply_join_records_to_snapshot(
+    pk_entries: &mut [Vec<u8>],
+    n_max: u64,
+    join_records: &[BarrierJoinLeafRecord],
+) -> Result<(), CityGError> {
+    let leaf_base = usize::try_from(n_max.saturating_sub(1))
+        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+    for record in join_records {
+        let leaf_node = leaf_base
+            .checked_add(
+                usize::try_from(record.leaf_index)
+                    .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
+            )
+            .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+        let slot = pk_entries
+            .get_mut(leaf_node)
+            .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+        *slot = record.ek_leaf.clone();
+        clear_barrier_path(pk_entries, leaf_node, false, Vec::clear);
+    }
+    Ok(())
+}
+
+fn apply_revoked_indices_to_snapshot(
+    pk_entries: &mut [Vec<u8>],
+    n_max: u64,
+    revoked_leaf_indices: &[u32],
+) -> Result<(), CityGError> {
+    let leaf_base = usize::try_from(n_max.saturating_sub(1))
+        .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+    for leaf_index in revoked_leaf_indices {
+        let leaf_node = leaf_base
+            .checked_add(
+                usize::try_from(*leaf_index)
+                    .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
+            )
+            .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+        if pk_entries.get(leaf_node).is_none() {
+            return Err(CityGError::InvalidInput("barrier_update malformed"));
+        }
+        clear_barrier_path(pk_entries, leaf_node, true, Vec::clear);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_full_verification_witness_candidate(
+    state_before: &GroupState,
+    current_history_commitment: &HistoryCommitment,
+    author_leaf_id: &[u8; 32],
+    barrier_update_reason: u64,
+    barrier_update: &[u8],
+    joins_prev_barrier_version: u64,
+    join_records: &[BarrierJoinLeafRecord],
+    revocation_roots_hash: &[u8; 32],
+    revoked_leaf_indices: &[u32],
+) -> Result<(), CityGError> {
+    if barrier_update_reason != 0 && barrier_update_reason != 1 {
+        return Err(CityGError::InvalidInput("barrier_update malformed"));
+    }
+    if state_before.current_history_commitment != *current_history_commitment {
+        return Err(CityGError::InvalidInput(
+            "history commitment mismatch for full verification witness",
+        ));
+    }
+    if joins_prev_barrier_version != state_before.barrier_version {
+        return Err(CityGError::InvalidInput(
+            "joins_prev_barrier_version mismatch for full verification witness",
+        ));
+    }
+    if state_before.revoked.contains(author_leaf_id)
+        || !state_before.leaf_device_pk.contains_key(author_leaf_id)
+    {
+        return Err(freeze_barrier_updater_invalid_error());
+    }
+    let expected_updater_leaf = u64::from(cover_leaf_index(author_leaf_id, state_before.n_max));
+    let mut header = BTreeMap::new();
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE,
+        Value::Bytes(barrier_update.to_vec()),
+    );
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE_REASON,
+        Value::Integer(Integer::from(barrier_update_reason)),
+    );
+    let parsed = parse_barrier_update(&header, state_before.n_max)?
+        .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+    if parsed.prev_barrier_version != state_before.barrier_version
+        || parsed.updater_leaf != expected_updater_leaf
+        || parsed.revocation_roots_hash != *revocation_roots_hash
+    {
+        return Err(freeze_barrier_updater_invalid_error());
+    }
+    let revocation_changed = *revocation_roots_hash != state_before.barrier_roots_hash;
+    if (revocation_changed && barrier_update_reason != 0)
+        || (!revocation_changed && barrier_update_reason != 1)
+    {
+        return Err(freeze_barrier_updater_invalid_error());
+    }
+
+    let mut snapshot_pre = build_pk_entries_cow(state_before)?
+        .into_iter()
+        .map(|entry| entry.into_owned())
+        .collect::<Vec<_>>();
+    apply_join_records_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        state_before.n_max,
+        join_records,
+    )?;
+    apply_revoked_indices_to_snapshot(
+        snapshot_pre.as_mut_slice(),
+        state_before.n_max,
+        revoked_leaf_indices,
+    )?;
+    let expected_before = compute_barrier_tree_hash(state_before.n_max, snapshot_pre.as_slice())?;
+    if expected_before != parsed.kem_tree_hash_before {
+        return Err(CityGError::Acceptance(
+            msphf_orchestrator::AcceptanceError::Freeze(
+                msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
+            ),
+        ));
+    }
+    verify_barrier_update_pairs_and_targets(snapshot_pre.as_slice(), &parsed, state_before.n_max)?;
+    for (node, ek) in &parsed.new_public_keys {
+        let index = usize::try_from(*node)
+            .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+        let slot = snapshot_pre
+            .get_mut(index)
+            .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+        *slot = ek.clone();
+    }
+    let expected_after = compute_barrier_tree_hash(state_before.n_max, snapshot_pre.as_slice())?;
+    if expected_after != parsed.kem_tree_hash_after {
+        return Err(CityGError::Acceptance(
+            msphf_orchestrator::AcceptanceError::Freeze(
+                msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE,
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn header_bytes32(
@@ -6955,6 +7454,36 @@ mod tests {
                     receipt_signature,
                 )?),
             );
+            if authority.mode.requires_full_verification_witness()
+                && (barrier_update_reason == 0 || barrier_update_reason == 1)
+            {
+                let deployment_profile_manifest = server.deployment_profile_manifest_bytes(
+                    &gid,
+                    "v0.1.4",
+                    server.history_authority_extension_id(),
+                    ticket.n_max,
+                    ticket.max_barrier_update_bytes,
+                    ticket.fs_forward_leap_policy,
+                )?;
+                refresh_bundle.header_map.insert(
+                    hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+                    Value::Bytes(server.full_verification_witness_bytes(
+                        &gid,
+                        &history_commitment,
+                        ticket.barrier_version,
+                        &ticket.kem_tree_hash_after,
+                        &generated.leaf_id,
+                        barrier_update_reason,
+                        parsed_barrier_update.updater_leaf,
+                        raw_barrier_update.as_slice(),
+                        ticket.barrier_version,
+                        join_records.records.as_slice(),
+                        &committed_roots_hash,
+                        committed_revoked.leaf_indices.as_slice(),
+                        deployment_profile_manifest.as_slice(),
+                    )?),
+                );
+            }
         }
         let pristine_bundle = refresh_bundle.clone();
 
@@ -7996,6 +8525,11 @@ mod tests {
                 .header_map
                 .contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
         );
+        assert!(
+            !bundle
+                .header_map
+                .contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS)
+        );
         Ok(())
     }
 
@@ -8061,6 +8595,84 @@ mod tests {
                 ))?;
         verify_history_authority_signature(&stored_descriptor, payload.as_slice(), &signature)?;
         assert_eq!(finality_kind, GLOBAL_HISTORY_ATTESTATION_FINALITY_KIND);
+        Ok(())
+    }
+
+    #[test]
+    fn full_verification_witness_rejects_barrier_update_hash_mismatch() -> Result<(), CityGError> {
+        let generated = build_genesis_member_bundle(0x7D)?;
+        let mut server = demo_server_with_global_history_authority();
+        server.accept_epoch(&generated.bundle)?;
+
+        let ticket = server
+            .build_merge_ticket_for_refresh(&cityg_client::demo::DEMO_GID, &generated.leaf_id)?;
+        let join_records =
+            server.resolve_joins_since(&cityg_client::demo::DEMO_GID, ticket.barrier_version)?;
+        let committed_roots_hash =
+            super::compute_revocation_roots_hash(&ticket.revoked_since_root, &ticket.revoked_root)?;
+        let committed_revoked = server
+            .resolve_revoked_leaf_indices(&cityg_client::demo::DEMO_GID, &committed_roots_hash)?;
+        let (bundle, _) =
+            build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
+        let raw_barrier_update = bundle
+            .header_map
+            .get(&hdr::HDR_BARRIER_UPDATE)
+            .and_then(Value::as_bytes)
+            .ok_or(CityGError::InvalidInput("missing barrier_update"))?;
+        let super::BarrierUpdateWire(
+            mode,
+            barrier_version,
+            prev_barrier_version,
+            tree_size,
+            revocation_roots_hash,
+            kem_tree_hash_before,
+            mut kem_tree_hash_after,
+            cover_payload,
+        ) = super::parse_deterministic_cbor(raw_barrier_update)?;
+        kem_tree_hash_after[0] ^= 0xFF;
+        let tampered_barrier_update = super::to_cbor_vec(&super::BarrierUpdateWire(
+            mode,
+            barrier_version,
+            prev_barrier_version,
+            tree_size,
+            revocation_roots_hash,
+            kem_tree_hash_before,
+            kem_tree_hash_after,
+            cover_payload,
+        ))?;
+        let deployment_profile_manifest = server.deployment_profile_manifest_bytes(
+            &cityg_client::demo::DEMO_GID,
+            "v0.1.4",
+            server.history_authority_extension_id(),
+            ticket.n_max,
+            ticket.max_barrier_update_bytes,
+            ticket.fs_forward_leap_policy,
+        )?;
+
+        let err = server
+            .full_verification_witness_bytes(
+                &cityg_client::demo::DEMO_GID,
+                &ticket.current_history_commitment,
+                ticket.barrier_version,
+                &ticket.kem_tree_hash_after,
+                &generated.leaf_id,
+                1,
+                ticket.cover_leaf_index,
+                tampered_barrier_update.as_slice(),
+                ticket.barrier_version,
+                join_records.records.as_slice(),
+                &committed_roots_hash,
+                committed_revoked.leaf_indices.as_slice(),
+                deployment_profile_manifest.as_slice(),
+            )
+            .expect_err("tampered barrier_update must not receive a full verification witness");
+        assert!(matches!(
+            err,
+            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE.code
+                    && freeze.reason
+                        == msphf_orchestrator::FREEZE_BARRIER_TREE_HASH_CHAIN_FAILURE.reason
+        ));
         Ok(())
     }
 

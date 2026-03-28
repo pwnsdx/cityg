@@ -1415,6 +1415,7 @@ dependencies = [
  "ciborium",
  "cityg-client",
  "hex",
+ "msphf-core",
  "msphf-orchestrator",
  "pqcrypto-dilithium",
  "pqcrypto-traits",

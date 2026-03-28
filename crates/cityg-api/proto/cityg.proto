@@ -444,6 +444,26 @@ message BarrierLookupMergeAcceptanceResponse {
   bytes deployment_profile_manifest = 15;
 }
 
+message BarrierIssueFullVerificationWitnessRequest {
+  reserved 1000 to 1999;
+  string room_id = 1;
+  bytes author_leaf_id = 2;
+  uint64 barrier_update_reason = 3;
+  bytes barrier_update = 4;
+  optional HistoryCommitment current_history_commitment = 5;
+  bytes current_global_history_attestation = 6;
+  uint64 joins_prev_barrier_version = 7;
+  repeated BarrierJoinLeafRecord join_records = 8;
+  bytes revocation_roots_hash = 9;
+  repeated uint32 revoked_leaf_indices = 10;
+  bytes deployment_profile_manifest = 11;
+}
+
+message BarrierIssueFullVerificationWitnessResponse {
+  reserved 1000 to 1999;
+  bytes full_verification_witness = 1;
+}
+
 message HistoryCommitment {
   reserved 1000 to 1999;
   bytes history_view_id = 1;

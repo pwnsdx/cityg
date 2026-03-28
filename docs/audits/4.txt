@@ -628,3 +628,24 @@ Le **rapport final de vérification** va globalement dans le même sens, mais av
 
 **Réponse courte à ta demande** :
 **Oui, les changements satisfont en grande partie mon audit initial sur les points textuels concrets. Non, ils ne le satisfont pas totalement si le standard est la fermeture complète de la frontière recover-only/FULL comme propriété protocolaire server-verifiable.** Le résidu important est désormais clair et assumé : `reason 2` est devenu server-checkable, mais `reason 0/1` restent encore fondamentalement dépendants des restrictions locales du client honnête.  
+
+--
+
+## Commentaires Codex (2026-03-29, full-verification witness)
+
+Nouvelle passe protocolaire + implémentation:
+
+- Le profil de base exige maintenant aussi `header[183] = barrier_full_verification_witness` pour tout `barrier_update` `reason in {0,1}` sous `global-history-authority-v1`.
+- Ce witness n’est pas une simple auto-déclaration client: il est émis par l’autorité d’historique uniquement après relecture serveur de la candidate `barrier_update` contre l’arbre public courant authentifié, les helpers A/B authentifiés et le `deployment_profile_manifest` authentifié du même current state.
+- Le serveur rejette désormais fail-closed un `reason 0/1` sans `header[183]`, et l’orchestrateur accepte explicitement cette nouvelle clé merge-only.
+- Les flows runtime ciblés restent verts après ce durcissement: `perform_join_second_member_can_send_immediately`, `epoch_sync_after_second_join_keeps_local_pcs_refresh_valid`, `join_finalize_fault_injection_after_publish_recovers_via_epoch_sync`.
+
+Conséquence de lecture:
+
+- `4.1` est maintenant **fermé dans le profil courant**: l’acceptation `reason 0/1` ne dépend plus d’une simple interdiction locale “honest-client only”.
+- Le reste plus fort qui peut encore être réservé à un futur profil est différent: une attestation indépendante de l’**exécution interne** de l’algorithme FULL côté client, au-delà du witness serveur sur la décision d’authoring.
+
+Statut audit final canonique:
+
+- **Closed**: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7
+- **Reclassified**: 4.8

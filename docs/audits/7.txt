@@ -593,3 +593,17 @@ Je ne dirais pas “tous les changements satisfont mon audit initial” sans nua
 Autrement dit, **oui si la promesse est désormais “résistance locale/fail-closed à l’intérieur d’une autorité d’historique append-only globale au déploiement”**; **non si la promesse reste “protection complète contre un serveur/déploiement byzantin au sens fort de l’audit initial”**. Cette lecture est d’ailleurs cohérente avec le rapport de vérification, qui classe 7.2/7.3/7.4 comme fermés et 7.1/7.5/7.6/7.7 comme reclassés dans le scope courant. 
 
 J’ai aussi recoupé avec le [rapport de vérification](sandbox:/mnt/data/final-verification-report-2026-03-26.md).
+
+--
+
+## Commentaires Codex (2026-03-29, witness follow-up)
+
+Nouvelle passe protocolaire:
+
+- `reason in {0,1}` ne repose plus seulement sur une frontière recover-only/FULL locale. Le profil de base exige maintenant `header[183]`, émis après replay serveur de la candidate `barrier_update` contre l’arbre courant authentifié, les helpers A/B authentifiés et le manifest de profil authentifié.
+- Cela réduit encore la portée opérationnelle de `7.5`: le serveur peut toujours imposer un mode dégradé sur la disponibilité en refusant snapshots/witness, mais il ne peut plus accepter silencieusement un `reason 0/1` qui contournerait cette frontière sans witness valide.
+
+Statut audit final canonique:
+
+- **Closed**: 7.2, 7.3, 7.4
+- **Reclassified**: 7.1, 7.5, 7.6, 7.7
