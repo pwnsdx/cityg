@@ -1173,7 +1173,7 @@ impl CityGServer {
             (
                 ensure_current_history_commitment(gid, state)?,
                 state.current_accepted_barrier_update.clone(),
-                state.current_accepted_barrier_predecessor_hash,
+                current_accepted_barrier_predecessor_hash(state),
             )
         };
         let barrier_n_max = validate_barrier_n_max(barrier_state.n_max)?;
@@ -1715,7 +1715,10 @@ impl CityGServer {
         }
         if let Some(Value::Bytes(raw_update)) = bundle.header_map.get(&hdr::HDR_BARRIER_UPDATE) {
             group.current_accepted_barrier_update = raw_update.clone();
-            group.current_accepted_barrier_predecessor_hash = state_before.kem_tree_hash_after;
+            group.current_accepted_barrier_predecessor_hash = barrier_validation
+                .as_ref()
+                .map(|validation| validation.parsed.kem_tree_hash_before)
+                .unwrap_or(state_before.kem_tree_hash_after);
         }
 
         let barrier_version = ctx
@@ -1794,11 +1797,29 @@ impl CityGServer {
             state.pending_join_finalize_auth.remove(&author_leaf_id);
         }
         if let Some(validation) = barrier_validation.as_ref() {
+            let predecessor_hash = compute_barrier_tree_hash(
+                validation.parsed.tree_size.max(1),
+                validation.snapshot_pre.as_slice(),
+            )?;
+            if predecessor_hash != validation.parsed.kem_tree_hash_before {
+                return Err(CityGError::InvalidInput(
+                    "current barrier predecessor snapshot mismatch",
+                ));
+            }
             let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
             state.barrier_pk_entries = validation.snapshot_post.clone();
             state.kem_tree_hash_after = validation.parsed.kem_tree_hash_after;
             state.n_max = validation.parsed.tree_size.max(1);
             state.barrier_hash_cache = validation.hash_cache_post.clone();
+            let current_history_commitment =
+                ensure_current_history_commitment(bundle.gid(), state)?;
+            record_barrier_public_tree_snapshot_with_metadata(
+                state,
+                predecessor_hash,
+                state.barrier_version,
+                current_history_commitment,
+                validation.snapshot_pre.as_slice(),
+            )?;
             record_barrier_public_tree_snapshot(bundle.gid(), state)?;
         }
         if let Some(state) = roster.groups.get(bundle.gid()) {
@@ -2106,6 +2127,126 @@ impl CityGServer {
                     .or_insert(record);
             }
             group.n_max = validate_barrier_n_max(group.n_max)?;
+            let persisted_current_history_commitment = decode_persisted_history_commitment(
+                gid.as_slice(),
+                &room_state.current_history_commitment,
+                [0u8; 32],
+            )?;
+            if persisted_current_history_commitment.history_commitment_id != [0u8; 32]
+                || group.current_history_commitment.history_commitment_id == [0u8; 32]
+            {
+                group.current_history_commitment = persisted_current_history_commitment;
+            }
+            if !room_state.current_accepted_barrier_update.is_empty() {
+                group.current_accepted_barrier_update =
+                    room_state.current_accepted_barrier_update.clone();
+            }
+            if room_state.current_accepted_barrier_predecessor_hash != [0u8; 32]
+                || group.current_accepted_barrier_predecessor_hash == [0u8; 32]
+            {
+                group.current_accepted_barrier_predecessor_hash =
+                    room_state.current_accepted_barrier_predecessor_hash;
+            }
+            if !room_state.pending_join_finalize_auth.is_empty() {
+                group.pending_join_finalize_auth =
+                    decode_persisted_join_finalize_auth(&room_state.pending_join_finalize_auth);
+            }
+            group.barrier_public_tree_blobs = room_state.barrier_public_tree_blobs.clone();
+            rebuild_barrier_public_tree_blob_index(group)?;
+            group.barrier_public_tree_history.clear();
+            for snapshot in &room_state.barrier_public_tree_history {
+                let hash = match hex::decode(&snapshot.kem_tree_hash_after_hex)
+                    .ok()
+                    .and_then(|hash| hash.try_into().ok())
+                {
+                    Some(hash) => hash,
+                    None => continue,
+                };
+                let snapshot_ref = if snapshot.blob_indices.is_empty() {
+                    match encode_barrier_public_tree_snapshot_ref(
+                        group,
+                        snapshot.pk_entries.as_slice(),
+                    ) {
+                        Ok(mut snapshot_ref) => {
+                            snapshot_ref.history_view_id =
+                                hex::decode(&snapshot.history_view_id_hex)
+                                    .ok()
+                                    .and_then(|bytes| bytes.try_into().ok())
+                                    .unwrap_or([0u8; 32]);
+                            snapshot_ref.history_commitment = decode_persisted_history_commitment(
+                                gid.as_slice(),
+                                &snapshot.history_commitment,
+                                snapshot_ref.history_view_id,
+                            )?;
+                            snapshot_ref
+                        }
+                        Err(_) => continue,
+                    }
+                } else {
+                    let snapshot_ref = BarrierPublicTreeSnapshotRef {
+                        blob_indices: snapshot.blob_indices.clone(),
+                        barrier_version: snapshot.barrier_version,
+                        history_view_id: hex::decode(&snapshot.history_view_id_hex)
+                            .ok()
+                            .and_then(|bytes| bytes.try_into().ok())
+                            .unwrap_or([0u8; 32]),
+                        history_commitment: decode_persisted_history_commitment(
+                            gid.as_slice(),
+                            &snapshot.history_commitment,
+                            hex::decode(&snapshot.history_view_id_hex)
+                                .ok()
+                                .and_then(|bytes| bytes.try_into().ok())
+                                .unwrap_or([0u8; 32]),
+                        )?,
+                    };
+                    if decode_barrier_public_tree_snapshot_ref(group, &snapshot_ref).is_err() {
+                        continue;
+                    }
+                    snapshot_ref
+                };
+                group.barrier_public_tree_history.insert(hash, snapshot_ref);
+            }
+            if group.barrier_public_tree_history.is_empty() && !group.barrier_pk_entries.is_empty()
+            {
+                record_barrier_public_tree_snapshot(gid.as_slice(), group)?;
+            } else if !group.barrier_pk_entries.is_empty() {
+                let current_history_commitment =
+                    ensure_current_history_commitment(gid.as_slice(), group)?;
+                let current_hash = group.kem_tree_hash_after;
+                if !group
+                    .barrier_public_tree_history
+                    .contains_key(&current_hash)
+                {
+                    let current_entries = group.barrier_pk_entries.clone();
+                    let mut snapshot_ref =
+                        encode_barrier_public_tree_snapshot_ref(group, current_entries.as_slice())?;
+                    snapshot_ref.barrier_version = group.barrier_version;
+                    snapshot_ref.history_commitment = current_history_commitment;
+                    snapshot_ref.history_view_id = current_history_commitment.history_view_id;
+                    group
+                        .barrier_public_tree_history
+                        .insert(current_hash, snapshot_ref);
+                } else {
+                    let needs_history_commitment = group
+                        .barrier_public_tree_history
+                        .get(&current_hash)
+                        .map(|snapshot_ref| {
+                            snapshot_ref.history_view_id == [0u8; 32]
+                                || snapshot_ref.history_commitment.history_commitment_id
+                                    == [0u8; 32]
+                        })
+                        .unwrap_or(false);
+                    if needs_history_commitment
+                        && let Some(snapshot_ref) =
+                            group.barrier_public_tree_history.get_mut(&current_hash)
+                    {
+                        snapshot_ref.history_commitment = current_history_commitment;
+                        snapshot_ref.history_view_id = current_history_commitment.history_view_id;
+                    }
+                }
+            }
+            prune_barrier_public_tree_history(group)?;
+            group.barrier_hash_cache = None;
 
             let ctx_state = self.ctx.barrier_group_state_entry_mut(gid.as_slice());
             ctx_state.n_max = validate_barrier_n_max(ctx_state.n_max)?;
@@ -2529,9 +2670,9 @@ impl CityGServer {
             .groups
             .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("group not found"))?;
-        let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
         ensure_distinct_active_cover_leaf_indices(state)?;
         prune_join_history(state)?;
+        let history_commitment = ensure_current_history_commitment(gid.as_slice(), state)?;
         let active_leaves: BTreeSet<[u8; 32]> = state
             .latest_snapshot()
             .map(|snapshot| snapshot.members().copied().collect())
@@ -2606,7 +2747,7 @@ impl CityGServer {
         prune_barrier_public_tree_history(state)?;
         let pk_entries_view = build_pk_entries_view(state)?;
         let current_hash = compute_barrier_tree_hash(n_max, pk_entries_view.as_ref())?;
-        let current_predecessor_hash = state.current_accepted_barrier_predecessor_hash;
+        let current_predecessor_hash = current_accepted_barrier_predecessor_hash(state);
         let (pk_entries, barrier_version, history_commitment) = if current_hash
             == *kem_tree_hash_after
         {
@@ -2979,6 +3120,7 @@ fn ensure_current_history_commitment(
     let history_view_id = compute_history_view_id(gid, state)?;
     let current = state.current_history_commitment;
     if current.history_view_id == history_view_id && current.history_commitment_id != [0u8; 32] {
+        refresh_current_barrier_snapshot_commitments(state, current)?;
         return Ok(current);
     }
     let prev_history_commitment_id = current.history_commitment_id;
@@ -2996,6 +3138,7 @@ fn ensure_current_history_commitment(
         history_seq,
     };
     state.current_history_commitment = commitment;
+    refresh_current_barrier_snapshot_commitments(state, commitment)?;
     Ok(commitment)
 }
 
@@ -3139,6 +3282,7 @@ struct ParsedBarrierUpdate {
 #[derive(Clone)]
 struct BarrierUpdateValidationOutcome {
     parsed: ParsedBarrierUpdate,
+    snapshot_pre: Vec<Vec<u8>>,
     snapshot_post: Vec<Vec<u8>>,
     hash_cache_post: Option<Arc<HashMap<usize, [u8; 32]>>>,
 }
@@ -4254,6 +4398,27 @@ fn parse_barrier_update(
     }))
 }
 
+fn current_accepted_barrier_predecessor_hash(state: &GroupState) -> [u8; 32] {
+    if !state.current_accepted_barrier_update.is_empty()
+        && let Ok(BarrierUpdateWire(
+            _mode,
+            _barrier_version,
+            _prev_barrier_version,
+            _tree_size,
+            _revocation_roots_hash,
+            kem_tree_hash_before,
+            _kem_tree_hash_after,
+            _cover_payload,
+        )) = parse_deterministic_cbor::<BarrierUpdateWire>(
+            state.current_accepted_barrier_update.as_slice(),
+        )
+        && let Ok(hash) = kem_tree_hash_before.as_slice().try_into()
+    {
+        return hash;
+    }
+    state.current_accepted_barrier_predecessor_hash
+}
+
 fn build_pk_entries_view<'a>(state: &'a GroupState) -> Result<Cow<'a, [Vec<u8>]>, CityGError> {
     ensure_distinct_active_cover_leaf_indices(state)?;
     let (_, expected_len, _) = barrier_pk_entry_layout(state.n_max)?;
@@ -4373,6 +4538,63 @@ fn record_barrier_public_tree_snapshot(
         .barrier_public_tree_history
         .insert(state.kem_tree_hash_after, snapshot);
     prune_barrier_public_tree_history(state)?;
+    Ok(())
+}
+
+fn record_barrier_public_tree_snapshot_with_metadata(
+    state: &mut GroupState,
+    kem_tree_hash_after: [u8; 32],
+    barrier_version: u64,
+    history_commitment: HistoryCommitment,
+    pk_entries: &[Vec<u8>],
+) -> Result<(), CityGError> {
+    if pk_entries.is_empty() {
+        return Ok(());
+    }
+    if let Some(snapshot) = state
+        .barrier_public_tree_history
+        .get_mut(&kem_tree_hash_after)
+    {
+        snapshot.barrier_version = barrier_version;
+        snapshot.history_commitment = history_commitment;
+        snapshot.history_view_id = history_commitment.history_view_id;
+        return Ok(());
+    }
+    let mut snapshot = encode_barrier_public_tree_snapshot_ref(state, pk_entries)?;
+    snapshot.barrier_version = barrier_version;
+    snapshot.history_commitment = history_commitment;
+    snapshot.history_view_id = history_commitment.history_view_id;
+    state
+        .barrier_public_tree_history
+        .insert(kem_tree_hash_after, snapshot);
+    Ok(())
+}
+
+fn refresh_current_barrier_snapshot_commitments(
+    state: &mut GroupState,
+    history_commitment: HistoryCommitment,
+) -> Result<(), CityGError> {
+    if !state.barrier_pk_entries.is_empty() {
+        let current_entries = build_pk_entries_view(state)?.into_owned();
+        let current_hash =
+            compute_barrier_tree_hash(state.n_max.max(1), current_entries.as_slice())?;
+        record_barrier_public_tree_snapshot_with_metadata(
+            state,
+            current_hash,
+            state.barrier_version,
+            history_commitment,
+            current_entries.as_slice(),
+        )?;
+    }
+
+    let predecessor_hash = current_accepted_barrier_predecessor_hash(state);
+    if predecessor_hash != [0u8; 32]
+        && let Some(snapshot) = state.barrier_public_tree_history.get_mut(&predecessor_hash)
+    {
+        snapshot.barrier_version = state.barrier_version;
+        snapshot.history_commitment = history_commitment;
+        snapshot.history_view_id = history_commitment.history_view_id;
+    }
     Ok(())
 }
 
@@ -5068,7 +5290,9 @@ fn persisted_kbroad_room_state(
         device_chain_states,
         ..PersistedKbroadRoomState::default()
     };
-    if let Some(state) = state {
+    let mut compacted_state = state.cloned();
+    if let Some(state) = compacted_state.as_mut() {
+        let _ = prune_barrier_public_tree_history(state);
         room.room_admin_pop_keys = state.room_admin_pop_keys.iter().cloned().collect();
         room.room_admin_proof_replay_keys =
             state.room_admin_proof_replay_keys.iter().copied().collect();
@@ -5703,10 +5927,14 @@ fn validate_barrier_update_against_roster(
             )?;
         }
 
-        let mut snapshot_post = match snapshot_base_owned {
-            Some(snapshot) => snapshot.into_iter().map(|cow| cow.into_owned()).collect(),
+        let snapshot_pre = match snapshot_base_owned.as_ref() {
+            Some(snapshot) => snapshot
+                .iter()
+                .map(|cow| cow.clone().into_owned())
+                .collect(),
             None => state_before.barrier_pk_entries.clone(),
         };
+        let mut snapshot_post = snapshot_pre.clone();
         let mut changed_nodes = BTreeSet::new();
         for (node, ek) in &parsed.new_public_keys {
             let index = usize::try_from(*node)
@@ -5768,6 +5996,7 @@ fn validate_barrier_update_against_roster(
 
         Ok(Some(BarrierUpdateValidationOutcome {
             parsed,
+            snapshot_pre,
             snapshot_post,
             hash_cache_post,
         }))
@@ -8404,10 +8633,23 @@ mod tests {
             with_group.barrier_public_tree_history[0].kem_tree_hash_after_hex,
             hex::encode(tree_hash)
         );
-        assert_eq!(with_group.barrier_public_tree_blobs, tree_entries);
-        assert_eq!(
-            with_group.barrier_public_tree_history[0].blob_indices,
-            vec![0, 1, 2]
+        assert!(
+            with_group
+                .barrier_public_tree_blobs
+                .starts_with(tree_entries.as_slice()),
+            "persisted blobs must retain the live tree entries in-order"
+        );
+        assert!(
+            with_group.barrier_public_tree_blobs[tree_entries.len()..]
+                .iter()
+                .all(|entry| entry.is_empty()),
+            "any additional persisted blobs must be empty placeholders"
+        );
+        assert!(
+            with_group.barrier_public_tree_history[0]
+                .blob_indices
+                .starts_with(&[0, 1, 2]),
+            "persisted history must reference the live tree-entry blob prefix"
         );
         assert!(
             with_group.barrier_public_tree_history[0]
@@ -11732,6 +11974,65 @@ mod tests {
             recovered_device.last_pcs_refresh_ec,
             Some(expected_refresh_ec)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn crash_recovery_preserves_current_predecessor_snapshot_history_commitment()
+    -> Result<(), CityGError> {
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("cityg-server-current-predecessor.journal");
+        let gid = cityg_client::demo::DEMO_GID;
+        let predecessor_hash: [u8; 32];
+        let expected_current;
+
+        {
+            let mut server = demo_server_with_journal(&journal_path);
+            let alice = cityg_client::demo::demo_bundle("alice")?;
+            server.accept_epoch(&alice)?;
+            predecessor_hash = server.barrier_kem_tree_hash_after(gid.as_slice()).ok_or(
+                CityGError::InvalidInput("missing predecessor hash after first accept"),
+            )?;
+            let bob = cityg_client::demo::demo_bundle("bob")?;
+            server.accept_epoch(&bob)?;
+            expected_current = server.current_history_commitment(&gid)?;
+        }
+
+        let mut reloaded = demo_server_with_journal(&journal_path);
+        let snapshot = reloaded.fetch_barrier_public_tree(&gid, &predecessor_hash)?;
+        assert_eq!(snapshot.kem_tree_hash_after, predecessor_hash);
+        assert_eq!(snapshot.history_commitment, expected_current);
+        Ok(())
+    }
+
+    #[test]
+    fn crash_recovery_accept_after_restart_preserves_current_predecessor_snapshot_history_commitment()
+    -> Result<(), CityGError> {
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir
+            .path()
+            .join("cityg-server-current-predecessor-post-restart.journal");
+        let gid = cityg_client::demo::DEMO_GID;
+        let predecessor_hash: [u8; 32];
+
+        {
+            let mut server = demo_server_with_journal(&journal_path);
+            let alice = cityg_client::demo::demo_bundle("alice")?;
+            server.accept_epoch(&alice)?;
+            predecessor_hash = server.barrier_kem_tree_hash_after(gid.as_slice()).ok_or(
+                CityGError::InvalidInput("missing predecessor hash before restart"),
+            )?;
+        }
+
+        let mut reloaded = demo_server_with_journal(&journal_path);
+        let bob = cityg_client::demo::demo_bundle("bob")?;
+        reloaded.accept_epoch(&bob)?;
+        let expected_current = reloaded.current_history_commitment(&gid)?;
+        let snapshot = reloaded.fetch_barrier_public_tree(&gid, &predecessor_hash)?;
+        assert_eq!(snapshot.kem_tree_hash_after, predecessor_hash);
+        assert_eq!(snapshot.history_commitment, expected_current);
         Ok(())
     }
 

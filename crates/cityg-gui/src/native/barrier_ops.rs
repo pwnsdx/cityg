@@ -45,9 +45,7 @@ pub(super) fn reload_join_finalization_session(
 ) -> Result<AppSession> {
     match load_session_at(&session.server_url, &session.room_id) {
         Ok(Some(reloaded))
-            if reloaded.gid == session.gid
-                && reloaded.leaf_id == session.leaf_id
-                && !reloaded.barrier_state.barrier_recovery_pending =>
+            if reloaded.gid == session.gid && reloaded.leaf_id == session.leaf_id =>
         {
             Ok(reloaded)
         }
@@ -507,7 +505,17 @@ async fn publish_revocation_merge_from_ticket(
     .is_err()
     {
         return Err(anyhow!(
-            "barrier snapshot-auth history commitment mismatch (960.9): snapshot / joins / revoked leaves do not share one authenticated current-state commitment"
+            "barrier snapshot-auth history commitment mismatch (960.9): snapshot={}#{} joins={}#{} revoked={}#{}",
+            hex_encode(
+                barrier_tree_response
+                    .history_commitment
+                    .history_commitment_id
+            ),
+            barrier_tree_response.history_commitment.history_seq,
+            hex_encode(join_resolution.history_commitment.history_commitment_id),
+            join_resolution.history_commitment.history_seq,
+            hex_encode(revoked_resolution.history_commitment.history_commitment_id),
+            revoked_resolution.history_commitment.history_seq,
         ));
     }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
@@ -967,6 +975,11 @@ async fn perform_barrier_merge_inner(
             "cannot originate barrier updates from recover-only barrier state; re-establish FULL barrier verification first"
         ));
     }
+    if mode == BarrierMergeMode::JoinFinalize && join_finalize_auth_token == [0u8; 32] {
+        return Err(anyhow!(
+            "cannot originate join_finalize without server-issued join_finalize auth token"
+        ));
+    }
 
     let client = new_api_client(&server_url);
     let mut retry_attempt = 0u32;
@@ -1064,11 +1077,6 @@ async fn perform_barrier_merge_inner(
     header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
     header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
     if mode == BarrierMergeMode::JoinFinalize {
-        if join_finalize_auth_token == [0u8; 32] {
-            return Err(anyhow!(
-                "cannot originate join_finalize without server-issued join_finalize auth token"
-            ));
-        }
         header.insert(
             hdr::HDR_JOIN_FINALIZE_AUTH,
             Value::Bytes(join_finalize_auth_token.to_vec()),
@@ -1161,7 +1169,17 @@ async fn perform_barrier_merge_inner(
     .is_err()
     {
         return Err(anyhow!(
-            "barrier snapshot-auth history commitment mismatch (960.9): snapshot / joins / revoked leaves do not share one authenticated current-state commitment"
+            "barrier snapshot-auth history commitment mismatch (960.9): snapshot={}#{} joins={}#{} revoked={}#{}",
+            hex_encode(
+                barrier_tree_response
+                    .history_commitment
+                    .history_commitment_id
+            ),
+            barrier_tree_response.history_commitment.history_seq,
+            hex_encode(join_resolution.history_commitment.history_commitment_id),
+            join_resolution.history_commitment.history_seq,
+            hex_encode(revoked_resolution.history_commitment.history_commitment_id),
+            revoked_resolution.history_commitment.history_seq,
         ));
     }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();

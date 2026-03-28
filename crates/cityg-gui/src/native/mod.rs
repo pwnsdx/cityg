@@ -68,8 +68,6 @@ use msphf_orchestrator::{
     OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_fs_dev_commit_v2,
     compute_leaf_id, compute_proofs_commit_bytes, derive_we_epoch_id, hdr,
 };
-#[cfg(test)]
-use pqcrypto_dilithium::dilithium3;
 use pqcrypto_dilithium::dilithium5;
 #[cfg(test)]
 use pqcrypto_dilithium::dilithium5::{

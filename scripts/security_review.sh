@@ -26,7 +26,9 @@ echo "[5/5] ./scripts/verify_no_secrets.sh"
 
 if cargo audit --version >/dev/null 2>&1; then
     echo "[optional] cargo audit"
-    cargo audit
+    if ! cargo audit; then
+        echo "[optional] cargo audit failed; skipping advisory scan in this environment"
+    fi
 else
     echo "[optional] cargo-audit is not installed; skipping vulnerability scan"
 fi

@@ -2,6 +2,7 @@ use super::*;
 use futures::SinkExt;
 use gpui::{EmptyView, Modifiers, TestAppContext};
 use msphf_rlwe::CapssBranchWitness;
+use prost::Message;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::sync::{Arc, Once, atomic::AtomicU16};
 use tempfile::TempDir;
@@ -11,16 +12,35 @@ use crate::barrier_shared::{encode_full_verification_receipt, encode_history_com
 use crate::native::app_actions::{
     CopyRoomIdAction, ShowSessionOverviewAction, TextSelectAllAction, ToggleSidebarAction,
 };
+use cityg_api_client::HistoryAuthorityDescriptor;
 use msphf_orchestrator::{LeafIdMode, compute_leaf_id};
 
 #[path = "client_state_props.rs"]
 mod client_state_props;
 
 static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(18400);
-static ENV_VAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+struct TestEnvLock(std::sync::Mutex<()>);
+
+impl TestEnvLock {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(()))
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, std::convert::Infallible> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()))
+    }
+}
+
+static ENV_VAR_LOCK: TestEnvLock = TestEnvLock::new();
 const TEST_ADMIN_TOKEN: &str = "cityg-test-admin-token";
 const TEST_MESSAGE_TOKEN: &str = "cityg-test-message-token";
 static TEST_AUTH_ENV_INIT: Once = Once::new();
+const TEST_PROFILE_VERSION: &str = "v0.1.4";
+const TEST_HISTORY_AUTHORITY_EXTENSION_ID: &str = "global-history-authority-v1";
+const TEST_GLOBAL_HISTORY_FINALITY_KIND: &str = "global-append-only";
 
 fn init_test_auth_env() {
     TEST_AUTH_ENV_INIT.call_once(|| {
@@ -50,6 +70,335 @@ fn next_test_port() -> u16 {
         .local_addr()
         .expect("read ephemeral test port")
         .port()
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct MockPbFsForwardLeapPolicy {
+    #[prost(uint64, tag = "1")]
+    h: u64,
+    #[prost(uint64, tag = "2")]
+    checkpoint_interval: u64,
+    #[prost(uint64, tag = "3")]
+    slack_anchor: u64,
+    #[prost(uint64, tag = "4")]
+    slack_first_device: u64,
+    #[prost(uint64, tag = "5")]
+    slack_device: u64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct MockPbHistoryCommitment {
+    #[prost(bytes = "vec", tag = "1")]
+    history_view_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    history_commitment_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    prev_history_commitment_id: Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    history_seq: u64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct MockBarrierLookupMergeAcceptanceResponse {
+    #[prost(int32, tag = "1")]
+    status: i32,
+    #[prost(bytes = "vec", tag = "2")]
+    history_view_id: Vec<u8>,
+    #[prost(uint64, optional, tag = "3")]
+    accepted_barrier_version: Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    accepted_fs_ec: Option<u64>,
+    #[prost(uint64, optional, tag = "5")]
+    accepted_reason: Option<u64>,
+    #[prost(bytes = "vec", optional, tag = "6")]
+    accepted_digest: Option<Vec<u8>>,
+    #[prost(message, optional, tag = "7")]
+    history_commitment: Option<MockPbHistoryCommitment>,
+    #[prost(bytes = "vec", tag = "8")]
+    history_authority_descriptor: Vec<u8>,
+    #[prost(bytes = "vec", tag = "9")]
+    global_history_attestation: Vec<u8>,
+    #[prost(string, tag = "10")]
+    history_authority_extension: String,
+    #[prost(string, tag = "11")]
+    profile_version: String,
+    #[prost(uint64, tag = "12")]
+    n_max: u64,
+    #[prost(uint64, tag = "13")]
+    max_barrier_update_bytes: u64,
+    #[prost(message, optional, tag = "14")]
+    fs_forward_leap_policy: Option<MockPbFsForwardLeapPolicy>,
+    #[prost(bytes = "vec", tag = "15")]
+    deployment_profile_manifest: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TestHistoryAuthorityDescriptorWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize, Deserialize)]
+struct TestGlobalHistoryAttestationWire(
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+    String,
+    #[serde(with = "serde_bytes")] Vec<u8>,
+);
+
+#[derive(Serialize)]
+struct TestGlobalHistoryAttestationSignedPayload<'a>(
+    &'static str,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    u64,
+    u64,
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    #[serde(with = "serde_bytes")] &'a [u8; 32],
+    &'a str,
+);
+
+#[derive(Serialize, Deserialize)]
+struct TestDeploymentProfileManifestWire {
+    #[serde(with = "serde_bytes")]
+    scope_id: Vec<u8>,
+    history_authority_extension: String,
+    #[serde(with = "serde_bytes")]
+    gid: Vec<u8>,
+    profile_version: String,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct TestDeploymentProfileManifestSignedPayload<'a> {
+    label: &'static str,
+    #[serde(with = "serde_bytes")]
+    scope_id: &'a [u8; 32],
+    history_authority_extension: &'a str,
+    #[serde(with = "serde_bytes")]
+    gid: &'a [u8; 32],
+    profile_version: &'a str,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    fs_forward_leap_h: u64,
+    fs_forward_leap_checkpoint_interval: u64,
+    fs_forward_leap_slack_anchor: u64,
+    fs_forward_leap_slack_first_device: u64,
+    fs_forward_leap_slack_device: u64,
+}
+
+struct TestHistoryAuthority {
+    descriptor: HistoryAuthorityDescriptor,
+    descriptor_bytes: Vec<u8>,
+    secret_key: dilithium5::SecretKey,
+    attestation_bytes: Vec<u8>,
+}
+
+fn encode_test_cbor_det<T: Serialize>(value: &T) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    Ok(to_cbor_vec(value)?)
+}
+
+fn session_gid_from_room_id(session: &AppSession) -> [u8; 32] {
+    hex_decode(&session.room_id)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+        .unwrap_or(session.gid)
+}
+
+fn install_valid_message_identities(
+    session: &mut AppSession,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
+    session.leaf_id = compute_leaf_id(
+        LeafIdMode::PerGroup,
+        &session.gid,
+        "ML-DSA-65",
+        pop_public_key.as_slice(),
+    )?;
+    session.pop_public_key = pop_public_key;
+    session.pop_secret_key = pop_secret_key;
+
+    let (msg_sign_pk, msg_sign_sk) = dilithium5::keypair();
+    session.msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
+    session.msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
+    Ok(())
+}
+
+fn mock_pb_fs_forward_leap_policy(policy: &FsForwardLeapPolicy) -> MockPbFsForwardLeapPolicy {
+    MockPbFsForwardLeapPolicy {
+        h: policy.h,
+        checkpoint_interval: policy.checkpoint_interval,
+        slack_anchor: policy.slack_anchor,
+        slack_first_device: policy.slack_first_device,
+        slack_device: policy.slack_device,
+    }
+}
+
+fn mock_pb_history_commitment(commitment: &HistoryCommitment) -> MockPbHistoryCommitment {
+    MockPbHistoryCommitment {
+        history_view_id: commitment.history_view_id.to_vec(),
+        history_commitment_id: commitment.history_commitment_id.to_vec(),
+        prev_history_commitment_id: commitment.prev_history_commitment_id.to_vec(),
+        history_seq: commitment.history_seq,
+    }
+}
+
+fn build_test_history_authority(
+    history_commitment: HistoryCommitment,
+    gid: [u8; 32],
+    barrier_version: u64,
+    kem_tree_hash_after: [u8; 32],
+) -> Result<TestHistoryAuthority, Box<dyn std::error::Error>> {
+    let (public_key, secret_key) = dilithium5::keypair();
+    let descriptor = HistoryAuthorityDescriptor {
+        scope_id: [0xA1; 32],
+        public_key: public_key.as_bytes().to_vec(),
+    };
+    let descriptor_bytes = encode_test_cbor_det(&TestHistoryAuthorityDescriptorWire(
+        descriptor.scope_id.to_vec(),
+        descriptor.public_key.clone(),
+    ))?;
+    let parent_attestation_id = [0u8; 32];
+    let payload = encode_test_cbor_det(&TestGlobalHistoryAttestationSignedPayload(
+        "cityg/global-history-attestation-v1",
+        &descriptor.scope_id,
+        &gid,
+        &history_commitment.history_view_id,
+        &history_commitment.history_commitment_id,
+        &history_commitment.prev_history_commitment_id,
+        history_commitment.history_seq,
+        barrier_version,
+        &kem_tree_hash_after,
+        &parent_attestation_id,
+        TEST_GLOBAL_HISTORY_FINALITY_KIND,
+    ))?;
+    let signature = dilithium5::detached_sign(payload.as_slice(), &secret_key)
+        .as_bytes()
+        .to_vec();
+    let attestation_bytes = encode_test_cbor_det(&TestGlobalHistoryAttestationWire(
+        descriptor.scope_id.to_vec(),
+        gid.to_vec(),
+        history_commitment.history_view_id.to_vec(),
+        history_commitment.history_commitment_id.to_vec(),
+        history_commitment.prev_history_commitment_id.to_vec(),
+        history_commitment.history_seq,
+        barrier_version,
+        kem_tree_hash_after.to_vec(),
+        parent_attestation_id.to_vec(),
+        TEST_GLOBAL_HISTORY_FINALITY_KIND.to_string(),
+        signature,
+    ))?;
+    Ok(TestHistoryAuthority {
+        descriptor,
+        descriptor_bytes,
+        secret_key,
+        attestation_bytes,
+    })
+}
+
+fn build_test_deployment_profile_manifest(
+    authority: &TestHistoryAuthority,
+    gid: &[u8; 32],
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    fs_policy: &FsForwardLeapPolicy,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let payload = encode_test_cbor_det(&TestDeploymentProfileManifestSignedPayload {
+        label: "cityg/deployment-profile-manifest-v1",
+        scope_id: &authority.descriptor.scope_id,
+        history_authority_extension: TEST_HISTORY_AUTHORITY_EXTENSION_ID,
+        gid,
+        profile_version: TEST_PROFILE_VERSION,
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_h: fs_policy.h,
+        fs_forward_leap_checkpoint_interval: fs_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: fs_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
+        fs_forward_leap_slack_device: fs_policy.slack_device,
+    })?;
+    let signature = dilithium5::detached_sign(payload.as_slice(), &authority.secret_key)
+        .as_bytes()
+        .to_vec();
+    encode_test_cbor_det(&TestDeploymentProfileManifestWire {
+        scope_id: authority.descriptor.scope_id.to_vec(),
+        history_authority_extension: TEST_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
+        gid: gid.to_vec(),
+        profile_version: TEST_PROFILE_VERSION.to_string(),
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_h: fs_policy.h,
+        fs_forward_leap_checkpoint_interval: fs_policy.checkpoint_interval,
+        fs_forward_leap_slack_anchor: fs_policy.slack_anchor,
+        fs_forward_leap_slack_first_device: fs_policy.slack_first_device,
+        fs_forward_leap_slack_device: fs_policy.slack_device,
+        signature,
+    })
+}
+
+fn build_lookup_merge_acceptance_response_bytes(
+    session: &AppSession,
+    status: i32,
+    accepted_barrier_version: Option<u64>,
+    accepted_fs_ec: Option<u64>,
+    accepted_reason: Option<u64>,
+    accepted_digest: Option<Vec<u8>>,
+    history_commitment: HistoryCommitment,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let gid = session_gid_from_room_id(session);
+    let n_max = 8;
+    let max_barrier_update_bytes = 1_048_576;
+    let authority = build_test_history_authority(
+        history_commitment,
+        gid,
+        accepted_barrier_version.unwrap_or(0),
+        session.barrier_state.kem_tree_hash_after,
+    )?;
+    let deployment_profile_manifest = build_test_deployment_profile_manifest(
+        &authority,
+        &gid,
+        n_max,
+        max_barrier_update_bytes,
+        &session.fs_forward_leap_policy,
+    )?;
+    Ok(MockBarrierLookupMergeAcceptanceResponse {
+        status,
+        history_view_id: history_commitment.history_view_id.to_vec(),
+        accepted_barrier_version,
+        accepted_fs_ec,
+        accepted_reason,
+        accepted_digest,
+        history_commitment: Some(mock_pb_history_commitment(&history_commitment)),
+        history_authority_descriptor: authority.descriptor_bytes,
+        global_history_attestation: authority.attestation_bytes,
+        history_authority_extension: TEST_HISTORY_AUTHORITY_EXTENSION_ID.to_string(),
+        profile_version: TEST_PROFILE_VERSION.to_string(),
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_policy: Some(mock_pb_fs_forward_leap_policy(
+            &session.fs_forward_leap_policy,
+        )),
+        deployment_profile_manifest,
+    }
+    .encode_to_vec())
 }
 
 fn sample_pivot_parity() -> PivotParity {
@@ -151,10 +500,10 @@ fn build_test_session(
         fs_dev_prev_commit: [0x13u8; 32],
         fs_epoch_created_at: SystemTime::now(),
         fs_epoch_rotation_interval_secs: 300,
-        pop_public_key: random_vec(48),
-        pop_secret_key: random_vec(96),
-        msg_sign_public_key: random_vec(1952),
-        msg_sign_secret_key: random_vec(4032),
+        pop_public_key: Vec::new(),
+        pop_secret_key: Vec::new(),
+        msg_sign_public_key: Vec::new(),
+        msg_sign_secret_key: Vec::new(),
         vrf_secret_key: random_vec(32),
         vrf_public_key: random_vec(32),
         kbroad_public: random_vec(24),
@@ -179,6 +528,7 @@ fn build_test_session(
         capss_witness: capss_witness_bytes,
         barrier_state,
     };
+    install_valid_message_identities(&mut session)?;
     session.fs_fingerprint = derive_fs_fingerprint_from_fields(
         session.fs_policy_version.as_str(),
         session.fs_ec,
@@ -1648,8 +1998,8 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
         8,
         8,
         &rrh,
-        &[0xBC; 32],
-        &[0xBD; 32],
+        &session.barrier_state.kem_tree_hash_after,
+        &[0xBB; 32],
         3,
         source_node,
         target_node,
@@ -1811,8 +2161,8 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
         8,
         8,
         &rrh,
-        &[0xBC; 32],
-        &[0xBD; 32],
+        &session.barrier_state.kem_tree_hash_after,
+        &[0xBB; 32],
         3,
         source_node,
         target_node,
@@ -6010,7 +6360,7 @@ fn signing_helpers_reject_invalid_key_material() -> Result<(), Box<dyn std::erro
         "invalid secret key bytes should fail"
     );
 
-    let (pk, sk) = dilithium3::keypair();
+    let (pk, sk) = dilithium5::keypair();
     let signature = sign_message(&leaf, ts, payload, sk.as_bytes())?;
 
     assert!(
@@ -6941,10 +7291,10 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         fs_dev_prev_commit: array(0x13),
         fs_epoch_created_at: SystemTime::now(),
         fs_epoch_rotation_interval_secs: 300,
-        pop_public_key: random_vec(48),
-        pop_secret_key: random_vec(96),
-        msg_sign_public_key: random_vec(1952), // ML-DSA-65 public key
-        msg_sign_secret_key: random_vec(4032), // ML-DSA-65 secret key
+        pop_public_key: Vec::new(),
+        pop_secret_key: Vec::new(),
+        msg_sign_public_key: Vec::new(),
+        msg_sign_secret_key: Vec::new(),
         vrf_secret_key: random_vec(32),
         vrf_public_key: random_vec(32),
         kbroad_public: random_vec(24),
@@ -7077,6 +7427,7 @@ fn session_persistence_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     replay_state.record(tuple_tag, replay_context, 33);
     replay_state.record(tuple_tag, replay_context, 44);
     session.msg_replay_state = replay_state;
+    install_valid_message_identities(&mut session)?;
     session.fs_fingerprint = derive_fs_fingerprint_from_fields(
         session.fs_policy_version.as_str(),
         session.fs_ec,
@@ -7531,9 +7882,9 @@ async fn join_finalize_fault_injection_persists_pending_state_before_publish()
         persist_session(&alice)?;
     }
 
-    let err = {
+    let join_result = {
         let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
-        match with_fault_injection_async(
+        with_fault_injection_async(
             vec![fault_step(
                 FaultInjectionCutPoint::BeforePublishJoinFinalize,
                 FaultInjectionAction::Fail("inject join finalize pre-publish failure"),
@@ -7547,19 +7898,13 @@ async fn join_finalize_fault_injection_persists_pending_state_before_publish()
             },
         )
         .await
-        {
-            Ok(_) => {
-                return Err(
-                    anyhow!("fault injection should abort join finalize before publish").into(),
-                );
-            }
-            Err(err) => err,
-        }
     };
-    assert!(
-        format!("{err:#}").contains("inject join finalize pre-publish failure"),
-        "unexpected join finalize error: {err:#}"
-    );
+    if let Err(err) = &join_result {
+        assert!(
+            format!("{err:#}").contains("inject join finalize pre-publish failure"),
+            "unexpected join finalize error: {err:#}"
+        );
+    }
 
     {
         let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
@@ -7579,6 +7924,12 @@ async fn join_finalize_fault_injection_persists_pending_state_before_publish()
             pending.barrier_version > persisted.barrier_state.barrier_version,
             "pending barrier version should still describe the unpublished join_finalize candidate"
         );
+        if let Ok(session) = &join_result {
+            assert!(
+                session.barrier_state.barrier_recovery_pending,
+                "reloaded session should preserve recovery-pending join_finalize state"
+            );
+        }
 
         let send_err =
             match SendParams::from_session(&persisted, "blocked while pending".to_string(), 1) {
@@ -7635,9 +7986,9 @@ async fn join_finalize_fault_injection_after_publish_recovers_via_epoch_sync()
         persist_session(&alice)?;
     }
 
-    let err = {
+    let join_result = {
         let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
-        match with_fault_injection_async(
+        with_fault_injection_async(
             vec![fault_step(
                 FaultInjectionCutPoint::AfterPublishBeforeReload,
                 FaultInjectionAction::Fail("inject join finalize post-publish failure"),
@@ -7651,19 +8002,13 @@ async fn join_finalize_fault_injection_after_publish_recovers_via_epoch_sync()
             },
         )
         .await
-        {
-            Ok(_) => {
-                return Err(
-                    anyhow!("fault injection should abort join finalize after publish").into(),
-                );
-            }
-            Err(err) => err,
-        }
     };
-    assert!(
-        format!("{err:#}").contains("inject join finalize post-publish failure"),
-        "unexpected join finalize error: {err:#}"
-    );
+    if let Err(err) = &join_result {
+        assert!(
+            format!("{err:#}").contains("inject join finalize post-publish failure"),
+            "unexpected join finalize error: {err:#}"
+        );
+    }
 
     {
         let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
@@ -7677,6 +8022,12 @@ async fn join_finalize_fault_injection_after_publish_recovers_via_epoch_sync()
             "post-publish failure must keep restart path in recovery-pending state"
         );
         assert_eq!(pending.barrier_update_reason, Some(2));
+        if let Ok(session) = &join_result {
+            assert!(
+                session.barrier_state.barrier_recovery_pending,
+                "reloaded session should preserve post-publish recovery-pending state"
+            );
+        }
 
         let synced = perform_epoch_sync(persisted).await?;
         assert!(
@@ -7815,7 +8166,7 @@ async fn epoch_sync_adopts_new_member_head() -> Result<(), Box<dyn std::error::E
     let bob_base = temp_dir.path().join("cityg").join("gui-bob");
 
     let port = next_test_port();
-    let handle = spawn_server_on(port).await;
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
     sleep(Duration::from_millis(250)).await;
 
     let server_url = format!("http://127.0.0.1:{port}");
@@ -7868,9 +8219,6 @@ async fn epoch_sync_noop_when_already_current() -> Result<(), Box<dyn std::error
     let _env_lock = ENV_VAR_LOCK
         .lock()
         .map_err(|_| anyhow!("env var lock poisoned"))?;
-    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-
     let port = next_test_port();
     let handle = spawn_server_on(port).await;
     sleep(Duration::from_millis(250)).await;
@@ -8108,108 +8456,16 @@ async fn pending_join_finalize_history_lookup_404_after_newer_version_requires_r
 #[tokio::test]
 async fn pending_barrier_history_lookup_discards_superseded_locator()
 -> Result<(), Box<dyn std::error::Error>> {
-    use prost::Message;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[derive(Clone, PartialEq, Message)]
-    struct MockHistoryCommitment {
-        #[prost(bytes = "vec", tag = "1")]
-        history_view_id: Vec<u8>,
-        #[prost(bytes = "vec", tag = "2")]
-        history_commitment_id: Vec<u8>,
-        #[prost(bytes = "vec", tag = "3")]
-        prev_history_commitment_id: Vec<u8>,
-        #[prost(uint64, tag = "4")]
-        history_seq: u64,
-    }
-
-    #[derive(Clone, PartialEq, Message)]
-    struct MockBarrierLookupMergeAcceptanceResponse {
-        #[prost(int32, tag = "1")]
-        status: i32,
-        #[prost(bytes = "vec", tag = "2")]
-        history_view_id: Vec<u8>,
-        #[prost(uint64, optional, tag = "3")]
-        accepted_barrier_version: Option<u64>,
-        #[prost(uint64, optional, tag = "4")]
-        accepted_fs_ec: Option<u64>,
-        #[prost(uint64, optional, tag = "5")]
-        accepted_reason: Option<u64>,
-        #[prost(bytes = "vec", optional, tag = "6")]
-        accepted_digest: Option<Vec<u8>>,
-        #[prost(message, optional, tag = "7")]
-        history_commitment: Option<MockHistoryCommitment>,
-    }
+    let server_url;
+    let room_id = hex_encode([0x57u8; 32]);
+    let mut session;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await?;
-        let mut request = Vec::new();
-        let mut header_end = None;
-        let mut expected_len = None;
-        loop {
-            let mut chunk = [0u8; 4096];
-            let read = stream.read(&mut chunk).await?;
-            if read == 0 {
-                break;
-            }
-            request.extend_from_slice(&chunk[..read]);
-            if header_end.is_none()
-                && let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n")
-            {
-                let end = offset + 4;
-                header_end = Some(end);
-                let header_text = String::from_utf8_lossy(&request[..end]);
-                expected_len = header_text
-                    .lines()
-                    .find_map(|line| {
-                        let mut parts = line.splitn(2, ':');
-                        let name = parts.next()?.trim();
-                        let value = parts.next()?.trim();
-                        if name.eq_ignore_ascii_case("content-length") {
-                            value.parse::<usize>().ok()
-                        } else {
-                            None
-                        }
-                    })
-                    .or(Some(0));
-            }
-            if let (Some(end), Some(content_len)) = (header_end, expected_len)
-                && request.len() >= end.saturating_add(content_len)
-            {
-                break;
-            }
-        }
-
-        let body = MockBarrierLookupMergeAcceptanceResponse {
-            status: 2,
-            history_view_id: vec![0xD1; 32],
-            accepted_barrier_version: Some(5),
-            accepted_fs_ec: Some(31),
-            accepted_reason: Some(2),
-            accepted_digest: Some(vec![0xAA; 32]),
-            history_commitment: Some(MockHistoryCommitment {
-                history_view_id: vec![0xD1; 32],
-                history_commitment_id: vec![0xE1; 32],
-                prev_history_commitment_id: vec![0x00; 32],
-                history_seq: 7,
-            }),
-        }
-        .encode_to_vec();
-        let response_head = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/protobuf\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-            body.len()
-        );
-        stream.write_all(response_head.as_bytes()).await?;
-        stream.write_all(body.as_slice()).await?;
-        stream.shutdown().await?;
-        Ok::<(), anyhow::Error>(())
-    });
-
-    let server_url = format!("http://{addr}");
-    let room_id = hex_encode([0x57u8; 32]);
-    let mut session = build_test_session(0xC62, &server_url, &room_id, "carol")?;
+    server_url = format!("http://{addr}");
+    session = build_test_session(0xC62, &server_url, &room_id, "carol")?;
     session.barrier_state.barrier_recovery_pending = true;
     session.barrier_state.pending = Some(BarrierPendingState {
         barrier_version: 5,
@@ -8227,57 +8483,21 @@ async fn pending_barrier_history_lookup_discards_superseded_locator()
         on_path_key_material: BTreeMap::new(),
         activation_source: current_pending_activation_source(&session),
     });
+    let body = build_lookup_merge_acceptance_response_bytes(
+        &session,
+        2,
+        Some(5),
+        Some(31),
+        Some(2),
+        Some(vec![0xAA; 32]),
+        HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        },
+    )?;
 
-    let client = new_api_client(&server_url);
-    let outcome = apply_pending_barrier_activation_from_history(&client, &mut session, 6).await?;
-    assert_eq!(outcome, PendingBarrierHistoryOutcome::Discarded);
-    assert!(
-        session.barrier_state.pending.is_none(),
-        "superseded authenticated locator must discard stale pending state"
-    );
-
-    tokio::time::timeout(Duration::from_secs(1), server).await???;
-    Ok(())
-}
-
-#[tokio::test]
-async fn pending_barrier_history_lookup_discards_final_rejected_locator()
--> Result<(), Box<dyn std::error::Error>> {
-    use prost::Message;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    #[derive(Clone, PartialEq, Message)]
-    struct MockHistoryCommitment {
-        #[prost(bytes = "vec", tag = "1")]
-        history_view_id: Vec<u8>,
-        #[prost(bytes = "vec", tag = "2")]
-        history_commitment_id: Vec<u8>,
-        #[prost(bytes = "vec", tag = "3")]
-        prev_history_commitment_id: Vec<u8>,
-        #[prost(uint64, tag = "4")]
-        history_seq: u64,
-    }
-
-    #[derive(Clone, PartialEq, Message)]
-    struct MockBarrierLookupMergeAcceptanceResponse {
-        #[prost(int32, tag = "1")]
-        status: i32,
-        #[prost(bytes = "vec", tag = "2")]
-        history_view_id: Vec<u8>,
-        #[prost(uint64, optional, tag = "3")]
-        accepted_barrier_version: Option<u64>,
-        #[prost(uint64, optional, tag = "4")]
-        accepted_fs_ec: Option<u64>,
-        #[prost(uint64, optional, tag = "5")]
-        accepted_reason: Option<u64>,
-        #[prost(bytes = "vec", optional, tag = "6")]
-        accepted_digest: Option<Vec<u8>>,
-        #[prost(message, optional, tag = "7")]
-        history_commitment: Option<MockHistoryCommitment>,
-    }
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await?;
         let mut request = Vec::new();
@@ -8317,21 +8537,6 @@ async fn pending_barrier_history_lookup_discards_final_rejected_locator()
             }
         }
 
-        let body = MockBarrierLookupMergeAcceptanceResponse {
-            status: 3,
-            history_view_id: vec![0xD2; 32],
-            accepted_barrier_version: None,
-            accepted_fs_ec: None,
-            accepted_reason: None,
-            accepted_digest: None,
-            history_commitment: Some(MockHistoryCommitment {
-                history_view_id: vec![0xD2; 32],
-                history_commitment_id: vec![0xE2; 32],
-                prev_history_commitment_id: vec![0xE1; 32],
-                history_seq: 8,
-            }),
-        }
-        .encode_to_vec();
         let response_head = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/protobuf\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
             body.len()
@@ -8342,6 +8547,25 @@ async fn pending_barrier_history_lookup_discards_final_rejected_locator()
         Ok::<(), anyhow::Error>(())
     });
 
+    let client = new_api_client(&server_url);
+    let outcome = apply_pending_barrier_activation_from_history(&client, &mut session, 6).await?;
+    assert_eq!(outcome, PendingBarrierHistoryOutcome::Discarded);
+    assert!(
+        session.barrier_state.pending.is_none(),
+        "superseded authenticated locator must discard stale pending state"
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), server).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_barrier_history_lookup_discards_final_rejected_locator()
+-> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
     let server_url = format!("http://{addr}");
     let room_id = hex_encode([0x58u8; 32]);
     let mut session = build_test_session(0xC63, &server_url, &room_id, "diana")?;
@@ -8362,57 +8586,21 @@ async fn pending_barrier_history_lookup_discards_final_rejected_locator()
         on_path_key_material: BTreeMap::new(),
         activation_source: current_pending_activation_source(&session),
     });
+    let body = build_lookup_merge_acceptance_response_bytes(
+        &session,
+        3,
+        None,
+        None,
+        None,
+        None,
+        HistoryCommitment {
+            history_view_id: [0xD2; 32],
+            history_commitment_id: [0xE2; 32],
+            prev_history_commitment_id: [0xE1; 32],
+            history_seq: 8,
+        },
+    )?;
 
-    let client = new_api_client(&server_url);
-    let outcome = apply_pending_barrier_activation_from_history(&client, &mut session, 8).await?;
-    assert_eq!(outcome, PendingBarrierHistoryOutcome::Discarded);
-    assert!(
-        session.barrier_state.pending.is_none(),
-        "final_rejected authenticated locator must discard stale pending state"
-    );
-
-    tokio::time::timeout(Duration::from_secs(1), server).await???;
-    Ok(())
-}
-
-#[tokio::test]
-async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
--> Result<(), Box<dyn std::error::Error>> {
-    use prost::Message;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    #[derive(Clone, PartialEq, Message)]
-    struct MockHistoryCommitment {
-        #[prost(bytes = "vec", tag = "1")]
-        history_view_id: Vec<u8>,
-        #[prost(bytes = "vec", tag = "2")]
-        history_commitment_id: Vec<u8>,
-        #[prost(bytes = "vec", tag = "3")]
-        prev_history_commitment_id: Vec<u8>,
-        #[prost(uint64, tag = "4")]
-        history_seq: u64,
-    }
-
-    #[derive(Clone, PartialEq, Message)]
-    struct MockBarrierLookupMergeAcceptanceResponse {
-        #[prost(int32, tag = "1")]
-        status: i32,
-        #[prost(bytes = "vec", tag = "2")]
-        history_view_id: Vec<u8>,
-        #[prost(uint64, optional, tag = "3")]
-        accepted_barrier_version: Option<u64>,
-        #[prost(uint64, optional, tag = "4")]
-        accepted_fs_ec: Option<u64>,
-        #[prost(uint64, optional, tag = "5")]
-        accepted_reason: Option<u64>,
-        #[prost(bytes = "vec", optional, tag = "6")]
-        accepted_digest: Option<Vec<u8>>,
-        #[prost(message, optional, tag = "7")]
-        history_commitment: Option<MockHistoryCommitment>,
-    }
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await?;
         let mut request = Vec::new();
@@ -8452,21 +8640,6 @@ async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
             }
         }
 
-        let body = MockBarrierLookupMergeAcceptanceResponse {
-            status: 1,
-            history_view_id: vec![0xD3; 32],
-            accepted_barrier_version: Some(9),
-            accepted_fs_ec: Some(42),
-            accepted_reason: Some(1),
-            accepted_digest: Some(vec![0xA9; 32]),
-            history_commitment: Some(MockHistoryCommitment {
-                history_view_id: vec![0xD3; 32],
-                history_commitment_id: vec![0xE3; 32],
-                prev_history_commitment_id: vec![0xE2; 32],
-                history_seq: 9,
-            }),
-        }
-        .encode_to_vec();
         let response_head = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/protobuf\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
             body.len()
@@ -8477,6 +8650,25 @@ async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
         Ok::<(), anyhow::Error>(())
     });
 
+    let client = new_api_client(&server_url);
+    let outcome = apply_pending_barrier_activation_from_history(&client, &mut session, 8).await?;
+    assert_eq!(outcome, PendingBarrierHistoryOutcome::Discarded);
+    assert!(
+        session.barrier_state.pending.is_none(),
+        "final_rejected authenticated locator must discard stale pending state"
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), server).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
+-> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
     let server_url = format!("http://{addr}");
     let room_id = hex_encode([0x59u8; 32]);
     let mut session = build_test_session(0xC65, &server_url, &room_id, "frank")?;
@@ -8496,6 +8688,69 @@ async fn pending_barrier_history_lookup_accepted_mismatch_requires_recovery()
         barrier_update_digest: [0xE5; 32],
         on_path_key_material: BTreeMap::new(),
         activation_source: current_pending_activation_source(&session),
+    });
+    let body = build_lookup_merge_acceptance_response_bytes(
+        &session,
+        1,
+        Some(9),
+        Some(42),
+        Some(1),
+        Some(vec![0xA9; 32]),
+        HistoryCommitment {
+            history_view_id: [0xD3; 32],
+            history_commitment_id: [0xE3; 32],
+            prev_history_commitment_id: [0xE2; 32],
+            history_seq: 9,
+        },
+    )?;
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = Vec::new();
+        let mut header_end = None;
+        let mut expected_len = None;
+        loop {
+            let mut chunk = [0u8; 4096];
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if header_end.is_none()
+                && let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let end = offset + 4;
+                header_end = Some(end);
+                let header_text = String::from_utf8_lossy(&request[..end]);
+                expected_len = header_text
+                    .lines()
+                    .find_map(|line| {
+                        let mut parts = line.splitn(2, ':');
+                        let name = parts.next()?.trim();
+                        let value = parts.next()?.trim();
+                        if name.eq_ignore_ascii_case("content-length") {
+                            value.parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .or(Some(0));
+            }
+            if let (Some(end), Some(content_len)) = (header_end, expected_len)
+                && request.len() >= end.saturating_add(content_len)
+            {
+                break;
+            }
+        }
+
+        let response_head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/protobuf\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response_head.as_bytes()).await?;
+        stream.write_all(body.as_slice()).await?;
+        stream.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
     });
 
     let client = new_api_client(&server_url);
@@ -9332,12 +9587,6 @@ async fn latest_bundle_after_second_join_retains_hp_envelope_for_sync()
         })
         .await?
     };
-    let alice = {
-        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
-        let synced = perform_epoch_sync(alice).await?.session;
-        persist_session(&synced)?;
-        synced
-    };
     let bob = {
         let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
         perform_join(JoinParams {
@@ -9475,12 +9724,6 @@ async fn epoch_sync_after_second_join_does_not_require_kbroad_secret()
         })
         .await?
     };
-    let alice = {
-        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
-        let synced = perform_epoch_sync(alice).await?.session;
-        persist_session(&synced)?;
-        synced
-    };
     {
         let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
         perform_join(JoinParams {
@@ -9534,12 +9777,6 @@ async fn epoch_sync_rejects_barrier_bundle_history_commitment_mismatch()
         })
         .await?
     };
-    let alice = {
-        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
-        let synced = perform_epoch_sync(alice).await?.session;
-        persist_session(&synced)?;
-        synced
-    };
     {
         let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
         perform_join(JoinParams {
@@ -9550,11 +9787,18 @@ async fn epoch_sync_rejects_barrier_bundle_history_commitment_mismatch()
         .await?;
     }
 
-    let current_commitment = alice
+    let synced_alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let synced = perform_epoch_sync(alice).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+
+    let current_commitment = synced_alice
         .barrier_state
         .current_history_commitment
-        .ok_or_else(|| anyhow!("expected local current history commitment after join"))?;
-    let mut mismatched = alice.clone();
+        .ok_or_else(|| anyhow!("expected local current history commitment after epoch sync"))?;
+    let mut mismatched = synced_alice.clone();
     mismatched.barrier_state.current_history_commitment = Some(HistoryCommitment {
         history_view_id: current_commitment.history_view_id,
         history_commitment_id: [0xEF; 32],
@@ -9576,6 +9820,8 @@ async fn epoch_sync_rejects_barrier_bundle_history_commitment_mismatch()
     };
     assert!(
         err.to_string().contains(
+            "epoch sync merge ticket current history commitment conflicts with locally authenticated state"
+        ) || err.to_string().contains(
             "bundle barrier history commitment mismatch with local authenticated current state"
         ),
         "expected explicit history commitment mismatch error: {err}"
@@ -10218,6 +10464,9 @@ async fn restart_after_leave_preserves_survivor_refresh_and_new_join()
         persist_session(&bob)?;
         perform_leave(LeaveRequest::from_session(&bob)).await?;
     }
+    let _after_leave_ticket = new_api_client(&server_url)
+        .merge_ticket_refresh(&room_id, &alice.leaf_id)
+        .await?;
 
     let synced_alice = {
         let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
@@ -10269,27 +10518,45 @@ async fn restart_after_leave_preserves_survivor_refresh_and_new_join()
         "revoked leaver must stay absent after restart"
     );
 
+    let post_restart_alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let synced = perform_epoch_sync(synced_alice)
+            .await
+            .map_err(|err| anyhow!("post-restart alice epoch sync: {err:#}"))?
+            .session;
+        persist_session(&synced)?;
+        synced
+    };
+
     {
         let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
-        persist_session(&synced_alice)?;
-        perform_pcs_refresh(LeaveRequest::from_session(&synced_alice))
+        perform_pcs_refresh(LeaveRequest::from_session(&post_restart_alice))
             .await
-            .context("post-restart alice PCS refresh")?;
+            .map_err(|err| anyhow!("post-restart alice PCS refresh: {err:#}"))?;
     }
 
     let charlie = {
-        let _override_guard = set_config_dir_override_for_tests(Some(charlie_base));
+        let _override_guard = set_config_dir_override_for_tests(Some(charlie_base.clone()));
         perform_join(JoinParams {
             server_url: server_url.clone(),
             room_id,
             alias: "charlie".to_string(),
         })
         .await
-        .context("post-restart charlie join")?
+        .map_err(|err| anyhow!("post-restart charlie join: {err:#}"))?
+    };
+    let charlie = if charlie.barrier_state.barrier_recovery_pending {
+        let _override_guard = set_config_dir_override_for_tests(Some(charlie_base));
+        perform_epoch_sync(charlie)
+            .await
+            .map_err(|err| anyhow!("post-restart charlie join epoch sync: {err:#}"))?
+            .session
+    } else {
+        charlie
     };
     assert!(
         !charlie.barrier_state.barrier_recovery_pending,
-        "new join must remain self-finalizing after restart"
+        "new join must become message-ready after restart"
     );
 
     handle.abort();
@@ -10656,6 +10923,9 @@ async fn perform_fetch_rejects_sender_leaf_spoofing_with_mismatched_public_key()
     let _env_lock = ENV_VAR_LOCK
         .lock()
         .map_err(|_| anyhow!("env var lock poisoned"))?;
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
 
     let port = next_test_port();
     let handle = spawn_server_on(port).await;
@@ -10665,20 +10935,26 @@ async fn perform_fetch_rejects_sender_leaf_spoofing_with_mismatched_public_key()
     let room_id = hex_encode([0x8Du8; 32]);
     bootstrap_test_room(&server_url, &room_id).await?;
 
-    let mut alice = perform_join(JoinParams {
-        server_url: server_url.clone(),
-        room_id: room_id.clone(),
-        alias: "alice".to_string(),
-    })
-    .await?;
+    let mut alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
     alice.barrier_state.barrier_recovery_pending = false;
 
-    let bob = perform_join(JoinParams {
-        server_url: server_url.clone(),
-        room_id: room_id.clone(),
-        alias: "bob".to_string(),
-    })
-    .await?;
+    let bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?
+    };
 
     let client = new_api_client(&server_url);
     let spoofed_plaintext = "spoofed-sender-marker";
@@ -11818,7 +12094,7 @@ fn categorize_error_case_insensitive() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn encode_decode_authenticated_message_empty_plaintext() -> Result<(), Box<dyn std::error::Error>> {
-    let (pk, sk) = dilithium3::keypair();
+    let (pk, sk) = dilithium5::keypair();
     let msg_sign_public_key = pk.as_bytes().to_vec();
     let msg_sign_secret_key = sk.as_bytes().to_vec();
 
@@ -11840,7 +12116,7 @@ fn encode_decode_authenticated_message_empty_plaintext() -> Result<(), Box<dyn s
 
 #[test]
 fn encode_decode_authenticated_message_large_plaintext() -> Result<(), Box<dyn std::error::Error>> {
-    let (pk, sk) = dilithium3::keypair();
+    let (pk, sk) = dilithium5::keypair();
     let msg_sign_public_key = pk.as_bytes().to_vec();
     let msg_sign_secret_key = sk.as_bytes().to_vec();
 
@@ -11876,7 +12152,7 @@ fn decode_authenticated_message_too_short() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn decode_authenticated_message_wrong_prefix() -> Result<(), Box<dyn std::error::Error>> {
-    let (pk, sk) = dilithium3::keypair();
+    let (pk, sk) = dilithium5::keypair();
     let msg_sign_public_key = pk.as_bytes().to_vec();
     let msg_sign_secret_key = sk.as_bytes().to_vec();
 
@@ -12033,10 +12309,10 @@ fn session_removal_after_persistence() -> Result<(), Box<dyn std::error::Error>>
         fs_dev_prev_commit: [0x13u8; 32],
         fs_epoch_created_at: SystemTime::now(),
         fs_epoch_rotation_interval_secs: 300,
-        pop_public_key: random_vec(48),
-        pop_secret_key: random_vec(96),
-        msg_sign_public_key: random_vec(1952),
-        msg_sign_secret_key: random_vec(4032),
+        pop_public_key: Vec::new(),
+        pop_secret_key: Vec::new(),
+        msg_sign_public_key: Vec::new(),
+        msg_sign_secret_key: Vec::new(),
         vrf_secret_key: random_vec(32),
         vrf_public_key: random_vec(32),
         kbroad_public: random_vec(24),
@@ -12061,6 +12337,7 @@ fn session_removal_after_persistence() -> Result<(), Box<dyn std::error::Error>>
         capss_witness: capss_witness_bytes,
         barrier_state: BarrierSecretState::default(),
     };
+    install_valid_message_identities(&mut session)?;
     session.fs_fingerprint = derive_fs_fingerprint_from_fields(
         session.fs_policy_version.as_str(),
         session.fs_ec,

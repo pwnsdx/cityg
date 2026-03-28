@@ -99,6 +99,7 @@ fn random_room_id() -> String {
 const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
 const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
 const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
+const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
 
 fn read_nonempty_env(var: &str) -> Option<String> {
     std::env::var(var)
@@ -1373,9 +1374,47 @@ async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> R
     .await
 }
 
+fn is_cover_leaf_index_collision_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("cover leaf index already allocated")
+    })
+}
+
 async fn perform_join(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
-    let session = prepare_join_session(server_url, room_id, alias).await?;
-    perform_join_finalize(session).await
+    let mut retry_attempt = 0u32;
+    loop {
+        let session = match prepare_join_session(server_url, room_id, alias).await {
+            Ok(session) => session,
+            Err(err)
+                if is_cover_leaf_index_collision_error(&err)
+                    && retry_attempt < JOIN_IDENTITY_RETRY_MAX_ATTEMPTS =>
+            {
+                retry_attempt = retry_attempt.saturating_add(1);
+                warn!(
+                    attempt = retry_attempt,
+                    "join identity collided on cover leaf index; regenerating identity"
+                );
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        match perform_join_finalize(session).await {
+            Ok(session) => return Ok(session),
+            Err(err)
+                if is_cover_leaf_index_collision_error(&err)
+                    && retry_attempt < JOIN_IDENTITY_RETRY_MAX_ATTEMPTS =>
+            {
+                retry_attempt = retry_attempt.saturating_add(1);
+                warn!(
+                    attempt = retry_attempt,
+                    "join finalize collided on cover leaf index; regenerating identity"
+                );
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4165,6 +4204,18 @@ mod tests {
             "too many requests: kbroad key missing",
             None
         ));
+    }
+
+    #[test]
+    fn join_collision_classifier_detects_nested_cover_leaf_errors() {
+        let err = anyhow!("server error (500): invalid input: cover leaf index already allocated");
+        assert!(is_cover_leaf_index_collision_error(&err));
+
+        let wrapped = err.context("server rejected join bundle");
+        assert!(is_cover_leaf_index_collision_error(&wrapped));
+
+        let unrelated = anyhow!("server error (500): invalid input: kbroad key missing");
+        assert!(!is_cover_leaf_index_collision_error(&unrelated));
     }
 
     #[test]

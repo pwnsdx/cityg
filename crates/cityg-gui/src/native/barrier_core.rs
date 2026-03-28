@@ -647,9 +647,11 @@ pub(super) async fn full_chain_check_barrier_update(
         ));
     }
 
-    let h_prev = session.barrier_state.kem_tree_hash_after;
-    let (snapshot_prev, snapshot_prev_history_commitment) = if let Some(snapshot_prev) =
-        current_public_tree_cache(session)
+    let expected_snapshot_hash = parsed.kem_tree_hash_before;
+    let (mut snapshot_prev, mut snapshot_prev_history_commitment) = if let Some(snapshot_prev) =
+        (session.barrier_state.kem_tree_hash_after == expected_snapshot_hash)
+            .then(|| current_public_tree_cache(session))
+            .flatten()
     {
         let current_history_commitment = session
             .barrier_state
@@ -661,12 +663,14 @@ pub(super) async fn full_chain_check_barrier_update(
             })?;
         ((*snapshot_prev).clone(), current_history_commitment)
     } else if let Some((snapshot_prev, current_history_commitment)) =
-        retained_authenticated_current_public_tree_cache(session)
+        (session.barrier_state.kem_tree_hash_after == expected_snapshot_hash)
+            .then(|| retained_authenticated_current_public_tree_cache(session))
+            .flatten()
     {
         ((*snapshot_prev).clone(), current_history_commitment)
     } else {
         let snapshot_prev_response = client
-            .barrier_fetch_public_tree(room_id, &h_prev)
+            .barrier_fetch_public_tree(room_id, &expected_snapshot_hash)
             .await
             .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
         let snapshot_prev = snapshot_prev_response.tree;
@@ -676,7 +680,7 @@ pub(super) async fn full_chain_check_barrier_update(
                 snapshot_prev.n_max
             ));
         }
-        validate_barrier_tree_snapshot_auth(&h_prev, n_max, &snapshot_prev)?;
+        validate_barrier_tree_snapshot_auth(&expected_snapshot_hash, n_max, &snapshot_prev)?;
         (snapshot_prev, snapshot_prev_response.history_commitment)
     };
 
@@ -712,8 +716,40 @@ pub(super) async fn full_chain_check_barrier_update(
     )
     .is_err()
     {
+        let snapshot_prev_response = client
+            .barrier_fetch_public_tree(room_id, &expected_snapshot_hash)
+            .await
+            .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
+        if snapshot_prev_response.tree.n_max != n_max {
+            return Err(anyhow!(
+                "barrier tree snapshot auth failure (960.9): n_max mismatch (expected {n_max}, got {})",
+                snapshot_prev_response.tree.n_max
+            ));
+        }
+        validate_barrier_tree_snapshot_auth(
+            &expected_snapshot_hash,
+            n_max,
+            &snapshot_prev_response.tree,
+        )?;
+        snapshot_prev = snapshot_prev_response.tree;
+        snapshot_prev_history_commitment = snapshot_prev_response.history_commitment;
+    }
+    if require_current_state_history_commitment(
+        &snapshot_prev_history_commitment,
+        &join_resolution.history_commitment,
+        &revoked_resolution.history_commitment,
+    )
+    .is_err()
+    {
         return Err(anyhow!(
-            "barrier full chain-check prevalidation failed (960.9): snapshot / joins / revoked leaves do not share one authenticated current-state history commitment"
+            "barrier full chain-check prevalidation failed (960.9): before={} snapshot={}#{} joins={}#{} revoked={}#{}",
+            hex_encode(parsed.kem_tree_hash_before),
+            hex_encode(snapshot_prev_history_commitment.history_commitment_id),
+            snapshot_prev_history_commitment.history_seq,
+            hex_encode(join_resolution.history_commitment.history_commitment_id),
+            join_resolution.history_commitment.history_seq,
+            hex_encode(revoked_resolution.history_commitment.history_commitment_id),
+            revoked_resolution.history_commitment.history_seq,
         ));
     }
 
@@ -785,7 +821,7 @@ pub(super) async fn full_chain_check_barrier_update(
             revoked_leaf_count,
             expected_before = %hex_encode(expected_before),
             parsed_before = %hex_encode(parsed.kem_tree_hash_before),
-            snapshot_prev_hash = %hex_encode(h_prev),
+            snapshot_prev_hash = %hex_encode(expected_snapshot_hash),
             "barrier full chain-check pre-state hash mismatch"
         );
         return Err(anyhow!(
