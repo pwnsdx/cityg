@@ -332,7 +332,7 @@ fn load_or_generate_kbroad_keys() -> Result<(Vec<u8>, Vec<u8>), CityGError> {
         let mut payload = Vec::with_capacity(pair.0.len() + pair.1.len());
         payload.extend_from_slice(pair.0.as_slice());
         payload.extend_from_slice(pair.1.as_slice());
-        let _ = fs::write(path, payload);
+        fs::write(path, payload)?;
     }
 
     Ok(pair)
@@ -826,6 +826,12 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn demo_vrf_keys_are_stable_across_calls() {
         let (sk1, pk1) = demo_vrf_keys();
@@ -859,9 +865,7 @@ mod tests {
 
     #[test]
     fn demo_config_root_respects_env_override() -> Result<(), CityGError> {
-        let _guard = env_lock()
-            .lock()
-            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let _guard = lock_env();
         let (dir, previous) = setup_demo_config_dir("root")?;
         let root = demo_config_root().expect("config root should resolve");
         assert_eq!(root, dir);
@@ -871,9 +875,7 @@ mod tests {
 
     #[test]
     fn demo_config_root_uses_fallback_when_env_blank() -> Result<(), CityGError> {
-        let _guard = env_lock()
-            .lock()
-            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let _guard = lock_env();
         let previous = std::env::var_os("CITYG_DEMO_CONFIG_DIR");
         // SAFETY: tests are serialized via `env_lock`, so mutating process env is race-free.
         unsafe { std::env::set_var("CITYG_DEMO_CONFIG_DIR", "   ") };
@@ -891,9 +893,7 @@ mod tests {
 
     #[test]
     fn load_or_generate_kbroad_keys_roundtrips_on_disk() -> Result<(), CityGError> {
-        let _guard = env_lock()
-            .lock()
-            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let _guard = lock_env();
         let (dir, previous) = setup_demo_config_dir("kbroad-roundtrip")?;
 
         let (pk_first, sk_first) = load_or_generate_kbroad_keys()?;
@@ -910,9 +910,7 @@ mod tests {
 
     #[test]
     fn load_or_generate_kbroad_keys_replaces_malformed_file() -> Result<(), CityGError> {
-        let _guard = env_lock()
-            .lock()
-            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let _guard = lock_env();
         let (dir, previous) = setup_demo_config_dir("kbroad-malformed")?;
 
         fs::write(dir.join("demo-kbroad.key"), [0xAA, 0xBB, 0xCC])?;
@@ -929,9 +927,7 @@ mod tests {
 
     #[test]
     fn load_or_generate_bootstrap_keys_roundtrips_on_disk() -> Result<(), CityGError> {
-        let _guard = env_lock()
-            .lock()
-            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let _guard = lock_env();
         let (dir, previous) = setup_demo_config_dir("bootstrap-roundtrip")?;
 
         let (pk_first, sk_first) = load_or_generate_bootstrap_keys()?;
@@ -948,9 +944,7 @@ mod tests {
 
     #[test]
     fn load_or_generate_bootstrap_keys_replaces_malformed_file() -> Result<(), CityGError> {
-        let _guard = env_lock()
-            .lock()
-            .map_err(|_| CityGError::InvalidInput("env lock poisoned"))?;
+        let _guard = lock_env();
         let (dir, previous) = setup_demo_config_dir("bootstrap-malformed")?;
 
         fs::write(dir.join("demo-bootstrap.key"), [0xAA, 0xBB])?;

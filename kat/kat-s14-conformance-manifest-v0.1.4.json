@@ -159,7 +159,7 @@
         },
         {
           "crate": "cityg-gui",
-          "test": "native::tests::pending_join_finalize_history_lookup_discards_after_newer_version_404",
+          "test": "native::tests::pending_join_finalize_history_lookup_404_after_newer_version_requires_recovery",
           "expectation": "accept_history_non_acceptance_discard"
         }
       ]

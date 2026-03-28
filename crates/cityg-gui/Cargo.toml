@@ -57,6 +57,7 @@ cityg-api = { path = "../cityg-api" }
 axum = "0.8"
 prost = "0.14"
 proptest = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 [[bin]]
 name = "join_leave"

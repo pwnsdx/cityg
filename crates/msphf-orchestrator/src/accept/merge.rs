@@ -750,8 +750,9 @@ mod tests {
         sample_header, sample_parts_params_joiner, sample_pop_keys, seed_capss_with,
     };
     use crate::{
-        BARRIER_HP_MODE, JoinerKGenResult, OrchestrationParams, compute_proofs_commit_bytes,
-        joiner_kgen_merge_or, mhw::HeadRecord,
+        BARRIER_HP_MODE, HpEnvelopeBinding, JoinerKGenResult, LocalHpEnvelopeMaterial,
+        OrchestrationParams, compute_proofs_commit_bytes, joiner_kgen_merge_or, mhw::HeadRecord,
+        rebind_local_hp_envelope_with_barrier_key,
     };
     use anyhow::{Result, anyhow};
     use ciborium::value::Integer;
@@ -766,6 +767,34 @@ mod tests {
     );
 
     type PreparedMergeHeader = (BTreeMap<u64, Value>, Vec<[u8; 32]>);
+    const TEST_BARRIER_KEY: [u8; 32] = [0x5Au8; 32];
+
+    fn attach_published_merge_hp_envelope(
+        header: &mut BTreeMap<u64, Value>,
+        parts: &AnchorInstanceParts<'_>,
+        merge_joiner: &JoinerKGenResult,
+    ) -> Result<()> {
+        let rebound = rebind_local_hp_envelope_with_barrier_key(
+            header,
+            HpEnvelopeBinding {
+                gid: parts.gid,
+                xk_hash: &merge_joiner.xk_hash,
+                hp_commit: &merge_joiner.hp_commit,
+            },
+            LocalHpEnvelopeMaterial {
+                hp_ciphertext: &merge_joiner.hp_ciphertext,
+                hp_aead_key: &merge_joiner.hp_aead_key,
+            },
+            &TEST_BARRIER_KEY,
+            HpEnvelopeBinding {
+                gid: parts.gid,
+                xk_hash: &merge_joiner.xk_hash,
+                hp_commit: &merge_joiner.hp_commit,
+            },
+        )?;
+        header.insert(HDR_HP_BYTES, rebound.envelope);
+        Ok(())
+    }
 
     fn build_merge_fixture() -> Result<MergeFixture> {
         let (parts, mut params, join_joiner) = sample_parts_params_joiner();
@@ -978,6 +1007,7 @@ mod tests {
         pivot_parity.srx_commit = None;
         recompute_proofs_commit(&mut header)?;
         refresh_seed_bindings(&mut header, parts, merge_joiner);
+        attach_published_merge_hp_envelope(&mut header, parts, merge_joiner)?;
 
         let proofs_commit = header
             .get(&HDR_PROOFS_COMMIT)
@@ -1306,6 +1336,7 @@ mod tests {
         let mut header = merge_joiner.header_map.clone();
         recompute_proofs_commit(&mut header)?;
         header.insert(HDR_SRX_MODE, Value::Text("mock".to_string()));
+        attach_published_merge_hp_envelope(&mut header, &parts, &merge_joiner)?;
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
         let now = ctx.next_accept_instant();
 
@@ -1331,6 +1362,7 @@ mod tests {
         recompute_proofs_commit(&mut header)?;
         header.remove(&HDR_ROLLUP_PROVENANCE_COMMIT);
         header.insert(HDR_ROLLUP_VCK_COMMIT, Value::Bytes(vec![0xAA; 32]));
+        attach_published_merge_hp_envelope(&mut header, &parts, &merge_joiner)?;
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
         let now = ctx.next_accept_instant();
 
@@ -1358,6 +1390,7 @@ mod tests {
             *first ^= 0xFF;
         }
         recompute_proofs_commit(&mut header)?;
+        attach_published_merge_hp_envelope(&mut header, &parts, &merge_joiner)?;
         seed_capss_with(&mut ctx, &merge_joiner.capss_witness);
         let now = ctx.next_accept_instant();
 
@@ -1979,7 +2012,9 @@ mod tests {
     #[test]
     fn merge_anchor_rejects_invalid_pivot_envelope_bytes() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
-        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.remove(&HDR_HP_BYTES);
         let pivot_weid = header
             .get(&HDR_ROLLUP_PIVOT_WEID)
             .and_then(Value::as_bytes)
@@ -2014,7 +2049,9 @@ mod tests {
     #[test]
     fn merge_anchor_rejects_well_formed_but_invalid_pivot_envelope_shape() -> Result<()> {
         let (mut ctx, parts, _params, merge_joiner, retired_heads) = build_merge_fixture()?;
-        let (header, heads) = ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        let (mut header, heads) =
+            ready_merge_header(&mut ctx, &parts, &merge_joiner, &retired_heads)?;
+        header.remove(&HDR_HP_BYTES);
         let pivot_weid = header
             .get(&HDR_ROLLUP_PIVOT_WEID)
             .and_then(Value::as_bytes)

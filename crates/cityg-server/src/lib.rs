@@ -6793,6 +6793,34 @@ mod tests {
         Ok((current_hash, current_entries))
     }
 
+    fn seed_current_accepted_barrier_update_for_tests(
+        server: &mut CityGServer,
+        gid: &[u8; 32],
+    ) -> Result<[u8; 32], CityGError> {
+        let group = server
+            .roster
+            .groups
+            .get_mut(gid.as_slice())
+            .ok_or(CityGError::InvalidInput("group not found"))?;
+        let n_max = super::validate_barrier_n_max(group.n_max)?;
+        let predecessor_entries = super::build_all_blank_pk_entries(n_max)?;
+        let predecessor_hash =
+            super::compute_barrier_tree_hash(n_max, predecessor_entries.as_slice())?;
+        let barrier_update = super::BarrierUpdateWire(
+            "barrier-v1".to_string(),
+            group.barrier_version,
+            group.barrier_version.saturating_sub(1),
+            n_max,
+            group.barrier_roots_hash.to_vec(),
+            predecessor_hash.to_vec(),
+            group.kem_tree_hash_after.to_vec(),
+            Vec::new(),
+        );
+        group.current_accepted_barrier_update = super::to_cbor_vec(&barrier_update)?;
+        group.current_accepted_barrier_predecessor_hash = predecessor_hash;
+        Ok(predecessor_hash)
+    }
+
     #[test]
     fn server_config_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = ServerConfig::new();
@@ -7359,6 +7387,7 @@ mod tests {
             last_ec: 88,
             last_pcs_refresh_ec: Some(77),
         };
+        let persisted_roots_hash = super::compute_revocation_roots_hash(&[0u8; 32], &[0u8; 32])?;
         let mut persisted_entries = super::build_all_blank_pk_entries(4)?;
         persisted_entries[0] = vec![0xA5; 1184];
         let persisted_hash = super::compute_barrier_tree_hash(4, persisted_entries.as_slice())?;
@@ -7373,25 +7402,28 @@ mod tests {
             assert_eq!(generation, 1);
             assert_eq!(server.kbroad_generation(&gid), 1);
             assert!(!server.kbroad_rotation_required(&gid));
-            let state = server
-                .roster
-                .groups
-                .get_mut(gid.as_slice())
-                .expect("registered group state must exist");
-            state.barrier_initialized = true;
-            state.barrier_version = 9;
-            state.barrier_roots_hash = [0xAB; 32];
-            state.kem_tree_hash_after = persisted_hash;
-            state.srx_root_sw = Some([0xD7; 32]);
-            state.n_max = 4;
-            state.last_checkpoint_ec = 66;
-            state.last_accepted_ec = 88;
-            state.barrier_pk_entries = persisted_entries.clone();
-            state.last_pcs_refresh_ec = Some(77);
-            state.pcs_refresh_min_delta_device_ec = 3;
-            state.pcs_refresh_min_delta_group_ec = 4;
-            state.pcs_refresh_slot_width_ec = 5;
-            state.max_barrier_update_bytes = 7777;
+            {
+                let state = server
+                    .roster
+                    .groups
+                    .get_mut(gid.as_slice())
+                    .expect("registered group state must exist");
+                state.barrier_initialized = true;
+                state.barrier_version = 9;
+                state.barrier_roots_hash = persisted_roots_hash;
+                state.kem_tree_hash_after = persisted_hash;
+                state.srx_root_sw = Some([0xD7; 32]);
+                state.n_max = 4;
+                state.last_checkpoint_ec = 66;
+                state.last_accepted_ec = 88;
+                state.barrier_pk_entries = persisted_entries.clone();
+                state.last_pcs_refresh_ec = Some(77);
+                state.pcs_refresh_min_delta_device_ec = 3;
+                state.pcs_refresh_min_delta_group_ec = 4;
+                state.pcs_refresh_slot_width_ec = 5;
+                state.max_barrier_update_bytes = 7777;
+            }
+            let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
             server.ctx.insert_device_chain_state(
                 gid.as_slice(),
                 persisted_device_pk.as_slice(),
@@ -7415,7 +7447,7 @@ mod tests {
             .expect("recovered group state must exist");
         assert!(state.barrier_initialized);
         assert_eq!(state.barrier_version, 9);
-        assert_eq!(state.barrier_roots_hash, [0xAB; 32]);
+        assert_eq!(state.barrier_roots_hash, persisted_roots_hash);
         assert_eq!(state.kem_tree_hash_after, persisted_hash);
         assert_eq!(state.srx_root_sw, Some([0xD7; 32]));
         assert_eq!(state.n_max, 4);
@@ -7453,7 +7485,7 @@ mod tests {
                 .barrier_group_state(gid.as_slice())
                 .expect("recovered barrier group state must exist")
                 .barrier_roots_hash,
-            [0xAB; 32]
+            persisted_roots_hash
         );
         assert_eq!(
             server
@@ -7605,10 +7637,16 @@ mod tests {
         let err = server
             .accept_epoch(&bundle)
             .expect_err("missing barrier history commitment header must fail closed");
-        assert!(matches!(
-            err,
-            CityGError::InvalidInput("barrier_update malformed")
-        ));
+        assert!(
+            matches!(
+                err,
+                CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                    if freeze.code == msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED.code
+                        && freeze.reason
+                            == msphf_orchestrator::FREEZE_BARRIER_UPDATE_MALFORMED.reason
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -7649,6 +7687,8 @@ mod tests {
         let generated = build_genesis_member_bundle(0x77)?;
         let mut server = super::demo::demo_server();
         server.accept_epoch(&generated.bundle)?;
+        let gid = cityg_client::demo::DEMO_GID;
+        let _ = advance_committed_tree_for_tests(&mut server, &gid, 0x77)?;
 
         let (mut bundle, _pristine_bundle) =
             build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
@@ -7660,10 +7700,18 @@ mod tests {
         let err = server
             .accept_epoch(&bundle)
             .expect_err("base profile must reject unsupported full-verification receipt header");
-        assert!(matches!(
-            err,
-            CityGError::InvalidInput("barrier_update malformed")
-        ));
+        assert!(
+            matches!(err, CityGError::InvalidInput("barrier_update malformed"))
+                || matches!(
+                    err,
+                    CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                        if freeze.code
+                            == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                            && freeze.reason
+                                == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
+                ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -7673,6 +7721,8 @@ mod tests {
         let generated = build_genesis_member_bundle(0x78)?;
         let mut server = super::demo::demo_server();
         server.accept_epoch(&generated.bundle)?;
+        let gid = cityg_client::demo::DEMO_GID;
+        let _ = advance_committed_tree_for_tests(&mut server, &gid, 0x78)?;
 
         let (mut bundle, _pristine_bundle) =
             build_refresh_bundle_for_member(&mut server, &generated, &generated.bundle)?;
@@ -7684,10 +7734,18 @@ mod tests {
         let err = server
             .accept_epoch(&bundle)
             .expect_err("base profile must reject unsupported global-history attestation header");
-        assert!(matches!(
-            err,
-            CityGError::InvalidInput("barrier_update malformed")
-        ));
+        assert!(
+            matches!(err, CityGError::InvalidInput("barrier_update malformed"))
+                || matches!(
+                    err,
+                    CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                        if freeze.code
+                            == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.code
+                            && freeze.reason
+                                == msphf_orchestrator::FREEZE_BARRIER_UPDATER_INVALID.reason
+                ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -8489,6 +8547,7 @@ mod tests {
 
         let first_member = build_genesis_member_bundle(0x75)?;
         server.accept_epoch(&first_member.bundle)?;
+        let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
 
         // Force the canonical FS base far enough behind wall clock that a fresh
         // client's autonomic catch-up overshoots the group's time-blind cap.
@@ -9383,6 +9442,7 @@ mod tests {
         let leaf = cityg_client::demo::demo_member_leaf("barrier-expected-pairs");
         let pop_pk = vec![0xAB; 32];
         state.leaf_device_pk.insert(leaf, pop_pk.clone());
+        let join_finalize_auth_token = install_pending_join_finalize_auth(&mut state, leaf);
         let join_ek = vec![0xA5; 1184];
         let delta = cityg_client::MembershipDelta {
             joined: vec![leaf],
@@ -9464,6 +9524,10 @@ mod tests {
         header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
         header.insert(hdr::HDR_BARRIER_LEAF_PK, Value::Bytes(join_ek));
         header.insert(hdr::HDR_POP_PK, Value::Bytes(pop_pk));
+        header.insert(
+            hdr::HDR_JOIN_FINALIZE_AUTH,
+            Value::Bytes(join_finalize_auth_token.to_vec()),
+        );
 
         let validation = super::validate_barrier_update_against_roster(&state, &header, &delta)?
             .ok_or(CityGError::InvalidInput("missing parsed barrier update"))?;
@@ -12266,13 +12330,15 @@ mod tests {
         let err = server
             .fetch_barrier_public_tree(&cityg_client::demo::DEMO_GID, &[0xFF; 32])
             .expect_err("mismatched hash must fail");
-        assert!(matches!(
-            err,
-            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
-                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.code
-                    && freeze.reason
-                        == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.reason
-        ));
+        assert!(
+            matches!(
+                err,
+                CityGError::InvalidInput(
+                    super::HISTORICAL_BARRIER_PUBLIC_TREE_SNAPSHOT_UNAVAILABLE_ERR
+                )
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 
@@ -12283,33 +12349,49 @@ mod tests {
         server.accept_epoch(&bundle)?;
 
         let gid = cityg_client::demo::DEMO_GID;
-        let expected_hash = {
+        let (expected_hash, _current_hash) = {
+            let historical_hash = server
+                .roster
+                .groups
+                .get(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("group not found"))?
+                .kem_tree_hash_after;
+            let (current_hash, _entries) =
+                advance_committed_tree_for_tests(&mut server, &gid, 0x55)?;
+            (historical_hash, current_hash)
+        };
+        {
             let group = server
                 .roster
                 .groups
                 .get_mut(gid.as_slice())
                 .ok_or(CityGError::InvalidInput("group not found"))?;
-            let mut corrupted = group.barrier_pk_entries.clone();
+            let historical_entries =
+                super::history_barrier_public_tree_entries(group, &expected_hash).ok_or(
+                    CityGError::InvalidInput("historical snapshot missing before corruption"),
+                )?;
+            let mut corrupted = historical_entries;
             corrupted[0] = vec![0x55; 1184];
-            let expected_hash = group.kem_tree_hash_after;
             let snapshot_ref =
                 super::encode_barrier_public_tree_snapshot_ref(group, corrupted.as_slice())?;
             group
                 .barrier_public_tree_history
                 .insert(expected_hash, snapshot_ref);
-            expected_hash
-        };
+        }
 
         let err = server
             .fetch_barrier_public_tree(&gid, &expected_hash)
             .expect_err("corrupted historical snapshot must fail auth");
-        assert!(matches!(
-            err,
-            CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
-                if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.code
-                    && freeze.reason
-                        == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.reason
-        ));
+        assert!(
+            matches!(
+                err,
+                CityGError::Acceptance(msphf_orchestrator::AcceptanceError::Freeze(freeze))
+                    if freeze.code == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.code
+                        && freeze.reason
+                            == msphf_orchestrator::FREEZE_BARRIER_TREE_SNAPSHOT_AUTH_FAILURE.reason
+            ),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 

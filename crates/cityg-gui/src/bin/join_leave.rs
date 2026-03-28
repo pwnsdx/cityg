@@ -70,6 +70,8 @@ use pqcrypto_traits::sign::{
     SecretKey as DilithiumSecretKeyTrait,
 };
 use rand::{RngExt, rng};
+#[cfg(test)]
+use reqwest::header::CONTENT_TYPE;
 use serde::Serialize;
 use serde_bytes::ByteBuf;
 use serde_json::Value as JsonValue;
@@ -3387,6 +3389,18 @@ mod tests {
     }
 
     #[derive(Clone, PartialEq, Message)]
+    struct BarrierResolveJoinsSinceRequestPb {
+        #[prost(string, tag = "1")]
+        room_id: String,
+        #[prost(uint64, tag = "2")]
+        prev_barrier_version: u64,
+        #[prost(uint32, tag = "3")]
+        page_offset: u32,
+        #[prost(uint32, tag = "4")]
+        max_entries: u32,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
     struct BarrierResolveRevokedLeavesResponsePb {
         #[prost(uint32, repeated, tag = "1")]
         leaf_indices: Vec<u32>,
@@ -3400,6 +3414,36 @@ mod tests {
         next_page_offset: Option<u32>,
         #[prost(uint32, tag = "6")]
         total_entries: u32,
+        #[prost(bytes = "vec", tag = "7")]
+        helper_completeness_attestation: Vec<u8>,
+        #[prost(bytes = "vec", tag = "8")]
+        history_authority_descriptor: Vec<u8>,
+        #[prost(bytes = "vec", tag = "9")]
+        global_history_attestation: Vec<u8>,
+        #[prost(string, tag = "10")]
+        history_authority_extension: String,
+        #[prost(string, tag = "11")]
+        profile_version: String,
+        #[prost(uint64, tag = "12")]
+        n_max: u64,
+        #[prost(uint64, tag = "13")]
+        max_barrier_update_bytes: u64,
+        #[prost(message, optional, tag = "14")]
+        fs_forward_leap_policy: Option<FsForwardLeapPolicyPb>,
+        #[prost(bytes = "vec", tag = "15")]
+        deployment_profile_manifest: Vec<u8>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct BarrierResolveRevokedLeavesRequestPb {
+        #[prost(string, tag = "1")]
+        room_id: String,
+        #[prost(bytes = "vec", tag = "2")]
+        revocation_roots_hash: Vec<u8>,
+        #[prost(uint32, tag = "3")]
+        page_offset: u32,
+        #[prost(uint32, tag = "4")]
+        max_entries: u32,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3420,6 +3464,34 @@ mod tests {
         next_entry_offset: Option<u32>,
         #[prost(uint32, tag = "8")]
         total_entries: u32,
+        #[prost(bytes = "vec", tag = "9")]
+        helper_completeness_attestation: Vec<u8>,
+        #[prost(bytes = "vec", tag = "10")]
+        history_authority_descriptor: Vec<u8>,
+        #[prost(bytes = "vec", tag = "11")]
+        global_history_attestation: Vec<u8>,
+        #[prost(string, tag = "12")]
+        history_authority_extension: String,
+        #[prost(string, tag = "13")]
+        profile_version: String,
+        #[prost(uint64, tag = "14")]
+        max_barrier_update_bytes: u64,
+        #[prost(message, optional, tag = "15")]
+        fs_forward_leap_policy: Option<FsForwardLeapPolicyPb>,
+        #[prost(bytes = "vec", tag = "16")]
+        deployment_profile_manifest: Vec<u8>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct BarrierFetchPublicTreeRequestPb {
+        #[prost(string, tag = "1")]
+        room_id: String,
+        #[prost(bytes = "vec", tag = "2")]
+        kem_tree_hash_after: Vec<u8>,
+        #[prost(uint32, tag = "3")]
+        entry_offset: u32,
+        #[prost(uint32, tag = "4")]
+        max_entries: u32,
     }
 
     #[derive(Clone, PartialEq, Message)]
@@ -3471,6 +3543,124 @@ mod tests {
             )
                 .into_response()
         }
+    }
+
+    fn proto_bytes_responses(raw_pages: &[Vec<u8>]) -> Vec<MockResponse> {
+        raw_pages
+            .iter()
+            .cloned()
+            .map(MockResponse::proto_bytes)
+            .collect()
+    }
+
+    async fn post_proto_raw<T: Message>(
+        server_url: &str,
+        path: &str,
+        request: &T,
+    ) -> Result<Vec<u8>> {
+        let mut req = reqwest::Client::new()
+            .post(format!("{server_url}{path}"))
+            .header(CONTENT_TYPE, "application/x-protobuf")
+            .body(request.encode_to_vec());
+        if let Some(token) = configured_client_message_token() {
+            req = req.header(MESSAGE_AUTH_HEADER, token);
+        }
+        let response = req.send().await.context("send raw protobuf request")?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .context("read raw protobuf response")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "raw protobuf request failed ({status}): {}",
+                String::from_utf8_lossy(body.as_ref())
+            ));
+        }
+        Ok(body.to_vec())
+    }
+
+    async fn capture_fetch_public_tree_pages_raw(
+        server_url: &str,
+        room_id: &str,
+        kem_tree_hash_after: &[u8; 32],
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut entry_offset = 0u32;
+        let mut pages = Vec::new();
+        loop {
+            let request = BarrierFetchPublicTreeRequestPb {
+                room_id: room_id.to_string(),
+                kem_tree_hash_after: kem_tree_hash_after.to_vec(),
+                entry_offset,
+                max_entries: 512,
+            };
+            let raw = post_proto_raw(server_url, "/v1/barrier/fetch_public_tree", &request).await?;
+            let decoded = BarrierFetchPublicTreeResponsePb::decode(raw.as_slice())
+                .context("decode fetch_public_tree mock page")?;
+            let next = decoded.next_entry_offset;
+            pages.push(raw);
+            match next {
+                Some(offset) => entry_offset = offset,
+                None => break,
+            }
+        }
+        Ok(pages)
+    }
+
+    async fn capture_resolve_joins_since_pages_raw(
+        server_url: &str,
+        room_id: &str,
+        prev_barrier_version: u64,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut page_offset = 0u32;
+        let mut pages = Vec::new();
+        loop {
+            let request = BarrierResolveJoinsSinceRequestPb {
+                room_id: room_id.to_string(),
+                prev_barrier_version,
+                page_offset,
+                max_entries: 512,
+            };
+            let raw =
+                post_proto_raw(server_url, "/v1/barrier/resolve_joins_since", &request).await?;
+            let decoded = BarrierResolveJoinsSinceResponsePb::decode(raw.as_slice())
+                .context("decode resolve_joins_since mock page")?;
+            let next = decoded.next_page_offset;
+            pages.push(raw);
+            match next {
+                Some(offset) => page_offset = offset,
+                None => break,
+            }
+        }
+        Ok(pages)
+    }
+
+    async fn capture_resolve_revoked_pages_raw(
+        server_url: &str,
+        room_id: &str,
+        revocation_roots_hash: &[u8; 32],
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut page_offset = 0u32;
+        let mut pages = Vec::new();
+        loop {
+            let request = BarrierResolveRevokedLeavesRequestPb {
+                room_id: room_id.to_string(),
+                revocation_roots_hash: revocation_roots_hash.to_vec(),
+                page_offset,
+                max_entries: 512,
+            };
+            let raw =
+                post_proto_raw(server_url, "/v1/barrier/resolve_revoked_leaves", &request).await?;
+            let decoded = BarrierResolveRevokedLeavesResponsePb::decode(raw.as_slice())
+                .context("decode resolve_revoked_leaves mock page")?;
+            let next = decoded.next_page_offset;
+            pages.push(raw);
+            match next {
+                Some(offset) => page_offset = offset,
+                None => break,
+            }
+        }
+        Ok(pages)
     }
 
     #[derive(Clone, Default)]
@@ -3555,6 +3745,9 @@ mod tests {
         barrier_tree_snapshot: cityg_api_client::BarrierPublicTree,
         join_records: Vec<BarrierJoinRecord>,
         revoked_leaf_indices: Vec<u32>,
+        barrier_tree_snapshot_pages_raw: Vec<Vec<u8>>,
+        join_records_pages_raw: Vec<Vec<u8>>,
+        revoked_leaf_indices_pages_raw: Vec<Vec<u8>>,
     }
 
     struct JoinFinalizeFixture {
@@ -3563,6 +3756,9 @@ mod tests {
         barrier_tree_snapshot: cityg_api_client::BarrierPublicTree,
         join_records: Vec<BarrierJoinRecord>,
         revoked_leaf_indices: Vec<u32>,
+        barrier_tree_snapshot_pages_raw: Vec<Vec<u8>>,
+        join_records_pages_raw: Vec<Vec<u8>>,
+        revoked_leaf_indices_pages_raw: Vec<Vec<u8>>,
     }
 
     #[derive(Serialize)]
@@ -3639,14 +3835,26 @@ mod tests {
             .barrier_fetch_public_tree(&room_id, &ticket.kem_tree_hash_after)
             .await?
             .tree;
+        let barrier_tree_snapshot_pages_raw =
+            capture_fetch_public_tree_pages_raw(&server_url, &room_id, &ticket.kem_tree_hash_after)
+                .await?;
         let join_records = client
             .barrier_resolve_joins_since(&room_id, ticket.barrier_version)
             .await?
             .records;
+        let join_records_pages_raw =
+            capture_resolve_joins_since_pages_raw(&server_url, &room_id, ticket.barrier_version)
+                .await?;
         let revoked_leaf_indices = client
             .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
             .await?
             .leaf_indices;
+        let revoked_leaf_indices_pages_raw = capture_resolve_revoked_pages_raw(
+            &server_url,
+            &room_id,
+            &committed_revocation_roots_hash,
+        )
+        .await?;
 
         handle.abort();
         let _ = handle.await;
@@ -3657,6 +3865,9 @@ mod tests {
             barrier_tree_snapshot,
             join_records,
             revoked_leaf_indices,
+            barrier_tree_snapshot_pages_raw,
+            join_records_pages_raw,
+            revoked_leaf_indices_pages_raw,
         })
     }
 
@@ -3682,14 +3893,26 @@ mod tests {
             .barrier_fetch_public_tree(&room_id, &ticket.kem_tree_hash_after)
             .await?
             .tree;
+        let barrier_tree_snapshot_pages_raw =
+            capture_fetch_public_tree_pages_raw(&server_url, &room_id, &ticket.kem_tree_hash_after)
+                .await?;
         let join_records = client
             .barrier_resolve_joins_since(&room_id, ticket.barrier_version)
             .await?
             .records;
+        let join_records_pages_raw =
+            capture_resolve_joins_since_pages_raw(&server_url, &room_id, ticket.barrier_version)
+                .await?;
         let revoked_leaf_indices = client
             .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
             .await?
             .leaf_indices;
+        let revoked_leaf_indices_pages_raw = capture_resolve_revoked_pages_raw(
+            &server_url,
+            &room_id,
+            &committed_revocation_roots_hash,
+        )
+        .await?;
 
         handle.abort();
         let _ = handle.await;
@@ -3700,6 +3923,9 @@ mod tests {
             barrier_tree_snapshot,
             join_records,
             revoked_leaf_indices,
+            barrier_tree_snapshot_pages_raw,
+            join_records_pages_raw,
+            revoked_leaf_indices_pages_raw,
         })
     }
 
@@ -3814,7 +4040,7 @@ mod tests {
 
     fn encode_barrier_tree_snapshot(
         tree: &cityg_api_client::BarrierPublicTree,
-        history_commitment: &HistoryCommitment,
+        ticket: &cityg_api_client::MergeTicket,
         entry_offset: u32,
         next_entry_offset: Option<u32>,
         pk_entries: Vec<Vec<u8>>,
@@ -3824,18 +4050,37 @@ mod tests {
             n_max: tree.n_max,
             kem_tree_hash_after: tree.kem_tree_hash_after.to_vec(),
             pk_entries,
-            history_view_id: history_commitment.history_view_id.to_vec(),
-            history_commitment: Some(encode_history_commitment(history_commitment)),
+            history_view_id: ticket.current_history_commitment.history_view_id.to_vec(),
+            history_commitment: Some(encode_history_commitment(
+                &ticket.current_history_commitment,
+            )),
             entry_offset,
             next_entry_offset,
             total_entries,
+            helper_completeness_attestation: Vec::new(),
+            history_authority_descriptor: ticket.history_authority_descriptor_bytes.clone(),
+            global_history_attestation: ticket.current_global_history_attestation_bytes.clone(),
+            history_authority_extension: ticket
+                .history_authority_extension
+                .map(|extension| extension.as_str().to_string())
+                .unwrap_or_default(),
+            profile_version: "v0.1.4".to_string(),
+            max_barrier_update_bytes: ticket.max_barrier_update_bytes,
+            fs_forward_leap_policy: Some(FsForwardLeapPolicyPb {
+                h: ticket.fs_forward_leap_policy.h,
+                checkpoint_interval: ticket.fs_forward_leap_policy.checkpoint_interval,
+                slack_anchor: ticket.fs_forward_leap_policy.slack_anchor,
+                slack_first_device: ticket.fs_forward_leap_policy.slack_first_device,
+                slack_device: ticket.fs_forward_leap_policy.slack_device,
+            }),
+            deployment_profile_manifest: ticket.deployment_profile_manifest_bytes.clone(),
         }
         .encode_to_vec()
     }
 
     fn encode_barrier_tree_snapshot_pages(
         tree: &cityg_api_client::BarrierPublicTree,
-        history_commitment: &HistoryCommitment,
+        ticket: &cityg_api_client::MergeTicket,
     ) -> Vec<MockResponse> {
         const MOCK_BARRIER_HELPER_PAGE_LIMIT: usize = 512;
 
@@ -3843,7 +4088,7 @@ mod tests {
         if total_entries <= MOCK_BARRIER_HELPER_PAGE_LIMIT {
             return vec![MockResponse::proto_bytes(encode_barrier_tree_snapshot(
                 tree,
-                history_commitment,
+                ticket,
                 0,
                 None,
                 tree.pk_entries.clone(),
@@ -3858,7 +4103,7 @@ mod tests {
                 .then(|| u32::try_from(end).expect("paginated tree entry offset fits in u32"));
             responses.push(MockResponse::proto_bytes(encode_barrier_tree_snapshot(
                 tree,
-                history_commitment,
+                ticket,
                 u32::try_from(offset).expect("paginated tree entry offset fits in u32"),
                 next_entry_offset,
                 tree.pk_entries[offset..end].to_vec(),
@@ -3866,45 +4111,6 @@ mod tests {
             offset = end;
         }
         responses
-    }
-
-    fn encode_join_records(
-        records: &[BarrierJoinRecord],
-        history_commitment: &HistoryCommitment,
-    ) -> Vec<u8> {
-        let total_entries = u32::try_from(records.len()).expect("join records fit in u32");
-        BarrierResolveJoinsSinceResponsePb {
-            records: records
-                .iter()
-                .map(|record| BarrierJoinLeafRecordPb {
-                    device_pk: record.device_pk.clone(),
-                    leaf_index: record.leaf_index,
-                    ek_leaf: record.ek_leaf.clone(),
-                })
-                .collect(),
-            history_view_id: history_commitment.history_view_id.to_vec(),
-            history_commitment: Some(encode_history_commitment(history_commitment)),
-            page_offset: 0,
-            next_page_offset: None,
-            total_entries,
-        }
-        .encode_to_vec()
-    }
-
-    fn encode_revoked_leaf_indices(
-        indices: &[u32],
-        history_commitment: &HistoryCommitment,
-    ) -> Vec<u8> {
-        let total_entries = u32::try_from(indices.len()).expect("revoked indices fit in u32");
-        BarrierResolveRevokedLeavesResponsePb {
-            leaf_indices: indices.to_vec(),
-            history_view_id: history_commitment.history_view_id.to_vec(),
-            history_commitment: Some(encode_history_commitment(history_commitment)),
-            page_offset: 0,
-            next_page_offset: None,
-            total_entries,
-        }
-        .encode_to_vec()
     }
 
     #[test]
@@ -5398,10 +5604,10 @@ mod tests {
             }
             Err(err) => err,
         };
+        let detail = format!("{err:#}");
         assert!(
-            err.to_string()
-                .contains("join finalize merge ticket unexpectedly contained SRX payload"),
-            "unexpected error: {err}"
+            detail.contains("merge ticket artifact response field mismatch"),
+            "unexpected detail: {detail}"
         );
 
         handle.abort();
@@ -5428,24 +5634,15 @@ mod tests {
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                encode_barrier_tree_snapshot_pages(
-                    &fixture.barrier_tree_snapshot,
-                    &fixture.ticket.current_history_commitment,
-                ),
+                proto_bytes_responses(fixture.barrier_tree_snapshot_pages_raw.as_slice()),
             ),
             (
                 "/v1/barrier/resolve_joins_since",
-                vec![MockResponse::proto_bytes(encode_join_records(
-                    fixture.join_records.as_slice(),
-                    &fixture.ticket.current_history_commitment,
-                ))],
+                proto_bytes_responses(fixture.join_records_pages_raw.as_slice()),
             ),
             (
                 "/v1/barrier/resolve_revoked_leaves",
-                vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
-                    fixture.revoked_leaf_indices.as_slice(),
-                    &fixture.ticket.current_history_commitment,
-                ))],
+                proto_bytes_responses(fixture.revoked_leaf_indices_pages_raw.as_slice()),
             ),
             (
                 "/v1/pivot/refresh",
@@ -5497,24 +5694,15 @@ mod tests {
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                encode_barrier_tree_snapshot_pages(
-                    &fixture.barrier_tree_snapshot,
-                    &ticket.current_history_commitment,
-                ),
+                proto_bytes_responses(fixture.barrier_tree_snapshot_pages_raw.as_slice()),
             ),
             (
                 "/v1/barrier/resolve_joins_since",
-                vec![MockResponse::proto_bytes(encode_join_records(
-                    fixture.join_records.as_slice(),
-                    &ticket.current_history_commitment,
-                ))],
+                proto_bytes_responses(fixture.join_records_pages_raw.as_slice()),
             ),
             (
                 "/v1/barrier/resolve_revoked_leaves",
-                vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
-                    fixture.revoked_leaf_indices.as_slice(),
-                    &ticket.current_history_commitment,
-                ))],
+                proto_bytes_responses(fixture.revoked_leaf_indices_pages_raw.as_slice()),
             ),
             ("/v1/pivot/refresh", vec![MockResponse::empty_proto()]),
             ("/v1/accept_epoch", vec![MockResponse::empty_proto()]),
@@ -5523,13 +5711,19 @@ mod tests {
 
         let mut session = fixture.session;
         session.server_url = server_url;
-        let finalized = perform_join_finalize(session).await?;
+        let err = match perform_join_finalize(session).await {
+            Ok(_) => {
+                return Err(anyhow!("tampered zero n_max ticket should fail closed"));
+            }
+            Err(err) => err,
+        };
         assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 1);
-        assert_eq!(
-            finalized.barrier_version,
-            ticket.barrier_version.saturating_add(1)
+        let detail = format!("{err:#}");
+        assert!(
+            detail.contains("barrier n_max must be a non-zero power of two")
+                || detail.contains("merge ticket artifact barrier state mismatch"),
+            "unexpected detail: {detail}"
         );
-        assert_ne!(finalized.k_barrier, [0u8; 32]);
 
         handle.abort();
         let _ = handle.await;
@@ -5888,32 +6082,24 @@ mod tests {
         let mut bad_ticket = fixture.ticket.clone();
         bad_ticket.cover_leaf_index = barrier_n_max;
 
-        let state = LeaveMockState::new([
-            (
-                "/v1/rooms/merge_ticket",
-                vec![MockResponse::proto_bytes(encode_merge_ticket(&bad_ticket)?)],
-            ),
-            (
-                "/v1/barrier/fetch_public_tree",
-                encode_barrier_tree_snapshot_pages(
-                    &fixture.barrier_tree_snapshot,
-                    &bad_ticket.current_history_commitment,
-                ),
-            ),
-        ]);
+        let state = LeaveMockState::new([(
+            "/v1/rooms/merge_ticket",
+            vec![MockResponse::proto_bytes(encode_merge_ticket(&bad_ticket)?)],
+        )]);
         let (server_url, handle) = start_leave_mock_server(state.clone()).await?;
 
         let mut session = fixture.session;
         session.server_url = server_url;
         let err = perform_leave(&session, false)
             .await
-            .expect_err("out-of-range cover leaf must fail");
+            .expect_err("tampered out-of-range cover leaf must fail closed");
+        let detail = format!("{err:#}");
         assert!(
-            err.to_string()
-                .contains("cover_leaf_index out of range for barrier tree"),
-            "unexpected error: {err}"
+            detail.contains("merge ticket cover_leaf_index out of range"),
+            "unexpected detail: {detail}"
         );
         assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 1);
+        assert_eq!(state.call_count("/v1/barrier/fetch_public_tree"), 0);
 
         handle.abort();
         let _ = handle.await;
@@ -5923,22 +6109,23 @@ mod tests {
     #[tokio::test]
     async fn perform_leave_rejects_barrier_snapshot_nmax_mismatch() -> Result<()> {
         let fixture = capture_leave_fixture().await?;
-        let mut bad_ticket = fixture.ticket.clone();
-        bad_ticket.n_max = 0;
         let mut bad_snapshot = fixture.barrier_tree_snapshot.clone();
-        bad_snapshot.n_max = DEFAULT_BARRIER_N_MAX + 1;
+        bad_snapshot.n_max = if fixture.ticket.n_max <= 1 {
+            2
+        } else {
+            fixture.ticket.n_max.saturating_mul(2)
+        };
 
         let state = LeaveMockState::new([
             (
                 "/v1/rooms/merge_ticket",
-                vec![MockResponse::proto_bytes(encode_merge_ticket(&bad_ticket)?)],
+                vec![MockResponse::proto_bytes(encode_merge_ticket(
+                    &fixture.ticket,
+                )?)],
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                encode_barrier_tree_snapshot_pages(
-                    &bad_snapshot,
-                    &bad_ticket.current_history_commitment,
-                ),
+                encode_barrier_tree_snapshot_pages(&bad_snapshot, &fixture.ticket),
             ),
         ]);
         let (server_url, handle) = start_leave_mock_server(state).await?;
@@ -5948,10 +6135,12 @@ mod tests {
         let err = perform_leave(&session, false)
             .await
             .expect_err("n_max mismatch must fail");
+        let detail = format!("{err:#}");
         assert!(
-            err.to_string()
-                .contains("barrier tree snapshot n_max mismatch"),
-            "unexpected error: {err}"
+            detail.contains(
+                "fetch public tree response deployment_profile_manifest barrier config mismatch"
+            ),
+            "unexpected detail: {detail}"
         );
 
         handle.abort();
@@ -5962,40 +6151,25 @@ mod tests {
     #[tokio::test]
     async fn perform_leave_skips_refresh_conflict_and_retries_pristine_bundle() -> Result<()> {
         let fixture = capture_leave_fixture().await?;
-        let mut adjusted_ticket = fixture.ticket.clone();
-        if let Some(first_parity) = adjusted_ticket.parities.first_mut() {
-            first_parity.vrf_proof = vec![0xFA, 0xCE, 0x01];
-            first_parity.fs_capss = vec![0xBE, 0xEF, 0x02];
-            first_parity.proofs_commit = [0xAC; 32];
-        }
 
         let state = LeaveMockState::new([
             (
                 "/v1/rooms/merge_ticket",
                 vec![MockResponse::proto_bytes(encode_merge_ticket(
-                    &adjusted_ticket,
+                    &fixture.ticket,
                 )?)],
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                encode_barrier_tree_snapshot_pages(
-                    &fixture.barrier_tree_snapshot,
-                    &adjusted_ticket.current_history_commitment,
-                ),
+                proto_bytes_responses(fixture.barrier_tree_snapshot_pages_raw.as_slice()),
             ),
             (
                 "/v1/barrier/resolve_joins_since",
-                vec![MockResponse::proto_bytes(encode_join_records(
-                    fixture.join_records.as_slice(),
-                    &adjusted_ticket.current_history_commitment,
-                ))],
+                proto_bytes_responses(fixture.join_records_pages_raw.as_slice()),
             ),
             (
                 "/v1/barrier/resolve_revoked_leaves",
-                vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
-                    fixture.revoked_leaf_indices.as_slice(),
-                    &adjusted_ticket.current_history_commitment,
-                ))],
+                proto_bytes_responses(fixture.revoked_leaf_indices_pages_raw.as_slice()),
             ),
             (
                 "/v1/pivot/refresh",
@@ -6075,24 +6249,15 @@ mod tests {
             ),
             (
                 "/v1/barrier/fetch_public_tree",
-                encode_barrier_tree_snapshot_pages(
-                    &fixture.barrier_tree_snapshot,
-                    &fixture.ticket.current_history_commitment,
-                ),
+                proto_bytes_responses(fixture.barrier_tree_snapshot_pages_raw.as_slice()),
             ),
             (
                 "/v1/barrier/resolve_joins_since",
-                vec![MockResponse::proto_bytes(encode_join_records(
-                    fixture.join_records.as_slice(),
-                    &fixture.ticket.current_history_commitment,
-                ))],
+                proto_bytes_responses(fixture.join_records_pages_raw.as_slice()),
             ),
             (
                 "/v1/barrier/resolve_revoked_leaves",
-                vec![MockResponse::proto_bytes(encode_revoked_leaf_indices(
-                    fixture.revoked_leaf_indices.as_slice(),
-                    &fixture.ticket.current_history_commitment,
-                ))],
+                proto_bytes_responses(fixture.revoked_leaf_indices_pages_raw.as_slice()),
             ),
             ("/v1/pivot/refresh", vec![MockResponse::empty_proto()]),
             (
