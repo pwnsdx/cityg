@@ -5622,7 +5622,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_history_authority_extension_accepts_empty_local_and_global_extensions()
+    fn parse_history_authority_extension_accepts_empty_legacy_local_and_global_extensions()
     -> Result<(), String> {
         assert_eq!(
             parse_history_authority_extension("", false).map_err(|err| err.to_string())?,

@@ -500,6 +500,8 @@ message JoinTicketResponse {
 Base-profile notes:
 - `history_authority_extension` MUST be present and MUST equal `global-history-authority-v1` on successful responses.
 - In this base profile, `global-history-authority-v1` means one deployment-global authenticated history authority. It does not imply federated cross-deployment consensus by itself.
+- `local-history-authority-v1` is retained only for explicit non-base legacy/test-only compatibility paths and is not a valid value for base-profile responses.
+- Reserved future stronger-profile identifiers such as `witnessed-full-verification-v1` or `federated-history-authority-v1` are not defined by the current base profile and MUST be rejected unless separately negotiated by another profile document.
 - `provisioning_artifact` MUST be non-empty and MUST be verified before a client consumes the delivered current-state provisioning fields.
 - `deployment_profile_manifest` MUST be non-empty and MUST be verified before a client consumes
   delivered profile/config fields such as `n_max`, `max_barrier_update_bytes`, and the FLG
@@ -602,6 +604,9 @@ any accompanying `history_authority_descriptor`,
 field MUST equal `"global-history-authority-v1"`.
 In this base profile, that extension is deployment-global, not federated across independent
 deployments.
+`"local-history-authority-v1"` is legacy/test-only outside the base profile. Stronger future
+identifiers such as `"witnessed-full-verification-v1"` or `"federated-history-authority-v1"` are
+reserved but unsupported in the current profile.
 `merge_ticket_artifact` MUST be present and MUST be verified before the client consumes any
 delivered current-state/helper field from the merge/expel ticket. In the base profile, that
 artifact is signed under the negotiated history-authority extension and binds the current

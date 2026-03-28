@@ -179,8 +179,10 @@ Summary:
 - Bounded and crash-safe anti-replay release path:
   `docs/specs.md:616-638`, `crates/cityg-gui/src/message_crypto.rs:9-120`, `crates/cityg-gui/src/native/network_messages.rs:107-118,147-149,225`, `crates/cityg-gui/src/native/session_fetch.rs:119-175`, `crates/cityg-gui/src/native/tests/mod.rs:2702-2753`.
 
-## Highest-priority remaining work
+## Reserved Future-Profile Work
 
-1. Decide whether a future stronger profile should add independent remote attestation of the client's FULL-verification path beyond the current `header[181]` helper-state binding.
-2. Decide whether `global-history-authority-v1` should remain deployment-global append-only or grow a federated / multi-witness non-equivocation layer as a future stronger profile.
-3. Decide whether the remaining non-base `local-history-authority-v1` compatibility path should stay supported or be explicitly demoted to legacy/test-only scope.
+The current base profile is now explicit on the remaining scope boundaries:
+
+1. `header[181]` stays an exact attested-helper/current-state binding in this profile. A future stronger profile MAY define independent remote attestation of the client's FULL-verification path (for example under a reserved identifier such as `witnessed-full-verification-v1`), but that is not part of the current base profile.
+2. `global-history-authority-v1` is intentionally deployment-global append-only in this profile. A future stronger profile MAY add federated / multi-witness non-equivocation or stronger finality (for example under a reserved identifier such as `federated-history-authority-v1`), but that is not part of the current base profile.
+3. `local-history-authority-v1` is now treated as legacy/test-only non-base compatibility, not as an alternative production base-profile target.

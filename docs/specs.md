@@ -199,7 +199,7 @@ Shared authenticated-view rule (normative):
 * If the deployment cannot provide authenticated completeness/finality for one requested result inside its `HistoryAuthorityScope`, it MUST return an authenticated "insufficient history / not available / pending" style outcome rather than silently omitting records and claiming success.
 * The base profile REQUIRES `global-history-authority-v1` on join/merge/provisioning/helper/lookup surfaces that carry authenticated current-state or helper objects.
 * Therefore A), B), and C) MUST carry non-empty `helper_completeness_attestation` values verified under one negotiated `HistoryAuthorityDescriptor`.
-* `local-history-authority-v1` remains defined as a non-base optional extension for explicitly scope-local deployments and tests; clients enforcing the base profile MUST reject it on base-profile API/wire paths.
+* `local-history-authority-v1` remains defined only as a non-base legacy/test-only extension for explicitly scope-local deployments, fixtures, and compatibility tests; clients enforcing the base profile MUST reject it on base-profile API/wire paths.
 * API/wire surfaces that carry `HistoryAuthorityDescriptor`, `global_history_attestation`, `current_global_history_attestation`, or `helper_completeness_attestation` MUST also carry an explicit extension identifier string `history_authority_extension`.
 * In the base profile, `history_authority_extension` MUST equal exactly `"global-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
 * When `local-history-authority-v1` is explicitly negotiated outside the base profile, `history_authority_extension` MUST equal exactly `"local-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
@@ -268,8 +268,8 @@ where:
 The authenticated response MUST bind `merge_locator`, `status`, `history_commitment`, and any populated `accepted_*` fields to the returned `history_view_id`.
 Implementations MAY store additional stable identifiers, but any such identifier MUST be injectively bound to `merge_locator` within `gid`; it MUST NOT identify two distinct merge attempts.
 
-E) Optional local history authority extension (not part of base profile)
-Deployments MAY negotiate `local-history-authority-v1`, a deployment-local extension that strengthens one `HistoryAuthorityScope` with explicit signed objects for helper completeness, current-state attestation, and server-verifiable FULL-verification receipts. It does NOT claim federated/global canonity across scopes.
+E) Optional local history authority extension (legacy/test-only; not part of base profile)
+Deployments MAY negotiate `local-history-authority-v1` only for explicitly scope-local legacy compatibility paths, fixtures, and tests. It strengthens one `HistoryAuthorityScope` with explicit signed objects for helper completeness, current-state attestation, and server-verifiable FULL-verification receipts, but it is not the recommended production profile and it does NOT claim federated/global canonity across scopes.
 Requirements on that extension:
 * One negotiated `HistoryAuthorityDescriptor` object MUST identify the scope and the public verification key for that scope-local history authority.
 * `HistoryAuthorityDescriptor := [scope_id:bstr32, public_key:bstr]`.
@@ -285,6 +285,7 @@ Requirements on that extension:
 * `helper_kind` MUST be one of `resolve_revoked_leaves`, `resolve_joins_since`, or `fetch_public_tree`.
 * When this extension is negotiated, any join/merge/provisioning artifact that carries current-state helper payloads for a client decision SHOULD also carry the same `HistoryAuthorityDescriptor` and matching scope-local attestation objects for those helper payloads.
 * This extension proves append-only correlation, current-state binding, and helper-page completeness only inside one `HistoryAuthorityScope`. It does NOT, by itself, prove non-equivocation across multiple servers, independent witnesses, or any stronger globally canonical finality.
+* Production deployments conforming to the base profile defined by this document MUST prefer `global-history-authority-v1` instead. `local-history-authority-v1` is retained only so existing tests and explicitly negotiated non-base compatibility paths have a stable identifier.
 
 F) Deployment-global history authority (REQUIRED in base profile)
 The base profile REQUIRES `global-history-authority-v1`, a deployment-global extension that lifts one whole deployment onto one authenticated append-only history authority. It is stronger than `local-history-authority-v1` because it defines one deployment-global attested lineage, but it still does NOT claim federated cross-deployment consensus.
@@ -309,6 +310,10 @@ Security-scope clarifications (normative):
 * The signed artifacts defined by this document commit only the fields they explicitly name: `provisioning_artifact`, `merge_ticket_artifact`, and `deployment_profile_manifest` cover the client-consumed provisioning/helper/profile fields carried by those surfaces. They do NOT, by themselves, commit broader admin/governance state unless another normative document or negotiated extension explicitly adds those fields.
 * The base profile is fail-closed for safety inside one `HistoryAuthorityScope`; it does NOT guarantee liveness or progress when that authority withholds snapshots/history or otherwise refuses to serve authenticated helper material.
 * Deployment-global non-equivocation across multiple independently operated history authorities is out of profile unless a stronger extension explicitly defines it.
+* Reserved stronger-profile identifiers:
+  * `witnessed-full-verification-v1` MAY be defined by a future profile to add independently authenticated remote attestation of the author's FULL-verification path beyond `header[181]`'s current helper-state binding semantics.
+  * `federated-history-authority-v1` MAY be defined by a future profile to add multi-witness or cross-deployment non-equivocation/finality stronger than `global-history-authority-v1`.
+* The current base profile does not define either reserved stronger-profile identifier. Implementations receiving them today MUST reject them as unsupported unless another negotiated profile explicitly defines them.
 
 Snapshot-auth failure handling (normative; 960.9 wiring):
 If FetchBarrierPublicTree(kem_tree_hash_after) returns pk_entries with TreeHash(root_node) != kem_tree_hash_after, the caller MUST treat the server as faulty/active, MUST NOT proceed with barrier_update creation/activation/verification that depends on that tree, and MUST surface local diagnostic code 960.9 barrier_tree_snapshot_auth_failure.
