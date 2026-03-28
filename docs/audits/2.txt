@@ -1,5 +1,9 @@
 2. Crypto Binding / Downgrade / Cut-and-Paste (COMPLETED)
 
+Note de lecture canonique:
+- Ce fichier conserve volontairement les notes historiques de tranche.
+- En cas de désaccord entre des commentaires intermédiaires et l'état actuel du repo, la section finale `Commentaires Codex (..., final coherence)` de ce fichier et `/Users/admin/Desktop/Repositories/cityg/docs/audits/final-verification-report-2026-03-26.md` font foi.
+
 Tu es un cryptographic protocol reviewer focalisé sur les binding gaps, downgrade paths, replay cross-context et substitution d’artefacts.
 
 Tu n’as accès qu’à:
