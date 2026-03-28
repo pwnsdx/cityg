@@ -19,6 +19,12 @@ Verification method:
 - Used existing targeted tests as proof anchors where they exist.
 - Final proof policy for this report: every `Closed` or `Reclassified` item below is anchored to at least one concrete code and/or test location in the current repo, not only to `docs/specs.md`.
 
+Revalidation addendum (2026-03-28):
+- Re-parsed all `51` final findings from this report and re-checked their current proof anchors against the repo state.
+- Every current finding entry still resolves to at least one live `crates/...` proof anchor in the repo.
+- Every cited `docs/...`, `crates/...`, and `proto` location referenced by the final verdict blocks still exists, and all cited line numbers remain in-bounds.
+- No final verdict required reopening during this revalidation pass.
+
 Scope-hardening addendum (same date, later tranche):
 - `docs/specs.md` now explicitly defines `HistoryAuthorityScope` and states that authenticated acceptance/finality is scoped to one such authority, not to an implicit global/federated consensus object.
 - `docs/specs.md` now also states explicitly that `current_barrier_full_verified` is a client-local predicate and that `header[180]` proves helper-state coherence, not FULL verification to the server.
