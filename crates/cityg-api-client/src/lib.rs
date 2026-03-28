@@ -6863,6 +6863,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn barrier_resolve_revoked_leaves_rejects_local_history_authority_in_base_profile()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
+        let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
+        let deployment_profile_manifest = build_test_deployment_profile_manifest(
+            &authority,
+            LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            &[0x41; 32],
+            EXPECTED_PROFILE_VERSION,
+            8,
+            1_048_576,
+            &fs_forward_leap_policy,
+        );
+        let app = Router::new().route(
+            "/v1/barrier/resolve_revoked_leaves",
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let deployment_profile_manifest = deployment_profile_manifest.clone();
+                async move {
+                    encode_proto(BarrierResolveRevokedLeavesResponse {
+                        leaf_indices: vec![1, 2],
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE1, 0x00, 7,
+                        )),
+                        page_offset: 0,
+                        next_page_offset: None,
+                        total_entries: 2,
+                        helper_completeness_attestation: Vec::new(),
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                        history_authority_extension: LOCAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                        n_max: 8,
+                        max_barrier_update_bytes: 1_048_576,
+                        fs_forward_leap_policy: Some(fs_forward_leap_policy),
+                        deployment_profile_manifest,
+                    })
+                }
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_resolve_revoked_leaves(
+                "4141414141414141414141414141414141414141414141414141414141414141",
+                &[0xCC; 32],
+            )
+            .await
+            .expect_err("local history authority must be rejected on base-profile helper");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("global-history-authority-v1")
+                    && message.contains("base profile")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn barrier_resolve_joins_since_rejects_missing_deployment_profile_manifest()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -6927,6 +7006,89 @@ mod tests {
         assert!(matches!(
             err,
             Error::Parse(message) if message.contains("missing deployment_profile_manifest")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn barrier_resolve_joins_since_rejects_local_history_authority_in_base_profile()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
+        let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
+        let deployment_profile_manifest = build_test_deployment_profile_manifest(
+            &authority,
+            LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            &[0x41; 32],
+            EXPECTED_PROFILE_VERSION,
+            8,
+            1_048_576,
+            &fs_forward_leap_policy,
+        );
+        let app = Router::new().route(
+            "/v1/barrier/resolve_joins_since",
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let deployment_profile_manifest = deployment_profile_manifest.clone();
+                async move {
+                    encode_proto(BarrierResolveJoinsSinceResponse {
+                        records: vec![pb::BarrierJoinLeafRecord {
+                            device_pk: vec![0xAA; 32],
+                            leaf_index: 9,
+                            ek_leaf: vec![0xBB; 1184],
+                        }],
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE1, 0x00, 7,
+                        )),
+                        page_offset: 0,
+                        next_page_offset: None,
+                        total_entries: 1,
+                        helper_completeness_attestation: Vec::new(),
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                        history_authority_extension: LOCAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                        n_max: 8,
+                        max_barrier_update_bytes: 1_048_576,
+                        fs_forward_leap_policy: Some(fs_forward_leap_policy),
+                        deployment_profile_manifest,
+                    })
+                }
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_resolve_joins_since(
+                "4141414141414141414141414141414141414141414141414141414141414141",
+                0,
+            )
+            .await
+            .expect_err("local history authority must be rejected on base-profile helper");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("global-history-authority-v1")
+                    && message.contains("base profile")
         ));
 
         handle.abort();
@@ -7002,6 +7164,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn barrier_fetch_public_tree_rejects_local_history_authority_in_base_profile()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
+        let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
+        let deployment_profile_manifest = build_test_deployment_profile_manifest(
+            &authority,
+            LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            &[0x41; 32],
+            EXPECTED_PROFILE_VERSION,
+            8,
+            1_048_576,
+            &fs_forward_leap_policy,
+        );
+        let app = Router::new().route(
+            "/v1/barrier/fetch_public_tree",
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let deployment_profile_manifest = deployment_profile_manifest.clone();
+                async move {
+                    encode_proto(BarrierFetchPublicTreeResponse {
+                        n_max: 8,
+                        kem_tree_hash_after: vec![0xCC; 32],
+                        pk_entries: vec![Vec::new(); 15],
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE1, 0x00, 7,
+                        )),
+                        entry_offset: 0,
+                        next_entry_offset: None,
+                        total_entries: 15,
+                        helper_completeness_attestation: Vec::new(),
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                        history_authority_extension: LOCAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                        max_barrier_update_bytes: 1_048_576,
+                        fs_forward_leap_policy: Some(fs_forward_leap_policy),
+                        deployment_profile_manifest,
+                    })
+                }
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_fetch_public_tree(
+                "4141414141414141414141414141414141414141414141414141414141414141",
+                &[0xCC; 32],
+            )
+            .await
+            .expect_err("local history authority must be rejected on base-profile helper");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("global-history-authority-v1")
+                    && message.contains("base profile")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn barrier_lookup_merge_acceptance_rejects_missing_deployment_profile_manifest()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -7065,6 +7307,88 @@ mod tests {
         assert!(matches!(
             err,
             Error::Parse(message) if message.contains("missing deployment_profile_manifest")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn barrier_lookup_merge_acceptance_rejects_local_history_authority_in_base_profile()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE2; 32],
+            prev_history_commitment_id: [0xE1; 32],
+            history_seq: 8,
+        };
+        let authority =
+            build_test_history_authority(history_commitment, [0x41; 32], 11, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
+        let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
+        let deployment_profile_manifest = build_test_deployment_profile_manifest(
+            &authority,
+            LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            &[0x41; 32],
+            EXPECTED_PROFILE_VERSION,
+            8,
+            1_048_576,
+            &fs_forward_leap_policy,
+        );
+        let app = Router::new().route(
+            "/v1/barrier/lookup_merge_acceptance",
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let deployment_profile_manifest = deployment_profile_manifest.clone();
+                async move {
+                    encode_proto(BarrierLookupMergeAcceptanceResponse {
+                        status: PbMergeAcceptanceStatus::Accepted as i32,
+                        history_view_id: vec![0xD1; 32],
+                        accepted_barrier_version: Some(11),
+                        accepted_fs_ec: Some(22),
+                        accepted_reason: Some(1),
+                        accepted_digest: Some(vec![0xDD; 32]),
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE2, 0xE1, 8,
+                        )),
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                        history_authority_extension: LOCAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                        n_max: 8,
+                        max_barrier_update_bytes: 1_048_576,
+                        fs_forward_leap_policy: Some(fs_forward_leap_policy),
+                        deployment_profile_manifest,
+                    })
+                }
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_lookup_merge_acceptance(
+                "4141414141414141414141414141414141414141414141414141414141414141",
+                11,
+                &[0xAB; 32],
+                &[0xCD; 32],
+            )
+            .await
+            .expect_err("local history authority must be rejected on base-profile helper");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("global-history-authority-v1")
+                    && message.contains("base profile")
         ));
 
         handle.abort();

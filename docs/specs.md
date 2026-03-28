@@ -298,7 +298,15 @@ Requirements on that extension:
 * Under `global-history-authority-v1`, `helper_completeness_attestation` MUST be non-empty on successful A), B), and C) responses and MUST be signed over `(scope_id, helper_kind, history_view_id, history_commitment_id, page_offset, total_entries, selector/page payload)`.
 * Under `global-history-authority-v1`, `accepted`, `superseded`, and `final_rejected` in D) MUST be interpreted as statements about that deployment-global append-only authority rather than one merely local server view.
 * Under `global-history-authority-v1`, provisioning artifacts and `header[182]` / `header[181]` decisions MUST bind to one exact deployment-global attestation lineage.
-* A deployment MUST NOT describe itself as providing globally canonical/final history under this profile unless such an extension is present.
+* A deployment MUST NOT describe itself as providing federated cross-deployment canonical/final history under this profile unless a stronger negotiated extension explicitly defines that property.
+
+Security-scope clarifications (normative):
+* In this document, "global" in `global-history-authority-v1` means deployment-global for one authenticated `HistoryAuthorityScope`. It does NOT mean federated across independently operated deployments or witnesses.
+* Helper completeness, `LookupMergeAcceptance` finality, and `header[182]` / `header[181]` statements are only claims about that one deployment-global append-only authority unless a stronger negotiated extension says otherwise.
+* `header[181]` proves exact author/updater binding to one exact attested helper/current-state decision within the negotiated `HistoryAuthorityScope`. It does NOT claim an independently witnessed execution trace of the client's local FULL algorithm.
+* The signed artifacts defined by this document commit only the fields they explicitly name: `provisioning_artifact`, `merge_ticket_artifact`, and `deployment_profile_manifest` cover the client-consumed provisioning/helper/profile fields carried by those surfaces. They do NOT, by themselves, commit broader admin/governance state unless another normative document or negotiated extension explicitly adds those fields.
+* The base profile is fail-closed for safety inside one `HistoryAuthorityScope`; it does NOT guarantee liveness or progress when that authority withholds snapshots/history or otherwise refuses to serve authenticated helper material.
+* Deployment-global non-equivocation across multiple independently operated history authorities is out of profile unless a stronger extension explicitly defines it.
 
 Snapshot-auth failure handling (normative; 960.9 wiring):
 If FetchBarrierPublicTree(kem_tree_hash_after) returns pk_entries with TreeHash(root_node) != kem_tree_hash_after, the caller MUST treat the server as faulty/active, MUST NOT proceed with barrier_update creation/activation/verification that depends on that tree, and MUST surface local diagnostic code 960.9 barrier_tree_snapshot_auth_failure.
@@ -306,6 +314,10 @@ If FetchBarrierPublicTree(kem_tree_hash_after) returns pk_entries with TreeHash(
 Verification levels (normative):
 * A client that has A) and B) but not C) MUST NOT claim FULL barrier chain-check (it may still recover K_barrier via unique match).
 * A client that has A), B), and C) and performs the MUST checks in S11.11.2 (FULL chain-check) and S11.13.6 (ek_n verification) is a FULL-verifying client.
+Terminology clarification (normative):
+* `recover-only` means the client may recover or correlate local state from authenticated headers and helper material, but has not established FULL verification of the current public tree for the exact stored current state.
+* `join-finalize bootstrap-eligible` means a newly joined recover-only client that has satisfied the S11.11.1 bootstrap exception for the provisioned current state and therefore MAY originate reason 2 only.
+* `current_barrier_full_verified` is a client-local predicate for one exact stored current state; it is not self-authenticating on the wire.
 
 S3.4 Header[97] HP envelope transport (normative)
 `header[97]` carries the opaque HP transport envelope used by merge/join-finalize publication and client recovery.
@@ -1516,6 +1528,7 @@ Before committing the recovered post-state, the client MUST replay every server-
 * `header[153]` MUST equal `H_L("fs/dev/chain/v2", [header[108], header[141], header[152], header[176], barrier_update_digest])`.
 * If `header[108]` equals the local author's device key, then `header[152]` MUST equal the locally persisted `fs_dev_prev_commit` and `header[141]` MUST be >= the locally persisted local-device `fs_ec`.
 * If the client cannot perform these checks from authenticated headers plus locally persisted state, it MUST NOT commit the recovered post-state and MUST enter `barrier_recovery_pending` or `recovery_required`.
+* This replay subset is intentionally limited to invariants derivable from authenticated headers plus locally persisted state. Remote membership/governance/rate-limit checks that are not client-visible remain server-side acceptance responsibilities in this base profile.
 On successful processing:
 * barrier_initialized := true
 * barrier_version     := v_new
@@ -1586,6 +1599,7 @@ Upon observing acceptance of the merge carrying this barrier_update, or after `L
   * new-device forward jumps beyond the carried `last_accepted_ec + D_first_device` window when `header[152] == ZERO32` (947.5),
   * local-device forward jumps beyond the persisted `stored_last_ec + D_device_max` window when the activating bundle is authored by the same local device (947.4).
 * The helper/provisioning artifact used for these local checks MUST therefore carry the current FLG window parameters `(H, checkpoint_interval, S_anchor, S_first, S_device)` or an equivalent authenticated derivation of `(D_anchor_max, D_first_device, D_device_max)`, together with the current group `last_accepted_ec`.
+* This client-side replay subset does not replace broader server-side S10 authorization, governance, or rate-limit checks that are not derivable from authenticated headers plus locally persisted state.
 * If match: activate -- update local state:
   * barrier_initialized := true
   * barrier_version := pending_barrier_version

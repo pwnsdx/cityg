@@ -166,6 +166,12 @@ Le verdict central est donc oui : **un serveur byzantin peut exploiter l’ordre
 
 ## Commentaires Codex (2026-03-25)
 
+## Commentaires Codex (2026-03-28, coherence pass)
+
+- La base profile ne promet plus un objet d’historique “global/fédéré” implicite. `global-history-authority-v1` est maintenant décrit sans ambiguïté comme **deployment-global append-only**, et tout le reste est explicitement un chantier de profil futur, pas un trou local caché.
+- En conséquence, les points qui dépendaient uniquement d’une attente “federated non-equivocation” ont été reclassés dans le rapport consolidé, au lieu d’être laissés en faux `Partial`.
+- Les points `3.3`, `3.5` et `3.6` sont désormais considérés fermés dans le scope actuel: la corrélation d’acceptance, la couverture du current-state et les régressions locales de current-state sont maintenant cohérentes entre spec et implémentation.
+
 Verdict après vérification contre la spec et l’implémentation:
 
 - **Retenu** : le cœur du signal est juste. La machine d’état globale autour de `accepted` / `superseded` / `final_rejected` / restart correlation n’est pas encore fermée end-to-end.

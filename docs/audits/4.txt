@@ -168,6 +168,12 @@ J’ai audité uniquement `docs/specs.md` / **CITY-G Unified Spec v0.1.4** daté
 
 ## Commentaires Codex (2026-03-25)
 
+## Commentaires Codex (2026-03-28, coherence pass)
+
+- La spec distingue maintenant explicitement trois notions qui étaient auparavant mélangées: `recover-only`, `join-finalize bootstrap-eligible`, et `current_barrier_full_verified`.
+- `join_finalize` est désormais traité comme une exception bootstrap **server-checkable** distincte, et non comme une pseudo-preuve FULL implicite.
+- Le reste vraiment ouvert sur cet audit se réduit maintenant au point volontairement conservé en `Partial`: `header[181]` prouve l’attested-helper-state binding, mais pas encore une preuve indépendante que l’auteur a exécuté FULL plutôt qu’un path recover-only auto-signé.
+
 Verdict après vérification contre la spec et l’implémentation:
 
 - **Retenu et traité partiellement** : la provenance FULL/recover-only du state courant est maintenant explicitée dans la spec et déjà persistée dans l’implémentation via `current_barrier_full_verified`.

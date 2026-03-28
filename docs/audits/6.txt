@@ -155,6 +155,12 @@ Le pattern dominant ici n’est pas “crypto chère”; c’est “histoire exa
 
 ## Commentaires Codex (2026-03-25)
 
+## Commentaires Codex (2026-03-28, coherence pass)
+
+- Les bornes structurelles, la pagination helper, la rétention snapshot, les caps de payload et l’anti-replay durable sont maintenant fermés dans le scope actuel.
+- Le seul `Partial` conservé dans le rapport final est `6.4`: les snapshots déjà retenus/authentifiés ont un fast-path borné, mais un prédécesseur historique non retenu retombe encore sur un chemin whole-tree.
+- C’est maintenant un sujet de coût/optimisation protocolaire, pas un manque de garde-fous de sécurité de base.
+
 Verdict après vérification contre la spec et l’implémentation:
 
 - **Retenu et traité** : l’absence de plafond explicite sur `PayloadEnvelope.ct_payload`. La spec impose maintenant `MAX_CT_PAYLOAD_BYTES` / `MAX_PAYLOAD_ENVELOPE_BYTES`, et le code rejette explicitement les payloads trop gros côté client et côté API.

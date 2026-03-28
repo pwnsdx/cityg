@@ -172,6 +172,12 @@ Réponse courte à la question centrale: les manques les plus dangereux sont le 
 
 ## Commentaires Codex (2026-03-25)
 
+## Commentaires Codex (2026-03-28, coherence pass)
+
+- Tout le reste de cet audit est maintenant fermé ou reclassé dans le rapport consolidé.
+- Le seul vrai reste substantiel est `2.5`: la base profile sait maintenant vérifier la cohérence d’un `barrier_update` avec un helper-state attesté, mais elle ne sait toujours pas distinguer cryptographiquement un auteur FULL d’un auteur recover-only qui peut auto-signer la même vue attestée.
+- Ce point reste donc un chantier protocolaire réel, pas un écart de documentation.
+
 Verdict après vérification contre la spec et l’implémentation:
 
 - **Retenu et traité** : le point le plus solide était l’absence de revalidation explicite de `header[99]` après déchiffrement de `header[97]`. La spec l’impose maintenant explicitement et le code `msphf-orchestrator` le vérifiait déjà.

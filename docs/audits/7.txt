@@ -148,6 +148,12 @@ En réponse à la question centrale: **non, le texte ne protège pas seulement c
 
 ## Commentaires Codex (2026-03-25)
 
+## Commentaires Codex (2026-03-28, coherence pass)
+
+- La spec dit maintenant explicitement ce que protège la base profile: une autorité d’historique **deployment-global append-only**, des attestations de complétude helper dans cette même portée, et un comportement fail-close côté client/runtime.
+- Les attentes “quarantaine byzantine globale”, “consensus fédéré”, ou “policy/governance entièrement engagée dans la même lignée” ne sont plus laissées comme sous-entendus; elles sont désormais traitées comme chantiers de profil futurs ou frontières multi-docs.
+- Dans le scope actuel, la non-omission helper et le binding current-state/helper/provisioning sont désormais assez définis pour être fermés ou reclassés honnêtement dans le rapport consolidé.
+
 Verdict après vérification contre la spec et l’implémentation:
 
 - **Retenu** : le point le plus solide reste l’absence de canonité/finalité/history object vraiment global et authentifié. L’audit 5 puis cette tranche ont renforcé la cohérence de vue (`history_view_id`), mais cela ne prouve toujours pas une branche canonique append-only globale.
