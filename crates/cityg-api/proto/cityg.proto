@@ -341,6 +341,11 @@ message BarrierResolveRevokedLeavesResponse {
   bytes history_authority_descriptor = 8;
   bytes global_history_attestation = 9;
   string history_authority_extension = 10;
+  string profile_version = 11;
+  uint64 n_max = 12;
+  uint64 max_barrier_update_bytes = 13;
+  optional FsForwardLeapPolicy fs_forward_leap_policy = 14;
+  bytes deployment_profile_manifest = 15;
 }
 
 message BarrierJoinLeafRecord {
@@ -370,6 +375,11 @@ message BarrierResolveJoinsSinceResponse {
   bytes history_authority_descriptor = 8;
   bytes global_history_attestation = 9;
   string history_authority_extension = 10;
+  string profile_version = 11;
+  uint64 n_max = 12;
+  uint64 max_barrier_update_bytes = 13;
+  optional FsForwardLeapPolicy fs_forward_leap_policy = 14;
+  bytes deployment_profile_manifest = 15;
 }
 
 message BarrierFetchPublicTreeRequest {
@@ -394,6 +404,10 @@ message BarrierFetchPublicTreeResponse {
   bytes history_authority_descriptor = 10;
   bytes global_history_attestation = 11;
   string history_authority_extension = 12;
+  string profile_version = 13;
+  uint64 max_barrier_update_bytes = 14;
+  optional FsForwardLeapPolicy fs_forward_leap_policy = 15;
+  bytes deployment_profile_manifest = 16;
 }
 
 enum MergeAcceptanceStatus {
@@ -423,6 +437,11 @@ message BarrierLookupMergeAcceptanceResponse {
   bytes history_authority_descriptor = 8;
   bytes global_history_attestation = 9;
   string history_authority_extension = 10;
+  string profile_version = 11;
+  uint64 n_max = 12;
+  uint64 max_barrier_update_bytes = 13;
+  optional FsForwardLeapPolicy fs_forward_leap_policy = 14;
+  bytes deployment_profile_manifest = 15;
 }
 
 message HistoryCommitment {

@@ -2408,6 +2408,23 @@ impl CityGServer {
         self.roster.groups.get(gid).map(|state| state.n_max)
     }
 
+    pub fn barrier_max_barrier_update_bytes(&self, gid: &[u8]) -> Option<u64> {
+        self.roster
+            .groups
+            .get(gid)
+            .map(|state| u64::try_from(state.max_barrier_update_bytes).unwrap_or(u64::MAX))
+    }
+
+    pub fn fs_forward_leap_policy(&self) -> FsForwardLeapPolicy {
+        FsForwardLeapPolicy {
+            h: self.acceptance_options.fs_policy_config.h,
+            checkpoint_interval: self.acceptance_options.fs_policy_config.checkpoint_interval,
+            slack_anchor: self.acceptance_options.fs_policy_config.slack_anchor,
+            slack_first_device: self.acceptance_options.fs_policy_config.slack_first_device,
+            slack_device: self.acceptance_options.fs_policy_config.slack_device,
+        }
+    }
+
     pub fn lookup_merge_acceptance(
         &mut self,
         gid: &[u8; 32],

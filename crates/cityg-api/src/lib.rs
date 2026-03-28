@@ -2727,6 +2727,10 @@ async fn barrier_resolve_revoked_leaves(
         global_history_attestation,
         helper_completeness_attestation,
         history_authority_extension,
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_policy,
+        deployment_profile_manifest,
     ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
@@ -2765,12 +2769,33 @@ async fn barrier_resolve_revoked_leaves(
                 leaf_indices.as_slice(),
             )
             .map_err(ApiError::from)?;
+        let n_max = guard
+            .barrier_n_max(&gid)
+            .ok_or_else(|| ApiError::server_message("group n_max missing"))?;
+        let max_barrier_update_bytes = guard
+            .barrier_max_barrier_update_bytes(&gid)
+            .ok_or_else(|| ApiError::server_message("group max_barrier_update_bytes missing"))?;
+        let fs_forward_leap_policy = guard.fs_forward_leap_policy();
+        let deployment_profile_manifest = guard
+            .deployment_profile_manifest_bytes(
+                &gid,
+                API_PROFILE_VERSION,
+                guard.history_authority_extension_id(),
+                n_max,
+                max_barrier_update_bytes,
+                fs_forward_leap_policy,
+            )
+            .map_err(ApiError::from)?;
         (
             resolved,
             history_authority_descriptor,
             global_history_attestation,
             helper_completeness_attestation,
             guard.history_authority_extension_id().to_string(),
+            n_max,
+            max_barrier_update_bytes,
+            fs_forward_leap_policy,
+            deployment_profile_manifest,
         )
     };
     let (leaf_indices, page_offset, next_page_offset, total_entries) =
@@ -2791,6 +2816,11 @@ async fn barrier_resolve_revoked_leaves(
         history_authority_descriptor,
         global_history_attestation,
         history_authority_extension,
+        profile_version: API_PROFILE_VERSION.to_string(),
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
+        deployment_profile_manifest,
     };
     Ok(protobuf_response(&response))
 }
@@ -2819,6 +2849,10 @@ async fn barrier_resolve_joins_since(
         global_history_attestation,
         helper_completeness_attestation,
         history_authority_extension,
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_policy,
+        deployment_profile_manifest,
     ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
@@ -2857,12 +2891,33 @@ async fn barrier_resolve_joins_since(
                 records_page.as_slice(),
             )
             .map_err(ApiError::from)?;
+        let n_max = guard
+            .barrier_n_max(&gid)
+            .ok_or_else(|| ApiError::server_message("group n_max missing"))?;
+        let max_barrier_update_bytes = guard
+            .barrier_max_barrier_update_bytes(&gid)
+            .ok_or_else(|| ApiError::server_message("group max_barrier_update_bytes missing"))?;
+        let fs_forward_leap_policy = guard.fs_forward_leap_policy();
+        let deployment_profile_manifest = guard
+            .deployment_profile_manifest_bytes(
+                &gid,
+                API_PROFILE_VERSION,
+                guard.history_authority_extension_id(),
+                n_max,
+                max_barrier_update_bytes,
+                fs_forward_leap_policy,
+            )
+            .map_err(ApiError::from)?;
         (
             resolved,
             history_authority_descriptor,
             global_history_attestation,
             helper_completeness_attestation,
             guard.history_authority_extension_id().to_string(),
+            n_max,
+            max_barrier_update_bytes,
+            fs_forward_leap_policy,
+            deployment_profile_manifest,
         )
     };
     let (records_page, page_offset, next_page_offset, total_entries) =
@@ -2896,6 +2951,11 @@ async fn barrier_resolve_joins_since(
         history_authority_descriptor,
         global_history_attestation,
         history_authority_extension,
+        profile_version: API_PROFILE_VERSION.to_string(),
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
+        deployment_profile_manifest,
     };
     Ok(protobuf_response(&response))
 }
@@ -2931,6 +2991,9 @@ async fn barrier_fetch_public_tree(
         global_history_attestation,
         helper_completeness_attestation,
         history_authority_extension,
+        max_barrier_update_bytes,
+        fs_forward_leap_policy,
+        deployment_profile_manifest,
     ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
@@ -2963,12 +3026,29 @@ async fn barrier_fetch_public_tree(
                 pk_entries_page.as_slice(),
             )
             .map_err(ApiError::from)?;
+        let max_barrier_update_bytes = guard
+            .barrier_max_barrier_update_bytes(&gid)
+            .ok_or_else(|| ApiError::server_message("group max_barrier_update_bytes missing"))?;
+        let fs_forward_leap_policy = guard.fs_forward_leap_policy();
+        let deployment_profile_manifest = guard
+            .deployment_profile_manifest_bytes(
+                &gid,
+                API_PROFILE_VERSION,
+                guard.history_authority_extension_id(),
+                snapshot.n_max,
+                max_barrier_update_bytes,
+                fs_forward_leap_policy,
+            )
+            .map_err(ApiError::from)?;
         (
             snapshot,
             history_authority_descriptor,
             global_history_attestation,
             helper_completeness_attestation,
             guard.history_authority_extension_id().to_string(),
+            max_barrier_update_bytes,
+            fs_forward_leap_policy,
+            deployment_profile_manifest,
         )
     };
     let (pk_entries, entry_offset, next_entry_offset, total_entries) =
@@ -2991,6 +3071,10 @@ async fn barrier_fetch_public_tree(
         history_authority_descriptor,
         global_history_attestation,
         history_authority_extension,
+        profile_version: API_PROFILE_VERSION.to_string(),
+        max_barrier_update_bytes,
+        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
+        deployment_profile_manifest,
     };
     Ok(protobuf_response(&response))
 }
@@ -3033,6 +3117,10 @@ async fn barrier_lookup_merge_acceptance(
         history_authority_descriptor,
         global_history_attestation,
         history_authority_extension,
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_policy,
+        deployment_profile_manifest,
     ) = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
@@ -3063,11 +3151,32 @@ async fn barrier_lookup_merge_acceptance(
                 &kem_tree_hash_after,
             )
             .map_err(ApiError::from)?;
+        let n_max = guard
+            .barrier_n_max(&gid)
+            .ok_or_else(|| ApiError::server_message("group n_max missing"))?;
+        let max_barrier_update_bytes = guard
+            .barrier_max_barrier_update_bytes(&gid)
+            .ok_or_else(|| ApiError::server_message("group max_barrier_update_bytes missing"))?;
+        let fs_forward_leap_policy = guard.fs_forward_leap_policy();
+        let deployment_profile_manifest = guard
+            .deployment_profile_manifest_bytes(
+                &gid,
+                API_PROFILE_VERSION,
+                guard.history_authority_extension_id(),
+                n_max,
+                max_barrier_update_bytes,
+                fs_forward_leap_policy,
+            )
+            .map_err(ApiError::from)?;
         (
             record,
             history_authority_descriptor,
             global_history_attestation,
             guard.history_authority_extension_id().to_string(),
+            n_max,
+            max_barrier_update_bytes,
+            fs_forward_leap_policy,
+            deployment_profile_manifest,
         )
     };
 
@@ -3089,6 +3198,11 @@ async fn barrier_lookup_merge_acceptance(
         history_authority_descriptor,
         global_history_attestation,
         history_authority_extension,
+        profile_version: API_PROFILE_VERSION.to_string(),
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
+        deployment_profile_manifest,
     };
     Ok(protobuf_response(&response))
 }
@@ -6565,6 +6679,14 @@ mod tests {
             !decoded.helper_completeness_attestation.is_empty(),
             "joins-since response should carry helper completeness attestation under base-profile global authority"
         );
+        assert_eq!(decoded.profile_version, API_PROFILE_VERSION);
+        assert!(decoded.n_max > 0);
+        assert!(decoded.max_barrier_update_bytes > 0);
+        assert!(decoded.fs_forward_leap_policy.is_some());
+        assert!(
+            !decoded.deployment_profile_manifest.is_empty(),
+            "joins-since response should carry deployment_profile_manifest under base-profile global authority"
+        );
     }
 
     #[tokio::test]
@@ -6687,6 +6809,14 @@ mod tests {
             !revoked_decoded.helper_completeness_attestation.is_empty(),
             "revoked-leaves response should carry helper completeness attestation under base-profile global authority"
         );
+        assert_eq!(revoked_decoded.profile_version, API_PROFILE_VERSION);
+        assert!(revoked_decoded.n_max > 0);
+        assert!(revoked_decoded.max_barrier_update_bytes > 0);
+        assert!(revoked_decoded.fs_forward_leap_policy.is_some());
+        assert!(
+            !revoked_decoded.deployment_profile_manifest.is_empty(),
+            "revoked-leaves response should carry deployment_profile_manifest under base-profile global authority"
+        );
 
         let mut bad_tree_body = Vec::new();
         BarrierFetchPublicTreeRequest {
@@ -6769,6 +6899,13 @@ mod tests {
         assert!(
             !tree_decoded.helper_completeness_attestation.is_empty(),
             "fetch-public-tree response should carry helper completeness attestation under base-profile global authority"
+        );
+        assert_eq!(tree_decoded.profile_version, API_PROFILE_VERSION);
+        assert!(tree_decoded.max_barrier_update_bytes > 0);
+        assert!(tree_decoded.fs_forward_leap_policy.is_some());
+        assert!(
+            !tree_decoded.deployment_profile_manifest.is_empty(),
+            "fetch-public-tree response should carry deployment_profile_manifest under base-profile global authority"
         );
         assert_eq!(
             tree_decoded.global_history_attestation, revoked_decoded.global_history_attestation,
@@ -7406,6 +7543,14 @@ mod tests {
         assert_eq!(pending.accepted_digest, None);
         assert_ne!(pending.history_view_id, vec![0u8; 32]);
         assert!(pending.history_commitment.is_some());
+        assert_eq!(pending.profile_version, API_PROFILE_VERSION);
+        assert!(pending.n_max > 0);
+        assert!(pending.max_barrier_update_bytes > 0);
+        assert!(pending.fs_forward_leap_policy.is_some());
+        assert!(
+            !pending.deployment_profile_manifest.is_empty(),
+            "lookup response should carry deployment_profile_manifest under base-profile global authority"
+        );
 
         let err = barrier_lookup_merge_acceptance(
             State(state),

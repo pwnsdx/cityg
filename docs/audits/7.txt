@@ -515,3 +515,15 @@ Lecture consolidée:
 
 - cela ferme la partie “config/policy livrée sans objet signé dédié” du finding 7.6;
 - `7.6` reste néanmoins **Partial** parce que la policy/gouvernance complète et la lignée byzantine plus forte dépassent encore ce que ce manifest local ferme.
+
+## Commentaires Codex (2026-03-28, helper/lookup deployment profile manifest)
+
+Nouvelle passe spec + implémentation:
+
+- les réponses helper/current-state `ResolveRevokedLeaves`, `ResolveJoinsSince`, `FetchBarrierPublicTree` et `LookupMergeAcceptance` portent maintenant le même `deployment_profile_manifest` signé que les tickets join/merge;
+- le client vérifie ce manifest et refuse toute divergence inter-pages sur les helpers paginés.
+
+Lecture consolidée:
+
+- cela réduit encore `7.6` côté distribution de config/policy visible au client;
+- `7.6` reste honnêtement **Partial** tant que la policy/gouvernance complète n’est pas engagée dans la même lignée authentifiée et que la finalité globale reste un sujet de profil.

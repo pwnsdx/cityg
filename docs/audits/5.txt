@@ -379,3 +379,16 @@ Lecture consolidée:
 
 - cela réduit encore la malléabilité locale des paramètres de profile/config livrés sur join/merge;
 - `5.8` reste néanmoins **Partial** parce qu’on n’a toujours pas un manifest global unique couvrant l’ensemble du déploiement et de ses flows helpers/histoire, ni une canonité globale plus forte.
+
+## Commentaires Codex (2026-03-28, helper/lookup deployment profile manifest)
+
+Nouvelle passe spec + implémentation:
+
+- `ResolveRevokedLeaves`, `ResolveJoinsSince`, `FetchBarrierPublicTree` et `LookupMergeAcceptance` transportent maintenant eux aussi un `deployment_profile_manifest` signé;
+- chaque page d’un helper paginé doit porter exactement le même manifest, sinon le client refuse fail-closed;
+- le client vérifie désormais ce manifest avant de consommer les champs profile/config visibles sur ces réponses helper/current-state.
+
+Lecture consolidée:
+
+- la partie “config incohérente entre join/merge/helper/lookup” de `5.8` est maintenant fermée localement;
+- le reste byzantin/global continue d’être suivi dans les audits 3 et 7, mais ne relève plus de `5.8` lui-même.
