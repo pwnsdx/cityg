@@ -533,3 +533,18 @@ Lecture consolidée:
 
 - cela réduit encore `7.6` côté distribution de config/policy visible au client;
 - `7.6` reste honnêtement **Partial** tant que la policy/gouvernance complète n’est pas engagée dans la même lignée authentifiée et que la finalité globale reste un sujet de profil.
+
+--
+
+## Commentaires Codex (2026-03-28, final coherence)
+
+Dernière relecture spec + implémentation:
+
+- `7.4` n’est plus honnêtement un `Partial` dans le scope du profil courant. Les helpers A/B/C portent maintenant une complétude signée sous `global-history-authority-v1`, avec vérification fail-closed côté client et cohérence de page/manifest.
+- `7.6` n’est plus honnêtement un `Partial` local non plus. Le provisioning, les tickets merge/expel, les helpers et les lookups engagent maintenant leurs champs visibles côté client sous artefacts signés et sous un `deployment_profile_manifest` signé commun; le reste éventuel relève d’un engagement plus large de policy/gouvernance dans une lignée plus forte, donc d’un choix de profil, pas d’un décalage avec l’implémentation actuelle.
+- `7.1`, `7.5`, `7.6` et `7.7` doivent désormais être lus comme des frontières de scope assumées par le profil de base, pas comme des trous encore ouverts.
+
+Statut audit final:
+
+- **Closed**: 7.2, 7.3, 7.4
+- **Reclassified**: 7.1, 7.5, 7.6, 7.7

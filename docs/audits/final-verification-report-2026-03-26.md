@@ -2,6 +2,10 @@
 
 Scope: re-verify every finding from `docs/audits/1.txt` through `docs/audits/7.txt` against the current `docs/specs.md` and the current implementation.
 
+Canonical reading note:
+- The per-audit files intentionally retain historical tranche notes.
+- When older tranche commentary disagrees with the final current state, this report and the last `Commentaires Codex ... final coherence` section of each audit file are canonical.
+
 Status legend:
 - `Closed`: the original finding is now satisfied by the current spec and/or code, with concrete proof references.
 - `Partial`: materially improved, but the underlying protocol or implementation gap is not fully closed.
@@ -17,7 +21,7 @@ Verification method:
 Scope-hardening addendum (same date, later tranche):
 - `docs/specs.md` now explicitly defines `HistoryAuthorityScope` and states that authenticated acceptance/finality is scoped to one such authority, not to an implicit global/federated consensus object.
 - `docs/specs.md` now also states explicitly that `current_barrier_full_verified` is a client-local predicate and that `header[180]` proves helper-state coherence, not FULL verification to the server.
-- `docs/specs.md` now defines one concrete optional deployment-local extension, `local-history-authority-v1`, which carries a scope-local `HistoryAuthorityDescriptor`, helper completeness attestations for A/B/C, a scope-local attested `header[182]`, and a server-verifiable `header[181]` receipt bound to that attestation.
+- `docs/specs.md` now retains one concrete non-base legacy/test-only deployment-local extension, `local-history-authority-v1`, which carries a scope-local `HistoryAuthorityDescriptor`, helper completeness attestations for A/B/C, a scope-local attested `header[182]`, and a server-verifiable `header[181]` receipt bound to that attestation.
 - `docs/specs.md` now also defines one concrete deployment-global extension, `global-history-authority-v1`, which the base profile now requires on join/merge/provisioning/helper/lookup/current-state paths. It carries a deployment-global `HistoryAuthorityDescriptor`, deployment-global helper completeness attestations for A/B/C, a deployment-global attested `header[182]`, and a deployment-global interpretation of `LookupMergeAcceptance`.
 - The wire/API contract now carries an explicit `history_authority_extension` identifier on join/merge/helper/lookup responses; in the base profile it MUST equal `global-history-authority-v1`, and clients fail closed on empty/local/unknown values for base-profile paths.
 - `docs/specs.md`, the API server, the API client, and the GUI join paths now treat `header[181]` / `header[182]` as base-profile-required companions for authority-bound `barrier_update` decisions, not as forbidden extension-only headers.
@@ -32,6 +36,10 @@ Summary:
 - `Partial`: `0`
 - `Open`: `0`
 - `Reclassified`: `14`
+
+Current-scope interpretation:
+- No finding remains `Partial` or `Open` within the current base-profile scope implemented by this repo.
+- `Reclassified` items are future-profile work, multi-doc boundaries, or stronger guarantees intentionally outside the current profile.
 
 ## Audit 1
 
