@@ -159,7 +159,7 @@ S3. IDENTIFIERS, MEMBERSHIP/BARRIER INTERFACES, AND CONTEXT VALUES
 S3.1 Core identifiers (inputs)
 * gid : bstr    group identifier (stable for group lifetime)
 * weid : bstr32 "window id" (FS context id)
-* xk_hash : bstr32 transcript hash / handshake binding (opaque here)
+* xk_hash : bstr32 transcript hash / handshake binding. For `v0.1.4`, this is not an opaque deployment-local convention: `xk_hash := H_L("msphf/xk", [CBOR_det(X_k)])`, where `X_k` commits at minimum `(gid, cat, we_epoch_id, anchor_hdr_ctx, tswe_salt_hash, parent_root, join_delta_root, revoked_since_prev_root, revoked_root, pox_r_commit when present)`.
 * E_k : bstr    ME-OR derived value / binding (opaque here)
 * history_view_id : bstr32 exact committed membership/checkpoint/barrier history view identifier
 * HistoryAuthorityScope : one deployment-defined authenticated history authority domain for `(gid, deployment)` that issues the A)/B)/C)/D) responses consumed together by one client decision. In this base profile, the scope is the authenticated deployment/server context that vends those responses unless an extension defines a stronger explicit scope identifier.
@@ -470,6 +470,13 @@ S4.2.4 Merge/checkpoint keys (merge-only set)
 130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148
 Restriction: key 136 kbroad_replay is FORBIDDEN (presence -> reject 907.1).
 
+Base-profile merge/checkpoint profile (normative):
+* For `v0.1.4`, there is no unstated external "merge profile" document. The merge/checkpoint profile for this document is exactly the closed-world key set of S4.2.4 together with the per-key presence/absence rules stated in this document.
+* Implementations MUST NOT rely on any deployment-local or out-of-document rule to decide the in-profile presence or absence of keys `130, 131, 132, 133, 134, 135, 136, 138, 144, 145, 148`.
+* Key 136 is always FORBIDDEN in this profile.
+* Key 135 is not a general-purpose extension point in this profile; when key 175 is present, key 135 MUST be absent and presence MUST be rejected per S11.12.1.A.
+* No key outside S4.2.4 may be treated as a merge/checkpoint key in `v0.1.4`.
+
 S4.2.5 SRX-only keys (MERGE-only, conditional)
 Key 121: srx_commit (bstr32)
 Key 122: srx_payload (bstr)
@@ -481,7 +488,7 @@ On MERGE: either all present (SRX applies) or all absent (SRX forbidden). See S9
 S4.3 Presence matrix summary (normative)
 * JOIN: MUST include S4.2.1 + S4.2.2; MUST NOT include any of S4.2.3/S4.2.4/S4.2.5.
 * REGULAR: MUST include S4.2.1; MUST NOT include any of S4.2.2/S4.2.3/S4.2.4/S4.2.5.
-* MERGE: MUST include S4.2.1; MUST include merge/checkpoint keys as required by merge profile;
+* MERGE: MUST include S4.2.1; MUST use only the S4.2.4 merge/checkpoint key set, with exact presence/absence determined only by this document's normative rules;
   MAY include S4.2.3 (subject to S10.4/S10.4A/S10.4B/S10.4C/S11) and MAY include S4.2.5 (subject to S9.3);
   MUST NOT include S4.2.2.
 Additional presence rule (normative):

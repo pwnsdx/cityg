@@ -349,3 +349,23 @@ Mon verdict final est donc:
 
 Donc, si ta question est “est-ce que les changements répondent matériellement à l’audit initial ?”, ma réponse est **oui, largement**.
 Si ta question est “est-ce que chaque finding initial est maintenant fermé exactement selon la barre crypto-binding stricte que j’avais posée ?”, ma réponse est **non, pas à 100 %**: il reste surtout `2.3` et, plus subtilement, `2.5`.
+
+--
+
+## Commentaires Codex (2026-03-28, xk_hash semantics made explicit)
+
+Nouvelle passe spec de clôture:
+
+- `docs/specs.md` dit maintenant explicitement que `xk_hash := H_L("msphf/xk", [CBOR_det(X_k)])`;
+- la définition normative de `X_k` y commit désormais explicitement `gid` et `we_epoch_id`, en plus des autres racines/contexte déjà portés par l’implémentation;
+- cela aligne enfin le texte avec le calcul déjà réalisé dans `/Users/admin/Desktop/Repositories/cityg/crates/msphf-core/src/instance.rs` et avec l’usage de `xk_hash` dans `bind_fs`.
+
+Preuves de cohérence repo:
+
+- `/Users/admin/Desktop/Repositories/cityg/crates/msphf-core/src/instance.rs`
+- `/Users/admin/Desktop/Repositories/cityg/crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs`
+
+Statut audit final:
+
+- **Closed**: 2.1, 2.2, 2.3, 2.4, 2.6
+- **Reclassified**: 2.5

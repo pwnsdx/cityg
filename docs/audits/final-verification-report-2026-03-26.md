@@ -33,10 +33,10 @@ Scope-hardening addendum (same date, later tranche):
 
 Summary:
 - Total findings reviewed: `51`
-- `Closed`: `37`
+- `Closed`: `39`
 - `Partial`: `0`
 - `Open`: `0`
-- `Reclassified`: `14`
+- `Reclassified`: `12`
 
 Current-scope interpretation:
 - No finding remains `Partial` or `Open` within the current base-profile scope implemented by this repo.
@@ -52,8 +52,8 @@ Current-scope interpretation:
   Proof: `docs/specs.md:574-579`, `docs/specs.md:907-926`, `crates/cityg-gui/src/bin/join_leave.rs:207-303,4002-4035`.
 - `1.4` `Closed` — `ResolveJoinsSince` / `JoinSet` semantics are now explicit for the selected authenticated view.
   Proof: `docs/specs.md:197-213`, `crates/cityg-server/src/lib.rs:2519-2586,11955-12074`, `crates/cityg-api/src/lib.rs:2828-2930`.
-- `1.5` `Reclassified` — “closed-world registry / merge profile” remains a documentation packaging problem, not a local implementation defect closed in this pass.
-  Proof: the current implementation remains intentionally split across `crates/msphf-orchestrator/src/hdr.rs:1-60`, `crates/cityg-api/proto/cityg.proto:1-444`, and `crates/cityg-server/src/lib.rs`; there is still no single local “closed-world registry” object to patch, so this remains a packaging/documentation issue rather than a repo-local defect.
+- `1.5` `Closed` — the base profile now defines the merge/checkpoint profile inside `docs/specs.md` itself instead of relying on an unstated external merge profile.
+  Proof: `docs/specs.md` now makes S4.2.4/S4.3 self-contained for `v0.1.4`, and the implementation already uses the same closed-world header universe and merge-only acceptance rules in `crates/msphf-orchestrator/src/hdr.rs:1-60`, `crates/msphf-orchestrator/src/accept/merge.rs:1-30`, and `crates/msphf-orchestrator/src/accept/mod.rs:799-821`.
 - `1.6` `Closed` — `960.11` vs `960.13` conflict is resolved by explicit partitioning.
   Proof: `docs/specs.md:754-758`, `docs/specs.md:1167-1184`, `docs/specs.md:1601-1624`, `crates/msphf-orchestrator/src/accept/errors.rs:206-217`.
 - `1.7` `Closed` — `PayloadEnvelope.msg_index` position is explicit.
@@ -65,8 +65,8 @@ Current-scope interpretation:
   Proof: `docs/specs.md:309-323`; KAT coverage in `docs/specs.md:1643-1650`; code/test anchors in `crates/msphf-orchestrator/src/lib.rs:843-933,4045-4101,7100-7126` and `crates/msphf-orchestrator/src/accept/stages.rs:715-748`.
 - `2.2` `Closed` — `profile_version` is now explicitly bound into `bind_fs` and therefore into ZK-VRF proof verification.
   Proof: `docs/specs.md:683-698`, `crates/msphf-orchestrator/src/proofs/zk_vrf/mod.rs:23-36`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:123-157`, `crates/msphf-orchestrator/src/lib.rs:121,3009-3023`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:455-466`.
-- `2.3` `Reclassified` — the “missing `gid/weid` in bind_fs” claim is too strong as stated because `xk_hash` already carries handshake context; the remaining gap is documentary, not a confirmed local defect.
-  Proof: `docs/specs.md:162`, `docs/specs.md:279-313`, `docs/specs.md:642-656`, `crates/msphf-core/src/instance.rs:58`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:140-157`.
+- `2.3` `Closed` — the spec now states explicitly that `xk_hash` commits `gid` and `we_epoch_id` through `X_k`, matching the existing implementation and removing the remaining spec-only ambiguity.
+  Proof: `docs/specs.md:161-162`, `docs/specs.md:279-313`, `docs/specs.md:642-656`, `crates/msphf-core/src/instance.rs:8-58`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:140-157`.
 - `2.4` `Closed` — barrier/HP KDFs now bind `gid` directly in the spec and in the concrete barrier/HP derivation helpers.
   Proof: `docs/specs.md:324-338`, `docs/specs.md:1072-1127`, `docs/specs.md:1390-1402`, `docs/specs.md:1716-1731`, `crates/msphf-orchestrator/src/lib.rs:698-845`, `crates/cityg-gui/src/barrier_shared.rs:47-55`, `crates/cityg-gui/src/native/barrier_core.rs:33-39,689-706`, `crates/cityg-gui/src/native/tests/mod.rs:1484-1539`, `crates/cityg-client/src/lib.rs:699-705,718-735`, `crates/msphf-orchestrator/tests/end_to_end.rs:954-988`.
 - `2.5` `Reclassified` — the remaining ask for remote distinction between locally FULL and locally recover-only execution is now explicitly outside the base profile. The current profile intentionally guarantees helper-state/authority binding plus local origination restrictions, not remote attestation of the client's internal verification path.
