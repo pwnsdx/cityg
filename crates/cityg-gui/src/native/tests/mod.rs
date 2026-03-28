@@ -1354,49 +1354,30 @@ fn validate_client_visible_activation_guards_rejects_tampered_receipt_for_local_
 }
 
 #[test]
-fn epoch_sync_validation_uses_ticket_attestation_when_local_state_is_unpinned()
+fn epoch_sync_pending_bundle_allows_authority_headers_with_authenticated_source()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut session =
-        build_test_session(0xB973, "http://127.0.0.1:9", "room-b87g-ticket-seed", "bob")?;
-    let ticket_attestation = vec![0xA1, 0xB2, 0xC3, 0xD4];
+    let mut session = build_test_session(
+        0xB973,
+        "http://127.0.0.1:9",
+        "room-b87g-pending-seed",
+        "bob",
+    )?;
     let header = build_authority_activation_guard_header(
         &mut session,
         HistoryAuthorityExtension::GlobalHistoryAuthorityV1,
-        ticket_attestation.clone(),
+        vec![0xA1, 0xB2, 0xC3, 0xD4],
     )?;
-    let commitment = session
-        .barrier_state
-        .current_history_commitment
-        .clone()
-        .ok_or("test session missing current history commitment")?;
-    let mut validation_session = session.clone();
-    validation_session
-        .barrier_state
-        .current_history_authority_extension = None;
-    validation_session
-        .barrier_state
-        .current_global_history_attestation_bytes
-        .clear();
-    seed_epoch_sync_validation_session_from_ticket_if_unpinned(
-        &mut validation_session,
-        session.barrier_state.barrier_version,
-        session.barrier_state.barrier_roots_hash,
-        session.barrier_state.kem_tree_hash_after,
-        &commitment,
-        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1),
-        ticket_attestation.as_slice(),
-    );
-    validate_client_visible_activation_guards(&validation_session, &header)?;
+    ensure_epoch_sync_pending_bundle_has_authenticated_source(&session, true, true, &header)?;
     Ok(())
 }
 
 #[test]
-fn epoch_sync_validation_rejects_bundle_attestation_mismatch_with_authenticated_ticket_state()
+fn epoch_sync_pending_bundle_rejects_authority_headers_without_authenticated_source()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut session = build_test_session(
         0xB974,
         "http://127.0.0.1:9",
-        "room-b87g-ticket-mismatch",
+        "room-b87g-pending-missing",
         "bob",
     )?;
     let header = build_authority_activation_guard_header(
@@ -1404,34 +1385,21 @@ fn epoch_sync_validation_rejects_bundle_attestation_mismatch_with_authenticated_
         HistoryAuthorityExtension::GlobalHistoryAuthorityV1,
         vec![0xDE, 0xAD, 0xBE, 0xEF],
     )?;
-    let commitment = session
-        .barrier_state
-        .current_history_commitment
-        .clone()
-        .ok_or("test session missing current history commitment")?;
-    let mut validation_session = session.clone();
-    validation_session
-        .barrier_state
-        .current_history_authority_extension = None;
-    validation_session
+    session.barrier_state.current_history_authority_extension = None;
+    session
         .barrier_state
         .current_global_history_attestation_bytes
         .clear();
-    seed_epoch_sync_validation_session_from_ticket_if_unpinned(
-        &mut validation_session,
-        session.barrier_state.barrier_version,
-        session.barrier_state.barrier_roots_hash,
-        session.barrier_state.kem_tree_hash_after,
-        &commitment,
-        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1),
-        &[0xAA, 0xBB, 0xCC, 0xDD],
+    let err = ensure_epoch_sync_pending_bundle_has_authenticated_source(
+        &session, true, true, &header,
+    )
+    .expect_err(
+        "local pending authority-bound bundle without authenticated pre-publish state must fail",
     );
-    let err = validate_client_visible_activation_guards(&validation_session, &header)
-        .expect_err("bundle attestation that disagrees with authenticated ticket state must fail");
     assert!(
         err.to_string()
-            .contains("header[182] global_history_attestation mismatch"),
-        "unexpected ticket/header attestation mismatch error: {err}"
+            .contains("without authenticated pre-publish authority state"),
+        "unexpected pending-source authority error: {err}"
     );
     Ok(())
 }

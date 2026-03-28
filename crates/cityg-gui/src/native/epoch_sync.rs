@@ -1,34 +1,31 @@
 use super::*;
 
-pub(super) fn seed_epoch_sync_validation_session_from_ticket_if_unpinned(
-    validation_session: &mut AppSession,
-    ticket_barrier_version: u64,
-    ticket_barrier_roots_hash: [u8; 32],
-    ticket_kem_tree_hash_after: [u8; 32],
-    ticket_history_commitment: &HistoryCommitment,
-    ticket_history_authority_extension: Option<HistoryAuthorityExtension>,
-    ticket_current_global_history_attestation_bytes: &[u8],
-) {
-    if !validation_session
+pub(super) fn ensure_epoch_sync_pending_bundle_has_authenticated_source(
+    validation_session: &AppSession,
+    authored_by_local_device: bool,
+    pending_bundle_match: bool,
+    header_map: &BTreeMap<u64, Value>,
+) -> Result<()> {
+    if !authored_by_local_device || !pending_bundle_match {
+        return Ok(());
+    }
+    if !header_map.contains_key(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION) {
+        return Ok(());
+    }
+    if validation_session
         .barrier_state
         .current_global_history_attestation_bytes
         .is_empty()
+        || validation_session
+            .barrier_state
+            .current_history_authority_extension
+            .is_none()
     {
-        return;
+        return Err(anyhow!(
+            "epoch sync cannot validate a local pending authority-bound barrier bundle without authenticated pre-publish authority state (960.7)"
+        ));
     }
-    if ticket_current_global_history_attestation_bytes.is_empty() {
-        return;
-    }
-
-    install_authenticated_current_state(
-        validation_session,
-        ticket_barrier_version,
-        ticket_barrier_roots_hash,
-        ticket_kem_tree_hash_after,
-        ticket_history_commitment.clone(),
-        ticket_history_authority_extension,
-        ticket_current_global_history_attestation_bytes.to_vec(),
-    );
+    Ok(())
 }
 
 pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochSyncOutcome> {
@@ -239,15 +236,12 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
                     source.current_global_history_attestation_bytes.clone();
             }
         }
-        seed_epoch_sync_validation_session_from_ticket_if_unpinned(
-            &mut validation_session,
-            ticket.barrier_version,
-            ticket_barrier_roots_hash,
-            ticket_kem_tree_hash_after,
-            &ticket_history_commitment,
-            ticket.history_authority_extension,
-            ticket.current_global_history_attestation_bytes.as_slice(),
-        );
+        ensure_epoch_sync_pending_bundle_has_authenticated_source(
+            &validation_session,
+            bundle_authored_by_local_device(&session, &bundle.header_map),
+            pending_bundle_match,
+            &bundle.header_map,
+        )?;
         if pending_bundle_match
             || !matches!(
                 pending_history_outcome,
