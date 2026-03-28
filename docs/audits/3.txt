@@ -406,12 +406,14 @@ Dernière passe runtime + spec:
 
 - le bug concret qui cassait `epoch_sync_after_second_join_keeps_local_pcs_refresh_valid` est fermé: la recovery path réapplique maintenant `barrier_version` et `kem_tree_hash_after` avant d’installer le snapshot post-state, ce qui réaligne enfin `S11.13.7` avec l’état courant réellement stocké;
 - la spec décrit maintenant explicitement le catch-up multi-version: frontière `pcs_refresh` non authentifiée => `recovery_required`, best-effort limité au current head non-refresh, activation best-effort => `current_barrier_full_verified := false`, et sessions pending => send/fetch payload toujours désactivés;
+- pour un bundle local pending portant `header[181]/[182]`, `epoch_sync` réutilise maintenant la source pré-publish authentifiée persistée avec le pending merge; il ne compare plus ces headers au `merge_ticket_refresh` courant si la tête a déjà avancé vers le post-state;
 - les preuves runtime couvrent désormais à la fois le cas adjacent (`epoch_sync_after_second_join_keeps_local_pcs_refresh_valid`) et le cas multi-gap (`epoch_sync_survives_multi_version_barrier_gap_after_refresh_and_leave`).
 
 Preuves d’implémentation exécutées:
 
 - `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::epoch_sync_after_second_join_keeps_local_pcs_refresh_valid --features native-app -- --exact --nocapture`
 - `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::epoch_sync_survives_multi_version_barrier_gap_after_refresh_and_leave --features native-app -- --exact --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::join_finalize_fault_injection_after_publish_recovers_via_epoch_sync --features native-app -- --exact --nocapture`
 
 Statut audit final:
 

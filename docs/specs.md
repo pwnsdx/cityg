@@ -1583,6 +1583,9 @@ Before publishing/submitting any merge carrying header[175], the updater MUST pe
   * source_barrier_version
   * source_barrier_roots_hash
   * source_kem_tree_hash_after
+  * source_current_history_commitment when the pre-publish source state was authenticated under a `HistoryAuthorityExtension`
+  * source_current_history_authority_extension when the pre-publish source state was authenticated under a `HistoryAuthorityExtension`
+  * source_current_global_history_attestation when the pre-publish source state was authenticated under a `HistoryAuthorityExtension`
   * source_fs_ec
   * source_fs_dev_prev_commit
 * pending_on_path_key_material = { for each node n in ExpectedNodeSet:
@@ -1606,6 +1609,7 @@ Upon observing acceptance of the merge carrying this barrier_update, or after `L
 * Require the observed accepted `header[141]` to equal `pending_fs_ec`.
 * Require the observed accepted `header[178]` to equal `pending_barrier_update_reason`.
 * Require the client's current locally persisted pre-activation source state to equal `pending_activation_source`; if not, the updater MUST enter `recovery_required/history_inconsistent` and MUST NOT activate.
+* If the activating bundle is authored by the same local device, matches the locally persisted pending merge, and carries authority-bound headers (`header[181]` / `header[182]`), the client MUST validate those headers against the persisted `pending_activation_source` from the original pre-publish decision. The client MUST NOT silently reseed this validation from a later `merge_ticket_refresh` or other post-acceptance current-state artifact, because those artifacts may already describe the accepted post-state rather than the original pre-publish state bound into the bundle.
 * Before local activation, clients MUST replay the client-visible subset of S10 using locally persisted state and the authenticated helper/provisioning values carried for that current state. At minimum this subset MUST reject:
   * unsupported/mismatched `fs_policy_version` (944.6),
   * mismatched `fs_epoch_base_ts` (945.0),
