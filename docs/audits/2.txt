@@ -369,3 +369,24 @@ Statut audit final:
 
 - **Closed**: 2.1, 2.2, 2.3, 2.4, 2.6
 - **Reclassified**: 2.5
+
+--
+
+## Commentaires Codex (2026-03-28, recovery AAD binds full barrier metadata)
+
+Nouvelle passe spec + implémentation:
+
+- l’AAD de wrap recovery ne se limite plus à `(gid, v_new, RRH, updater_leaf, s, t, pkhash_t)`;
+- il lie maintenant aussi `BU.prev_barrier_version`, `BU.tree_size`, `BU.kem_tree_hash_before` et `BU.kem_tree_hash_after`;
+- le runtime auteur et le runtime recover utilisent exactement le même préimage enrichi;
+- les tests ajoutés vérifient qu’un bundle dont `kem_tree_hash_before` ou `kem_tree_hash_after` a été altéré sans rechiffrer les wraps échoue désormais cryptographiquement en recovery best-effort.
+
+Preuves de cohérence repo:
+
+- `/Users/admin/Desktop/Repositories/cityg/crates/cityg-gui/src/native/barrier_core.rs`
+- `/Users/admin/Desktop/Repositories/cityg/crates/cityg-gui/src/native/barrier_runtime.rs`
+- `/Users/admin/Desktop/Repositories/cityg/crates/cityg-gui/src/native/tests/mod.rs`
+
+Statut audit final:
+
+- **Closed**: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6

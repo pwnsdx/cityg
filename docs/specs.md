@@ -1166,7 +1166,7 @@ For each step i from 0 to len(pn)-2:
   * Let ek_t := snapshot_pre.pk_entries[t] (the ML-KEM ek at node t). It MUST be non-blank.
   * Compute target_pk_hash := H_pk(ek_t)[0..15].
   * Compute (kem_ct, ss32) := ML-KEM-768.Encaps(ek_t).
-  * Define aad := CBOR_det([gid, v_new, RRH, u, source_node, t, H_pk(ek_t)]).
+  * Define aad := CBOR_det([gid, v_new, BU.prev_barrier_version, BU.tree_size, RRH, BU.kem_tree_hash_before, BU.kem_tree_hash_after, u, source_node, t, H_pk(ek_t)]).
   * Define nonce := H_L("barrier/wrap/nonce", [source_node, t])[0..11].
   * Define wrapped_ps := AEAD_Seal(
       key32     = ss32,
@@ -1497,7 +1497,7 @@ Failure -> reject barrier_update locally with 960.7.
 S11.13.4 Recover derivation (normative)
 Given the unique match (s, t) and the accepted BarrierUpdate with barrier_version=v_new:
 ss := ML-KEM-768.Decaps(dk_t, kem_ct)
-aad := CBOR_det([gid, v_new, revocation_roots_hash, CP.updater_leaf, s, t, pkhash_t])
+aad := CBOR_det([gid, v_new, BU.prev_barrier_version, BU.tree_size, revocation_roots_hash, BU.kem_tree_hash_before, BU.kem_tree_hash_after, CP.updater_leaf, s, t, pkhash_t])
 nonce := H_L("barrier/wrap/nonce", [s, t])[0..11]
 pt := AEAD_Open(key=ss, nonce=nonce, aad=aad, ct=wrapped_ps)
 If AEAD_Open fails -> reject with 960.7.
@@ -1859,12 +1859,13 @@ The KAT MUST include at least one barrier_update where:
 * server validation (S11.12.1) MUST accept,
 * a FULL-verifying client that derives path_secret[n] MUST compute ek_n via S11.10 and MUST reject locally per S11.13.6 (fail closed, 960.7).
 
-S14.3 KAT: recover AAD uses pkhash_t (MUST)
+S14.3 KAT: recover AAD binds full barrier metadata (MUST)
 A reference test vector set MUST include at least one barrier_update where a client recovers using S11.13 and:
 * the client stores pkhash_t for its matching target node t,
-* the client constructs AAD using pkhash_t as specified in S11.13.4,
+* the client constructs AAD using pkhash_t plus `BU.prev_barrier_version`, `BU.tree_size`, `BU.kem_tree_hash_before`, and `BU.kem_tree_hash_after` as specified in S11.13.4,
 * decryption succeeds and yields a 32-byte path_secret[s].
 A negative variant MUST modify pkhash_t (client-side) and MUST cause AEAD_Open failure (client rejects with 960.7).
+Additional negative variants MUST modify exactly one of `BU.prev_barrier_version`, `BU.kem_tree_hash_before`, or `BU.kem_tree_hash_after` while leaving the candidate ciphertext and target selection otherwise unchanged; recovery MUST fail closed and MUST NOT yield an activated/persisted barrier state from that tampered bundle.
 
 S14.4 KAT: updater activation stores pkhash_n (MUST)
 A reference test vector set (or implementation conformance test) MUST include a scenario where:

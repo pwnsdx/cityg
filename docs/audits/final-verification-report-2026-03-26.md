@@ -33,10 +33,10 @@ Scope-hardening addendum (same date, later tranche):
 
 Summary:
 - Total findings reviewed: `51`
-- `Closed`: `39`
+- `Closed`: `40`
 - `Partial`: `0`
 - `Open`: `0`
-- `Reclassified`: `12`
+- `Reclassified`: `11`
 
 Current-scope interpretation:
 - No finding remains `Partial` or `Open` within the current base-profile scope implemented by this repo.
@@ -69,8 +69,8 @@ Current-scope interpretation:
   Proof: `docs/specs.md:161-162`, `docs/specs.md:279-313`, `docs/specs.md:642-656`, `crates/msphf-core/src/instance.rs:8-58`, `crates/msphf-orchestrator/src/proofs/zk_vrf/lb.rs:140-157`.
 - `2.4` `Closed` — barrier/HP KDFs now bind `gid` directly in the spec and in the concrete barrier/HP derivation helpers.
   Proof: `docs/specs.md:324-338`, `docs/specs.md:1072-1127`, `docs/specs.md:1390-1402`, `docs/specs.md:1716-1731`, `crates/msphf-orchestrator/src/lib.rs:698-845`, `crates/cityg-gui/src/barrier_shared.rs:47-55`, `crates/cityg-gui/src/native/barrier_core.rs:33-39,689-706`, `crates/cityg-gui/src/native/tests/mod.rs:1484-1539`, `crates/cityg-client/src/lib.rs:699-705,718-735`, `crates/msphf-orchestrator/tests/end_to_end.rs:954-988`.
-- `2.5` `Reclassified` — the remaining ask for remote distinction between locally FULL and locally recover-only execution is now explicitly outside the base profile. The current profile intentionally guarantees helper-state/authority binding plus local origination restrictions, not remote attestation of the client's internal verification path.
-  Proof: `docs/specs.md:306`, `docs/specs.md:318-320`, `docs/specs.md:1270-1281`, `crates/cityg-gui/src/native/session_types.rs:72-99`, `crates/cityg-gui/src/native/barrier_ops.rs:214-251`.
+- `2.5` `Closed` — recovery wraps are now cryptographically bound to the full barrier metadata that motivated the original finding, including `BU.prev_barrier_version`, `BU.tree_size`, `BU.kem_tree_hash_before`, and `BU.kem_tree_hash_after`, rather than only `(gid, v_new, RRH, updater_leaf, s, t, pkhash_t)`.
+  Proof: `docs/specs.md:1169-1176`, `docs/specs.md:1497-1505`, `docs/specs.md:1862-1868`, `crates/cityg-gui/src/native/barrier_core.rs:21-31`, `crates/cityg-gui/src/native/barrier_runtime.rs:285-297,1169-1181`, `crates/cityg-gui/src/native/tests/mod.rs` (`try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_before_in_aad`, `try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_after_in_aad`).
 - `2.6` `Closed` — sender/device binding is enforced in code, and the message plane now signs with the same persisted device identity family that the sender-leaf binding checks derive from; the spec also makes `leaf_id(device_pk)` deterministic per `(gid, device_pk, device_pk_alg)` and non-reassignable across distinct device keys within a `gid`.
   Proof: `docs/specs.md:176-178`, `docs/specs.md:600-606`, `crates/cityg-gui/src/native/message_auth.rs:97-156,388-437`, `crates/cityg-gui/src/native/network_messages.rs:14-50,188-203`, `crates/cityg-gui/src/native/tests/mod.rs:7606-7659,8670-8740`, `crates/cityg-gui/src/bin/join_leave.rs:873-970,2311-2328`.
 

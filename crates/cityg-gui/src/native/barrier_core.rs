@@ -21,6 +21,10 @@ pub(super) struct BarrierWrapNoncePreimage(pub(super) u64, pub(super) u64);
 pub(super) struct BarrierWrapAadPreimage<'a>(
     #[serde(with = "serde_bytes")] pub(super) &'a [u8; 32],
     pub(super) u64,
+    pub(super) u64,
+    pub(super) u64,
+    #[serde(with = "serde_bytes")] pub(super) &'a [u8; 32],
+    #[serde(with = "serde_bytes")] pub(super) &'a [u8; 32],
     #[serde(with = "serde_bytes")] pub(super) &'a [u8; 32],
     pub(super) u64,
     pub(super) u64,

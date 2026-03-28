@@ -1645,7 +1645,11 @@ fn try_recover_barrier_from_header_recovers_key_and_pcs_reseed()
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
         9,
+        8,
+        8,
         &rrh,
+        &[0xBC; 32],
+        &[0xBD; 32],
         3,
         source_node,
         target_node,
@@ -1804,7 +1808,11 @@ fn try_recover_barrier_from_header_rejects_new_public_key_mismatch()
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
         9,
+        8,
+        8,
         &rrh,
+        &[0xBC; 32],
+        &[0xBD; 32],
         3,
         source_node,
         target_node,
@@ -1945,7 +1953,11 @@ fn try_recover_barrier_from_header_rejects_when_pkhash_t_breaks_aad()
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
         9,
+        8,
+        8,
         &rrh,
+        &session.barrier_state.kem_tree_hash_after,
+        &[0xBB; 32],
         3,
         source_node,
         target_node,
@@ -2079,7 +2091,11 @@ fn try_recover_barrier_from_header_rejects_when_client_pkhash_t_mismatches()
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
         9,
+        8,
+        8,
         &rrh,
+        &[0xBC; 32],
+        &[0xBD; 32],
         3,
         source_node,
         target_node,
@@ -2333,7 +2349,11 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
     let aad = to_cbor_vec(&BarrierWrapAadPreimage(
         &session.gid,
         9,
+        8,
+        8,
         &rrh,
+        &[0xBC; 32],
+        &[0xBD; 32],
         3,
         source_node,
         target_node,
@@ -2447,6 +2467,296 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
     assert!(!session.barrier_state.current_barrier_full_verified);
     assert_eq!(session.barrier_state.barrier_version, 9);
     assert_eq!(session.barrier_state.kem_tree_hash_after, [0xBD; 32]);
+    Ok(())
+}
+
+#[test]
+fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_before_in_aad()
+-> Result<(), Box<dyn std::error::Error>> {
+    use chacha20poly1305::{
+        ChaCha20Poly1305,
+        aead::{Aead, KeyInit, Payload},
+    };
+
+    let mut session = build_test_session(0xD54, "http://127.0.0.1:9", "room-k2", "kate")?;
+    session.barrier_state.n_max = 8;
+    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.barrier_version = 7;
+    session.barrier_state.barrier_initialized = true;
+    session.barrier_state.kem_tree_hash_after = [0xAA; 32];
+
+    let (leaf_ek, leaf_dk) = kyber768::keypair();
+    let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
+    session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
+    session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+
+    let revoked_since_root = [0x71; 32];
+    let revoked_root = [0x72; 32];
+    let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+    session.revoked_since_root = revoked_since_root;
+    session.revoked_root = revoked_root;
+    session.barrier_state.barrier_roots_hash = rrh;
+
+    let source_node = 4u64;
+    let target_node = 10u64;
+    let path_secret_source = [0x74; 32];
+    let salt_1 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 1),
+    )?;
+    let ps_1 = hkdf_blake3(&salt_1, &path_secret_source, BARRIER_TREE_INFO);
+    let salt_0 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
+    )?;
+    let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
+    let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
+    let (ss, ct) = kyber768::encapsulate(&target_pk);
+    let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+    let aad = to_cbor_vec(&BarrierWrapAadPreimage(
+        &session.gid,
+        9,
+        8,
+        8,
+        &rrh,
+        &[0xBC; 32],
+        &[0xBD; 32],
+        3,
+        source_node,
+        target_node,
+        &target_pkhash,
+    ))?;
+    let nonce_full = h_l(
+        "barrier/wrap/nonce",
+        &BarrierWrapNoncePreimage(source_node, target_node),
+    )?;
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&nonce_full[..12]);
+    let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+    let wrapped_ps = cipher.encrypt(
+        (&nonce).into(),
+        Payload {
+            msg: path_secret_source.as_slice(),
+            aad: aad.as_slice(),
+        },
+    )?;
+
+    let mut target_prefix = [0u8; 16];
+    target_prefix.copy_from_slice(&target_pkhash[..16]);
+    let node_ciphertexts = vec![NodeCiphertextWire(
+        source_node,
+        target_node,
+        target_prefix.to_vec(),
+        KemCiphertext::as_bytes(&ct).to_vec(),
+        wrapped_ps,
+    )];
+    let (_, _, ek_0) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_0, 9, &rrh, 8, 0)?;
+    let (_, _, ek_1) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_1, 9, &rrh, 8, 1)?;
+    let (_, _, ek_4) = derive_internal_node_key_material(
+        session.gid.as_slice(),
+        &path_secret_source,
+        9,
+        &rrh,
+        8,
+        4,
+    )?;
+    let new_public_keys = vec![
+        NewPublicKeyWire(0, ek_0),
+        NewPublicKeyWire(1, ek_1),
+        NewPublicKeyWire(4, ek_4),
+    ];
+    let cover = KemTreeCoverPayloadWire(
+        3,
+        vec![10, 4, 1, 0],
+        None,
+        node_ciphertexts,
+        new_public_keys,
+    );
+    let cover_bytes = to_cbor_vec(&cover)?;
+    let update = BarrierUpdateWire(
+        "barrier-v1".to_string(),
+        9,
+        8,
+        8,
+        rrh.to_vec(),
+        [0xBE; 32].to_vec(),
+        [0xBD; 32].to_vec(),
+        cover_bytes,
+    );
+    let update_bytes = to_cbor_vec(&update)?;
+
+    let mut header = BTreeMap::new();
+    header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(update_bytes));
+    header.insert(
+        hdr::HDR_REVOKED_SINCE_ROOT,
+        Value::Bytes(revoked_since_root.to_vec()),
+    );
+    header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE_REASON,
+        Value::Integer(Integer::from(1u64)),
+    );
+    header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0xED; 32]));
+
+    let err = try_recover_barrier_best_effort(
+        &session,
+        &header,
+        &session.we_epoch_id,
+        31,
+        DEFAULT_MAX_BARRIER_UPDATE_BYTES as usize,
+    )
+    .expect_err("tampered kem_tree_hash_before must fail recovery AAD");
+    assert!(
+        err.to_string().contains("candidate unwrap/decrypt failure"),
+        "unexpected error for kem_tree_hash_before AAD mismatch: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn try_recover_barrier_best_effort_rejects_tampered_kem_tree_hash_after_in_aad()
+-> Result<(), Box<dyn std::error::Error>> {
+    use chacha20poly1305::{
+        ChaCha20Poly1305,
+        aead::{Aead, KeyInit, Payload},
+    };
+
+    let mut session = build_test_session(0xD55, "http://127.0.0.1:9", "room-k3", "kate")?;
+    session.barrier_state.n_max = 8;
+    session.barrier_state.cover_leaf_index = 3;
+    session.barrier_state.barrier_version = 7;
+    session.barrier_state.barrier_initialized = true;
+    session.barrier_state.kem_tree_hash_after = [0xAA; 32];
+
+    let (leaf_ek, leaf_dk) = kyber768::keypair();
+    let leaf_ek_bytes = KemPublicKey::as_bytes(&leaf_ek).to_vec();
+    session.barrier_state.dk_leaf = Zeroizing::new(KemSecretKey::as_bytes(&leaf_dk).to_vec());
+    session.barrier_state.pkhash_leaf = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+
+    let revoked_since_root = [0x71; 32];
+    let revoked_root = [0x72; 32];
+    let rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+    session.revoked_since_root = revoked_since_root;
+    session.revoked_root = revoked_root;
+    session.barrier_state.barrier_roots_hash = rrh;
+
+    let source_node = 4u64;
+    let target_node = 10u64;
+    let path_secret_source = [0x74; 32];
+    let salt_1 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 1),
+    )?;
+    let ps_1 = hkdf_blake3(&salt_1, &path_secret_source, BARRIER_TREE_INFO);
+    let salt_0 = h_l(
+        "barrier/tree/path",
+        &BarrierTreePathSaltPreimage(session.gid.as_slice(), 0),
+    )?;
+    let ps_0 = hkdf_blake3(&salt_0, &ps_1, BARRIER_TREE_INFO);
+    let target_pk = kyber768::PublicKey::from_bytes(leaf_ek_bytes.as_slice())?;
+    let (ss, ct) = kyber768::encapsulate(&target_pk);
+    let target_pkhash = compute_barrier_pkhash(leaf_ek_bytes.as_slice())?;
+    let aad = to_cbor_vec(&BarrierWrapAadPreimage(
+        &session.gid,
+        9,
+        8,
+        8,
+        &rrh,
+        &[0xBC; 32],
+        &[0xBD; 32],
+        3,
+        source_node,
+        target_node,
+        &target_pkhash,
+    ))?;
+    let nonce_full = h_l(
+        "barrier/wrap/nonce",
+        &BarrierWrapNoncePreimage(source_node, target_node),
+    )?;
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&nonce_full[..12]);
+    let cipher = ChaCha20Poly1305::new(ss.as_bytes().into());
+    let wrapped_ps = cipher.encrypt(
+        (&nonce).into(),
+        Payload {
+            msg: path_secret_source.as_slice(),
+            aad: aad.as_slice(),
+        },
+    )?;
+
+    let mut target_prefix = [0u8; 16];
+    target_prefix.copy_from_slice(&target_pkhash[..16]);
+    let node_ciphertexts = vec![NodeCiphertextWire(
+        source_node,
+        target_node,
+        target_prefix.to_vec(),
+        KemCiphertext::as_bytes(&ct).to_vec(),
+        wrapped_ps,
+    )];
+    let (_, _, ek_0) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_0, 9, &rrh, 8, 0)?;
+    let (_, _, ek_1) =
+        derive_internal_node_key_material(session.gid.as_slice(), &ps_1, 9, &rrh, 8, 1)?;
+    let (_, _, ek_4) = derive_internal_node_key_material(
+        session.gid.as_slice(),
+        &path_secret_source,
+        9,
+        &rrh,
+        8,
+        4,
+    )?;
+    let new_public_keys = vec![
+        NewPublicKeyWire(0, ek_0),
+        NewPublicKeyWire(1, ek_1),
+        NewPublicKeyWire(4, ek_4),
+    ];
+    let cover = KemTreeCoverPayloadWire(
+        3,
+        vec![10, 4, 1, 0],
+        None,
+        node_ciphertexts,
+        new_public_keys,
+    );
+    let cover_bytes = to_cbor_vec(&cover)?;
+    let update = BarrierUpdateWire(
+        "barrier-v1".to_string(),
+        9,
+        8,
+        8,
+        rrh.to_vec(),
+        [0xBC; 32].to_vec(),
+        [0xBE; 32].to_vec(),
+        cover_bytes,
+    );
+    let update_bytes = to_cbor_vec(&update)?;
+
+    let mut header = BTreeMap::new();
+    header.insert(hdr::HDR_BARRIER_UPDATE, Value::Bytes(update_bytes));
+    header.insert(
+        hdr::HDR_REVOKED_SINCE_ROOT,
+        Value::Bytes(revoked_since_root.to_vec()),
+    );
+    header.insert(hdr::HDR_REVOKED_ROOT, Value::Bytes(revoked_root.to_vec()));
+    header.insert(
+        hdr::HDR_BARRIER_UPDATE_REASON,
+        Value::Integer(Integer::from(1u64)),
+    );
+    header.insert(hdr::HDR_POP_PK, Value::Bytes(vec![0xED; 32]));
+
+    let err = try_recover_barrier_best_effort(
+        &session,
+        &header,
+        &session.we_epoch_id,
+        31,
+        DEFAULT_MAX_BARRIER_UPDATE_BYTES as usize,
+    )
+    .expect_err("tampered kem_tree_hash_after must fail recovery AAD");
+    assert!(
+        err.to_string().contains("candidate unwrap/decrypt failure"),
+        "unexpected error for kem_tree_hash_after AAD mismatch: {err}"
+    );
     Ok(())
 }
 

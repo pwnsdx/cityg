@@ -285,7 +285,11 @@ pub(super) fn try_recover_barrier_inner(
         let aad = to_cbor_vec(&BarrierWrapAadPreimage(
             &session.gid,
             parsed.barrier_version,
+            parsed.prev_barrier_version,
+            parsed.tree_size,
             &parsed.revocation_roots_hash,
+            &parsed.kem_tree_hash_before,
+            &parsed.kem_tree_hash_after,
             parsed.updater_leaf,
             node.source_node,
             node.target_node,
@@ -1165,7 +1169,11 @@ pub(super) fn build_barrier_update_bytes(
             let aad = to_cbor_vec(&BarrierWrapAadPreimage(
                 gid,
                 barrier_version,
+                prev_barrier_version,
+                n_max,
                 &revocation_roots_hash,
+                &kem_tree_hash_before,
+                &kem_tree_hash_after,
                 updater_leaf,
                 source_node,
                 target_node,
