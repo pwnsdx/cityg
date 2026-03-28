@@ -60,15 +60,19 @@ pub(super) fn apply_recovered_barrier_state(
     current_barrier_full_verified: bool,
 ) -> Result<()> {
     let BarrierRecoverResult {
+        barrier_version,
         k_barrier_new,
+        kem_tree_hash_after,
         k_fs_after_pcs,
         derived_node_key_material,
         ..
     } = recovered;
     session.barrier_state.barrier_initialized = true;
+    session.barrier_state.barrier_version = barrier_version;
     session.barrier_state.barrier_roots_hash =
         compute_revocation_roots_hash(&session.revoked_since_root, &session.revoked_root)?;
     session.barrier_state.k_barrier = k_barrier_new;
+    session.barrier_state.kem_tree_hash_after = kem_tree_hash_after;
     for (node, material) in derived_node_key_material {
         session.barrier_state.dk_nodes.insert(node, material);
     }
@@ -445,6 +449,7 @@ pub(super) fn try_recover_barrier_inner(
     zeroize_path_secret_map(&mut path_secrets);
 
     Ok(Some(BarrierRecoverResult {
+        barrier_version: parsed.barrier_version,
         k_barrier_new: Zeroizing::new(k_barrier_new),
         kem_tree_hash_after: parsed.kem_tree_hash_after,
         k_fs_after_pcs: k_fs_after_pcs.map(Zeroizing::new),
@@ -545,6 +550,10 @@ pub(super) fn validate_client_visible_activation_guards(
     session: &AppSession,
     header_map: &BTreeMap<u64, Value>,
 ) -> Result<()> {
+    let has_barrier_update = matches!(
+        header_map.get(&hdr::HDR_BARRIER_UPDATE),
+        Some(Value::Bytes(_))
+    );
     let global_history_attestation = match header_map
         .get(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
     {
@@ -585,16 +594,12 @@ pub(super) fn validate_client_visible_activation_guards(
                 "client-side activation guard failed (960.7): header[182] global_history_attestation mismatch with local authenticated current state"
             ));
         }
-    } else if global_history_attestation.is_some() {
+    } else if global_history_attestation.is_some() && !has_barrier_update {
         return Err(anyhow!(
             "client-side activation guard failed (960.7): unexpected header[182] global_history_attestation without pinned local authority state"
         ));
     }
     if global_history_attestation.is_some()
-        && session
-            .barrier_state
-            .current_history_authority_extension
-            .is_some()
         && !header_map.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
     {
         return Err(anyhow!(
@@ -609,17 +614,11 @@ pub(super) fn validate_client_visible_activation_guards(
         ));
     }
     if let Some(global_history_attestation) = global_history_attestation {
-        if session
-            .barrier_state
-            .current_history_authority_extension
-            .is_some()
-        {
-            verify_client_visible_full_verification_receipt(
-                session,
-                header_map,
-                global_history_attestation.as_slice(),
-            )?;
-        }
+        verify_client_visible_full_verification_receipt(
+            session,
+            header_map,
+            global_history_attestation.as_slice(),
+        )?;
     }
     let fs_policy_version = header_policy_version(header_map, hdr::HDR_FS_POLICY_VERSION)
         .ok_or_else(|| {

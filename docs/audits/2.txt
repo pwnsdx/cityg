@@ -293,3 +293,18 @@ Nouvelle vérification implémentation:
 - le chemin concret `perform_send` de la GUI ne réutilise plus une famille de clé incompatible avec la vérification `sender_leaf_id`; il signe maintenant avec la même identité de device persistée que la réception rebind vers `leaf_id`;
 - le scénario d’intégration `perform_join_second_member_can_send_immediately` repasse, ce qui prouve que la self-finalization join n’aboutit plus à une session incapable de signer sur le message-plane;
 - le binaire `join_leave` a été réaligné sur la même sémantique de signature/vérification pour éviter de garder un deuxième frontend divergent.
+
+--
+
+## Commentaires Codex (2026-03-28, final coherence)
+
+Dernière relecture spec + implémentation:
+
+- `2.5` n’est plus honnêtement un `Partial` local. La spec dit maintenant explicitement que la base profile ne cherche pas à faire de remote attestation de “FULL vs recover-only” comme propriété wire autonome.
+- Le profil actuel garantit autre chose, plus étroitement et plus honnêtement: restriction locale d’origination, `current_barrier_full_verified` persistant côté client, et binding serveur-visible à une décision helper/current-state attestée via `header[180]/[181]/[182]`.
+- Si un audit futur veut exiger une preuve indépendante du chemin de calcul FULL, il faut un profil plus fort. Ce n’est plus un écart entre la spec actuelle et l’implémentation actuelle.
+
+Statut audit final:
+
+- **Closed**: 2.1, 2.2, 2.4, 2.6
+- **Reclassified**: 2.3, 2.5

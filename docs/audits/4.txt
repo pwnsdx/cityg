@@ -573,3 +573,23 @@ Lecture consolidée:
 
 - cela renforce encore `4.8`: les dépendances de current-state utilisées avant authoring merge/expel ne sont plus “externes” au sens faible du finding initial;
 - `4.8` reste néanmoins **Partial** parce que la finalité/gouvernance globale et le niveau de preuve byzantin dépassent encore ce que ce nouvel artefact local ferme.
+
+--
+
+## Commentaires Codex (2026-03-28, final coherence)
+
+Dernière relecture spec + implémentation:
+
+- `4.1` n’est plus honnêtement un `Partial` local. La spec dit maintenant explicitement que la base profile ne promet pas de remote attestation du chemin interne FULL/recover-only; elle promet un binding serveur-visible à une décision helper/current-state attestée.
+- Le runtime GUI vérifie maintenant cryptographiquement `header[181]` contre le `barrier_update` exact, `header[180]`, `header[182]`, `(gid, author_leaf_id, barrier_update_reason, updater_leaf)` et la clé POP auteur. Le sous-gap “receipt présent mais non vraiment vérifié côté client” n’existe plus.
+- Le vrai reste éventuel est donc un profil plus fort, pas une incohérence entre la spec et le code actuels.
+
+Preuves d’implémentation exécutées:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui validate_client_visible_activation_guards_ --features native-app -- --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::perform_join_second_member_can_send_immediately --features native-app -- --exact --nocapture`
+
+Statut audit final:
+
+- **Closed**: 4.2, 4.3, 4.4, 4.5, 4.6, 4.7
+- **Reclassified**: 4.1, 4.8

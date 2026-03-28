@@ -101,6 +101,7 @@ pub(super) struct ParsedBarrierUpdate {
 
 #[derive(Clone, Debug)]
 pub(super) struct BarrierRecoverResult {
+    pub(super) barrier_version: u64,
     pub(super) k_barrier_new: Zeroizing<[u8; 32]>,
     pub(super) kem_tree_hash_after: [u8; 32],
     pub(super) k_fs_after_pcs: Option<Zeroizing<[u8; 32]>>,
@@ -697,6 +698,8 @@ pub(super) async fn full_chain_check_barrier_update(
         .barrier_resolve_revoked_leaves(room_id, &revocation_roots_hash)
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
+    let join_record_count = join_resolution.records.len();
+    let revoked_leaf_count = revoked_resolution.leaf_indices.len();
     if require_current_state_history_commitment(
         &snapshot_prev_history_commitment,
         &join_resolution.history_commitment,
@@ -769,6 +772,17 @@ pub(super) async fn full_chain_check_barrier_update(
         .map_err(|err| anyhow!("barrier full chain-check worker join failure (960.8): {err}"))??;
 
     if expected_before != parsed.kem_tree_hash_before {
+        warn!(
+            local_barrier_version,
+            parsed_prev_barrier_version = parsed.prev_barrier_version,
+            parsed_barrier_version = parsed.barrier_version,
+            join_record_count,
+            revoked_leaf_count,
+            expected_before = %hex_encode(expected_before),
+            parsed_before = %hex_encode(parsed.kem_tree_hash_before),
+            snapshot_prev_hash = %hex_encode(h_prev),
+            "barrier full chain-check pre-state hash mismatch"
+        );
         return Err(anyhow!(
             "barrier tree hash-chain failure (960.8): kem_tree_hash_before mismatch"
         ));

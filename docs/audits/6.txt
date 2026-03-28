@@ -315,3 +315,17 @@ Statut audit mis à jour:
 
 - **Closed**: 6.1, 6.2, 6.3, 6.5, 6.6, 6.7, 6.8
 - **Partial**: 6.4
+
+--
+
+## Commentaires Codex (2026-03-28, final coherence)
+
+Dernière relecture spec + implémentation:
+
+- `6.4` n’est plus honnêtement un `Partial`. Le profil actuel autorise bien encore un path whole-tree pour des prédécesseurs historiques non retenus localement, mais ce path est maintenant explicitement **borné** dans la spec: un seul `pk_entries` de taille `(2*N_max-1)`, A/B paginés, et `N_max <= MAX_BARRIER_N_MAX`.
+- Le retained-snapshot fast path reste une optimisation mémoire/latence, pas une condition de sécurité ou de bornage indispensable au profil.
+- Côté implémentation, cette borne est déjà enforced des deux côtés, et le cache local borné continue d’éviter le refetch/coût dans les cas courants/historiques déjà authentifiés.
+
+Statut audit final:
+
+- **Closed**: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8

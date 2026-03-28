@@ -204,6 +204,7 @@ Shared authenticated-view rule (normative):
 * In the base profile, `history_authority_extension` MUST equal exactly `"global-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
 * When `local-history-authority-v1` is explicitly negotiated outside the base profile, `history_authority_extension` MUST equal exactly `"local-history-authority-v1"` on every successful join/merge/provisioning/helper/lookup response that carries any of those extension-defined objects.
 * Clients MUST fail closed if extension-defined objects are present while `history_authority_extension` is absent/empty, if `history_authority_extension` names an unsupported extension, if a base-profile path carries `"local-history-authority-v1"`, or if pages of one logical A)/B)/C) result drift across different `history_authority_extension` values.
+* `MAX_BARRIER_N_MAX := 65_536`.
 * `MAX_BARRIER_HELPER_PAGE_ENTRIES := 512`.
 * A), B), and C) are paged interfaces in the base profile. Each request MUST accept an explicit `page_offset`/`entry_offset` and `max_entries`; `max_entries == 0` means "use the profile default page size", namely `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
 * A), B), and C) MUST reject requests whose effective page size exceeds `MAX_BARRIER_HELPER_PAGE_ENTRIES`.
@@ -248,6 +249,7 @@ Historical retention contract (normative):
 * FetchBarrierPublicTree(kem_tree_hash_after) MUST work for any committed historical barrier public tree snapshot addressed by kem_tree_hash_after, not only the current one.
 * `MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS := 256` committed snapshots per `gid`, inclusive of the current committed snapshot.
 * `MAX_RETAINED_LOCAL_PUBLIC_TREE_SNAPSHOTS := 8` locally retained authenticated public-tree snapshots per client/session; clients that implement a retained-snapshot fast path MUST evict older retained snapshots before exceeding this bound.
+* `N_max` MUST be `<= MAX_BARRIER_N_MAX`.
 * The server MUST retain the current committed snapshot plus the most recent committed historical snapshots up to `MAX_RETAINED_BARRIER_PUBLIC_TREE_SNAPSHOTS`.
 * Older committed snapshots MAY be retired once they fall outside that bounded retained window. Retirement MUST fail closed: the server MUST return an authenticated "retired / not available" style outcome, or an equivalent deployment-defined typed error for that authenticated member request; it MUST NOT silently substitute the current snapshot.
 * This contract constrains fetch semantics, not internal storage layout. Implementations MAY satisfy it via deltas, structural sharing, compression, or other equivalent internal representations, provided FetchBarrierPublicTree(kem_tree_hash_after) deterministically reconstructs the exact pk_entries array for the requested committed snapshot.
@@ -1244,6 +1246,7 @@ A FULL-verifying client processing a barrier_update MUST:
   * a formerly current FULL-verified committed tree within the same `HistoryAuthorityScope`.
 * Clients that implement this retained historical predecessor fast path MUST bound the local cache to `MAX_RETAINED_LOCAL_PUBLIC_TREE_SNAPSHOTS`.
 * For uncached historical predecessor snapshots, S3.3.C fetch/authentication remains required.
+* The base profile's worst-case work for one uncached historical predecessor chain-check is therefore the exact reconstruction and hashing of one `pk_entries` array of size `(2*N_max-1)`, plus the bounded A)/B) helper pages for that same result. Because `N_max <= MAX_BARRIER_N_MAX`, this path is normatively bounded even when no retained-snapshot fast path applies. Proof/subtree shortcuts are optional optimization extensions, not required for base-profile conformance.
 * Obtain `RevokedLeafSet := ResolveRevokedLeaves(revocation_roots_hash)` and `JoinSet := ResolveJoinsSince(BU.prev_barrier_version)` and record their authenticated view identifiers `hv_revoked` and `hv_join`.
 * Require `hv_revoked == hv_join`; mismatch or missing authenticated current-state view binding -> 960.9.
 * In this FULL-client flow, `H_prev` is the client's locally stored current committed tree, so `hc_tree` MUST equal the current-state `HistoryCommitment` authenticated by A/B; mismatch -> 960.9.
@@ -1272,6 +1275,13 @@ Additional restriction (normative):
 * `current_barrier_full_verified` remains a client-local safety predicate even in the base profile.
 * `header[180]` proves only that the author claims one authenticated current-state `HistoryCommitment` for its helper inputs; it does NOT, by itself, prove to the server that the author actually executed S11.11.2 correctly.
 * In the base profile, `header[181]` + `header[182]` make that helper-state binding wire-visible and server-checkable within `global-history-authority-v1`, but they still do NOT, by themselves, prove federated consensus or any stronger cross-deployment finality than S3.3.F defines.
+* The base profile intentionally does NOT remotely attest whether the author reached that attested helper/current-state decision via a locally FULL path or a locally recover-only path. The remote/server-visible guarantee in this profile is exact binding to one authenticated helper/current-state decision plus the local origination restrictions above. Deployments that require a stronger remote distinction MUST define an extension with an independently authenticated verifier for that distinction.
+Catch-up over multi-version gaps (normative):
+* If the client knows that the currently accepted head is newer than `local barrier_version + 1`, it is in catch-up mode.
+* In catch-up mode, if the currently observed accepted bundle itself carries `header[178] == 1 (pcs_refresh)` and the client lacks authenticated lineage sufficient to order the intervening accepted heads, it MUST enter `recovery_required/insufficient_authenticated_history` (or an equivalent fail-closed state). It MUST NOT best-effort apply that bundle and MUST NOT reseed `K_fs`.
+* In catch-up mode, if the currently observed accepted bundle does NOT carry `header[178] == 1`, the client MAY attempt best-effort recovery of that exact currently accepted head via the unique-match rules of S11.13 only.
+* If that best-effort recovery succeeds, the client MAY activate the recovered barrier state using S11.13.7, but MUST set `current_barrier_full_verified := false` for that post-state unless it also completed S11.11.2 for that exact post-state in the same crash-safe decision.
+* If best-effort recovery yields no unique match, or if authenticated history remains insufficient to prove ordering/completeness for the current head, the client MUST remain in `barrier_recovery_pending` or `recovery_required`, and MUST keep payload send/fetch disabled until a later authenticated sync or targeted barrier update resolves the state.
 
 S11.11.4 FULL-verification receipt
 In the base profile, key `181` is bound to `global-history-authority-v1`. Additional non-base deployments MAY define stronger receipts, but they MUST satisfy the generic requirements below.

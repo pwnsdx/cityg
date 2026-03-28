@@ -1240,7 +1240,7 @@ fn validate_client_visible_activation_guards_rejects_global_history_attestation_
     let err = validate_client_visible_activation_guards(&session, &header)
         .expect_err("reserved global_history_attestation header must fail");
     assert!(
-        err.to_string().contains("960.7") && err.to_string().contains("header[182]"),
+        err.to_string().contains("960.7") && err.to_string().contains("header[181]"),
         "unexpected reserved header error: {err}"
     );
     Ok(())
@@ -1287,6 +1287,24 @@ fn validate_client_visible_activation_guards_accepts_matching_global_authority_h
         HistoryAuthorityExtension::GlobalHistoryAuthorityV1,
         vec![0xDE, 0xAD, 0xBE, 0xEF],
     )?;
+    validate_client_visible_activation_guards(&session, &header)?;
+    Ok(())
+}
+
+#[test]
+fn validate_client_visible_activation_guards_accepts_global_authority_headers_without_pinned_local_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut session = build_test_session(0xB972, "http://127.0.0.1:9", "room-b87g-nopin", "bob")?;
+    let header = build_authority_activation_guard_header(
+        &mut session,
+        HistoryAuthorityExtension::GlobalHistoryAuthorityV1,
+        vec![0xDE, 0xAD, 0xBE, 0xEF],
+    )?;
+    session.barrier_state.current_history_authority_extension = None;
+    session
+        .barrier_state
+        .current_global_history_attestation_bytes
+        .clear();
     validate_client_visible_activation_guards(&session, &header)?;
     Ok(())
 }
@@ -2376,6 +2394,8 @@ fn try_recover_barrier_best_effort_allows_local_barrier_version_gap()
     apply_recovered_barrier_state(&mut session, recovered, false)?;
     assert!(!session.barrier_state.barrier_recovery_pending);
     assert!(!session.barrier_state.current_barrier_full_verified);
+    assert_eq!(session.barrier_state.barrier_version, 9);
+    assert_eq!(session.barrier_state.kem_tree_hash_after, [0xBD; 32]);
     Ok(())
 }
 

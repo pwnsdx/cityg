@@ -24,14 +24,14 @@ Scope-hardening addendum (same date, later tranche):
 - Within both concrete extensions defined by this document, `header[181]` is now mandatory whenever `header[182]` is present on a `barrier_update`; the server normalizes this requirement even when recovering persisted authority state, and GUI activation guards reject authority-bound bundles that carry an attestation without a matching receipt.
 - GUI activation guards now also cryptographically verify `header[181]` against the exact `barrier_update`, `header[180]`, `header[182]`, `(gid, author_leaf_id, barrier_update_reason, updater_leaf)` tuple and the author POP public key, instead of treating `header[181]` as a presence-only token on the receive path.
 - The server/API/client now negotiate and verify both concrete extensions end-to-end. Positive proof anchors include `tests::build_refresh_bundle_includes_global_history_authority_headers` in `crates/cityg-server/src/lib.rs` and `parses_and_verifies_history_authority_extensions` plus `merge_ticket_refresh_accepts_global_history_authority_attestation` in `crates/cityg-api-client`.
-- As a result, the repo/spec now line up on one clear base-profile story: deployment-global append-only authority is in scope, stronger federated/non-equivocation semantics are future-profile work, and only a small residual set remains truly `Partial`.
+- As a result, the repo/spec now line up on one clear base-profile story: deployment-global append-only authority is in scope, stronger federated/non-equivocation semantics are future-profile work, and no finding remains `Open` or `Partial` in the current base-profile scope.
 
 Summary:
 - Total findings reviewed: `51`
-- `Closed`: `35`
-- `Partial`: `4`
+- `Closed`: `37`
+- `Partial`: `0`
 - `Open`: `0`
-- `Reclassified`: `12`
+- `Reclassified`: `14`
 
 ## Audit 1
 
@@ -60,8 +60,8 @@ Summary:
   Proof: `docs/specs.md:162`, `docs/specs.md:279-313`, `docs/specs.md:642-656`.
 - `2.4` `Closed` — barrier/HP KDFs now bind `gid` directly in the spec and in the concrete barrier/HP derivation helpers.
   Proof: `docs/specs.md:324-338`, `docs/specs.md:1072-1127`, `docs/specs.md:1390-1402`, `docs/specs.md:1716-1731`, `crates/msphf-orchestrator/src/lib.rs:698-845`, `crates/cityg-gui/src/barrier_shared.rs:47-55`, `crates/cityg-gui/src/native/barrier_core.rs:33-39,689-706`, `crates/cityg-gui/src/native/tests/mod.rs:1484-1539`, `crates/cityg-client/src/lib.rs:699-705,718-735`, `crates/msphf-orchestrator/tests/end_to_end.rs:954-988`.
-- `2.5` `Partial` — recover-only misuse is reduced by persistent `current_barrier_full_verified`, but still not protocol-enforced end-to-end.
-  Proof: `docs/specs.md:1093-1096`, `docs/specs.md:1154-1157`, `crates/cityg-gui/src/native/session_types.rs:72-99`, `crates/cityg-gui/src/native/barrier_ops.rs:214-251`.
+- `2.5` `Reclassified` — the remaining ask for remote distinction between locally FULL and locally recover-only execution is now explicitly outside the base profile. The current profile intentionally guarantees helper-state/authority binding plus local origination restrictions, not remote attestation of the client's internal verification path.
+  Proof: `docs/specs.md:306`, `docs/specs.md:318-320`, `docs/specs.md:1270-1281`, `crates/cityg-gui/src/native/session_types.rs:72-99`, `crates/cityg-gui/src/native/barrier_ops.rs:214-251`.
 - `2.6` `Closed` — sender/device binding is enforced in code, and the message plane now signs with the same persisted device identity family that the sender-leaf binding checks derive from; the spec also makes `leaf_id(device_pk)` deterministic per `(gid, device_pk, device_pk_alg)` and non-reassignable across distinct device keys within a `gid`.
   Proof: `docs/specs.md:176-178`, `docs/specs.md:600-606`, `crates/cityg-gui/src/native/message_auth.rs:97-156,388-437`, `crates/cityg-gui/src/native/network_messages.rs:14-50,188-203`, `crates/cityg-gui/src/native/tests/mod.rs:7606-7659,8670-8740`, `crates/cityg-gui/src/bin/join_leave.rs:873-970,2311-2328`.
 
@@ -79,13 +79,13 @@ Summary:
   Proof: `docs/specs.md:288-306`, `docs/specs.md:1195-1198`, `docs/specs.md:1259-1265`, `crates/cityg-server/src/lib.rs`, `crates/cityg-api-client/src/lib.rs:1458-2047`.
 - `3.6` `Closed` — within the current deployment-global scope, authenticated current-state regression and rollback/fork conflicts are fail-closed in both spec and client runtime.
   Proof: `docs/specs.md:188-194`, `docs/specs.md:302-306`, `crates/cityg-gui/src/native/barrier_core.rs:290-338`, `crates/cityg-gui/src/native/barrier_ops.rs:294-360,874-985`, `crates/cityg-gui/src/native/epoch_sync.rs:62-73`, `crates/cityg-gui/src/native/tests/mod.rs:219-292`.
-- `3.7` `Partial` — the spec now explicitly forbids best-effort `K_fs` advancement across an unauthenticated `pcs_refresh` boundary in catch-up/version-gap mode, and the GUI enters `recovery_required` instead of attempting best-effort recovery when the currently observed gap bundle is itself `reason=1`; broader future/gap ordering remains unspecified.
-  Proof: `docs/specs.md:1382-1384`, `crates/cityg-gui/src/native/epoch_sync.rs:257-276`, `crates/cityg-gui/src/native/barrier_runtime.rs:82-104`, `crates/cityg-gui/src/native/tests/mod.rs:379-432`.
+- `3.7` `Closed` — the catch-up / multi-version-gap path around `pcs_refresh` is now explicitly specified and matches the runtime: unauthenticated refresh boundaries force `recovery_required`, best-effort recovery is limited to non-refresh current heads, successful recovery activates crash-safely with `current_barrier_full_verified := false`, and unresolved catch-up keeps payload send/fetch disabled.
+  Proof: `docs/specs.md:1275-1280`, `docs/specs.md:1530-1541`, `crates/cityg-gui/src/native/epoch_sync.rs:314-383,386-416`, `crates/cityg-gui/src/native/barrier_runtime.rs:57-82`, `crates/cityg-gui/src/native/tests/mod.rs:9736-10063`.
 
 ## Audit 4
 
-- `4.1` `Partial` — updater eligibility is now server-checkable within the negotiated deployment-global authority, but the server still cannot distinguish honest FULL execution from a recover-only client that can self-sign the same attested helper state.
-  Proof: `docs/specs.md` (S3.3.E-F, S11.11.4-S11.11.5), `crates/cityg-server/src/lib.rs:4644-4731,7025-7059,7192-7234`, `crates/cityg-api-client/tests/history_authority_extensions.rs`, `crates/cityg-gui/src/native/barrier_runtime.rs`, `crates/cityg-gui/src/native/tests/mod.rs:1177-1328`.
+- `4.1` `Reclassified` — the current base profile now states unambiguously that `header[181]`/`header[182]` provide server-checkable authority-bound helper-state binding, not remote attestation of the client's internal FULL-vs-recover-only execution path. The stronger ask is future-profile work, not a mismatch between current spec and code.
+  Proof: `docs/specs.md:300-306`, `docs/specs.md:1270-1283`, `crates/cityg-server/src/lib.rs:4644-4731,7025-7059,7192-7234`, `crates/cityg-gui/src/native/barrier_runtime.rs:545-621`, `crates/cityg-gui/src/native/tests/mod.rs:1177-1328`.
 - `4.2` `Closed` — `join_finalize` is now server-checkable via `header[179] join_finalize_auth`, and the bootstrap exception is explicitly separate from the stronger FULL predicate.
   Proof: `docs/specs.md:1155-1174`, `docs/specs.md:1579-1583`, `crates/msphf-orchestrator/src/accept/mod.rs:1884-1949`, `crates/cityg-server/src/lib.rs:2381-2438,4022-4085,10705-10735`, `crates/cityg-gui/src/native/barrier_core.rs:568-589`, `crates/cityg-gui/src/native/tests/mod.rs:8589-8658,9070-9130`.
 - `4.3` `Closed` — provenance that the current barrier state is not FULL-verified is now persisted and surfaced.
@@ -128,8 +128,8 @@ Summary:
   Proof: `docs/specs.md:229-231`, `crates/cityg-server/src/lib.rs:3143-3182`, `crates/cityg-server/src/lib.rs:10631-10680`.
 - `6.3` `Closed` — payload envelope size is bounded in spec and code.
   Proof: `docs/specs.md:563-565`, `crates/cityg-gui/src/message_crypto.rs:816-846`.
-- `6.4` `Partial` — the base profile now permits a bounded retained-snapshot fast path for the current authenticated tree and for explicitly named historical predecessor snapshots already authenticated locally, and the GUI reuses both classes of snapshots. Uncached historical states still fall back to whole-tree work.
-  Proof: `docs/specs.md:229-236`, `docs/specs.md:1148-1160`, `docs/specs.md:1174-1197`, `crates/cityg-gui/src/native/session_types.rs`, `crates/cityg-gui/src/native/barrier_core.rs`, `crates/cityg-gui/src/native/epoch_sync.rs`, `crates/cityg-gui/src/native/barrier_runtime.rs`, `crates/cityg-gui/src/native/tests/mod.rs`.
+- `6.4` `Closed` — the retained-snapshot fast path remains an optimization, but the base profile now states explicitly that uncached historical predecessor verification is still in-profile because it is bounded by one exact `(2*N_max-1)` tree reconstruction plus bounded helper pages, and `N_max` itself is hard-capped. The code already enforces that cap and reuses retained snapshots when available.
+  Proof: `docs/specs.md:207-214`, `docs/specs.md:248-255`, `docs/specs.md:1241-1247`, `crates/cityg-gui/src/barrier_shared.rs:15,294-296`, `crates/cityg-server/src/lib.rs:13187-13202`, `crates/cityg-gui/src/native/barrier_core.rs:171-204`, `crates/cityg-gui/src/native/tests/mod.rs:805-849`.
 - `6.5` `Closed` — A/B/C now have explicit page framing, bounded page size, and client-side aggregation checks tied to one `HistoryCommitment`.
   Proof: `docs/specs.md:194-238`, `crates/cityg-api/proto/cityg.proto:303-358`, `crates/cityg-api/src/lib.rs:197,900-942,2497-2618,6326-6354`, `crates/cityg-api-client/src/lib.rs:181,1188-1464,2358-2407,2757-2869`.
 - `6.6` `Closed` — unresolved joins are now bounded by `N_max`, and resolved/revoked join activations are pruned from server state.
@@ -181,7 +181,6 @@ Summary:
 
 ## Highest-priority remaining work
 
-1. Decide whether the base profile should keep `header[181]` as “exact attested-helper-state binding” or evolve it into a stronger independently witnessed FULL-verification proof. This is the main remaining substantive protocol gap (`2.5` / `4.1`).
-2. Extend the retained-snapshot fast path into a bounded-cost general path for historical predecessors too, instead of relying on whole-tree work whenever the required predecessor snapshot is not already retained/authenticated locally (`6.4`).
-3. Decide whether `global-history-authority-v1` should remain deployment-global append-only or grow a federated / multi-witness non-equivocation layer as a future stronger profile.
-4. Decide whether the remaining non-base `local-history-authority-v1` compatibility path should stay supported or be explicitly demoted to legacy/test-only scope.
+1. Decide whether a future stronger profile should add independent remote attestation of the client's FULL-verification path beyond the current `header[181]` helper-state binding.
+2. Decide whether `global-history-authority-v1` should remain deployment-global append-only or grow a federated / multi-witness non-equivocation layer as a future stronger profile.
+3. Decide whether the remaining non-base `local-history-authority-v1` compatibility path should stay supported or be explicitly demoted to legacy/test-only scope.

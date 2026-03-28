@@ -2069,6 +2069,11 @@ impl CitygApiClient {
                 "fetch public tree response",
             )?;
             let response_tree_hash = array32(&response.kem_tree_hash_after)?;
+            if response_tree_hash != *kem_tree_hash_after {
+                return Err(Error::Parse(
+                    "fetch public tree response tree hash mismatch with requested hash".to_string(),
+                ));
+            }
             let global_history_attestation = match history_authority.as_ref() {
                 Some(authority) => {
                     let attestation = parse_global_history_attestation_bytes(
