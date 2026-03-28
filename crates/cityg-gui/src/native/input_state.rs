@@ -28,11 +28,13 @@ impl MessageComposer {
         self.active = false;
     }
 
+    #[cfg(test)]
     pub(super) fn set_text(&mut self, text: String) {
         self.text = text;
         self.editor.reset_for_text(&self.text);
     }
 
+    #[cfg(test)]
     pub(super) fn text(&self) -> &str {
         self.text.as_str()
     }
@@ -106,6 +108,7 @@ pub(super) struct MembersSearchState {
 }
 
 impl MembersSearchState {
+    #[cfg(test)]
     pub(super) fn focus(&mut self) {
         self.active = true;
     }
@@ -119,11 +122,13 @@ impl MembersSearchState {
         self.editor.reset();
     }
 
+    #[cfg(test)]
     pub(super) fn set_query(&mut self, query: String) {
         self.query = query;
         self.editor.reset_for_text(&self.query);
     }
 
+    #[cfg(test)]
     pub(super) fn query(&self) -> &str {
         self.query.as_str()
     }

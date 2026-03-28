@@ -696,12 +696,12 @@ pub(super) fn validate_client_visible_activation_guards(
         ));
     }
 
-    if author_device_pk == session.pop_public_key.as_slice() {
-        if fs_dev_prev_commit != session.fs_dev_prev_commit || fs_ec < session.fs_ec {
-            return Err(anyhow!(
-                "client-side activation guard failed (947.0): local device chain continuity mismatch"
-            ));
-        }
+    if author_device_pk == session.pop_public_key.as_slice()
+        && (fs_dev_prev_commit != session.fs_dev_prev_commit || fs_ec < session.fs_ec)
+    {
+        return Err(anyhow!(
+            "client-side activation guard failed (947.0): local device chain continuity mismatch"
+        ));
     }
 
     let Some(bundle_history_commitment) = header_history_commitment(header_map)? else {
@@ -851,6 +851,7 @@ pub(super) enum PendingBarrierHistoryOutcome {
     RecoveryRequired(BarrierRecoveryIssue),
 }
 
+#[cfg(test)]
 pub(super) fn apply_pending_barrier_activation(
     session: &mut AppSession,
     observed_barrier_version: u64,

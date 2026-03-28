@@ -56,10 +56,11 @@ use message_crypto::{
     derive_msg_replay_tuple_tag,
 };
 use msphf_core::{ds, hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
+#[cfg(test)]
+use msphf_orchestrator::compute_leaf_id;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
-    OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_leaf_id, derive_we_epoch_id,
-    hdr,
+    OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
 };
 use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
 use pqcrypto_kyber::kyber768;
@@ -204,6 +205,7 @@ struct BarrierUpdateBuildResult {
     k_barrier_new: [u8; 32],
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_barrier_update_bytes(
     gid: &[u8],
     n_max: u64,
@@ -430,6 +432,7 @@ fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ensure_matching_history_dependencies(
     context: &str,
     expected_view_id: Option<&[u8; 32]>,
@@ -915,6 +918,7 @@ struct Session {
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 const MESSAGE_PREFIX: &[u8; 4] = b"CGM1";
+#[cfg(test)]
 const MESSAGE_SENDER_DEVICE_PK_ALG: &str = "ML-DSA-65";
 
 #[cfg(test)]
@@ -3041,7 +3045,13 @@ fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+#[allow(
+    dead_code,
+    clippy::clone_on_copy,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 mod tests {
     use super::*;
     use axum::{

@@ -132,6 +132,8 @@ struct PersistedMsgReplayTupleState {
 }
 
 impl PersistedMsgReplayTupleState {
+    #[cfg(test)]
+    #[allow(dead_code)]
     fn semantic_key(&self) -> (&str, &str, &Vec<u64>) {
         (
             self.tuple_tag_hex.as_str(),
@@ -206,6 +208,8 @@ impl PersistedMsgReplayState {
         Ok(runtime)
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn semantically_equivalent(&self, other: &Self) -> bool {
         self.tuple_tag_hex == other.tuple_tag_hex
             && self.seen_msg_indices == other.seen_msg_indices
@@ -552,6 +556,7 @@ fn decode_hex32_or_zero(name: &str, value: &str) -> Result<[u8; 32]> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -9243,7 +9243,6 @@ async fn epoch_sync_rejects_barrier_bundle_history_commitment_mismatch()
     let current_commitment = alice
         .barrier_state
         .current_history_commitment
-        .clone()
         .ok_or_else(|| anyhow!("expected local current history commitment after join"))?;
     let mut mismatched = alice.clone();
     mismatched.barrier_state.current_history_commitment = Some(HistoryCommitment {

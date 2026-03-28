@@ -63,7 +63,7 @@ pub(super) fn run_native_app() {
             })
             .detach();
 
-            let _ = entity.update(cx, |model, cx| {
+            entity.update(cx, |model, cx| {
                 model.window_active = window.is_window_active();
                 model.bootstrap_session_runtime(cx);
                 cx.observe_window_activation(window, |model, window, cx| {

@@ -204,6 +204,7 @@ pub fn header_history_commitment(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn encode_full_verification_receipt(
     gid: &[u8; 32],
     author_leaf_id: &[u8; 32],
@@ -239,6 +240,7 @@ pub fn encode_full_verification_receipt(
     .map_err(|err| anyhow!("encode full verification receipt: {err}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn verify_full_verification_receipt(
     raw: &[u8],
     gid: &[u8; 32],
@@ -498,6 +500,7 @@ pub fn collect_resolution_targets(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

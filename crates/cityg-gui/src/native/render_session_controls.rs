@@ -28,9 +28,7 @@ impl AppModel {
             .text_size(px(14.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(UI_PANEL_TEXT))
-            .bg(if leaving {
-                rgb(UI_DANGER_MUTED_FILL)
-            } else if membership_op_busy {
+            .bg(if leaving || membership_op_busy {
                 rgb(UI_DANGER_MUTED_FILL)
             } else {
                 rgb(UI_DANGER_FILL)

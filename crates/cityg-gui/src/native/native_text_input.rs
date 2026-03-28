@@ -21,6 +21,7 @@ pub(super) enum NativeTextFieldKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum NativeTextContextMenuAction {
     Cut,
     Copy,
@@ -29,6 +30,7 @@ enum NativeTextContextMenuAction {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(dead_code)]
 struct NativeTextContextMenuAvailability {
     cut: bool,
     copy: bool,
@@ -151,6 +153,7 @@ mod mac_text_context_menu {
         unsafe { NSString::alloc(nil).init_str(text).autorelease() }
     }
 
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
     fn context_menu_target_class() -> &'static Class {
         const CLASS_NAME: &str = "CityGTextContextMenuTarget";
         static REGISTER: Once = Once::new();
@@ -867,10 +870,10 @@ impl Element for NativeTextFieldElement {
                 .paint(bounds.origin, window.line_height(), window, cx)
                 .ok();
 
-            if focus_handle.is_focused(window) {
-                if let Some(cursor) = prepaint.cursor.take() {
-                    window.paint_quad(cursor);
-                }
+            if focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
             }
         }
 
@@ -1144,31 +1147,26 @@ impl AppModel {
             .key_context("cityg-text-input")
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, {
-                let field = field;
                 cx.listener(move |this, event, window, cx| {
                     this.on_text_field_mouse_down(field, event, window, cx);
                 })
             })
             .on_mouse_down(MouseButton::Right, {
-                let field = field;
                 cx.listener(move |this, event, window, cx| {
                     this.on_text_field_secondary_mouse_down(field, event, window, cx);
                 })
             })
             .on_mouse_move({
-                let field = field;
                 cx.listener(move |this, event, window, cx| {
                     this.on_text_field_mouse_move(field, event, window, cx);
                 })
             })
             .on_mouse_up(MouseButton::Left, {
-                let field = field;
                 cx.listener(move |this, event, window, cx| {
                     this.on_text_field_mouse_up(field, event, window, cx);
                 })
             })
             .on_mouse_up_out(MouseButton::Left, {
-                let field = field;
                 cx.listener(move |this, event, window, cx| {
                     this.on_text_field_mouse_up(field, event, window, cx);
                 })

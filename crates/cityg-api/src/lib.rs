@@ -2106,11 +2106,16 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
             .join_provisioning_artifact_bytes(
                 &ticket,
                 API_PROFILE_VERSION,
-                history_authority_extension.as_str(),
-                history_authority_descriptor.as_slice(),
-                current_global_history_attestation.as_slice(),
-                current_join_records_completeness_attestation.as_slice(),
-                current_revoked_leaf_indices_completeness_attestation.as_slice(),
+                cityg_server::JoinProvisioningAuthorityArtifacts {
+                    history_authority_extension: history_authority_extension.as_str(),
+                    history_authority_descriptor: history_authority_descriptor.as_slice(),
+                    current_global_history_attestation: current_global_history_attestation
+                        .as_slice(),
+                    current_join_records_completeness_attestation:
+                        current_join_records_completeness_attestation.as_slice(),
+                    current_revoked_leaf_indices_completeness_attestation:
+                        current_revoked_leaf_indices_completeness_attestation.as_slice(),
+                },
             )
             .map_err(ApiError::from)?
     };

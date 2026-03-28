@@ -65,7 +65,7 @@ pub(super) async fn perform_epoch_sync(mut session: AppSession) -> Result<EpochS
         }
     };
     let ticket_kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
-    let ticket_history_commitment = ticket.current_history_commitment.clone();
+    let ticket_history_commitment = ticket.current_history_commitment;
     let ticket_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
     } else {

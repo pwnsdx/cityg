@@ -45,6 +45,7 @@ impl AppModel {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn on_composer_clicked(
         &mut self,
         _: &MouseDownEvent,
@@ -72,6 +73,7 @@ impl AppModel {
         self.toggle_ciphertext(cx);
     }
 
+    #[cfg(test)]
     pub(super) fn focus_field(&mut self, field: ActiveField, cx: &mut ViewContext<Self>) {
         self.join_form.active = Some(field);
         self.composer.blur();

@@ -83,6 +83,7 @@ pub(super) fn parse_join_invite(raw: &str) -> Result<Option<JoinInvitePayload>> 
     Ok(Some(invite))
 }
 
+#[cfg(test)]
 pub(super) fn apply_join_field_paste(field: ActiveField, existing: &str, pasted: &str) -> String {
     let sanitized = sanitize_clipboard_text(pasted);
     if field == ActiveField::Room {
@@ -128,6 +129,7 @@ impl JoinFormState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn field(&self, field: ActiveField) -> &str {
         match field {
             ActiveField::Server => self.server.as_str(),

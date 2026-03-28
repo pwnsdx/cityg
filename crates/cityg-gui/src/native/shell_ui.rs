@@ -26,6 +26,7 @@ pub(super) fn ui_canvas_fill(window_active: bool) -> gpui::Rgba {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn ui_sidebar_fill(window_active: bool) -> gpui::Rgba {
     if window_active {
         rgba(0x0c1118f3)
@@ -66,6 +67,7 @@ pub(super) fn ui_input_fill(focused: bool) -> gpui::Rgba {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn ui_sheet_fill(window_active: bool) -> gpui::Rgba {
     if window_active {
         rgba(0x0f141cf4)

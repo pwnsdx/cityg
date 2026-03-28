@@ -598,7 +598,7 @@ async fn publish_revocation_merge_from_ticket(
             barrier_version,
             barrier_roots_hash: committed_revocation_roots_hash,
             kem_tree_hash_after: snapshot_hash,
-            current_history_commitment: Some(ticket_history_commitment.clone()),
+            current_history_commitment: Some(ticket_history_commitment),
             current_history_authority_extension: ticket_history_authority_extension,
             current_global_history_attestation_bytes: current_global_history_attestation_bytes
                 .clone(),
@@ -1248,7 +1248,7 @@ async fn perform_barrier_merge_inner(
             barrier_version,
             barrier_roots_hash: committed_revocation_roots_hash,
             kem_tree_hash_after: snapshot_hash,
-            current_history_commitment: Some(ticket_history_commitment.clone()),
+            current_history_commitment: Some(ticket_history_commitment),
             current_history_authority_extension: ticket_history_authority_extension,
             current_global_history_attestation_bytes: current_global_history_attestation_bytes
                 .clone(),

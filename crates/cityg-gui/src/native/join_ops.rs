@@ -486,7 +486,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 "current_history_view_id",
                 &ticket.current_history_view_id,
             )?,
-            current_history_commitment: current_history_commitment.clone(),
+            current_history_commitment,
             current_history_authority_extension,
             current_global_history_attestation_bytes: ticket
                 .current_global_history_attestation

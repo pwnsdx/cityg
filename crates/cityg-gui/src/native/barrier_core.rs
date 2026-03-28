@@ -288,6 +288,7 @@ pub(super) fn clear_all_public_tree_caches(state: &mut BarrierSecretState) {
     state.retained_public_trees.clear();
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn ensure_non_regressing_authenticated_current_state(
     local_barrier_version: u64,
     local_kem_tree_hash_after: &[u8; 32],

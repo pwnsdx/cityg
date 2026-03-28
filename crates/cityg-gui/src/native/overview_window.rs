@@ -313,7 +313,7 @@ impl AppModel {
                     start_width: sidebar_width,
                 },
                 move |state: &SidebarResizeState, position, _, cx: &mut App| {
-                    let _ = entity.update(cx, |model, cx| {
+                    entity.update(cx, |model, cx| {
                         model.sidebar_resize = Some(SidebarResizeState {
                             start_mouse_x: f32::from(position.x),
                             start_width: state.start_width,
@@ -369,7 +369,7 @@ impl AppModel {
                     start_width: inspector_width,
                 },
                 move |state: &InspectorResizeState, position, _, cx: &mut App| {
-                    let _ = entity.update(cx, |model, cx| {
+                    entity.update(cx, |model, cx| {
                         model.inspector_resize = Some(InspectorResizeState {
                             start_mouse_x: f32::from(position.x),
                             start_width: state.start_width,

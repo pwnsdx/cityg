@@ -283,7 +283,6 @@ pub struct CityGServer {
     acceptance_options: AcceptanceOptions,
     journal: Option<ServerJournal>,
     kbroad_state_path: Option<PathBuf>,
-    history_authority_path: Option<PathBuf>,
     history_authority: Option<HistoryAuthorityState>,
     replaying: bool,
 }
@@ -368,6 +367,14 @@ pub struct JoinTicketBundle {
     pub n_max: u64,
     /// Deployment-wide barrier update size limit.
     pub max_barrier_update_bytes: u64,
+}
+
+pub struct JoinProvisioningAuthorityArtifacts<'a> {
+    pub history_authority_extension: &'a str,
+    pub history_authority_descriptor: &'a [u8],
+    pub current_global_history_attestation: &'a [u8],
+    pub current_join_records_completeness_attestation: &'a [u8],
+    pub current_revoked_leaf_indices_completeness_attestation: &'a [u8],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -551,10 +558,10 @@ fn barrier_genesis_required_freeze_error() -> CityGError {
     ))
 }
 
-fn require_genesis_provisioning_snapshot<'a>(
-    state: &'a GroupState,
+fn require_genesis_provisioning_snapshot(
+    state: &GroupState,
     missing_err: impl FnOnce() -> CityGError,
-) -> Result<&'a GroupMembership, CityGError> {
+) -> Result<&GroupMembership, CityGError> {
     state.latest_snapshot().ok_or_else(missing_err)
 }
 
@@ -1042,7 +1049,6 @@ impl CityGServer {
             acceptance_options: options,
             journal,
             kbroad_state_path,
-            history_authority_path,
             history_authority,
             replaying: false,
         };
@@ -1053,10 +1059,10 @@ impl CityGServer {
             .and_then(|path| ServerJournal::load_entries(path).ok())
             .map(|entries| !entries.is_empty())
             .unwrap_or(false);
-        if let Some(path) = config.state_path {
-            if let Err(err) = server.recover_from_state(&path, persisted_kbroad_state.as_ref()) {
-                eprintln!("cityg-server: state recovery failed: {err:?}");
-            }
+        if let Some(path) = config.state_path
+            && let Err(err) = server.recover_from_state(&path, persisted_kbroad_state.as_ref())
+        {
+            eprintln!("cityg-server: state recovery failed: {err:?}");
         }
         if let Some(state) = persisted_kbroad_state
             && let Err(err) = if journal_has_entries {
@@ -1776,17 +1782,16 @@ impl CityGServer {
             }
             prune_join_history(state)?;
         }
-        if let Some(state) = roster.groups.get_mut(bundle.gid()) {
-            if matches!(barrier_update_reason, Some(2))
-                && let Some(pop_pk) = maybe_device_pk.as_deref()
-                && let Some(author_leaf_id) = state
-                    .leaf_device_pk
-                    .iter()
-                    .find(|(_, device_pk)| device_pk.as_slice() == pop_pk)
-                    .map(|(leaf_id, _)| *leaf_id)
-            {
-                state.pending_join_finalize_auth.remove(&author_leaf_id);
-            }
+        if let Some(state) = roster.groups.get_mut(bundle.gid())
+            && matches!(barrier_update_reason, Some(2))
+            && let Some(pop_pk) = maybe_device_pk.as_deref()
+            && let Some(author_leaf_id) = state
+                .leaf_device_pk
+                .iter()
+                .find(|(_, device_pk)| device_pk.as_slice() == pop_pk)
+                .map(|(leaf_id, _)| *leaf_id)
+        {
+            state.pending_join_finalize_auth.remove(&author_leaf_id);
         }
         if let Some(validation) = barrier_validation.as_ref() {
             let state = roster.groups.entry(bundle.gid().to_vec()).or_default();
@@ -2010,14 +2015,12 @@ impl CityGServer {
                                     == [0u8; 32]
                         })
                         .unwrap_or(false);
-                    if needs_history_commitment {
-                        if let Some(snapshot_ref) =
+                    if needs_history_commitment
+                        && let Some(snapshot_ref) =
                             group.barrier_public_tree_history.get_mut(&current_hash)
-                        {
-                            snapshot_ref.history_commitment = current_history_commitment;
-                            snapshot_ref.history_view_id =
-                                current_history_commitment.history_view_id;
-                        }
+                    {
+                        snapshot_ref.history_commitment = current_history_commitment;
+                        snapshot_ref.history_view_id = current_history_commitment.history_view_id;
                     }
                 }
             }
@@ -2703,11 +2706,7 @@ impl CityGServer {
         &self,
         bundle: &JoinTicketBundle,
         profile_version: &str,
-        history_authority_extension: &str,
-        history_authority_descriptor: &[u8],
-        current_global_history_attestation: &[u8],
-        current_join_records_completeness_attestation: &[u8],
-        current_revoked_leaf_indices_completeness_attestation: &[u8],
+        artifacts: JoinProvisioningAuthorityArtifacts<'_>,
     ) -> Result<Vec<u8>, CityGError> {
         let authority = self
             .history_authority
@@ -2715,16 +2714,7 @@ impl CityGServer {
             .ok_or(CityGError::InvalidInput(
                 "history authority unavailable for join provisioning artifact",
             ))?;
-        encode_join_provisioning_artifact(
-            authority,
-            bundle,
-            profile_version,
-            history_authority_extension,
-            history_authority_descriptor,
-            current_global_history_attestation,
-            current_join_records_completeness_attestation,
-            current_revoked_leaf_indices_completeness_attestation,
-        )
+        encode_join_provisioning_artifact(authority, bundle, profile_version, artifacts)
     }
 
     pub fn merge_ticket_artifact_bytes(
@@ -3607,6 +3597,7 @@ fn sign_history_authority_message(
         .to_vec())
 }
 
+#[cfg(test)]
 fn verify_history_authority_signature(
     descriptor: &HistoryAuthorityDescriptor,
     payload: &[u8],
@@ -3683,21 +3674,22 @@ fn encode_global_history_attestation(
     ))?)
 }
 
+#[cfg(test)]
+type ParsedGlobalHistoryAttestation = (
+    HistoryAuthorityDescriptor,
+    [u8; 32],
+    HistoryCommitment,
+    u64,
+    [u8; 32],
+    [u8; 32],
+    String,
+    Vec<u8>,
+);
+
+#[cfg(test)]
 fn parse_global_history_attestation(
     raw: &[u8],
-) -> Result<
-    (
-        HistoryAuthorityDescriptor,
-        [u8; 32],
-        HistoryCommitment,
-        u64,
-        [u8; 32],
-        [u8; 32],
-        String,
-        Vec<u8>,
-    ),
-    CityGError,
-> {
+) -> Result<ParsedGlobalHistoryAttestation, CityGError> {
     let GlobalHistoryAttestationWire(
         scope_id,
         gid,
@@ -3731,6 +3723,7 @@ fn parse_global_history_attestation(
     ))
 }
 
+#[cfg(test)]
 fn encode_full_verification_receipt(
     author_leaf_id: &[u8; 32],
     barrier_update_reason: u64,
@@ -3771,16 +3764,12 @@ fn encode_join_provisioning_artifact(
     state: &HistoryAuthorityState,
     bundle: &JoinTicketBundle,
     profile_version: &str,
-    history_authority_extension: &str,
-    history_authority_descriptor: &[u8],
-    current_global_history_attestation: &[u8],
-    current_join_records_completeness_attestation: &[u8],
-    current_revoked_leaf_indices_completeness_attestation: &[u8],
+    artifacts: JoinProvisioningAuthorityArtifacts<'_>,
 ) -> Result<Vec<u8>, CityGError> {
     let payload = to_cbor_vec(&JoinProvisioningArtifactSignedPayload {
         label: "cityg/join-provisioning-artifact-v1",
         scope_id: &state.descriptor.scope_id,
-        history_authority_extension,
+        history_authority_extension: artifacts.history_authority_extension,
         gid: &bundle.gid,
         profile_version,
         leaf_id: &bundle.leaf_id,
@@ -3804,10 +3793,12 @@ fn encode_join_provisioning_artifact(
         fs_forward_leap_slack_first_device: bundle.fs_forward_leap_policy.slack_first_device,
         fs_forward_leap_slack_device: bundle.fs_forward_leap_policy.slack_device,
         last_accepted_ec: bundle.last_accepted_ec,
-        history_authority_descriptor,
-        current_global_history_attestation,
-        current_join_records_completeness_attestation,
-        current_revoked_leaf_indices_completeness_attestation,
+        history_authority_descriptor: artifacts.history_authority_descriptor,
+        current_global_history_attestation: artifacts.current_global_history_attestation,
+        current_join_records_completeness_attestation: artifacts
+            .current_join_records_completeness_attestation,
+        current_revoked_leaf_indices_completeness_attestation: artifacts
+            .current_revoked_leaf_indices_completeness_attestation,
         current_barrier_update: bundle.current_barrier_update.as_slice(),
         current_join_records: bundle.current_join_records.as_slice(),
         current_revoked_leaf_indices: bundle.current_revoked_leaf_indices.as_slice(),
@@ -3815,7 +3806,7 @@ fn encode_join_provisioning_artifact(
     let signature = sign_history_authority_message(state, payload.as_slice())?;
     Ok(to_cbor_vec(&JoinProvisioningArtifactWire {
         scope_id: state.descriptor.scope_id.to_vec(),
-        history_authority_extension: history_authority_extension.to_string(),
+        history_authority_extension: artifacts.history_authority_extension.to_string(),
         gid: bundle.gid.to_vec(),
         profile_version: profile_version.to_string(),
         leaf_id: bundle.leaf_id.to_vec(),
@@ -6626,13 +6617,11 @@ mod tests {
             hdr::HDR_BARRIER_HISTORY_COMMITMENT,
             Value::Bytes(history_commitment_header.clone()),
         );
-        if barrier_update_reason == 2 {
-            if generated.join_finalize_auth_token != [0u8; 32] {
-                header.insert(
-                    hdr::HDR_JOIN_FINALIZE_AUTH,
-                    Value::Bytes(generated.join_finalize_auth_token.to_vec()),
-                );
-            }
+        if barrier_update_reason == 2 && generated.join_finalize_auth_token != [0u8; 32] {
+            header.insert(
+                hdr::HDR_JOIN_FINALIZE_AUTH,
+                Value::Bytes(generated.join_finalize_auth_token.to_vec()),
+            );
         }
 
         let parts = AnchorInstanceParts {

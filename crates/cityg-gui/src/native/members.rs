@@ -275,6 +275,7 @@ impl AppModel {
         self.load_more_members(cx);
     }
 
+    #[cfg(test)]
     pub(super) fn on_members_search_field_clicked(
         &mut self,
         _: &MouseDownEvent,

@@ -98,7 +98,7 @@ impl AppModel {
 
         workspace = workspace.child(main_columns);
 
-        let root = div()
+        div()
             .flex()
             .w_full()
             .h_full()
@@ -107,8 +107,6 @@ impl AppModel {
             .px(px(12.0))
             .py(px(12.0))
             .bg(ui_canvas_fill(self.window_active))
-            .child(workspace);
-
-        root
+            .child(workspace)
     }
 }

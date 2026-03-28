@@ -718,20 +718,19 @@ impl CitygApiClient {
             current_history_view_id,
             response.current_history_commitment.clone(),
         )?;
-        let history_authority_extension =
-            Some(require_base_profile_global_history_authority_extension(
-                parse_history_authority_extension(
-                    response.history_authority_extension.as_str(),
-                    !response.history_authority_descriptor.is_empty()
-                        || !response.current_global_history_attestation.is_empty(),
-                )?,
-                "merge ticket",
-            )?);
+        let history_authority_extension = require_base_profile_global_history_authority_extension(
+            parse_history_authority_extension(
+                response.history_authority_extension.as_str(),
+                !response.history_authority_descriptor.is_empty()
+                    || !response.current_global_history_attestation.is_empty(),
+            )?,
+            "merge ticket",
+        )?;
         let history_authority = parse_history_authority_descriptor_bytes(
             response.history_authority_descriptor.as_slice(),
         )?;
         require_history_authority_descriptor_for_extension(
-            history_authority_extension,
+            Some(history_authority_extension),
             &history_authority,
             "merge ticket",
         )?;
@@ -766,7 +765,7 @@ impl CitygApiClient {
                     ));
                 }
                 validate_local_history_attestation_kind(
-                    history_authority_extension,
+                    Some(history_authority_extension),
                     &attestation,
                     "merge ticket",
                 )?;
@@ -796,23 +795,27 @@ impl CitygApiClient {
             verify_deployment_profile_manifest(
                 response.deployment_profile_manifest.as_slice(),
                 authority,
-                history_authority_extension.expect("validated base-profile extension"),
-                &attestation.gid,
-                response.profile_version.as_str(),
-                response.n_max,
-                response.max_barrier_update_bytes,
-                &fs_forward_leap_policy,
-                "merge ticket",
+                history_authority_extension,
+                DeploymentProfileManifestContext {
+                    gid: &attestation.gid,
+                    profile_version: response.profile_version.as_str(),
+                    n_max: response.n_max,
+                    max_barrier_update_bytes: response.max_barrier_update_bytes,
+                    fs_forward_leap_policy: &fs_forward_leap_policy,
+                    context: "merge ticket",
+                },
             )?;
             verify_merge_ticket_artifact(
                 response.merge_ticket_artifact.as_slice(),
                 authority,
-                history_authority_extension.expect("validated base-profile extension"),
-                author_leaf_id,
-                &response,
-                &current_history_commitment,
-                attestation,
-                &fs_forward_leap_policy,
+                history_authority_extension,
+                MergeTicketArtifactContext {
+                    requested_leaf_id: author_leaf_id,
+                    response: &response,
+                    current_history_commitment: &current_history_commitment,
+                    current_global_history_attestation: attestation,
+                    fs_forward_leap_policy: &fs_forward_leap_policy,
+                },
             )?;
         } else if !response.merge_ticket_artifact.is_empty()
             || !response.deployment_profile_manifest.is_empty()
@@ -850,7 +853,7 @@ impl CitygApiClient {
             cover_leaf_index: response.cover_leaf_index,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
             current_history_commitment,
-            history_authority_extension,
+            history_authority_extension: Some(history_authority_extension),
             history_authority_descriptor_bytes: response.history_authority_descriptor,
             history_authority,
             current_global_history_attestation_bytes: response.current_global_history_attestation,
@@ -1108,23 +1111,21 @@ impl CitygApiClient {
             .clone()
             .map(|commitment| parse_history_commitment(current_history_view_id, Some(commitment)))
             .transpose()?;
-        let history_authority_extension =
-            Some(require_base_profile_global_history_authority_extension(
-                parse_history_authority_extension(
-                    response.history_authority_extension.as_str(),
-                    !response.history_authority_descriptor.is_empty()
-                        || !response.current_global_history_attestation.is_empty()
-                        || !response
-                            .current_join_records_completeness_attestation
-                            .is_empty()
-                        || !response
-                            .current_revoked_leaf_indices_completeness_attestation
-                            .is_empty(),
-                )?,
-                "join ticket",
-            )?);
-        let fs_forward_leap_policy =
-            parse_fs_forward_leap_policy(response.fs_forward_leap_policy.clone())?;
+        let history_authority_extension = require_base_profile_global_history_authority_extension(
+            parse_history_authority_extension(
+                response.history_authority_extension.as_str(),
+                !response.history_authority_descriptor.is_empty()
+                    || !response.current_global_history_attestation.is_empty()
+                    || !response
+                        .current_join_records_completeness_attestation
+                        .is_empty()
+                    || !response
+                        .current_revoked_leaf_indices_completeness_attestation
+                        .is_empty(),
+            )?,
+            "join ticket",
+        )?;
+        let fs_forward_leap_policy = parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
         let current_predecessor_kem_tree_hash_after =
             if response.current_predecessor_kem_tree_hash_after.is_empty() {
                 [0u8; 32]
@@ -1177,7 +1178,7 @@ impl CitygApiClient {
             response.history_authority_descriptor.as_slice(),
         )?;
         require_history_authority_descriptor_for_extension(
-            history_authority_extension,
+            Some(history_authority_extension),
             &history_authority,
             "join ticket",
         )?;
@@ -1197,13 +1198,13 @@ impl CitygApiClient {
                     "join ticket current_global_history_attestation gid mismatch".to_string(),
                 ));
             }
-            if let Some(commitment) = current_history_commitment {
-                if attestation.history_commitment != commitment {
-                    return Err(Error::Parse(
-                        "join ticket current_global_history_attestation commitment mismatch"
-                            .to_string(),
-                    ));
-                }
+            if let Some(commitment) = current_history_commitment
+                && attestation.history_commitment != commitment
+            {
+                return Err(Error::Parse(
+                    "join ticket current_global_history_attestation commitment mismatch"
+                        .to_string(),
+                ));
             }
             if attestation.barrier_version != response.barrier_version {
                 return Err(Error::Parse(
@@ -1217,7 +1218,7 @@ impl CitygApiClient {
                 ));
             }
             validate_local_history_attestation_kind(
-                history_authority_extension,
+                Some(history_authority_extension),
                 &attestation,
                 "join ticket",
             )?;
@@ -1225,18 +1226,20 @@ impl CitygApiClient {
                 verify_deployment_profile_manifest(
                     response.deployment_profile_manifest.as_slice(),
                     authority,
-                    history_authority_extension.expect("validated base-profile extension"),
-                    &gid,
-                    response.profile_version.as_str(),
-                    response.n_max,
-                    response.max_barrier_update_bytes,
-                    &fs_forward_leap_policy,
-                    "join ticket",
+                    history_authority_extension,
+                    DeploymentProfileManifestContext {
+                        gid: &gid,
+                        profile_version: response.profile_version.as_str(),
+                        n_max: response.n_max,
+                        max_barrier_update_bytes: response.max_barrier_update_bytes,
+                        fs_forward_leap_policy: &fs_forward_leap_policy,
+                        context: "join ticket",
+                    },
                 )?;
                 verify_join_provisioning_artifact(
                     response.provisioning_artifact.as_slice(),
                     authority,
-                    history_authority_extension.expect("validated base-profile extension"),
+                    history_authority_extension,
                     &response,
                     commitment,
                     &fs_forward_leap_policy,
@@ -1409,20 +1412,19 @@ impl CitygApiClient {
             current_history_view_id,
             response.current_history_commitment.clone(),
         )?;
-        let history_authority_extension =
-            Some(require_base_profile_global_history_authority_extension(
-                parse_history_authority_extension(
-                    response.history_authority_extension.as_str(),
-                    !response.history_authority_descriptor.is_empty()
-                        || !response.current_global_history_attestation.is_empty(),
-                )?,
-                "merge ticket",
-            )?);
+        let history_authority_extension = require_base_profile_global_history_authority_extension(
+            parse_history_authority_extension(
+                response.history_authority_extension.as_str(),
+                !response.history_authority_descriptor.is_empty()
+                    || !response.current_global_history_attestation.is_empty(),
+            )?,
+            "merge ticket",
+        )?;
         let history_authority = parse_history_authority_descriptor_bytes(
             response.history_authority_descriptor.as_slice(),
         )?;
         require_history_authority_descriptor_for_extension(
-            history_authority_extension,
+            Some(history_authority_extension),
             &history_authority,
             "merge ticket",
         )?;
@@ -1457,7 +1459,7 @@ impl CitygApiClient {
                     ));
                 }
                 validate_local_history_attestation_kind(
-                    history_authority_extension,
+                    Some(history_authority_extension),
                     &attestation,
                     "merge ticket",
                 )?;
@@ -1487,23 +1489,27 @@ impl CitygApiClient {
             verify_deployment_profile_manifest(
                 response.deployment_profile_manifest.as_slice(),
                 authority,
-                history_authority_extension.expect("validated base-profile extension"),
-                &attestation.gid,
-                response.profile_version.as_str(),
-                response.n_max,
-                response.max_barrier_update_bytes,
-                &fs_forward_leap_policy,
-                "merge ticket",
+                history_authority_extension,
+                DeploymentProfileManifestContext {
+                    gid: &attestation.gid,
+                    profile_version: response.profile_version.as_str(),
+                    n_max: response.n_max,
+                    max_barrier_update_bytes: response.max_barrier_update_bytes,
+                    fs_forward_leap_policy: &fs_forward_leap_policy,
+                    context: "merge ticket",
+                },
             )?;
             verify_merge_ticket_artifact(
                 response.merge_ticket_artifact.as_slice(),
                 authority,
-                history_authority_extension.expect("validated base-profile extension"),
-                leaf_id,
-                &response,
-                &current_history_commitment,
-                attestation,
-                &fs_forward_leap_policy,
+                history_authority_extension,
+                MergeTicketArtifactContext {
+                    requested_leaf_id: leaf_id,
+                    response: &response,
+                    current_history_commitment: &current_history_commitment,
+                    current_global_history_attestation: attestation,
+                    fs_forward_leap_policy: &fs_forward_leap_policy,
+                },
             )?;
         } else if !response.merge_ticket_artifact.is_empty()
             || !response.deployment_profile_manifest.is_empty()
@@ -1541,7 +1547,7 @@ impl CitygApiClient {
             cover_leaf_index: response.cover_leaf_index,
             kem_tree_hash_after: array32(&response.kem_tree_hash_after)?,
             current_history_commitment,
-            history_authority_extension,
+            history_authority_extension: Some(history_authority_extension),
             history_authority_descriptor_bytes: response.history_authority_descriptor,
             history_authority,
             current_global_history_attestation_bytes: response.current_global_history_attestation,
@@ -1594,9 +1600,9 @@ impl CitygApiClient {
             ensure_profile_version(&response.profile_version)?;
             let n_max = validate_barrier_n_max(response.n_max)?;
             let fs_forward_leap_policy =
-                parse_fs_forward_leap_policy(response.fs_forward_leap_policy.clone())?;
+                parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
             let history_authority_extension =
-                Some(require_base_profile_global_history_authority_extension(
+                require_base_profile_global_history_authority_extension(
                     parse_history_authority_extension(
                         response.history_authority_extension.as_str(),
                         !response.history_authority_descriptor.is_empty()
@@ -1605,12 +1611,12 @@ impl CitygApiClient {
                             || !response.deployment_profile_manifest.is_empty(),
                     )?,
                     "revoked leaves response",
-                )?);
+                )?;
             let history_authority = parse_history_authority_descriptor_bytes(
                 response.history_authority_descriptor.as_slice(),
             )?;
             require_history_authority_descriptor_for_extension(
-                history_authority_extension,
+                Some(history_authority_extension),
                 &history_authority,
                 "revoked leaves response",
             )?;
@@ -1633,20 +1639,22 @@ impl CitygApiClient {
                         ));
                     }
                     validate_local_history_attestation_kind(
-                        history_authority_extension,
+                        Some(history_authority_extension),
                         &attestation,
                         "revoked leaves response",
                     )?;
                     verify_deployment_profile_manifest(
                         response.deployment_profile_manifest.as_slice(),
                         authority,
-                        history_authority_extension.expect("validated base-profile extension"),
-                        &gid,
-                        response.profile_version.as_str(),
-                        n_max,
-                        response.max_barrier_update_bytes,
-                        &fs_forward_leap_policy,
-                        "revoked leaves response",
+                        history_authority_extension,
+                        DeploymentProfileManifestContext {
+                            gid: &gid,
+                            profile_version: response.profile_version.as_str(),
+                            n_max,
+                            max_barrier_update_bytes: response.max_barrier_update_bytes,
+                            fs_forward_leap_policy: &fs_forward_leap_policy,
+                            context: "revoked leaves response",
+                        },
                     )?;
                     Some(attestation)
                 }
@@ -1689,17 +1697,17 @@ impl CitygApiClient {
             ensure_barrier_helper_history_page(
                 &mut expected_history,
                 history_view_id,
-                history_commitment.clone(),
+                history_commitment,
                 total_entries,
             )?;
-            match (expected_extension, history_authority_extension) {
-                (Some(expected), Some(actual)) if expected != actual => {
+            match expected_extension {
+                Some(expected) if expected != history_authority_extension => {
                     return Err(Error::Parse(
                         "revoked leaves response history authority extension mismatch across pages"
                             .to_string(),
                     ));
                 }
-                (None, Some(actual)) => expected_extension = Some(actual),
+                None => expected_extension = Some(history_authority_extension),
                 _ => {}
             }
             match (&expected_authority, &history_authority) {
@@ -1817,9 +1825,9 @@ impl CitygApiClient {
             ensure_profile_version(&response.profile_version)?;
             let n_max = validate_barrier_n_max(response.n_max)?;
             let fs_forward_leap_policy =
-                parse_fs_forward_leap_policy(response.fs_forward_leap_policy.clone())?;
+                parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
             let history_authority_extension =
-                Some(require_base_profile_global_history_authority_extension(
+                require_base_profile_global_history_authority_extension(
                     parse_history_authority_extension(
                         response.history_authority_extension.as_str(),
                         !response.history_authority_descriptor.is_empty()
@@ -1828,12 +1836,12 @@ impl CitygApiClient {
                             || !response.deployment_profile_manifest.is_empty(),
                     )?,
                     "joins since response",
-                )?);
+                )?;
             let history_authority = parse_history_authority_descriptor_bytes(
                 response.history_authority_descriptor.as_slice(),
             )?;
             require_history_authority_descriptor_for_extension(
-                history_authority_extension,
+                Some(history_authority_extension),
                 &history_authority,
                 "joins since response",
             )?;
@@ -1864,20 +1872,22 @@ impl CitygApiClient {
                         ));
                     }
                     validate_local_history_attestation_kind(
-                        history_authority_extension,
+                        Some(history_authority_extension),
                         &attestation,
                         "joins since response",
                     )?;
                     verify_deployment_profile_manifest(
                         response.deployment_profile_manifest.as_slice(),
                         authority,
-                        history_authority_extension.expect("validated base-profile extension"),
-                        &gid,
-                        response.profile_version.as_str(),
-                        n_max,
-                        response.max_barrier_update_bytes,
-                        &fs_forward_leap_policy,
-                        "joins since response",
+                        history_authority_extension,
+                        DeploymentProfileManifestContext {
+                            gid: &gid,
+                            profile_version: response.profile_version.as_str(),
+                            n_max,
+                            max_barrier_update_bytes: response.max_barrier_update_bytes,
+                            fs_forward_leap_policy: &fs_forward_leap_policy,
+                            context: "joins since response",
+                        },
                     )?;
                     let helper_attestation = parse_helper_completeness_attestation_bytes(
                         response.helper_completeness_attestation.as_slice(),
@@ -1918,17 +1928,17 @@ impl CitygApiClient {
             ensure_barrier_helper_history_page(
                 &mut expected_history,
                 history_view_id,
-                history_commitment.clone(),
+                history_commitment,
                 total_entries,
             )?;
-            match (expected_extension, history_authority_extension) {
-                (Some(expected), Some(actual)) if expected != actual => {
+            match expected_extension {
+                Some(expected) if expected != history_authority_extension => {
                     return Err(Error::Parse(
                         "joins since response history authority extension mismatch across pages"
                             .to_string(),
                     ));
                 }
-                (None, Some(actual)) => expected_extension = Some(actual),
+                None => expected_extension = Some(history_authority_extension),
                 _ => {}
             }
             match (&expected_authority, &history_authority) {
@@ -2048,9 +2058,9 @@ impl CitygApiClient {
                 parse_history_commitment(history_view_id, response.history_commitment)?;
             ensure_profile_version(&response.profile_version)?;
             let fs_forward_leap_policy =
-                parse_fs_forward_leap_policy(response.fs_forward_leap_policy.clone())?;
+                parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
             let history_authority_extension =
-                Some(require_base_profile_global_history_authority_extension(
+                require_base_profile_global_history_authority_extension(
                     parse_history_authority_extension(
                         response.history_authority_extension.as_str(),
                         !response.history_authority_descriptor.is_empty()
@@ -2059,12 +2069,12 @@ impl CitygApiClient {
                             || !response.deployment_profile_manifest.is_empty(),
                     )?,
                     "fetch public tree response",
-                )?);
+                )?;
             let history_authority = parse_history_authority_descriptor_bytes(
                 response.history_authority_descriptor.as_slice(),
             )?;
             require_history_authority_descriptor_for_extension(
-                history_authority_extension,
+                Some(history_authority_extension),
                 &history_authority,
                 "fetch public tree response",
             )?;
@@ -2099,20 +2109,22 @@ impl CitygApiClient {
                         ));
                     }
                     validate_local_history_attestation_kind(
-                        history_authority_extension,
+                        Some(history_authority_extension),
                         &attestation,
                         "fetch public tree response",
                     )?;
                     verify_deployment_profile_manifest(
                         response.deployment_profile_manifest.as_slice(),
                         authority,
-                        history_authority_extension.expect("validated base-profile extension"),
-                        &gid,
-                        response.profile_version.as_str(),
-                        n_max,
-                        response.max_barrier_update_bytes,
-                        &fs_forward_leap_policy,
-                        "fetch public tree response",
+                        history_authority_extension,
+                        DeploymentProfileManifestContext {
+                            gid: &gid,
+                            profile_version: response.profile_version.as_str(),
+                            n_max,
+                            max_barrier_update_bytes: response.max_barrier_update_bytes,
+                            fs_forward_leap_policy: &fs_forward_leap_policy,
+                            context: "fetch public tree response",
+                        },
                     )?;
                     let helper_attestation = parse_helper_completeness_attestation_bytes(
                         response.helper_completeness_attestation.as_slice(),
@@ -2153,17 +2165,17 @@ impl CitygApiClient {
             ensure_barrier_helper_history_page(
                 &mut expected_history,
                 history_view_id,
-                history_commitment.clone(),
+                history_commitment,
                 total_entries,
             )?;
-            match (expected_extension, history_authority_extension) {
-                (Some(expected), Some(actual)) if expected != actual => {
+            match expected_extension {
+                Some(expected) if expected != history_authority_extension => {
                     return Err(Error::Parse(
                         "fetch public tree response history authority extension mismatch across pages"
                             .to_string(),
                     ));
                 }
-                (None, Some(actual)) => expected_extension = Some(actual),
+                None => expected_extension = Some(history_authority_extension),
                 _ => {}
             }
             match expected_n_max {
@@ -2308,23 +2320,21 @@ impl CitygApiClient {
             parse_history_commitment(history_view_id, response.history_commitment)?;
         ensure_profile_version(&response.profile_version)?;
         let n_max = validate_barrier_n_max(response.n_max)?;
-        let fs_forward_leap_policy =
-            parse_fs_forward_leap_policy(response.fs_forward_leap_policy.clone())?;
-        let history_authority_extension =
-            Some(require_base_profile_global_history_authority_extension(
-                parse_history_authority_extension(
-                    response.history_authority_extension.as_str(),
-                    !response.history_authority_descriptor.is_empty()
-                        || !response.global_history_attestation.is_empty()
-                        || !response.deployment_profile_manifest.is_empty(),
-                )?,
-                "lookup merge acceptance",
-            )?);
+        let fs_forward_leap_policy = parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?;
+        let history_authority_extension = require_base_profile_global_history_authority_extension(
+            parse_history_authority_extension(
+                response.history_authority_extension.as_str(),
+                !response.history_authority_descriptor.is_empty()
+                    || !response.global_history_attestation.is_empty()
+                    || !response.deployment_profile_manifest.is_empty(),
+            )?,
+            "lookup merge acceptance",
+        )?;
         let history_authority = parse_history_authority_descriptor_bytes(
             response.history_authority_descriptor.as_slice(),
         )?;
         require_history_authority_descriptor_for_extension(
-            history_authority_extension,
+            Some(history_authority_extension),
             &history_authority,
             "lookup merge acceptance",
         )?;
@@ -2346,20 +2356,22 @@ impl CitygApiClient {
                     ));
                 }
                 validate_local_history_attestation_kind(
-                    history_authority_extension,
+                    Some(history_authority_extension),
                     &attestation,
                     "lookup merge acceptance",
                 )?;
                 verify_deployment_profile_manifest(
                     response.deployment_profile_manifest.as_slice(),
                     authority,
-                    history_authority_extension.expect("validated base-profile extension"),
-                    &gid,
-                    response.profile_version.as_str(),
-                    n_max,
-                    response.max_barrier_update_bytes,
-                    &fs_forward_leap_policy,
-                    "lookup merge acceptance",
+                    history_authority_extension,
+                    DeploymentProfileManifestContext {
+                        gid: &gid,
+                        profile_version: response.profile_version.as_str(),
+                        n_max,
+                        max_barrier_update_bytes: response.max_barrier_update_bytes,
+                        fs_forward_leap_policy: &fs_forward_leap_policy,
+                        context: "lookup merge acceptance",
+                    },
                 )?;
                 Some(attestation)
             }
@@ -2379,7 +2391,7 @@ impl CitygApiClient {
             status: parse_merge_acceptance_status(response.status)?,
             history_view_id,
             history_commitment,
-            history_authority_extension,
+            history_authority_extension: Some(history_authority_extension),
             history_authority,
             global_history_attestation,
             accepted_barrier_version: response.accepted_barrier_version,
@@ -3617,12 +3629,15 @@ fn verify_merge_ticket_artifact(
     raw: &[u8],
     authority: &HistoryAuthorityDescriptor,
     history_authority_extension: HistoryAuthorityExtension,
-    requested_leaf_id: &[u8; 32],
-    response: &MergeTicketResponse,
-    current_history_commitment: &HistoryCommitment,
-    current_global_history_attestation: &GlobalHistoryAttestation,
-    fs_forward_leap_policy: &FsForwardLeapPolicy,
+    context: MergeTicketArtifactContext<'_>,
 ) -> Result<(), Error> {
+    let MergeTicketArtifactContext {
+        requested_leaf_id,
+        response,
+        current_history_commitment,
+        current_global_history_attestation,
+        fs_forward_leap_policy,
+    } = context;
     if raw.is_empty() {
         return Err(Error::Parse(
             "merge ticket missing merge_ticket_artifact".to_string(),
@@ -3778,17 +3793,28 @@ fn verify_merge_ticket_artifact(
     )
 }
 
+struct MergeTicketArtifactContext<'a> {
+    requested_leaf_id: &'a [u8; 32],
+    response: &'a MergeTicketResponse,
+    current_history_commitment: &'a HistoryCommitment,
+    current_global_history_attestation: &'a GlobalHistoryAttestation,
+    fs_forward_leap_policy: &'a FsForwardLeapPolicy,
+}
+
 fn verify_deployment_profile_manifest(
     raw: &[u8],
     authority: &HistoryAuthorityDescriptor,
     history_authority_extension: HistoryAuthorityExtension,
-    gid: &[u8; 32],
-    profile_version: &str,
-    n_max: u64,
-    max_barrier_update_bytes: u64,
-    fs_forward_leap_policy: &FsForwardLeapPolicy,
-    context: &'static str,
+    context: DeploymentProfileManifestContext<'_>,
 ) -> Result<(), Error> {
+    let DeploymentProfileManifestContext {
+        gid,
+        profile_version,
+        n_max,
+        max_barrier_update_bytes,
+        fs_forward_leap_policy,
+        context,
+    } = context;
     if raw.is_empty() {
         return Err(Error::Parse(format!(
             "{context} missing deployment_profile_manifest"
@@ -3851,6 +3877,15 @@ fn verify_deployment_profile_manifest(
         authority.public_key.as_slice(),
         manifest.signature.as_slice(),
     )
+}
+
+struct DeploymentProfileManifestContext<'a> {
+    gid: &'a [u8; 32],
+    profile_version: &'a str,
+    n_max: u64,
+    max_barrier_update_bytes: u64,
+    fs_forward_leap_policy: &'a FsForwardLeapPolicy,
+    context: &'static str,
 }
 
 fn parse_history_authority_extension(
@@ -3983,7 +4018,6 @@ pub fn parse_global_history_attestation_bytes(
         prev_history_commitment_id: array32(&prev_history_commitment_id)?,
         history_seq,
     };
-    let barrier_version = barrier_version;
     let attestation = GlobalHistoryAttestation {
         scope_id,
         gid,
@@ -4504,7 +4538,6 @@ mod tests {
         );
         let fs_policy = response
             .fs_forward_leap_policy
-            .clone()
             .expect("fs_forward_leap_policy");
         let current_predecessor_kem_tree_hash_after =
             if response.current_predecessor_kem_tree_hash_after.is_empty() {
@@ -4629,7 +4662,6 @@ mod tests {
         );
         let fs_policy = response
             .fs_forward_leap_policy
-            .clone()
             .expect("fs_forward_leap_policy");
         let gid = array32(&response.gid).expect("gid");
         let payload = encode_cbor_det(&DeploymentProfileManifestSignedPayload {
@@ -4693,7 +4725,7 @@ mod tests {
             history_seq: current_history_commitment.history_seq,
         };
         let authority = build_test_history_authority(
-            history_commitment.clone(),
+            history_commitment,
             [0x41; 32],
             response.barrier_version,
             array32(&response.kem_tree_hash_after).expect("kem_tree_hash_after"),
@@ -4702,7 +4734,6 @@ mod tests {
         let leaf_id = [0x01; 32];
         let fs_policy = response
             .fs_forward_leap_policy
-            .clone()
             .expect("merge ticket fs_forward_leap_policy");
         let we_epoch_id = array32(&response.we_epoch_id).expect("we_epoch_id");
         let cat = array32(&response.cat).expect("cat");
@@ -4836,7 +4867,6 @@ mod tests {
         );
         let fs_policy = response
             .fs_forward_leap_policy
-            .clone()
             .expect("merge ticket fs_forward_leap_policy");
         let gid = [0x41; 32];
         let payload = encode_cbor_det(&DeploymentProfileManifestSignedPayload {
@@ -5092,7 +5122,7 @@ mod tests {
             "/v1/barrier/resolve_revoked_leaves" => {
                 let request = BarrierResolveRevokedLeavesRequest::decode(body)
                     .unwrap_or_else(|_| BarrierResolveRevokedLeavesRequest::default());
-                let all = vec![1u32, 7u32];
+                let all = [1u32, 7u32];
                 let (start, end, next_page_offset) = page_bounds(request.page_offset, all.len(), 1);
                 let history_commitment = HistoryCommitment {
                     history_view_id: [0xD1; 32],
@@ -5145,7 +5175,7 @@ mod tests {
             "/v1/barrier/resolve_joins_since" => {
                 let request = BarrierResolveJoinsSinceRequest::decode(body)
                     .unwrap_or_else(|_| BarrierResolveJoinsSinceRequest::default());
-                let all = vec![
+                let all = [
                     pb::BarrierJoinLeafRecord {
                         device_pk: vec![0xAA; 32],
                         leaf_index: 9,
@@ -6516,7 +6546,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
                     encode_proto(BarrierFetchPublicTreeResponse {
@@ -6594,7 +6624,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
                     encode_proto(BarrierFetchPublicTreeResponse {
@@ -6670,7 +6700,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
                     encode_proto(BarrierResolveRevokedLeavesResponse {
@@ -6747,7 +6777,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
                     encode_proto(BarrierResolveJoinsSinceResponse {
@@ -6819,7 +6849,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 async move {
                     encode_proto(BarrierResolveRevokedLeavesResponse {
                         leaf_indices: vec![1, 2],
@@ -6895,7 +6925,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
                     encode_proto(BarrierResolveRevokedLeavesResponse {
@@ -6965,7 +6995,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 async move {
                     encode_proto(BarrierResolveJoinsSinceResponse {
                         records: vec![pb::BarrierJoinLeafRecord {
@@ -7045,7 +7075,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
                     encode_proto(BarrierResolveJoinsSinceResponse {
@@ -7119,7 +7149,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 async move {
                     encode_proto(BarrierFetchPublicTreeResponse {
                         n_max: 8,
@@ -7196,7 +7226,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
                     encode_proto(BarrierFetchPublicTreeResponse {
@@ -7268,7 +7298,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 async move {
                     encode_proto(BarrierLookupMergeAcceptanceResponse {
                         status: PbMergeAcceptanceStatus::Accepted as i32,
@@ -7347,7 +7377,7 @@ mod tests {
             post(move || {
                 let descriptor_bytes = descriptor_bytes.clone();
                 let attestation_bytes = attestation_bytes.clone();
-                let fs_forward_leap_policy = fs_forward_leap_policy.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
                 let deployment_profile_manifest = deployment_profile_manifest.clone();
                 async move {
                     encode_proto(BarrierLookupMergeAcceptanceResponse {

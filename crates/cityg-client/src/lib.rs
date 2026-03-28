@@ -220,6 +220,13 @@ impl From<std::io::Error> for CityGError {
 #[derive(Debug, Default)]
 pub struct CityGClient;
 
+struct MergeForwardStateOptions<'a> {
+    fs_state: Option<&'a mut ForwardSecrecyState>,
+    note: Option<&'a str>,
+    witness: Option<&'a [u8]>,
+    evolve: bool,
+}
+
 impl CityGClient {
     fn prepare_forward_state(
         fs_state: Option<&mut ForwardSecrecyState>,
@@ -407,7 +414,16 @@ impl CityGClient {
         witness: Option<&'a [u8]>,
     ) -> Result<ClientEpochBundle, CityGError> {
         Self::generate_merge_with_forward_state_inner(
-            header, parts, params, fs_state, parities, note, witness, false,
+            header,
+            parts,
+            params,
+            parities,
+            MergeForwardStateOptions {
+                fs_state,
+                note,
+                witness,
+                evolve: false,
+            },
         )
     }
 
@@ -421,7 +437,16 @@ impl CityGClient {
         witness: Option<&'a [u8]>,
     ) -> Result<ClientEpochBundle, CityGError> {
         Self::generate_merge_with_forward_state_inner(
-            header, parts, params, fs_state, parities, note, witness, true,
+            header,
+            parts,
+            params,
+            parities,
+            MergeForwardStateOptions {
+                fs_state,
+                note,
+                witness,
+                evolve: true,
+            },
         )
     }
 
@@ -429,20 +454,27 @@ impl CityGClient {
         header: BTreeMap<u64, Value>,
         parts: AnchorInstanceParts<'a>,
         params: OrchestrationParams<'a>,
-        mut fs_state: Option<&mut ForwardSecrecyState>,
         parities: &[PivotParity],
-        note: Option<&'a str>,
-        witness: Option<&'a [u8]>,
-        evolve: bool,
+        mut options: MergeForwardStateOptions<'a>,
     ) -> Result<ClientEpochBundle, CityGError> {
         let anchor_bundle = AnchorBundle::try_from_parts(&parts)?;
         let params_snapshot = ParamsSnapshot::from(&params);
-        let witness_bytes = witness.map(|bytes| bytes.to_vec());
+        let witness_bytes = options.witness.map(|bytes| bytes.to_vec());
 
-        Self::prepare_forward_state(fs_state.as_deref_mut(), params.fs_epoch_base_ts, evolve);
+        Self::prepare_forward_state(
+            options.fs_state.as_deref_mut(),
+            params.fs_epoch_base_ts,
+            options.evolve,
+        );
 
         let result = joiner_kgen_merge_or_with_state(
-            header, parities, note, parts, params, fs_state, witness,
+            header,
+            parities,
+            options.note,
+            parts,
+            params,
+            options.fs_state,
+            options.witness,
         )?;
 
         ClientEpochBundle::from_joiner_result(anchor_bundle, params_snapshot, witness_bytes, result)

@@ -1,5 +1,13 @@
 use super::*;
 
+fn clipboard_outcome(updated: bool) -> KeyOutcome {
+    if updated {
+        KeyOutcome::Updated
+    } else {
+        KeyOutcome::None
+    }
+}
+
 impl AppModel {
     pub(super) fn handle_join_form_clipboard_shortcuts(
         &mut self,
@@ -11,24 +19,15 @@ impl AppModel {
         }
 
         if is_primary_shortcut(keystroke, "c") {
-            return self
-                .copy_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.copy_focused_text(cx));
         }
 
         if is_primary_shortcut(keystroke, "x") {
-            return self
-                .cut_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.cut_focused_text(cx));
         }
 
         if is_primary_shortcut(keystroke, "v") {
-            return self
-                .paste_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.paste_focused_text(cx));
         }
 
         KeyOutcome::None
@@ -44,24 +43,15 @@ impl AppModel {
         }
 
         if is_primary_shortcut(keystroke, "c") {
-            return self
-                .copy_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.copy_focused_text(cx));
         }
 
         if is_primary_shortcut(keystroke, "x") {
-            return self
-                .cut_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.cut_focused_text(cx));
         }
 
         if is_primary_shortcut(keystroke, "v") {
-            return self
-                .paste_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.paste_focused_text(cx));
         }
 
         KeyOutcome::None
@@ -77,24 +67,15 @@ impl AppModel {
         }
 
         if is_primary_shortcut(keystroke, "c") {
-            return self
-                .copy_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.copy_focused_text(cx));
         }
 
         if is_primary_shortcut(keystroke, "x") {
-            return self
-                .cut_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.cut_focused_text(cx));
         }
 
         if is_primary_shortcut(keystroke, "v") {
-            return self
-                .paste_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.paste_focused_text(cx));
         }
 
         KeyOutcome::None
@@ -110,24 +91,15 @@ impl AppModel {
         }
 
         if is_primary_shortcut(keystroke, "c") {
-            return self
-                .copy_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.copy_focused_text(cx));
         }
 
         if is_primary_shortcut(keystroke, "x") {
-            return self
-                .cut_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.cut_focused_text(cx));
         }
 
         if is_primary_shortcut(keystroke, "v") {
-            return self
-                .paste_focused_text(cx)
-                .then_some(KeyOutcome::Updated)
-                .unwrap_or(KeyOutcome::None);
+            return clipboard_outcome(self.paste_focused_text(cx));
         }
 
         KeyOutcome::None

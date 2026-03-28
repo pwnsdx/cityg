@@ -191,6 +191,7 @@ impl AppModel {
         cx.notify();
     }
 
+    #[cfg(test)]
     pub(super) fn on_keystroke(&mut self, keystroke: &Keystroke, cx: &mut ViewContext<Self>) {
         self.on_keystroke_inner(keystroke, None, cx);
     }
@@ -302,7 +303,7 @@ impl AppModel {
         match self.join_form.handle_keystroke(keystroke) {
             KeyOutcome::None => {}
             KeyOutcome::Updated => {
-                if let Some(window) = window.as_deref_mut() {
+                if let Some(window) = window {
                     if let Some(active) = self.join_form.active {
                         self.focus_field_in_window(active, window, cx);
                     } else {

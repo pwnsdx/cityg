@@ -95,10 +95,10 @@ struct FetchPublicTreeSelector<'a> {
     pk_entries: &'a [Vec<u8>],
 }
 
-fn encode_cbor_det<T: Serialize>(value: &T) -> Vec<u8> {
+fn encode_cbor_det<T: Serialize>(value: &T) -> Result<Vec<u8>, Box<dyn StdError>> {
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(value, &mut bytes).expect("deterministic cbor encoding");
-    bytes
+    ciborium::ser::into_writer(value, &mut bytes)?;
+    Ok(bytes)
 }
 
 fn history_authority(seed: u8) -> (HistoryAuthorityDescriptor, dilithium5::SecretKey) {
@@ -128,7 +128,7 @@ fn sign_global_history_attestation(
     history_commitment: &HistoryCommitment,
     barrier_version: u64,
     kem_tree_hash_after: &[u8; 32],
-) -> (Vec<u8>, GlobalHistoryAttestation) {
+) -> Result<(Vec<u8>, GlobalHistoryAttestation), Box<dyn StdError>> {
     let parent_attestation_id =
         parent_attestation_id(&history_commitment.prev_history_commitment_id);
     let finality_kind = "local-append-only".to_string();
@@ -144,7 +144,7 @@ fn sign_global_history_attestation(
         kem_tree_hash_after,
         &parent_attestation_id,
         finality_kind.as_str(),
-    ));
+    ))?;
     let signature = dilithium5::detached_sign(payload.as_slice(), secret_key)
         .as_bytes()
         .to_vec();
@@ -160,8 +160,8 @@ fn sign_global_history_attestation(
         parent_attestation_id.to_vec(),
         finality_kind.clone(),
         signature.clone(),
-    ));
-    (
+    ))?;
+    Ok((
         wire,
         GlobalHistoryAttestation {
             scope_id: authority.scope_id,
@@ -173,7 +173,7 @@ fn sign_global_history_attestation(
             finality_kind,
             signature,
         },
-    )
+    ))
 }
 
 fn sign_helper_completeness_attestation<T: Serialize>(
@@ -184,7 +184,7 @@ fn sign_helper_completeness_attestation<T: Serialize>(
     page_offset: u32,
     total_entries: u32,
     selector: T,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, Box<dyn StdError>> {
     let payload = encode_cbor_det(&HelperCompletenessSignedPayload {
         label: "cityg/helper-completeness-attestation-v1",
         scope_id: &authority.scope_id,
@@ -194,7 +194,7 @@ fn sign_helper_completeness_attestation<T: Serialize>(
         page_offset,
         total_entries,
         selector,
-    });
+    })?;
     let signature = dilithium5::detached_sign(payload.as_slice(), secret_key)
         .as_bytes()
         .to_vec();
@@ -218,9 +218,9 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
     let descriptor_bytes = encode_cbor_det(&HistoryAuthorityDescriptorWire(
         authority.scope_id.to_vec(),
         authority.public_key.clone(),
-    ));
+    ))?;
     let parsed_authority = parse_history_authority_descriptor_bytes(&descriptor_bytes)?
-        .expect("authority descriptor should parse");
+        .ok_or("authority descriptor should parse")?;
     assert_eq!(parsed_authority, authority);
 
     let (global_attestation_bytes, expected_attestation) = sign_global_history_attestation(
@@ -230,10 +230,10 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
         &history_commitment,
         7,
         &[0xCF; 32],
-    );
+    )?;
     let parsed_attestation =
         parse_global_history_attestation_bytes(&global_attestation_bytes, Some(&authority))?
-            .expect("global attestation should parse");
+            .ok_or("global attestation should parse")?;
     assert_eq!(parsed_attestation, expected_attestation);
 
     let revoked_bytes = sign_helper_completeness_attestation(
@@ -247,10 +247,10 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
             revocation_roots_hash: &[0xDD; 32],
             leaf_indices: &[1, 7],
         },
-    );
+    )?;
     let revoked_attestation =
         parse_revoked_leaves_completeness_attestation_bytes(&revoked_bytes, &authority)?
-            .expect("revoked helper attestation should parse");
+            .ok_or("revoked helper attestation should parse")?;
     assert_eq!(
         revoked_attestation,
         HelperCompletenessAttestation {
@@ -285,10 +285,10 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
             prev_barrier_version: 3,
             records: std::slice::from_ref(&join_record),
         },
-    );
+    )?;
     let joins_attestation =
         parse_joins_since_completeness_attestation_bytes(&joins_bytes, &authority)?
-            .expect("joins helper attestation should parse");
+            .ok_or("joins helper attestation should parse")?;
     verify_joins_since_completeness_attestation(
         &joins_attestation,
         &authority,
@@ -311,10 +311,10 @@ fn parses_and_verifies_history_authority_extensions() -> Result<(), Box<dyn StdE
             kem_tree_hash_after: &[0xCF; 32],
             pk_entries: pk_entries.as_slice(),
         },
-    );
+    )?;
     let tree_attestation =
         parse_fetch_public_tree_completeness_attestation_bytes(&tree_bytes, &authority)?
-            .expect("tree helper attestation should parse");
+            .ok_or("tree helper attestation should parse")?;
     verify_fetch_public_tree_completeness_attestation(
         &tree_attestation,
         &authority,
