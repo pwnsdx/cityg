@@ -188,6 +188,7 @@ cargo test --locked -p cityg-server \
 cargo test --locked -p cityg-api --test integration \
   malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins \
   malformed_admin_expel_request_concurrent_with_honest_join_survives_restart \
+  concurrent_malformed_admin_expel_request_and_honest_join_preserve_room_across_restart \
   -- --exact --nocapture
 
 cargo test --locked -p cityg-api --test integration \
@@ -220,6 +221,7 @@ These gates cover:
 - malformed admin expel rejection without poisoning the room before or after restart
 - malformed admin expel control-plane requests fail closed and still allow honest joins after restart
 - malformed admin expel control-plane races still allow the honest join before restart, and restart preserves both that joined member and the room-admin ACL
+- fully concurrent malformed admin expel requests and honest joins still converge to the honest room state across restart
 - malformed admin grant/revoke control-plane requests fail closed without poisoning ACL state or restart recovery
 - stale leave versus honest join race with clean post-restart recovery
 - replayed room-admin proofs staying rejected after restart without poisoning ACL state

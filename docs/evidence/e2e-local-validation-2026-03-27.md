@@ -1122,6 +1122,30 @@ Assertions:
 - after restart, the honest joined member remains visible in the room roster
 - after restart, the room-admin ACL still lists the original admin key
 
+### Flow W3: fully concurrent malformed admin expel request and honest join preserve room state
+
+Goal:
+
+- prove that a malformed admin control-plane request and an honest public join
+  can run in parallel without poisoning the room, and that restart preserves
+  the honest outcome
+
+Coverage:
+
+- `cargo test --locked -p cityg-api --test integration concurrent_malformed_admin_expel_request_and_honest_join_preserve_room_across_restart -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/api-admin-concurrent-race`
+
+Assertions:
+
+- the malformed HTTP `expel_member_ticket` request is rejected as `400 Bad Request`
+- the honest join commits successfully even while the malformed request is in flight
+- before restart, the room roster contains the honest joined member
+- after restart, the honest joined member remains visible in the room roster
+- after restart, the room-admin ACL still lists the original admin key
+
 ### Flow X: malformed leave rejection does not poison room state
 
 Goal:

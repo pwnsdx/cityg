@@ -762,6 +762,111 @@ async fn malformed_admin_expel_request_concurrent_with_honest_join_survives_rest
 
 #[tokio::test]
 #[allow(clippy::expect_used)]
+async fn concurrent_malformed_admin_expel_request_and_honest_join_preserve_room_across_restart()
+-> Result<()> {
+    let temp_root = std::env::temp_dir().join(format!(
+        "cityg-api-concurrent-malformed-admin-expel-race-{}-{}",
+        std::process::id(),
+        next_free_local_port()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let journal_path = temp_root.join("concurrent-malformed-admin-expel-race.journal");
+    let room_id = hex::encode([0x39u8; 32]);
+    let gid = hex::decode(&room_id)?;
+    let port = next_free_local_port();
+    let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = test_client(base_url.clone());
+    let honest_client = test_client(base_url.clone());
+    let (alice_pk, alice_sk) = dilithium5::keypair();
+    bootstrap_room_with_admin_identity(&client, &room_id, alice_pk.as_bytes(), &alice_sk).await?;
+
+    let malformed_request = RawExpelMemberTicketRequest {
+        room_id: room_id.clone(),
+        author_leaf_id: [0xC3; 32].to_vec(),
+        target_leaf_id: [0xD4; 31].to_vec(),
+        admin_proof: Some(build_room_admin_leaf_pair_proof(
+            RoomAdminOperation::ExpelMember,
+            &room_id,
+            &[0xC3; 32],
+            &[0xD4; 32],
+            alice_pk.as_bytes(),
+            alice_sk.as_bytes(),
+        )?),
+    };
+    let honest_room_id = room_id.clone();
+
+    let malformed_future = async move {
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{port}/v1/rooms/expel_member_ticket"
+            ))
+            .header("content-type", "application/protobuf")
+            .body(malformed_request.encode_to_vec())
+            .send()
+            .await
+            .expect("send malformed expel request");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "concurrent malformed admin expel must fail closed"
+        );
+        Ok::<(), anyhow::Error>(())
+    };
+    let honest_join_future = async move {
+        let charlie = join_room_member(&honest_client, &honest_room_id, "charlie", 0x97).await?;
+        honest_client
+            .accept_epoch_bundle(&charlie.bundle)
+            .await
+            .expect("accept charlie during concurrent malformed expel race");
+        Ok::<(), anyhow::Error>(())
+    };
+
+    let (malformed_result, honest_result) = tokio::join!(malformed_future, honest_join_future);
+    malformed_result?;
+    honest_result?;
+
+    let members_before_restart = client.members(gid.as_slice(), None).await?;
+    assert_eq!(
+        members_before_restart.members.len(),
+        1,
+        "concurrent malformed expel request must not block the honest joined member"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let members_after_restart = client.members(gid.as_slice(), None).await?;
+    assert_eq!(
+        members_after_restart.members.len(),
+        1,
+        "restart must preserve the honest joined member after the concurrent malformed expel race"
+    );
+    let listed_admins = client
+        .list_room_admins(
+            &room_id,
+            build_room_admin_listing_proof(&room_id, alice_pk.as_bytes(), alice_sk.as_bytes())?,
+        )
+        .await?;
+    assert_eq!(
+        listed_admins.admin_pop_public_keys,
+        vec![alice_pk.as_bytes().to_vec()],
+        "room-admin ACL must remain healthy after the concurrent malformed expel race and restart"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
 async fn malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart() -> Result<()> {
     let temp_root = std::env::temp_dir().join(format!(
         "cityg-api-malformed-admin-mutation-{}-{}",
