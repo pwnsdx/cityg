@@ -634,3 +634,81 @@ Results:
 Notes:
 
 - the known server log line `500 invalid input: kbroad key missing` was still emitted during the targeted join test, but the join flow completed successfully and did not regress under the new receipt verification path
+
+## Additional Targeted Flows (2026-03-29)
+
+### Flow H: stale dual PCS refresh race
+
+Goal:
+
+- exercise a protocol-specific race where two members start from the same authenticated baseline, one publishes a PCS refresh, and the other attempts a stale refresh from the old state
+- prove that the room converges without stranding either member and that message delivery still works after the race
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::stale_dueling_pcs_refreshes_converge_and_preserve_messaging --features native-app -- --exact --nocapture`
+
+Assertions:
+
+- the loser of the stale race does not wedge the room
+- both members converge to the same `we_epoch_id` and `barrier_version`
+- both members remain message-ready after reconciliation
+- bidirectional send/fetch still succeeds after the race
+
+Result:
+
+- passed on slot `.cargo-target/gui-newflows-5`
+
+Notes:
+
+- server logs still emitted the known `kbroad key missing` and `fs_dev_chain_break` lines during the stale attempt, but the final state converged and the test remained green
+
+### Flow I: replay-state bounded fetch delivery
+
+Goal:
+
+- exercise a general messaging invariant: repeated fetches must not re-release already delivered ciphertexts, while a later fetch must still release genuinely new traffic
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::message_replay_state_only_releases_new_messages_between_fetch_rounds --features native-app -- --exact --nocapture`
+
+Assertions:
+
+- first fetch releases the initial message burst
+- a repeated fetch with unchanged replay state returns no duplicate user-visible messages
+- a later fetch after a second burst releases only the new messages
+- member listing remains stable across the two fetch rounds
+
+Result:
+
+- passed on slot `.cargo-target/gui-newflows-5`
+
+Notes:
+
+- the runtime warnings `dropping replayed msg_index=...` are expected here and are exactly the signal that the replay filter is working
+
+### Flow J: client restart between fetch rounds
+
+Goal:
+
+- exercise a lightweight chaos/restart path on the messaging layer by persisting the receiver session, reloading it, and verifying that replay-state survives the restart boundary
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::message_replay_state_survives_client_restart_between_fetch_rounds --features native-app -- --exact --nocapture`
+
+Assertions:
+
+- the persisted session keeps the fetch watermark across restart
+- a post-restart fetch with no new traffic returns no duplicate messages
+- a later fetch after new traffic delivers only the new burst
+- pre-restart traffic is not re-delivered after restart
+
+Result:
+
+- passed on slot `.cargo-target/gui-newflows-5`
+
+Notes:
+
+- the `dropping replayed msg_index=...` warnings are again expected and confirm that persisted replay-state is active immediately after reload
