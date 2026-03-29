@@ -1190,3 +1190,48 @@ Assertions:
 - the ACL remains unchanged after each malformed request
 - after restart, a later honest `grant_admin` succeeds
 - after the same restart, a later honest `revoke_admin` still succeeds
+
+### Flow AB: stale leave race with honest join does not poison restart recovery
+
+Goal:
+
+- prove that a leave bundle built from stale room state cannot override a later
+  honest join, and that restart still preserves the healthy room
+
+Coverage:
+
+- `cargo test --locked -p cityg-server stale_leave_race_with_honest_join_does_not_poison_restart_recovery -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/server-stale-race`
+
+Assertions:
+
+- a valid leave bundle built before later room progress is rejected once a
+  concurrent honest join has already advanced the room
+- the rejection preserves the healthy live roster
+- after restart, the healthy roster remains intact
+- restart still yields a healthy survivor refresh ticket
+
+### Flow AC: replayed room-admin proof stays rejected after restart
+
+Goal:
+
+- prove that a previously valid room-admin proof cannot be replayed after
+  restart to mutate ACL state or wedge later honest governance operations
+
+Coverage:
+
+- `cargo test --locked -p cityg-api --test integration replayed_room_admin_grant_proof_rejected_after_restart_without_poisoning_acl -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/api-admin-replay`
+
+Assertions:
+
+- an honest `grant_admin` succeeds once
+- replaying the same signed proof after restart is rejected as an HTTP error
+- ACL state remains intact after the replay attempt
+- a later honest `revoke_admin` still succeeds

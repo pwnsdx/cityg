@@ -53,6 +53,8 @@ system by protocol contract rather than by implementation detail.
 | Malformed `join_finalize` payloads cannot poison restart recovery | A malicious `reason=2` activation payload must be rejected without corrupting persisted state, and restart must still expose a healthy refresh / `join_finalize` recovery path. | Covered | `malformed_join_finalize_rejection_does_not_poison_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
 | Malformed admin expel payloads cannot poison room state or restart recovery | A malicious admin-targeted revocation payload must be rejected without corrupting either the live roster or the bootstrapped room state, and restart must still preserve a healthy room that admits later honest traffic. | Covered | `malformed_admin_expel_rejection_does_not_poison_room_state`, `malformed_admin_expel_rejection_does_not_poison_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs), `malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
 | Malformed room-admin grant/revoke requests cannot poison ACL or restart recovery | A malformed control-plane admin mutation must fail closed, leave ACL state intact, and still allow later honest ACL changes after restart. | Covered | `malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
+| Honest progress wins over a stale leave race | A valid leave bundle built from stale room state must not override a later honest join, and restart must still preserve the healthy room. | Covered | `stale_leave_race_with_honest_join_does_not_poison_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
+| Room-admin proof replays stay rejected across restart | A previously valid admin proof replayed after restart must fail closed and leave ACL state healthy for later honest governance changes. | Covered | `replayed_room_admin_grant_proof_rejected_after_restart_without_poisoning_acl` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
 | Helper responses missing authenticated fields are rejected fail-closed | Helper paths must reject missing history commitments or manifests instead of accepting underspecified state. | Covered | `barrier_fetch_public_tree_rejects_missing_history_commitment`, `barrier_fetch_public_tree_rejects_missing_deployment_profile_manifest` in [`../../crates/cityg-api-client/src/lib.rs`](../../crates/cityg-api-client/src/lib.rs) |
 | Base-profile helper guards reject unexpected completeness/authority extensions | Helper responses with unsupported completeness attestations or local-authority extensions must fail closed under the base profile. | Covered | `barrier_resolve_revoked_leaves_rejects_unexpected_completeness_attestation`, `barrier_resolve_joins_since_rejects_unexpected_completeness_attestation`, `barrier_fetch_public_tree_rejects_local_history_authority_in_base_profile` in [`../../crates/cityg-api-client/src/lib.rs`](../../crates/cityg-api-client/src/lib.rs) |
 
@@ -126,6 +128,7 @@ cargo test --locked -p cityg-server \
   malformed_leave_rejection_does_not_poison_room_state \
   malformed_refresh_rejection_does_not_poison_room_state \
   malformed_join_finalize_rejection_does_not_poison_restart_recovery \
+  stale_leave_race_with_honest_join_does_not_poison_restart_recovery \
   -- --nocapture
 
 cargo test --locked -p cityg-server \
@@ -139,6 +142,7 @@ cargo test --locked -p cityg-api --test integration \
 
 cargo test --locked -p cityg-api --test integration \
   malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart \
+  replayed_room_admin_grant_proof_rejected_after_restart_without_poisoning_acl \
   -- --exact --nocapture
 ```
 

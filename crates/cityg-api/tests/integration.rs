@@ -811,6 +811,90 @@ async fn malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart() -
 
 #[tokio::test]
 #[allow(clippy::expect_used)]
+async fn replayed_room_admin_grant_proof_rejected_after_restart_without_poisoning_acl() -> Result<()>
+{
+    let temp_root = std::env::temp_dir().join(format!(
+        "cityg-api-replayed-admin-grant-{}-{}",
+        std::process::id(),
+        next_free_local_port()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let journal_path = temp_root.join("replayed-admin-grant.journal");
+    let room_id = hex::encode([0x37u8; 32]);
+    let port = next_free_local_port();
+    let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    let (creator_pk, creator_sk) = dilithium5::keypair();
+    let (delegate_pk, _delegate_sk) = dilithium5::keypair();
+    bootstrap_room_with_admin_identity(&client, &room_id, creator_pk.as_bytes(), &creator_sk)
+        .await?;
+
+    let grant_proof = build_room_admin_target_proof(
+        RoomAdminOperation::GrantAdmin,
+        &room_id,
+        delegate_pk.as_bytes(),
+        creator_pk.as_bytes(),
+        creator_sk.as_bytes(),
+    )?;
+    let granted = client
+        .grant_room_admin(&room_id, delegate_pk.as_bytes(), grant_proof.clone())
+        .await?;
+    assert_eq!(granted.status, "granted");
+    assert_eq!(granted.admin_count, 2);
+
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let replay_err = client
+        .grant_room_admin(&room_id, delegate_pk.as_bytes(), grant_proof)
+        .await
+        .expect_err("replayed room-admin proof must fail after restart");
+    assert!(
+        matches!(replay_err, Error::HttpStatus { .. }),
+        "replayed room-admin proof should surface as an HTTP rejection: {replay_err:?}"
+    );
+
+    let listed_after_replay = client
+        .list_room_admins(
+            &room_id,
+            build_room_admin_listing_proof(&room_id, creator_pk.as_bytes(), creator_sk.as_bytes())?,
+        )
+        .await?;
+    assert_eq!(
+        listed_after_replay.admin_pop_public_keys.len(),
+        2,
+        "replayed grant proof must not poison ACL state after restart"
+    );
+
+    let revoked = client
+        .revoke_room_admin(
+            &room_id,
+            delegate_pk.as_bytes(),
+            build_room_admin_target_proof(
+                RoomAdminOperation::RevokeAdmin,
+                &room_id,
+                delegate_pk.as_bytes(),
+                creator_pk.as_bytes(),
+                creator_sk.as_bytes(),
+            )?,
+        )
+        .await?;
+    assert_eq!(revoked.status, "revoked");
+    assert_eq!(revoked.admin_count, 1);
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
 async fn window_limits_can_be_tuned() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new("error"))

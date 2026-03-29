@@ -14249,6 +14249,66 @@ mod tests {
     }
 
     #[test]
+    fn stale_leave_race_with_honest_join_does_not_poison_restart_recovery() -> Result<(), CityGError>
+    {
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("stale-leave-race.journal");
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice = build_genesis_member_bundle(0x8F)?;
+
+        {
+            let mut server = demo_server_with_journal_and_global_history_authority(&journal_path);
+            server.accept_epoch(&alice.bundle)?;
+            let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+
+            let stale_leave = build_leave_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+            let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x90, true)?;
+            server.accept_epoch(&bob.bundle)?;
+
+            let err = server
+                .accept_epoch(&stale_leave)
+                .expect_err("stale leave race must be rejected");
+            assert!(
+                matches!(err, CityGError::InvalidInput(_))
+                    || matches!(err, CityGError::Acceptance(_)),
+                "unexpected stale leave race error: {err:?}"
+            );
+
+            let members_before_restart = server.members(&gid);
+            assert_eq!(
+                members_before_restart.len(),
+                2,
+                "stale leave rejection must preserve the healthy live roster"
+            );
+            assert!(
+                members_before_restart.contains(&alice.leaf_id)
+                    && members_before_restart.contains(&bob.leaf_id),
+                "alice and bob must remain visible after the stale leave race"
+            );
+        }
+
+        let mut reloaded = demo_server_with_journal_and_global_history_authority(&journal_path);
+        let members_after_restart = reloaded.members(&gid);
+        assert_eq!(
+            members_after_restart.len(),
+            2,
+            "restart must preserve the healthy roster after stale leave rejection"
+        );
+        assert!(
+            members_after_restart.contains(&alice.leaf_id),
+            "surviving author must remain visible after restart"
+        );
+
+        let followup_ticket = reloaded.build_merge_ticket_for_refresh(&gid, &alice.leaf_id)?;
+        assert_eq!(
+            followup_ticket.barrier_version, 0,
+            "restart must still allow a healthy survivor refresh ticket after stale leave rejection"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn join_cover_leaf_index_guard_rejects_colliding_cover_index() -> Result<(), CityGError> {
         let active_leaf = colliding_cover_leaf(5);
         let colliding_leaf = colliding_cover_leaf(1029);
