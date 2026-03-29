@@ -2454,10 +2454,12 @@ impl CityGServer {
         &mut self,
         state: &PersistedKbroadState,
     ) -> Result<(), CityGError> {
+        let mut registry = self.ctx.kbroad_registry().cloned().unwrap_or_default();
         for (gid, room_state) in state {
             let Ok(gid_arr) = gid.as_slice().try_into() else {
                 continue;
             };
+            registry.insert(gid.clone(), room_state.kbroad_public.clone());
             let group = self.roster.groups.entry(gid.clone()).or_default();
             group.kbroad_generation = room_state.kbroad_generation;
             group.rotation_required = room_state.rotation_required;
@@ -2475,6 +2477,7 @@ impl CityGServer {
                 .max(1);
             self.initialize_group_barrier_bootstrap_state(&gid_arr)?;
         }
+        self.ctx.set_kbroad_registry(Some(registry));
         Ok(())
     }
 
@@ -14041,6 +14044,207 @@ mod tests {
             server.members(&gid).len(),
             2,
             "room must still accept an honest join after malformed refresh rejection"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_refresh_concurrent_with_honest_join_does_not_poison_restart_recovery()
+    -> Result<(), CityGError> {
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("malformed-refresh-race.journal");
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice = build_genesis_member_bundle(0x92)?;
+        let bob_leaf_id;
+
+        {
+            let mut server = demo_server_with_journal_and_global_history_authority(&journal_path);
+            server.accept_epoch(&alice.bundle)?;
+            let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+
+            let (join_finalize, _) =
+                build_refresh_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+            let mut malformed_refresh = join_finalize.clone();
+            malformed_refresh.header_map.insert(
+                hdr::HDR_BARRIER_UPDATE_REASON,
+                Value::Integer(Integer::from(1u64)),
+            );
+            malformed_refresh
+                .header_map
+                .remove(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS);
+
+            let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x93, true)?;
+            server.accept_epoch(&bob.bundle)?;
+            bob_leaf_id = bob.leaf_id;
+
+            let err = server
+                .accept_epoch(&malformed_refresh)
+                .expect_err("malformed refresh race must be rejected");
+            assert!(
+                matches!(err, CityGError::InvalidInput(_))
+                    || matches!(err, CityGError::Acceptance(_)),
+                "unexpected malformed refresh race error: {err:?}"
+            );
+
+            let members_before_restart = server.members(&gid);
+            assert_eq!(
+                members_before_restart.len(),
+                2,
+                "malformed refresh race must preserve the healthy live roster"
+            );
+            assert!(
+                members_before_restart.contains(&alice.leaf_id)
+                    && members_before_restart.contains(&bob.leaf_id),
+                "alice and bob must remain visible after the malformed refresh race"
+            );
+        }
+
+        let mut reloaded = demo_server_with_journal_and_global_history_authority(&journal_path);
+        let members_after_restart = reloaded.members(&gid);
+        assert_eq!(
+            members_after_restart.len(),
+            2,
+            "restart must preserve the healthy roster after malformed refresh race rejection"
+        );
+        assert!(
+            members_after_restart.contains(&alice.leaf_id)
+                && members_after_restart.contains(&bob_leaf_id),
+            "alice and bob must remain visible after restart"
+        );
+
+        let followup_ticket = reloaded.build_merge_ticket_for_refresh(&gid, &alice.leaf_id)?;
+        assert_eq!(
+            followup_ticket.barrier_version, 0,
+            "restart must still allow a healthy survivor refresh ticket after malformed refresh race"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hostile_barrier_update_mutations_fail_closed_without_poisoning_restart_recovery()
+    -> Result<(), CityGError> {
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("hostile-barrier-mutations.journal");
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice = build_genesis_member_bundle(0x95)?;
+
+        {
+            let mut server = demo_server_with_journal_and_global_history_authority(&journal_path);
+            server.accept_epoch(&alice.bundle)?;
+            let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+            let (pristine_bundle, _) =
+                build_refresh_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+
+            for mutation in [
+                "missing_witness",
+                "corrupt_receipt",
+                "corrupt_attestation",
+                "corrupt_barrier_update",
+                "mismatched_reason",
+            ] {
+                let mut mutated = pristine_bundle.clone();
+                match mutation {
+                    "missing_witness" => {
+                        mutated
+                            .header_map
+                            .remove(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS);
+                    }
+                    "corrupt_receipt" => {
+                        let Value::Bytes(raw_receipt) = mutated
+                            .header_map
+                            .get_mut(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
+                            .ok_or(CityGError::InvalidInput(
+                                "missing full verification receipt",
+                            ))?
+                        else {
+                            return Err(CityGError::InvalidInput(
+                                "full verification receipt must be bytes",
+                            ));
+                        };
+                        if raw_receipt.is_empty() {
+                            raw_receipt.push(0x01);
+                        } else {
+                            raw_receipt[0] ^= 0x55;
+                        }
+                    }
+                    "corrupt_attestation" => {
+                        let Value::Bytes(raw_attestation) = mutated
+                            .header_map
+                            .get_mut(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
+                            .ok_or(CityGError::InvalidInput(
+                                "missing global history attestation",
+                            ))?
+                        else {
+                            return Err(CityGError::InvalidInput(
+                                "global history attestation must be bytes",
+                            ));
+                        };
+                        if raw_attestation.is_empty() {
+                            raw_attestation.push(0x01);
+                        } else {
+                            raw_attestation[0] ^= 0xA5;
+                        }
+                    }
+                    "corrupt_barrier_update" => {
+                        let Value::Bytes(raw_update) = mutated
+                            .header_map
+                            .get_mut(&hdr::HDR_BARRIER_UPDATE)
+                            .ok_or(CityGError::InvalidInput("missing barrier update"))?
+                        else {
+                            return Err(CityGError::InvalidInput("barrier update must be bytes"));
+                        };
+                        raw_update.truncate(raw_update.len().min(4));
+                        if raw_update.is_empty() {
+                            raw_update.push(0x01);
+                        }
+                    }
+                    "mismatched_reason" => {
+                        mutated.header_map.insert(
+                            hdr::HDR_BARRIER_UPDATE_REASON,
+                            Value::Integer(Integer::from(1u64)),
+                        );
+                    }
+                    _ => unreachable!("unknown mutation"),
+                }
+
+                let err = server
+                    .accept_epoch(&mutated)
+                    .expect_err("hostile mutation must be rejected");
+                assert!(
+                    matches!(err, CityGError::InvalidInput(_))
+                        || matches!(err, CityGError::Acceptance(_)),
+                    "unexpected hostile mutation error for {mutation}: {err:?}"
+                );
+                assert_eq!(
+                    server.members(&gid),
+                    vec![alice.leaf_id],
+                    "mutation {mutation} must not poison the live roster",
+                );
+            }
+
+            let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x96, true)?;
+            server.accept_epoch(&bob.bundle)?;
+            let members_after_honest_join = server.members(&gid);
+            assert_eq!(
+                members_after_honest_join.len(),
+                2,
+                "room must still accept an honest join after hostile barrier mutations"
+            );
+        }
+
+        let mut reloaded = demo_server_with_journal_and_global_history_authority(&journal_path);
+        let members_after_restart = reloaded.members(&gid);
+        assert_eq!(
+            members_after_restart.len(),
+            2,
+            "restart must preserve the healthy roster after hostile barrier mutations"
+        );
+        let followup_ticket = reloaded.build_merge_ticket_for_refresh(&gid, &alice.leaf_id)?;
+        assert_eq!(
+            followup_ticket.barrier_version, 0,
+            "restart must still allow a healthy survivor refresh ticket after hostile barrier mutations"
         );
         Ok(())
     }

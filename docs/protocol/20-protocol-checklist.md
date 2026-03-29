@@ -50,8 +50,11 @@ system by protocol contract rather than by implementation detail.
 | Malformed join payloads cannot poison room state or restart recovery | A malicious join attempt must be rejected without corrupting the live roster, and the room must still admit later honest joins even after restart. | Covered | `malformed_join_rejection_does_not_poison_room_state` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs), `malformed_join_rejection_does_not_poison_restart_or_future_honest_joins` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
 | Malformed leave payloads cannot poison room state | A malicious self-removal payload must be rejected without corrupting the live roster, and the room must still accept later honest traffic. | Covered | `malformed_leave_rejection_does_not_poison_room_state` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
 | Malformed refresh payloads cannot poison room state | A malicious epoch-advance payload, including a forged `reason=1` mutation, must be rejected without wedging the room or preventing later honest joins. | Covered | `malformed_refresh_rejection_does_not_poison_room_state` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
+| Honest publish wins over a malformed refresh race | A malformed refresh-shaped payload racing with a later honest join must fail closed without overriding the healthy room or blocking restart recovery. | Covered | `malformed_refresh_concurrent_with_honest_join_does_not_poison_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
+| Structured barrier mutations fail closed without poisoning restart recovery | A bundle with intact overall shape but corrupted witness, receipt, attestation, reason, or barrier-update bytes must be rejected without corrupting the live roster or later restart recovery. | Covered | `hostile_barrier_update_mutations_fail_closed_without_poisoning_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
 | Malformed `join_finalize` payloads cannot poison restart recovery | A malicious `reason=2` activation payload must be rejected without corrupting persisted state, and restart must still expose a healthy refresh / `join_finalize` recovery path. | Covered | `malformed_join_finalize_rejection_does_not_poison_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
 | Malformed admin expel payloads cannot poison room state or restart recovery | A malicious admin-targeted revocation payload must be rejected without corrupting either the live roster or the bootstrapped room state, and restart must still preserve a healthy room that admits later honest traffic. | Covered | `malformed_admin_expel_rejection_does_not_poison_room_state`, `malformed_admin_expel_rejection_does_not_poison_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs), `malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
+| Honest join wins over a malformed admin control-plane race | A malformed admin expel request racing with an honest public join must fail closed without blocking the join, and restart must preserve both the joined member and the room-admin ACL. | Covered | `malformed_admin_expel_request_concurrent_with_honest_join_survives_restart` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
 | Malformed room-admin grant/revoke requests cannot poison ACL or restart recovery | A malformed control-plane admin mutation must fail closed, leave ACL state intact, and still allow later honest ACL changes after restart. | Covered | `malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
 | Honest progress wins over a stale leave race | A valid leave bundle built from stale room state must not override a later honest join, and restart must still preserve the healthy room. | Covered | `stale_leave_race_with_honest_join_does_not_poison_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
 | Room-admin proof replays stay rejected across restart | A previously valid admin proof replayed after restart must fail closed and leave ACL state healthy for later honest governance changes. | Covered | `replayed_room_admin_grant_proof_rejected_after_restart_without_poisoning_acl` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
@@ -127,6 +130,8 @@ cargo test --locked -p cityg-api --test integration \
 cargo test --locked -p cityg-server \
   malformed_leave_rejection_does_not_poison_room_state \
   malformed_refresh_rejection_does_not_poison_room_state \
+  malformed_refresh_concurrent_with_honest_join_does_not_poison_restart_recovery \
+  hostile_barrier_update_mutations_fail_closed_without_poisoning_restart_recovery \
   malformed_join_finalize_rejection_does_not_poison_restart_recovery \
   stale_leave_race_with_honest_join_does_not_poison_restart_recovery \
   -- --nocapture
@@ -138,6 +143,7 @@ cargo test --locked -p cityg-server \
 
 cargo test --locked -p cityg-api --test integration \
   malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins \
+  malformed_admin_expel_request_concurrent_with_honest_join_survives_restart \
   -- --exact --nocapture
 
 cargo test --locked -p cityg-api --test integration \

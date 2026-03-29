@@ -174,6 +174,8 @@ cargo test --locked -p cityg-api --test integration \
 cargo test --locked -p cityg-server \
   malformed_leave_rejection_does_not_poison_room_state \
   malformed_refresh_rejection_does_not_poison_room_state \
+  malformed_refresh_concurrent_with_honest_join_does_not_poison_restart_recovery \
+  hostile_barrier_update_mutations_fail_closed_without_poisoning_restart_recovery \
   malformed_join_finalize_rejection_does_not_poison_restart_recovery \
   stale_leave_race_with_honest_join_does_not_poison_restart_recovery \
   -- --nocapture
@@ -185,6 +187,7 @@ cargo test --locked -p cityg-server \
 
 cargo test --locked -p cityg-api --test integration \
   malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins \
+  malformed_admin_expel_request_concurrent_with_honest_join_survives_restart \
   -- --exact --nocapture
 
 cargo test --locked -p cityg-api --test integration \
@@ -211,9 +214,12 @@ These gates cover:
 - malformed join rejection without poisoning the room before or after restart
 - malformed leave rejection without poisoning the room state
 - malformed refresh rejection without poisoning the room state
+- malformed refresh race against an honest join without poisoning restart recovery
+- structured barrier header/update mutations staying fail-closed without poisoning restart recovery
 - malformed `join_finalize` rejection without poisoning restart recovery
 - malformed admin expel rejection without poisoning the room before or after restart
 - malformed admin expel control-plane requests fail closed and still allow honest joins after restart
+- malformed admin expel control-plane races still allow the honest join before restart, and restart preserves both that joined member and the room-admin ACL
 - malformed admin grant/revoke control-plane requests fail closed without poisoning ACL state or restart recovery
 - stale leave versus honest join race with clean post-restart recovery
 - replayed room-admin proofs staying rejected after restart without poisoning ACL state

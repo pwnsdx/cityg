@@ -1099,6 +1099,29 @@ Notes:
   revocation traffic also fails closed and remains recoverable, both for raw
   accepted bundles and for malformed HTTP control-plane requests
 
+### Flow W2: malformed admin expel control-plane race does not beat an honest join
+
+Goal:
+
+- prove that a malformed admin expel request racing with an honest public join
+  cannot poison the room before restart, and that restart preserves both the
+  joined member and the room-admin ACL
+
+Coverage:
+
+- `cargo test --locked -p cityg-api --test integration malformed_admin_expel_request_concurrent_with_honest_join_survives_restart -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/api-admin-race`
+
+Assertions:
+
+- the malformed HTTP `expel_member_ticket` request is rejected as `400 Bad Request`
+- an honest join still succeeds before restart after the malformed request
+- after restart, the honest joined member remains visible in the room roster
+- after restart, the room-admin ACL still lists the original admin key
+
 ### Flow X: malformed leave rejection does not poison room state
 
 Goal:
@@ -1143,6 +1166,53 @@ Assertions:
   rejected fail-closed
 - the rejection does not corrupt membership state
 - a later honest join still succeeds after the malformed refresh rejection
+
+### Flow Y2: malformed refresh race does not beat an honest join or restart recovery
+
+Goal:
+
+- prove that a malformed refresh-shaped payload racing with a later honest join
+  cannot override healthy room progress or poison restart recovery
+
+Coverage:
+
+- `cargo test --locked -p cityg-server malformed_refresh_concurrent_with_honest_join_does_not_poison_restart_recovery -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/server-race-refresh`
+
+Assertions:
+
+- a malformed refresh-shaped payload is rejected even after a later honest join
+  has advanced the room
+- the live roster remains healthy before restart
+- after restart, the healthy roster is preserved
+- a healthy survivor refresh ticket is still issuable after restart
+
+### Flow Y3: structured barrier mutations fail closed without poisoning restart recovery
+
+Goal:
+
+- prove that a bundle with intact overall shape but corrupted authority or
+  barrier bytes cannot poison the room or restart recovery
+
+Coverage:
+
+- `cargo test --locked -p cityg-server hostile_barrier_update_mutations_fail_closed_without_poisoning_restart_recovery -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/server-hostile-mutations`
+
+Assertions:
+
+- corrupted witness, receipt, attestation, barrier-update bytes, and mismatched
+  reason are all rejected fail-closed
+- repeated hostile mutations do not change the live roster
+- a later honest join still succeeds after the hostile mutation sequence
+- after restart, the healthy roster is preserved and a survivor refresh ticket
+  is still issuable
 
 ### Flow Z: malformed `join_finalize` rejection does not poison restart recovery
 
