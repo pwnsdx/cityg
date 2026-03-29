@@ -6809,6 +6809,15 @@ mod tests {
         CityGServer::new(config)
     }
 
+    fn demo_server_with_journal_and_global_history_authority(
+        path: impl AsRef<Path>,
+    ) -> CityGServer {
+        let mut config = demo_acceptance_config();
+        config.state_path = Some(path.as_ref().to_path_buf());
+        config.enable_global_history_authority();
+        CityGServer::new(config)
+    }
+
     fn demo_server_with_local_history_authority() -> CityGServer {
         let mut config = demo_acceptance_config();
         config.enable_local_history_authority();
@@ -7637,6 +7646,223 @@ mod tests {
         let pristine_bundle = refresh_bundle.clone();
 
         Ok((refresh_bundle, pristine_bundle))
+    }
+
+    fn build_admin_expel_bundle_for_member(
+        server: &mut CityGServer,
+        generated: &GeneratedMemberBundle,
+        source_bundle: &ClientEpochBundle,
+        target_leaf_id: &[u8; 32],
+        replay_tag: u8,
+    ) -> Result<ClientEpochBundle, CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let fs_ec = u64_from_header(&source_bundle.header_map, hdr::HDR_FS_EC)?;
+        let fs_epoch_commit =
+            bytes32_from_header(&source_bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT)?;
+        let fs_dev_prev_commit =
+            bytes32_from_header(&source_bundle.header_map, hdr::HDR_FS_DEV_COMMIT)?;
+
+        let ticket = server.build_admin_expel_ticket(
+            &gid,
+            &generated.pop_public_key,
+            &generated.leaf_id,
+            target_leaf_id,
+            test_room_admin_replay_key(replay_tag),
+        )?;
+        let parities = hydrate_parities(
+            ticket.parities.as_slice(),
+            fs_ec,
+            fs_epoch_commit,
+            fs_dev_prev_commit,
+        );
+        let pivot = select_pivot_parity(parities.as_slice())
+            .ok_or(CityGError::InvalidInput("pivot parity missing"))?;
+
+        let revocation_roots_hash =
+            super::compute_revocation_roots_hash(&ticket.revoked_since_root, &ticket.revoked_root)?;
+        let committed_roots_hash =
+            super::compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+        let mut snapshot_pre = server
+            .fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?
+            .pk_entries;
+        let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
+        let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
+        let revoked_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
+            .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
+        let mut post_revoked_leaf_indices = committed_revoked.leaf_indices.clone();
+        if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
+            post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
+        }
+        apply_join_records_to_snapshot(
+            snapshot_pre.as_mut_slice(),
+            ticket.n_max,
+            join_records.records.as_slice(),
+        )?;
+        apply_revoked_indices_to_snapshot(
+            snapshot_pre.as_mut_slice(),
+            ticket.n_max,
+            post_revoked_leaf_indices.as_slice(),
+        )?;
+        let kem_tree_hash_before =
+            super::compute_barrier_tree_hash(ticket.n_max, snapshot_pre.as_slice())?;
+        let next_barrier_version = ticket.barrier_version.saturating_add(1);
+        let barrier_update = build_refresh_barrier_update_bytes(
+            ticket.n_max,
+            ticket.cover_leaf_index,
+            next_barrier_version,
+            ticket.barrier_version,
+            revocation_roots_hash,
+            kem_tree_hash_before,
+            snapshot_pre.as_slice(),
+        )?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+        header.insert(
+            hdr::HDR_KBROAD_PUB,
+            Value::Bytes(ticket.kbroad_public.clone()),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(barrier_update.clone()),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
+        );
+
+        let history_commitment = ticket.current_history_commitment;
+        let history_commitment_header =
+            super::encode_barrier_history_commitment_header(history_commitment)?;
+        header.insert(
+            hdr::HDR_BARRIER_HISTORY_COMMITMENT,
+            Value::Bytes(history_commitment_header.clone()),
+        );
+
+        if let Some(authority) = server.history_authority.as_ref() {
+            let parsed_barrier_update = super::parse_barrier_update(&header, ticket.n_max)?
+                .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+            let global_history_attestation = super::encode_global_history_attestation(
+                authority,
+                &gid,
+                &history_commitment,
+                ticket.barrier_version,
+                &ticket.kem_tree_hash_after,
+            )?;
+            header.insert(
+                hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+                Value::Bytes(global_history_attestation.clone()),
+            );
+            let receipt_payload = super::full_verification_receipt_payload(
+                &gid,
+                &generated.leaf_id,
+                0,
+                parsed_barrier_update.updater_leaf,
+                history_commitment_header.as_slice(),
+                global_history_attestation.as_slice(),
+                barrier_update.as_slice(),
+            )?;
+            let receipt_signature =
+                dilithium5::detached_sign(receipt_payload.as_slice(), &generated.pop_secret_key)
+                    .as_bytes()
+                    .to_vec();
+            header.insert(
+                hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+                Value::Bytes(super::encode_full_verification_receipt(
+                    &generated.leaf_id,
+                    0,
+                    parsed_barrier_update.updater_leaf,
+                    receipt_signature,
+                )?),
+            );
+            if authority.mode.requires_full_verification_witness() {
+                let deployment_profile_manifest = server.deployment_profile_manifest_bytes(
+                    &gid,
+                    "v0.1.4",
+                    server.history_authority_extension_id(),
+                    ticket.n_max,
+                    ticket.max_barrier_update_bytes,
+                    ticket.fs_forward_leap_policy,
+                )?;
+                header.insert(
+                    hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+                    Value::Bytes(server.full_verification_witness_bytes(
+                        &gid,
+                        &history_commitment,
+                        ticket.barrier_version,
+                        &ticket.kem_tree_hash_after,
+                        &generated.leaf_id,
+                        0,
+                        parsed_barrier_update.updater_leaf,
+                        barrier_update.as_slice(),
+                        ticket.barrier_version,
+                        join_records.records.as_slice(),
+                        &revocation_roots_hash,
+                        post_revoked_leaf_indices.as_slice(),
+                        deployment_profile_manifest.as_slice(),
+                    )?),
+                );
+            }
+        }
+
+        let srx_inputs = witness::SrxInputsOwned::from_cbor(&ticket.srx_cbor)
+            .map_err(|_| CityGError::InvalidInput("decode SRX inputs"))?
+            .into_srx_inputs();
+        let witness_bytes = if ticket.witness_cbor.is_empty() {
+            None
+        } else {
+            Some(ticket.witness_cbor.as_slice())
+        };
+
+        let parts = AnchorInstanceParts {
+            gid: &gid,
+            cat: &ticket.cat,
+            tswe_salt_hash: &ticket.tswe_salt_hash,
+            parent_root: &ticket.parent_root,
+            join_delta_root: &ticket.join_delta_root,
+            revoked_since_prev_root: &ticket.revoked_since_root,
+            revoked_root: &ticket.revoked_root,
+            pox_r_commit: Some(&ticket.pox_r_commit),
+        };
+
+        let params = OrchestrationParams {
+            msphf_crs_id: ticket.msphf_crs_id.as_str(),
+            params_id: ticket.msphf_params_id.as_str(),
+            srx: Some(srx_inputs),
+            srx_mode: SrxMode::Complete,
+            pop_keys: Some(PopKeypair {
+                algorithm: "ML-DSA-65",
+                public_key: generated.pop_public_key.as_slice(),
+                secret_key: &generated.pop_secret_key,
+            }),
+            leaf_id_mode: LeafIdMode::PerGroup,
+            proof_mode: ticket.proof_mode.as_str(),
+            vrf_id: ticket.vrf_id.as_str(),
+            policy_version: ticket.policy_version.as_str(),
+            vrf_secret_key: Some(generated.vrf_secret_key.as_slice()),
+            vrf_public_key: Some(generated.vrf_public_key.as_slice()),
+            fs_policy_version: ticket.fs_policy_version.as_str(),
+            fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+            barrier_version: next_barrier_version,
+            fs_join: FsJoinInputs {
+                fs_ec,
+                fs_epoch_commit,
+                fs_dev_prev_commit,
+            },
+            fs_merge: FsMergeInputs::default(),
+        };
+
+        let mut bundle = CityGClient::generate_merge(
+            header,
+            parts,
+            params,
+            parities.as_slice(),
+            None,
+            witness_bytes,
+        )?;
+        strip_rollup_metadata(&mut bundle.header_map);
+        apply_pivot_alignment(&mut bundle.header_map, pivot);
+        Ok(bundle)
     }
 
     fn advance_committed_tree_for_tests(
@@ -13466,6 +13692,182 @@ mod tests {
                         if code.code == 9071
                 ),
             "unexpected error: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_join_rejection_does_not_poison_room_state() -> Result<(), CityGError> {
+        let mut server = super::demo::demo_server();
+        let alice = cityg_client::demo::demo_bundle("alice")?;
+        server.accept_epoch(&alice)?;
+        assert_eq!(
+            server.members(&cityg_client::demo::DEMO_GID).len(),
+            1,
+            "room must be healthy after the first honest join"
+        );
+
+        let mut malformed_bob = cityg_client::demo::demo_bundle("bob")?;
+        malformed_bob.header_map.remove(&hdr::HDR_BARRIER_LEAF_PK);
+        let err = server
+            .accept_epoch(&malformed_bob)
+            .expect_err("malformed join must be rejected");
+        assert!(
+            matches!(err, CityGError::InvalidInput(_)) || matches!(err, CityGError::Acceptance(_)),
+            "unexpected malformed join error: {err:?}"
+        );
+
+        let members_after_reject = server.members(&cityg_client::demo::DEMO_GID);
+        assert_eq!(
+            members_after_reject.len(),
+            1,
+            "rejected malformed join must not change membership"
+        );
+        assert_eq!(
+            members_after_reject[0],
+            cityg_client::demo::demo_member_leaf("alice"),
+            "the healthy survivor roster must remain intact"
+        );
+
+        let honest_bob = cityg_client::demo::demo_bundle("bob")?;
+        server.accept_epoch(&honest_bob)?;
+        assert_eq!(
+            server.members(&cityg_client::demo::DEMO_GID).len(),
+            2,
+            "a later honest join must still succeed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_admin_expel_rejection_does_not_poison_room_state() -> Result<(), CityGError> {
+        let mut server = demo_server_with_global_history_authority();
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice = build_genesis_member_bundle(0x81)?;
+        server.accept_epoch(&alice.bundle)?;
+        let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+        let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x82, true)?;
+        server.accept_epoch(&bob.bundle)?;
+
+        {
+            let group = server
+                .roster
+                .groups
+                .get_mut(gid.as_slice())
+                .ok_or(CityGError::InvalidInput("missing demo group state"))?;
+            group
+                .room_admin_pop_keys
+                .insert(alice.pop_public_key.clone());
+        }
+
+        let mut malformed_expel = build_admin_expel_bundle_for_member(
+            &mut server,
+            &alice,
+            &alice.bundle,
+            &bob.leaf_id,
+            0x31,
+        )?;
+        malformed_expel.header_map.remove(&hdr::HDR_BARRIER_UPDATE);
+        let err = server
+            .accept_epoch(&malformed_expel)
+            .expect_err("malformed admin expel must be rejected");
+        assert!(
+            matches!(err, CityGError::InvalidInput(_)) || matches!(err, CityGError::Acceptance(_)),
+            "unexpected malformed admin expel error: {err:?}"
+        );
+
+        let members_after_reject = server.members(&gid);
+        assert_eq!(
+            members_after_reject.len(),
+            2,
+            "rejected malformed admin expel must not evict or corrupt members"
+        );
+        assert!(
+            members_after_reject.contains(&alice.leaf_id)
+                && members_after_reject.contains(&bob.leaf_id),
+            "the healthy room membership must remain intact after malformed admin expel"
+        );
+
+        let charlie = build_join_member_from_server_ticket(&mut server, &gid, 0x83, true)?;
+        server.accept_epoch(&charlie.bundle)?;
+        let members_after_honest_join = server.members(&gid);
+        assert_eq!(
+            members_after_honest_join.len(),
+            3,
+            "a later honest join must still succeed after malformed admin expel rejection"
+        );
+        assert!(
+            members_after_honest_join.contains(&alice.leaf_id)
+                && members_after_honest_join.contains(&bob.leaf_id)
+                && members_after_honest_join.contains(&charlie.leaf_id),
+            "the room must remain healthy after malformed admin expel rejection"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_admin_expel_rejection_does_not_poison_restart_recovery() -> Result<(), CityGError>
+    {
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("malformed-admin-expel.journal");
+        let gid = cityg_client::demo::DEMO_GID;
+
+        {
+            let mut server = demo_server_with_journal_and_global_history_authority(&journal_path);
+            let alice = build_genesis_member_bundle(0x83)?;
+            server.accept_epoch(&alice.bundle)?;
+            let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+            let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x84, true)?;
+            server.accept_epoch(&bob.bundle)?;
+
+            {
+                let group = server
+                    .roster
+                    .groups
+                    .get_mut(gid.as_slice())
+                    .ok_or(CityGError::InvalidInput("missing demo group state"))?;
+                group
+                    .room_admin_pop_keys
+                    .insert(alice.pop_public_key.clone());
+            }
+
+            let mut malformed_expel = build_admin_expel_bundle_for_member(
+                &mut server,
+                &alice,
+                &alice.bundle,
+                &bob.leaf_id,
+                0x41,
+            )?;
+            malformed_expel.header_map.remove(&hdr::HDR_BARRIER_UPDATE);
+            let err = server
+                .accept_epoch(&malformed_expel)
+                .expect_err("malformed admin expel must be rejected before restart");
+            assert!(
+                matches!(err, CityGError::InvalidInput(_))
+                    || matches!(err, CityGError::Acceptance(_)),
+                "unexpected malformed admin expel error: {err:?}"
+            );
+
+            let members_before_restart = server.members(&gid);
+            assert_eq!(members_before_restart.len(), 2);
+        }
+
+        let mut reloaded = demo_server_with_journal_and_global_history_authority(&journal_path);
+        let members_after_restart = reloaded.members(&gid);
+        assert_eq!(
+            members_after_restart.len(),
+            2,
+            "restart must preserve the healthy roster after malformed admin expel rejection"
+        );
+
+        let charlie = build_join_member_from_server_ticket(&mut reloaded, &gid, 0x85, true)?;
+        reloaded.accept_epoch(&charlie.bundle)?;
+        let members_after_honest_join = reloaded.members(&gid);
+        assert_eq!(
+            members_after_honest_join.len(),
+            3,
+            "room must still accept later honest joins after restart"
         );
         Ok(())
     }

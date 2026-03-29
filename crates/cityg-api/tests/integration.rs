@@ -289,6 +289,88 @@ async fn restart_rehydrates_bundle_store_for_post_restart_bundle_fetch() {
 
 #[tokio::test]
 #[allow(clippy::expect_used)]
+async fn malformed_join_rejection_does_not_poison_restart_or_future_honest_joins() -> Result<()> {
+    let temp_root = std::env::temp_dir().join(format!(
+        "cityg-api-malformed-join-{}-{}",
+        std::process::id(),
+        next_free_local_port()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let journal_path = temp_root.join("malformed-join.journal");
+    let port = next_free_local_port();
+    let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    let alice = demo_bundle("alice").expect("alice bundle");
+    client
+        .accept_epoch_bundle(&alice)
+        .await
+        .expect("accept alice");
+
+    let mut malformed_bob = demo_bundle("bob").expect("bob bundle");
+    malformed_bob
+        .header_map
+        .remove(&msphf_orchestrator::hdr::HDR_BARRIER_LEAF_PK);
+    let malformed_err = client
+        .accept_epoch_bundle(&malformed_bob)
+        .await
+        .expect_err("malformed join must fail");
+    assert!(
+        matches!(malformed_err, Error::HttpStatus { .. }),
+        "malformed join should surface as an HTTP rejection"
+    );
+
+    let members_before_restart = client
+        .members(DEMO_GID.as_ref(), None)
+        .await
+        .expect("members after malformed reject");
+    assert_eq!(
+        members_before_restart.members.len(),
+        1,
+        "rejected malformed join must not poison the live roster"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let members_after_restart = client
+        .members(DEMO_GID.as_ref(), None)
+        .await
+        .expect("members after restart");
+    assert_eq!(
+        members_after_restart.members.len(),
+        1,
+        "restart after malformed join must preserve the healthy roster"
+    );
+
+    let bob = demo_bundle("bob").expect("bob bundle");
+    client
+        .accept_epoch_bundle(&bob)
+        .await
+        .expect("honest bob join after malformed reject");
+
+    let members_after_honest_join = client
+        .members(DEMO_GID.as_ref(), None)
+        .await
+        .expect("members after honest bob");
+    assert_eq!(
+        members_after_honest_join.members.len(),
+        2,
+        "a later honest join must still succeed after restart"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
 async fn window_limits_can_be_tuned() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new("error"))

@@ -166,6 +166,15 @@ cargo test --locked -p cityg-gui --bin cityg-gui \
 cargo test --locked -p cityg-gui --bin join_leave \
   tests::watch_mode_reconnect_under_burst_resumes_live_notifications \
   -- --exact --nocapture
+
+cargo test --locked -p cityg-api --test integration \
+  malformed_join_rejection_does_not_poison_restart_or_future_honest_joins \
+  -- --exact --nocapture
+
+cargo test --locked -p cityg-server \
+  malformed_admin_expel_rejection_does_not_poison_room_state \
+  malformed_admin_expel_rejection_does_not_poison_restart_recovery \
+  -- --nocapture
 ```
 
 These gates cover:
@@ -183,6 +192,8 @@ These gates cover:
 - client restart during multi-version catch-up after `refresh + leave`
 - two restarted members resuming bilateral traffic without duplicate delivery
 - restart + expel churn with later joiner messaging
+- malformed join rejection without poisoning the room before or after restart
+- malformed admin expel rejection without poisoning the room before or after restart
 - restart during a published-but-not-reloaded `join_finalize` activation
 - watch websocket reconnect resuming fresh notifications under active burst traffic
 

@@ -1023,3 +1023,71 @@ Notes:
 
 - this flow complements the single-client restart tests by proving that both
   sides can cross the same restart boundary and continue exchanging traffic
+
+### Flow V: malformed join rejection does not poison room state or restart recovery
+
+Goal:
+
+- prove that a malicious join payload cannot strand a public room: the malformed
+  payload must be rejected, the live roster must remain healthy, and a restart
+  must not preserve any toxic partial state
+
+Coverage:
+
+- `cargo test --locked -p cityg-server malformed_join_rejection_does_not_poison_room_state -- --nocapture`
+- `cargo test --locked -p cityg-api --test integration malformed_join_rejection_does_not_poison_restart_or_future_honest_joins -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/malformed-join-proof`
+- `2026-03-29` on `.cargo-target/malformed-join-proof`
+
+Assertions:
+
+- a malformed join bundle with a missing `barrier_leaf_pk` is rejected
+- the rejection does not add, evict, or corrupt the existing room membership
+- after restart, the room still exposes the healthy roster from before the
+  malicious attempt
+- a later honest join still succeeds after the malformed rejection and restart
+
+Notes:
+
+- the API proof surfaced the malformed join as `400 Bad Request: invalid bundle
+  components`
+- this complements the existing malformed ciphertext fetch tests by proving that
+  malformed membership traffic also fails closed without poisoning recovery
+
+### Flow W: malformed admin expel rejection does not poison room state or restart recovery
+
+Goal:
+
+- prove that a malicious room-admin revocation payload cannot strand a public
+  room: the malformed expel must be rejected, the live roster must remain
+  healthy, and a restart must not preserve any toxic partial state
+
+Coverage:
+
+- `cargo test --locked -p cityg-server malformed_admin_expel_rejection_does_not_poison_room_state -- --nocapture`
+- `cargo test --locked -p cityg-server malformed_admin_expel_rejection_does_not_poison_restart_recovery -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/admin-malformed-proof`
+- `2026-03-29` on `.cargo-target/admin-malformed-proof`
+
+Assertions:
+
+- a malformed admin expel bundle with a missing `barrier_update` is rejected
+- the rejection does not evict, corrupt, or otherwise poison the live roster
+- a later honest join still succeeds after the malformed admin rejection
+- after restart, the room still exposes the healthy roster from before the
+  malicious attempt
+- a later honest join still succeeds after the malformed admin rejection and
+  restart
+
+Notes:
+
+- this proof targets the “malicious admin payload” concern directly, rather than
+  only malformed public join traffic
+- it complements the admin expel happy-path flows by proving malformed targeted
+  revocation traffic also fails closed and remains recoverable
