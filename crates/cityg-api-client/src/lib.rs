@@ -4762,7 +4762,14 @@ mod tests {
     };
     use pqcrypto_dilithium::dilithium5;
     use prost::Message;
-    use std::{error::Error as StdError, net::SocketAddr, sync::OnceLock};
+    use std::{
+        error::Error as StdError,
+        net::SocketAddr,
+        sync::{
+            Arc, OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
     use tokio::net::TcpListener;
 
     fn encode_proto<T: Message>(msg: T) -> Vec<u8> {
@@ -7433,6 +7440,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn barrier_resolve_revoked_leaves_rejects_deployment_profile_manifest_mismatch_across_pages()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
+        let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
+        let deployment_profile_manifest_page_0 = build_test_deployment_profile_manifest(
+            &authority,
+            GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            &[0x41; 32],
+            EXPECTED_PROFILE_VERSION,
+            8,
+            1_048_576,
+            &fs_forward_leap_policy,
+        );
+        let deployment_profile_manifest_page_1 = build_test_deployment_profile_manifest(
+            &authority,
+            GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            &[0x41; 32],
+            EXPECTED_PROFILE_VERSION,
+            8,
+            1_048_577,
+            &fs_forward_leap_policy,
+        );
+        let helper_attestation_page_0 = build_test_helper_completeness_attestation(
+            &authority,
+            HELPER_KIND_REVOKED_LEAVES,
+            &history_commitment,
+            0,
+            2,
+            RevokedLeavesSelector {
+                revocation_roots_hash: &[0xCC; 32],
+                leaf_indices: &[1],
+            },
+        );
+        let helper_attestation_page_1 = build_test_helper_completeness_attestation(
+            &authority,
+            HELPER_KIND_REVOKED_LEAVES,
+            &history_commitment,
+            1,
+            2,
+            RevokedLeavesSelector {
+                revocation_roots_hash: &[0xCC; 32],
+                leaf_indices: &[2],
+            },
+        );
+        let page = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/barrier/resolve_revoked_leaves",
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                let deployment_profile_manifest_page_0 = deployment_profile_manifest_page_0.clone();
+                let deployment_profile_manifest_page_1 = deployment_profile_manifest_page_1.clone();
+                let helper_attestation_page_0 = helper_attestation_page_0.clone();
+                let helper_attestation_page_1 = helper_attestation_page_1.clone();
+                let page = page.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
+                async move {
+                    let call_index = page.fetch_add(1, Ordering::SeqCst);
+                    let (
+                        leaf_indices,
+                        page_offset,
+                        next_page_offset,
+                        max_barrier_update_bytes,
+                        deployment_profile_manifest,
+                        helper_completeness_attestation,
+                    ) = if call_index == 0 {
+                        (
+                            vec![1],
+                            0,
+                            Some(1),
+                            1_048_576,
+                            deployment_profile_manifest_page_0,
+                            helper_attestation_page_0,
+                        )
+                    } else {
+                        (
+                            vec![2],
+                            1,
+                            None,
+                            1_048_577,
+                            deployment_profile_manifest_page_1,
+                            helper_attestation_page_1,
+                        )
+                    };
+                    encode_proto(BarrierResolveRevokedLeavesResponse {
+                        leaf_indices,
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE1, 0x00, 7,
+                        )),
+                        page_offset,
+                        next_page_offset,
+                        total_entries: 2,
+                        helper_completeness_attestation,
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                        history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                        n_max: 8,
+                        max_barrier_update_bytes,
+                        fs_forward_leap_policy: Some(fs_forward_leap_policy),
+                        deployment_profile_manifest,
+                    })
+                }
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_resolve_revoked_leaves(
+                "4141414141414141414141414141414141414141414141414141414141414141",
+                &[0xCC; 32],
+            )
+            .await
+            .expect_err("manifest mismatch across revoked-leaf pages must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("deployment_profile_manifest mismatch across pages")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn barrier_resolve_joins_since_rejects_missing_deployment_profile_manifest()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -7587,6 +7734,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn barrier_resolve_joins_since_rejects_global_history_attestation_mismatch_across_pages()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority_page_0 =
+            build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let authority_page_1 =
+            build_test_history_authority(history_commitment, [0x41; 32], 8, [0xCD; 32]);
+        let descriptor_bytes = authority_page_0.descriptor_bytes.clone();
+        let attestation_bytes_page_0 = authority_page_0.attestation_bytes.clone();
+        let attestation_bytes_page_1 = authority_page_1.attestation_bytes.clone();
+        let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
+        let deployment_profile_manifest = build_test_deployment_profile_manifest(
+            &authority_page_0,
+            GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            &[0x41; 32],
+            EXPECTED_PROFILE_VERSION,
+            8,
+            1_048_576,
+            &fs_forward_leap_policy,
+        );
+        let helper_attestation_page_0 = build_test_helper_completeness_attestation(
+            &authority_page_0,
+            HELPER_KIND_JOINS_SINCE,
+            &history_commitment,
+            0,
+            2,
+            JoinsSinceSelector {
+                prev_barrier_version: 0,
+                records: &[BarrierJoinRecord {
+                    device_pk: vec![0xAA; 32],
+                    leaf_index: 9,
+                    ek_leaf: vec![0xBB; 1184],
+                }],
+            },
+        );
+        let helper_attestation_page_1 = build_test_helper_completeness_attestation(
+            &authority_page_0,
+            HELPER_KIND_JOINS_SINCE,
+            &history_commitment,
+            1,
+            2,
+            JoinsSinceSelector {
+                prev_barrier_version: 0,
+                records: &[BarrierJoinRecord {
+                    device_pk: vec![0xAB; 32],
+                    leaf_index: 10,
+                    ek_leaf: vec![0xBC; 1184],
+                }],
+            },
+        );
+        let page = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/barrier/resolve_joins_since",
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes_page_0 = attestation_bytes_page_0.clone();
+                let attestation_bytes_page_1 = attestation_bytes_page_1.clone();
+                let deployment_profile_manifest = deployment_profile_manifest.clone();
+                let helper_attestation_page_0 = helper_attestation_page_0.clone();
+                let helper_attestation_page_1 = helper_attestation_page_1.clone();
+                let page = page.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
+                async move {
+                    let call_index = page.fetch_add(1, Ordering::SeqCst);
+                    let (
+                        records,
+                        page_offset,
+                        next_page_offset,
+                        global_history_attestation,
+                        helper_completeness_attestation,
+                    ) = if call_index == 0 {
+                        (
+                            vec![pb::BarrierJoinLeafRecord {
+                                device_pk: vec![0xAA; 32],
+                                leaf_index: 9,
+                                ek_leaf: vec![0xBB; 1184],
+                            }],
+                            0,
+                            Some(1),
+                            attestation_bytes_page_0,
+                            helper_attestation_page_0,
+                        )
+                    } else {
+                        (
+                            vec![pb::BarrierJoinLeafRecord {
+                                device_pk: vec![0xAB; 32],
+                                leaf_index: 10,
+                                ek_leaf: vec![0xBC; 1184],
+                            }],
+                            1,
+                            None,
+                            attestation_bytes_page_1,
+                            helper_attestation_page_1,
+                        )
+                    };
+                    encode_proto(BarrierResolveJoinsSinceResponse {
+                        records,
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE1, 0x00, 7,
+                        )),
+                        page_offset,
+                        next_page_offset,
+                        total_entries: 2,
+                        helper_completeness_attestation,
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation,
+                        history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                        n_max: 8,
+                        max_barrier_update_bytes: 1_048_576,
+                        fs_forward_leap_policy: Some(fs_forward_leap_policy),
+                        deployment_profile_manifest,
+                    })
+                }
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_resolve_joins_since(
+                "4141414141414141414141414141414141414141414141414141414141414141",
+                0,
+            )
+            .await
+            .expect_err("attestation mismatch across joins pages must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("global history attestation mismatch across pages")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn barrier_fetch_public_tree_rejects_missing_deployment_profile_manifest()
     -> Result<(), Box<dyn StdError>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -7728,6 +8023,147 @@ mod tests {
             Error::Parse(message)
                 if message.contains("global-history-authority-v1")
                     && message.contains("base profile")
+        ));
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn barrier_fetch_public_tree_rejects_deployment_profile_manifest_mismatch_across_pages()
+    -> Result<(), Box<dyn StdError>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let history_commitment = HistoryCommitment {
+            history_view_id: [0xD1; 32],
+            history_commitment_id: [0xE1; 32],
+            prev_history_commitment_id: [0x00; 32],
+            history_seq: 7,
+        };
+        let authority = build_test_history_authority(history_commitment, [0x41; 32], 7, [0xCC; 32]);
+        let descriptor_bytes = authority.descriptor_bytes.clone();
+        let attestation_bytes = authority.attestation_bytes.clone();
+        let fs_forward_leap_policy = fs_forward_leap_policy_ok_payload();
+        let deployment_profile_manifest_page_0 = build_test_deployment_profile_manifest(
+            &authority,
+            GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            &[0x41; 32],
+            EXPECTED_PROFILE_VERSION,
+            8,
+            1_048_576,
+            &fs_forward_leap_policy,
+        );
+        let deployment_profile_manifest_page_1 = build_test_deployment_profile_manifest(
+            &authority,
+            GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            &[0x41; 32],
+            EXPECTED_PROFILE_VERSION,
+            8,
+            1_048_577,
+            &fs_forward_leap_policy,
+        );
+        let helper_attestation_page_0 = build_test_helper_completeness_attestation(
+            &authority,
+            HELPER_KIND_FETCH_PUBLIC_TREE,
+            &history_commitment,
+            0,
+            15,
+            FetchPublicTreeSelector {
+                kem_tree_hash_after: &[0xCC; 32],
+                pk_entries: &vec![vec![0x01; 32]; 8],
+            },
+        );
+        let helper_attestation_page_1 = build_test_helper_completeness_attestation(
+            &authority,
+            HELPER_KIND_FETCH_PUBLIC_TREE,
+            &history_commitment,
+            8,
+            15,
+            FetchPublicTreeSelector {
+                kem_tree_hash_after: &[0xCC; 32],
+                pk_entries: &vec![vec![0x02; 32]; 7],
+            },
+        );
+        let page = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/barrier/fetch_public_tree",
+            post(move || {
+                let descriptor_bytes = descriptor_bytes.clone();
+                let attestation_bytes = attestation_bytes.clone();
+                let deployment_profile_manifest_page_0 = deployment_profile_manifest_page_0.clone();
+                let deployment_profile_manifest_page_1 = deployment_profile_manifest_page_1.clone();
+                let helper_attestation_page_0 = helper_attestation_page_0.clone();
+                let helper_attestation_page_1 = helper_attestation_page_1.clone();
+                let page = page.clone();
+                let fs_forward_leap_policy = fs_forward_leap_policy;
+                async move {
+                    let call_index = page.fetch_add(1, Ordering::SeqCst);
+                    let (
+                        pk_entries,
+                        entry_offset,
+                        next_entry_offset,
+                        max_barrier_update_bytes,
+                        deployment_profile_manifest,
+                        helper_completeness_attestation,
+                    ) = if call_index == 0 {
+                        (
+                            vec![vec![0x01; 32]; 8],
+                            0,
+                            Some(8),
+                            1_048_576,
+                            deployment_profile_manifest_page_0,
+                            helper_attestation_page_0,
+                        )
+                    } else {
+                        (
+                            vec![vec![0x02; 32]; 7],
+                            8,
+                            None,
+                            1_048_577,
+                            deployment_profile_manifest_page_1,
+                            helper_attestation_page_1,
+                        )
+                    };
+                    encode_proto(BarrierFetchPublicTreeResponse {
+                        n_max: 8,
+                        kem_tree_hash_after: vec![0xCC; 32],
+                        pk_entries,
+                        history_view_id: vec![0xD1; 32],
+                        history_commitment: Some(history_commitment_ok_payload(
+                            0xD1, 0xE1, 0x00, 7,
+                        )),
+                        entry_offset,
+                        next_entry_offset,
+                        total_entries: 15,
+                        helper_completeness_attestation,
+                        history_authority_descriptor: descriptor_bytes,
+                        global_history_attestation: attestation_bytes,
+                        history_authority_extension: GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID
+                            .to_string(),
+                        profile_version: EXPECTED_PROFILE_VERSION.to_string(),
+                        max_barrier_update_bytes,
+                        fs_forward_leap_policy: Some(fs_forward_leap_policy),
+                        deployment_profile_manifest,
+                    })
+                }
+            }),
+        );
+        let addr: SocketAddr = listener.local_addr()?;
+        let base = format!("http://{}", addr);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CitygApiClient::new(base);
+        let err = client
+            .barrier_fetch_public_tree(
+                "4141414141414141414141414141414141414141414141414141414141414141",
+                &[0xCC; 32],
+            )
+            .await
+            .expect_err("manifest mismatch across fetch-public-tree pages must fail closed");
+        assert!(matches!(
+            err,
+            Error::Parse(message) if message.contains("deployment_profile_manifest mismatch across pages")
         ));
 
         handle.abort();

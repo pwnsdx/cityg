@@ -203,6 +203,12 @@ cargo test --locked -p cityg-api --test integration \
   malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart \
   replayed_room_admin_grant_proof_rejected_after_restart_without_poisoning_acl \
   -- --exact --nocapture
+
+cargo test --locked -p cityg-api-client --lib \
+  tests::barrier_resolve_revoked_leaves_rejects_deployment_profile_manifest_mismatch_across_pages \
+  tests::barrier_resolve_joins_since_rejects_global_history_attestation_mismatch_across_pages \
+  tests::barrier_fetch_public_tree_rejects_deployment_profile_manifest_mismatch_across_pages \
+  -- --exact --nocapture
 ```
 
 These gates cover:
@@ -240,6 +246,7 @@ These gates cover:
 - replayed room-admin proofs staying rejected after restart without poisoning ACL state
 - restart during a published-but-not-reloaded `join_finalize` activation
 - watch websocket reconnect resuming fresh notifications under active burst traffic
+- paginated helper responses that mutate their manifest or attestation between pages still fail closed
 - the remaining large-churn and hostile `join_finalize` guarantees are covered by the existing composite matrix in [`docs/protocol/20-protocol-checklist.md`](./protocol/20-protocol-checklist.md), so no blocking runtime backlog remains for the current profile
 
 ## Phase 1: Baseline Smoke

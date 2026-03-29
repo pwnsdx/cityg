@@ -1467,3 +1467,29 @@ direct flow or by an explicit composite of already-green flows:
   same-identity rejoin, replay-state after restart, and watch recovery
 - mutation harness coverage: structured barrier mutations, helper-manifest
   guards, authority/header mismatch guards, and sender-binding spoof rejection
+
+### Flow AE: paginated helper mutations fail closed
+
+Goal:
+
+- prove that helper responses cannot mutate authenticated manifest or
+  attestation state between pages without the client failing closed
+
+Coverage:
+
+- `cargo test --locked -p cityg-api-client --lib tests::barrier_resolve_revoked_leaves_rejects_deployment_profile_manifest_mismatch_across_pages -- --exact --nocapture`
+- `cargo test --locked -p cityg-api-client --lib tests::barrier_resolve_joins_since_rejects_global_history_attestation_mismatch_across_pages -- --exact --nocapture`
+- `cargo test --locked -p cityg-api-client --lib tests::barrier_fetch_public_tree_rejects_deployment_profile_manifest_mismatch_across_pages -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/api-mutation-pages`
+
+Assertions:
+
+- `ResolveRevokedLeaves` rejects a deployment-profile manifest that changes
+  across pages even when both pages remain individually signed/valid
+- `ResolveJoinsSince` rejects a global history attestation that changes across
+  pages even when both pages remain individually valid
+- `FetchBarrierPublicTree` rejects a deployment-profile manifest that changes
+  across pages even when both pages remain individually signed/valid
