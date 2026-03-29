@@ -1098,3 +1098,95 @@ Notes:
 - it complements the admin expel happy-path flows by proving malformed targeted
   revocation traffic also fails closed and remains recoverable, both for raw
   accepted bundles and for malformed HTTP control-plane requests
+
+### Flow X: malformed leave rejection does not poison room state
+
+Goal:
+
+- prove that a malicious self-removal payload cannot strand a public room: the
+  malformed leave must be rejected and later honest room traffic must still
+  succeed
+
+Coverage:
+
+- `cargo test --locked -p cityg-server malformed_leave_rejection_does_not_poison_room_state -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/server-malicious-mutations`
+
+Assertions:
+
+- a malformed leave bundle with a missing `barrier_update` is rejected
+- the rejection does not evict or otherwise corrupt the live roster
+- a later honest join still succeeds after the malformed leave rejection
+
+### Flow Y: malformed refresh rejection does not poison room state
+
+Goal:
+
+- prove that a malicious epoch-advance payload, including a forged
+  `barrier_update_reason=1`, cannot wedge the room or prevent later honest
+  traffic
+
+Coverage:
+
+- `cargo test --locked -p cityg-server malformed_refresh_rejection_does_not_poison_room_state -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/server-malicious-mutations`
+
+Assertions:
+
+- a forged refresh-shaped bundle derived from a `join_finalize` baseline is
+  rejected fail-closed
+- the rejection does not corrupt membership state
+- a later honest join still succeeds after the malformed refresh rejection
+
+### Flow Z: malformed `join_finalize` rejection does not poison restart recovery
+
+Goal:
+
+- prove that a malicious `reason=2` activation payload cannot corrupt persisted
+  room state or block the post-restart recovery path
+
+Coverage:
+
+- `cargo test --locked -p cityg-server malformed_join_finalize_rejection_does_not_poison_restart_recovery -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/server-malicious-mutations`
+
+Assertions:
+
+- a malformed `join_finalize` bundle with a missing `join_finalize_auth` is
+  rejected
+- restart preserves the healthy pre-attack roster
+- restart still yields a valid refresh ticket and a fresh `join_finalize`
+  generation path for the surviving member
+
+### Flow AA: malformed room-admin grant/revoke requests do not poison ACL state
+
+Goal:
+
+- prove that malformed control-plane room-admin mutations fail closed without
+  corrupting ACL state, and that restart still preserves healthy admin
+  governance for later honest mutations
+
+Coverage:
+
+- `cargo test --locked -p cityg-api --test integration malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/api-admin-mutations`
+
+Assertions:
+
+- malformed `grant_admin` and `revoke_admin` requests with truncated target
+  POP keys are rejected as `400 Bad Request`
+- the ACL remains unchanged after each malformed request
+- after restart, a later honest `grant_admin` succeeds
+- after the same restart, a later honest `revoke_admin` still succeeds

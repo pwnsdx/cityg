@@ -7648,6 +7648,215 @@ mod tests {
         Ok((refresh_bundle, pristine_bundle))
     }
 
+    fn build_leave_bundle_for_member(
+        server: &mut CityGServer,
+        generated: &GeneratedMemberBundle,
+        source_bundle: &ClientEpochBundle,
+    ) -> Result<ClientEpochBundle, CityGError> {
+        let gid = cityg_client::demo::DEMO_GID;
+        let fs_ec = u64_from_header(&source_bundle.header_map, hdr::HDR_FS_EC)?;
+        let fs_epoch_commit =
+            bytes32_from_header(&source_bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT)?;
+        let fs_dev_prev_commit =
+            bytes32_from_header(&source_bundle.header_map, hdr::HDR_FS_DEV_COMMIT)?;
+
+        let ticket = server.build_merge_ticket(&gid, &generated.leaf_id)?;
+        let parities = hydrate_parities(
+            ticket.parities.as_slice(),
+            fs_ec,
+            fs_epoch_commit,
+            fs_dev_prev_commit,
+        );
+        let pivot = select_pivot_parity(parities.as_slice())
+            .ok_or(CityGError::InvalidInput("pivot parity missing"))?;
+
+        let revocation_roots_hash =
+            super::compute_revocation_roots_hash(&ticket.revoked_since_root, &ticket.revoked_root)?;
+        let committed_roots_hash =
+            super::compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+        let mut snapshot_pre = server
+            .fetch_barrier_public_tree(&gid, &ticket.kem_tree_hash_after)?
+            .pk_entries;
+        let join_records = server.resolve_joins_since(&gid, ticket.barrier_version)?;
+        let committed_revoked = server.resolve_revoked_leaf_indices(&gid, &committed_roots_hash)?;
+        let revoked_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
+            .map_err(|_| CityGError::InvalidInput("cover_leaf_index out of range"))?;
+        let mut post_revoked_leaf_indices = committed_revoked.leaf_indices.clone();
+        if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
+            post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
+        }
+        apply_join_records_to_snapshot(
+            snapshot_pre.as_mut_slice(),
+            ticket.n_max,
+            join_records.records.as_slice(),
+        )?;
+        apply_revoked_indices_to_snapshot(
+            snapshot_pre.as_mut_slice(),
+            ticket.n_max,
+            post_revoked_leaf_indices.as_slice(),
+        )?;
+        let kem_tree_hash_before =
+            super::compute_barrier_tree_hash(ticket.n_max, snapshot_pre.as_slice())?;
+        let next_barrier_version = ticket.barrier_version.saturating_add(1);
+        let barrier_update = build_refresh_barrier_update_bytes(
+            ticket.n_max,
+            ticket.cover_leaf_index,
+            next_barrier_version,
+            ticket.barrier_version,
+            revocation_roots_hash,
+            kem_tree_hash_before,
+            snapshot_pre.as_slice(),
+        )?;
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+        header.insert(
+            hdr::HDR_KBROAD_PUB,
+            Value::Bytes(ticket.kbroad_public.clone()),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(barrier_update.clone()),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
+        );
+
+        let history_commitment = ticket.current_history_commitment;
+        let history_commitment_header =
+            super::encode_barrier_history_commitment_header(history_commitment)?;
+        header.insert(
+            hdr::HDR_BARRIER_HISTORY_COMMITMENT,
+            Value::Bytes(history_commitment_header.clone()),
+        );
+
+        if let Some(authority) = server.history_authority.as_ref() {
+            let parsed_barrier_update = super::parse_barrier_update(&header, ticket.n_max)?
+                .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
+            let global_history_attestation = super::encode_global_history_attestation(
+                authority,
+                &gid,
+                &history_commitment,
+                ticket.barrier_version,
+                &ticket.kem_tree_hash_after,
+            )?;
+            header.insert(
+                hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+                Value::Bytes(global_history_attestation.clone()),
+            );
+            let receipt_payload = super::full_verification_receipt_payload(
+                &gid,
+                &generated.leaf_id,
+                0,
+                parsed_barrier_update.updater_leaf,
+                history_commitment_header.as_slice(),
+                global_history_attestation.as_slice(),
+                barrier_update.as_slice(),
+            )?;
+            let receipt_signature =
+                dilithium5::detached_sign(receipt_payload.as_slice(), &generated.pop_secret_key)
+                    .as_bytes()
+                    .to_vec();
+            header.insert(
+                hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+                Value::Bytes(super::encode_full_verification_receipt(
+                    &generated.leaf_id,
+                    0,
+                    parsed_barrier_update.updater_leaf,
+                    receipt_signature,
+                )?),
+            );
+            if authority.mode.requires_full_verification_witness() {
+                let deployment_profile_manifest = server.deployment_profile_manifest_bytes(
+                    &gid,
+                    "v0.1.4",
+                    server.history_authority_extension_id(),
+                    ticket.n_max,
+                    ticket.max_barrier_update_bytes,
+                    ticket.fs_forward_leap_policy,
+                )?;
+                header.insert(
+                    hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+                    Value::Bytes(server.full_verification_witness_bytes(
+                        &gid,
+                        &history_commitment,
+                        ticket.barrier_version,
+                        &ticket.kem_tree_hash_after,
+                        &generated.leaf_id,
+                        0,
+                        parsed_barrier_update.updater_leaf,
+                        barrier_update.as_slice(),
+                        ticket.barrier_version,
+                        join_records.records.as_slice(),
+                        &revocation_roots_hash,
+                        post_revoked_leaf_indices.as_slice(),
+                        deployment_profile_manifest.as_slice(),
+                    )?),
+                );
+            }
+        }
+
+        let srx_inputs = witness::SrxInputsOwned::from_cbor(&ticket.srx_cbor)
+            .map_err(|_| CityGError::InvalidInput("decode SRX inputs"))?
+            .into_srx_inputs();
+        let witness_bytes = if ticket.witness_cbor.is_empty() {
+            None
+        } else {
+            Some(ticket.witness_cbor.as_slice())
+        };
+
+        let parts = AnchorInstanceParts {
+            gid: &gid,
+            cat: &ticket.cat,
+            tswe_salt_hash: &ticket.tswe_salt_hash,
+            parent_root: &ticket.parent_root,
+            join_delta_root: &ticket.join_delta_root,
+            revoked_since_prev_root: &ticket.revoked_since_root,
+            revoked_root: &ticket.revoked_root,
+            pox_r_commit: Some(&ticket.pox_r_commit),
+        };
+
+        let params = OrchestrationParams {
+            msphf_crs_id: ticket.msphf_crs_id.as_str(),
+            params_id: ticket.msphf_params_id.as_str(),
+            srx: Some(srx_inputs),
+            srx_mode: SrxMode::Complete,
+            pop_keys: Some(PopKeypair {
+                algorithm: "ML-DSA-65",
+                public_key: generated.pop_public_key.as_slice(),
+                secret_key: &generated.pop_secret_key,
+            }),
+            leaf_id_mode: LeafIdMode::PerGroup,
+            proof_mode: ticket.proof_mode.as_str(),
+            vrf_id: ticket.vrf_id.as_str(),
+            policy_version: ticket.policy_version.as_str(),
+            vrf_secret_key: Some(generated.vrf_secret_key.as_slice()),
+            vrf_public_key: Some(generated.vrf_public_key.as_slice()),
+            fs_policy_version: ticket.fs_policy_version.as_str(),
+            fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+            barrier_version: next_barrier_version,
+            fs_join: FsJoinInputs {
+                fs_ec,
+                fs_epoch_commit,
+                fs_dev_prev_commit,
+            },
+            fs_merge: FsMergeInputs::default(),
+        };
+
+        let mut bundle = CityGClient::generate_merge(
+            header,
+            parts,
+            params,
+            parities.as_slice(),
+            None,
+            witness_bytes,
+        )?;
+        strip_rollup_metadata(&mut bundle.header_map);
+        apply_pivot_alignment(&mut bundle.header_map, pivot);
+        Ok(bundle)
+    }
+
     fn build_admin_expel_bundle_for_member(
         server: &mut CityGServer,
         generated: &GeneratedMemberBundle,
@@ -13740,6 +13949,103 @@ mod tests {
     }
 
     #[test]
+    fn malformed_leave_rejection_does_not_poison_room_state() -> Result<(), CityGError> {
+        let mut server = demo_server_with_global_history_authority();
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice = build_genesis_member_bundle(0x86)?;
+        server.accept_epoch(&alice.bundle)?;
+        let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+        let mut malformed_leave =
+            build_leave_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+        assert_eq!(
+            u64_from_header(&malformed_leave.header_map, hdr::HDR_BARRIER_UPDATE_REASON)?,
+            0,
+            "leave bundle should use barrier_update reason 0"
+        );
+        malformed_leave.header_map.remove(&hdr::HDR_BARRIER_UPDATE);
+        let err = server
+            .accept_epoch(&malformed_leave)
+            .expect_err("malformed leave must be rejected");
+        assert!(
+            matches!(err, CityGError::InvalidInput(_)) || matches!(err, CityGError::Acceptance(_)),
+            "unexpected malformed leave error: {err:?}"
+        );
+
+        let members_after_reject = server.members(&gid);
+        assert_eq!(
+            members_after_reject,
+            vec![alice.leaf_id],
+            "rejected malformed leave must not poison the live roster"
+        );
+
+        let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x8A, true)?;
+        server.accept_epoch(&bob.bundle)?;
+        let members_after_honest_join = server.members(&gid);
+        assert_eq!(
+            members_after_honest_join.len(),
+            2,
+            "a later honest join must still succeed after malformed leave rejection"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_refresh_rejection_does_not_poison_room_state() -> Result<(), CityGError> {
+        let mut server = demo_server_with_global_history_authority();
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice = build_genesis_member_bundle(0x87)?;
+        server.accept_epoch(&alice.bundle)?;
+        let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+
+        let (join_finalize, _) =
+            build_refresh_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+        assert_eq!(
+            u64_from_header(&join_finalize.header_map, hdr::HDR_BARRIER_UPDATE_REASON)?,
+            2,
+            "first post-join merge should be join_finalize"
+        );
+        let mut malformed_refresh = join_finalize.clone();
+        malformed_refresh.header_map.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+        assert_eq!(
+            u64_from_header(
+                &malformed_refresh.header_map,
+                hdr::HDR_BARRIER_UPDATE_REASON
+            )?,
+            1,
+            "mutated hostile bundle should masquerade as a refresh"
+        );
+        malformed_refresh
+            .header_map
+            .remove(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS);
+        let err = server
+            .accept_epoch(&malformed_refresh)
+            .expect_err("malformed refresh must be rejected");
+        assert!(
+            matches!(err, CityGError::InvalidInput(_)) || matches!(err, CityGError::Acceptance(_)),
+            "unexpected malformed refresh error: {err:?}"
+        );
+
+        let members_after_reject = server.members(&gid);
+        assert_eq!(
+            members_after_reject,
+            vec![alice.leaf_id],
+            "rejected malformed refresh must not poison membership state"
+        );
+
+        let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x8B, true)?;
+        server.accept_epoch(&bob.bundle)?;
+        assert_eq!(
+            server.members(&gid).len(),
+            2,
+            "room must still accept an honest join after malformed refresh rejection"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn malformed_admin_expel_rejection_does_not_poison_room_state() -> Result<(), CityGError> {
         let mut server = demo_server_with_global_history_authority();
         let gid = cityg_client::demo::DEMO_GID;
@@ -13868,6 +14174,76 @@ mod tests {
             members_after_honest_join.len(),
             3,
             "room must still accept later honest joins after restart"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_join_finalize_rejection_does_not_poison_restart_recovery() -> Result<(), CityGError>
+    {
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("malformed-join-finalize.journal");
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice = build_genesis_member_bundle(0x88)?;
+
+        {
+            let mut server = demo_server_with_journal_and_global_history_authority(&journal_path);
+            server.accept_epoch(&alice.bundle)?;
+            let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+
+            let (pristine_join_finalize, _) =
+                build_refresh_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+            let mut malformed_join_finalize = pristine_join_finalize.clone();
+            assert_eq!(
+                u64_from_header(
+                    &malformed_join_finalize.header_map,
+                    hdr::HDR_BARRIER_UPDATE_REASON
+                )?,
+                2,
+                "first post-join merge should be join_finalize"
+            );
+            malformed_join_finalize
+                .header_map
+                .remove(&hdr::HDR_JOIN_FINALIZE_AUTH);
+            let err = server
+                .accept_epoch(&malformed_join_finalize)
+                .expect_err("malformed join_finalize must be rejected");
+            assert!(
+                matches!(err, CityGError::InvalidInput(_))
+                    || matches!(err, CityGError::Acceptance(_)),
+                "unexpected malformed join_finalize error: {err:?}"
+            );
+
+            let members_before_restart = server.members(&gid);
+            assert_eq!(
+                members_before_restart,
+                vec![alice.leaf_id],
+                "rejected malformed join_finalize must not poison the live roster"
+            );
+        }
+
+        let mut reloaded = demo_server_with_journal_and_global_history_authority(&journal_path);
+        assert_eq!(
+            reloaded.members(&gid),
+            vec![alice.leaf_id],
+            "restart must preserve healthy membership after malformed join_finalize rejection"
+        );
+
+        let followup_ticket = reloaded.build_merge_ticket_for_refresh(&gid, &alice.leaf_id)?;
+        assert_eq!(
+            followup_ticket.barrier_version, 0,
+            "restart must still allow a fresh join_finalize/refresh ticket after malformed rejection"
+        );
+        let (fresh_join_finalize, _) =
+            build_refresh_bundle_for_member(&mut reloaded, &alice, &alice.bundle)?;
+        assert_eq!(
+            u64_from_header(
+                &fresh_join_finalize.header_map,
+                hdr::HDR_BARRIER_UPDATE_REASON
+            )?,
+            2,
+            "restart must still permit a valid join_finalize after malformed rejection"
         );
         Ok(())
     }

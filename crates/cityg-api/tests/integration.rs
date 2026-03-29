@@ -5,7 +5,8 @@ use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
 use ciborium::value::Value;
 use cityg_api_client::{
     CitygApiClient, Error, IdentityBinding, RoomAdminOperation, RoomAdminProof,
-    build_room_admin_leaf_pair_proof, build_room_admin_proof, generate_room_admin_keypair,
+    build_room_admin_leaf_pair_proof, build_room_admin_listing_proof, build_room_admin_proof,
+    build_room_admin_target_proof, generate_room_admin_keypair,
 };
 use cityg_client::{
     CityGClient, ClientEpochBundle,
@@ -150,6 +151,16 @@ struct RawExpelMemberTicketRequest {
     #[prost(bytes = "vec", tag = "3")]
     target_leaf_id: Vec<u8>,
     #[prost(message, optional, tag = "4")]
+    admin_proof: Option<RoomAdminProof>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RawRoomAdminMutationRequest {
+    #[prost(string, tag = "1")]
+    room_id: String,
+    #[prost(bytes = "vec", tag = "2")]
+    target_pop_public_key: Vec<u8>,
+    #[prost(message, optional, tag = "3")]
     admin_proof: Option<RoomAdminProof>,
 }
 
@@ -656,6 +667,142 @@ async fn malformed_admin_expel_request_does_not_poison_restart_or_future_honest_
         1,
         "the room must remain joinable after malformed admin expel rejection and restart"
     );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart() -> Result<()> {
+    let temp_root = std::env::temp_dir().join(format!(
+        "cityg-api-malformed-admin-mutation-{}-{}",
+        std::process::id(),
+        next_free_local_port()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let journal_path = temp_root.join("malformed-admin-mutation.journal");
+    let room_id = hex::encode([0x36u8; 32]);
+    let port = next_free_local_port();
+    let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    let (creator_pk, creator_sk) = dilithium5::keypair();
+    let (delegate_pk, _delegate_sk) = dilithium5::keypair();
+    bootstrap_room_with_admin_identity(&client, &room_id, creator_pk.as_bytes(), &creator_sk)
+        .await?;
+
+    let malformed_grant = RawRoomAdminMutationRequest {
+        room_id: room_id.clone(),
+        target_pop_public_key: delegate_pk.as_bytes()[..47].to_vec(),
+        admin_proof: Some(build_room_admin_target_proof(
+            RoomAdminOperation::GrantAdmin,
+            &room_id,
+            &delegate_pk.as_bytes()[..47],
+            creator_pk.as_bytes(),
+            creator_sk.as_bytes(),
+        )?),
+    };
+    let malformed_grant_response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/rooms/grant_admin"))
+        .header("content-type", "application/protobuf")
+        .body(malformed_grant.encode_to_vec())
+        .send()
+        .await
+        .expect("send malformed grant_admin request");
+    assert_eq!(malformed_grant_response.status(), StatusCode::BAD_REQUEST);
+
+    let listed_before_restart = client
+        .list_room_admins(
+            &room_id,
+            build_room_admin_listing_proof(&room_id, creator_pk.as_bytes(), creator_sk.as_bytes())?,
+        )
+        .await?;
+    assert_eq!(listed_before_restart.admin_pop_public_keys.len(), 1);
+
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let granted = client
+        .grant_room_admin(
+            &room_id,
+            delegate_pk.as_bytes(),
+            build_room_admin_target_proof(
+                RoomAdminOperation::GrantAdmin,
+                &room_id,
+                delegate_pk.as_bytes(),
+                creator_pk.as_bytes(),
+                creator_sk.as_bytes(),
+            )?,
+        )
+        .await?;
+    assert_eq!(granted.status, "granted");
+    assert_eq!(granted.admin_count, 2);
+
+    let malformed_revoke = RawRoomAdminMutationRequest {
+        room_id: room_id.clone(),
+        target_pop_public_key: delegate_pk.as_bytes()[..47].to_vec(),
+        admin_proof: Some(build_room_admin_target_proof(
+            RoomAdminOperation::RevokeAdmin,
+            &room_id,
+            &delegate_pk.as_bytes()[..47],
+            creator_pk.as_bytes(),
+            creator_sk.as_bytes(),
+        )?),
+    };
+    let malformed_revoke_response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/rooms/revoke_admin"))
+        .header("content-type", "application/protobuf")
+        .body(malformed_revoke.encode_to_vec())
+        .send()
+        .await
+        .expect("send malformed revoke_admin request");
+    assert_eq!(malformed_revoke_response.status(), StatusCode::BAD_REQUEST);
+
+    let listed_after_bad_revoke = client
+        .list_room_admins(
+            &room_id,
+            build_room_admin_listing_proof(&room_id, creator_pk.as_bytes(), creator_sk.as_bytes())?,
+        )
+        .await?;
+    assert_eq!(listed_after_bad_revoke.admin_pop_public_keys.len(), 2);
+
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let revoked = client
+        .revoke_room_admin(
+            &room_id,
+            delegate_pk.as_bytes(),
+            build_room_admin_target_proof(
+                RoomAdminOperation::RevokeAdmin,
+                &room_id,
+                delegate_pk.as_bytes(),
+                creator_pk.as_bytes(),
+                creator_sk.as_bytes(),
+            )?,
+        )
+        .await?;
+    assert_eq!(revoked.status, "revoked");
+    assert_eq!(revoked.admin_count, 1);
+
+    let listed_final = client
+        .list_room_admins(
+            &room_id,
+            build_room_admin_listing_proof(&room_id, creator_pk.as_bytes(), creator_sk.as_bytes())?,
+        )
+        .await?;
+    assert_eq!(listed_final.admin_pop_public_keys.len(), 1);
 
     handle.abort();
     let _ = handle.await;

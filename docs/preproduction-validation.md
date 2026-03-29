@@ -172,12 +172,22 @@ cargo test --locked -p cityg-api --test integration \
   -- --exact --nocapture
 
 cargo test --locked -p cityg-server \
+  malformed_leave_rejection_does_not_poison_room_state \
+  malformed_refresh_rejection_does_not_poison_room_state \
+  malformed_join_finalize_rejection_does_not_poison_restart_recovery \
+  -- --nocapture
+
+cargo test --locked -p cityg-server \
   malformed_admin_expel_rejection_does_not_poison_room_state \
   malformed_admin_expel_rejection_does_not_poison_restart_recovery \
   -- --nocapture
 
 cargo test --locked -p cityg-api --test integration \
   malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins \
+  -- --exact --nocapture
+
+cargo test --locked -p cityg-api --test integration \
+  malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart \
   -- --exact --nocapture
 ```
 
@@ -197,8 +207,12 @@ These gates cover:
 - two restarted members resuming bilateral traffic without duplicate delivery
 - restart + expel churn with later joiner messaging
 - malformed join rejection without poisoning the room before or after restart
+- malformed leave rejection without poisoning the room state
+- malformed refresh rejection without poisoning the room state
+- malformed `join_finalize` rejection without poisoning restart recovery
 - malformed admin expel rejection without poisoning the room before or after restart
 - malformed admin expel control-plane requests fail closed and still allow honest joins after restart
+- malformed admin grant/revoke control-plane requests fail closed without poisoning ACL state or restart recovery
 - restart during a published-but-not-reloaded `join_finalize` activation
 - watch websocket reconnect resuming fresh notifications under active burst traffic
 
