@@ -169,6 +169,8 @@ cargo test --locked -p cityg-gui --bin join_leave \
 
 cargo test --locked -p cityg-api --test integration \
   malformed_join_rejection_does_not_poison_restart_or_future_honest_joins \
+  concurrent_malformed_join_and_honest_join_preserve_room_across_restart \
+  restart_during_concurrent_malformed_join_and_honest_join_recovers_cleanly \
   -- --exact --nocapture
 
 cargo test --locked -p cityg-server \
@@ -214,6 +216,8 @@ These gates cover:
 - two restarted members resuming bilateral traffic without duplicate delivery
 - restart + expel churn with later joiner messaging
 - malformed join rejection without poisoning the room before or after restart
+- concurrent malformed join and honest join races still converge to the honest room state across restart
+- restart in the middle of that malformed join race still converges to the honest joined member
 - malformed leave rejection without poisoning the room state
 - malformed refresh rejection without poisoning the room state
 - malformed refresh race against an honest join without poisoning restart recovery

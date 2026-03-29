@@ -1050,6 +1050,49 @@ Assertions:
   malicious attempt
 - a later honest join still succeeds after the malformed rejection and restart
 
+### Flow V2: concurrent malformed join and honest join preserve room state
+
+Goal:
+
+- prove that a malformed public join racing with an honest join does not block
+  the honest member or poison the room before and after restart
+
+Coverage:
+
+- `cargo test --locked -p cityg-api --test integration concurrent_malformed_join_and_honest_join_preserve_room_across_restart -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/api-join-race`
+
+Assertions:
+
+- the malformed join is rejected as `400 Bad Request`
+- the honest join succeeds while the malformed join is in flight
+- before restart, the room roster contains both the original member and the honest joiner
+- after restart, the same healthy roster is preserved
+
+### Flow V3: restart during concurrent malformed join race still converges cleanly
+
+Goal:
+
+- prove that a server restart in the middle of a malformed public join race and
+  an honest join still converges to the honest room state
+
+Coverage:
+
+- `cargo test --locked -p cityg-api --test integration restart_during_concurrent_malformed_join_and_honest_join_recovers_cleanly -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/api-join-race-restart`
+
+Assertions:
+
+- the malformed join is rejected or dropped by the restart without poisoning state
+- the in-flight honest join either commits before restart or is retried cleanly after restart
+- after convergence, the room roster contains both the original member and the honest joiner
+
 Notes:
 
 - the API proof surfaced the malformed join as `400 Bad Request: invalid bundle

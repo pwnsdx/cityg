@@ -599,6 +599,169 @@ async fn malformed_join_rejection_does_not_poison_restart_or_future_honest_joins
 
 #[tokio::test]
 #[allow(clippy::expect_used)]
+async fn concurrent_malformed_join_and_honest_join_preserve_room_across_restart() -> Result<()> {
+    let temp_root = std::env::temp_dir().join(format!(
+        "cityg-api-concurrent-malformed-join-race-{}-{}",
+        std::process::id(),
+        next_free_local_port()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let journal_path = temp_root.join("concurrent-malformed-join-race.journal");
+    let port = next_free_local_port();
+    let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = test_client(base_url.clone());
+    let honest_client = test_client(base_url);
+    let alice = demo_bundle("alice").expect("alice bundle");
+    client
+        .accept_epoch_bundle(&alice)
+        .await
+        .expect("accept alice");
+
+    let honest_bob = demo_bundle("bob").expect("bob bundle");
+    let mut malformed_bob = honest_bob.clone();
+    malformed_bob
+        .header_map
+        .remove(&msphf_orchestrator::hdr::HDR_BARRIER_LEAF_PK);
+
+    let malformed_task = tokio::spawn(async move {
+        let err = client
+            .accept_epoch_bundle(&malformed_bob)
+            .await
+            .expect_err("malformed join must fail");
+        assert!(
+            matches!(err, Error::HttpStatus { .. }),
+            "malformed join should surface as an HTTP rejection: {err:?}"
+        );
+        Ok::<(), anyhow::Error>(())
+    });
+    let honest_task = tokio::spawn(async move {
+        honest_client
+            .accept_epoch_bundle(&honest_bob)
+            .await
+            .expect("honest join must succeed during malformed join race");
+        Ok::<(), anyhow::Error>(())
+    });
+
+    malformed_task.await.expect("malformed task panicked")?;
+    honest_task.await.expect("honest task panicked")?;
+
+    let members_before_restart = test_client(format!("http://127.0.0.1:{port}"))
+        .members(DEMO_GID.as_ref(), None)
+        .await?;
+    assert_eq!(
+        members_before_restart.members.len(),
+        2,
+        "concurrent malformed join must not block the honest joined member"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let members_after_restart = test_client(format!("http://127.0.0.1:{port}"))
+        .members(DEMO_GID.as_ref(), None)
+        .await?;
+    assert_eq!(
+        members_after_restart.members.len(),
+        2,
+        "restart must preserve the honest joined member after the concurrent malformed join race"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn restart_during_concurrent_malformed_join_and_honest_join_recovers_cleanly() -> Result<()> {
+    let temp_root = std::env::temp_dir().join(format!(
+        "cityg-api-restart-concurrent-malformed-join-race-{}-{}",
+        std::process::id(),
+        next_free_local_port()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let journal_path = temp_root.join("restart-concurrent-malformed-join-race.journal");
+    let port = next_free_local_port();
+    let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let base_url = format!("http://127.0.0.1:{port}");
+    let client = test_client(base_url.clone());
+    let honest_client = test_client(base_url.clone());
+    let observe_client = test_client(base_url);
+    let alice = demo_bundle("alice").expect("alice bundle");
+    client
+        .accept_epoch_bundle(&alice)
+        .await
+        .expect("accept alice");
+
+    let honest_bob = demo_bundle("bob").expect("bob bundle");
+    let mut malformed_bob = honest_bob.clone();
+    malformed_bob
+        .header_map
+        .remove(&msphf_orchestrator::hdr::HDR_BARRIER_LEAF_PK);
+
+    let malformed_task = tokio::spawn(async move {
+        match client.accept_epoch_bundle(&malformed_bob).await {
+            Err(Error::HttpStatus { .. }) => Ok::<(), anyhow::Error>(()),
+            Err(Error::Http(err)) if err.is_connect() || err.is_request() || err.is_timeout() => {
+                Ok(())
+            }
+            other => Err(anyhow!("unexpected malformed join outcome: {other:?}")),
+        }
+    });
+    let honest_task =
+        tokio::spawn(async move { honest_client.accept_epoch_bundle(&honest_bob).await });
+
+    sleep(Duration::from_millis(25)).await;
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path).await;
+    sleep(Duration::from_millis(250)).await;
+
+    malformed_task.await.expect("malformed task panicked")?;
+    match honest_task.await.expect("honest task panicked") {
+        Ok(_) => {}
+        Err(Error::Http(_)) => {}
+        Err(Error::HttpStatus { status, .. })
+            if status == StatusCode::INTERNAL_SERVER_ERROR
+                || status == StatusCode::SERVICE_UNAVAILABLE
+                || status == StatusCode::BAD_GATEWAY => {}
+        Err(other) => return Err(anyhow!("unexpected honest join outcome: {other:?}")),
+    }
+
+    let members_after_restart = observe_client.members(DEMO_GID.as_ref(), None).await?;
+    if members_after_restart.members.len() < 2 {
+        let honest_retry = demo_bundle("bob").expect("bob retry bundle");
+        observe_client
+            .accept_epoch_bundle(&honest_retry)
+            .await
+            .expect("retry honest join after restart");
+    }
+
+    let members_final = observe_client.members(DEMO_GID.as_ref(), None).await?;
+    assert_eq!(
+        members_final.members.len(),
+        2,
+        "room must converge to the honest joined member after concurrent malformed join race and restart"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
 async fn malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins() -> Result<()>
 {
     let temp_root = std::env::temp_dir().join(format!(

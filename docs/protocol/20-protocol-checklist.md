@@ -47,7 +47,7 @@ system by protocol contract rather than by implementation detail.
 | Barrier bundle history commitment mismatches are rejected | `epoch_sync` must fail closed if helper/current-state headers disagree with the authenticated local state. | Covered | `native::tests::epoch_sync_rejects_barrier_bundle_history_commitment_mismatch` |
 | Barrier bundle FS policy mismatches are rejected | `epoch_sync` must fail closed if the bundle carries an incompatible FS policy version. | Covered | `native::tests::epoch_sync_rejects_barrier_bundle_fs_policy_version_mismatch` |
 | Sender leaf spoofing is rejected during fetch | A ciphertext signed by one device key but claimed under another leaf must not decrypt or release plaintext. | Covered | `native::tests::perform_fetch_rejects_sender_leaf_spoofing_with_mismatched_public_key` |
-| Malformed join payloads cannot poison room state or restart recovery | A malicious join attempt must be rejected without corrupting the live roster, and the room must still admit later honest joins even after restart. | Covered | `malformed_join_rejection_does_not_poison_room_state` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs), `malformed_join_rejection_does_not_poison_restart_or_future_honest_joins` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
+| Malformed join payloads cannot poison room state or restart recovery | A malicious join attempt must be rejected without corrupting the live roster, and the room must still admit later honest joins even after restart. | Covered | `malformed_join_rejection_does_not_poison_room_state` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs), `malformed_join_rejection_does_not_poison_restart_or_future_honest_joins`, `concurrent_malformed_join_and_honest_join_preserve_room_across_restart`, `restart_during_concurrent_malformed_join_and_honest_join_recovers_cleanly` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
 | Malformed leave payloads cannot poison room state | A malicious self-removal payload must be rejected without corrupting the live roster, and the room must still accept later honest traffic. | Covered | `malformed_leave_rejection_does_not_poison_room_state` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
 | Malformed refresh payloads cannot poison room state | A malicious epoch-advance payload, including a forged `reason=1` mutation, must be rejected without wedging the room or preventing later honest joins. | Covered | `malformed_refresh_rejection_does_not_poison_room_state` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
 | Honest publish wins over a malformed refresh race | A malformed refresh-shaped payload racing with a later honest join must fail closed without overriding the healthy room or blocking restart recovery. | Covered | `malformed_refresh_concurrent_with_honest_join_does_not_poison_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
@@ -126,6 +126,8 @@ cargo test --locked -p cityg-gui --bin join_leave \
 
 cargo test --locked -p cityg-api --test integration \
   malformed_join_rejection_does_not_poison_restart_or_future_honest_joins \
+  concurrent_malformed_join_and_honest_join_preserve_room_across_restart \
+  restart_during_concurrent_malformed_join_and_honest_join_recovers_cleanly \
   -- --exact --nocapture
 
 cargo test --locked -p cityg-server \
@@ -163,3 +165,11 @@ cargo test --locked -p cityg-api --test integration \
   level KATs, unit tests, or acceptance-pipeline tests.
 - The matrix is intentionally runtime-facing; lower-level API unit tests still
   exist below these end-to-end flows.
+
+## Next Useful E2E TODO
+
+- `P1`: hostile `refresh` / honest publish race with and without server restart
+- `P1`: hostile `join_finalize` / honest survivor refresh race with and without server restart
+- `P2`: 8-to-16 member churn flow combining expel, refresh, rejoin, offline catch-up, and active traffic
+- `P2`: dual-client restart during active watch traffic plus backlog replay validation
+- `P2`: API-side mutation harness that systematically flips `barrier_update`, `reason`, `header[180..183]`, manifests, and sender binding fields while asserting fail-closed recovery
