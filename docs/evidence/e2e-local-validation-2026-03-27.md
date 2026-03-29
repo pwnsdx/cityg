@@ -1069,11 +1069,13 @@ Coverage:
 
 - `cargo test --locked -p cityg-server malformed_admin_expel_rejection_does_not_poison_room_state -- --nocapture`
 - `cargo test --locked -p cityg-server malformed_admin_expel_rejection_does_not_poison_restart_recovery -- --nocapture`
+- `cargo test --locked -p cityg-api --test integration malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins -- --exact --nocapture`
 
 Passed:
 
 - `2026-03-29` on `.cargo-target/admin-malformed-proof`
 - `2026-03-29` on `.cargo-target/admin-malformed-proof`
+- `2026-03-29` on `.cargo-target/api-malformed-admin`
 
 Assertions:
 
@@ -1084,10 +1086,15 @@ Assertions:
   malicious attempt
 - a later honest join still succeeds after the malformed admin rejection and
   restart
+- a malformed HTTP `expel_member_ticket` request with a truncated `target_leaf_id`
+  is rejected as `400 Bad Request`
+- the rejected control-plane request does not poison persisted room state, and a
+  later honest first join still succeeds after restart
 
 Notes:
 
 - this proof targets the “malicious admin payload” concern directly, rather than
   only malformed public join traffic
 - it complements the admin expel happy-path flows by proving malformed targeted
-  revocation traffic also fails closed and remains recoverable
+  revocation traffic also fails closed and remains recoverable, both for raw
+  accepted bundles and for malformed HTTP control-plane requests

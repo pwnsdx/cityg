@@ -2,15 +2,27 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
+use ciborium::value::Value;
 use cityg_api_client::{
-    CitygApiClient, Error, RoomAdminOperation, build_room_admin_proof, generate_room_admin_keypair,
+    CitygApiClient, Error, IdentityBinding, RoomAdminOperation, RoomAdminProof,
+    build_room_admin_leaf_pair_proof, build_room_admin_proof, generate_room_admin_keypair,
 };
 use cityg_client::{
-    ClientEpochBundle,
+    CityGClient, ClientEpochBundle,
     demo::{DEMO_GID, bootstrap_public, demo_bundle, demo_member_leaf, kbroad_public},
+    witness::SrxInputsOwned,
 };
 use cityg_config::CityGConfig;
+use msphf_orchestrator::{
+    AnchorInstanceParts, DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
+    ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair,
+    compute_leaf_id, hdr,
+};
+use pqcrypto_dilithium::dilithium5;
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
+use prost::Message as _;
 use reqwest::StatusCode;
+use serde_bytes::ByteBuf;
 use std::sync::Once;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::sleep;
@@ -127,6 +139,211 @@ fn encode_field1_bytes(payload: &[u8]) -> Vec<u8> {
     }
     body.extend_from_slice(payload);
     body
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RawExpelMemberTicketRequest {
+    #[prost(string, tag = "1")]
+    room_id: String,
+    #[prost(bytes = "vec", tag = "2")]
+    author_leaf_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    target_leaf_id: Vec<u8>,
+    #[prost(message, optional, tag = "4")]
+    admin_proof: Option<RoomAdminProof>,
+}
+
+struct JoinedMember {
+    bundle: ClientEpochBundle,
+}
+
+fn array32(name: &str, bytes: &[u8]) -> Result<[u8; 32]> {
+    bytes
+        .try_into()
+        .map_err(|_| anyhow!("{name} must be 32 bytes"))
+}
+
+fn barrier_leaf_public_key() -> Vec<u8> {
+    vec![0x42; 1_184]
+}
+
+fn demo_vrf_keys_for_seed(seed: u8) -> Result<(Vec<u8>, Vec<u8>)> {
+    let params = msphf_orchestrator::lb::generate_parameters([seed; 32])?;
+    let (sk, pk) = msphf_orchestrator::lb::generate_keypair(&params, [seed.wrapping_add(1); 32])?;
+    Ok((sk, pk))
+}
+
+fn build_identity_binding(
+    alias: &str,
+    pop_public_key: &[u8],
+    pop_secret_key: &dilithium5::SecretKey,
+) -> Result<IdentityBinding> {
+    let message_data = (
+        ByteBuf::from(alias.as_bytes().to_vec()),
+        ByteBuf::from(pop_public_key.to_vec()),
+    );
+    let mut message = Vec::new();
+    ciborium::ser::into_writer(&message_data, &mut message)?;
+    let signature = dilithium5::detached_sign(message.as_slice(), pop_secret_key);
+    Ok(IdentityBinding {
+        alias: alias.to_string(),
+        pop_public_key: pop_public_key.to_vec(),
+        signature: signature.as_bytes().to_vec(),
+    })
+}
+
+async fn bootstrap_room_with_admin_identity(
+    client: &CitygApiClient,
+    room_id: &str,
+    admin_pop_public_key: &[u8],
+    admin_pop_secret_key: &dilithium5::SecretKey,
+) -> Result<()> {
+    let admin_proof = build_room_admin_proof(
+        RoomAdminOperation::Bootstrap,
+        room_id,
+        kbroad_public(),
+        admin_pop_public_key,
+        admin_pop_secret_key.as_bytes(),
+    )?;
+    client
+        .bootstrap_room_as_admin(room_id, kbroad_public(), admin_proof)
+        .await?;
+    Ok(())
+}
+
+async fn join_room_member(
+    client: &CitygApiClient,
+    room_id: &str,
+    alias: &str,
+    seed: u8,
+) -> Result<JoinedMember> {
+    let (pop_pk, pop_sk) = dilithium5::keypair();
+    join_room_member_with_identity(
+        client,
+        room_id,
+        alias,
+        seed,
+        pop_pk.as_bytes().to_vec(),
+        pop_sk,
+    )
+    .await
+}
+
+async fn join_room_member_with_identity(
+    client: &CitygApiClient,
+    room_id: &str,
+    alias: &str,
+    seed: u8,
+    pop_public_key: Vec<u8>,
+    pop_sk: dilithium5::SecretKey,
+) -> Result<JoinedMember> {
+    let identity_binding = build_identity_binding(alias, &pop_public_key, &pop_sk)?;
+    let ticket = client
+        .join_ticket(room_id, alias, Some(identity_binding))
+        .await?;
+    let gid = array32("gid", &ticket.gid)?;
+    let leaf_id = array32("leaf_id", &ticket.leaf_id)?;
+    let expected_leaf_id = compute_leaf_id(
+        LeafIdMode::PerGroup,
+        &gid,
+        "ML-DSA-65",
+        pop_public_key.as_slice(),
+    )?;
+    assert_eq!(
+        leaf_id, expected_leaf_id,
+        "join ticket leaf_id must match identity binding"
+    );
+
+    let srx_inputs = SrxInputsOwned::from_cbor(&ticket.srx_cbor)?.into_srx_inputs();
+    let (vrf_secret_key, vrf_public_key) = demo_vrf_keys_for_seed(seed)?;
+    let mut fs_state = ForwardSecrecyState::new([seed.wrapping_add(1); 32]);
+    let mut header = std::collections::BTreeMap::new();
+    header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+    header.insert(
+        hdr::HDR_KBROAD_PUB,
+        Value::Bytes(ticket.kbroad_public.clone()),
+    );
+    header.insert(
+        hdr::HDR_BARRIER_VERSION,
+        Value::Integer(ciborium::value::Integer::from(ticket.barrier_version)),
+    );
+    header.insert(
+        hdr::HDR_BARRIER_LEAF_PK,
+        Value::Bytes(barrier_leaf_public_key()),
+    );
+
+    let parts = AnchorInstanceParts {
+        gid: &gid,
+        cat: &array32("cat", &ticket.cat)?,
+        tswe_salt_hash: &array32("tswe_salt_hash", &ticket.tswe_salt_hash)?,
+        parent_root: &array32("parent_root", &ticket.parent_root)?,
+        join_delta_root: &array32("join_delta_root", &ticket.join_delta_root)?,
+        revoked_since_prev_root: &array32("revoked_since_root", &ticket.revoked_since_root)?,
+        revoked_root: &array32("revoked_root", &ticket.revoked_root)?,
+        pox_r_commit: Some(&array32("pox_r_commit", &ticket.pox_r_commit)?),
+    };
+
+    let params = OrchestrationParams {
+        msphf_crs_id: if ticket.msphf_crs_id.is_empty() {
+            msphf_core::params::RLWE_CRS_ID_DEFAULT
+        } else {
+            ticket.msphf_crs_id.as_str()
+        },
+        params_id: if ticket.msphf_params_id.is_empty() {
+            msphf_core::params::RLWE_PARAMS_ID_MOCK
+        } else {
+            ticket.msphf_params_id.as_str()
+        },
+        srx: Some(srx_inputs),
+        srx_mode: msphf_orchestrator::SrxMode::Complete,
+        pop_keys: Some(PopKeypair {
+            algorithm: "ML-DSA-65",
+            public_key: pop_public_key.as_slice(),
+            secret_key: &pop_sk,
+        }),
+        leaf_id_mode: LeafIdMode::PerGroup,
+        proof_mode: if ticket.proof_mode.is_empty() {
+            DEFAULT_PROOF_MODE
+        } else {
+            ticket.proof_mode.as_str()
+        },
+        vrf_id: if ticket.vrf_id.is_empty() {
+            DEFAULT_VRF_ID
+        } else {
+            ticket.vrf_id.as_str()
+        },
+        policy_version: if ticket.policy_version.is_empty() {
+            DEFAULT_POLICY_VERSION
+        } else {
+            ticket.policy_version.as_str()
+        },
+        vrf_secret_key: Some(vrf_secret_key.as_slice()),
+        vrf_public_key: Some(vrf_public_key.as_slice()),
+        fs_policy_version: ticket.fs_policy_version.as_str(),
+        fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+        barrier_version: ticket.barrier_version,
+        fs_join: FsJoinInputs::default(),
+        fs_merge: FsMergeInputs::default(),
+    };
+
+    let witness_bytes = if ticket.witness_cbor.is_empty() {
+        None
+    } else {
+        Some(ticket.witness_cbor.as_slice())
+    };
+
+    let mut bundle =
+        CityGClient::generate_epoch(header, parts, params, &mut fs_state, witness_bytes)?;
+    if !ticket.bootstrap_public.is_empty() {
+        assert_eq!(
+            ticket.bootstrap_public,
+            bootstrap_public(),
+            "join ticket bootstrap key should match the demo bootstrap authority in tests"
+        );
+        cityg_client::demo::attach_bootstrap(&mut bundle)?;
+    }
+
+    Ok(JoinedMember { bundle })
 }
 
 #[tokio::test]
@@ -362,6 +579,82 @@ async fn malformed_join_rejection_does_not_poison_restart_or_future_honest_joins
         members_after_honest_join.members.len(),
         2,
         "a later honest join must still succeed after restart"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins() -> Result<()>
+{
+    let temp_root = std::env::temp_dir().join(format!(
+        "cityg-api-malformed-admin-expel-{}-{}",
+        std::process::id(),
+        next_free_local_port()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let journal_path = temp_root.join("malformed-admin-expel.journal");
+    let room_id = hex::encode([0x35u8; 32]);
+    let gid = hex::decode(&room_id)?;
+    let port = next_free_local_port();
+    let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    let (alice_pk, alice_sk) = dilithium5::keypair();
+    bootstrap_room_with_admin_identity(&client, &room_id, alice_pk.as_bytes(), &alice_sk).await?;
+
+    let author_leaf_id = [0xA1; 32];
+    let target_leaf_id = [0xB2; 32];
+    let admin_proof = build_room_admin_leaf_pair_proof(
+        RoomAdminOperation::ExpelMember,
+        &room_id,
+        &author_leaf_id,
+        &target_leaf_id,
+        alice_pk.as_bytes(),
+        alice_sk.as_bytes(),
+    )?;
+    let malformed_request = RawExpelMemberTicketRequest {
+        room_id: room_id.clone(),
+        author_leaf_id: author_leaf_id.to_vec(),
+        target_leaf_id: target_leaf_id[..31].to_vec(),
+        admin_proof: Some(admin_proof),
+    };
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/v1/rooms/expel_member_ticket"
+        ))
+        .header("content-type", "application/protobuf")
+        .body(malformed_request.encode_to_vec())
+        .send()
+        .await
+        .expect("send malformed expel request");
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed admin expel request must fail closed"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let charlie = join_room_member(&client, &room_id, "charlie", 0x93).await?;
+    client
+        .accept_epoch_bundle(&charlie.bundle)
+        .await
+        .expect("accept charlie after malformed admin expel restart");
+    let members_after_honest_join = client.members(gid.as_slice(), None).await?;
+    assert_eq!(
+        members_after_honest_join.members.len(),
+        1,
+        "the room must remain joinable after malformed admin expel rejection and restart"
     );
 
     handle.abort();

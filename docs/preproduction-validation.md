@@ -175,6 +175,10 @@ cargo test --locked -p cityg-server \
   malformed_admin_expel_rejection_does_not_poison_room_state \
   malformed_admin_expel_rejection_does_not_poison_restart_recovery \
   -- --nocapture
+
+cargo test --locked -p cityg-api --test integration \
+  malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins \
+  -- --exact --nocapture
 ```
 
 These gates cover:
@@ -194,6 +198,7 @@ These gates cover:
 - restart + expel churn with later joiner messaging
 - malformed join rejection without poisoning the room before or after restart
 - malformed admin expel rejection without poisoning the room before or after restart
+- malformed admin expel control-plane requests fail closed and still allow honest joins after restart
 - restart during a published-but-not-reloaded `join_finalize` activation
 - watch websocket reconnect resuming fresh notifications under active burst traffic
 

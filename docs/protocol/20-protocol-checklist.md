@@ -48,7 +48,7 @@ system by protocol contract rather than by implementation detail.
 | Barrier bundle FS policy mismatches are rejected | `epoch_sync` must fail closed if the bundle carries an incompatible FS policy version. | Covered | `native::tests::epoch_sync_rejects_barrier_bundle_fs_policy_version_mismatch` |
 | Sender leaf spoofing is rejected during fetch | A ciphertext signed by one device key but claimed under another leaf must not decrypt or release plaintext. | Covered | `native::tests::perform_fetch_rejects_sender_leaf_spoofing_with_mismatched_public_key` |
 | Malformed join payloads cannot poison room state or restart recovery | A malicious join attempt must be rejected without corrupting the live roster, and the room must still admit later honest joins even after restart. | Covered | `malformed_join_rejection_does_not_poison_room_state` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs), `malformed_join_rejection_does_not_poison_restart_or_future_honest_joins` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
-| Malformed admin expel payloads cannot poison room state or restart recovery | A malicious admin-targeted revocation payload must be rejected without corrupting the live roster, and restart must still preserve a healthy room that admits later honest traffic. | Covered | `malformed_admin_expel_rejection_does_not_poison_room_state`, `malformed_admin_expel_rejection_does_not_poison_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs) |
+| Malformed admin expel payloads cannot poison room state or restart recovery | A malicious admin-targeted revocation payload must be rejected without corrupting either the live roster or the bootstrapped room state, and restart must still preserve a healthy room that admits later honest traffic. | Covered | `malformed_admin_expel_rejection_does_not_poison_room_state`, `malformed_admin_expel_rejection_does_not_poison_restart_recovery` in [`../../crates/cityg-server/src/lib.rs`](../../crates/cityg-server/src/lib.rs), `malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
 | Helper responses missing authenticated fields are rejected fail-closed | Helper paths must reject missing history commitments or manifests instead of accepting underspecified state. | Covered | `barrier_fetch_public_tree_rejects_missing_history_commitment`, `barrier_fetch_public_tree_rejects_missing_deployment_profile_manifest` in [`../../crates/cityg-api-client/src/lib.rs`](../../crates/cityg-api-client/src/lib.rs) |
 | Base-profile helper guards reject unexpected completeness/authority extensions | Helper responses with unsupported completeness attestations or local-authority extensions must fail closed under the base profile. | Covered | `barrier_resolve_revoked_leaves_rejects_unexpected_completeness_attestation`, `barrier_resolve_joins_since_rejects_unexpected_completeness_attestation`, `barrier_fetch_public_tree_rejects_local_history_authority_in_base_profile` in [`../../crates/cityg-api-client/src/lib.rs`](../../crates/cityg-api-client/src/lib.rs) |
 
@@ -122,6 +122,10 @@ cargo test --locked -p cityg-server \
   malformed_admin_expel_rejection_does_not_poison_room_state \
   malformed_admin_expel_rejection_does_not_poison_restart_recovery \
   -- --nocapture
+
+cargo test --locked -p cityg-api --test integration \
+  malformed_admin_expel_request_does_not_poison_restart_or_future_honest_joins \
+  -- --exact --nocapture
 ```
 
 ## Notes
