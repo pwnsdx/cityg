@@ -1477,7 +1477,4 @@ See [`docs/protocol/14-deployment-guide.md`](./protocol/14-deployment-guide.md) 
 - [FAQ](./protocol/17-faq.md)
 
 ---
-
-**Last Updated:** 2025-11-06
-**API Version:** 1.0
-**Protocol Version:** v1
+**API surface is versioned by the current repo state and the current base profile in [`./specs.md`](./specs.md).**

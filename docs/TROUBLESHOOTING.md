@@ -4,8 +4,6 @@ This guide helps you diagnose and resolve common issues with City-G.
 
 > **Note**: Unfamiliar with protocol terms like anchors, heads, or epochs? See the [Glossary](./GLOSSARY.md) for quick definitions.
 
-> Last updated: **12 Nov 2025** (City-G v0.1.0)
-
 **Quick Links:**
 - [Installation Issues](#installation-issues)
 - [Connection Problems](#connection-problems)
@@ -720,6 +718,4 @@ If you've tried the solutions above and still have issues:
 - [Observability Guide](./OBSERVABILITY.md) - Logging and monitoring
 
 ---
-
-**Last Updated**: 2025-11-12
-**Applies to**: City-G v0.1.0+
+**Applies to**: the current City-G repo state and base profile documented in [`./specs.md`](./specs.md)

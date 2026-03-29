@@ -737,10 +737,7 @@ Want to improve the GUI? Contributions are welcome!
 For contribution guidelines, see the [GitHub repository](https://github.com/pwnsdx/cityg).
 
 ---
-
-**Last Updated:** 2025-11-06
-**GUI Version:** 1.0
-**Compatible Server:** cityg-api v1.0+
+**This guide follows the current desktop client in this repo and the current base profile in [`./specs.md`](./specs.md).**
 
 For more information, see:
 - [City-G Protocol Documentation](./protocol/00-README.md)

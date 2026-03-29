@@ -3,6 +3,7 @@
 Scope: re-verify every finding from `docs/audits/1.txt` through `docs/audits/7.txt` against the current `docs/specs.md` and the current implementation.
 
 Canonical reading note:
+- Read this report first.
 - The per-audit files intentionally retain historical tranche notes.
 - When older tranche commentary disagrees with the final current state, this report and the last `Commentaires Codex ... final coherence` section of each audit file are canonical.
 

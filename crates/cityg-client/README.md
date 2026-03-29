@@ -461,6 +461,4 @@ See `crates/cityg-gui` for a complete desktop application using this crate.
 MIT License - see [LICENSE](../../LICENSE) file.
 
 ---
-
-**Status**: Alpha (0.1.0) - Research-grade implementation
-**Last Updated**: 2025-11-12
+**Status**: Research-grade alpha implementation for the current `v0.1.4` base profile.

@@ -5,6 +5,7 @@ Welcome to the City-G documentation! This index helps you find the right documen
 > [!IMPORTANT]
 > For `tswe/msphf-we/fs-hybrid + prs-barrier`, the authoritative normative spec is [`./specs.md`](./specs.md).
 > The `docs/protocol/*` chapters are legacy companion material; if there is any conflict, follow the unified spec and implementation behavior/tests.
+> The current shipping wire/profile baseline in this repo is `v0.1.4`.
 
 ## 📚 Documentation by Audience
 
@@ -29,24 +30,10 @@ Building applications with City-G:
 Implementing the City-G protocol:
 
 - **[Unified Specification](./specs.md)** - Authoritative normative source
-- **[Protocol Companion Docs](./protocol/00-README.md)** - Legacy chapterized companion material
-  - [01 - Overview](./protocol/01-overview.md) - Protocol architecture and design
-  - [02 - Cryptographic Primitives](./protocol/02-cryptographic-primitives.md)
-  - [03 - Data Structures](./protocol/03-data-structures.md)
-  - [04 - Witness Validation](./protocol/04-witness-validation.md)
-  - [05 - SPHF & ME-OR](./protocol/05-sphf-meor.md)
-  - [06 - Proof Systems](./protocol/06-proof-systems.md)
-  - [07 - Server Acceptance](./protocol/07-server-acceptance.md)
-  - [08 - Client Operations](./protocol/08-client-operations.md)
-  - [09 - Multi-Head Window](./protocol/09-multi-head-window.md)
-  - [10 - Security Model](./protocol/10-security-model.md)
-  - [11 - Implementation Guide](./protocol/11-implementation-guide.md)
-  - [12 - Error Reference](./protocol/12-error-reference.md)
-  - [13 - Testing Guide](./protocol/13-testing-guide.md)
-  - [14 - Deployment Guide](./protocol/14-deployment-guide.md)
-  - [15 - Label Registry](./protocol/15-label-registry.md)
-  - [16 - Comparison with MLS](./protocol/16-comparison-mls.md)
-  - [17 - FAQ](./protocol/17-faq.md)
+- **[Protocol Companion Index](./protocol/00-README.md)** - Legacy chapterized companion material, indexed by role and mapped back to the spec
+- **[Implementation Guide](./protocol/11-implementation-guide.md)** - Current code walkthrough and module map
+- **[Testing Guide](./protocol/13-testing-guide.md)** - Tests, manifests, CI expectations, and local validation flows
+- **[Protocol Checklist](./protocol/20-protocol-checklist.md)** - Guarantee-to-flow coverage matrix for the current profile
 
 ### For Operators
 Deploying and managing City-G in production:
@@ -58,42 +45,33 @@ Deploying and managing City-G in production:
 - **[Security Review Checklist](./security-review-checklist.md)** - Security verification workflow
 - **[Timing Verification](./timing-verification.md)** - Side-channel analysis and verification
 
-## 📖 Documentation by Topic
+### For Security Auditors
+Reviewing the current protocol/profile claims and their proof anchors:
 
-### Getting Started
-- [GUI User Guide](./gui-user-guide.md) - Desktop application walkthrough
-- [GUI Material System Roadmap](./gui-material-system-roadmap.md) - Semantic material system and cross-platform GUI direction
-- [API Reference](./api-reference.md) - REST API quick start
-- [Workflows](./workflows.md) - Common operation flows
+- **[Final Verification Report](./audits/final-verification-report-2026-03-26.md)** - Canonical audit verdict index for the current repo state
+- **[Protocol Checklist](./protocol/20-protocol-checklist.md)** - Guarantee-to-flow runtime coverage matrix
+- **[Preproduction Validation](./preproduction-validation.md)** - Operational validation gates and longer campaign runners
+- **[Evidence Index](./evidence/README.md)** - Benchmarks, Dudect, proof metrics, and runtime evidence
 
-### Core Concepts
-- [Unified Specification](./specs.md) - Normative protocol behavior
-- [Room-Scoped Administration Redesign](./room-admin-governance-redesign.md) - Room governance and control-plane auth
-- [Protocol Overview](./protocol/01-overview.md) - High-level architecture (legacy companion)
-- [Security Model](./protocol/10-security-model.md) - Threat model and guarantees (legacy companion)
-- [FAQ](./protocol/17-faq.md) - Frequently asked questions
+## 📖 Canonical Reading Paths
 
-### Configuration & Deployment
-- [Configuration Guide](./configuration.md) - All configuration options
-- [Examples Directory](./examples/) - Docker, Kubernetes, production configs
-- [Deployment Guide](./protocol/14-deployment-guide.md) - Production deployment
-- [Release QA Checklist](./release-qa-checklist.md) - Release validation gates
-- [Security Review Checklist](./security-review-checklist.md) - Security validation gates
-- [Observability](./OBSERVABILITY.md) - Monitoring and debugging
+### Product and Runtime
+- [GUI User Guide](./gui-user-guide.md)
+- [Workflows](./workflows.md)
+- [Troubleshooting](./TROUBLESHOOTING.md)
 
-### Protocol Details
-- [Unified Specification](./specs.md) - Full normative protocol definition
-- [Cryptographic Primitives](./protocol/02-cryptographic-primitives.md) - Crypto building blocks (legacy companion)
-- [SPHF & ME-OR](./protocol/05-sphf-meor.md) - Smooth projective hash functions (legacy companion)
-- [Proof Systems](./protocol/06-proof-systems.md) - Zero-knowledge proofs (legacy companion)
-- [Multi-Head Window](./protocol/09-multi-head-window.md) - Concurrency control (legacy companion)
+### Protocol and Implementation
+- [Unified Specification](./specs.md)
+- [Protocol Companion Index](./protocol/00-README.md)
+- [Implementation Guide](./protocol/11-implementation-guide.md)
+- [Protocol Checklist](./protocol/20-protocol-checklist.md)
 
-### Reference
-- [Glossary](./GLOSSARY.md) - Complete terminology reference (A-Z)
-- [Data Structures](./protocol/03-data-structures.md) - CBOR encodings and wire formats (legacy companion)
-- [Label Registry](./protocol/15-label-registry.md) - Domain separation labels (legacy companion)
-- [Error Reference](./protocol/12-error-reference.md) - All error codes explained (legacy companion)
-- [Constraints & Requirements](./constraints.md) - Canonical security/functional targets
+### Operations and Release
+- [Configuration Guide](./configuration.md)
+- [Observability](./OBSERVABILITY.md)
+- [Preproduction Validation](./preproduction-validation.md)
+- [Release QA Checklist](./release-qa-checklist.md)
+- [Security Review Checklist](./security-review-checklist.md)
 
 ## 🔍 Quick Links
 
@@ -147,9 +125,9 @@ Verification artifacts and benchmarks:
 - [Testing Guide](./protocol/13-testing-guide.md) - How to run and write tests (legacy companion)
 - [Implementation Guide](./protocol/11-implementation-guide.md) - Code walkthrough (legacy companion)
 
-## 🚀 0.1.2 Cutover Order
+## 🚀 Current Cutover Order
 
-Direct cutover policy for `v0.1.2` (no legacy interop/A-B path):
+Direct cutover policy for the current base profile (`v0.1.4`):
 
 1. Update server and clients from the same release set.
 2. Confirm conformance gates on the release candidate:
@@ -177,5 +155,3 @@ Rollback action: revert server + client binaries together as one unit and replay
 ---
 
 **Need help?** Start with the [FAQ](./protocol/17-faq.md), [Glossary](./GLOSSARY.md), or [GUI User Guide](./gui-user-guide.md).
-
-**Last Updated**: 2026-02-25

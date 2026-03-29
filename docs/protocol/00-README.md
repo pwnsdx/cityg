@@ -1,21 +1,32 @@
 # City-G Protocol Documentation
 
 > [!IMPORTANT]
-> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs.md`](../specs.md).
-> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
+> This directory is legacy companion material. For the current
+> `tswe/msphf-we/fs-hybrid + prs-barrier` profile, the normative source is
+> [`../specs.md`](../specs.md).
+> If a chapter here conflicts with the unified spec or implementation
+> behavior/tests, follow the unified spec and the live code/tests.
+>
+> Several companion chapters still preserve earlier "Alpha (0.1.0)" blueprint
+> labels or historical framing in their explanatory text. Read those as
+> historical companion terminology, not as a competing current profile claim.
 
+## Current Role of This Directory
 
-## tswe/msphf-we/fs-hybrid — Alpha (0.1.0)
+This directory is no longer the normative protocol source. Its job is to make
+the current repo easier to navigate by providing:
 
-**Version:** Alpha (0.1.0)
-**Profile:** Post-quantum, anytrust-free, offline-ready epoch-key extraction for extremely large E2EE groups with publisher blindness and integrated merge/rollup support
-**Specification:** [`specs.md`](../specs.md)
+- explanatory chapterization around the unified spec;
+- implementation-oriented walkthroughs;
+- error/testing/deployment companion material;
+- historical context where useful.
 
 ---
 
 ## 📚 Documentation Structure
 
-This directory contains legacy, chapterized companion material that complements the unified specification and reference implementation.
+This directory contains companion material that complements the unified
+specification and reference implementation.
 
 ### Core Protocol Documents
 
@@ -46,80 +57,29 @@ This directory contains legacy, chapterized companion material that complements 
 
 ---
 
-## 🎯 Quick Navigation
+## 🎯 Recommended Entry Points
 
-### For Cryptographers
-- Start with: [02-cryptographic-primitives.md](02-cryptographic-primitives.md), [05-sphf-meor.md](05-sphf-meor.md), [06-proof-systems.md](06-proof-systems.md)
-- Security proofs: [10-security-model.md](10-security-model.md)
-- Formal specification: [`specs.md`](../specs.md)
+### If you need the protocol rules
+- Start with [`../specs.md`](../specs.md).
+- Use this directory only for explanation, walkthroughs, and cross-references.
 
-### For Protocol Developers
-- Start with: [01-overview.md](01-overview.md), [03-data-structures.md](03-data-structures.md)
-- Implementation: [11-implementation-guide.md](11-implementation-guide.md)
-- Error handling: [12-error-reference.md](12-error-reference.md)
+### If you need the current implementation map
+- Start with [11-implementation-guide.md](11-implementation-guide.md).
+- Then use [13-testing-guide.md](13-testing-guide.md) and
+  [20-protocol-checklist.md](20-protocol-checklist.md).
 
-### For Application Developers
-- Start with: [01-overview.md](01-overview.md), [08-client-operations.md](08-client-operations.md)
-- Deployment: [14-deployment-guide.md](14-deployment-guide.md)
-- FAQ: [17-faq.md](17-faq.md)
+### If you need protocol guarantees and runtime proof coverage
+- Start with [20-protocol-checklist.md](20-protocol-checklist.md).
+- Then review [`../preproduction-validation.md`](../preproduction-validation.md)
+  and [`../evidence/e2e-local-validation-2026-03-27.md`](../evidence/e2e-local-validation-2026-03-27.md).
 
-### For Security Auditors
-- Start with: [10-security-model.md](10-security-model.md)
-- Server blindness: [07-server-acceptance.md](07-server-acceptance.md) §3
-- Side-channels: [`../timing-verification.md`](../timing-verification.md)
-- Test coverage: [13-testing-guide.md](13-testing-guide.md)
-- Protocol guarantees: [20-protocol-checklist.md](20-protocol-checklist.md)
-
----
-
-## 🔑 Key Concepts
-
-### Server Blindness
-The server **cannot** and **does not** learn:
-- Hash projections (hp)
-- VRF outputs (Y*)
-- Epoch keys (E_k)
-- Epoch identifiers (eid)
-
-This is **cryptographically enforced**, not trust-based.
-
-**Important**: "Server blindness" means **encryption key confidentiality** (the server cannot decrypt messages or derive epoch keys). However, the server **CAN identify devices** via public keys (ML-DSA-65, ~2KB) transmitted in field #108 during join/merge. This is NOT sender anonymity.
-
-### Offline Join
-Devices can join and derive epoch keys **without online interaction** with other members.
-
-### Parallel Joins
-Multiple devices can join simultaneously via the Multi-Head Window (MHW) mechanism, unlike MLS which requires sequential processing.
-
-### Post-Quantum Security
-Uses NIST-standardized post-quantum algorithms:
-- **ML-KEM-768** (Kyber) for key encapsulation
-- **ML-DSA-65** (Dilithium) for signatures
-- **RLWE-HPS** for smooth projective hashing
-
----
-
-## 📖 Reading Guide
-
-### Recommended Reading Order
-
-**First-time readers:**
-1. [01-overview.md](01-overview.md) - Understand the big picture
-2. [03-data-structures.md](03-data-structures.md) - Learn the wire format
-3. [07-server-acceptance.md](07-server-acceptance.md) - See how validation works
-4. [08-client-operations.md](08-client-operations.md) - Understand client workflow
-
-**Implementers:**
-1. [11-implementation-guide.md](11-implementation-guide.md) - Code structure
-2. [02-cryptographic-primitives.md](02-cryptographic-primitives.md) - Crypto APIs
-3. [04-witness-validation.md](04-witness-validation.md) - Critical validation logic
-4. [12-error-reference.md](12-error-reference.md) - Error handling
-
-**Cryptographers:**
-1. [05-sphf-meor.md](05-sphf-meor.md) - Core SPHF construction
-2. [06-proof-systems.md](06-proof-systems.md) - Zero-knowledge proofs
-3. [10-security-model.md](10-security-model.md) - Security analysis
-4. Specification: [`specs.md`](../specs.md)
+### If you need security/audit review support
+- Start with [10-security-model.md](10-security-model.md),
+  [12-error-reference.md](12-error-reference.md),
+  [13-testing-guide.md](13-testing-guide.md), and
+  [20-protocol-checklist.md](20-protocol-checklist.md).
+- Then cross-check the canonical audit state in
+  [`../audits/final-verification-report-2026-03-26.md`](../audits/final-verification-report-2026-03-26.md).
 
 ---
 
@@ -224,9 +184,3 @@ When adding or updating documentation:
 ## 📄 License
 
 This documentation is part of the City-G `tswe/msphf-we/fs-hybrid` reference implementation. See the top-level LICENSE file for terms.
-
----
-
-**Last Updated:** 2025-10-18
-**Specification Version:** Alpha (0.1.0)
-**Implementation Version:** 0.1.0

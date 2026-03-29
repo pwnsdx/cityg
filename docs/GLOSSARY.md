@@ -2,6 +2,11 @@
 
 A comprehensive reference for City-G terminology, organized alphabetically for quick lookup.
 
+> [!IMPORTANT]
+> This glossary tracks the current repo state, but some entries still mention
+> earlier profile revision numbers where the term first became salient. For
+> current normative behavior, follow [`./specs.md`](./specs.md).
+
 ---
 
 ## A
@@ -15,7 +20,7 @@ Configuration parameters that control coarse-grained policy for anchor validatio
 ### Anchor
 A signed, server-blind update representing a state transition (e.g., member join, merge, or revocation). The server can validate it cryptographically but cannot decrypt the protected header containing epoch keys. Devices derive and use those keys privately.
 
-**Anchor types** (v0.1.2, spec S4.1):
+**Anchor types** (current base profile, spec S4.1):
 - **JOIN**: introduces a new device leaf; carries `barrier_leaf_pk` (key 177).
 - **MERGE**: carries merge/checkpoint state; may carry `barrier_update` (key 175).
 - **REGULAR**: any anchor that is neither JOIN nor MERGE.
@@ -34,7 +39,9 @@ Authenticated Encryption with Associated Data. Used in City-G for encrypting the
 ## B
 
 ### Barrier (PRS Barrier)
-The post-revocation secrecy subsystem introduced in v0.1.2 (spec S11). Uses a KEM-tree cover to rotate `K_barrier` after revocations, ensuring that revoked members cannot decrypt future messages.
+The post-revocation secrecy subsystem of the current base profile (spec S11).
+Uses a KEM-tree cover to rotate `K_barrier` after revocations, ensuring that
+revoked members cannot decrypt future messages.
 
 **Components**: `K_barrier`, `barrier_version`, `BarrierUpdate`, `KemTreeCoverPayload`
 
@@ -90,7 +97,11 @@ A physical endpoint (phone, laptop, server) with its own cryptographic identity 
 ## E
 
 ### E_k (Epoch Key)
-The symmetric encryption key used to encrypt/decrypt messages within a specific epoch. In v0.1.2, the payload key schedule binds to `K_barrier` and `barrier_version` (spec S8.3): `K_msg_epoch` is derived via HKDF-BLAKE3 from `E_k` with `K_barrier` in the salt, ensuring revoked members cannot decrypt.
+The symmetric encryption key used to encrypt/decrypt messages within a
+specific epoch. In the current base profile, the payload key schedule binds to
+`K_barrier` and `barrier_version` (spec S8.3): `K_msg_epoch` is derived via
+HKDF-BLAKE3 from `E_k` with `K_barrier` in the salt, ensuring revoked members
+cannot decrypt.
 
 **Security**: Server never learns E_k (cryptographically enforced).
 
@@ -350,7 +361,7 @@ Security model where the first encountered public key for an identity is trusted
 **City-G Usage**: Optional identity binding with ML-DSA-65 PoP; alias→key mappings stored locally
 
 ### tswe/msphf-we/fs-hybrid + prs-barrier
-The City-G protocol profile name (v0.1.2):
+The City-G protocol profile family name used by the current base profile:
 - **tswe**: Time-Stamped Witness Extraction
 - **msphf-we**: Masked SPHF with Witness Extraction
 - **fs-hybrid**: Forward Secrecy with hybrid pivot rotation
@@ -398,7 +409,8 @@ The unique epoch digest computed via ME-OR from SPHF evaluation. Used to derive 
 - Unique per epoch
 - 32 bytes
 
-**Derivation**: In v0.1.2, message keys are bound to `K_barrier` via HKDF-BLAKE3 (spec S8.3).
+**Derivation**: In the current base profile, message keys are bound to
+`K_barrier` via HKDF-BLAKE3 (spec S8.3).
 
 **See also**: [SPHF & ME-OR](./protocol/05-sphf-meor.md)
 
@@ -473,6 +485,4 @@ Standard size for:
 - **[Data Structures](./protocol/03-data-structures.md)** - CBOR encodings
 
 ---
-
-**Last Updated**: 2026-02-25
 **Note**: This glossary consolidates terminology from across City-G documentation. For formal definitions, see the [specification](./specs.md).

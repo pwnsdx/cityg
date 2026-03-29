@@ -833,6 +833,4 @@ Fine-grained policy = "Should I persist this anchor?" (your app logic)
 - [GUI User Guide](./gui-user-guide.md) - Desktop application guide
 
 ---
-
-**Last Updated:** 2025-11-06
-**Protocol Version:** v1
+**These workflow diagrams are explanatory and should be read against the current base profile in [`./specs.md`](./specs.md).**
