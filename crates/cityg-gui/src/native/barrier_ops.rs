@@ -521,6 +521,12 @@ async fn publish_revocation_merge_from_ticket(
         ));
     }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
+    let revoked_cover_leaf_index = u32::try_from(revoked_cover_leaf_index)
+        .map_err(|_| anyhow!("cover_leaf_index out of range for barrier tree"))?;
+    let mut post_revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
+    if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
+        post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
+    }
     apply_join_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
@@ -529,11 +535,8 @@ async fn publish_revocation_merge_from_ticket(
     apply_revoked_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        revoked_resolution.leaf_indices.as_slice(),
+        post_revoked_leaf_indices.as_slice(),
     )?;
-    let leaf_base = barrier_n_max.saturating_sub(1);
-    let revoked_leaf_node = leaf_base.saturating_add(revoked_cover_leaf_index);
-    blank_leaf_and_path(snapshot_pre.as_mut_slice(), revoked_leaf_node)?;
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let next_barrier_version = barrier_version.saturating_add(1);
     let updater_leaf = cover_leaf_index_for_n_max(&leaf_id, barrier_n_max);
@@ -614,8 +617,8 @@ async fn publish_revocation_merge_from_ticket(
                 &snapshot_hash,
                 barrier_version,
                 join_resolution.records.as_slice(),
-                &committed_revocation_roots_hash,
-                revoked_resolution.leaf_indices.as_slice(),
+                &revocation_roots_hash,
+                post_revoked_leaf_indices.as_slice(),
                 deployment_profile_manifest_bytes.as_slice(),
             )
             .await
@@ -1227,10 +1230,21 @@ async fn perform_barrier_merge_inner(
         barrier_n_max,
         join_resolution.records.as_slice(),
     )?;
+    let mut witness_revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
+    let witness_revocation_roots_hash = if mode.reason() == 0 {
+        let cover_leaf_index_u32 = u32::try_from(cover_leaf_index)
+            .map_err(|_| anyhow!("cover_leaf_index out of range"))?;
+        if let Err(insert_at) = witness_revoked_leaf_indices.binary_search(&cover_leaf_index_u32) {
+            witness_revoked_leaf_indices.insert(insert_at, cover_leaf_index_u32);
+        }
+        revocation_roots_hash
+    } else {
+        committed_revocation_roots_hash
+    };
     apply_revoked_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        revoked_resolution.leaf_indices.as_slice(),
+        witness_revoked_leaf_indices.as_slice(),
     )?;
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let next_barrier_version = barrier_version.saturating_add(1);
@@ -1315,8 +1329,8 @@ async fn perform_barrier_merge_inner(
                     &snapshot_hash,
                     barrier_version,
                     join_resolution.records.as_slice(),
-                    &committed_revocation_roots_hash,
-                    revoked_resolution.leaf_indices.as_slice(),
+                    &witness_revocation_roots_hash,
+                    witness_revoked_leaf_indices.as_slice(),
                     deployment_profile_manifest_bytes.as_slice(),
                 )
                 .await

@@ -41,6 +41,22 @@ fn require_base_profile_global_history_authority_extension(
     }
 }
 
+const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
+
+fn generate_room_identity() -> RoomIdentity {
+    let (pop_pk, pop_sk) = dilithium5::keypair();
+    RoomIdentity {
+        pop_public_key: pop_pk.as_bytes().to_vec(),
+        pop_secret_key: pop_sk.as_bytes().to_vec(),
+    }
+}
+
+fn rotate_room_identity(server_url: &str, room_id: &str) -> Result<RoomIdentity> {
+    let identity = generate_room_identity();
+    persist_room_identity(server_url, room_id, &identity)?;
+    Ok(identity)
+}
+
 pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let JoinParams {
         server_url,
@@ -58,15 +74,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         return Err(anyhow!("alias must not be empty"));
     }
 
-    let room_identity = load_or_create_room_identity(&server_url, &room_id)
+    let mut room_identity = load_or_create_room_identity(&server_url, &room_id)
         .context("load or create persistent room identity")?;
-    let pop_public_key = room_identity.pop_public_key.clone();
-    let pop_secret_key = room_identity.pop_secret_key.clone();
-    let identity_binding = Some(build_identity_binding(
-        &alias,
-        &pop_public_key,
-        &pop_secret_key,
-    )?);
 
     let mut generated_kbroad_public: Option<Vec<u8>> = None;
     let mut bootstrap_attempted = false;
@@ -74,10 +83,14 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
 
     let client = new_api_client(&server_url);
     let ticket = loop {
-        match client
-            .join_ticket(&room_id, &alias, identity_binding.clone())
-            .await
-        {
+        let pop_public_key = room_identity.pop_public_key.clone();
+        let pop_secret_key = room_identity.pop_secret_key.clone();
+        let identity_binding = Some(build_identity_binding(
+            &alias,
+            &pop_public_key,
+            &pop_secret_key,
+        )?);
+        match client.join_ticket(&room_id, &alias, identity_binding).await {
             Ok(ticket) => break ticket,
             Err(ApiClientError::HttpStatus {
                 status,
@@ -126,6 +139,20 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                             return Err(anyhow!("failed to bootstrap room KBROAD key: {}", err));
                         }
                     }
+                }
+
+                if status.is_server_error()
+                    && message.contains("cover leaf index already allocated")
+                    && retry_attempt < JOIN_IDENTITY_RETRY_MAX_ATTEMPTS
+                {
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    room_identity = rotate_room_identity(&server_url, &room_id)
+                        .context("regenerate room identity after cover leaf collision")?;
+                    warn!(
+                        attempt = retry_attempt,
+                        "join identity collided on cover leaf index; regenerating identity"
+                    );
+                    continue;
                 }
 
                 if should_retry_ticket_http_error(status.as_u16(), &message, freeze_code)
@@ -197,8 +224,10 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let mut k_fs = [0u8; 32];
     rand::rng().fill(&mut k_fs);
     let mut fs_state = ForwardSecrecyState::new(k_fs);
-    let pop_secret =
-        Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
+    let pop_secret = Box::new(
+        dilithium5::SecretKey::from_bytes(&room_identity.pop_secret_key)
+            .context("invalid POP key")?,
+    );
 
     // Room-scoped PoP identity was loaded or created above.
 
@@ -316,7 +345,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         srx_mode: SrxMode::Complete,
         pop_keys: Some(PopKeypair {
             algorithm: "ML-DSA-65",
-            public_key: pop_public_key.as_slice(),
+            public_key: room_identity.pop_public_key.as_slice(),
             secret_key: pop_secret.as_ref(),
         }),
         leaf_id_mode: LeafIdMode::PerGroup,
@@ -452,8 +481,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         fs_dev_prev_commit,
         fs_epoch_created_at: SystemTime::now(),
         fs_epoch_rotation_interval_secs: 300,
-        pop_public_key,
-        pop_secret_key,
+        pop_public_key: room_identity.pop_public_key.clone(),
+        pop_secret_key: room_identity.pop_secret_key.clone(),
         msg_sign_public_key,
         msg_sign_secret_key,
         vrf_secret_key,

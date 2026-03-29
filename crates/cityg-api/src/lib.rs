@@ -1428,6 +1428,19 @@ fn room_admin_proof_replay_key(proof: &RoomAdminProof) -> Result<[u8; 32], ApiEr
     .map_err(|err| ApiError::server_message(err.to_string()))
 }
 
+fn compute_api_revocation_roots_hash(
+    revoked_since_root: &[u8; 32],
+    revoked_root: &[u8; 32],
+) -> Result<[u8; 32], ApiError> {
+    #[derive(Serialize)]
+    struct Preimage<'a>(
+        #[serde(with = "serde_bytes")] &'a [u8; 32],
+        #[serde(with = "serde_bytes")] &'a [u8; 32],
+    );
+    h_l("barrier/roots", &Preimage(revoked_since_root, revoked_root))
+        .map_err(|err| ApiError::server_message(err.to_string()))
+}
+
 fn encode_room_admin_leaf_pair_payload(
     author_leaf_id: &[u8; 32],
     target_leaf_id: &[u8; 32],
@@ -2786,6 +2799,9 @@ async fn barrier_issue_full_verification_witness(
             guard.build_merge_ticket_for_refresh(&gid, &author_leaf_id)
         }
         .map_err(ApiError::from)?;
+        let committed_revocation_roots_hash = guard
+            .barrier_roots_hash(&gid)
+            .ok_or(ApiError::InvalidRequest("group not found"))?;
         if bundle.current_history_commitment != current_history_commitment {
             return Err(ApiError::InvalidRequest(
                 "current_history_commitment mismatch with authenticated current state",
@@ -2825,6 +2841,16 @@ async fn barrier_issue_full_verification_witness(
                 "deployment_profile_manifest mismatch with authenticated current state",
             ));
         }
+        let expected_revocation_roots_hash = if request.barrier_update_reason == 0 {
+            compute_api_revocation_roots_hash(&bundle.revoked_since_root, &bundle.revoked_root)?
+        } else {
+            committed_revocation_roots_hash
+        };
+        if revocation_roots_hash != expected_revocation_roots_hash {
+            return Err(ApiError::InvalidRequest(
+                "revocation_roots_hash mismatch with authenticated current state",
+            ));
+        }
         let resolved_joins = guard
             .resolve_joins_since(&gid, request.joins_prev_barrier_version)
             .map_err(map_barrier_helper_error)?;
@@ -2844,12 +2870,29 @@ async fn barrier_issue_full_verification_witness(
                 "join helper data mismatch with authenticated current state",
             ));
         }
-        let resolved_revoked = guard
-            .resolve_revoked_leaf_indices(&gid, &revocation_roots_hash)
-            .map_err(map_barrier_helper_error)?;
-        if resolved_revoked.history_commitment != bundle.current_history_commitment
-            || request.revoked_leaf_indices != resolved_revoked.leaf_indices
-        {
+        let expected_revoked_leaf_indices = if request.barrier_update_reason == 0 {
+            let mut leaf_indices = guard
+                .resolve_revoked_leaf_indices(&gid, &committed_revocation_roots_hash)
+                .map_err(map_barrier_helper_error)?
+                .leaf_indices;
+            let cover_leaf_index = u32::try_from(bundle.cover_leaf_index)
+                .map_err(|_| ApiError::InvalidRequest("cover_leaf_index out of range"))?;
+            if let Err(insert_at) = leaf_indices.binary_search(&cover_leaf_index) {
+                leaf_indices.insert(insert_at, cover_leaf_index);
+            }
+            leaf_indices
+        } else {
+            let resolved_revoked = guard
+                .resolve_revoked_leaf_indices(&gid, &revocation_roots_hash)
+                .map_err(map_barrier_helper_error)?;
+            if resolved_revoked.history_commitment != bundle.current_history_commitment {
+                return Err(ApiError::InvalidRequest(
+                    "revoked helper data mismatch with authenticated current state",
+                ));
+            }
+            resolved_revoked.leaf_indices
+        };
+        if request.revoked_leaf_indices != expected_revoked_leaf_indices {
             return Err(ApiError::InvalidRequest(
                 "revoked helper data mismatch with authenticated current state",
             ));
@@ -2867,7 +2910,7 @@ async fn barrier_issue_full_verification_witness(
                 request.joins_prev_barrier_version,
                 requested_join_records.as_slice(),
                 &revocation_roots_hash,
-                request.revoked_leaf_indices.as_slice(),
+                expected_revoked_leaf_indices.as_slice(),
                 request.deployment_profile_manifest.as_slice(),
             )
             .map_err(ApiError::from)?

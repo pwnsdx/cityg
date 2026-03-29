@@ -8463,14 +8463,12 @@ async fn pending_barrier_history_lookup_discards_superseded_locator()
 -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let server_url;
     let room_id = hex_encode([0x57u8; 32]);
-    let mut session;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    server_url = format!("http://{addr}");
-    session = build_test_session(0xC62, &server_url, &room_id, "carol")?;
+    let server_url = format!("http://{addr}");
+    let mut session = build_test_session(0xC62, &server_url, &room_id, "carol")?;
     session.barrier_state.barrier_recovery_pending = true;
     session.barrier_state.pending = Some(BarrierPendingState {
         barrier_version: 5,

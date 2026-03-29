@@ -23,16 +23,16 @@ use anyhow::{Context, Result, anyhow};
 use barrier_shared::{
     BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
     DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, apply_join_set_to_snapshot,
-    apply_revoked_set_to_snapshot, barrier_path_nodes, blank_leaf_and_path,
-    collect_resolution_targets, compute_barrier_pkhash, compute_barrier_tree_hash,
-    compute_revocation_roots_hash, encode_full_verification_receipt,
-    encode_history_commitment_header, expected_barrier_tree_nodes, should_retry_ticket_http_error,
-    sibling_node, ticket_retry_delay, validate_barrier_n_max,
+    apply_revoked_set_to_snapshot, barrier_path_nodes, collect_resolution_targets,
+    compute_barrier_pkhash, compute_barrier_tree_hash, compute_revocation_roots_hash,
+    encode_full_verification_receipt, encode_history_commitment_header,
+    expected_barrier_tree_nodes, should_retry_ticket_http_error, sibling_node, ticket_retry_delay,
+    validate_barrier_n_max,
 };
 #[cfg(test)]
 use barrier_shared::{
     TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS, TICKET_RETRY_MAX_DELAY_MS,
-    blank_internal_path_from_leaf, decode_history_commitment_header,
+    blank_internal_path_from_leaf, blank_leaf_and_path, decode_history_commitment_header,
 };
 use ciborium::value::{Integer, Value};
 #[cfg(test)]
@@ -2051,6 +2051,12 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         );
     }
     let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
+    let revoked_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
+        .map_err(|_| anyhow!("cover_leaf_index out of range for barrier tree"))?;
+    let mut post_revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
+    if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
+        post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
+    }
     apply_join_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
@@ -2059,11 +2065,8 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     apply_revoked_set_to_snapshot(
         snapshot_pre.as_mut_slice(),
         barrier_n_max,
-        revoked_resolution.leaf_indices.as_slice(),
+        post_revoked_leaf_indices.as_slice(),
     )?;
-    let leaf_base = barrier_n_max.saturating_sub(1);
-    let revoked_leaf_node = leaf_base.saturating_add(ticket.cover_leaf_index);
-    blank_leaf_and_path(snapshot_pre.as_mut_slice(), revoked_leaf_node)?;
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let barrier_update = build_barrier_update_bytes(
         &session.gid,
@@ -2097,6 +2100,37 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         header.insert(
             hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
             Value::Bytes(receipt),
+        );
+        let history_authority = ticket.history_authority.as_ref().ok_or_else(|| {
+            anyhow!("leave merge ticket missing history_authority descriptor for full verification witness")
+        })?;
+        let history_authority_extension = ticket.history_authority_extension.ok_or_else(|| {
+            anyhow!("leave merge ticket missing history_authority_extension for full verification witness")
+        })?;
+        let full_verification_witness = client
+            .barrier_issue_full_verification_witness(
+                &session.room_id,
+                &session.leaf_id,
+                0,
+                barrier_update.raw_update.as_slice(),
+                barrier_n_max,
+                &ticket.current_history_commitment,
+                history_authority_extension,
+                history_authority,
+                ticket.current_global_history_attestation_bytes.as_slice(),
+                ticket.barrier_version,
+                &snapshot_hash,
+                ticket.barrier_version,
+                join_resolution.records.as_slice(),
+                &revocation_roots_hash,
+                post_revoked_leaf_indices.as_slice(),
+                ticket.deployment_profile_manifest_bytes.as_slice(),
+            )
+            .await
+            .context("issue full verification witness for leave merge")?;
+        header.insert(
+            hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+            Value::Bytes(full_verification_witness),
         );
     }
 
@@ -3706,6 +3740,7 @@ mod tests {
     struct LeaveMockState {
         responses: Arc<Mutex<BTreeMap<String, VecDeque<MockResponse>>>>,
         counts: Arc<Mutex<BTreeMap<String, usize>>>,
+        witness_proxy_base_url: Option<String>,
     }
 
     impl LeaveMockState {
@@ -3717,7 +3752,13 @@ mod tests {
             Self {
                 responses: Arc::new(Mutex::new(responses)),
                 counts: Arc::new(Mutex::new(BTreeMap::new())),
+                witness_proxy_base_url: None,
             }
+        }
+
+        fn with_witness_proxy(mut self, base_url: String) -> Self {
+            self.witness_proxy_base_url = Some(base_url);
+            self
         }
 
         fn response_for(&self, path: &str) -> MockResponse {
@@ -3758,7 +3799,54 @@ mod tests {
         "ok"
     }
 
-    async fn mock_leave_post(State(state): State<LeaveMockState>, uri: Uri) -> Response {
+    async fn post_proto_bytes_raw(server_url: &str, path: &str, body: &[u8]) -> Result<Vec<u8>> {
+        let mut req = reqwest::Client::new()
+            .post(format!("{server_url}{path}"))
+            .header(CONTENT_TYPE, "application/x-protobuf")
+            .body(body.to_vec());
+        if let Some(token) = configured_client_message_token() {
+            req = req.header(MESSAGE_AUTH_HEADER, token);
+        }
+        let response = req
+            .send()
+            .await
+            .context("send raw protobuf bytes request")?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .context("read raw protobuf bytes response")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "raw protobuf bytes request failed ({status}): {}",
+                String::from_utf8_lossy(body.as_ref())
+            ));
+        }
+        Ok(body.to_vec())
+    }
+
+    async fn mock_leave_post(
+        State(state): State<LeaveMockState>,
+        uri: Uri,
+        body: axum::body::Bytes,
+    ) -> Response {
+        if uri.path() == "/v1/barrier/issue_full_verification_witness"
+            && let Some(base_url) = state.witness_proxy_base_url.as_deref()
+        {
+            match post_proto_bytes_raw(base_url, uri.path(), body.as_ref()).await {
+                Ok(raw) => return MockResponse::proto_bytes(raw).into_response(),
+                Err(err) => {
+                    warn!("witness proxy failed: {err}");
+                    return MockResponse::json(
+                        HttpStatusCode::INTERNAL_SERVER_ERROR,
+                        "witness proxy failed",
+                        None,
+                        None,
+                    )
+                    .into_response();
+                }
+            }
+        }
         state.response_for(uri.path()).into_response()
     }
 
@@ -3853,7 +3941,8 @@ mod tests {
         pivot
     }
 
-    async fn capture_leave_fixture() -> Result<LeaveFixture> {
+    async fn capture_leave_fixture_with_server()
+    -> Result<(LeaveFixture, String, tokio::task::JoinHandle<()>)> {
         let port = next_free_local_port();
         let handle = spawn_server_on(port).await;
         sleep(Duration::from_millis(250)).await;
@@ -3894,20 +3983,27 @@ mod tests {
             &committed_revocation_roots_hash,
         )
         .await?;
+        Ok((
+            LeaveFixture {
+                session,
+                ticket,
+                barrier_tree_snapshot,
+                join_records,
+                revoked_leaf_indices,
+                barrier_tree_snapshot_pages_raw,
+                join_records_pages_raw,
+                revoked_leaf_indices_pages_raw,
+            },
+            server_url,
+            handle,
+        ))
+    }
 
+    async fn capture_leave_fixture() -> Result<LeaveFixture> {
+        let (fixture, _server_url, handle) = capture_leave_fixture_with_server().await?;
         handle.abort();
         let _ = handle.await;
-
-        Ok(LeaveFixture {
-            session,
-            ticket,
-            barrier_tree_snapshot,
-            join_records,
-            revoked_leaf_indices,
-            barrier_tree_snapshot_pages_raw,
-            join_records_pages_raw,
-            revoked_leaf_indices_pages_raw,
-        })
+        Ok(fixture)
     }
 
     async fn capture_join_finalize_fixture() -> Result<JoinFinalizeFixture> {
@@ -6201,7 +6297,8 @@ mod tests {
 
     #[tokio::test]
     async fn perform_leave_skips_refresh_conflict_and_retries_pristine_bundle() -> Result<()> {
-        let fixture = capture_leave_fixture().await?;
+        let (fixture, witness_proxy_base_url, witness_handle) =
+            capture_leave_fixture_with_server().await?;
 
         let state = LeaveMockState::new([
             (
@@ -6246,7 +6343,8 @@ mod tests {
                     MockResponse::empty_proto(),
                 ],
             ),
-        ]);
+        ])
+        .with_witness_proxy(witness_proxy_base_url);
         let (server_url, handle) = start_leave_mock_server(state.clone()).await?;
 
         let mut session = fixture.session;
@@ -6257,6 +6355,8 @@ mod tests {
 
         handle.abort();
         let _ = handle.await;
+        witness_handle.abort();
+        let _ = witness_handle.await;
         Ok(())
     }
 
@@ -6290,7 +6390,8 @@ mod tests {
 
     #[tokio::test]
     async fn perform_leave_surfaces_final_accept_epoch_failure_detail() -> Result<()> {
-        let fixture = capture_leave_fixture().await?;
+        let (fixture, witness_proxy_base_url, witness_handle) =
+            capture_leave_fixture_with_server().await?;
         let state = LeaveMockState::new([
             (
                 "/v1/rooms/merge_ticket",
@@ -6320,7 +6421,8 @@ mod tests {
                     Some("barrier_version_mismatch"),
                 )],
             ),
-        ]);
+        ])
+        .with_witness_proxy(witness_proxy_base_url);
         let (server_url, handle) = start_leave_mock_server(state).await?;
 
         let mut session = fixture.session;
@@ -6340,6 +6442,8 @@ mod tests {
 
         handle.abort();
         let _ = handle.await;
+        witness_handle.abort();
+        let _ = witness_handle.await;
         Ok(())
     }
 

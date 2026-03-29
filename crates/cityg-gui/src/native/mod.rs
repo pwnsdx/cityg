@@ -9,10 +9,10 @@ use std::{
 use crate::barrier_shared::{
     BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
     DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, apply_join_set_to_snapshot,
-    apply_revoked_set_to_snapshot, barrier_path_nodes, blank_leaf_and_path,
-    collect_resolution_targets, compute_barrier_pkhash, compute_barrier_tree_hash,
-    compute_revocation_roots_hash, expected_barrier_tree_nodes, should_retry_ticket_http_error,
-    sibling_node, ticket_retry_delay, validate_barrier_n_max,
+    apply_revoked_set_to_snapshot, barrier_path_nodes, collect_resolution_targets,
+    compute_barrier_pkhash, compute_barrier_tree_hash, compute_revocation_roots_hash,
+    expected_barrier_tree_nodes, should_retry_ticket_http_error, sibling_node, ticket_retry_delay,
+    validate_barrier_n_max,
 };
 #[cfg(test)]
 use crate::message_crypto::{
