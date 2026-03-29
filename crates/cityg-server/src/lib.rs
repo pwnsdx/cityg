@@ -6791,6 +6791,7 @@ mod tests {
     };
     use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey};
     use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
     use rand::{RngExt, SeedableRng, rngs::StdRng};
     use serde::Serialize;
     use std::{
@@ -14478,34 +14479,43 @@ mod tests {
             let mut mutated = pristine_bundle.clone();
             match mutation_target {
                 0 => {
-                    let Value::Bytes(raw) = mutated
+                    let raw = match mutated
                         .header_map
                         .get_mut(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
-                        .expect("refresh receipt must exist under global authority")
-                    else {
-                        panic!("refresh receipt must stay bytes");
+                    {
+                        Some(Value::Bytes(raw)) => raw,
+                        _ => {
+                            return Err(TestCaseError::fail(
+                                "refresh receipt must exist as bytes under global authority",
+                            ));
+                        }
                     };
                     let idx = offset_seed % raw.len();
                     raw[idx] ^= xor_mask;
                 }
                 1 => {
-                    let Value::Bytes(raw) = mutated
+                    let raw = match mutated
                         .header_map
                         .get_mut(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
-                        .expect("refresh attestation must exist under global authority")
-                    else {
-                        panic!("refresh attestation must stay bytes");
+                    {
+                        Some(Value::Bytes(raw)) => raw,
+                        _ => {
+                            return Err(TestCaseError::fail(
+                                "refresh attestation must exist as bytes under global authority",
+                            ));
+                        }
                     };
                     let idx = offset_seed % raw.len();
                     raw[idx] ^= xor_mask;
                 }
                 2 => {
-                    let Value::Bytes(raw) = mutated
-                        .header_map
-                        .get_mut(&hdr::HDR_BARRIER_UPDATE)
-                        .expect("refresh barrier update must exist")
-                    else {
-                        panic!("refresh barrier update must stay bytes");
+                    let raw = match mutated.header_map.get_mut(&hdr::HDR_BARRIER_UPDATE) {
+                        Some(Value::Bytes(raw)) => raw,
+                        _ => {
+                            return Err(TestCaseError::fail(
+                                "refresh barrier update must exist as bytes",
+                            ));
+                        }
                     };
                     let idx = offset_seed % raw.len();
                     raw[idx] ^= xor_mask;
@@ -14529,12 +14539,13 @@ mod tests {
                         let idx = offset_seed % raw.len();
                         raw[idx] ^= xor_mask;
                     } else {
-                        let Value::Bytes(raw) = mutated
-                            .header_map
-                            .get_mut(&hdr::HDR_BARRIER_UPDATE)
-                            .expect("refresh barrier update must exist")
-                        else {
-                            panic!("refresh barrier update must stay bytes");
+                        let raw = match mutated.header_map.get_mut(&hdr::HDR_BARRIER_UPDATE) {
+                            Some(Value::Bytes(raw)) => raw,
+                            _ => {
+                                return Err(TestCaseError::fail(
+                                    "fallback refresh barrier update must exist as bytes",
+                                ));
+                            }
                         };
                         let idx = offset_seed % raw.len();
                         raw[idx] ^= xor_mask;
@@ -15839,7 +15850,7 @@ fn default_max_barrier_update_bytes() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedKbroadRoomState {
     kbroad_public: Vec<u8>,
     kbroad_generation: u64,
@@ -15894,6 +15905,41 @@ struct PersistedKbroadRoomState {
     pending_join_finalize_auth: Vec<PersistedJoinFinalizeAuthRecord>,
     #[serde(default)]
     device_chain_states: Vec<PersistedDeviceChainState>,
+}
+
+impl Default for PersistedKbroadRoomState {
+    fn default() -> Self {
+        Self {
+            kbroad_public: Vec::new(),
+            kbroad_generation: 0,
+            rotation_required: false,
+            room_admin_pop_keys: Vec::new(),
+            room_admin_proof_replay_keys: Vec::new(),
+            revoked_leaf_ids_hex: Vec::new(),
+            barrier_initialized: false,
+            barrier_version: 0,
+            barrier_roots_hash: [0u8; 32],
+            kem_tree_hash_after: [0u8; 32],
+            last_checkpoint_ec: 0,
+            last_accepted_ec: 0,
+            srx_root_sw: None,
+            barrier_pk_entries: Vec::new(),
+            barrier_public_tree_blobs: Vec::new(),
+            barrier_public_tree_history: Vec::new(),
+            n_max: default_barrier_n_max(),
+            last_pcs_refresh_ec: None,
+            pcs_refresh_min_delta_device_ec: default_pcs_refresh_min_delta_device_ec(),
+            pcs_refresh_min_delta_group_ec: default_pcs_refresh_min_delta_group_ec(),
+            pcs_refresh_slot_width_ec: default_pcs_refresh_slot_width_ec(),
+            max_barrier_update_bytes: default_max_barrier_update_bytes(),
+            accepted_barrier_merges: Vec::new(),
+            current_history_commitment: PersistedHistoryCommitment::default(),
+            current_accepted_barrier_update: Vec::new(),
+            current_accepted_barrier_predecessor_hash: [0u8; 32],
+            pending_join_finalize_auth: Vec::new(),
+            device_chain_states: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
