@@ -1292,6 +1292,15 @@ impl CityGServer {
         self.build_merge_ticket_core(gid, leaf_id, None)
     }
 
+    pub fn build_merge_ticket_for_targeted_revocation(
+        &mut self,
+        gid: &[u8; 32],
+        author_leaf_id: &[u8; 32],
+        target_leaf_id: &[u8; 32],
+    ) -> Result<MergeTicketBundle, CityGError> {
+        self.build_merge_ticket_core(gid, author_leaf_id, Some(*target_leaf_id))
+    }
+
     pub fn build_admin_expel_ticket(
         &mut self,
         gid: &[u8; 32],
@@ -3051,6 +3060,7 @@ impl CityGServer {
             history_commitment,
             author_leaf_id,
             barrier_update_reason,
+            updater_leaf,
             barrier_update,
             joins_prev_barrier_version,
             join_records,
@@ -6144,13 +6154,25 @@ fn validate_barrier_update_against_roster(
                 author_leaf_ids.push(*leaf);
             }
         }
+        let parsed_updater_leaf_usize = usize::try_from(parsed.updater_leaf)
+            .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?;
+        let has_full_verification_witness =
+            header.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS);
+        let author_is_room_admin = state_before
+            .room_admin_pop_keys
+            .iter()
+            .any(|pop_key| pop_key.as_slice() == author_pop_pk);
+        let targeted_admin_revocation = matches!(barrier_update_reason, Some(0))
+            && delta.revoked.iter().any(|leaf| {
+                *leaf != author_leaf_ids.first().copied().unwrap_or([0u8; 32])
+                    && u64::from(cover_leaf_index(leaf, tree_n_max)) == parsed.updater_leaf
+            })
+            && has_full_verification_witness
+            && author_is_room_admin;
         if author_cover_indices.len() != 1
-            || !author_cover_indices.contains(&parsed.updater_leaf)
+            || (!author_cover_indices.contains(&parsed.updater_leaf) && !targeted_admin_revocation)
             || author_leaf_ids.len() != 1
-            || committed_revoked_indices.contains(
-                &usize::try_from(parsed.updater_leaf)
-                    .map_err(|_| CityGError::InvalidInput("barrier_update malformed"))?,
-            )
+            || committed_revoked_indices.contains(&parsed_updater_leaf_usize)
         {
             return Err(CityGError::Acceptance(
                 msphf_orchestrator::AcceptanceError::Freeze(
@@ -6412,6 +6434,7 @@ fn validate_full_verification_witness_candidate(
     current_history_commitment: &HistoryCommitment,
     author_leaf_id: &[u8; 32],
     barrier_update_reason: u64,
+    updater_leaf: u64,
     barrier_update: &[u8],
     joins_prev_barrier_version: u64,
     join_records: &[BarrierJoinLeafRecord],
@@ -6436,7 +6459,6 @@ fn validate_full_verification_witness_candidate(
     {
         return Err(freeze_barrier_updater_invalid_error());
     }
-    let expected_updater_leaf = u64::from(cover_leaf_index(author_leaf_id, state_before.n_max));
     let mut header = BTreeMap::new();
     header.insert(
         hdr::HDR_BARRIER_UPDATE,
@@ -6449,7 +6471,7 @@ fn validate_full_verification_witness_candidate(
     let parsed = parse_barrier_update(&header, state_before.n_max)?
         .ok_or(CityGError::InvalidInput("barrier_update malformed"))?;
     if parsed.prev_barrier_version != state_before.barrier_version
-        || parsed.updater_leaf != expected_updater_leaf
+        || parsed.updater_leaf != updater_leaf
         || parsed.revocation_roots_hash != *revocation_roots_hash
     {
         return Err(freeze_barrier_updater_invalid_error());

@@ -1395,6 +1395,8 @@ impl CitygApiClient {
         &self,
         room_id: &str,
         author_leaf_id: &[u8; 32],
+        revocation_target_leaf_id: Option<&[u8; 32]>,
+        merge_ticket_artifact: &[u8],
         barrier_update_reason: u64,
         barrier_update: &[u8],
         n_max: u64,
@@ -1434,11 +1436,16 @@ impl CitygApiClient {
             revocation_roots_hash: revocation_roots_hash.to_vec(),
             revoked_leaf_indices: revoked_leaf_indices.to_vec(),
             deployment_profile_manifest: deployment_profile_manifest.to_vec(),
+            revocation_target_leaf_id: revocation_target_leaf_id
+                .map(|leaf_id| leaf_id.to_vec())
+                .unwrap_or_default(),
+            merge_ticket_artifact: merge_ticket_artifact.to_vec(),
         };
         let response: BarrierIssueFullVerificationWitnessResponse = self
             .post_proto("/v1/barrier/issue_full_verification_witness", request)
             .await?;
-        let updater_leaf = cover_leaf_index_for_n_max(author_leaf_id, n_max);
+        let updater_leaf =
+            cover_leaf_index_for_n_max(revocation_target_leaf_id.unwrap_or(author_leaf_id), n_max);
         verify_full_verification_witness(
             response.full_verification_witness.as_slice(),
             history_authority,

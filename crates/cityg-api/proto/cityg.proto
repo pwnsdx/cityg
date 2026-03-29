@@ -457,6 +457,8 @@ message BarrierIssueFullVerificationWitnessRequest {
   bytes revocation_roots_hash = 9;
   repeated uint32 revoked_leaf_indices = 10;
   bytes deployment_profile_manifest = 11;
+  bytes revocation_target_leaf_id = 12;
+  bytes merge_ticket_artifact = 13;
 }
 
 message BarrierIssueFullVerificationWitnessResponse {

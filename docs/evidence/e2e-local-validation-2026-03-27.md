@@ -712,3 +712,94 @@ Result:
 Notes:
 
 - the `dropping replayed msg_index=...` warnings are again expected and confirm that persisted replay-state is active immediately after reload
+
+### Flow K: room-admin expel removes member and preserves survivor messaging
+
+Goal:
+
+- exercise the room-admin expel path end-to-end from a real joined admin identity
+- prove that the expelled member disappears from the roster, cannot keep sending, and does not decrypt survivor traffic from the new epoch
+- prove that the survivor remains message-ready immediately after expel
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::admin_expel_removes_member_and_preserves_survivor_messaging --features native-app -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on slot `.cargo-target/gui-protocol-checklist`
+
+Assertions:
+
+- a bootstrap admin can delegate room-admin authority to the joined author leaf
+- the delegated admin can expel another leaf with a real expel merge ticket
+- the expelled member disappears from `members(...)`
+- survivor traffic continues after expel
+- the expelled member cannot continue writing and does not decrypt the new survivor message
+
+### Flow L: offline member restart -> epoch sync -> decrypt after refresh
+
+Goal:
+
+- exercise a user-visible offline recovery path: one member goes offline, another member refreshes and sends traffic, then the offline member restarts and catches up
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::offline_member_restart_then_epoch_sync_after_pcs_refresh_decrypts_new_messages --features native-app -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on slot `.cargo-target/gui-protocol-checklist`
+
+Assertions:
+
+- the offline member does not decrypt the post-refresh message before syncing
+- reloading the stale persisted session simulates a client restart boundary
+- epoch sync moves that reloaded session to the latest epoch
+- the post-sync fetch decrypts the offline traffic
+- the recovered member can reply and the sender still decrypts that reply
+
+### Flow M: restart after admin expel preserves survivor state and new joiner messaging
+
+Goal:
+
+- extend the existing leave/restart chaos path to the room-admin expel path
+- prove that journal replay preserves the expulsion, that the survivor state stays healthy after restart, and that a new member can still join and restore live traffic afterwards
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messaging --features native-app -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on slot `.cargo-target/gui-protocol-checklist`
+
+Assertions:
+
+- the expelled member stays absent before and after restart
+- the survivor remains visible after journal replay
+- the survivor state survives restart + replay without losing room ownership
+- a fresh third member can join, become message-ready, and send after the restart + expel churn
+
+### Flow N: room-admin grant/revoke lifecycle preserves authorization boundaries
+
+Goal:
+
+- exercise the room-admin ACL lifecycle end-to-end from real joined identities
+- prove that delegated admins can grant and revoke admin authority, and that revoked admins lose visibility immediately
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::room_admin_grant_and_revoke_flow_preserves_authorization_boundaries --features native-app -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on slot `.cargo-target/gui-protocol-checklist`
+
+Assertions:
+
+- the bootstrap admin can delegate admin authority to a joined member
+- the delegated admin can grant admin authority to another joined member
+- the new admin appears in `list_room_admins(...)`
+- revoking that admin removes it from the ACL
+- the revoked admin loses ACL visibility immediately

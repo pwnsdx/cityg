@@ -96,9 +96,33 @@ Success criteria:
 Run these before longer smoke/chaos campaigns when you want fast signal on the
 protocol-sensitive room state machine and the user-visible messaging contract.
 
+Canonical protocol checklist:
+
+- [`protocol/20-protocol-checklist.md`](protocol/20-protocol-checklist.md)
+
 Commands:
 
 ```bash
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::perform_join_second_member_can_send_immediately \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::send_fetch_and_members_roundtrip \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::offline_member_restart_then_epoch_sync_after_pcs_refresh_decrypts_new_messages \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::admin_expel_removes_member_and_preserves_survivor_messaging \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::room_admin_grant_and_revoke_flow_preserves_authorization_boundaries \
+  --features native-app -- --exact --nocapture
+
 cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::stale_dueling_pcs_refreshes_converge_and_preserve_messaging \
   --features native-app -- --exact --nocapture
@@ -110,13 +134,22 @@ cargo test --locked -p cityg-gui --bin cityg-gui \
 cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::message_replay_state_survives_client_restart_between_fetch_rounds \
   --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messaging \
+  --features native-app -- --exact --nocapture
 ```
 
 These gates cover:
 
+- fresh join plus bidirectional messaging baseline
+- offline catch-up after `pcs_refresh` across a simulated client restart
+- room-admin expel with survivor continuity
+- room-admin grant/revoke lifecycle and ACL visibility
 - stale dual-refresh convergence from one authenticated baseline
 - replay-state enforcement across repeated fetch rounds
 - replay-state persistence across a simulated client restart
+- restart + expel churn with later joiner messaging
 
 ## Phase 1: Baseline Smoke
 

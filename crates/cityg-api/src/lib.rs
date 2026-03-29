@@ -2766,6 +2766,11 @@ async fn barrier_issue_full_verification_witness(
             "deployment_profile_manifest must be provided",
         ));
     }
+    if request.merge_ticket_artifact.is_empty() {
+        return Err(ApiError::InvalidRequest(
+            "merge_ticket_artifact must be provided",
+        ));
+    }
     if request.barrier_update_reason != 0 && request.barrier_update_reason != 1 {
         return Err(ApiError::InvalidRequest(
             "barrier_update_reason must be 0 or 1 for full verification witness",
@@ -2774,6 +2779,13 @@ async fn barrier_issue_full_verification_witness(
     if request.revocation_roots_hash.len() != 32 {
         return Err(ApiError::InvalidRequest(
             "revocation_roots_hash must be 32 bytes",
+        ));
+    }
+    if !request.revocation_target_leaf_id.is_empty()
+        && request.revocation_target_leaf_id.len() != 32
+    {
+        return Err(ApiError::InvalidRequest(
+            "revocation_target_leaf_id must be 32 bytes when provided",
         ));
     }
     let gid = parse_gid(&request.room_id)?;
@@ -2789,12 +2801,27 @@ async fn barrier_issue_full_verification_witness(
     author_leaf_id.copy_from_slice(&request.author_leaf_id);
     let mut revocation_roots_hash = [0u8; 32];
     revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
+    let revocation_target_leaf_id = if request.revocation_target_leaf_id.is_empty() {
+        None
+    } else {
+        let mut leaf_id = [0u8; 32];
+        leaf_id.copy_from_slice(&request.revocation_target_leaf_id);
+        Some(leaf_id)
+    };
 
     let witness = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         let bundle = if request.barrier_update_reason == 0 {
-            guard.build_merge_ticket(&gid, &author_leaf_id)
+            match revocation_target_leaf_id {
+                Some(target_leaf_id) if target_leaf_id != author_leaf_id => guard
+                    .build_merge_ticket_for_targeted_revocation(
+                        &gid,
+                        &author_leaf_id,
+                        &target_leaf_id,
+                    ),
+                _ => guard.build_merge_ticket(&gid, &author_leaf_id),
+            }
         } else {
             guard.build_merge_ticket_for_refresh(&gid, &author_leaf_id)
         }
@@ -2826,6 +2853,9 @@ async fn barrier_issue_full_verification_witness(
                 "current_global_history_attestation mismatch with authenticated current state",
             ));
         }
+        let history_authority_descriptor = guard
+            .history_authority_descriptor_bytes()
+            .map_err(ApiError::from)?;
         let expected_manifest = guard
             .deployment_profile_manifest_bytes(
                 &gid,
@@ -2839,6 +2869,26 @@ async fn barrier_issue_full_verification_witness(
         if request.deployment_profile_manifest.as_slice() != expected_manifest.as_slice() {
             return Err(ApiError::InvalidRequest(
                 "deployment_profile_manifest mismatch with authenticated current state",
+            ));
+        }
+        let pivot_parity_cbor = bundle
+            .parities
+            .iter()
+            .map(pivot_parity_to_cbor)
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_merge_ticket_artifact = guard
+            .merge_ticket_artifact_bytes(
+                &bundle,
+                API_PROFILE_VERSION,
+                guard.history_authority_extension_id(),
+                history_authority_descriptor.as_slice(),
+                expected_attestation.as_slice(),
+                pivot_parity_cbor.as_slice(),
+            )
+            .map_err(ApiError::from)?;
+        if request.merge_ticket_artifact.as_slice() != expected_merge_ticket_artifact.as_slice() {
+            return Err(ApiError::InvalidRequest(
+                "merge_ticket_artifact mismatch with authenticated current state",
             ));
         }
         let expected_revocation_roots_hash = if request.barrier_update_reason == 0 {
@@ -3464,6 +3514,7 @@ async fn send_message(
     let mut sender_leaf = [0u8; 32];
     sender_leaf.copy_from_slice(&sender);
     let scope = ensure_leaf_member_for_epoch(&state, &weid, sender_leaf).await?;
+    ensure_leaf_member_for_room(&state, &scope.gid, sender_leaf).await?;
     let timestamp_ms = current_timestamp_ms();
 
     let stored = StoredMessage {

@@ -36,12 +36,13 @@ This directory contains legacy, chapterized companion material that complements 
 12. **[12-error-reference.md](12-error-reference.md)** - Complete freeze/reject error catalog
 13. **[13-testing-guide.md](13-testing-guide.md)** - Test coverage and known-answer tests (KATs)
 14. **[14-deployment-guide.md](14-deployment-guide.md)** - Deployment considerations for experimental/research use
+15. **[20-protocol-checklist.md](20-protocol-checklist.md)** - Protocol guarantee checklist and E2E coverage map
 
 ### Reference Materials
 
-15. **[15-label-registry.md](15-label-registry.md)** - All domain-separation labels and constants
-16. **[16-comparison-mls.md](16-comparison-mls.md)** - How City-G differs from MLS
-17. **[17-faq.md](17-faq.md)** - Frequently asked questions
+16. **[15-label-registry.md](15-label-registry.md)** - All domain-separation labels and constants
+17. **[16-comparison-mls.md](16-comparison-mls.md)** - How City-G differs from MLS
+18. **[17-faq.md](17-faq.md)** - Frequently asked questions
 
 ---
 
@@ -67,6 +68,7 @@ This directory contains legacy, chapterized companion material that complements 
 - Server blindness: [07-server-acceptance.md](07-server-acceptance.md) §3
 - Side-channels: [`../timing-verification.md`](../timing-verification.md)
 - Test coverage: [13-testing-guide.md](13-testing-guide.md)
+- Protocol guarantees: [20-protocol-checklist.md](20-protocol-checklist.md)
 
 ---
 

@@ -97,12 +97,13 @@ async fn finalize_joined_room(session: AppSession, mode: BarrierMergeMode) -> Re
                 load_session_at(&session.server_url, &session.room_id)?.ok_or_else(|| {
                     anyhow!("persisted joined session missing after barrier merge publish")
                 })?;
-            let sync = perform_epoch_sync(persisted)
+            let mut sync = perform_epoch_sync(persisted)
                 .await
                 .context(mode.fallback_sync_context())?;
             if sync.session.barrier_state.barrier_recovery_pending {
                 return Err(anyhow!(mode.still_pending_message()));
             }
+            sync.session.barrier_state.pending = None;
             persist_activated_joined_session(&sync.session).context(mode.persist_context())?;
             Ok(sync.session)
         }
@@ -238,12 +239,6 @@ fn apply_local_published_barrier_merge(
     Ok(())
 }
 
-fn cover_leaf_index_for_n_max(leaf_id: &[u8; 32], n_max: u64) -> u64 {
-    let n_max = n_max.max(1).min(u32::MAX as u64) as u32;
-    let leaf_suffix: [u8; 4] = leaf_id[28..32].try_into().unwrap_or_default();
-    u64::from(u32::from_be_bytes(leaf_suffix) % n_max)
-}
-
 fn ensure_full_barrier_verification_for_origin(
     barrier_recovery_pending: bool,
     current_barrier_full_verified: bool,
@@ -322,6 +317,7 @@ async fn publish_revocation_merge_from_ticket(
     request: LeaveRequest,
     ticket: MergeTicket,
     operation_label: &'static str,
+    revocation_target_leaf_id: Option<[u8; 32]>,
 ) -> Result<PublishedBarrierMerge> {
     let persist_request = request.clone();
     let LeaveRequest {
@@ -382,6 +378,7 @@ async fn publish_revocation_merge_from_ticket(
         history_authority_extension: ticket_history_authority_extension,
         history_authority,
         current_global_history_attestation_bytes,
+        merge_ticket_artifact_bytes,
         deployment_profile_manifest_bytes,
         n_max,
         max_barrier_update_bytes,
@@ -539,7 +536,7 @@ async fn publish_revocation_merge_from_ticket(
     )?;
     let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
     let next_barrier_version = barrier_version.saturating_add(1);
-    let updater_leaf = cover_leaf_index_for_n_max(&leaf_id, barrier_n_max);
+    let updater_leaf = u64::from(revoked_cover_leaf_index);
     let barrier_update = build_barrier_update_bytes(
         &gid,
         barrier_n_max,
@@ -606,6 +603,8 @@ async fn publish_revocation_merge_from_ticket(
             .barrier_issue_full_verification_witness(
                 &room_id,
                 &leaf_id,
+                Some(&revocation_target_leaf_id.unwrap_or(leaf_id)),
+                merge_ticket_artifact_bytes.as_slice(),
                 0,
                 barrier_update.raw_update.as_slice(),
                 barrier_n_max,
@@ -846,7 +845,8 @@ pub(super) async fn perform_leave(request: LeaveRequest) -> Result<()> {
         }
     };
 
-    publish_revocation_merge_from_ticket(request, ticket, "leave").await?;
+    let leave_leaf_id = request.leaf_id;
+    publish_revocation_merge_from_ticket(request, ticket, "leave", Some(leave_leaf_id)).await?;
     Ok(())
 }
 
@@ -918,7 +918,9 @@ pub(super) async fn perform_room_admin_expel(
         }
     };
 
-    let published = publish_revocation_merge_from_ticket(request, ticket, "expel").await?;
+    let published =
+        publish_revocation_merge_from_ticket(request, ticket, "expel", Some(target_leaf_id))
+            .await?;
     let mut updated = session.clone();
     match apply_local_published_barrier_merge(&mut updated, published) {
         Ok(()) => {
@@ -932,12 +934,13 @@ pub(super) async fn perform_room_admin_expel(
             );
             let persisted = load_session_at(&session.server_url, &session.room_id)?
                 .ok_or_else(|| anyhow!("persisted session missing after expel merge publish"))?;
-            let sync = perform_epoch_sync(persisted)
+            let mut sync = perform_epoch_sync(persisted)
                 .await
                 .context("sync room after expel merge")?;
             if sync.session.barrier_state.barrier_recovery_pending {
                 return Err(anyhow!("barrier recovery still pending after expel merge"));
             }
+            sync.session.barrier_state.pending = None;
             persist_activated_joined_session(&sync.session)
                 .context("persist room session after expel merge sync")?;
             Ok(sync.session)
@@ -1084,6 +1087,7 @@ async fn perform_barrier_merge_inner(
         history_authority_extension: ticket_history_authority_extension,
         history_authority,
         current_global_history_attestation_bytes,
+        merge_ticket_artifact_bytes,
         deployment_profile_manifest_bytes,
         n_max,
         max_barrier_update_bytes,
@@ -1318,6 +1322,8 @@ async fn perform_barrier_merge_inner(
                 .barrier_issue_full_verification_witness(
                     &room_id,
                     &leaf_id,
+                    None,
+                    merge_ticket_artifact_bytes.as_slice(),
                     mode.reason(),
                     barrier_update.raw_update.as_slice(),
                     barrier_n_max,
