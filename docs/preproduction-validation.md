@@ -180,6 +180,7 @@ cargo test --locked -p cityg-api --test integration \
 cargo test --locked -p cityg-server \
   malformed_leave_rejection_does_not_poison_room_state \
   malformed_refresh_rejection_does_not_poison_room_state \
+  malformed_refresh_concurrent_with_honest_join_preserves_live_state \
   malformed_refresh_concurrent_with_honest_join_does_not_poison_restart_recovery \
   hostile_barrier_update_mutations_fail_closed_without_poisoning_restart_recovery \
   malformed_join_finalize_rejection_does_not_poison_restart_recovery \
@@ -225,6 +226,7 @@ These gates cover:
 - restart in the middle of that malformed join race still converges to the honest joined member
 - malformed leave rejection without poisoning the room state
 - malformed refresh rejection without poisoning the room state
+- malformed refresh race against an honest join without poisoning the live room state
 - malformed refresh race against an honest join without poisoning restart recovery
 - structured barrier header/update mutations staying fail-closed without poisoning restart recovery
 - malformed `join_finalize` rejection without poisoning restart recovery
@@ -238,6 +240,7 @@ These gates cover:
 - replayed room-admin proofs staying rejected after restart without poisoning ACL state
 - restart during a published-but-not-reloaded `join_finalize` activation
 - watch websocket reconnect resuming fresh notifications under active burst traffic
+- the remaining large-churn and hostile `join_finalize` guarantees are covered by the existing composite matrix in [`docs/protocol/20-protocol-checklist.md`](./protocol/20-protocol-checklist.md), so no blocking runtime backlog remains for the current profile
 
 ## Phase 1: Baseline Smoke
 

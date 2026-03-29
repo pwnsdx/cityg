@@ -14049,6 +14049,57 @@ mod tests {
     }
 
     #[test]
+    fn malformed_refresh_concurrent_with_honest_join_preserves_live_state() -> Result<(), CityGError>
+    {
+        let mut server = demo_server_with_global_history_authority();
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice = build_genesis_member_bundle(0x91)?;
+        server.accept_epoch(&alice.bundle)?;
+        let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+
+        let (join_finalize, _) =
+            build_refresh_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+        let mut malformed_refresh = join_finalize.clone();
+        malformed_refresh.header_map.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(1u64)),
+        );
+        malformed_refresh
+            .header_map
+            .remove(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS);
+
+        let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x92, true)?;
+        server.accept_epoch(&bob.bundle)?;
+
+        let err = server
+            .accept_epoch(&malformed_refresh)
+            .expect_err("malformed refresh race must be rejected");
+        assert!(
+            matches!(err, CityGError::InvalidInput(_)) || matches!(err, CityGError::Acceptance(_)),
+            "unexpected malformed refresh live-race error: {err:?}"
+        );
+
+        let members_after_race = server.members(&gid);
+        assert_eq!(
+            members_after_race.len(),
+            2,
+            "malformed refresh race must preserve the healthy live roster without restart"
+        );
+        assert!(
+            members_after_race.contains(&alice.leaf_id)
+                && members_after_race.contains(&bob.leaf_id),
+            "alice and bob must remain present after the malformed refresh live race"
+        );
+
+        let followup_ticket = server.build_merge_ticket_for_refresh(&gid, &alice.leaf_id)?;
+        assert_eq!(
+            followup_ticket.barrier_version, 0,
+            "live malformed refresh race must still allow a healthy survivor refresh ticket"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn malformed_refresh_concurrent_with_honest_join_does_not_poison_restart_recovery()
     -> Result<(), CityGError> {
         let _guard = super::journal_serial_guard();

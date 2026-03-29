@@ -1431,3 +1431,39 @@ Assertions:
 - replaying the same signed proof after restart is rejected as an HTTP error
 - ACL state remains intact after the replay attempt
 - a later honest `revoke_admin` still succeeds
+
+### Flow AD: malformed refresh live race preserves the healthy room state
+
+Goal:
+
+- prove that a malformed refresh-shaped bundle racing with a later honest join
+  cannot poison the live room even before any restart path is exercised
+
+Coverage:
+
+- `cargo test --locked -p cityg-server malformed_refresh_concurrent_with_honest_join_preserves_live_state -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/server-malicious-mutations`
+
+Assertions:
+
+- a malformed refresh-shaped bundle derived from a `join_finalize` baseline is
+  rejected once a later honest join has already advanced the room
+- the rejection preserves the healthy live roster immediately, without relying
+  on a restart boundary
+- a later honest survivor refresh ticket is still buildable from the live room
+
+### Composite closure note
+
+The last runtime backlog items from the checklist are now closed either by a
+direct flow or by an explicit composite of already-green flows:
+
+- hostile `refresh` race: Flow AD plus the earlier restart proof
+- hostile `join_finalize` interference: malformed `join_finalize` rejection,
+  post-publish `epoch_sync` recovery, and restart-during-pending activation
+- large public-room churn: expel/refresh/new-join continuity, offline catch-up,
+  same-identity rejoin, replay-state after restart, and watch recovery
+- mutation harness coverage: structured barrier mutations, helper-manifest
+  guards, authority/header mismatch guards, and sender-binding spoof rejection
