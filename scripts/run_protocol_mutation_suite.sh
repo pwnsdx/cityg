@@ -17,6 +17,9 @@ cargo test --locked -p cityg-server \
   hostile_barrier_update_byte_flip_sweep_fail_closed_without_poisoning_restart_recovery \
   -- --nocapture
 cargo test --locked -p cityg-server \
+  prop_authority_bound_refresh_bundle_mutations_fail_closed_without_poisoning_live_state \
+  -- --nocapture
+cargo test --locked -p cityg-server \
   malformed_refresh_concurrent_with_honest_join_preserves_live_state \
   -- --nocapture
 cargo test --locked -p cityg-server \

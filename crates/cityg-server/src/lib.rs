@@ -6790,6 +6790,7 @@ mod tests {
         self, SecretKey as MlDsaSecretKey, keypair as ml_dsa_keypair,
     };
     use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey};
+    use proptest::prelude::*;
     use rand::{RngExt, SeedableRng, rngs::StdRng};
     use serde::Serialize;
     use std::{
@@ -14442,6 +14443,123 @@ mod tests {
             "restart must still allow a healthy survivor refresh ticket after the byte-flip mutation sweep"
         );
         Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 24,
+            max_shrink_iters: 0,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn prop_authority_bound_refresh_bundle_mutations_fail_closed_without_poisoning_live_state(
+            mutation_target in 0u8..5,
+            offset_seed in any::<usize>(),
+            xor_mask in 1u8..=u8::MAX,
+            alternate_reason in prop_oneof![Just(0u64), Just(2u64), 3u64..=32u64],
+        ) {
+            let gid = cityg_client::demo::DEMO_GID;
+            let alice = build_genesis_member_bundle(0xA0).expect("build alice");
+            let mut server = demo_server_with_global_history_authority();
+            server.accept_epoch(&alice.bundle).expect("accept alice");
+            let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)
+                .expect("seed accepted barrier update");
+
+            let (pristine_bundle, _) =
+                build_refresh_bundle_for_member(&mut server, &alice, &alice.bundle)
+                    .expect("build refresh bundle");
+            let baseline_reason = u64_from_header(
+                &pristine_bundle.header_map,
+                hdr::HDR_BARRIER_UPDATE_REASON,
+            )
+            .expect("baseline reason");
+
+            let mut mutated = pristine_bundle.clone();
+            match mutation_target {
+                0 => {
+                    let Value::Bytes(raw) = mutated
+                        .header_map
+                        .get_mut(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
+                        .expect("refresh receipt must exist under global authority")
+                    else {
+                        panic!("refresh receipt must stay bytes");
+                    };
+                    let idx = offset_seed % raw.len();
+                    raw[idx] ^= xor_mask;
+                }
+                1 => {
+                    let Value::Bytes(raw) = mutated
+                        .header_map
+                        .get_mut(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
+                        .expect("refresh attestation must exist under global authority")
+                    else {
+                        panic!("refresh attestation must stay bytes");
+                    };
+                    let idx = offset_seed % raw.len();
+                    raw[idx] ^= xor_mask;
+                }
+                2 => {
+                    let Value::Bytes(raw) = mutated
+                        .header_map
+                        .get_mut(&hdr::HDR_BARRIER_UPDATE)
+                        .expect("refresh barrier update must exist")
+                    else {
+                        panic!("refresh barrier update must stay bytes");
+                    };
+                    let idx = offset_seed % raw.len();
+                    raw[idx] ^= xor_mask;
+                }
+                3 => {
+                    let replacement_reason = if alternate_reason == baseline_reason {
+                        if baseline_reason == 0 { 2 } else { 0 }
+                    } else {
+                        alternate_reason
+                    };
+                    mutated.header_map.insert(
+                        hdr::HDR_BARRIER_UPDATE_REASON,
+                        Value::Integer(Integer::from(replacement_reason)),
+                    );
+                }
+                4 => {
+                    if let Some(Value::Bytes(raw)) = mutated
+                        .header_map
+                        .get_mut(&hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS)
+                    {
+                        let idx = offset_seed % raw.len();
+                        raw[idx] ^= xor_mask;
+                    } else {
+                        let Value::Bytes(raw) = mutated
+                            .header_map
+                            .get_mut(&hdr::HDR_BARRIER_UPDATE)
+                            .expect("refresh barrier update must exist")
+                        else {
+                            panic!("refresh barrier update must stay bytes");
+                        };
+                        let idx = offset_seed % raw.len();
+                        raw[idx] ^= xor_mask;
+                    }
+                }
+                _ => unreachable!("bounded mutation target"),
+            }
+
+            let err = server
+                .accept_epoch(&mutated)
+                .expect_err("mutated refresh bundle must be rejected");
+            prop_assert!(
+                matches!(err, CityGError::InvalidInput(_))
+                    || matches!(err, CityGError::Acceptance(_)),
+                "unexpected property mutation error: {err:?}"
+            );
+
+            let members = server.members(&gid);
+            prop_assert_eq!(
+                members.len(),
+                1,
+                "mutated refresh bundle must not poison the live roster"
+            );
+            prop_assert!(members.contains(&alice.leaf_id));
+        }
     }
 
     #[test]

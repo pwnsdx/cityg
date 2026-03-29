@@ -247,6 +247,7 @@ These gates cover:
 - restart during a published-but-not-reloaded `join_finalize` activation
 - watch websocket reconnect resuming fresh notifications under active burst traffic
 - paginated helper responses that mutate their manifest or attestation between pages still fail closed
+- property-style authority-bound refresh bundle mutations stay fail-closed
 - the remaining large-churn and hostile `join_finalize` guarantees are covered by the existing composite matrix in [`docs/protocol/20-protocol-checklist.md`](./protocol/20-protocol-checklist.md), so no blocking runtime backlog remains for the current profile
 
 Convenience wrappers for the optional scale-up campaigns live in:
@@ -283,7 +284,9 @@ Success criteria:
 
 - watch-mode join/leave flow completes successfully
 - message send path emits and receives a notification event
-- restart-chaos run produces `client-restarts.log` plus client-state artifacts
+- restart-chaos run produces client-state artifacts and, when an individual
+  `join_leave` child survives long enough to cross the configured threshold,
+  also produces `client-restarts.log`
 - capacity test still raises the expected `freeze 925` / `mh_window_full` path when requested separately
 
 Artifacts:
@@ -385,7 +388,10 @@ Collect:
 - periodic `/health/detailed` snapshots
 - periodic `/metrics` snapshots
 - restart timestamps and replay duration
-- `client-restarts.log` and per-round `worker-*-client-state/*.json`
+- `restarts.log`
+- `client-restarts.log` when the configured client-restart threshold is
+  actually crossed by a long-lived child
+- per-round `worker-*-client-state/*.json`
 
 Named runner:
 

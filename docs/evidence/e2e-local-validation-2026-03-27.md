@@ -1516,6 +1516,29 @@ Assertions:
 - the live roster remains intact after the sweep
 - restart still preserves the healthy roster and refresh-ticket path
 
+### Flow AF2: property-style hostile refresh mutations fail closed
+
+Goal:
+
+- prove across many generated mutations, not just named hand-picked ones, that
+  an authority-bound refresh bundle mutated after honest construction still
+  fails closed without poisoning the live room
+
+Coverage:
+
+- `cargo test --locked -p cityg-server prop_authority_bound_refresh_bundle_mutations_fail_closed_without_poisoning_live_state -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/protocol-mutation-suite`
+
+Assertions:
+
+- mutations across witness, receipt, attestation, `barrier_update`, and
+  `barrier_update_reason` are sampled repeatedly by the property harness
+- each generated mutation is rejected fail-closed
+- the live roster remains intact after every generated mutation case
+
 ### Flow AG: named protocol mutation suite runner
 
 Goal:
@@ -1534,6 +1557,7 @@ Passed:
 Assertions:
 
 - server-side hostile bundle mutation guards pass as a suite
+- the property-style refresh mutation harness passes inside the same runner
 - GUI-side authority/header and sender-binding negative tests still pass
 - API-client paginated helper mutation guards still pass
 
@@ -1556,6 +1580,11 @@ Passed:
     `/tmp/cityg-stress-large-group-short`
   - `.cargo-target/stress-large-group` reused for the restart-heavy profile,
     with artifacts under `/tmp/cityg-stress-restart-traffic-short2`
+- `2026-03-29` with longer confidence runs on:
+  - `.cargo-target/stress-large-group` with artifacts under
+    `/tmp/cityg-stress-large-group-60s`
+  - `.cargo-target/stress-large-group` reused for the restart-heavy profile,
+    with artifacts under `/tmp/cityg-stress-restart-traffic-60s`
 
 Assertions:
 
@@ -1569,6 +1598,15 @@ Assertions:
   `rounds_completed=4`, `worker_failures=0`, `restarts=3`,
   `accept_epoch_ok=17`, `refresh_conflicts=3`, and produced both
   `restarts.log` and `client-restarts.log`
+- longer large-group validation finished with `workers=2`,
+  `rounds_completed=8`, `worker_failures=0`, `accept_epoch_ok=183`,
+  `refresh_conflicts=19`
+- longer restart-heavy validation finished with `workers=2`,
+  `rounds_completed=16`, `worker_failures=0`, `restarts=4`,
+  `accept_epoch_ok=37`, `refresh_conflicts=7`, and produced `restarts.log`
+- the presence of `client-restarts.log` remains workload-dependent because the
+  harness only injects a managed client restart when an individual
+  `join_leave` child survives long enough to cross the configured threshold
   attestation state between pages without the client failing closed
 
 Coverage:
