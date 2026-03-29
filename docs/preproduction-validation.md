@@ -156,6 +156,10 @@ cargo test --locked -p cityg-gui --bin cityg-gui \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::dual_restarted_watchers_fetch_offline_backlog_and_resume_live_notifications \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messaging \
   --features native-app -- --exact --nocapture
 
@@ -214,6 +218,7 @@ These gates cover:
 - watch reconnect bridging offline backlog before resuming the live feed
 - client restart during multi-version catch-up after `refresh + leave`
 - two restarted members resuming bilateral traffic without duplicate delivery
+- two restarted watchers bridging offline backlog before resuming live notifications
 - restart + expel churn with later joiner messaging
 - malformed join rejection without poisoning the room before or after restart
 - concurrent malformed join and honest join races still converge to the honest room state across restart

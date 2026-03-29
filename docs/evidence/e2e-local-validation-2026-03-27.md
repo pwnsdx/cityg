@@ -1024,6 +1024,43 @@ Notes:
 - this flow complements the single-client restart tests by proving that both
   sides can cross the same restart boundary and continue exchanging traffic
 
+### Flow U2: dual restarted watchers bridge backlog and resume live notifications
+
+Goal:
+
+- prove the stronger watch/runtime property that two members can both restart,
+  miss traffic while offline, reconnect their websocket watchers, fetch the
+  missed backlog exactly once, and then both resume receiving fresh live
+  notifications
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::dual_restarted_watchers_fetch_offline_backlog_and_resume_live_notifications --features native-app -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/gui-dual-watch-restart`
+
+Assertions:
+
+- both restarted watchers reconnect their websocket feed after loading from
+  disk
+- traffic emitted while both watchers were offline is bridged by `perform_fetch`
+  on both clients
+- once the backlog is fetched, repeated fetches are empty on both sides
+- a later live message produces websocket `Message` notifications for both
+  restarted watchers
+- the follow-up fetch for each watcher includes only the fresh live traffic and
+  does not replay the bridged backlog
+
+Notes:
+
+- this extends Flow T and Flow U together instead of validating those two
+  properties in isolation
+- the sender remains online while the two watchers cross the restart boundary,
+  which is closer to the public-room watch UX than the bilateral-only restart
+  flow
+
 ### Flow V: malformed join rejection does not poison room state or restart recovery
 
 Goal:

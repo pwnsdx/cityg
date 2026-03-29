@@ -37,6 +37,7 @@ system by protocol contract rather than by implementation detail.
 | Multi-version gap recovery is bounded | A stale member can survive a version gap after `refresh + leave` without dangerous best-effort activation. | Covered | `native::tests::epoch_sync_survives_multi_version_barrier_gap_after_refresh_and_leave` |
 | Client restart during multi-version catch-up recovers cleanly | A stale client can restart across a `refresh + leave` gap, sync, and return to message-ready operation. | Covered | `native::tests::client_restart_during_multi_version_catchup_after_refresh_and_leave_recovers_cleanly` |
 | Two restarted members resume messaging without duplicate delivery | Two members can both restart from disk, resume bilateral traffic immediately, and keep fetch replay-state suppression intact across the restart boundary. | Covered | `native::tests::two_restarted_members_exchange_traffic_without_duplicate_delivery` |
+| Two restarted watchers bridge backlog and resume live notifications | Two restarted watchers can reconnect after offline traffic, fetch the missed backlog exactly once, and then both resume live websocket notifications without replaying that backlog. | Covered | `native::tests::dual_restarted_watchers_fetch_offline_backlog_and_resume_live_notifications` |
 | Restart after leave preserves room health | Restarting the server after leave churn preserves survivor state and allows new joins. | Covered | `native::tests::restart_after_leave_preserves_survivor_refresh_and_new_join` |
 | Restart after expel preserves room health | Restarting the server after admin expel preserves survivor state and allows a fresh joiner to resume room traffic. | Covered | `native::tests::restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messaging` |
 | Restart during pending `join_finalize` activation recovers cleanly | If a `join_finalize` is published but the joiner crashes before reload, a server restart still leaves the published epoch bundle fetchable and `epoch_sync` clears the pending recovery state. | Covered | `native::tests::restart_during_pending_join_finalize_activation_recovers_via_epoch_sync`, `restart_rehydrates_bundle_store_for_post_restart_bundle_fetch` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
@@ -113,6 +114,10 @@ cargo test --locked -p cityg-gui --bin cityg-gui \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::dual_restarted_watchers_fetch_offline_backlog_and_resume_live_notifications \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messaging \
   --features native-app -- --exact --nocapture
 
@@ -171,5 +176,4 @@ cargo test --locked -p cityg-api --test integration \
 - `P1`: hostile `refresh` / honest publish race with and without server restart
 - `P1`: hostile `join_finalize` / honest survivor refresh race with and without server restart
 - `P2`: 8-to-16 member churn flow combining expel, refresh, rejoin, offline catch-up, and active traffic
-- `P2`: dual-client restart during active watch traffic plus backlog replay validation
 - `P2`: API-side mutation harness that systematically flips `barrier_update`, `reason`, `header[180..183]`, manifests, and sender binding fields while asserting fail-closed recovery
