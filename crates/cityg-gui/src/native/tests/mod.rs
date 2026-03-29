@@ -8054,7 +8054,134 @@ async fn join_finalize_fault_injection_after_publish_recovers_via_epoch_sync()
     Ok(())
 }
 
-#[test]
+#[tokio::test]
+async fn restart_during_pending_join_finalize_activation_recovers_via_epoch_sync()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+
+    let temp_dir = TempDir::new()?;
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+    let journal_dir = temp_dir.path().join("cityg").join("server");
+    std::fs::create_dir_all(&journal_dir)?;
+    let journal_path = journal_dir.join("restart-pending-join-finalize.journal");
+
+    let port = next_test_port();
+    let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let mut room_id_bytes = [0xB3u8; 32];
+    room_id_bytes[..2].copy_from_slice(&port.to_le_bytes());
+    let room_id = hex_encode(room_id_bytes);
+    bootstrap_test_room(&server_url, &room_id).await?;
+
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+        let mut alice = perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?;
+        alice.barrier_state.barrier_recovery_pending = false;
+        persist_session(&alice)?;
+    }
+
+    let join_result = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        with_fault_injection_async(
+            vec![fault_step(
+                FaultInjectionCutPoint::AfterPublishBeforeReload,
+                FaultInjectionAction::Fail("inject join finalize post-publish failure"),
+            )],
+            || {
+                perform_join(JoinParams {
+                    server_url: server_url.clone(),
+                    room_id: room_id.clone(),
+                    alias: "bob".to_string(),
+                })
+            },
+        )
+        .await
+    };
+    if let Err(err) = &join_result {
+        assert!(
+            format!("{err:#}").contains("inject join finalize post-publish failure"),
+            "unexpected join finalize error: {err:#}"
+        );
+    }
+
+    let persisted = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        let persisted = load_session_at(&server_url, &room_id)?
+            .ok_or_else(|| anyhow!("expected persisted bob session after post-publish fault"))?;
+        let pending = persisted.barrier_state.pending.clone().ok_or_else(|| {
+            anyhow!("expected pending join_finalize state after post-publish fault")
+        })?;
+        assert!(persisted.barrier_state.barrier_recovery_pending);
+        assert_eq!(pending.barrier_update_reason, Some(2));
+        persisted
+    };
+
+    let before_restart_members = new_api_client(&server_url)
+        .members(&persisted.gid, None)
+        .await?;
+    assert!(
+        before_restart_members
+            .members
+            .iter()
+            .any(|member| member.leaf_id.as_slice() == persisted.leaf_id.as_slice()),
+        "published join_finalize must already admit the new joiner before restart"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = new_api_client(&server_url);
+    let after_restart_members = client.members(&persisted.gid, None).await?;
+    assert!(
+        after_restart_members
+            .members
+            .iter()
+            .any(|member| member.leaf_id.as_slice() == persisted.leaf_id.as_slice()),
+        "restart must preserve the admitted joiner in the roster"
+    );
+    let refresh_ticket = client
+        .merge_ticket_refresh(&room_id, &persisted.leaf_id)
+        .await
+        .map_err(|err| anyhow!("merge_ticket_refresh after restart: {err:#}"))?;
+    client
+        .get_bundle(&refresh_ticket.we_epoch_id)
+        .await
+        .map_err(|err| anyhow!("replayed get_bundle after restart: {err:#}"))?;
+
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+        let synced = perform_epoch_sync(persisted)
+            .await
+            .map_err(|err| anyhow!("epoch_sync after restart: {err:#}"))?;
+        assert!(
+            !synced.session.barrier_state.barrier_recovery_pending,
+            "epoch sync should recover a published join_finalize after restart"
+        );
+        assert!(
+            synced.session.barrier_state.pending.is_none(),
+            "published join_finalize must clear pending state after restart recovery"
+        );
+    }
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
 fn room_identity_persists_reuses_same_room_and_survives_session_removal()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
@@ -11382,6 +11509,538 @@ async fn restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messa
         )?)
         .await
         .map_err(|err| anyhow!("post-restart charlie send after expel: {err:#}"))?;
+    }
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn admin_expel_then_survivor_refresh_preserves_room_and_new_joiner_messaging()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+    let charlie_base = temp_dir.path().join("cityg").join("gui-charlie");
+
+    let port = next_test_port();
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let mut room_id_bytes = [0xA8u8; 32];
+    room_id_bytes[..2].copy_from_slice(&port.to_le_bytes());
+    let room_id = hex_encode(room_id_bytes);
+    let (bootstrap_admin_pop_public_key, bootstrap_admin_pop_secret_key) =
+        bootstrap_test_room_with_admin_identity(&server_url, &room_id).await?;
+
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
+    let bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?
+    };
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let synced = perform_epoch_sync(alice).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+
+    let client = new_api_client(&server_url);
+    let grant_proof = build_room_admin_target_proof(
+        RoomAdminOperation::GrantAdmin,
+        &room_id,
+        &alice.pop_public_key,
+        &bootstrap_admin_pop_public_key,
+        &bootstrap_admin_pop_secret_key,
+    )?;
+    client
+        .grant_room_admin(&room_id, &alice.pop_public_key, grant_proof)
+        .await?;
+
+    let alice_after_expel = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        persist_session(&alice)?;
+        perform_room_admin_expel(alice.clone(), bob.leaf_id).await?
+    };
+    let alice_after_refresh = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        persist_session(&alice_after_expel)?;
+        perform_pcs_refresh(LeaveRequest::from_session(&alice_after_expel)).await?;
+        let pending = load_session_at(&server_url, &room_id)?
+            .ok_or_else(|| anyhow!("expected persisted alice session after expel+refresh"))?;
+        let synced = perform_epoch_sync(pending).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+    assert!(
+        !alice_after_refresh.barrier_state.barrier_recovery_pending,
+        "survivor should remain message-ready after expel followed by refresh"
+    );
+
+    let members_after_refresh = client.members(&alice_after_refresh.gid, None).await?;
+    assert_eq!(members_after_refresh.total_count, 1);
+    assert!(
+        members_after_refresh
+            .members
+            .iter()
+            .any(|member| member.leaf_id.as_slice() == alice_after_refresh.leaf_id.as_slice()),
+        "survivor must remain visible after expel+refresh"
+    );
+    assert!(
+        !members_after_refresh
+            .members
+            .iter()
+            .any(|member| member.leaf_id.as_slice() == bob.leaf_id.as_slice()),
+        "expelled member must stay absent after survivor refresh"
+    );
+
+    let survivor_plaintext = "alice-after-expel-refresh".to_string();
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_send(SendParams::from_session(
+            &alice_after_refresh,
+            survivor_plaintext.clone(),
+            0,
+        )?)
+        .await?;
+    }
+
+    let stale_bob_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_fetch(FetchParams::from_session(&bob, None)?).await?
+    };
+    assert!(
+        stale_bob_fetch
+            .messages
+            .iter()
+            .all(|message| message.plaintext != survivor_plaintext),
+        "expelled stale client must not decrypt survivor traffic after expel+refresh"
+    );
+
+    let stale_bob_sync = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+        perform_epoch_sync(bob).await
+    };
+    if let Ok(outcome) = stale_bob_sync {
+        let err = match perform_send(SendParams::from_session(
+            &outcome.session,
+            "bob-after-expel-refresh".to_string(),
+            1,
+        )?)
+        .await
+        {
+            Ok(_) => {
+                return Err(anyhow!(
+                    "expelled member must stay unable to send after expel+refresh"
+                )
+                .into());
+            }
+            Err(err) => err,
+        };
+        assert!(
+            !err.to_string().is_empty(),
+            "post-sync expel rejection must remain explicit after survivor refresh"
+        );
+    }
+
+    let charlie = {
+        let _override_guard = set_config_dir_override_for_tests(Some(charlie_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "charlie".to_string(),
+        })
+        .await?
+    };
+    let charlie = if charlie.barrier_state.barrier_recovery_pending {
+        let _override_guard = set_config_dir_override_for_tests(Some(charlie_base.clone()));
+        perform_epoch_sync(charlie).await?.session
+    } else {
+        charlie
+    };
+    assert!(
+        !charlie.barrier_state.barrier_recovery_pending,
+        "new joiner must still become message-ready after expel+refresh churn"
+    );
+    let charlie_plaintext = "charlie-after-expel-refresh".to_string();
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(charlie_base));
+        perform_send(SendParams::from_session(
+            &charlie,
+            charlie_plaintext.clone(),
+            0,
+        )?)
+        .await?;
+    }
+    assert!(
+        new_api_client(&server_url)
+            .members(&alice_after_refresh.gid, None)
+            .await?
+            .members
+            .iter()
+            .any(|member| member.leaf_id.as_slice() == charlie.leaf_id.as_slice()),
+        "fresh joiner must appear in the roster after expel+refresh churn"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_author_messaging_across_refresh_epoch_change_preserves_delivery()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+
+    let port = next_test_port();
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let room_id = hex_encode([0xA9u8; 32]);
+    bootstrap_test_room(&server_url, &room_id).await?;
+
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
+    let bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?
+    };
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let latest_members = perform_fetch_members(MembersParams::from_session(
+            &alice,
+            0,
+            50,
+            MembersMode::Full,
+        ))
+        .await?;
+        let mut alice_with_latest_root = alice.clone();
+        alice_with_latest_root.parent_root = latest_members.root;
+        let synced = perform_epoch_sync(alice_with_latest_root).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+
+    let pre_refresh_messages = [
+        ("alice-before-refresh", &alice),
+        ("bob-before-refresh", &bob),
+    ];
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_send(SendParams::from_session(
+            pre_refresh_messages[0].1,
+            pre_refresh_messages[0].0.to_string(),
+            0,
+        )?)
+        .await?;
+    }
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_send(SendParams::from_session(
+            pre_refresh_messages[1].1,
+            pre_refresh_messages[1].0.to_string(),
+            0,
+        )?)
+        .await?;
+    }
+
+    let mut alice_after_pre_fetch = alice.clone();
+    let alice_pre_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_fetch(FetchParams::from_session(&alice_after_pre_fetch, None)?).await?
+    };
+    for (plaintext, sender) in pre_refresh_messages {
+        assert!(
+            alice_pre_fetch
+                .messages
+                .iter()
+                .any(|message| message.plaintext == plaintext
+                    && message.sender_leaf == Some(sender.leaf_id)),
+            "pre-refresh fetch should include {plaintext}"
+        );
+    }
+    apply_fetch_outcome_to_session(&mut alice_after_pre_fetch, &alice_pre_fetch);
+
+    let alice_after_refresh = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        persist_session(&alice_after_pre_fetch)?;
+        perform_pcs_refresh(LeaveRequest::from_session(&alice_after_pre_fetch)).await?;
+        let pending = load_session_at(&server_url, &room_id)?
+            .ok_or_else(|| anyhow!("expected persisted alice session after refresh"))?;
+        let synced = perform_epoch_sync(pending).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+    assert!(
+        !alice_after_refresh.barrier_state.barrier_recovery_pending,
+        "refresh author must return to message-ready before post-refresh messaging"
+    );
+
+    let alice_post_refresh_plaintext = "alice-after-refresh".to_string();
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_send(SendParams::from_session(
+            &alice_after_refresh,
+            alice_post_refresh_plaintext.clone(),
+            1,
+        )?)
+        .await?;
+    }
+
+    let stale_bob_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_fetch(FetchParams::from_session(&bob, None)?).await?
+    };
+    assert!(
+        stale_bob_fetch
+            .messages
+            .iter()
+            .all(|message| message.plaintext != alice_post_refresh_plaintext),
+        "stale member must not decrypt post-refresh traffic before syncing"
+    );
+
+    let bob_after_sync = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        let synced = perform_epoch_sync(bob).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+    assert!(
+        !bob_after_sync.barrier_state.barrier_recovery_pending,
+        "stale member should become message-ready after syncing the refresh"
+    );
+
+    let bob_post_refresh_plaintext = "bob-after-refresh".to_string();
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_send(SendParams::from_session(
+            &bob_after_sync,
+            bob_post_refresh_plaintext.clone(),
+            1,
+        )?)
+        .await?;
+    }
+
+    let mut bob_after_fetch = bob_after_sync.clone();
+    let bob_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_fetch(FetchParams::from_session(&bob_after_fetch, None)?).await?
+    };
+    assert!(
+        bob_fetch
+            .messages
+            .iter()
+            .any(|message| message.plaintext == alice_post_refresh_plaintext
+                && message.sender_leaf == Some(alice_after_refresh.leaf_id)),
+        "synced stale member should decrypt the post-refresh traffic"
+    );
+    assert!(
+        bob_fetch
+            .messages
+            .iter()
+            .any(|message| message.plaintext == bob_post_refresh_plaintext
+                && message.sender_leaf == Some(bob_after_sync.leaf_id)),
+        "post-sync fetch should also include the sender's own new traffic"
+    );
+    assert!(
+        bob_fetch.messages.iter().all(|message| {
+            message.plaintext != "alice-before-refresh" && message.plaintext != "bob-before-refresh"
+        }),
+        "post-refresh fetch must not replay pre-refresh traffic after replay-state advanced"
+    );
+    apply_fetch_outcome_to_session(&mut bob_after_fetch, &bob_fetch);
+
+    let mut alice_after_fetch = alice_after_refresh.clone();
+    let alice_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_fetch(FetchParams::from_session(&alice_after_fetch, None)?).await?
+    };
+    assert!(
+        alice_fetch
+            .messages
+            .iter()
+            .any(|message| message.plaintext == bob_post_refresh_plaintext
+                && message.sender_leaf == Some(bob_after_sync.leaf_id)),
+        "refresh author should decrypt the stale member's first post-sync traffic"
+    );
+    apply_fetch_outcome_to_session(&mut alice_after_fetch, &alice_fetch);
+
+    let alice_final_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+        perform_fetch(FetchParams::from_session(&alice_after_fetch, None)?).await?
+    };
+    let bob_final_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+        perform_fetch(FetchParams::from_session(&bob_after_fetch, None)?).await?
+    };
+    assert!(
+        alice_final_fetch.messages.is_empty() && bob_final_fetch.messages.is_empty(),
+        "once replay-state advances on both sides, repeated fetches should be empty again"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_restart_during_multi_version_catchup_after_refresh_and_leave_recovers_cleanly()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+
+    let port = next_test_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let mut room_id_bytes = [0xAAu8; 32];
+    room_id_bytes[..2].copy_from_slice(&port.to_le_bytes());
+    let room_id = hex_encode(room_id_bytes);
+
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
+    let bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?
+    };
+    let synced_alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let synced = perform_epoch_sync(alice).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_pcs_refresh(LeaveRequest::from_session(&synced_alice)).await?;
+    }
+    let refreshed_alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let pending = load_session_at(&server_url, &room_id)?
+            .ok_or_else(|| anyhow!("expected persisted alice session after refresh"))?;
+        let synced = perform_epoch_sync(pending).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+    assert!(
+        !refreshed_alice.barrier_state.barrier_recovery_pending,
+        "refresh author should finalize local pending state before leaving"
+    );
+
+    let alice_plaintext = "alice-before-leave-after-refresh".to_string();
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_send(SendParams::from_session(
+            &refreshed_alice,
+            alice_plaintext.clone(),
+            0,
+        )?)
+        .await?;
+    }
+
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+        perform_leave(LeaveRequest::from_session(&refreshed_alice)).await?;
+    }
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        persist_session(&bob)?;
+    }
+    let reloaded_bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        load_session_at(&server_url, &room_id)?.ok_or_else(|| {
+            anyhow!("expected persisted stale bob session after simulated restart")
+        })?
+    };
+
+    let bob_after_sync = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        let outcome = perform_epoch_sync(reloaded_bob).await?;
+        persist_session(&outcome.session)?;
+        outcome.session
+    };
+    assert!(
+        !bob_after_sync.barrier_state.barrier_recovery_pending,
+        "stale restarted member should recover to a message-ready state"
+    );
+    let members_after = new_api_client(&server_url)
+        .members(&bob_after_sync.gid, None)
+        .await?;
+    assert_eq!(members_after.total_count, 1);
+    assert!(
+        members_after
+            .members
+            .iter()
+            .any(|member| member.leaf_id.as_slice() == bob_after_sync.leaf_id.as_slice()),
+        "surviving member must remain present after restart + catch-up"
+    );
+
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        let _ = perform_fetch(FetchParams::from_session(&bob_after_sync, None)?).await?;
+    }
+
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+        perform_send(SendParams::from_session(
+            &bob_after_sync,
+            "bob-after-restart-catchup".to_string(),
+            0,
+        )?)
+        .await?;
     }
 
     handle.abort();

@@ -2111,6 +2111,8 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             .barrier_issue_full_verification_witness(
                 &session.room_id,
                 &session.leaf_id,
+                Some(&session.leaf_id),
+                ticket.merge_ticket_artifact_bytes.as_slice(),
                 0,
                 barrier_update.raw_update.as_slice(),
                 barrier_n_max,
@@ -6148,6 +6150,77 @@ mod tests {
         })
         .await?;
 
+        handle.abort();
+        let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_mode_reconnect_under_burst_resumes_live_notifications() -> Result<()> {
+        let port = next_free_local_port();
+        let handle = spawn_server_on(port).await;
+        sleep(Duration::from_millis(250)).await;
+
+        let server_url = format!("http://127.0.0.1:{port}");
+        let room_id = hex::encode([0xA2u8; 32]);
+        bootstrap_test_room(&server_url, &room_id).await?;
+
+        let alice = perform_join(&server_url, &room_id, "watch-reconnect-alice").await?;
+
+        let message_token = configured_client_message_token()
+            .ok_or_else(|| anyhow!("message auth token is not configured"))?;
+        let ws_url = websocket_url(&server_url, &alice.gid, &alice.leaf_id);
+        let (mut first_rx, first_handle) =
+            spawn_notification_listener(&ws_url, Some(&message_token)).await?;
+        let mut bob = perform_join(&server_url, &room_id, "watch-reconnect-bob").await?;
+        expect_membership_event(
+            &mut first_rx,
+            &bob.gid,
+            &bob.leaf_id,
+            "join",
+            "bob join before reconnect".to_string(),
+        )
+        .await?;
+
+        send_text_message(&mut bob, "bob-before-reconnect-1").await?;
+        expect_message_event(
+            &mut first_rx,
+            &bob.we_epoch_id,
+            "message before reconnect #1".to_string(),
+        )
+        .await?;
+        send_text_message(&mut bob, "bob-before-reconnect-2").await?;
+        expect_message_event(
+            &mut first_rx,
+            &bob.we_epoch_id,
+            "message before reconnect #2".to_string(),
+        )
+        .await?;
+
+        first_handle.abort();
+        let _ = first_handle.await;
+
+        send_text_message(&mut bob, "bob-while-disconnected").await?;
+
+        let (mut second_rx, second_handle) =
+            spawn_notification_listener(&ws_url, Some(&message_token)).await?;
+        send_text_message(&mut bob, "bob-after-reconnect").await?;
+        expect_message_event(
+            &mut second_rx,
+            &bob.we_epoch_id,
+            "message after reconnect".to_string(),
+        )
+        .await?;
+        send_text_message(&mut bob, "bob-after-reconnect-2").await?;
+        expect_message_event(
+            &mut second_rx,
+            &bob.we_epoch_id,
+            "second message after reconnect".to_string(),
+        )
+        .await?;
+
+        second_handle.abort();
+        let _ = second_handle.await;
         handle.abort();
         let _ = handle.await;
         Ok(())

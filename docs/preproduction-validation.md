@@ -120,11 +120,19 @@ cargo test --locked -p cityg-gui --bin cityg-gui \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::admin_expel_then_survivor_refresh_preserves_room_and_new_joiner_messaging \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::room_admin_grant_and_revoke_flow_preserves_authorization_boundaries \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::stale_dueling_pcs_refreshes_converge_and_preserve_messaging \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::multi_author_messaging_across_refresh_epoch_change_preserves_delivery \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
@@ -136,8 +144,20 @@ cargo test --locked -p cityg-gui --bin cityg-gui \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::client_restart_during_multi_version_catchup_after_refresh_and_leave_recovers_cleanly \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messaging \
   --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::restart_during_pending_join_finalize_activation_recovers_via_epoch_sync \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin join_leave \
+  tests::watch_mode_reconnect_under_burst_resumes_live_notifications \
+  -- --exact --nocapture
 ```
 
 These gates cover:
@@ -145,11 +165,16 @@ These gates cover:
 - fresh join plus bidirectional messaging baseline
 - offline catch-up after `pcs_refresh` across a simulated client restart
 - room-admin expel with survivor continuity
+- room-admin expel followed by survivor refresh and a fresh rejoin
 - room-admin grant/revoke lifecycle and ACL visibility
 - stale dual-refresh convergence from one authenticated baseline
+- multi-author messaging continuity across a real epoch change
 - replay-state enforcement across repeated fetch rounds
 - replay-state persistence across a simulated client restart
+- client restart during multi-version catch-up after `refresh + leave`
 - restart + expel churn with later joiner messaging
+- restart during a published-but-not-reloaded `join_finalize` activation
+- watch websocket reconnect resuming fresh notifications under active burst traffic
 
 ## Phase 1: Baseline Smoke
 

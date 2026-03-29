@@ -94,6 +94,22 @@ async fn spawn_server_with_seed_demo_room(port: u16, seed_demo_room: bool) -> Jo
     })
 }
 
+async fn spawn_server_on_with_state_path(
+    port: u16,
+    state_path: std::path::PathBuf,
+) -> JoinHandle<()> {
+    ensure_admin_auth_env();
+    tokio::spawn(async move {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let mut config = CityGConfig::default();
+        config.server.seed_demo_room = true;
+        config.server.state_path = Some(state_path);
+        if let Err(err) = cityg_api::run_with_config(addr, config).await {
+            eprintln!("server exited with error: {err}");
+        }
+    })
+}
+
 fn encode_field1_bytes(payload: &[u8]) -> Vec<u8> {
     let mut body = Vec::with_capacity(payload.len() + 8);
     body.push(0x0A); // field #1, length-delimited bytes
@@ -217,6 +233,58 @@ async fn end_to_end_demo_flow() {
 
     drop(client);
     handle.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn restart_rehydrates_bundle_store_for_post_restart_bundle_fetch() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "cityg-api-restart-bundles-{}-{}",
+        std::process::id(),
+        next_free_local_port()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let journal_path = temp_root.join("bundle-restart.journal");
+    let port = next_free_local_port();
+    let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    let alice = demo_bundle("alice").expect("alice bundle");
+    client
+        .accept_epoch_bundle(&alice)
+        .await
+        .expect("accept alice");
+    let bob = demo_bundle("bob").expect("bob bundle");
+    client.accept_epoch_bundle(&bob).await.expect("accept bob");
+    client
+        .get_bundle(&bob.we_epoch_id)
+        .await
+        .expect("get bob bundle");
+
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let after_restart = client
+        .get_bundle(&bob.we_epoch_id)
+        .await
+        .expect("replayed bundle should remain fetchable after restart");
+    let replayed_bundle =
+        ClientEpochBundle::from_cbor(&after_restart.bundle_cbor).expect("decode replayed bundle");
+    assert_eq!(replayed_bundle.we_epoch_id, bob.we_epoch_id);
+    assert!(
+        replayed_bundle
+            .header_map
+            .contains_key(&msphf_orchestrator::hdr::HDR_HP_BYTES),
+        "replayed stored merge bundle should retain barrier hp envelope"
+    );
+
+    handle.abort();
+    let _ = handle.await;
 }
 
 #[tokio::test]

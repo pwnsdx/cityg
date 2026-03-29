@@ -803,3 +803,159 @@ Assertions:
 - the new admin appears in `list_room_admins(...)`
 - revoking that admin removes it from the ACL
 - the revoked admin loses ACL visibility immediately
+
+### Flow O: admin expel -> survivor refresh -> fresh joiner continuity
+
+Goal:
+
+- combine two protocol-sensitive room transitions instead of testing them in
+  isolation: admin expel first, then survivor `pcs_refresh`, then a fresh join
+- prove that the expelled member stays locked out, the survivor stays
+  message-ready, and a new joiner can still re-enter cleanly afterwards
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::admin_expel_then_survivor_refresh_preserves_room_and_new_joiner_messaging --features native-app -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `/tmp/cityg-target-flow-admin-refresh`
+
+Assertions:
+
+- the delegated admin expels a live member with a real expel merge ticket
+- the survivor can immediately publish a `pcs_refresh` after the expel
+- the expelled stale client still cannot decrypt the survivor's new traffic
+- any sync outcome for the expelled member still leaves the send path rejected
+- a fresh third member can join after the expel+refresh churn, becomes
+  message-ready, and is visible in the room roster
+
+Notes:
+
+- server logs still emit the known `invalid input: leaf not present in roster`
+  line on the stale expelled path; the flow remains functionally green and the
+  survivor/new-joiner guarantees stay intact
+
+### Flow P: multi-author messaging across refresh epoch change
+
+Goal:
+
+- exercise a user-visible messaging property rather than just the refresh
+  mechanism itself: both authors send before the refresh, one author refreshes,
+  the stale author syncs, then both continue sending in the new epoch
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::multi_author_messaging_across_refresh_epoch_change_preserves_delivery --features native-app -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `/tmp/cityg-target-flow-admin-refresh`
+
+Assertions:
+
+- the pre-refresh burst is delivered before the epoch changes
+- the stale member does not decrypt post-refresh traffic before syncing
+- after `epoch_sync`, the stale member decrypts the new epoch traffic and can
+  immediately send again
+- once replay-state advances on both sides, repeated fetches are empty again
+
+Notes:
+
+- `dropping replayed msg_index=...` warnings are expected here and confirm that
+  replay-state suppression stayed active while traffic crossed the epoch change
+
+### Flow Q: client restart during multi-version catch-up after refresh and leave
+
+Goal:
+
+- exercise the harder stale-client path where a member misses several room-head
+  transitions, restarts from disk, then catches up across the gap
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::client_restart_during_multi_version_catchup_after_refresh_and_leave_recovers_cleanly --features native-app -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `/tmp/cityg-target-flow-admin-refresh`
+
+Assertions:
+
+- the stale client survives a `refresh + leave` version gap after reload
+- `epoch_sync` returns the restarted client to a message-ready state
+- the survivor remains the only roster entry after catch-up
+- fetch stays operational after catch-up and the survivor can send again
+
+Notes:
+
+- the path still logs the known `kbroad key missing` server warning and
+  `barrier version gap detected; attempting best-effort recovery`; the flow is
+  green because recovery completes and the resumed sender remains operational
+
+### Flow R: watch reconnect under burst resumes live notifications
+
+Goal:
+
+- qualify the watch/websocket path directly instead of only through stress runs:
+  disconnect a live watcher during burst traffic, reconnect it, and prove that
+  fresh notifications continue to arrive
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin join_leave tests::watch_mode_reconnect_under_burst_resumes_live_notifications -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `/tmp/cityg-target-flow-admin-refresh`
+
+Assertions:
+
+- the watcher receives the second member's join membership event
+- the first websocket receives live message notifications before reconnect
+- after a forced disconnect, a fresh websocket reconnects successfully
+- the reconnected watcher receives new message notifications under continued burst traffic
+
+Notes:
+
+- the server logs a `Connection reset without closing handshake` warning when the
+  test aborts the first websocket handle intentionally
+- this flow proves live notification resume after reconnect; it does **not**
+  yet qualify backlog bridging for traffic emitted while the watcher is offline
+
+### Flow S: restart during pending `join_finalize` activation recovers via epoch sync
+
+Goal:
+
+- prove the specific post-publish failure mode that previously broke
+  `epoch_sync` after restart: a `join_finalize` is accepted server-side, the
+  joiner crashes before local reload, the server restarts, and the joiner must
+  still recover from the persisted pending state
+
+Coverage:
+
+- `cargo test --locked -p cityg-api --test integration restart_rehydrates_bundle_store_for_post_restart_bundle_fetch -- --exact --nocapture`
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::restart_during_pending_join_finalize_activation_recovers_via_epoch_sync --features native-app -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/api-restart`
+- `2026-03-29` on `.cargo-target/gui-restart`
+
+Assertions:
+
+- after API restart, `/v1/bundle` still serves the `we_epoch_id` returned by
+  `merge_ticket_refresh`
+- replayed stored merge bundles retain the barrier HP envelope required by the
+  client path
+- the post-publish pending session remains persisted across the simulated crash
+- after server restart, the admitted joiner is still present in the roster
+- `perform_epoch_sync` clears `barrier_recovery_pending` and removes the stale
+  pending activation state
+
+Notes:
+
+- the flow intentionally injects `AfterPublishBeforeReload` and still expects
+  the published merge to survive restart/replay
+- this closes the earlier `404 resource not found` path on
+  `merge_ticket_refresh -> get_bundle` after restart

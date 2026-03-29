@@ -11,6 +11,7 @@ mod middleware;
 use std::{
     collections::{BTreeMap, HashSet},
     convert::TryInto,
+    fs,
     hash::{Hash, Hasher},
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -64,7 +65,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use unicode_normalization::UnicodeNormalization;
 
-use cityg_client::{CityGError as ClientError, ClientEpochBundle};
+use cityg_client::{CityGError as ClientError, ClientEpochBundle, GroupMembership};
 use cityg_server::{
     BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord, CityGServer,
     FsForwardLeapPolicy as ServerFsForwardLeapPolicy, HistoryCommitment as ServerHistoryCommitment,
@@ -74,6 +75,7 @@ use cityg_server::{
 use msphf_core::{
     MsphfError,
     hash::h_l,
+    merkle::canonical_set_root,
     params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK},
 };
 use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
@@ -1682,6 +1684,69 @@ async fn store_bundle_bytes(state: &ApiState, weid: [u8; 32], bytes: Vec<u8>) {
     prune_bundle_indexes(state, &expired).await;
 }
 
+fn load_journal_entries(path: &Path) -> anyhow::Result<Vec<Vec<u8>>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut cursor = bytes.as_slice();
+    let mut entries = Vec::new();
+    while cursor.len() >= 4 {
+        let (len_bytes, rest) = cursor.split_at(4);
+        let len = u32::from_le_bytes(
+            len_bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid journal entry length"))?,
+        ) as usize;
+        if rest.len() < len {
+            break;
+        }
+        let (entry, remainder) = rest.split_at(len);
+        entries.push(entry.to_vec());
+        cursor = remainder;
+    }
+    Ok(entries)
+}
+
+fn materialize_replayed_bundle(
+    server: &mut CityGServer,
+    bundle: &ClientEpochBundle,
+    membership_root: [u8; 32],
+) -> Result<Vec<u8>, ApiError> {
+    let mut stored = bundle.clone();
+    if !stored.header_map.contains_key(&hdr::HDR_HP_BYTES)
+        && is_merge_bundle_header(&stored.header_map)
+    {
+        let parity = [membership_root, bundle.anchor.parent_root]
+            .into_iter()
+            .find_map(|root| {
+                server
+                    .context_mut()
+                    .pivot_parities_for(bundle.gid(), &root)
+                    .into_iter()
+                    .find(|parity| {
+                        parity.we_epoch_id == bundle.we_epoch_id && !parity.hp_envelope.is_empty()
+                    })
+            })
+            .ok_or_else(|| {
+                ApiError::server_message(
+                    "accepted merge parity missing hp envelope for replayed stored bundle",
+                )
+            })?;
+        let envelope: ciborium::value::Value =
+            ciborium::de::from_reader(parity.hp_envelope.as_ref()).map_err(|_| {
+                ApiError::server_message(
+                    "accepted merge parity hp envelope malformed for replayed stored bundle",
+                )
+            })?;
+        stored.header_map.insert(hdr::HDR_HP_BYTES, envelope);
+    }
+    stored.to_cbor().map_err(|err| {
+        ApiError::server_message(format!("failed to sanitize replayed bundle: {err}"))
+    })
+}
+
 async fn persist_bundle(
     state: &ApiState,
     bundle: &ClientEpochBundle,
@@ -1704,6 +1769,86 @@ async fn persist_bundle(
         .await;
     record_membership_updates(state, bundle, weid).await?;
     store_bundle_bytes(state, weid, bytes).await;
+    Ok(())
+}
+
+async fn rehydrate_bundle_indexes(
+    state: &ApiState,
+    bundle: &ClientEpochBundle,
+    weid: [u8; 32],
+    bytes: Vec<u8>,
+    membership_root: [u8; 32],
+) -> Result<(), ApiError> {
+    let gid: [u8; 32] = bundle
+        .gid()
+        .try_into()
+        .map_err(|_| ApiError::server_message("invalid gid length in bundle"))?;
+    state
+        .record_epoch_scope(
+            weid,
+            EpochScope {
+                gid,
+                membership_root,
+            },
+        )
+        .await;
+    let delta = bundle.membership_delta().map_err(|err| {
+        ApiError::server_message(format!(
+            "failed to compute membership delta during replay: {err}"
+        ))
+    })?;
+    let timestamp_ms = current_timestamp_ms();
+    for leaf in &delta.joined {
+        state.record_member_join(*leaf, weid, timestamp_ms).await;
+    }
+    if !delta.revoked.is_empty() {
+        state.record_member_revocations(&delta.revoked).await;
+    }
+    store_bundle_bytes(state, weid, bytes).await;
+    Ok(())
+}
+
+async fn rehydrate_persisted_bundle_indexes(
+    state: &ApiState,
+    cfg: &cityg_config::CityGConfig,
+    lane_count: usize,
+) -> anyhow::Result<()> {
+    let Some(base_path) = cfg.server.state_path.as_ref() else {
+        return Ok(());
+    };
+
+    let mut memberships: BTreeMap<[u8; 32], GroupMembership> = BTreeMap::new();
+    for lane_index in 0..lane_count.max(1) {
+        let journal_path = lane_state_path(base_path, lane_index, lane_count.max(1));
+        let entries = load_journal_entries(&journal_path)?;
+        for entry in entries {
+            let bundle = ClientEpochBundle::from_cbor(&entry).map_err(|err| {
+                anyhow::anyhow!("failed to decode replayed journal bundle: {err}")
+            })?;
+            let gid: [u8; 32] = bundle
+                .gid()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid gid length in replayed journal bundle"))?;
+            let delta = bundle.membership_delta().map_err(|err| {
+                anyhow::anyhow!("failed to compute replayed membership delta: {err}")
+            })?;
+            let membership = memberships.entry(gid).or_default();
+            membership
+                .apply_delta_checked(&delta)
+                .map_err(|err| anyhow::anyhow!("failed to replay membership delta: {err}"))?;
+            let leaves: Vec<[u8; 32]> = membership.members().copied().collect();
+            let membership_root = canonical_set_root(&leaves)
+                .map_err(|_| anyhow::anyhow!("failed to compute replayed membership root"))?;
+            let bytes = {
+                let lane = state.server_for_gid(&gid);
+                let mut guard = lane.write().await;
+                materialize_replayed_bundle(&mut guard, &bundle, membership_root)?
+            };
+            rehydrate_bundle_indexes(state, &bundle, bundle.we_epoch_id, bytes, membership_root)
+                .await?;
+        }
+    }
+
     Ok(())
 }
 
@@ -4340,6 +4485,9 @@ pub async fn run_with_config(
             expensive_rate_limit_max_keys,
         ),
     };
+    if let Err(err) = rehydrate_persisted_bundle_indexes(&state, &config, lane_count).await {
+        warn!("bundle/runtime index recovery failed: {err:#}");
+    }
 
     // Build router with all routes
     let mut router_with_state = Router::new()

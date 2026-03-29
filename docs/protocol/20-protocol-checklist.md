@@ -30,11 +30,16 @@ system by protocol contract rather than by implementation detail.
 | Expelled member loses future write access | An expelled member cannot keep sending after revocation. | Covered | `native::tests::admin_expel_removes_member_and_preserves_survivor_messaging` |
 | Expelled member cannot read post-expel traffic | A stale expelled client must not decrypt newer survivor traffic. | Covered | `native::tests::admin_expel_removes_member_and_preserves_survivor_messaging` |
 | Survivors continue after expel | Expelling a member does not strand the remaining room. | Covered | `native::tests::admin_expel_removes_member_and_preserves_survivor_messaging`, `native::tests::restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messaging` |
+| Survivor refresh after expel preserves room continuity | After an admin expels a member, a survivor can refresh, the expelled member stays locked out, and a fresh joiner can still re-enter the room. | Covered | `native::tests::admin_expel_then_survivor_refresh_preserves_room_and_new_joiner_messaging` |
 | Stale concurrent refreshes converge | Two stale `pcs_refresh` attempts converge to one room head without wedging. | Covered | `native::tests::stale_dueling_pcs_refreshes_converge_and_preserve_messaging`, Flow H |
+| Multi-author messaging survives an epoch change | Traffic sent before and after a `pcs_refresh` stays readable for the right members without replaying old bursts. | Covered | `native::tests::multi_author_messaging_across_refresh_epoch_change_preserves_delivery` |
 | Multi-version gap recovery is bounded | A stale member can survive a version gap after `refresh + leave` without dangerous best-effort activation. | Covered | `native::tests::epoch_sync_survives_multi_version_barrier_gap_after_refresh_and_leave` |
+| Client restart during multi-version catch-up recovers cleanly | A stale client can restart across a `refresh + leave` gap, sync, and return to message-ready operation. | Covered | `native::tests::client_restart_during_multi_version_catchup_after_refresh_and_leave_recovers_cleanly` |
 | Restart after leave preserves room health | Restarting the server after leave churn preserves survivor state and allows new joins. | Covered | `native::tests::restart_after_leave_preserves_survivor_refresh_and_new_join` |
 | Restart after expel preserves room health | Restarting the server after admin expel preserves survivor state and allows a fresh joiner to resume room traffic. | Covered | `native::tests::restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messaging` |
+| Restart during pending `join_finalize` activation recovers cleanly | If a `join_finalize` is published but the joiner crashes before reload, a server restart still leaves the published epoch bundle fetchable and `epoch_sync` clears the pending recovery state. | Covered | `native::tests::restart_during_pending_join_finalize_activation_recovers_via_epoch_sync`, `restart_rehydrates_bundle_store_for_post_restart_bundle_fetch` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
 | Watch-mode burst traffic survives chaos | Under `cityg-stress`, watch traffic and short bursts survive client/server restarts. | Covered | Flow E / Flow F in [`../evidence/e2e-local-validation-2026-03-27.md`](../evidence/e2e-local-validation-2026-03-27.md), [`../preproduction-validation.md`](../preproduction-validation.md) |
+| Watch reconnect resumes live notifications | A dropped watch websocket can reconnect under active traffic and resume receiving fresh message notifications. | Covered | `tests::watch_mode_reconnect_under_burst_resumes_live_notifications` in [`../../crates/cityg-gui/src/bin/join_leave.rs`](../../crates/cityg-gui/src/bin/join_leave.rs) |
 | Membership revoke signal is visible to the client | A revoke event is surfaced on the websocket membership feed. | Covered | `native::tests::websocket_worker_reports_revoke_membership_event` |
 | Room-admin grant/revoke lifecycle | Admin authority can be granted/revoked cleanly end-to-end via one user flow. | Covered | `native::tests::room_admin_grant_and_revoke_flow_preserves_authorization_boundaries` |
 
@@ -61,6 +66,10 @@ cargo test --locked -p cityg-gui --bin cityg-gui \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::admin_expel_then_survivor_refresh_preserves_room_and_new_joiner_messaging \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::room_admin_grant_and_revoke_flow_preserves_authorization_boundaries \
   --features native-app -- --exact --nocapture
 
@@ -69,8 +78,24 @@ cargo test --locked -p cityg-gui --bin cityg-gui \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::multi_author_messaging_across_refresh_epoch_change_preserves_delivery \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::client_restart_during_multi_version_catchup_after_refresh_and_leave_recovers_cleanly \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messaging \
   --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::restart_during_pending_join_finalize_activation_recovers_via_epoch_sync \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin join_leave \
+  tests::watch_mode_reconnect_under_burst_resumes_live_notifications \
+  -- --exact --nocapture
 ```
 
 ## Notes
