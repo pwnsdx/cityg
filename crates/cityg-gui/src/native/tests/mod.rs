@@ -10715,6 +10715,7 @@ async fn admin_expel_removes_member_and_preserves_survivor_messaging()
     let temp_dir = TempDir::new().expect("create temp dir");
     let alice_base = temp_dir.path().join("cityg").join("gui-alice");
     let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+    let charlie_base = temp_dir.path().join("cityg").join("gui-charlie");
 
     let port = next_test_port();
     let handle = spawn_server_on(port).await;
@@ -10873,6 +10874,35 @@ async fn admin_expel_removes_member_and_preserves_survivor_messaging()
             !err.to_string().is_empty(),
             "post-sync expel rejection should remain explicit"
         );
+    }
+
+    let charlie = {
+        let _override_guard = set_config_dir_override_for_tests(Some(charlie_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "charlie".to_string(),
+        })
+        .await?
+    };
+    let charlie = if charlie.barrier_state.barrier_recovery_pending {
+        let _override_guard = set_config_dir_override_for_tests(Some(charlie_base.clone()));
+        perform_epoch_sync(charlie).await?.session
+    } else {
+        charlie
+    };
+    assert!(
+        !charlie.barrier_state.barrier_recovery_pending,
+        "new joiner must become message-ready after admin expel"
+    );
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(charlie_base));
+        perform_send(SendParams::from_session(
+            &charlie,
+            "charlie-after-expel".to_string(),
+            0,
+        )?)
+        .await?;
     }
 
     handle.abort();
@@ -11263,7 +11293,6 @@ async fn restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messa
         persist_session(&alice)?;
         perform_room_admin_expel(alice, bob.leaf_id).await?
     };
-
     let before_restart = client.members(&expelled_alice.gid, None).await?;
     assert_eq!(before_restart.total_count, 1);
     assert!(

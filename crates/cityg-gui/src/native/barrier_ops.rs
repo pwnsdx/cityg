@@ -736,7 +736,14 @@ async fn publish_revocation_merge_from_ticket(
     bundle
         .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
         .with_context(|| format!("rebind merge HP envelope for {operation_label}"))?;
+    let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC)
+        .ok_or_else(|| anyhow!("{operation_label} merge bundle missing fs_ec"))?;
     pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
+    pending_barrier_state.fs_ec = observed_fs_ec;
+    let next_forward = forward_state.snapshot();
+    pending_barrier_state.next_forward_fs_ec = next_forward.fs_ec;
+    pending_barrier_state.next_forward_fs_dev_commit = next_forward.fs_dev_commit;
+    pending_barrier_state.next_forward_last_weid = next_forward.last_weid;
     bundle
         .header_map
         .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
@@ -771,7 +778,7 @@ async fn publish_revocation_merge_from_ticket(
         Err(ApiClientError::HttpStatus {
             status, message, ..
         }) if is_refresh_pivot_conflict(status.as_u16(), &message) => {
-            warn!("refresh pivot skipped: {message}");
+            debug!(status = status.as_u16(), "refresh pivot skipped: {message}");
         }
         Err(err) => return Err(err).context("refresh pivot parity"),
     }
@@ -1569,7 +1576,7 @@ async fn perform_barrier_merge_inner(
         Err(ApiClientError::HttpStatus {
             status, message, ..
         }) if is_refresh_pivot_conflict(status.as_u16(), &message) => {
-            warn!("refresh pivot skipped: {message}");
+            debug!(status = status.as_u16(), "refresh pivot skipped: {message}");
         }
         Err(err) => return Err(err).context("refresh pivot parity"),
     }
@@ -1591,7 +1598,10 @@ async fn perform_barrier_merge_inner(
                 Err(ApiClientError::HttpStatus {
                     status, message, ..
                 }) if is_refresh_pivot_conflict(status.as_u16(), &message) => {
-                    warn!("refresh pivot skipped after stale-group retry: {message}");
+                    debug!(
+                        status = status.as_u16(),
+                        "refresh pivot skipped after stale-group retry: {message}"
+                    );
                 }
                 Err(err) => {
                     return Err(err).context("refresh pivot parity after stale-group retry");
