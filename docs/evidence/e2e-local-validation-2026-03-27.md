@@ -1473,6 +1473,102 @@ direct flow or by an explicit composite of already-green flows:
 Goal:
 
 - prove that helper responses cannot mutate authenticated manifest or
+  attestation state across pages without failing closed in the client
+
+Coverage:
+
+- `cargo test --locked -p cityg-api-client --lib tests::barrier_resolve_revoked_leaves_rejects_deployment_profile_manifest_mismatch_across_pages -- --exact --nocapture`
+- `cargo test --locked -p cityg-api-client --lib tests::barrier_resolve_joins_since_rejects_global_history_attestation_mismatch_across_pages -- --exact --nocapture`
+- `cargo test --locked -p cityg-api-client --lib tests::barrier_fetch_public_tree_rejects_deployment_profile_manifest_mismatch_across_pages -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/api-mutation-pages`
+
+Assertions:
+
+- `ResolveRevokedLeaves` rejects deployment-profile manifest changes between
+  pages
+- `ResolveJoinsSince` rejects global history attestation changes between pages
+- `FetchBarrierPublicTree` rejects deployment-profile manifest changes between
+  pages
+
+### Flow AF: deterministic hostile byte-flip sweep fails closed
+
+Goal:
+
+- prove that a wider set of valid-shaped hostile bundle mutations still fail
+  closed without poisoning live membership or restart recovery
+
+Coverage:
+
+- `cargo test --locked -p cityg-server hostile_barrier_update_byte_flip_sweep_fail_closed_without_poisoning_restart_recovery -- --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/protocol-mutation-suite`
+
+Assertions:
+
+- byte flips across witness, receipt, attestation, and `barrier_update` bytes
+  are rejected at multiple offsets, not just on a single mutated byte
+- mutated `barrier_update_reason` values remain fail-closed
+- the live roster remains intact after the sweep
+- restart still preserves the healthy roster and refresh-ticket path
+
+### Flow AG: named protocol mutation suite runner
+
+Goal:
+
+- provide a single repeatable entrypoint for the current mutation/security E2E
+  subset instead of relying on scattered one-off commands
+
+Coverage:
+
+- `./scripts/run_protocol_mutation_suite.sh`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/protocol-mutation-suite`
+
+Assertions:
+
+- server-side hostile bundle mutation guards pass as a suite
+- GUI-side authority/header and sender-binding negative tests still pass
+- API-client paginated helper mutation guards still pass
+
+### Flow AH: named large-group chaos and restart-traffic runners
+
+Goal:
+
+- codify the optional longer confidence-building campaigns for large public-room
+  churn and continuous restart traffic into named wrappers
+
+Coverage:
+
+- `./scripts/run_large_group_chaos.sh`
+- `./scripts/run_restart_traffic_chaos.sh`
+
+Passed:
+
+- `2026-03-29` with short validation overrides on:
+  - `.cargo-target/stress-large-group` with artifacts under
+    `/tmp/cityg-stress-large-group-short`
+  - `.cargo-target/stress-large-group` reused for the restart-heavy profile,
+    with artifacts under `/tmp/cityg-stress-restart-traffic-short2`
+
+Assertions:
+
+- the wrappers resolve repo-local binaries from the active `CARGO_TARGET_DIR`
+- they create the expected artifact directories and summary files
+- they run `cityg-stress` with the intended large-group and restart-heavy
+  presets instead of ad hoc command lines
+- short large-group validation finished with `workers=2`, `rounds_completed=4`,
+  `worker_failures=0`, `accept_epoch_ok=70`, `refresh_conflicts=6`
+- short restart-heavy validation finished with `workers=2`,
+  `rounds_completed=4`, `worker_failures=0`, `restarts=3`,
+  `accept_epoch_ok=17`, `refresh_conflicts=3`, and produced both
+  `restarts.log` and `client-restarts.log`
   attestation state between pages without the client failing closed
 
 Coverage:

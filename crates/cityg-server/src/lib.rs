@@ -14301,6 +14301,150 @@ mod tests {
     }
 
     #[test]
+    fn hostile_barrier_update_byte_flip_sweep_fail_closed_without_poisoning_restart_recovery()
+    -> Result<(), CityGError> {
+        fn mutation_offsets(len: usize) -> Vec<usize> {
+            if len == 0 {
+                return Vec::new();
+            }
+            let mut offsets = vec![0, len / 3, (2 * len) / 3, len - 1];
+            offsets.sort_unstable();
+            offsets.dedup();
+            offsets
+        }
+
+        let _guard = super::journal_serial_guard();
+        let dir = tempdir()?;
+        let journal_path = dir.path().join("hostile-barrier-byte-flip-sweep.journal");
+        let gid = cityg_client::demo::DEMO_GID;
+        let alice = build_genesis_member_bundle(0x95)?;
+
+        {
+            let mut server = demo_server_with_journal_and_global_history_authority(&journal_path);
+            server.accept_epoch(&alice.bundle)?;
+            let _ = seed_current_accepted_barrier_update_for_tests(&mut server, &gid)?;
+            let (pristine_bundle, _) =
+                build_refresh_bundle_for_member(&mut server, &alice, &alice.bundle)?;
+
+            let byte_flip_headers = [
+                (
+                    "witness",
+                    hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+                    0x11u8,
+                ),
+                (
+                    "receipt",
+                    hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+                    0x22u8,
+                ),
+                (
+                    "attestation",
+                    hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+                    0x44u8,
+                ),
+                ("barrier_update", hdr::HDR_BARRIER_UPDATE, 0x88u8),
+            ];
+
+            let mut exercised_cases = 0usize;
+            for (label, header, mask) in byte_flip_headers {
+                let Some(raw) = pristine_bundle.header_map.get(&header) else {
+                    continue;
+                };
+                let Value::Bytes(raw_bytes) = raw else {
+                    return Err(CityGError::InvalidInput(
+                        "byte-flip mutation target must be bytes",
+                    ));
+                };
+
+                for offset in mutation_offsets(raw_bytes.len()) {
+                    let mut mutated = pristine_bundle.clone();
+                    let Value::Bytes(mutated_bytes) =
+                        mutated
+                            .header_map
+                            .get_mut(&header)
+                            .ok_or(CityGError::InvalidInput(
+                                "missing byte-flip mutation target",
+                            ))?
+                    else {
+                        return Err(CityGError::InvalidInput(
+                            "byte-flip mutation target must stay bytes",
+                        ));
+                    };
+                    mutated_bytes[offset] ^= mask;
+
+                    let err = server
+                        .accept_epoch(&mutated)
+                        .expect_err("byte-flipped hostile mutation must be rejected");
+                    assert!(
+                        matches!(err, CityGError::InvalidInput(_))
+                            || matches!(err, CityGError::Acceptance(_)),
+                        "unexpected byte-flip mutation error for {label}@{offset}: {err:?}"
+                    );
+                    assert_eq!(
+                        server.members(&gid),
+                        vec![alice.leaf_id],
+                        "mutation {label}@{offset} must not poison the live roster",
+                    );
+                    exercised_cases += 1;
+                }
+            }
+
+            assert!(
+                exercised_cases >= 10,
+                "mutation sweep should exercise multiple hostile byte-flip cases"
+            );
+
+            for reason in [0u64, 2u64, 7u64, u16::MAX as u64] {
+                let mut mutated = pristine_bundle.clone();
+                mutated.header_map.insert(
+                    hdr::HDR_BARRIER_UPDATE_REASON,
+                    Value::Integer(Integer::from(reason)),
+                );
+                let err = server
+                    .accept_epoch(&mutated)
+                    .expect_err("mutated reason must be rejected");
+                assert!(
+                    matches!(err, CityGError::InvalidInput(_))
+                        || matches!(err, CityGError::Acceptance(_)),
+                    "unexpected mutated reason error for reason={reason}: {err:?}"
+                );
+                assert_eq!(
+                    server.members(&gid),
+                    vec![alice.leaf_id],
+                    "mutated reason {reason} must not poison the live roster",
+                );
+                exercised_cases += 1;
+            }
+
+            assert!(
+                exercised_cases >= 14,
+                "mutation sweep should exercise a meaningful hostile bundle set"
+            );
+
+            let bob = build_join_member_from_server_ticket(&mut server, &gid, 0x98, true)?;
+            server.accept_epoch(&bob.bundle)?;
+            assert_eq!(
+                server.members(&gid).len(),
+                2,
+                "room must still accept an honest join after the byte-flip mutation sweep"
+            );
+        }
+
+        let mut reloaded = demo_server_with_journal_and_global_history_authority(&journal_path);
+        assert_eq!(
+            reloaded.members(&gid).len(),
+            2,
+            "restart must preserve the healthy roster after the byte-flip mutation sweep"
+        );
+        let followup_ticket = reloaded.build_merge_ticket_for_refresh(&gid, &alice.leaf_id)?;
+        assert_eq!(
+            followup_ticket.barrier_version, 0,
+            "restart must still allow a healthy survivor refresh ticket after the byte-flip mutation sweep"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn malformed_admin_expel_rejection_does_not_poison_room_state() -> Result<(), CityGError> {
         let mut server = demo_server_with_global_history_authority();
         let gid = cityg_client::demo::DEMO_GID;

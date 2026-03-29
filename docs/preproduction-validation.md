@@ -249,6 +249,12 @@ These gates cover:
 - paginated helper responses that mutate their manifest or attestation between pages still fail closed
 - the remaining large-churn and hostile `join_finalize` guarantees are covered by the existing composite matrix in [`docs/protocol/20-protocol-checklist.md`](./protocol/20-protocol-checklist.md), so no blocking runtime backlog remains for the current profile
 
+Convenience wrappers for the optional scale-up campaigns live in:
+
+- [`../scripts/run_protocol_mutation_suite.sh`](../scripts/run_protocol_mutation_suite.sh)
+- [`../scripts/run_large_group_chaos.sh`](../scripts/run_large_group_chaos.sh)
+- [`../scripts/run_restart_traffic_chaos.sh`](../scripts/run_restart_traffic_chaos.sh)
+
 ## Phase 1: Baseline Smoke
 
 Run:
@@ -380,6 +386,20 @@ Collect:
 - periodic `/metrics` snapshots
 - restart timestamps and replay duration
 - `client-restarts.log` and per-round `worker-*-client-state/*.json`
+
+Named runner:
+
+```bash
+./scripts/run_large_group_chaos.sh
+```
+
+Useful overrides:
+
+```bash
+CITYG_STRESS_MAX_COUNT=32 \
+CITYG_STRESS_DURATION_SECS=1800 \
+./scripts/run_large_group_chaos.sh
+```
 
 ## Phase 3: Load / Concurrency
 
@@ -517,6 +537,22 @@ Watch metrics:
 - WebSocket lag
 - freeze code distribution
 - join/merge ticket error rates
+
+Named runner:
+
+```bash
+./scripts/run_restart_traffic_chaos.sh
+```
+
+Useful overrides:
+
+```bash
+CITYG_STRESS_WORKERS=4 \
+CITYG_STRESS_DURATION_SECS=900 \
+CITYG_STRESS_RESTART_EVERY_SECS=30 \
+CITYG_STRESS_CLIENT_RESTART_EVERY_SECS=15 \
+./scripts/run_restart_traffic_chaos.sh
+```
 
 ## Phase 4: Chaos / Restart
 
