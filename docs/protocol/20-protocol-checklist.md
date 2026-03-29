@@ -24,6 +24,7 @@ system by protocol contract rather than by implementation detail.
 | Offline member catches up and decrypts after refresh | A member that was offline during a `pcs_refresh` can return, sync, and decrypt the new traffic. | Covered | `native::tests::offline_member_restart_then_epoch_sync_after_pcs_refresh_decrypts_new_messages` |
 | Repeated fetches do not replay old traffic | The client only releases new traffic between fetch rounds. | Covered | `native::tests::message_replay_state_only_releases_new_messages_between_fetch_rounds` |
 | Replay-state survives client restart | A restart does not cause old ciphertexts to be re-released. | Covered | `native::tests::message_replay_state_survives_client_restart_between_fetch_rounds` |
+| Watch reconnect bridges offline backlog and resumes live notifications | A dropped watcher can reconnect, fetch the traffic emitted while it was offline, and then keep receiving fresh live notifications without replaying the backlog twice. | Covered | `native::tests::watch_reconnect_fetches_offline_backlog_and_resumes_live_notifications`, `tests::watch_mode_reconnect_under_burst_resumes_live_notifications` in [`../../crates/cityg-gui/src/bin/join_leave.rs`](../../crates/cityg-gui/src/bin/join_leave.rs) |
 | Self-exclusion works | A member can leave and survivors converge on the new roster. | Covered | `native::tests::sequential_member_leaves_succeed` |
 | Same identity can rejoin after room empty | A member that emptied the room can rejoin with the same persistent identity. | Covered | `native::tests::rejoin_with_same_persisted_identity_succeeds_after_room_becomes_empty`, Flow B |
 | Room admin can expel a member | An authorized admin can expel another leaf from the room. | Covered | `native::tests::admin_expel_removes_member_and_preserves_survivor_messaging` |
@@ -35,6 +36,7 @@ system by protocol contract rather than by implementation detail.
 | Multi-author messaging survives an epoch change | Traffic sent before and after a `pcs_refresh` stays readable for the right members without replaying old bursts. | Covered | `native::tests::multi_author_messaging_across_refresh_epoch_change_preserves_delivery` |
 | Multi-version gap recovery is bounded | A stale member can survive a version gap after `refresh + leave` without dangerous best-effort activation. | Covered | `native::tests::epoch_sync_survives_multi_version_barrier_gap_after_refresh_and_leave` |
 | Client restart during multi-version catch-up recovers cleanly | A stale client can restart across a `refresh + leave` gap, sync, and return to message-ready operation. | Covered | `native::tests::client_restart_during_multi_version_catchup_after_refresh_and_leave_recovers_cleanly` |
+| Two restarted members resume messaging without duplicate delivery | Two members can both restart from disk, resume bilateral traffic immediately, and keep fetch replay-state suppression intact across the restart boundary. | Covered | `native::tests::two_restarted_members_exchange_traffic_without_duplicate_delivery` |
 | Restart after leave preserves room health | Restarting the server after leave churn preserves survivor state and allows new joins. | Covered | `native::tests::restart_after_leave_preserves_survivor_refresh_and_new_join` |
 | Restart after expel preserves room health | Restarting the server after admin expel preserves survivor state and allows a fresh joiner to resume room traffic. | Covered | `native::tests::restart_after_admin_expel_preserves_survivor_state_and_new_joiner_messaging` |
 | Restart during pending `join_finalize` activation recovers cleanly | If a `join_finalize` is published but the joiner crashes before reload, a server restart still leaves the published epoch bundle fetchable and `epoch_sync` clears the pending recovery state. | Covered | `native::tests::restart_during_pending_join_finalize_activation_recovers_via_epoch_sync`, `restart_rehydrates_bundle_store_for_post_restart_bundle_fetch` in [`../../crates/cityg-api/tests/integration.rs`](../../crates/cityg-api/tests/integration.rs) |
@@ -42,6 +44,11 @@ system by protocol contract rather than by implementation detail.
 | Watch reconnect resumes live notifications | A dropped watch websocket can reconnect under active traffic and resume receiving fresh message notifications. | Covered | `tests::watch_mode_reconnect_under_burst_resumes_live_notifications` in [`../../crates/cityg-gui/src/bin/join_leave.rs`](../../crates/cityg-gui/src/bin/join_leave.rs) |
 | Membership revoke signal is visible to the client | A revoke event is surfaced on the websocket membership feed. | Covered | `native::tests::websocket_worker_reports_revoke_membership_event` |
 | Room-admin grant/revoke lifecycle | Admin authority can be granted/revoked cleanly end-to-end via one user flow. | Covered | `native::tests::room_admin_grant_and_revoke_flow_preserves_authorization_boundaries` |
+| Barrier bundle history commitment mismatches are rejected | `epoch_sync` must fail closed if helper/current-state headers disagree with the authenticated local state. | Covered | `native::tests::epoch_sync_rejects_barrier_bundle_history_commitment_mismatch` |
+| Barrier bundle FS policy mismatches are rejected | `epoch_sync` must fail closed if the bundle carries an incompatible FS policy version. | Covered | `native::tests::epoch_sync_rejects_barrier_bundle_fs_policy_version_mismatch` |
+| Sender leaf spoofing is rejected during fetch | A ciphertext signed by one device key but claimed under another leaf must not decrypt or release plaintext. | Covered | `native::tests::perform_fetch_rejects_sender_leaf_spoofing_with_mismatched_public_key` |
+| Helper responses missing authenticated fields are rejected fail-closed | Helper paths must reject missing history commitments or manifests instead of accepting underspecified state. | Covered | `barrier_fetch_public_tree_rejects_missing_history_commitment`, `barrier_fetch_public_tree_rejects_missing_deployment_profile_manifest` in [`../../crates/cityg-api-client/src/lib.rs`](../../crates/cityg-api-client/src/lib.rs) |
+| Base-profile helper guards reject unexpected completeness/authority extensions | Helper responses with unsupported completeness attestations or local-authority extensions must fail closed under the base profile. | Covered | `barrier_resolve_revoked_leaves_rejects_unexpected_completeness_attestation`, `barrier_resolve_joins_since_rejects_unexpected_completeness_attestation`, `barrier_fetch_public_tree_rejects_local_history_authority_in_base_profile` in [`../../crates/cityg-api-client/src/lib.rs`](../../crates/cityg-api-client/src/lib.rs) |
 
 ## Minimum Runtime Gates
 
@@ -82,7 +89,15 @@ cargo test --locked -p cityg-gui --bin cityg-gui \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::watch_reconnect_fetches_offline_backlog_and_resumes_live_notifications \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::client_restart_during_multi_version_catchup_after_refresh_and_leave_recovers_cleanly \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::two_restarted_members_exchange_traffic_without_duplicate_delivery \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \

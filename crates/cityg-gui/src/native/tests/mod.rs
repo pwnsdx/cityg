@@ -8182,6 +8182,7 @@ async fn restart_during_pending_join_finalize_activation_recovers_via_epoch_sync
     Ok(())
 }
 
+#[test]
 fn room_identity_persists_reuses_same_room_and_survives_session_removal()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
@@ -12378,6 +12379,430 @@ async fn message_replay_state_survives_client_restart_between_fetch_rounds()
                 && message.plaintext != "bob-before-restart-2"
         }),
         "restart path must not re-deliver the pre-restart burst"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn watch_reconnect_fetches_offline_backlog_and_resumes_live_notifications()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+
+    let port = next_test_port();
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let room_id = hex_encode([0xA5u8; 32]);
+    bootstrap_test_room(&server_url, &room_id).await?;
+
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
+    let bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?
+    };
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let latest_members = perform_fetch_members(MembersParams::from_session(
+            &alice,
+            0,
+            50,
+            MembersMode::Full,
+        ))
+        .await?;
+        let mut alice_with_latest_root = alice.clone();
+        alice_with_latest_root.parent_root = latest_members.root;
+        let synced = perform_epoch_sync(alice_with_latest_root).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+
+    let ws_url = format!(
+        "{}/v1/ws?gid={}&leaf_id={}",
+        server_url
+            .replace("http://", "ws://")
+            .replace("https://", "wss://"),
+        hex_encode(alice.gid),
+        hex_encode(alice.leaf_id)
+    );
+
+    let (first_tx, mut first_rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+    let first_worker = tokio::spawn(run_websocket_worker(
+        ws_url.clone(),
+        Some(TEST_MESSAGE_TOKEN.to_string()),
+        Duration::from_millis(20),
+        first_tx,
+    ));
+
+    let mut first_connected = false;
+    for _ in 0..8 {
+        let next = tokio::time::timeout(Duration::from_secs(1), first_rx.next()).await?;
+        let Some(event) = next else {
+            break;
+        };
+        if matches!(event, WebSocketEvent::Connected) {
+            first_connected = true;
+            break;
+        }
+    }
+    assert!(
+        first_connected,
+        "watch reconnect flow must establish the first websocket before forcing disconnect"
+    );
+
+    first_worker.abort();
+    let _ = first_worker.await;
+
+    let backlog_plaintext = "bob-while-watcher-offline".to_string();
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_send(SendParams::from_session(
+            &bob,
+            backlog_plaintext.clone(),
+            0,
+        )?)
+        .await?;
+    }
+
+    let (second_tx, mut second_rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+    let second_worker = tokio::spawn(run_websocket_worker(
+        ws_url,
+        Some(TEST_MESSAGE_TOKEN.to_string()),
+        Duration::from_millis(20),
+        second_tx,
+    ));
+
+    let mut second_connected = false;
+    for _ in 0..8 {
+        let next = tokio::time::timeout(Duration::from_secs(1), second_rx.next()).await?;
+        let Some(event) = next else {
+            break;
+        };
+        if matches!(event, WebSocketEvent::Connected) {
+            second_connected = true;
+            break;
+        }
+    }
+    assert!(
+        second_connected,
+        "watch reconnect flow must re-establish the websocket before backlog fetch"
+    );
+
+    let mut alice_after_backlog_fetch = alice.clone();
+    let backlog_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_fetch(FetchParams::from_session(&alice_after_backlog_fetch, None)?).await?
+    };
+    assert!(
+        backlog_fetch
+            .messages
+            .iter()
+            .any(|message| message.plaintext == backlog_plaintext
+                && message.sender_leaf == Some(bob.leaf_id)),
+        "fetch after reconnect must bridge the backlog emitted while the watcher was offline"
+    );
+    apply_fetch_outcome_to_session(&mut alice_after_backlog_fetch, &backlog_fetch);
+
+    let live_plaintext = "bob-after-watch-reconnect".to_string();
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+        perform_send(SendParams::from_session(&bob, live_plaintext.clone(), 1)?).await?;
+    }
+
+    let mut saw_live_notification = false;
+    for _ in 0..8 {
+        let next = tokio::time::timeout(Duration::from_secs(1), second_rx.next()).await?;
+        let Some(event) = next else {
+            break;
+        };
+        match event {
+            WebSocketEvent::Message => {
+                saw_live_notification = true;
+                break;
+            }
+            WebSocketEvent::Connected
+            | WebSocketEvent::Disconnected
+            | WebSocketEvent::Membership(_) => {}
+        }
+    }
+    assert!(
+        saw_live_notification,
+        "watch reconnect flow must resume live message notifications after reconnect"
+    );
+
+    let mut alice_after_live_fetch = alice_after_backlog_fetch.clone();
+    let live_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_fetch(FetchParams::from_session(&alice_after_live_fetch, None)?).await?
+    };
+    assert!(
+        live_fetch
+            .messages
+            .iter()
+            .any(|message| message.plaintext == live_plaintext
+                && message.sender_leaf == Some(bob.leaf_id)),
+        "post-reconnect fetch must still deliver fresh live traffic"
+    );
+    assert!(
+        live_fetch
+            .messages
+            .iter()
+            .all(|message| message.plaintext != backlog_plaintext),
+        "post-reconnect live fetch must not replay the backlog once replay-state advanced"
+    );
+    apply_fetch_outcome_to_session(&mut alice_after_live_fetch, &live_fetch);
+
+    let final_empty_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+        perform_fetch(FetchParams::from_session(&alice_after_live_fetch, None)?).await?
+    };
+    assert!(
+        final_empty_fetch.messages.is_empty(),
+        "after backlog and live traffic are fetched once, repeated fetches should be empty"
+    );
+
+    second_worker.abort();
+    let _ = second_worker.await;
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_restarted_members_exchange_traffic_without_duplicate_delivery()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let alice_base = temp_dir.path().join("cityg").join("gui-alice");
+    let bob_base = temp_dir.path().join("cityg").join("gui-bob");
+
+    let port = next_test_port();
+    let handle = spawn_server_on(port).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let room_id = hex_encode([0xA6u8; 32]);
+    bootstrap_test_room(&server_url, &room_id).await?;
+
+    let alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "alice".to_string(),
+        })
+        .await?
+    };
+    let bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_join(JoinParams {
+            server_url: server_url.clone(),
+            room_id: room_id.clone(),
+            alias: "bob".to_string(),
+        })
+        .await?
+    };
+    let alice_after_sync = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        let latest_members = perform_fetch_members(MembersParams::from_session(
+            &alice,
+            0,
+            50,
+            MembersMode::Full,
+        ))
+        .await?;
+        let mut alice_with_latest_root = alice.clone();
+        alice_with_latest_root.parent_root = latest_members.root;
+        let synced = perform_epoch_sync(alice_with_latest_root).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+    let bob_after_sync = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        let synced = perform_epoch_sync(bob).await?.session;
+        persist_session(&synced)?;
+        synced
+    };
+    assert!(
+        !alice_after_sync.barrier_state.barrier_recovery_pending
+            && !bob_after_sync.barrier_state.barrier_recovery_pending,
+        "both members must be message-ready before simulating dual restart"
+    );
+
+    let restarted_alice = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        load_session_at(&server_url, &room_id)?
+            .ok_or_else(|| anyhow!("expected persisted alice session after restart"))?
+    };
+    let restarted_bob = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        load_session_at(&server_url, &room_id)?
+            .ok_or_else(|| anyhow!("expected persisted bob session after restart"))?
+    };
+    assert_eq!(
+        restarted_alice.we_epoch_id, restarted_bob.we_epoch_id,
+        "dual restart should reload both peers onto the same accepted epoch"
+    );
+
+    let mut alice_after_restart = restarted_alice.clone();
+    let mut bob_after_restart = restarted_bob.clone();
+
+    let alice_burst = ["alice-after-restart-1", "alice-after-restart-2"];
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_send(SendParams::from_session(
+            &alice_after_restart,
+            alice_burst[0].to_string(),
+            0,
+        )?)
+        .await?;
+        perform_send(SendParams::from_session(
+            &alice_after_restart,
+            alice_burst[1].to_string(),
+            1,
+        )?)
+        .await?;
+    }
+
+    let bob_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_fetch(FetchParams::from_session(&bob_after_restart, None)?).await?
+    };
+    for plaintext in alice_burst {
+        assert!(
+            bob_fetch
+                .messages
+                .iter()
+                .any(|message| message.plaintext == plaintext
+                    && message.sender_leaf == Some(alice_after_restart.leaf_id)),
+            "bob must decrypt alice's burst after both clients restart"
+        );
+    }
+    apply_fetch_outcome_to_session(&mut bob_after_restart, &bob_fetch);
+
+    let bob_empty_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_fetch(FetchParams::from_session(&bob_after_restart, None)?).await?
+    };
+    assert!(
+        bob_empty_fetch.messages.is_empty(),
+        "repeated fetch after bob advances replay-state must be empty"
+    );
+
+    let bob_burst = ["bob-after-restart-1", "bob-after-restart-2"];
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        perform_send(SendParams::from_session(
+            &bob_after_restart,
+            bob_burst[0].to_string(),
+            2,
+        )?)
+        .await?;
+        perform_send(SendParams::from_session(
+            &bob_after_restart,
+            bob_burst[1].to_string(),
+            3,
+        )?)
+        .await?;
+    }
+
+    let alice_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_fetch(FetchParams::from_session(&alice_after_restart, None)?).await?
+    };
+    for plaintext in bob_burst {
+        assert!(
+            alice_fetch
+                .messages
+                .iter()
+                .any(|message| message.plaintext == plaintext
+                    && message.sender_leaf == Some(bob_after_restart.leaf_id)),
+            "alice must decrypt bob's burst after both clients restart"
+        );
+    }
+    apply_fetch_outcome_to_session(&mut alice_after_restart, &alice_fetch);
+
+    let alice_empty_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        perform_fetch(FetchParams::from_session(&alice_after_restart, None)?).await?
+    };
+    assert!(
+        alice_empty_fetch.messages.is_empty(),
+        "repeated fetch after alice advances replay-state must be empty"
+    );
+
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        persist_session(&alice_after_restart)?;
+    }
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        persist_session(&bob_after_restart)?;
+    }
+
+    let alice_reloaded_again = {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base.clone()));
+        load_session_at(&server_url, &room_id)?
+            .ok_or_else(|| anyhow!("expected alice session after second simulated restart"))?
+    };
+    let bob_reloaded_again = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base.clone()));
+        load_session_at(&server_url, &room_id)?
+            .ok_or_else(|| anyhow!("expected bob session after second simulated restart"))?
+    };
+    assert_eq!(
+        alice_reloaded_again.last_fetch_timestamp_ms, alice_after_restart.last_fetch_timestamp_ms,
+        "alice replay watermark must survive repeated restart boundaries"
+    );
+    assert_eq!(
+        bob_reloaded_again.last_fetch_timestamp_ms, bob_after_restart.last_fetch_timestamp_ms,
+        "bob replay watermark must survive repeated restart boundaries"
+    );
+
+    let final_plaintext = "alice-final-after-dual-restart".to_string();
+    {
+        let _override_guard = set_config_dir_override_for_tests(Some(alice_base));
+        perform_send(SendParams::from_session(
+            &alice_reloaded_again,
+            final_plaintext.clone(),
+            4,
+        )?)
+        .await?;
+    }
+    let bob_final_fetch = {
+        let _override_guard = set_config_dir_override_for_tests(Some(bob_base));
+        perform_fetch(FetchParams::from_session(&bob_reloaded_again, None)?).await?
+    };
+    assert!(
+        bob_final_fetch
+            .messages
+            .iter()
+            .any(|message| message.plaintext == final_plaintext
+                && message.sender_leaf == Some(alice_reloaded_again.leaf_id)),
+        "traffic must still flow after both members cross a second restart boundary"
     );
 
     handle.abort();

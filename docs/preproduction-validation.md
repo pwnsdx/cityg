@@ -144,7 +144,15 @@ cargo test --locked -p cityg-gui --bin cityg-gui \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::watch_reconnect_fetches_offline_backlog_and_resumes_live_notifications \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
   native::tests::client_restart_during_multi_version_catchup_after_refresh_and_leave_recovers_cleanly \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::two_restarted_members_exchange_traffic_without_duplicate_delivery \
   --features native-app -- --exact --nocapture
 
 cargo test --locked -p cityg-gui --bin cityg-gui \
@@ -171,7 +179,9 @@ These gates cover:
 - multi-author messaging continuity across a real epoch change
 - replay-state enforcement across repeated fetch rounds
 - replay-state persistence across a simulated client restart
+- watch reconnect bridging offline backlog before resuming the live feed
 - client restart during multi-version catch-up after `refresh + leave`
+- two restarted members resuming bilateral traffic without duplicate delivery
 - restart + expel churn with later joiner messaging
 - restart during a published-but-not-reloaded `join_finalize` activation
 - watch websocket reconnect resuming fresh notifications under active burst traffic

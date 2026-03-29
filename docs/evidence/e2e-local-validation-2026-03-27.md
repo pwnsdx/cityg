@@ -959,3 +959,67 @@ Notes:
   the published merge to survive restart/replay
 - this closes the earlier `404 resource not found` path on
   `merge_ticket_refresh -> get_bundle` after restart
+
+### Flow T: watch reconnect fetches offline backlog and resumes live notifications
+
+Goal:
+
+- extend the watch reconnect coverage beyond the pure live-feed case: the
+  watcher drops offline during traffic, reconnects, fetches the missed burst,
+  and then resumes receiving fresh live notifications without replaying the
+  backlog twice
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::watch_reconnect_fetches_offline_backlog_and_resumes_live_notifications --features native-app -- --exact --nocapture`
+- `cargo test --locked -p cityg-gui --bin join_leave tests::watch_mode_reconnect_under_burst_resumes_live_notifications -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/gui-watch-backlog`
+- `2026-03-29` on `.cargo-target/gui-watch-backlog`
+
+Assertions:
+
+- the watcher reconnects after an intentional websocket drop
+- `perform_fetch` bridges the message emitted while the watcher was offline
+- once the backlog is fetched, the reconnected websocket still surfaces fresh
+  `Message` notifications
+- the follow-up fetch contains only the new live traffic and does not replay the
+  offline burst again
+
+Notes:
+
+- the lower-level `join_leave` flow still qualifies the websocket live-notify
+  path directly
+- the native GUI flow adds the missing backlog-bridging proof for traffic sent
+  while the watcher was offline
+
+### Flow U: two restarted members resume bilateral traffic without duplicate delivery
+
+Goal:
+
+- exercise a dual-client restart boundary directly: both members restart from
+  disk, resume bilateral traffic, and keep replay-state suppression intact
+
+Coverage:
+
+- `cargo test --locked -p cityg-gui --bin cityg-gui native::tests::two_restarted_members_exchange_traffic_without_duplicate_delivery --features native-app -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/gui-dual-restart`
+
+Assertions:
+
+- both restarted members reload the same accepted epoch from disk
+- the first restarted sender can emit a burst immediately after restart
+- the peer decrypts that burst exactly once, then sees an empty repeated fetch
+- the second restarted sender can answer with its own burst, again without
+  duplicate delivery
+- replay watermarks survive a second simulated restart boundary on both sides
+
+Notes:
+
+- this flow complements the single-client restart tests by proving that both
+  sides can cross the same restart boundary and continue exchanging traffic
