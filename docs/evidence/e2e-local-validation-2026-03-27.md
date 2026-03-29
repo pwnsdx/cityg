@@ -1146,6 +1146,28 @@ Assertions:
 - after restart, the honest joined member remains visible in the room roster
 - after restart, the room-admin ACL still lists the original admin key
 
+### Flow W4: restart during concurrent malformed admin race still converges cleanly
+
+Goal:
+
+- prove that a server restart in the middle of a malformed admin control-plane
+  race and an honest join still converges to the honest room state
+
+Coverage:
+
+- `cargo test --locked -p cityg-api --test integration restart_during_concurrent_malformed_admin_race_and_honest_join_recovers_cleanly -- --exact --nocapture`
+
+Passed:
+
+- `2026-03-29` on `.cargo-target/api-restart-admin-race`
+
+Assertions:
+
+- the malformed HTTP `expel_member_ticket` request fails closed or is dropped by the restart without poisoning state
+- the in-flight honest join either commits before restart or can be retried cleanly after restart
+- after convergence, the room roster contains the honest joined member
+- after restart, the room-admin ACL still lists the original admin key
+
 ### Flow X: malformed leave rejection does not poison room state
 
 Goal:

@@ -867,6 +867,125 @@ async fn concurrent_malformed_admin_expel_request_and_honest_join_preserve_room_
 
 #[tokio::test]
 #[allow(clippy::expect_used)]
+async fn restart_during_concurrent_malformed_admin_race_and_honest_join_recovers_cleanly()
+-> Result<()> {
+    let temp_root = std::env::temp_dir().join(format!(
+        "cityg-api-restart-concurrent-malformed-admin-race-{}-{}",
+        std::process::id(),
+        next_free_local_port()
+    ));
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    let journal_path = temp_root.join("restart-concurrent-malformed-admin-race.journal");
+    let room_id = hex::encode([0x3Au8; 32]);
+    let gid = hex::decode(&room_id)?;
+    let port = next_free_local_port();
+    let mut handle = spawn_server_on_with_state_path(port, journal_path.clone()).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let base_url = format!("http://127.0.0.1:{port}");
+    let control_client = test_client(base_url.clone());
+    let honest_client = test_client(base_url.clone());
+    let observe_client = test_client(base_url.clone());
+    let (alice_pk, alice_sk) = dilithium5::keypair();
+    bootstrap_room_with_admin_identity(&control_client, &room_id, alice_pk.as_bytes(), &alice_sk)
+        .await?;
+
+    let charlie = join_room_member(&control_client, &room_id, "charlie", 0x98).await?;
+    let honest_bundle = charlie.bundle.clone();
+    let malformed_request = RawExpelMemberTicketRequest {
+        room_id: room_id.clone(),
+        author_leaf_id: [0xC5; 32].to_vec(),
+        target_leaf_id: [0xD6; 31].to_vec(),
+        admin_proof: Some(build_room_admin_leaf_pair_proof(
+            RoomAdminOperation::ExpelMember,
+            &room_id,
+            &[0xC5; 32],
+            &[0xD6; 32],
+            alice_pk.as_bytes(),
+            alice_sk.as_bytes(),
+        )?),
+    };
+
+    let malformed_port = port;
+    let malformed_task = tokio::spawn(async move {
+        match reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{malformed_port}/v1/rooms/expel_member_ticket"
+            ))
+            .header("content-type", "application/protobuf")
+            .body(malformed_request.encode_to_vec())
+            .send()
+            .await
+        {
+            Ok(response) => {
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "concurrent malformed admin expel must fail closed when it reaches the server"
+                );
+                Ok::<(), anyhow::Error>(())
+            }
+            Err(err) if err.is_connect() || err.is_request() || err.is_timeout() => Ok(()),
+            Err(err) => Err(anyhow!(
+                "unexpected malformed request transport error: {err}"
+            )),
+        }
+    });
+    let honest_task =
+        tokio::spawn(async move { honest_client.accept_epoch_bundle(&honest_bundle).await });
+
+    sleep(Duration::from_millis(25)).await;
+    handle.abort();
+    let _ = handle.await;
+    sleep(Duration::from_millis(150)).await;
+
+    handle = spawn_server_on_with_state_path(port, journal_path).await;
+    sleep(Duration::from_millis(250)).await;
+
+    malformed_task.await??;
+    match honest_task.await.expect("honest join task panicked") {
+        Ok(_) => {}
+        Err(Error::Http(_)) => {}
+        Err(Error::HttpStatus { status, .. })
+            if status == StatusCode::INTERNAL_SERVER_ERROR
+                || status == StatusCode::SERVICE_UNAVAILABLE
+                || status == StatusCode::BAD_GATEWAY => {}
+        Err(other) => return Err(anyhow!("unexpected honest join outcome: {other:?}")),
+    }
+
+    let members_after_restart = observe_client.members(gid.as_slice(), None).await?;
+    if members_after_restart.members.is_empty() {
+        observe_client
+            .accept_epoch_bundle(&charlie.bundle)
+            .await
+            .expect("retry honest join after restart");
+    }
+
+    let members_final = observe_client.members(gid.as_slice(), None).await?;
+    assert_eq!(
+        members_final.members.len(),
+        1,
+        "room must converge to the honest joined member after concurrent malformed race and restart"
+    );
+    let listed_admins = observe_client
+        .list_room_admins(
+            &room_id,
+            build_room_admin_listing_proof(&room_id, alice_pk.as_bytes(), alice_sk.as_bytes())?,
+        )
+        .await?;
+    assert_eq!(
+        listed_admins.admin_pop_public_keys,
+        vec![alice_pk.as_bytes().to_vec()],
+        "room-admin ACL must remain healthy after concurrent malformed race and restart"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
 async fn malformed_room_admin_mutation_requests_do_not_poison_acl_or_restart() -> Result<()> {
     let temp_root = std::env::temp_dir().join(format!(
         "cityg-api-malformed-admin-mutation-{}-{}",
