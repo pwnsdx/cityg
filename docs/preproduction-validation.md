@@ -91,6 +91,33 @@ Success criteria:
 - the first creator can leave/restart/rejoin flows without any room admin token
   fallback
 
+## Targeted Runtime Gates
+
+Run these before longer smoke/chaos campaigns when you want fast signal on the
+protocol-sensitive room state machine and the user-visible messaging contract.
+
+Commands:
+
+```bash
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::stale_dueling_pcs_refreshes_converge_and_preserve_messaging \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::message_replay_state_only_releases_new_messages_between_fetch_rounds \
+  --features native-app -- --exact --nocapture
+
+cargo test --locked -p cityg-gui --bin cityg-gui \
+  native::tests::message_replay_state_survives_client_restart_between_fetch_rounds \
+  --features native-app -- --exact --nocapture
+```
+
+These gates cover:
+
+- stale dual-refresh convergence from one authenticated baseline
+- replay-state enforcement across repeated fetch rounds
+- replay-state persistence across a simulated client restart
+
 ## Phase 1: Baseline Smoke
 
 Run:
