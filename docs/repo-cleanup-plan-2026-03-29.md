@@ -242,9 +242,118 @@ Exit criteria:
 - The binary entrypoints are thin.
 - Acceptance logic becomes navigable by stage.
 
-## Workstream C: Test and E2E Harness Cleanup
+## Workstream C: Legacy Surface Removal and Spec Conformance Purge
 
-### C1. Normalize the runtime test taxonomy
+### C1. Inventory every legacy surface against `docs/specs.md`
+
+Problem:
+
+- The repo now has a much clearer current profile in `docs/specs.md`, but some
+  old names, compatibility paths, test-only extensions, fallback wording, and
+  comments may still survive in code or docs.
+- Modularization alone is not enough if it merely preserves dead or ambiguous
+  branches.
+
+Actions:
+
+- Build a concrete inventory of legacy surfaces that are no longer part of the
+  current normative profile.
+- Classify each item as one of:
+  - remove entirely;
+  - keep but mark `test-only` or `historical`;
+  - adapt to current profile wording/behavior;
+  - archive outside active code/docs.
+- Use repo sweeps to find candidates such as:
+  - old profile/version identifiers;
+  - superseded extension IDs or aliases;
+  - compatibility shims no longer needed by `docs/specs.md`;
+  - stale comments that describe removed protocol states;
+  - dead tests that only validate retired behavior;
+  - old CLI/help text and script comments;
+  - legacy docs references that still imply active support.
+
+Exit criteria:
+
+- Every remaining legacy surface has an explicit reason to exist.
+- No ambiguous "maybe active, maybe historical" protocol surface remains.
+
+### C2. Remove dead runtime code and obsolete compatibility paths
+
+Problem:
+
+- Old branches and compatibility helpers increase attack surface, review cost,
+  and maintenance burden.
+- Some paths may now be impossible or forbidden under the current profile, yet
+  still exist in the codebase as dormant support.
+
+Actions:
+
+- Remove code paths that no current spec section, test, or supported runner
+  requires.
+- Collapse obsolete enum variants, helper wrappers, and fallback branches where
+  the current profile now has only one valid behavior.
+- Delete dead glue introduced only to support older profile transitions that are
+  no longer accepted.
+- Remove stale feature gates, compatibility env vars, and deprecated script
+  toggles where they no longer serve the current profile.
+
+Exit criteria:
+
+- Active runtime behavior is a closer, smaller implementation of the current
+  spec.
+- The repo contains fewer dormant branches and fewer "compatibility-only"
+  helpers.
+
+### C3. Purge obsolete protocol mentions from active docs and code comments
+
+Problem:
+
+- Even when runtime behavior is correct, old names and comments create review
+  drift and make auditors think the repo supports more than it really does.
+
+Actions:
+
+- Sweep active docs, READMEs, script help text, inline comments, and error
+  strings for:
+  - superseded profile names;
+  - outdated extension framing;
+  - removed guarantees;
+  - old rollout assumptions;
+  - comments that contradict `docs/specs.md`.
+- Replace them with:
+  - current terminology;
+  - explicit `historical` or `test-only` framing;
+  - links/pointers to the canonical spec section when helpful.
+
+Exit criteria:
+
+- Active docs and comments describe the current profile only.
+- Historical wording is either archived or explicitly marked as such.
+
+### C4. Add regression guards against legacy reintroduction
+
+Problem:
+
+- Without explicit guardrails, removed legacy names and code paths tend to
+  creep back in through comments, scripts, or compatibility patches.
+
+Actions:
+
+- Add lightweight repo checks for disallowed legacy markers in active docs/code.
+- Add a short allowlist for intentional survivors such as:
+  - `historical` docs;
+  - `test-only` extension identifiers;
+  - archived audit/evidence material.
+- Fold these checks into the cleanup/CI workflow once the purge is complete.
+
+Exit criteria:
+
+- The repo has a deliberate mechanism that catches reintroduction of retired
+  protocol surface.
+
+## Workstream D: Test and E2E Harness Cleanup
+
+### D1. Normalize the runtime test taxonomy
 
 Actions:
 
@@ -261,7 +370,7 @@ Exit criteria:
 - Fewer overlapping test names.
 - Easier to identify which flow proves which guarantee.
 
-### C2. Extract shared E2E fixtures
+### D2. Extract shared E2E fixtures
 
 Problem:
 
@@ -281,7 +390,7 @@ Exit criteria:
 - Lower test LOC without losing coverage.
 - Less copy-pasted setup across GUI/API/server suites.
 
-### C3. Reclassify long-running flows
+### D3. Reclassify long-running flows
 
 Actions:
 
@@ -296,9 +405,9 @@ Exit criteria:
 
 - Reviewers can tell which gates are per-PR and which are confidence campaigns.
 
-## Workstream D: Repository Weight Reduction
+## Workstream E: Repository Weight Reduction
 
-### D1. Shrink tracked evidence
+### E1. Shrink tracked evidence
 
 Problem:
 
@@ -326,7 +435,7 @@ Exit criteria:
 - Evidence remains reproducible.
 - Git clone/review footprint drops materially.
 
-### D2. Clean historical/generated document clutter
+### E2. Clean historical/generated document clutter
 
 Actions:
 
@@ -339,7 +448,7 @@ Exit criteria:
 
 - The repo keeps source, not avoidable build byproducts.
 
-### D3. Formalize local workspace cleanup
+### E3. Formalize local workspace cleanup
 
 Problem:
 
@@ -361,9 +470,9 @@ Exit criteria:
 - Local disk state stops growing without bound.
 - Developers know which target dirs are safe to remove.
 
-## Workstream E: CI and Developer Experience
+## Workstream F: CI and Developer Experience
 
-### E1. Simplify CI workflow structure
+### F1. Simplify CI workflow structure
 
 Problem:
 
@@ -384,7 +493,7 @@ Exit criteria:
 - Required CI is easier to reason about.
 - Nightly and optional jobs stop cluttering the primary workflow.
 
-### E2. Unify script contracts
+### F2. Unify script contracts
 
 Actions:
 
@@ -400,7 +509,7 @@ Exit criteria:
 
 - Every runner feels like the same tool family.
 
-### E3. Tighten lint debt
+### F3. Tighten lint debt
 
 Problem:
 
@@ -420,9 +529,9 @@ Exit criteria:
 
 - The remaining `allow` list is short, deliberate, and documented.
 
-## Workstream F: Performance and Maintainability
+## Workstream G: Performance and Maintainability
 
-### F1. Remove needless text duplication
+### G1. Remove needless text duplication
 
 Actions:
 
@@ -435,7 +544,7 @@ Exit criteria:
 
 - Less prose to maintain for the same meaning.
 
-### F2. Reduce fixture and harness duplication
+### G2. Reduce fixture and harness duplication
 
 Actions:
 
@@ -447,7 +556,7 @@ Exit criteria:
 
 - Fewer manually duplicated fixture blobs.
 
-### F3. Re-measure after cleanup
+### G3. Re-measure after cleanup
 
 Actions:
 
@@ -483,10 +592,12 @@ Exit criteria:
 
 ### Phase 2: Test Surface Cleanup
 
-1. Split GUI tests.
-2. Split API integration tests by domain.
-3. Extract shared E2E fixtures/builders.
-4. Normalize runner docs and artifact contracts.
+1. Inventory and classify legacy code/comments/names against `docs/specs.md`.
+2. Remove obsolete compatibility branches and retired wording.
+3. Split GUI tests.
+4. Split API integration tests by domain.
+5. Extract shared E2E fixtures/builders.
+6. Normalize runner docs and artifact contracts.
 
 ### Phase 3: Code Modularization
 
@@ -527,7 +638,9 @@ The cleanup is done when the following are true:
 If cleanup starts now, the best first tranches are:
 
 1. stale docs/date/profile sweep;
-2. split `cityg-gui` native tests by domain;
-3. split `cityg-server` test modules out of `lib.rs`;
-4. archive or compress oversized evidence artifacts;
-5. split the single GitHub workflow into fast CI vs nightly/chaos.
+2. inventory and classify legacy code/docs/comments against `docs/specs.md`;
+3. remove obsolete compatibility paths and retired protocol wording;
+4. split `cityg-gui` native tests by domain;
+5. split `cityg-server` test modules out of `lib.rs`;
+6. archive or compress oversized evidence artifacts;
+7. split the single GitHub workflow into fast CI vs nightly/chaos.
