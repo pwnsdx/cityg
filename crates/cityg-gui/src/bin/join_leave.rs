@@ -100,6 +100,7 @@ const CLIENT_ADMIN_TOKEN_ENV: &str = "CITYG_CLIENT_ADMIN_TOKEN";
 const CLIENT_MESSAGE_TOKEN_ENV: &str = "CITYG_CLIENT_MESSAGE_AUTH_TOKEN";
 const MESSAGE_AUTH_HEADER: &str = "x-cityg-message-token";
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
+const LEAVE_ACCEPT_RETRY_MAX_ATTEMPTS: u32 = 2;
 
 fn read_nonempty_env(var: &str) -> Option<String> {
     std::env::var(var)
@@ -1886,571 +1887,603 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
 
 async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let client = new_api_client(&session.server_url);
-    let mut forward_state = session.forward_state.clone();
-    let mut retry_attempt = 0u32;
-    let ticket = loop {
-        match client
-            .merge_ticket(&session.room_id, &session.leaf_id)
-            .await
-        {
-            Ok(ticket) => break ticket,
-            Err(err) => {
-                if let ApiClientError::HttpStatus {
-                    status,
-                    message,
-                    freeze_code,
-                    ..
-                } = &err
-                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                {
-                    let delay = ticket_retry_delay(retry_attempt);
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    warn!(
-                        attempt = retry_attempt,
-                        delay_ms = delay.as_millis() as u64,
-                        status = status.as_u16(),
-                        message = %message,
-                        "merge_ticket race/concurrency rejection; retrying"
-                    );
-                    sleep(delay).await;
-                    continue;
+    let mut accept_retry_attempt = 0u32;
+    loop {
+        let mut forward_state = session.forward_state.clone();
+        let mut retry_attempt = 0u32;
+        let ticket = loop {
+            match client
+                .merge_ticket(&session.room_id, &session.leaf_id)
+                .await
+            {
+                Ok(ticket) => break ticket,
+                Err(err) => {
+                    if let ApiClientError::HttpStatus {
+                        status,
+                        message,
+                        freeze_code,
+                        ..
+                    } = &err
+                        && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                        && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
+                    {
+                        let delay = ticket_retry_delay(retry_attempt);
+                        retry_attempt = retry_attempt.saturating_add(1);
+                        warn!(
+                            attempt = retry_attempt,
+                            delay_ms = delay.as_millis() as u64,
+                            status = status.as_u16(),
+                            message = %message,
+                            "merge_ticket race/concurrency rejection; retrying"
+                        );
+                        sleep(delay).await;
+                        continue;
+                    }
+
+                    return Err(err).context("fetch merge ticket");
                 }
-
-                return Err(err).context("fetch merge ticket");
-            }
-        }
-    };
-    ensure_supported_attested_current_state_extension(
-        "leave merge ticket",
-        ticket.history_authority_extension,
-        ticket.current_global_history_attestation_bytes.as_slice(),
-    )?;
-    let current_fs_ec = session.fs_ec;
-    let current_fs_epoch_commit = session.fs_epoch_commit;
-    let current_fs_dev_prev_commit = session.fs_dev_prev_commit;
-    let current_anchor_hdr_ctx = session.anchor_hdr_ctx.clone();
-    let current_seed_ctx_hash = session.seed_ctx_hash;
-    let current_seed_commit = session.seed_commit;
-    let current_seed_bundle_commit = session.seed_bundle_commit;
-    let current_stored_header_map = session.stored_header_map.clone();
-
-    let parities = hydrate_parities(
-        &ticket.parities,
-        current_fs_ec,
-        current_fs_epoch_commit,
-        current_fs_dev_prev_commit,
-    );
-
-    if verbose {
-        for (idx, parity) in parities.iter().enumerate() {
-            println!(
-                "parity[{idx}] accept_seq={} is_join={} fs_ec_present={} fs_dev_present={} fs_epoch_present={}",
-                parity.accept_seq,
-                parity.is_join,
-                parity.fs_ec.is_some(),
-                parity.fs_dev_commit.is_some(),
-                parity.fs_epoch_commit.is_some()
-            );
-        }
-    }
-
-    let mut pivot: Option<&PivotParity> = None;
-    for candidate in &parities {
-        let better = match pivot {
-            None => true,
-            Some(current) => {
-                candidate.accept_seq > current.accept_seq
-                    || (candidate.accept_seq == current.accept_seq
-                        && candidate.xk_hash < current.xk_hash)
             }
         };
-        if better {
-            pivot = Some(candidate);
-        }
-    }
-    let pivot = pivot.ok_or(anyhow!("merge ticket missing pivot parity entries"))?;
-
-    let srx_inputs = SrxInputsOwned::from_cbor(&ticket.srx_cbor)
-        .context("decode SRX inputs")?
-        .into_srx_inputs();
-
-    let mut header = BTreeMap::new();
-    header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
-    header.insert(
-        hdr::HDR_KBROAD_PUB,
-        Value::Bytes(ticket.kbroad_public.clone()),
-    );
-
-    let cat = bytes32("cat", &ticket.cat)?;
-    let pox_r_commit = bytes32("pox_r_commit", &ticket.pox_r_commit)?;
-
-    let parent_root_arr = bytes32("parent_root", &ticket.parent_root)?;
-    let join_delta_root_arr = bytes32("join_delta_root", &ticket.join_delta_root)?;
-    let revoked_since_root_arr = bytes32("revoked_since_root", &ticket.revoked_since_root)?;
-    let revoked_root_arr = bytes32("revoked_root", &ticket.revoked_root)?;
-    let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
-    let snapshot_hash = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
-    let next_barrier_version = ticket.barrier_version.saturating_add(1);
-    let revocation_roots_hash =
-        compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
-    let committed_revocation_roots_hash =
-        compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
-    let barrier_tree_response = client
-        .barrier_fetch_public_tree(&session.room_id, &snapshot_hash)
-        .await
-        .context("fetch barrier public tree snapshot")?;
-    let barrier_tree_snapshot = barrier_tree_response.tree;
-    let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
-        DEFAULT_BARRIER_N_MAX
-    } else {
-        ticket.n_max
-    })?;
-    if ticket.cover_leaf_index >= barrier_n_max {
-        return Err(anyhow!(
-            "cover_leaf_index out of range for barrier tree: {} >= {}",
-            ticket.cover_leaf_index,
-            barrier_n_max
-        ));
-    }
-    if barrier_tree_snapshot.n_max != barrier_n_max {
-        return Err(anyhow!(
-            "barrier tree snapshot n_max mismatch: expected {barrier_n_max}, got {}",
-            barrier_tree_snapshot.n_max
-        ));
-    }
-    let join_resolution = client
-        .barrier_resolve_joins_since(&session.room_id, ticket.barrier_version)
-        .await
-        .context("resolve barrier joins since previous version")?;
-    let revoked_resolution = client
-        .barrier_resolve_revoked_leaves(&session.room_id, &committed_revocation_roots_hash)
-        .await
-        .context("resolve committed barrier revoked leaf indices")?;
-    ensure_matching_history_dependencies(
-        "leave",
-        Some(&ticket.current_history_commitment.history_view_id),
-        &ticket.current_history_commitment,
-        &barrier_tree_response.history_view_id,
-        &barrier_tree_response.history_commitment,
-        &join_resolution.history_view_id,
-        &join_resolution.history_commitment,
-        &revoked_resolution.history_view_id,
-        &revoked_resolution.history_commitment,
-    )?;
-    let history_commitment_header =
-        encode_history_commitment_header(&barrier_tree_response.history_commitment)?;
-    header.insert(
-        hdr::HDR_BARRIER_HISTORY_COMMITMENT,
-        Value::Bytes(history_commitment_header.clone()),
-    );
-    if !ticket.current_global_history_attestation_bytes.is_empty() {
-        header.insert(
-            hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
-            Value::Bytes(ticket.current_global_history_attestation_bytes.clone()),
-        );
-    }
-    let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
-    let revoked_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
-        .map_err(|_| anyhow!("cover_leaf_index out of range for barrier tree"))?;
-    let mut post_revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
-    if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
-        post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
-    }
-    apply_join_set_to_snapshot(
-        snapshot_pre.as_mut_slice(),
-        barrier_n_max,
-        join_resolution.records.as_slice(),
-    )?;
-    apply_revoked_set_to_snapshot(
-        snapshot_pre.as_mut_slice(),
-        barrier_n_max,
-        post_revoked_leaf_indices.as_slice(),
-    )?;
-    let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
-    let barrier_update = build_barrier_update_bytes(
-        &session.gid,
-        barrier_n_max,
-        ticket.cover_leaf_index,
-        next_barrier_version,
-        ticket.barrier_version,
-        revocation_roots_hash,
-        kem_tree_hash_before,
-        snapshot_pre.as_slice(),
-    )?;
-    header.insert(
-        hdr::HDR_BARRIER_UPDATE,
-        Value::Bytes(barrier_update.raw_update.clone()),
-    );
-    header.insert(
-        hdr::HDR_BARRIER_UPDATE_REASON,
-        Value::Integer(Integer::from(0u64)),
-    );
-    if !ticket.current_global_history_attestation_bytes.is_empty() {
-        let receipt = encode_full_verification_receipt(
-            &session.gid,
-            &session.leaf_id,
-            0,
-            ticket.cover_leaf_index,
-            history_commitment_header.as_slice(),
+        ensure_supported_attested_current_state_extension(
+            "leave merge ticket",
+            ticket.history_authority_extension,
             ticket.current_global_history_attestation_bytes.as_slice(),
-            barrier_update.raw_update.as_slice(),
-            session.pop_secret.as_bytes(),
         )?;
-        header.insert(
-            hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
-            Value::Bytes(receipt),
+        let current_fs_ec = session.fs_ec;
+        let current_fs_epoch_commit = session.fs_epoch_commit;
+        let current_fs_dev_prev_commit = session.fs_dev_prev_commit;
+        let current_anchor_hdr_ctx = session.anchor_hdr_ctx.clone();
+        let current_seed_ctx_hash = session.seed_ctx_hash;
+        let current_seed_commit = session.seed_commit;
+        let current_seed_bundle_commit = session.seed_bundle_commit;
+        let current_stored_header_map = session.stored_header_map.clone();
+
+        let parities = hydrate_parities(
+            &ticket.parities,
+            current_fs_ec,
+            current_fs_epoch_commit,
+            current_fs_dev_prev_commit,
         );
-        let history_authority = ticket.history_authority.as_ref().ok_or_else(|| {
-            anyhow!("leave merge ticket missing history_authority descriptor for full verification witness")
-        })?;
-        let history_authority_extension = ticket.history_authority_extension.ok_or_else(|| {
-            anyhow!("leave merge ticket missing history_authority_extension for full verification witness")
-        })?;
-        let full_verification_witness = client
-            .barrier_issue_full_verification_witness(
-                &session.room_id,
-                &session.leaf_id,
-                Some(&session.leaf_id),
-                ticket.merge_ticket_artifact_bytes.as_slice(),
-                0,
-                barrier_update.raw_update.as_slice(),
-                barrier_n_max,
-                &ticket.current_history_commitment,
-                history_authority_extension,
-                history_authority,
-                ticket.current_global_history_attestation_bytes.as_slice(),
-                ticket.barrier_version,
-                &snapshot_hash,
-                ticket.barrier_version,
-                join_resolution.records.as_slice(),
-                &revocation_roots_hash,
-                post_revoked_leaf_indices.as_slice(),
-                ticket.deployment_profile_manifest_bytes.as_slice(),
-            )
-            .await
-            .context("issue full verification witness for leave merge")?;
-        header.insert(
-            hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
-            Value::Bytes(full_verification_witness),
-        );
-    }
 
-    let parts = AnchorInstanceParts {
-        gid: &session.gid,
-        cat: cat.as_slice(),
-        tswe_salt_hash: tswe_salt_hash_arr.as_slice(),
-        parent_root: parent_root_arr.as_slice(),
-        join_delta_root: join_delta_root_arr.as_slice(),
-        revoked_since_prev_root: revoked_since_root_arr.as_slice(),
-        revoked_root: revoked_root_arr.as_slice(),
-        pox_r_commit: Some(pox_r_commit.as_slice()),
-    };
-
-    let pop_secret = session.pop_secret.as_ref();
-
-    let params = OrchestrationParams {
-        msphf_crs_id: ticket.msphf_crs_id.as_str(),
-        params_id: ticket.msphf_params_id.as_str(),
-        srx: Some(srx_inputs),
-        srx_mode: SrxMode::Complete,
-        pop_keys: Some(PopKeypair {
-            algorithm: "ML-DSA-65",
-            public_key: session.pop_public_key.as_slice(),
-            secret_key: pop_secret,
-        }),
-        leaf_id_mode: LeafIdMode::PerGroup,
-        proof_mode: ticket.proof_mode.as_str(),
-        vrf_id: ticket.vrf_id.as_str(),
-        policy_version: ticket.policy_version.as_str(),
-        vrf_secret_key: Some(&session.vrf_secret_key[..]),
-        vrf_public_key: Some(&session.vrf_public_key[..]),
-        fs_policy_version: ticket.fs_policy_version.as_str(),
-        fs_epoch_base_ts: ticket.fs_epoch_base_ts,
-        barrier_version: next_barrier_version,
-        fs_join: FsJoinInputs {
-            fs_ec: current_fs_ec,
-            fs_epoch_commit: current_fs_epoch_commit,
-            fs_dev_prev_commit: current_fs_dev_prev_commit,
-        },
-        fs_merge: FsMergeInputs::default(),
-    };
-
-    let witness_bytes = if ticket.witness_cbor.is_empty() {
-        None
-    } else {
-        Some(ticket.witness_cbor.as_slice())
-    };
-
-    let mut bundle = CityGClient::generate_merge_with_forward_state(
-        header,
-        parts,
-        params,
-        Some(&mut forward_state),
-        &parities,
-        None,
-        witness_bytes,
-    )
-    .context("generate merge bundle")?;
-    let pristine_bundle = bundle.clone();
-    strip_srx_and_rollup(&mut bundle.header_map);
-    apply_pivot_alignment(&mut bundle.header_map, pivot);
-    if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
-        bundle
-            .header_map
-            .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
-    }
-    let computed_anchor_ctx =
-        build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
-    let seed_ctx_hash =
-        compute_seed_ctx_hash(&computed_anchor_ctx).context("compute_seed_ctx_hash")?;
-    let seed_commit = compute_seed_commit(
-        &computed_anchor_ctx,
-        &SeedCommitFields {
-            gid: &session.gid,
-            cat: cat.as_slice(),
-            we_epoch_id: bundle.we_epoch_id,
-        },
-    )
-    .context("compute_seed_commit")?;
-    let seed_bundle_commit = compute_seed_bundle_commit(
-        &computed_anchor_ctx,
-        &bundle.hp_binding.rho_commit,
-        &session.gid,
-        cat.as_slice(),
-        &parent_root_arr,
-    )
-    .context("compute_seed_bundle_commit")?;
-    let derived_we_epoch_id = derive_we_epoch_id(&session.gid, &parent_root_arr, &seed_ctx_hash)
-        .context("derive we_epoch_id")?;
-
-    if verbose {
-        println!(
-            "seed_ctx_hash_equal={} seed_commit_equal={} seed_bundle_equal={}",
-            seed_ctx_hash == current_seed_ctx_hash,
-            seed_commit == current_seed_commit,
-            seed_bundle_commit == current_seed_bundle_commit
-        );
-        println!(
-            "binding_match={} seed_commit_match={} seed_bundle_match={}",
-            bundle.hp_binding.seed_ctx_hash == seed_ctx_hash,
-            bundle.hp_binding.seed_commit == seed_commit,
-            bundle.hp_binding.seed_bundle_commit == seed_bundle_commit
-        );
-    }
-
-    bundle.anchor.anchor_hdr_ctx = computed_anchor_ctx.clone();
-    bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
-    bundle.hp_binding.seed_commit = seed_commit;
-    bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
-    bundle.we_epoch_id = derived_we_epoch_id;
-    bundle
-        .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
-        .context("rebind merge HP envelope for leave")?;
-    bundle
-        .header_map
-        .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
-    bundle.header_map.insert(
-        hdr::HDR_RHO_COMMIT,
-        Value::Bytes(bundle.hp_binding.rho_commit.to_vec()),
-    );
-    bundle.header_map.insert(
-        hdr::HDR_SEED_BUNDLE_COMMIT,
-        Value::Bytes(seed_bundle_commit.to_vec()),
-    );
-
-    if verbose {
-        println!(
-            "pre-submit roots: parent={} join_delta={} revoked_since={} revoked={}",
-            describe_value(bundle.header_map.get(&110)),
-            describe_value(bundle.header_map.get(&111)),
-            describe_value(bundle.header_map.get(&112)),
-            describe_value(bundle.header_map.get(&hdr::HDR_REVOKED_ROOT)),
-        );
-        if let Some(Value::Bytes(bytes)) = bundle.header_map.get(&110) {
-            println!("pre-submit parent root hex={}", hex::encode(bytes));
-        }
-        if let Some(Value::Bytes(bytes)) = bundle.header_map.get(&111) {
-            println!("pre-submit join root hex={}", hex::encode(bytes));
-        }
-        let stored_ctx_map: BTreeMap<u64, Value> =
-            ciborium::de::from_reader(current_anchor_hdr_ctx.as_slice())
-                .context("decode stored anchor ctx")?;
-        println!(
-            "stored ctx roots: parent={} join_delta={} revoked_since={} revoked={}",
-            describe_value(stored_ctx_map.get(&110)),
-            describe_value(stored_ctx_map.get(&111)),
-            describe_value(stored_ctx_map.get(&112)),
-            describe_value(stored_ctx_map.get(&113)),
-        );
-        if let Some(Value::Bytes(bytes)) = stored_ctx_map.get(&110) {
-            println!("stored ctx parent root hex={}", hex::encode(bytes));
-        }
-        let adjusted: Vec<u64> = Vec::new();
-
-        use std::collections::BTreeSet;
-        let keys: BTreeSet<u64> = current_stored_header_map
-            .keys()
-            .chain(bundle.header_map.keys())
-            .copied()
-            .collect();
-        let mut diff_report = Vec::new();
-        for key in keys {
-            let stored = current_stored_header_map.get(&key);
-            let current = bundle.header_map.get(&key);
-            if stored != current {
-                diff_report.push((key, describe_value(stored), describe_value(current)));
-            }
-        }
-        println!(
-            "anchor_ctx_equal={} adjusted_keys={:?} diff_keys={:?}",
-            computed_anchor_ctx == current_anchor_hdr_ctx,
-            adjusted,
-            diff_report
-                .iter()
-                .map(|(key, _, _)| *key)
-                .collect::<Vec<_>>()
-        );
-        for (key, stored_desc, current_desc) in &diff_report {
-            println!(
-                " key {}: stored={} current={}",
-                key, stored_desc, current_desc
-            );
-        }
-
-        for key in [
-            hdr::HDR_TSWE_ALG,
-            hdr::HDR_MERKLE_SUITE,
-            hdr::HDR_KBROAD_ALG,
-            hdr::HDR_KBROAD_PUB,
-            hdr::HDR_CRS_ID,
-            hdr::HDR_PARAMS_ID,
-        ] {
-            println!(
-                " hdr {} => {}",
-                key,
-                describe_value(bundle.header_map.get(&key))
-            );
-        }
-    }
-    for key in [
-        hdr::HDR_POP_ALG,
-        hdr::HDR_POP_SIG,
-        hdr::HDR_BOOTSTRAP_ALG,
-        hdr::HDR_BOOTSTRAP_PK,
-        hdr::HDR_BOOTSTRAP_SIG,
-    ] {
-        bundle.header_map.remove(&key);
-    }
-
-    let pivot_fs_len = pivot.fs_capss.len();
-    let bundle_fs = extract_bytes(&bundle.header_map, hdr::HDR_FS_CAPSS)
-        .context("bundle missing fs_capss for comparison")?;
-    let vrf_bytes = extract_bytes(&bundle.header_map, hdr::HDR_VRF_PROOF)
-        .context("bundle missing vrf_proof for comparison")?;
-    let has_srx_root = bundle.header_map.contains_key(&hdr::HDR_SRX_ROOT_SW);
-    let has_srx_smallwood = bundle.header_map.contains_key(&hdr::HDR_SRX_SMALLWOOD);
-    if verbose {
-        let fs_match = pivot_fs_len == bundle_fs.len() && pivot.fs_capss == bundle_fs;
-        let vrf_match = pivot.vrf_proof == vrf_bytes;
-        println!(
-            "fs_capss pivot_len={} bundle_len={} equal={} vrf_equal={}",
-            pivot_fs_len,
-            bundle_fs.len(),
-            fs_match,
-            vrf_match
-        );
-        println!(
-            "srx_root_present={} srx_smallwood_present={}",
-            has_srx_root, has_srx_smallwood
-        );
-        println!(
-            "pivot_has_srx_commit={} pivot_accept_seq={}",
-            pivot.srx_commit.is_some(),
-            pivot.accept_seq
-        );
-        if let Some(Value::Array(items)) = bundle.header_map.get(&hdr::HDR_MH_HEADS) {
-            println!("mh_heads len={}", items.len());
-        }
-    }
-
-    let stored_commit = extract_bytes(&bundle.header_map, hdr::HDR_PROOFS_COMMIT)
-        .context("bundle missing proofs_commit")?;
-    let recomputed_commit =
-        recompute_proofs_commit(&bundle.header_map).context("recompute proofs commit")?;
-    if verbose {
-        println!(
-            "proofs_commit stored={} recomputed={}",
-            hex::encode(&stored_commit),
-            hex::encode(recomputed_commit)
-        );
-    }
-    if stored_commit.as_slice() != recomputed_commit {
         if verbose {
-            println!("warning: proofs_commit mismatch before submission");
-        }
-        bundle.header_map.insert(
-            hdr::HDR_PROOFS_COMMIT,
-            Value::Bytes(recomputed_commit.to_vec()),
-        );
-    }
-
-    if verbose {
-        log_fs_metadata(pivot, &bundle.header_map);
-    }
-
-    match client.refresh_pivot(&bundle).await {
-        Ok(_) => {}
-        Err(ApiClientError::HttpStatus {
-            status, message, ..
-        }) if message.contains("pivot head missing")
-            || message.contains("refresh payload diverges from stored parity") =>
-        {
-            if verbose {
+            for (idx, parity) in parities.iter().enumerate() {
                 println!(
-                    "refresh pivot skipped (status={}): {message}",
-                    status.as_u16()
+                    "parity[{idx}] accept_seq={} is_join={} fs_ec_present={} fs_dev_present={} fs_epoch_present={}",
+                    parity.accept_seq,
+                    parity.is_join,
+                    parity.fs_ec.is_some(),
+                    parity.fs_dev_commit.is_some(),
+                    parity.fs_epoch_commit.is_some()
                 );
             }
         }
-        Err(err) => return Err(err).context("refresh pivot parity"),
-    }
 
-    match client.accept_epoch_bundle(&bundle).await {
-        Ok(_) => Ok(()),
-        Err(ApiClientError::HttpStatus {
-            message,
-            freeze_reason,
-            ..
-        }) if message.contains("mh_heads_invalid")
-            || freeze_reason.as_deref() == Some("mh_heads_invalid") =>
-        {
-            if verbose {
-                println!("retrying leave with pristine merge bundle after mh_heads_invalid");
+        let mut pivot: Option<&PivotParity> = None;
+        for candidate in &parities {
+            let better = match pivot {
+                None => true,
+                Some(current) => {
+                    candidate.accept_seq > current.accept_seq
+                        || (candidate.accept_seq == current.accept_seq
+                            && candidate.xk_hash < current.xk_hash)
+                }
+            };
+            if better {
+                pivot = Some(candidate);
             }
-            let _ = client.refresh_pivot(&pristine_bundle).await;
-            client
-                .accept_epoch_bundle(&pristine_bundle)
-                .await
-                .context("server rejected pristine merge bundle")?;
-            Ok(())
         }
-        Err(ApiClientError::HttpStatus {
-            status,
-            message,
-            freeze_code,
-            freeze_reason,
-            ..
-        }) => {
-            let detail = describe_http_failure(
-                status.as_str(),
+        let pivot = pivot.ok_or(anyhow!("merge ticket missing pivot parity entries"))?;
+
+        let srx_inputs = SrxInputsOwned::from_cbor(&ticket.srx_cbor)
+            .context("decode SRX inputs")?
+            .into_srx_inputs();
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+        header.insert(
+            hdr::HDR_KBROAD_PUB,
+            Value::Bytes(ticket.kbroad_public.clone()),
+        );
+
+        let cat = bytes32("cat", &ticket.cat)?;
+        let pox_r_commit = bytes32("pox_r_commit", &ticket.pox_r_commit)?;
+
+        let parent_root_arr = bytes32("parent_root", &ticket.parent_root)?;
+        let join_delta_root_arr = bytes32("join_delta_root", &ticket.join_delta_root)?;
+        let revoked_since_root_arr = bytes32("revoked_since_root", &ticket.revoked_since_root)?;
+        let revoked_root_arr = bytes32("revoked_root", &ticket.revoked_root)?;
+        let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
+        let snapshot_hash = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
+        let next_barrier_version = ticket.barrier_version.saturating_add(1);
+        let revocation_roots_hash =
+            compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
+        let committed_revocation_roots_hash =
+            compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+        let barrier_tree_response = client
+            .barrier_fetch_public_tree(&session.room_id, &snapshot_hash)
+            .await
+            .context("fetch barrier public tree snapshot")?;
+        let barrier_tree_snapshot = barrier_tree_response.tree;
+        let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
+            DEFAULT_BARRIER_N_MAX
+        } else {
+            ticket.n_max
+        })?;
+        if ticket.cover_leaf_index >= barrier_n_max {
+            return Err(anyhow!(
+                "cover_leaf_index out of range for barrier tree: {} >= {}",
+                ticket.cover_leaf_index,
+                barrier_n_max
+            ));
+        }
+        if barrier_tree_snapshot.n_max != barrier_n_max {
+            return Err(anyhow!(
+                "barrier tree snapshot n_max mismatch: expected {barrier_n_max}, got {}",
+                barrier_tree_snapshot.n_max
+            ));
+        }
+        let join_resolution = client
+            .barrier_resolve_joins_since(&session.room_id, ticket.barrier_version)
+            .await
+            .context("resolve barrier joins since previous version")?;
+        let revoked_resolution = client
+            .barrier_resolve_revoked_leaves(&session.room_id, &committed_revocation_roots_hash)
+            .await
+            .context("resolve committed barrier revoked leaf indices")?;
+        ensure_matching_history_dependencies(
+            "leave",
+            Some(&ticket.current_history_commitment.history_view_id),
+            &ticket.current_history_commitment,
+            &barrier_tree_response.history_view_id,
+            &barrier_tree_response.history_commitment,
+            &join_resolution.history_view_id,
+            &join_resolution.history_commitment,
+            &revoked_resolution.history_view_id,
+            &revoked_resolution.history_commitment,
+        )?;
+        let history_commitment_header =
+            encode_history_commitment_header(&barrier_tree_response.history_commitment)?;
+        header.insert(
+            hdr::HDR_BARRIER_HISTORY_COMMITMENT,
+            Value::Bytes(history_commitment_header.clone()),
+        );
+        if !ticket.current_global_history_attestation_bytes.is_empty() {
+            header.insert(
+                hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+                Value::Bytes(ticket.current_global_history_attestation_bytes.clone()),
+            );
+        }
+        let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
+        let revoked_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
+            .map_err(|_| anyhow!("cover_leaf_index out of range for barrier tree"))?;
+        let mut post_revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
+        if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
+            post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
+        }
+        apply_join_set_to_snapshot(
+            snapshot_pre.as_mut_slice(),
+            barrier_n_max,
+            join_resolution.records.as_slice(),
+        )?;
+        apply_revoked_set_to_snapshot(
+            snapshot_pre.as_mut_slice(),
+            barrier_n_max,
+            post_revoked_leaf_indices.as_slice(),
+        )?;
+        let kem_tree_hash_before =
+            compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
+        let barrier_update = build_barrier_update_bytes(
+            &session.gid,
+            barrier_n_max,
+            ticket.cover_leaf_index,
+            next_barrier_version,
+            ticket.barrier_version,
+            revocation_roots_hash,
+            kem_tree_hash_before,
+            snapshot_pre.as_slice(),
+        )?;
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE,
+            Value::Bytes(barrier_update.raw_update.clone()),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_UPDATE_REASON,
+            Value::Integer(Integer::from(0u64)),
+        );
+        if !ticket.current_global_history_attestation_bytes.is_empty() {
+            let receipt = encode_full_verification_receipt(
+                &session.gid,
+                &session.leaf_id,
+                0,
+                ticket.cover_leaf_index,
+                history_commitment_header.as_slice(),
+                ticket.current_global_history_attestation_bytes.as_slice(),
+                barrier_update.raw_update.as_slice(),
+                session.pop_secret.as_bytes(),
+            )?;
+            header.insert(
+                hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+                Value::Bytes(receipt),
+            );
+            let history_authority = ticket.history_authority.as_ref().ok_or_else(|| {
+            anyhow!("leave merge ticket missing history_authority descriptor for full verification witness")
+        })?;
+            let history_authority_extension = ticket.history_authority_extension.ok_or_else(|| {
+            anyhow!("leave merge ticket missing history_authority_extension for full verification witness")
+        })?;
+            let full_verification_witness = client
+                .barrier_issue_full_verification_witness(
+                    &session.room_id,
+                    &session.leaf_id,
+                    Some(&session.leaf_id),
+                    ticket.merge_ticket_artifact_bytes.as_slice(),
+                    0,
+                    barrier_update.raw_update.as_slice(),
+                    barrier_n_max,
+                    &ticket.current_history_commitment,
+                    history_authority_extension,
+                    history_authority,
+                    ticket.current_global_history_attestation_bytes.as_slice(),
+                    ticket.barrier_version,
+                    &snapshot_hash,
+                    ticket.barrier_version,
+                    join_resolution.records.as_slice(),
+                    &revocation_roots_hash,
+                    post_revoked_leaf_indices.as_slice(),
+                    ticket.deployment_profile_manifest_bytes.as_slice(),
+                )
+                .await
+                .context("issue full verification witness for leave merge")?;
+            header.insert(
+                hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+                Value::Bytes(full_verification_witness),
+            );
+        }
+
+        let parts = AnchorInstanceParts {
+            gid: &session.gid,
+            cat: cat.as_slice(),
+            tswe_salt_hash: tswe_salt_hash_arr.as_slice(),
+            parent_root: parent_root_arr.as_slice(),
+            join_delta_root: join_delta_root_arr.as_slice(),
+            revoked_since_prev_root: revoked_since_root_arr.as_slice(),
+            revoked_root: revoked_root_arr.as_slice(),
+            pox_r_commit: Some(pox_r_commit.as_slice()),
+        };
+
+        let pop_secret = session.pop_secret.as_ref();
+
+        let params = OrchestrationParams {
+            msphf_crs_id: ticket.msphf_crs_id.as_str(),
+            params_id: ticket.msphf_params_id.as_str(),
+            srx: Some(srx_inputs),
+            srx_mode: SrxMode::Complete,
+            pop_keys: Some(PopKeypair {
+                algorithm: "ML-DSA-65",
+                public_key: session.pop_public_key.as_slice(),
+                secret_key: pop_secret,
+            }),
+            leaf_id_mode: LeafIdMode::PerGroup,
+            proof_mode: ticket.proof_mode.as_str(),
+            vrf_id: ticket.vrf_id.as_str(),
+            policy_version: ticket.policy_version.as_str(),
+            vrf_secret_key: Some(&session.vrf_secret_key[..]),
+            vrf_public_key: Some(&session.vrf_public_key[..]),
+            fs_policy_version: ticket.fs_policy_version.as_str(),
+            fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+            barrier_version: next_barrier_version,
+            fs_join: FsJoinInputs {
+                fs_ec: current_fs_ec,
+                fs_epoch_commit: current_fs_epoch_commit,
+                fs_dev_prev_commit: current_fs_dev_prev_commit,
+            },
+            fs_merge: FsMergeInputs::default(),
+        };
+
+        let witness_bytes = if ticket.witness_cbor.is_empty() {
+            None
+        } else {
+            Some(ticket.witness_cbor.as_slice())
+        };
+
+        let mut bundle = CityGClient::generate_merge_with_forward_state(
+            header,
+            parts,
+            params,
+            Some(&mut forward_state),
+            &parities,
+            None,
+            witness_bytes,
+        )
+        .context("generate merge bundle")?;
+        let pristine_bundle = bundle.clone();
+        strip_srx_and_rollup(&mut bundle.header_map);
+        apply_pivot_alignment(&mut bundle.header_map, pivot);
+        if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
+            bundle
+                .header_map
+                .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
+        }
+        let computed_anchor_ctx =
+            build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
+        let seed_ctx_hash =
+            compute_seed_ctx_hash(&computed_anchor_ctx).context("compute_seed_ctx_hash")?;
+        let seed_commit = compute_seed_commit(
+            &computed_anchor_ctx,
+            &SeedCommitFields {
+                gid: &session.gid,
+                cat: cat.as_slice(),
+                we_epoch_id: bundle.we_epoch_id,
+            },
+        )
+        .context("compute_seed_commit")?;
+        let seed_bundle_commit = compute_seed_bundle_commit(
+            &computed_anchor_ctx,
+            &bundle.hp_binding.rho_commit,
+            &session.gid,
+            cat.as_slice(),
+            &parent_root_arr,
+        )
+        .context("compute_seed_bundle_commit")?;
+        let derived_we_epoch_id =
+            derive_we_epoch_id(&session.gid, &parent_root_arr, &seed_ctx_hash)
+                .context("derive we_epoch_id")?;
+
+        if verbose {
+            println!(
+                "seed_ctx_hash_equal={} seed_commit_equal={} seed_bundle_equal={}",
+                seed_ctx_hash == current_seed_ctx_hash,
+                seed_commit == current_seed_commit,
+                seed_bundle_commit == current_seed_bundle_commit
+            );
+            println!(
+                "binding_match={} seed_commit_match={} seed_bundle_match={}",
+                bundle.hp_binding.seed_ctx_hash == seed_ctx_hash,
+                bundle.hp_binding.seed_commit == seed_commit,
+                bundle.hp_binding.seed_bundle_commit == seed_bundle_commit
+            );
+        }
+
+        bundle.anchor.anchor_hdr_ctx = computed_anchor_ctx.clone();
+        bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
+        bundle.hp_binding.seed_commit = seed_commit;
+        bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
+        bundle.we_epoch_id = derived_we_epoch_id;
+        bundle
+            .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
+            .context("rebind merge HP envelope for leave")?;
+        bundle
+            .header_map
+            .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
+        bundle.header_map.insert(
+            hdr::HDR_RHO_COMMIT,
+            Value::Bytes(bundle.hp_binding.rho_commit.to_vec()),
+        );
+        bundle.header_map.insert(
+            hdr::HDR_SEED_BUNDLE_COMMIT,
+            Value::Bytes(seed_bundle_commit.to_vec()),
+        );
+
+        if verbose {
+            println!(
+                "pre-submit roots: parent={} join_delta={} revoked_since={} revoked={}",
+                describe_value(bundle.header_map.get(&110)),
+                describe_value(bundle.header_map.get(&111)),
+                describe_value(bundle.header_map.get(&112)),
+                describe_value(bundle.header_map.get(&hdr::HDR_REVOKED_ROOT)),
+            );
+            if let Some(Value::Bytes(bytes)) = bundle.header_map.get(&110) {
+                println!("pre-submit parent root hex={}", hex::encode(bytes));
+            }
+            if let Some(Value::Bytes(bytes)) = bundle.header_map.get(&111) {
+                println!("pre-submit join root hex={}", hex::encode(bytes));
+            }
+            let stored_ctx_map: BTreeMap<u64, Value> =
+                ciborium::de::from_reader(current_anchor_hdr_ctx.as_slice())
+                    .context("decode stored anchor ctx")?;
+            println!(
+                "stored ctx roots: parent={} join_delta={} revoked_since={} revoked={}",
+                describe_value(stored_ctx_map.get(&110)),
+                describe_value(stored_ctx_map.get(&111)),
+                describe_value(stored_ctx_map.get(&112)),
+                describe_value(stored_ctx_map.get(&113)),
+            );
+            if let Some(Value::Bytes(bytes)) = stored_ctx_map.get(&110) {
+                println!("stored ctx parent root hex={}", hex::encode(bytes));
+            }
+            let adjusted: Vec<u64> = Vec::new();
+
+            use std::collections::BTreeSet;
+            let keys: BTreeSet<u64> = current_stored_header_map
+                .keys()
+                .chain(bundle.header_map.keys())
+                .copied()
+                .collect();
+            let mut diff_report = Vec::new();
+            for key in keys {
+                let stored = current_stored_header_map.get(&key);
+                let current = bundle.header_map.get(&key);
+                if stored != current {
+                    diff_report.push((key, describe_value(stored), describe_value(current)));
+                }
+            }
+            println!(
+                "anchor_ctx_equal={} adjusted_keys={:?} diff_keys={:?}",
+                computed_anchor_ctx == current_anchor_hdr_ctx,
+                adjusted,
+                diff_report
+                    .iter()
+                    .map(|(key, _, _)| *key)
+                    .collect::<Vec<_>>()
+            );
+            for (key, stored_desc, current_desc) in &diff_report {
+                println!(
+                    " key {}: stored={} current={}",
+                    key, stored_desc, current_desc
+                );
+            }
+
+            for key in [
+                hdr::HDR_TSWE_ALG,
+                hdr::HDR_MERKLE_SUITE,
+                hdr::HDR_KBROAD_ALG,
+                hdr::HDR_KBROAD_PUB,
+                hdr::HDR_CRS_ID,
+                hdr::HDR_PARAMS_ID,
+            ] {
+                println!(
+                    " hdr {} => {}",
+                    key,
+                    describe_value(bundle.header_map.get(&key))
+                );
+            }
+        }
+        for key in [
+            hdr::HDR_POP_ALG,
+            hdr::HDR_POP_SIG,
+            hdr::HDR_BOOTSTRAP_ALG,
+            hdr::HDR_BOOTSTRAP_PK,
+            hdr::HDR_BOOTSTRAP_SIG,
+        ] {
+            bundle.header_map.remove(&key);
+        }
+
+        let pivot_fs_len = pivot.fs_capss.len();
+        let bundle_fs = extract_bytes(&bundle.header_map, hdr::HDR_FS_CAPSS)
+            .context("bundle missing fs_capss for comparison")?;
+        let vrf_bytes = extract_bytes(&bundle.header_map, hdr::HDR_VRF_PROOF)
+            .context("bundle missing vrf_proof for comparison")?;
+        let has_srx_root = bundle.header_map.contains_key(&hdr::HDR_SRX_ROOT_SW);
+        let has_srx_smallwood = bundle.header_map.contains_key(&hdr::HDR_SRX_SMALLWOOD);
+        if verbose {
+            let fs_match = pivot_fs_len == bundle_fs.len() && pivot.fs_capss == bundle_fs;
+            let vrf_match = pivot.vrf_proof == vrf_bytes;
+            println!(
+                "fs_capss pivot_len={} bundle_len={} equal={} vrf_equal={}",
+                pivot_fs_len,
+                bundle_fs.len(),
+                fs_match,
+                vrf_match
+            );
+            println!(
+                "srx_root_present={} srx_smallwood_present={}",
+                has_srx_root, has_srx_smallwood
+            );
+            println!(
+                "pivot_has_srx_commit={} pivot_accept_seq={}",
+                pivot.srx_commit.is_some(),
+                pivot.accept_seq
+            );
+            if let Some(Value::Array(items)) = bundle.header_map.get(&hdr::HDR_MH_HEADS) {
+                println!("mh_heads len={}", items.len());
+            }
+        }
+
+        let stored_commit = extract_bytes(&bundle.header_map, hdr::HDR_PROOFS_COMMIT)
+            .context("bundle missing proofs_commit")?;
+        let recomputed_commit =
+            recompute_proofs_commit(&bundle.header_map).context("recompute proofs commit")?;
+        if verbose {
+            println!(
+                "proofs_commit stored={} recomputed={}",
+                hex::encode(&stored_commit),
+                hex::encode(recomputed_commit)
+            );
+        }
+        if stored_commit.as_slice() != recomputed_commit {
+            if verbose {
+                println!("warning: proofs_commit mismatch before submission");
+            }
+            bundle.header_map.insert(
+                hdr::HDR_PROOFS_COMMIT,
+                Value::Bytes(recomputed_commit.to_vec()),
+            );
+        }
+
+        if verbose {
+            log_fs_metadata(pivot, &bundle.header_map);
+        }
+
+        match client.refresh_pivot(&bundle).await {
+            Ok(_) => {}
+            Err(ApiClientError::HttpStatus {
+                status, message, ..
+            }) if message.contains("pivot head missing")
+                || message.contains("refresh payload diverges from stored parity") =>
+            {
+                if verbose {
+                    println!(
+                        "refresh pivot skipped (status={}): {message}",
+                        status.as_u16()
+                    );
+                }
+            }
+            Err(err) => return Err(err).context("refresh pivot parity"),
+        }
+
+        match client.accept_epoch_bundle(&bundle).await {
+            Ok(_) => return Ok(()),
+            Err(ApiClientError::HttpStatus {
+                message,
+                freeze_reason,
+                ..
+            }) if message.contains("mh_heads_invalid")
+                || freeze_reason.as_deref() == Some("mh_heads_invalid") =>
+            {
+                if verbose {
+                    println!("retrying leave with pristine merge bundle after mh_heads_invalid");
+                }
+                let _ = client.refresh_pivot(&pristine_bundle).await;
+                client
+                    .accept_epoch_bundle(&pristine_bundle)
+                    .await
+                    .context("server rejected pristine merge bundle")?;
+                return Ok(());
+            }
+            Err(ApiClientError::HttpStatus {
+                status,
+                message,
+                freeze_code,
+                freeze_reason,
+                ..
+            }) if should_retry_leave_accept_http_error(
+                status.as_u16(),
                 &message,
                 freeze_code,
                 freeze_reason.as_deref(),
-            );
-            Err(anyhow!(detail))
+            ) && accept_retry_attempt < LEAVE_ACCEPT_RETRY_MAX_ATTEMPTS =>
+            {
+                let delay = ticket_retry_delay(accept_retry_attempt);
+                accept_retry_attempt = accept_retry_attempt.saturating_add(1);
+                warn!(
+                    attempt = accept_retry_attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    status = status.as_u16(),
+                    message = %message,
+                    freeze_code = ?freeze_code,
+                    freeze_reason = freeze_reason.as_deref().unwrap_or(""),
+                    "leave accept rejected by stale checkpoint guard; refetching merge ticket"
+                );
+                sleep(delay).await;
+                continue;
+            }
+            Err(ApiClientError::HttpStatus {
+                status,
+                message,
+                freeze_code,
+                freeze_reason,
+                ..
+            }) => {
+                let detail = describe_http_failure(
+                    status.as_str(),
+                    &message,
+                    freeze_code,
+                    freeze_reason.as_deref(),
+                );
+                return Err(anyhow!(detail));
+            }
+            Err(err) => return Err(err.into()),
         }
-        Err(err) => Err(err.into()),
     }
 }
 
@@ -2944,6 +2977,22 @@ fn is_fs_forward_jump_group_http_error(
     freeze_reason: Option<&str>,
 ) -> bool {
     freeze_code == Some(9476) || freeze_reason == Some("fs_forward_jump_group")
+}
+
+fn should_retry_leave_accept_http_error(
+    status: u16,
+    message: &str,
+    freeze_code: Option<u32>,
+    freeze_reason: Option<&str>,
+) -> bool {
+    let retryable_freeze = matches!(freeze_code, Some(9471 | 9473))
+        || matches!(
+            freeze_reason,
+            Some("fs_checkpoint_backdate" | "fs_checkpoint_monotonicity")
+        )
+        || message.contains("fs_checkpoint_backdate")
+        || message.contains("fs_checkpoint_monotonicity");
+    retryable_freeze && (status == 409 || status >= 500)
 }
 
 fn recompute_proofs_commit(header: &BTreeMap<u64, Value>) -> Result<[u8; 32]> {
@@ -6424,6 +6473,70 @@ mod tests {
         session.server_url = server_url;
         perform_leave(&session, true).await?;
         assert_eq!(state.call_count("/v1/pivot/refresh"), 2);
+        assert_eq!(state.call_count("/v1/accept_epoch"), 2);
+
+        handle.abort();
+        let _ = handle.await;
+        witness_handle.abort();
+        let _ = witness_handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn perform_leave_retries_fresh_ticket_after_fs_checkpoint_monotonicity() -> Result<()> {
+        let (fixture, witness_proxy_base_url, witness_handle) =
+            capture_leave_fixture_with_server().await?;
+
+        let mut fetch_public_tree =
+            proto_bytes_responses(fixture.barrier_tree_snapshot_pages_raw.as_slice());
+        fetch_public_tree.extend(proto_bytes_responses(
+            fixture.barrier_tree_snapshot_pages_raw.as_slice(),
+        ));
+        let mut resolve_joins = proto_bytes_responses(fixture.join_records_pages_raw.as_slice());
+        resolve_joins.extend(proto_bytes_responses(
+            fixture.join_records_pages_raw.as_slice(),
+        ));
+        let mut resolve_revoked =
+            proto_bytes_responses(fixture.revoked_leaf_indices_pages_raw.as_slice());
+        resolve_revoked.extend(proto_bytes_responses(
+            fixture.revoked_leaf_indices_pages_raw.as_slice(),
+        ));
+
+        let state = LeaveMockState::new([
+            (
+                "/v1/rooms/merge_ticket",
+                vec![
+                    MockResponse::proto_bytes(encode_merge_ticket(&fixture.ticket)?),
+                    MockResponse::proto_bytes(encode_merge_ticket(&fixture.ticket)?),
+                ],
+            ),
+            ("/v1/barrier/fetch_public_tree", fetch_public_tree),
+            ("/v1/barrier/resolve_joins_since", resolve_joins),
+            ("/v1/barrier/resolve_revoked_leaves", resolve_revoked),
+            (
+                "/v1/pivot/refresh",
+                vec![MockResponse::empty_proto(), MockResponse::empty_proto()],
+            ),
+            (
+                "/v1/accept_epoch",
+                vec![
+                    MockResponse::json(
+                        HttpStatusCode::INTERNAL_SERVER_ERROR,
+                        "acceptance error: fs_checkpoint_monotonicity",
+                        Some(9473),
+                        Some("fs_checkpoint_monotonicity"),
+                    ),
+                    MockResponse::empty_proto(),
+                ],
+            ),
+        ])
+        .with_witness_proxy(witness_proxy_base_url);
+        let (server_url, handle) = start_leave_mock_server(state.clone()).await?;
+
+        let mut session = fixture.session;
+        session.server_url = server_url;
+        perform_leave(&session, true).await?;
+        assert_eq!(state.call_count("/v1/rooms/merge_ticket"), 2);
         assert_eq!(state.call_count("/v1/accept_epoch"), 2);
 
         handle.abort();

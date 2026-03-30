@@ -64,7 +64,13 @@ Once raw artefacts are collected, update `docs/annex_v_status.md` with:
 
 Keep the raw files in this `docs/evidence/` tree so they can be attached to audit bundles.
 
-## 5. System inventory
+## 5. E2E performance / chaos
+
+For end-to-end runtime throughput and restart-chaos evidence on the current profile, see:
+
+- [e2e-performance-validation-2026-03-30.md](/Users/admin/Desktop/Repositories/cityg/docs/evidence/e2e-performance-validation-2026-03-30.md)
+
+## 6. System inventory
 
 Run the helper script to capture hardware and toolchain information:
 
