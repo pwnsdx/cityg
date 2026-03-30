@@ -102,6 +102,7 @@ Crate-specific documentation:
 - **[msphf-lb-vrf](../crates/msphf-lb-vrf/README.md)** - Lattice-based VRF implementation
 - **[capss](../crates/capss/README.md)** - CAPSS Smallwood proof system
 - **[cityg-config](../crates/cityg-config/README.md)** - Configuration management
+- **[pqcrypto-kyber](../crates/pqcrypto-kyber/README.md)** - Local ML-KEM-768 bridge preserving the `pqcrypto_kyber::kyber768` API shape
 
 ## 🔬 Research & Evidence
 

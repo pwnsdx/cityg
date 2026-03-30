@@ -1,3 +1,14 @@
+//! Local ML-KEM-768 bridge that preserves the `pqcrypto_kyber::kyber768` API
+//! shape used throughout this repository.
+//!
+//! This crate is intentionally *not* a separate protocol mode or a fallback to
+//! an older wire profile. The current City-G profile is specified in terms of
+//! `ml-kem-768`; this crate exists only to keep a stable Rust API surface while
+//! the rest of the workspace imports `pqcrypto_kyber::kyber768`.
+//!
+//! Read any use of `pqcrypto_kyber::kyber768` in this repository as
+//! “ML-KEM-768 through the local bridge crate”.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub mod kyber768 {

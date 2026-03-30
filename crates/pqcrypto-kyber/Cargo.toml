@@ -3,7 +3,7 @@ name = "pqcrypto-kyber"
 version = "0.8.1"
 edition = "2024"
 license = "MIT"
-description = "City-G local compatibility shim exposing pqcrypto-kyber::kyber768 API backed by ml-kem"
+description = "City-G ML-KEM-768 bridge exposing the pqcrypto-kyber::kyber768 API"
 
 [features]
 default = ["std"]
