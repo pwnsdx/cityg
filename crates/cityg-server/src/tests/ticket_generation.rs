@@ -528,3 +528,46 @@ fn build_merge_ticket_for_refresh_keeps_revocation_roots_stable() -> Result<(), 
     );
     Ok(())
 }
+
+#[test]
+fn merge_ticket_after_single_join_has_parity() -> Result<(), CityGError> {
+    let mut server = demo::demo_server();
+    let bundle = cityg_client::demo::demo_bundle("alice")?;
+    server.accept_epoch(&bundle)?;
+
+    let leaf_id = cityg_client::demo::demo_member_leaf("alice");
+    let ticket = server.build_merge_ticket(&cityg_client::demo::DEMO_GID, &leaf_id)?;
+
+    assert!(
+        !ticket.parities.is_empty(),
+        "expected pivot parity snapshot for current parent root"
+    );
+    assert_eq!(ticket.parent_root, ticket.parities[0].parent_root);
+    Ok(())
+}
+
+#[test]
+fn merge_ticket_encodes_requester_self_revocation_delta() -> Result<(), CityGError> {
+    let mut server = demo::demo_server();
+    let bundle = cityg_client::demo::demo_bundle("alice")?;
+    server.accept_epoch(&bundle)?;
+
+    let leaf_id = cityg_client::demo::demo_member_leaf("alice");
+    let ticket = server.build_merge_ticket(&cityg_client::demo::DEMO_GID, &leaf_id)?;
+    let srx = cityg_client::witness::SrxInputsOwned::from_cbor(ticket.srx_cbor.as_slice())
+        .map_err(|_| CityGError::InvalidInput("merge srx decode failed"))?;
+
+    assert!(
+        srx.join_leaf_ids.is_empty(),
+        "merge must not add join leaves"
+    );
+    assert_eq!(
+        srx.since_leaf_ids,
+        vec![leaf_id],
+        "merge ticket should include requester in revoked_since delta"
+    );
+    let expected_since_root = msphf_core::merkle::canonical_set_root(&[leaf_id])?;
+    assert_eq!(ticket.revoked_since_root, expected_since_root);
+    assert_eq!(ticket.revoked_root, expected_since_root);
+    Ok(())
+}
