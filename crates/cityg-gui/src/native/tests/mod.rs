@@ -19,6 +19,8 @@ use msphf_orchestrator::{LeafIdMode, compute_leaf_id};
 mod admin_expel;
 #[path = "client_state_props.rs"]
 mod client_state_props;
+#[path = "join_bootstrap.rs"]
+mod join_bootstrap;
 #[path = "message_crypto.rs"]
 mod message_crypto;
 #[path = "pending_recovery_guards.rs"]
@@ -7795,146 +7797,6 @@ async fn perform_join_populates_barrier_leaf_key_material() -> Result<(), Box<dy
 }
 
 #[tokio::test]
-async fn perform_leave_rejects_while_barrier_recovery_is_pending()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut session = build_test_session(0xC31, "http://127.0.0.1:9", "room-leave-guard", "alice")?;
-    session.barrier_state.barrier_recovery_pending = true;
-
-    let err = perform_leave(LeaveRequest::from_session(&session))
-        .await
-        .expect_err("leave should be blocked while barrier recovery is pending");
-    assert!(
-        err.to_string()
-            .contains("complete FULL barrier recovery first"),
-        "expected explicit recover-before-update guidance: {err}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn perform_leave_rejects_without_full_barrier_verification()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut session = build_test_session(
-        0xC33,
-        "http://127.0.0.1:9",
-        "room-leave-recover-only",
-        "alice",
-    )?;
-    session.barrier_state.barrier_recovery_pending = false;
-    session.barrier_state.current_barrier_full_verified = false;
-
-    let err = perform_leave(LeaveRequest::from_session(&session))
-        .await
-        .expect_err("leave should be blocked while barrier state is recover-only");
-    assert!(
-        err.to_string().contains("recover-only barrier state"),
-        "expected explicit FULL-verification guidance: {err}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn perform_pcs_refresh_rejects_while_barrier_recovery_is_pending()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut session =
-        build_test_session(0xC32, "http://127.0.0.1:9", "room-refresh-guard", "alice")?;
-    session.barrier_state.barrier_recovery_pending = true;
-
-    let err = perform_pcs_refresh(LeaveRequest::from_session(&session))
-        .await
-        .expect_err("pcs refresh should be blocked while barrier recovery is pending");
-    assert!(
-        err.to_string()
-            .contains("complete FULL barrier recovery first"),
-        "expected explicit recover-before-update guidance: {err}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn perform_pcs_refresh_rejects_without_full_barrier_verification()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut session = build_test_session(
-        0xC34,
-        "http://127.0.0.1:9",
-        "room-refresh-recover-only",
-        "alice",
-    )?;
-    session.barrier_state.barrier_recovery_pending = false;
-    session.barrier_state.current_barrier_full_verified = false;
-
-    let err = perform_pcs_refresh(LeaveRequest::from_session(&session))
-        .await
-        .expect_err("pcs refresh should be blocked while barrier state is recover-only");
-    assert!(
-        err.to_string().contains("recover-only barrier state"),
-        "expected explicit FULL-verification guidance: {err}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn perform_join_finalize_rejects_pending_session_without_bootstrap_artifact()
--> Result<(), Box<dyn std::error::Error>> {
-    let temp_dir = TempDir::new().expect("create temp dir");
-    let _override_guard = set_config_dir_override_for_tests(Some(temp_dir.path().to_path_buf()));
-    let mut session = build_test_session(
-        0xC35,
-        "http://127.0.0.1:9",
-        "room-join-finalize-bootstrap-guard",
-        "alice",
-    )?;
-    session.parent_root = [0x44; 32];
-    session.barrier_state.barrier_version = 3;
-    session.barrier_state.barrier_recovery_pending = true;
-    session.barrier_state.current_barrier_full_verified = false;
-    session.barrier_state.bootstrap_history_commitment = None;
-    session
-        .barrier_state
-        .bootstrap_current_barrier_update
-        .clear();
-    persist_session(&session)?;
-
-    let err = match perform_join_finalize_inner(LeaveRequest::from_session(&session)).await {
-        Ok(_) => {
-            return Err("pending join_finalize must fail closed without bootstrap artifact".into());
-        }
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string().contains("bootstrap missing"),
-        "expected explicit bootstrap-artifact guidance: {err}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn perform_join_finalize_rejects_pending_session_without_auth_token()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut session = build_test_session(
-        0xC36,
-        "http://127.0.0.1:9",
-        "room-join-finalize-auth-guard",
-        "alice",
-    )?;
-    session.barrier_state.barrier_recovery_pending = true;
-    session.barrier_state.current_barrier_full_verified = true;
-    session.barrier_state.bootstrap_join_finalize_auth_token = [0u8; 32];
-
-    let err = match perform_join_finalize_inner(LeaveRequest::from_session(&session)).await {
-        Ok(_) => {
-            return Err("pending join_finalize must fail closed without auth token".into());
-        }
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string().contains("join_finalize auth token"),
-        "expected explicit join_finalize auth-token guidance: {err}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn perform_join_bootstraps_unprovisioned_room() -> Result<(), Box<dyn std::error::Error>> {
     let _env_lock = ENV_VAR_LOCK
         .lock()
@@ -8017,78 +7879,6 @@ async fn perform_join_bootstrapped_room_can_send_immediately()
 }
 
 #[tokio::test]
-async fn perform_join_bootstrapped_room_can_refresh_immediately()
--> Result<(), Box<dyn std::error::Error>> {
-    let _env_lock = ENV_VAR_LOCK
-        .lock()
-        .map_err(|_| anyhow!("env var lock poisoned"))?;
-    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
-
-    let port = next_test_port();
-    let handle = spawn_server_with_seed_demo_room(port, false).await;
-    sleep(Duration::from_millis(250)).await;
-
-    let server_url = format!("http://127.0.0.1:{port}");
-    let room_id = hex_encode([0x91u8; 32]);
-
-    let session = perform_join(JoinParams {
-        server_url: server_url.clone(),
-        room_id: room_id.clone(),
-        alias: "alice".to_string(),
-    })
-    .await?;
-    assert!(
-        !session.barrier_state.barrier_recovery_pending,
-        "bootstrapped join should leave the creator message-ready"
-    );
-
-    let client = new_api_client(&server_url);
-    let ticket = client
-        .merge_ticket_refresh(&room_id, &session.leaf_id)
-        .await
-        .context("fetch merge ticket after bootstrapped join")?;
-    assert_eq!(
-        ticket.we_epoch_id, session.we_epoch_id,
-        "bootstrapped join must already track the latest accepted epoch"
-    );
-    let bundle_response = client
-        .get_bundle(&ticket.we_epoch_id)
-        .await
-        .context("fetch latest bundle after bootstrapped join")?;
-    let bundle = ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor)
-        .context("decode latest bundle after bootstrapped join")?;
-    let server_dev_commit = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
-        .ok_or_else(|| anyhow!("latest bundle missing fs_dev_commit"))?;
-    assert_eq!(
-        session.fs_dev_prev_commit, server_dev_commit,
-        "bootstrapped join must persist the latest accepted fs_dev_commit"
-    );
-    assert_eq!(
-        session.forward_state.snapshot().fs_dev_commit,
-        server_dev_commit,
-        "bootstrapped join must also advance local FS state to the latest accepted dev commit"
-    );
-    assert!(
-        session.forward_state.snapshot().fs_ec > session.fs_ec,
-        "local FS state should advance beyond the visible anchor fs_ec after a refresh"
-    );
-
-    perform_pcs_refresh(LeaveRequest::from_session(&session)).await?;
-
-    let persisted = load_session_at(&server_url, &room_id)?
-        .ok_or_else(|| anyhow!("expected persisted session after pcs refresh"))?;
-    assert!(
-        persisted.barrier_state.pending.is_some(),
-        "pcs refresh should persist pending barrier state for later activation"
-    );
-
-    handle.abort();
-    let _ = handle.await;
-    Ok(())
-}
-
-#[tokio::test]
 async fn perform_join_second_member_can_send_immediately() -> Result<(), Box<dyn std::error::Error>>
 {
     let _env_lock = ENV_VAR_LOCK
@@ -8161,6 +7951,78 @@ async fn perform_join_second_member_can_send_immediately() -> Result<(), Box<dyn
         .await?
     };
     assert_eq!(sent.sender_leaf, Some(bob.leaf_id));
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn perform_join_bootstrapped_room_can_refresh_immediately()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _env_lock = ENV_VAR_LOCK
+        .lock()
+        .map_err(|_| anyhow!("env var lock poisoned"))?;
+    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+    // SAFETY: tests serialize env mutation with ENV_VAR_LOCK.
+
+    let port = next_test_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let server_url = format!("http://127.0.0.1:{port}");
+    let room_id = hex_encode([0x91u8; 32]);
+
+    let session = perform_join(JoinParams {
+        server_url: server_url.clone(),
+        room_id: room_id.clone(),
+        alias: "alice".to_string(),
+    })
+    .await?;
+    assert!(
+        !session.barrier_state.barrier_recovery_pending,
+        "bootstrapped join should leave the creator message-ready"
+    );
+
+    let client = new_api_client(&server_url);
+    let ticket = client
+        .merge_ticket_refresh(&room_id, &session.leaf_id)
+        .await
+        .context("fetch merge ticket after bootstrapped join")?;
+    assert_eq!(
+        ticket.we_epoch_id, session.we_epoch_id,
+        "bootstrapped join must already track the latest accepted epoch"
+    );
+    let bundle_response = client
+        .get_bundle(&ticket.we_epoch_id)
+        .await
+        .context("fetch latest bundle after bootstrapped join")?;
+    let bundle = ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor)
+        .context("decode latest bundle after bootstrapped join")?;
+    let server_dev_commit = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
+        .ok_or_else(|| anyhow!("latest bundle missing fs_dev_commit"))?;
+    assert_eq!(
+        session.fs_dev_prev_commit, server_dev_commit,
+        "bootstrapped join must persist the latest accepted fs_dev_commit"
+    );
+    assert_eq!(
+        session.forward_state.snapshot().fs_dev_commit,
+        server_dev_commit,
+        "bootstrapped join must also advance local FS state to the latest accepted dev commit"
+    );
+    assert!(
+        session.forward_state.snapshot().fs_ec > session.fs_ec,
+        "local FS state should advance beyond the visible anchor fs_ec after a refresh"
+    );
+
+    perform_pcs_refresh(LeaveRequest::from_session(&session)).await?;
+
+    let persisted = load_session_at(&server_url, &room_id)?
+        .ok_or_else(|| anyhow!("expected persisted session after pcs refresh"))?;
+    assert!(
+        persisted.barrier_state.pending.is_some(),
+        "pcs refresh should persist pending barrier state for later activation"
+    );
 
     handle.abort();
     let _ = handle.await;
