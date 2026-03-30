@@ -1,6 +1,12 @@
 # 08 — Client Operations (Joiner + Merge Builder)
 
-**Blueprint:** Alpha (0.1.0) §10, §12.3, Annex I
+> [!IMPORTANT]
+> This chapter is companion material, not the normative specification.
+> For the current `tswe/msphf-we/fs-hybrid + prs-barrier` profile, the normative source is [`../specs.md`](../specs.md).
+> Inline references below to `Alpha (0.1.0)` are historical blueprint citations only.
+> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and live code/tests.
+
+**Historical blueprint reference:** Alpha (0.1.0) §10, §12.3, Annex I
 **Normative Source:** [`../specs.md`](../specs.md)
 **Implementation:** [`../../crates/cityg-client/src/lib.rs`](../../crates/cityg-client/src/lib.rs), [`../../crates/msphf-orchestrator/src/lib.rs`](../../crates/msphf-orchestrator/src/lib.rs)
 

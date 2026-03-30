@@ -1,8 +1,13 @@
 # City‑G Protocol Specifications
 
+> [!IMPORTANT]
+> Historical archive of the retired `Alpha (0.1.0)` specification text.
+> The current normative source for this repository is [`./specs.md`](./specs.md).
+> Keep this document only for lineage and audit traceability; do not implement directly from it.
+
 **Profile identifier:** `tswe/msphf‑we/fs‑hybrid`
 **Date:** 2025‑11‑10
-**Status:** Alpha (0.1.0)
+**Status:** Historical archive (Alpha (0.1.0))
 
 ### Conformance language
 

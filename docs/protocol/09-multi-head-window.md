@@ -1,11 +1,13 @@
 # 09 — Multi-Head Window (MHW)
 
 > [!IMPORTANT]
-> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs.md`](../specs.md).
-> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
+> This chapter is companion material, not the normative specification.
+> For the current `tswe/msphf-we/fs-hybrid + prs-barrier` profile, the normative source is [`../specs.md`](../specs.md).
+> Inline references below to `Alpha (0.1.0)` are historical blueprint citations only.
+> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and live code/tests.
 
 
-**Blueprint**: Alpha (0.1.0) §13, Annex M
+**Historical blueprint reference**: Alpha (0.1.0) §13, Annex M
 **Implementation**: [`crates/msphf-orchestrator/src/mhw.rs`](../../crates/msphf-orchestrator/src/mhw.rs)
 
 ---

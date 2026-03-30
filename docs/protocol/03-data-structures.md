@@ -1,6 +1,12 @@
 # Data Structures & Wire Formats
 
-**Specification:** Alpha (0.1.0)
+> [!IMPORTANT]
+> This chapter is companion material, not the normative specification.
+> For the current `tswe/msphf-we/fs-hybrid + prs-barrier` profile, the normative source is [`../specs.md`](../specs.md).
+> Inline references below to `Alpha (0.1.0)` are historical blueprint citations only.
+> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and live code/tests.
+
+**Historical blueprint lineage:** Alpha (0.1.0)
 **Normative Source:** [`../specs.md`](../specs.md)
 **Implementation:** [`../../crates/msphf-orchestrator/src/hdr.rs`](../../crates/msphf-orchestrator/src/hdr.rs)
 

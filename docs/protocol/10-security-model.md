@@ -1,11 +1,14 @@
 # 10 — Security Model
 
 > [!IMPORTANT]
-> This chapter is a legacy companion document. For `tswe/msphf-we/fs-hybrid`, the normative source is [`../specs.md`](../specs.md).
-> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and implementation.
+> This chapter is companion material, not the normative specification.
+> For the current `tswe/msphf-we/fs-hybrid + prs-barrier` profile, the normative source is [`../specs.md`](../specs.md).
+> Inline references below to `Alpha (0.1.0)` are historical blueprint citations only.
+> If this chapter conflicts with the unified spec or implementation behavior/tests, follow the unified spec and live code/tests.
 
 
-**Profile**: City-G `tswe/msphf-we/fs-hybrid` (Alpha (0.1.0))
+**Current profile coverage:** City-G `tswe/msphf-we/fs-hybrid + prs-barrier`
+**Historical blueprint lineage:** Alpha (0.1.0)
 **Status**: Normative (threat model informative, properties normative)
 
 ## Table of Contents
