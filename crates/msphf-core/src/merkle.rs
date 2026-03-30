@@ -127,24 +127,6 @@ pub fn bytes32(slice: &[u8]) -> Result<[u8; 32], MsphfError> {
 mod tests {
     use super::*;
 
-    fn hash_interval_binding_v1_compat(
-        left_id: &[u8; 32],
-        left_leaf: &[u8; 32],
-        right_id: &[u8; 32],
-        right_leaf: &[u8; 32],
-        lca_left_height: u8,
-        lca_right_height: u8,
-    ) -> [u8; 32] {
-        crate::rpo256::interval_binding(
-            left_id,
-            left_leaf,
-            right_id,
-            right_leaf,
-            lca_left_height,
-            lca_right_height,
-        )
-    }
-
     fn leaf(id: u8) -> [u8; 32] {
         let mut data = [0u8; 32];
         data[31] = id;
@@ -230,7 +212,7 @@ mod tests {
         let right_leaf = [0x40u8; 32];
         let v2 = hash_interval_binding(&left_id, &left_leaf, &right_id, &right_leaf, 1, 2);
         let v1 =
-            hash_interval_binding_v1_compat(&left_id, &left_leaf, &right_id, &right_leaf, 1, 2);
+            crate::rpo256::interval_binding(&left_id, &left_leaf, &right_id, &right_leaf, 1, 2);
         assert_ne!(v2, v1, "interval binding should route through rpo-256/v2");
     }
 }

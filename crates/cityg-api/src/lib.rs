@@ -8288,7 +8288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_handler_rejects_query_token_compat() {
+    async fn websocket_handler_rejects_legacy_query_token_auth() {
         ensure_test_admin_tokens();
         let state = test_api_state();
         let bundle = demo_bundle("alice").expect("alice bundle");
@@ -8316,7 +8316,7 @@ mod tests {
         );
         assert!(
             tokio_tungstenite::connect_async(url).await.is_err(),
-            "query token compat must be rejected"
+            "legacy query token auth must be rejected"
         );
 
         server.abort();
