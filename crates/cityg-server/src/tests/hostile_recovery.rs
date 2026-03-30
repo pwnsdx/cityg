@@ -104,7 +104,10 @@ fn malformed_refresh_rejection_does_not_poison_room_state() -> Result<(), CityGE
         Value::Integer(Integer::from(1u64)),
     );
     assert_eq!(
-        u64_from_header(&malformed_refresh.header_map, hdr::HDR_BARRIER_UPDATE_REASON)?,
+        u64_from_header(
+            &malformed_refresh.header_map,
+            hdr::HDR_BARRIER_UPDATE_REASON
+        )?,
         1,
         "mutated hostile bundle should masquerade as a refresh"
     );
@@ -290,7 +293,9 @@ fn hostile_barrier_update_mutations_fail_closed_without_poisoning_restart_recove
                     let Value::Bytes(raw_receipt) = mutated
                         .header_map
                         .get_mut(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
-                        .ok_or(CityGError::InvalidInput("missing full verification receipt"))?
+                        .ok_or(CityGError::InvalidInput(
+                            "missing full verification receipt",
+                        ))?
                     else {
                         return Err(CityGError::InvalidInput(
                             "full verification receipt must be bytes",
@@ -409,9 +414,21 @@ fn hostile_barrier_update_byte_flip_sweep_fail_closed_without_poisoning_restart_
             build_refresh_bundle_for_member(&mut server, &alice, &alice.bundle)?;
 
         let byte_flip_headers = [
-            ("witness", hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS, 0x11u8),
-            ("receipt", hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT, 0x22u8),
-            ("attestation", hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION, 0x44u8),
+            (
+                "witness",
+                hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+                0x11u8,
+            ),
+            (
+                "receipt",
+                hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
+                0x22u8,
+            ),
+            (
+                "attestation",
+                hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
+                0x44u8,
+            ),
             ("barrier_update", hdr::HDR_BARRIER_UPDATE, 0x88u8),
         ];
 
@@ -428,12 +445,13 @@ fn hostile_barrier_update_byte_flip_sweep_fail_closed_without_poisoning_restart_
 
             for offset in mutation_offsets(raw_bytes.len()) {
                 let mut mutated = pristine_bundle.clone();
-                let Value::Bytes(mutated_bytes) = mutated
-                    .header_map
-                    .get_mut(&header)
-                    .ok_or(CityGError::InvalidInput(
-                        "missing byte-flip mutation target",
-                    ))?
+                let Value::Bytes(mutated_bytes) =
+                    mutated
+                        .header_map
+                        .get_mut(&header)
+                        .ok_or(CityGError::InvalidInput(
+                            "missing byte-flip mutation target",
+                        ))?
                 else {
                     return Err(CityGError::InvalidInput(
                         "byte-flip mutation target must stay bytes",
@@ -656,11 +674,18 @@ fn malformed_admin_expel_rejection_does_not_poison_room_state() -> Result<(), Ci
             .groups
             .get_mut(gid.as_slice())
             .ok_or(CityGError::InvalidInput("missing demo group state"))?;
-        group.room_admin_pop_keys.insert(alice.pop_public_key.clone());
+        group
+            .room_admin_pop_keys
+            .insert(alice.pop_public_key.clone());
     }
 
-    let mut malformed_expel =
-        build_admin_expel_bundle_for_member(&mut server, &alice, &alice.bundle, &bob.leaf_id, 0x31)?;
+    let mut malformed_expel = build_admin_expel_bundle_for_member(
+        &mut server,
+        &alice,
+        &alice.bundle,
+        &bob.leaf_id,
+        0x31,
+    )?;
     malformed_expel.header_map.remove(&hdr::HDR_BARRIER_UPDATE);
     let err = server
         .accept_epoch(&malformed_expel)
@@ -720,11 +745,18 @@ fn malformed_admin_expel_rejection_does_not_poison_restart_recovery() -> Result<
                 .groups
                 .get_mut(gid.as_slice())
                 .ok_or(CityGError::InvalidInput("missing demo group state"))?;
-            group.room_admin_pop_keys.insert(alice.pop_public_key.clone());
+            group
+                .room_admin_pop_keys
+                .insert(alice.pop_public_key.clone());
         }
 
-        let mut malformed_expel =
-            build_admin_expel_bundle_for_member(&mut server, &alice, &alice.bundle, &bob.leaf_id, 0x41)?;
+        let mut malformed_expel = build_admin_expel_bundle_for_member(
+            &mut server,
+            &alice,
+            &alice.bundle,
+            &bob.leaf_id,
+            0x41,
+        )?;
         malformed_expel.header_map.remove(&hdr::HDR_BARRIER_UPDATE);
         let err = server
             .accept_epoch(&malformed_expel)
@@ -774,7 +806,10 @@ fn malformed_join_finalize_rejection_does_not_poison_restart_recovery() -> Resul
             build_refresh_bundle_for_member(&mut server, &alice, &alice.bundle)?;
         let mut malformed_join_finalize = pristine_join_finalize.clone();
         assert_eq!(
-            u64_from_header(&malformed_join_finalize.header_map, hdr::HDR_BARRIER_UPDATE_REASON)?,
+            u64_from_header(
+                &malformed_join_finalize.header_map,
+                hdr::HDR_BARRIER_UPDATE_REASON
+            )?,
             2,
             "first post-join merge should be join_finalize"
         );
@@ -812,7 +847,10 @@ fn malformed_join_finalize_rejection_does_not_poison_restart_recovery() -> Resul
     let (fresh_join_finalize, _) =
         build_refresh_bundle_for_member(&mut reloaded, &alice, &alice.bundle)?;
     assert_eq!(
-        u64_from_header(&fresh_join_finalize.header_map, hdr::HDR_BARRIER_UPDATE_REASON)?,
+        u64_from_header(
+            &fresh_join_finalize.header_map,
+            hdr::HDR_BARRIER_UPDATE_REASON
+        )?,
         2,
         "restart must still permit a valid join_finalize after malformed rejection"
     );
