@@ -317,7 +317,7 @@ This crate is part of City-G and licensed under the MIT License. See the reposit
 
 ---
 
-**Note**: This is research-grade alpha software (City-G v0.1.0). While the Sage reference provides mathematical confidence, independent security review is required before production use.
+**Note**: This is research-grade software in the City-G repository, and independent security review is still required before production use. While the Sage reference provides mathematical confidence, it does not replace external review.
 > 💡 After cloning the repository, run
 > `git submodule update --init --recursive`
 > to fetch the reference implementation into `vendor/smallwood-python/`.

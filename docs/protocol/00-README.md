@@ -1,7 +1,7 @@
 # City-G Protocol Documentation
 
 > [!IMPORTANT]
-> This directory is legacy companion material. For the current
+> This directory is companion and historical material. For the current
 > `tswe/msphf-we/fs-hybrid + prs-barrier` profile, the normative source is
 > [`../specs.md`](../specs.md).
 > If a chapter here conflicts with the unified spec or implementation

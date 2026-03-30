@@ -4,7 +4,7 @@ Welcome to the City-G documentation! This index helps you find the right documen
 
 > [!IMPORTANT]
 > For `tswe/msphf-we/fs-hybrid + prs-barrier`, the authoritative normative spec is [`./specs.md`](./specs.md).
-> The `docs/protocol/*` chapters are legacy companion material; if there is any conflict, follow the unified spec and implementation behavior/tests.
+> The `docs/protocol/*` chapters are non-normative companion material. Some chapters are explanatory and some are historical; if there is any conflict, follow the unified spec and implementation behavior/tests.
 > The current shipping wire/profile baseline in this repo is `v0.1.4`.
 
 ## 📚 Documentation by Audience
@@ -20,6 +20,7 @@ Start here if you're new to City-G:
 Building applications with City-G:
 
 - **[Repository Cleanup Plan](./repo-cleanup-plan-2026-03-29.md)** - Structured cleanup roadmap for code, spec, docs, CI, and repository weight
+- **[Legacy Surface Inventory](./legacy-surface-inventory-2026-03-30.md)** - Classified list of obsolete, historical, test-only, and adaptation surfaces to purge or relabel
 - **[GUI Material System Roadmap](./gui-material-system-roadmap.md)** - Accepted UI architecture direction for GPUI materials and cross-platform shell design
 - **[API Reference](./api-reference.md)** - REST API and WebSocket documentation
 - **[Room-Scoped Administration Redesign](./room-admin-governance-redesign.md)** - Current room governance and admin model
@@ -30,7 +31,7 @@ Building applications with City-G:
 Implementing the City-G protocol:
 
 - **[Unified Specification](./specs.md)** - Authoritative normative source
-- **[Protocol Companion Index](./protocol/00-README.md)** - Legacy chapterized companion material, indexed by role and mapped back to the spec
+- **[Protocol Companion Index](./protocol/00-README.md)** - Chapterized companion material, indexed by role and mapped back to the spec
 - **[Implementation Guide](./protocol/11-implementation-guide.md)** - Current code walkthrough and module map
 - **[Testing Guide](./protocol/13-testing-guide.md)** - Tests, manifests, CI expectations, and local validation flows
 - **[Protocol Checklist](./protocol/20-protocol-checklist.md)** - Guarantee-to-flow coverage matrix for the current profile
@@ -89,9 +90,9 @@ Reviewing the current protocol/profile claims and their proof anchors:
 
 ### Protocol Understanding
 - **Normative behavior**: [Unified Specification](./specs.md)
-- **How server-blindness works**: [Protocol Overview](./protocol/01-overview.md#31-smooth-projective-hash-functions-sphf) (legacy companion)
-- **Join flow details**: [Client Operations](./protocol/08-client-operations.md) (legacy companion)
-- **Proof verification**: [Server Acceptance](./protocol/07-server-acceptance.md) (legacy companion)
+- **How server-blindness works**: [Protocol Overview](./protocol/01-overview.md#31-smooth-projective-hash-functions-sphf) (companion chapter)
+- **Join flow details**: [Client Operations](./protocol/08-client-operations.md) (companion chapter)
+- **Proof verification**: [Server Acceptance](./protocol/07-server-acceptance.md) (companion chapter)
 - **Compare to MLS**: [MLS Comparison](./protocol/16-comparison-mls.md)
 
 ## 📦 Component Documentation
@@ -122,8 +123,8 @@ Verification artifacts and benchmarks:
 
 - See the main [README](../README.md#contributing) for contribution guidelines
 - [Unified Specification](./specs.md) - Normative rules to implement/test against
-- [Testing Guide](./protocol/13-testing-guide.md) - How to run and write tests (legacy companion)
-- [Implementation Guide](./protocol/11-implementation-guide.md) - Code walkthrough (legacy companion)
+- [Testing Guide](./protocol/13-testing-guide.md) - How to run and write tests (companion chapter)
+- [Implementation Guide](./protocol/11-implementation-guide.md) - Code walkthrough (companion chapter)
 
 ## 🚀 Current Cutover Order
 

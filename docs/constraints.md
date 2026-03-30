@@ -27,9 +27,9 @@ Core security, functional, and performance requirements for the City-G protocol.
 8. **Asynchronous Coordination** — All operations route through the server; devices never have to contact each other directly.
 9. **Simple Client Footprint** — No MLS-style KeyPackages or per-peer sessions; state machines stay bounded.
 
-## 3. Performance Targets (Alpha Measurements)
+## 3. Performance Targets (Reference Measurements)
 
-| Operation             | Target                | Measured (v0.1.0) |
+| Operation             | Target                | Historical baseline |
 |-----------------------|-----------------------|-------------------|
 | ZK-VRF verification   | ≤ 2 ms server / ≤ 6 ms mobile | ✅ Met |
 | CAPSS Smallwood verify| ≤ 12 ms mobile        | ✅ Met |
@@ -38,4 +38,4 @@ Core security, functional, and performance requirements for the City-G protocol.
 | Witness size          | O(log N)              | ~2 KB at 1 M |
 | Working set           | ≤ 48 MB               | ✅ Met |
 
-> These figures originate from the `specs` blueprint benchmarks and the reference implementation’s profiling runs. Future releases update this file when targets shift.
+> These figures are historical reference measurements from the early profile bring-up and profiling runs. The current normative profile is defined in [`specs.md`](specs.md); use `docs/evidence/` and current validation runners for fresh empirical results.

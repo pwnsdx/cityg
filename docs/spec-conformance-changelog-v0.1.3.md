@@ -1,6 +1,10 @@
 # CityG Spec Conformance Changelog (v0.1.3)
 
-Last updated: 2026-03-20
+> [!IMPORTANT]
+> Historical profile-transition archive for the retired `v0.1.3` wire/profile revision.
+> For the current repo state, use [`docs/specs.md`](./specs.md) and
+> [`docs/audits/final-verification-report-2026-03-26.md`](./audits/final-verification-report-2026-03-26.md).
+
 Scope: protocol/spec conformance and related hardening/performance work.
 
 ## Purpose

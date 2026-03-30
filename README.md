@@ -1,6 +1,6 @@
 ## City‑G: Post-Quantum, Server-Blind E2EE for Large-Scale Groups
 
-[![Status](https://img.shields.io/badge/status-alpha-orange)]()
+[![Status](https://img.shields.io/badge/status-research%20prototype-orange)]()
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -131,7 +131,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 | **Scalability & concurrency** | Multi-Head Windows (default 16 parallel) + deterministic simulations to ~10⁶ members; real deployments >100k are still research pilots. | Sequential commits; batching reduces round-trips but increases wait time. OpenMLS reports strain beyond ≈1–2 k participants.[1] | Service limit 1 000 members per group.[2] | Large rooms are routine, but key-share fan-out grows with membership and stresses clients at very high scale. |
 | **Deniability** | Anchors use ML-DSA (non-deniable); application messages share epoch keys, yielding symmetric-key deniability similar to other shared-key groups. | Commit messages are signed (non-deniable). | Double Ratchet provides strong deniability. | Device identity keys are long-lived; deniability is limited. |
 | **Server-blindness verifiability** | `cargo test --all` + `./scripts/verify_no_secrets.sh` ensure no decryption helpers ship. | Depends on operator attestations/transparency logs; no built-in guard. | Relies on Signal Foundation operating the published stack. | Depends on homeserver operator policy; no automatic blindness proof. |
-| **Deployment maturity** | Research-grade alpha (0.1.0). | IETF standard with multiple implementations. | Global production deployment. | Production federated ecosystem. |
+| **Deployment maturity** | Research-grade prototype for the current `v0.1.4` base profile. | IETF standard with multiple implementations. | Global production deployment. | Production federated ecosystem. |
 
 **Notes & sources.**
 - City‑G's “millions” figure refers to deterministic simulations and architectural limits documented in `docs/protocol/01-overview.md`; real-world deployments beyond ≈100 k members remain research pilots.
@@ -181,7 +181,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 ## Read next
 
 * **Unified spec (v0.1.4):** publisher‑blind acceptance, offline admission, joins that self-finalize without another client online, merges/rollups, FS-hybrid, and PRS barrier — [`docs/specs.md`](docs/specs.md).
-* **Protocol companion docs:** chapterized legacy companion material — [`docs/protocol/`](docs/protocol/00-README.md).
+* **Protocol companion docs:** chapterized companion and historical material — [`docs/protocol/`](docs/protocol/00-README.md).
 * **Workflows & diagrams:** visual sequence diagrams for common operations — [`docs/workflows.md`](docs/workflows.md).
 
 ---
@@ -302,7 +302,7 @@ If you use City-G in academic research, please cite:
 ## Frequently Asked Questions
 
 ### **Q: Is this production-ready?**
-**A:** It's **alpha software** and not production-ready:
+**A:** It's a **research-grade prototype** and not production-ready:
 - Security audit complete (timing side-channels fixed)
 - `cargo test --all` targets currently pass (200+ core tests; protobuf compiler is automatically vendored)
 - CI-enforced server blindness checks (verify_no_secrets.sh)

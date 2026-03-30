@@ -1,6 +1,10 @@
 # CityG Spec Conformance Changelog (v0.1.4)
 
-Last updated: 2026-03-22
+> [!IMPORTANT]
+> Historical profile-transition archive for the cutover to `v0.1.4`.
+> The current normative and evidence entry points are [`docs/specs.md`](./specs.md)
+> and [`docs/audits/final-verification-report-2026-03-26.md`](./audits/final-verification-report-2026-03-26.md).
+
 Scope: protocol/spec conformance and related hardening/performance work.
 
 ## Purpose

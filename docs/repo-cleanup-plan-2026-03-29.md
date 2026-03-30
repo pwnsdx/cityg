@@ -258,6 +258,9 @@ Actions:
 
 - Build a concrete inventory of legacy surfaces that are no longer part of the
   current normative profile.
+- Track that inventory in a dedicated cleanup artifact so later code-purge
+  tranches can work from one classified list rather than ad hoc search.
+- Initial inventory output: `docs/legacy-surface-inventory-2026-03-30.md`.
 - Classify each item as one of:
   - remove entirely;
   - keep but mark `test-only` or `historical`;

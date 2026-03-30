@@ -432,7 +432,7 @@ cargo test --all -- --nocapture
 
 ### Q5.1: Is City-G production-ready?
 
-**A**: **No, this is alpha software**:
+**A**: **No, this is a research-grade prototype**:
 
 ✅ **Completed**:
 - Security audit completed (all timing side-channels fixed)
@@ -440,7 +440,7 @@ cargo test --all -- --nocapture
 - Type-safe server blindness (verified)
 - Post-quantum primitives (NIST-standardized)
 
-⚠️ **Alpha-stage considerations**:
+⚠️ **Prototype-stage considerations**:
 - Modern lattice-based cryptography (fewer third-party deployments to date compared with MLS)
 - Ecosystem currently centered on Rust
 - RLWE-HPS A1 analysis tracks ML-KEM research (currently aligned with NIST Category 3 security)

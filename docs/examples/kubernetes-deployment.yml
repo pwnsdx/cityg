@@ -71,7 +71,7 @@ metadata:
   namespace: cityg
   labels:
     app: cityg-api
-    version: v0.1.0
+    version: v0.1.4
 spec:
   replicas: 3
   selector:
@@ -81,7 +81,7 @@ spec:
     metadata:
       labels:
         app: cityg-api
-        version: v0.1.0
+        version: v0.1.4
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"

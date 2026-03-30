@@ -1,5 +1,9 @@
 # Migration TODO: 0.1.0 -> 0.1.2
 
+> [!IMPORTANT]
+> Historical migration tracker retained for audit traceability.
+> The current profile state is governed by [`docs/specs.md`](./specs.md), not by this completed migration checklist.
+
 This tracker captures the implementation migration from the FS-only profile
 to the unified FS-hybrid + PRS barrier profile in `/Users/admin/Desktop/Repositories/cityg/docs/specs.md`.
 
