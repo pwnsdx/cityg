@@ -1016,6 +1016,11 @@ pub struct ValidatedSendMessageRequest {
     pub sender_leaf: [u8; 32],
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedGetBundleRequest {
+    pub we_epoch_id: [u8; 32],
+}
+
 fn validate_room_kbroad_request(
     room_id: String,
     kbroad_public: Vec<u8>,
@@ -1237,6 +1242,24 @@ pub fn validate_send_message_request(
         sender: request.sender,
         sender_leaf,
     })
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum GetBundleRequestValidationError {
+    #[error("we_epoch_id must be 32 bytes")]
+    InvalidWeEpochId,
+}
+
+pub fn validate_get_bundle_request(
+    request: pb::GetBundleRequest,
+) -> Result<ValidatedGetBundleRequest, GetBundleRequestValidationError> {
+    let we_epoch_id: [u8; 32] = request
+        .we_epoch_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| GetBundleRequestValidationError::InvalidWeEpochId)?;
+
+    Ok(ValidatedGetBundleRequest { we_epoch_id })
 }
 
 /// Verify a room-admin proof over `(operation, room_id, payload)`.
@@ -2094,6 +2117,26 @@ mod tests {
                 sender: vec![0x51; 31],
             }),
             Err(SendMessageRequestValidationError::InvalidSender)
+        );
+    }
+
+    #[test]
+    fn validate_get_bundle_request_projects_required_fields() {
+        let validated = validate_get_bundle_request(pb::GetBundleRequest {
+            we_epoch_id: vec![0x61; 32],
+        })
+        .expect("validate get bundle request");
+
+        assert_eq!(validated.we_epoch_id, [0x61; 32]);
+    }
+
+    #[test]
+    fn validate_get_bundle_request_rejects_invalid_shape() {
+        assert_eq!(
+            validate_get_bundle_request(pb::GetBundleRequest {
+                we_epoch_id: vec![0x61; 31],
+            }),
+            Err(GetBundleRequestValidationError::InvalidWeEpochId)
         );
     }
 

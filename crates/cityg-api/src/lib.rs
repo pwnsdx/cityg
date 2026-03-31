@@ -32,10 +32,10 @@ use cityg_api_schema::verify_identity_binding as schema_verify_identity_binding;
 use cityg_api_schema::{
     API_PROFILE_VERSION, BarrierHelperRequestDecodeError, ExpelMemberTicketRequestValidationError,
     FetchMessagesRequestValidationError, FullVerificationWitnessRequestDecodeError,
-    IdentityBindingValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE,
-    MEMBERS_MAX_PAGE_SIZE, MergeTicketRequestValidationError, PreparedIdentityBindingError,
-    RoomAdminProofValidationError, RoomAdminRequestValidationError,
-    SendMessageRequestValidationError,
+    GetBundleRequestValidationError, IdentityBindingValidationError,
+    MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
+    MergeTicketRequestValidationError, PreparedIdentityBindingError, RoomAdminProofValidationError,
+    RoomAdminRequestValidationError, SendMessageRequestValidationError,
     decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
     decode_barrier_resolve_revoked_leaves_request as schema_decode_barrier_resolve_revoked_leaves_request,
@@ -54,6 +54,7 @@ use cityg_api_schema::{
     validate_bootstrap_room_request as schema_validate_bootstrap_room_request,
     validate_expel_member_ticket_request as schema_validate_expel_member_ticket_request,
     validate_fetch_messages_request as schema_validate_fetch_messages_request,
+    validate_get_bundle_request as schema_validate_get_bundle_request,
     validate_list_room_admins_request as schema_validate_list_room_admins_request,
     validate_merge_ticket_request as schema_validate_merge_ticket_request,
     validate_room_admin_mutation_request as schema_validate_room_admin_mutation_request,
@@ -813,6 +814,14 @@ fn map_send_message_request_validation_error(err: SendMessageRequestValidationEr
         }
         SendMessageRequestValidationError::InvalidSender => {
             ApiError::InvalidRequest("sender must be 32 bytes")
+        }
+    }
+}
+
+fn map_get_bundle_request_validation_error(err: GetBundleRequestValidationError) -> ApiError {
+    match err {
+        GetBundleRequestValidationError::InvalidWeEpochId => {
+            ApiError::InvalidRequest("we_epoch_id must be 32 bytes")
         }
     }
 }
@@ -2830,16 +2839,12 @@ async fn get_bundle(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = GetBundleRequest::decode(body)?;
-    if request.we_epoch_id.len() != 32 {
-        return Err(ApiError::InvalidRequest("we_epoch_id must be 32 bytes"));
-    }
-    let mut weid = [0u8; 32];
-    weid.copy_from_slice(&request.we_epoch_id);
+    let request = schema_validate_get_bundle_request(GetBundleRequest::decode(body)?)
+        .map_err(map_get_bundle_request_validation_error)?;
     enforce_expensive_rate_limit(
         &state,
         "get_bundle",
-        message_scoped_rate_limit_key(&headers, &weid),
+        message_scoped_rate_limit_key(&headers, &request.we_epoch_id),
     )
     .await?;
 
@@ -2848,7 +2853,7 @@ async fn get_bundle(
         let mut room_state = state.room_state.write().await;
         runtime_fetch_room_bundle(
             &mut room_state,
-            &weid,
+            &request.we_epoch_id,
             now_ms,
             state.message_retention,
             MESSAGE_PRUNE_INTERVAL_MS,

@@ -7,26 +7,26 @@ use std::{
 
 use cityg_api_schema::{
     API_PROFILE_VERSION, BarrierHelperRequestDecodeError, ExpelMemberTicketRequestValidationError,
-    FetchMessagesRequestValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES,
-    MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE, MergeTicketRequestValidationError,
-    PreparedIdentityBindingError, RoomAdminProofValidationError, RoomAdminRequestValidationError,
-    RoomScopedApiRoute, RoomScopedRequestTarget, RoomScopedRoutingKey,
-    SendMessageRequestValidationError, decode_barrier_fetch_public_tree_request,
-    decode_barrier_lookup_merge_acceptance_request, decode_barrier_resolve_revoked_leaves_request,
-    decode_full_verification_witness_request, encode_bootstrap_room_response,
-    encode_full_verification_witness_response, encode_list_room_admins_response,
-    encode_members_response, encode_prepared_barrier_public_tree_response,
-    encode_prepared_join_ticket_response, encode_prepared_merge_acceptance_lookup_response,
-    encode_prepared_merge_ticket_response, encode_prepared_resolved_joins_response,
-    encode_prepared_resolved_revoked_leaves_response, encode_room_admin_leaf_pair_payload,
-    encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
-    encode_search_members_response, extract_room_scoped_request_target, pb,
-    pb_member as schema_pb_member, prepare_identity_binding, room_admin_proof_replay_key,
-    validate_bootstrap_room_request, validate_expel_member_ticket_request,
-    validate_fetch_messages_request, validate_list_room_admins_request,
-    validate_merge_ticket_request, validate_room_admin_mutation_request,
-    validate_rotate_room_kbroad_request, validate_send_message_request, verify_room_admin_proof,
-    verify_room_admin_proof_payload,
+    FetchMessagesRequestValidationError, GetBundleRequestValidationError,
+    MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
+    MergeTicketRequestValidationError, PreparedIdentityBindingError, RoomAdminProofValidationError,
+    RoomAdminRequestValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
+    RoomScopedRoutingKey, SendMessageRequestValidationError,
+    decode_barrier_fetch_public_tree_request, decode_barrier_lookup_merge_acceptance_request,
+    decode_barrier_resolve_revoked_leaves_request, decode_full_verification_witness_request,
+    encode_bootstrap_room_response, encode_full_verification_witness_response,
+    encode_list_room_admins_response, encode_members_response,
+    encode_prepared_barrier_public_tree_response, encode_prepared_join_ticket_response,
+    encode_prepared_merge_acceptance_lookup_response, encode_prepared_merge_ticket_response,
+    encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
+    encode_room_admin_leaf_pair_payload, encode_room_admin_mutation_response,
+    encode_rotate_room_kbroad_response, encode_search_members_response,
+    extract_room_scoped_request_target, pb, pb_member as schema_pb_member,
+    prepare_identity_binding, room_admin_proof_replay_key, validate_bootstrap_room_request,
+    validate_expel_member_ticket_request, validate_fetch_messages_request,
+    validate_list_room_admins_request, validate_merge_ticket_request,
+    validate_room_admin_mutation_request, validate_rotate_room_kbroad_request,
+    validate_send_message_request, verify_room_admin_proof, verify_room_admin_proof_payload,
 };
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_runtime::{
@@ -293,7 +293,7 @@ impl CloudflareRoomDurableObject {
             RoomScopedApiRoute::FetchMessages => {
                 self.handle_fetch_messages(req, target, body).await
             }
-            RoomScopedApiRoute::GetBundle => self.handle_get_bundle(req, target).await,
+            RoomScopedApiRoute::GetBundle => self.handle_get_bundle(req, target, body).await,
             RoomScopedApiRoute::BarrierResolveRevokedLeaves => {
                 self.handle_barrier_resolve_revoked_leaves(req, target, body)
                     .await
@@ -1150,6 +1150,7 @@ impl CloudflareRoomDurableObject {
         &self,
         req: &Request,
         target: RoomScopedRequestTarget,
+        body: Vec<u8>,
     ) -> Result<Response> {
         if req.method() != Method::Post {
             return Response::error("method not allowed", 405);
@@ -1160,15 +1161,27 @@ impl CloudflareRoomDurableObject {
             return Response::error(message, 401);
         }
 
+        let request = match pb::GetBundleRequest::decode(body.as_slice()) {
+            Ok(request) => request,
+            Err(error) => {
+                return Response::error(
+                    format!("failed to decode {} request: {error}", target.route.path()),
+                    400,
+                );
+            }
+        };
+        let request = match cityg_api_schema::validate_get_bundle_request(request) {
+            Ok(request) => request,
+            Err(error) => return get_bundle_request_validation_error_response(error),
+        };
         let Some(checkpoint) = self.load_checkpoint_for_target(&target)? else {
             return Response::error("room checkpoint not found", 404);
         };
-        let we_epoch_id = route_we_epoch_id(&target)?;
         let mut room_state = RoomVolatileState::from_snapshot(checkpoint.volatile);
         let now_ms = current_timestamp_ms();
         let Some(bundle) = fetch_room_bundle(
             &mut room_state,
-            &we_epoch_id,
+            &request.we_epoch_id,
             now_ms,
             message_retention(),
             MESSAGE_PRUNE_INTERVAL_MS,
@@ -3003,6 +3016,12 @@ fn fetch_messages_request_validation_error_response(
 
 fn send_message_request_validation_error_response(
     err: SendMessageRequestValidationError,
+) -> Result<Response> {
+    Response::error(err.to_string(), 400)
+}
+
+fn get_bundle_request_validation_error_response(
+    err: GetBundleRequestValidationError,
 ) -> Result<Response> {
     Response::error(err.to_string(), 400)
 }
