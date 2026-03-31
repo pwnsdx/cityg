@@ -6,21 +6,22 @@ use std::{
 };
 
 use cityg_api_schema::{
-    API_PROFILE_VERSION, BarrierHelperRequestDecodeError, MAX_BARRIER_HELPER_PAGE_ENTRIES,
-    MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE, PreparedIdentityBindingError,
-    RoomAdminProofValidationError, RoomAdminRequestValidationError, RoomScopedApiRoute,
-    RoomScopedRequestTarget, RoomScopedRoutingKey, decode_barrier_fetch_public_tree_request,
-    decode_barrier_lookup_merge_acceptance_request, decode_barrier_resolve_revoked_leaves_request,
-    decode_full_verification_witness_request, encode_bootstrap_room_response,
-    encode_full_verification_witness_response, encode_list_room_admins_response,
-    encode_members_response, encode_prepared_barrier_public_tree_response,
-    encode_prepared_join_ticket_response, encode_prepared_merge_acceptance_lookup_response,
-    encode_prepared_merge_ticket_response, encode_prepared_resolved_joins_response,
-    encode_prepared_resolved_revoked_leaves_response, encode_room_admin_leaf_pair_payload,
-    encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
-    encode_search_members_response, extract_room_scoped_request_target, pb,
-    pb_member as schema_pb_member, prepare_identity_binding, room_admin_proof_replay_key,
-    validate_bootstrap_room_request, validate_list_room_admins_request,
+    API_PROFILE_VERSION, BarrierHelperRequestDecodeError, ExpelMemberTicketRequestValidationError,
+    MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
+    PreparedIdentityBindingError, RoomAdminProofValidationError, RoomAdminRequestValidationError,
+    RoomScopedApiRoute, RoomScopedRequestTarget, RoomScopedRoutingKey,
+    decode_barrier_fetch_public_tree_request, decode_barrier_lookup_merge_acceptance_request,
+    decode_barrier_resolve_revoked_leaves_request, decode_full_verification_witness_request,
+    encode_bootstrap_room_response, encode_full_verification_witness_response,
+    encode_list_room_admins_response, encode_members_response,
+    encode_prepared_barrier_public_tree_response, encode_prepared_join_ticket_response,
+    encode_prepared_merge_acceptance_lookup_response, encode_prepared_merge_ticket_response,
+    encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
+    encode_room_admin_leaf_pair_payload, encode_room_admin_mutation_response,
+    encode_rotate_room_kbroad_response, encode_search_members_response,
+    extract_room_scoped_request_target, pb, pb_member as schema_pb_member,
+    prepare_identity_binding, room_admin_proof_replay_key, validate_bootstrap_room_request,
+    validate_expel_member_ticket_request, validate_list_room_admins_request,
     validate_room_admin_mutation_request, validate_rotate_room_kbroad_request,
     verify_room_admin_proof, verify_room_admin_proof_payload,
 };
@@ -1751,37 +1752,23 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        let author_leaf_id =
-            match parse_bytes_32(request.author_leaf_id.as_slice(), "author_leaf_id") {
-                Ok(leaf_id) => leaf_id,
-                Err(message) => return Response::error(message, 400),
-            };
-        let target_leaf_id =
-            match parse_bytes_32(request.target_leaf_id.as_slice(), "target_leaf_id") {
-                Ok(leaf_id) => leaf_id,
-                Err(message) => return Response::error(message, 400),
-            };
-        if author_leaf_id == target_leaf_id {
-            return Response::error(
-                "author_leaf_id and target_leaf_id must differ; use controlled leave instead",
-                400,
-            );
-        }
-
-        let proof = match request.admin_proof.as_ref() {
-            Some(proof) => proof,
-            None => return Response::error("room admin proof is required", 401),
+        let request = match validate_expel_member_ticket_request(request) {
+            Ok(request) => request,
+            Err(error) => return expel_member_ticket_request_validation_error_response(error),
         };
-        let payload = match encode_room_admin_leaf_pair_payload(&author_leaf_id, &target_leaf_id) {
+        let payload = match encode_room_admin_leaf_pair_payload(
+            &request.author_leaf_id,
+            &request.target_leaf_id,
+        ) {
             Ok(payload) => payload,
             Err(error) => return room_admin_proof_validation_error_response(error),
         };
-        let replay_key = match room_admin_proof_replay_key(proof) {
+        let replay_key = match room_admin_proof_replay_key(&request.admin_proof) {
             Ok(replay_key) => replay_key,
             Err(error) => return room_admin_proof_validation_error_response(error),
         };
         let actor_pop_key = match verify_room_admin_proof_payload(
-            proof,
+            &request.admin_proof,
             "expel_room_member_v1",
             &request.room_id,
             &payload,
@@ -1808,8 +1795,8 @@ impl CloudflareRoomDurableObject {
         let bundle = match server.build_admin_expel_ticket(
             &gid,
             &actor_pop_key,
-            &author_leaf_id,
-            &target_leaf_id,
+            &request.author_leaf_id,
+            &request.target_leaf_id,
             replay_key,
         ) {
             Ok(bundle) => bundle,
@@ -2992,6 +2979,16 @@ fn room_admin_proof_validation_error_response(
 
 fn room_admin_request_validation_error_response(
     err: RoomAdminRequestValidationError,
+) -> Result<Response> {
+    if err.is_unauthorized() {
+        Response::error(err.to_string(), 401)
+    } else {
+        Response::error(err.to_string(), 400)
+    }
+}
+
+fn expel_member_ticket_request_validation_error_response(
+    err: ExpelMemberTicketRequestValidationError,
 ) -> Result<Response> {
     if err.is_unauthorized() {
         Response::error(err.to_string(), 401)

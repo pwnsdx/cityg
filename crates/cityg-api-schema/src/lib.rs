@@ -985,6 +985,14 @@ pub struct ValidatedListRoomAdminsRequest {
     pub admin_proof: pb::RoomAdminProof,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedExpelMemberTicketRequest {
+    pub room_id: String,
+    pub author_leaf_id: [u8; 32],
+    pub target_leaf_id: [u8; 32],
+    pub admin_proof: pb::RoomAdminProof,
+}
+
 fn validate_room_kbroad_request(
     room_id: String,
     kbroad_public: Vec<u8>,
@@ -1052,6 +1060,58 @@ pub fn validate_list_room_admins_request(
 
     Ok(ValidatedListRoomAdminsRequest {
         room_id: request.room_id,
+        admin_proof,
+    })
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ExpelMemberTicketRequestValidationError {
+    #[error("room_id must be provided")]
+    MissingRoomId,
+    #[error("author_leaf_id must be 32 bytes")]
+    InvalidAuthorLeafId,
+    #[error("target_leaf_id must be 32 bytes")]
+    InvalidTargetLeafId,
+    #[error("author_leaf_id and target_leaf_id must differ; use controlled leave instead")]
+    MatchingLeafIds,
+    #[error("room admin proof is required")]
+    MissingAdminProof,
+}
+
+impl ExpelMemberTicketRequestValidationError {
+    #[must_use]
+    pub const fn is_unauthorized(&self) -> bool {
+        matches!(self, Self::MissingAdminProof)
+    }
+}
+
+pub fn validate_expel_member_ticket_request(
+    request: pb::ExpelMemberTicketRequest,
+) -> Result<ValidatedExpelMemberTicketRequest, ExpelMemberTicketRequestValidationError> {
+    if request.room_id.is_empty() {
+        return Err(ExpelMemberTicketRequestValidationError::MissingRoomId);
+    }
+    let author_leaf_id: [u8; 32] = request
+        .author_leaf_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| ExpelMemberTicketRequestValidationError::InvalidAuthorLeafId)?;
+    let target_leaf_id: [u8; 32] = request
+        .target_leaf_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| ExpelMemberTicketRequestValidationError::InvalidTargetLeafId)?;
+    if author_leaf_id == target_leaf_id {
+        return Err(ExpelMemberTicketRequestValidationError::MatchingLeafIds);
+    }
+    let admin_proof = request
+        .admin_proof
+        .ok_or(ExpelMemberTicketRequestValidationError::MissingAdminProof)?;
+
+    Ok(ValidatedExpelMemberTicketRequest {
+        room_id: request.room_id,
+        author_leaf_id,
+        target_leaf_id,
         admin_proof,
     })
 }
@@ -1769,6 +1829,50 @@ mod tests {
                 admin_proof: None,
             }),
             Err(RoomAdminRequestValidationError::MissingAdminProof)
+        );
+    }
+
+    #[test]
+    fn validate_expel_member_ticket_request_projects_required_fields() {
+        let proof = pb::RoomAdminProof {
+            pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES],
+            signature: vec![0x22; ML_DSA_65_SIGNATURE_BYTES],
+        };
+        let validated = validate_expel_member_ticket_request(pb::ExpelMemberTicketRequest {
+            room_id: hex::encode(DEMO_GID),
+            author_leaf_id: vec![0x33; 32],
+            target_leaf_id: vec![0x44; 32],
+            admin_proof: Some(proof),
+        })
+        .expect("validate expel request");
+
+        assert_eq!(validated.author_leaf_id, [0x33; 32]);
+        assert_eq!(validated.target_leaf_id, [0x44; 32]);
+    }
+
+    #[test]
+    fn validate_expel_member_ticket_request_rejects_invalid_shape() {
+        assert_eq!(
+            validate_expel_member_ticket_request(pb::ExpelMemberTicketRequest::default()),
+            Err(ExpelMemberTicketRequestValidationError::MissingRoomId)
+        );
+        assert_eq!(
+            validate_expel_member_ticket_request(pb::ExpelMemberTicketRequest {
+                room_id: hex::encode(DEMO_GID),
+                author_leaf_id: vec![0x11; 31],
+                target_leaf_id: vec![0x22; 32],
+                admin_proof: None,
+            }),
+            Err(ExpelMemberTicketRequestValidationError::InvalidAuthorLeafId)
+        );
+        assert_eq!(
+            validate_expel_member_ticket_request(pb::ExpelMemberTicketRequest {
+                room_id: hex::encode(DEMO_GID),
+                author_leaf_id: vec![0x11; 32],
+                target_leaf_id: vec![0x11; 32],
+                admin_proof: Some(pb::RoomAdminProof::default()),
+            }),
+            Err(ExpelMemberTicketRequestValidationError::MatchingLeafIds)
         );
     }
 

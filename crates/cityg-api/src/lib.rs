@@ -30,7 +30,7 @@ use bytes::BytesMut;
 #[cfg(test)]
 use cityg_api_schema::verify_identity_binding as schema_verify_identity_binding;
 use cityg_api_schema::{
-    API_PROFILE_VERSION, BarrierHelperRequestDecodeError,
+    API_PROFILE_VERSION, BarrierHelperRequestDecodeError, ExpelMemberTicketRequestValidationError,
     FullVerificationWitnessRequestDecodeError, IdentityBindingValidationError,
     MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
     PreparedIdentityBindingError, RoomAdminProofValidationError, RoomAdminRequestValidationError,
@@ -50,6 +50,7 @@ use cityg_api_schema::{
     prepare_identity_binding as schema_prepare_identity_binding,
     room_admin_proof_replay_key as schema_room_admin_proof_replay_key,
     validate_bootstrap_room_request as schema_validate_bootstrap_room_request,
+    validate_expel_member_ticket_request as schema_validate_expel_member_ticket_request,
     validate_list_room_admins_request as schema_validate_list_room_admins_request,
     validate_room_admin_mutation_request as schema_validate_room_admin_mutation_request,
     validate_rotate_room_kbroad_request as schema_validate_rotate_room_kbroad_request,
@@ -738,6 +739,28 @@ fn map_room_admin_request_validation_error(err: RoomAdminRequestValidationError)
             ApiError::InvalidRequest("target_pop_public_key has unexpected length")
         }
         RoomAdminRequestValidationError::MissingAdminProof => {
+            ApiError::Unauthorized("room admin proof is required")
+        }
+    }
+}
+
+fn map_expel_member_ticket_request_validation_error(
+    err: ExpelMemberTicketRequestValidationError,
+) -> ApiError {
+    match err {
+        ExpelMemberTicketRequestValidationError::MissingRoomId => {
+            ApiError::InvalidRequest("room_id must be provided")
+        }
+        ExpelMemberTicketRequestValidationError::InvalidAuthorLeafId => {
+            ApiError::InvalidRequest("author_leaf_id must be 32 bytes")
+        }
+        ExpelMemberTicketRequestValidationError::InvalidTargetLeafId => {
+            ApiError::InvalidRequest("target_leaf_id must be 32 bytes")
+        }
+        ExpelMemberTicketRequestValidationError::MatchingLeafIds => ApiError::InvalidRequest(
+            "author_leaf_id and target_leaf_id must differ; use controlled leave instead",
+        ),
+        ExpelMemberTicketRequestValidationError::MissingAdminProof => {
             ApiError::Unauthorized("room admin proof is required")
         }
     }
@@ -2083,43 +2106,26 @@ async fn expel_member_ticket(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let request = ExpelMemberTicketRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    if request.author_leaf_id.len() != 32 {
-        return Err(ApiError::InvalidRequest("author_leaf_id must be 32 bytes"));
-    }
-    if request.target_leaf_id.len() != 32 {
-        return Err(ApiError::InvalidRequest("target_leaf_id must be 32 bytes"));
-    }
-
+    let request =
+        schema_validate_expel_member_ticket_request(ExpelMemberTicketRequest::decode(body)?)
+            .map_err(map_expel_member_ticket_request_validation_error)?;
     let gid = parse_gid(&request.room_id)?;
-    let mut author_leaf_id = [0u8; 32];
-    author_leaf_id.copy_from_slice(&request.author_leaf_id);
-    let mut target_leaf_id = [0u8; 32];
-    target_leaf_id.copy_from_slice(&request.target_leaf_id);
-    if author_leaf_id == target_leaf_id {
-        return Err(ApiError::InvalidRequest(
-            "author_leaf_id and target_leaf_id must differ; use controlled leave instead",
-        ));
-    }
-
-    let proof = request
-        .admin_proof
-        .as_ref()
-        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
-    let payload = encode_room_admin_leaf_pair_payload(&author_leaf_id, &target_leaf_id)?;
-    let replay_key = room_admin_proof_replay_key(proof)?;
-    let actor_pop_key =
-        verify_room_admin_proof_payload(proof, "expel_room_member_v1", &request.room_id, &payload)?;
+    let payload =
+        encode_room_admin_leaf_pair_payload(&request.author_leaf_id, &request.target_leaf_id)?;
+    let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
+    let actor_pop_key = verify_room_admin_proof_payload(
+        &request.admin_proof,
+        "expel_room_member_v1",
+        &request.room_id,
+        &payload,
+    )?;
     enforce_expensive_rate_limit(
         &state,
         "expel_member_ticket",
         fingerprint_rate_limit_parts(&[
             &gid,
-            &author_leaf_id,
-            &target_leaf_id,
+            &request.author_leaf_id,
+            &request.target_leaf_id,
             actor_pop_key.as_slice(),
         ]),
     )
@@ -2132,8 +2138,8 @@ async fn expel_member_ticket(
             .build_admin_expel_ticket(
                 &gid,
                 &actor_pop_key,
-                &author_leaf_id,
-                &target_leaf_id,
+                &request.author_leaf_id,
+                &request.target_leaf_id,
                 replay_key,
             )
             .map_err(|err| {
