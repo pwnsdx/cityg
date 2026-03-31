@@ -1,11 +1,14 @@
 //! Shared validation stages reused across join, merge, and burst handlers.
 
-use super::{ml_dsa_public_key_bytes, ml_dsa_signature_bytes, verify_ml_dsa, *};
+use super::*;
 use crate::{
     BARRIER_HP_MODE, HP_AEAD_SUITE, KBROAD_ML_KEM_ALG, TSWE_ALG_CODE, TSWE_ALG_LABEL,
     proofs::srx_smallwood::{self, SRX_SMALLWOOD_MAX_BYTES},
 };
 use ciborium::de;
+use cityg_pqc::{
+    ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES, verify_ml_dsa_65_detached_signature,
+};
 use msphf_core::ds::MSPHF_POP_MSG;
 use serde::Serialize;
 use tracing::debug;
@@ -115,11 +118,11 @@ pub(super) fn ensure_join_pop(
     }
 
     let pk_bytes = match header.get(&KEY_PK) {
-        Some(Value::Bytes(bytes)) if bytes.len() == ml_dsa_public_key_bytes() => bytes,
+        Some(Value::Bytes(bytes)) if bytes.len() == ML_DSA_65_PUBLIC_KEY_BYTES => bytes,
         _ => return Err(AcceptanceError::Freeze(FREEZE_POP_INVALID)),
     };
     let sig_bytes = match header.get(&KEY_SIG) {
-        Some(Value::Bytes(bytes)) if bytes.len() == ml_dsa_signature_bytes() => bytes,
+        Some(Value::Bytes(bytes)) if bytes.len() == ML_DSA_65_SIGNATURE_BYTES => bytes,
         _ => return Err(AcceptanceError::Freeze(FREEZE_POP_INVALID)),
     };
 
@@ -146,11 +149,8 @@ pub(super) fn ensure_join_pop(
     )
     .map_err(AcceptanceError::from)?;
 
-    let pk = MlDsaPublicKey::from_bytes(pk_bytes.as_slice())
+    verify_ml_dsa_65_detached_signature(pk_bytes.as_slice(), &msg, sig_bytes.as_slice())
         .map_err(|_| AcceptanceError::Freeze(FREEZE_POP_INVALID))?;
-    let sig = MlDsaDetachedSignature::from_bytes(sig_bytes.as_slice())
-        .map_err(|_| AcceptanceError::Freeze(FREEZE_POP_INVALID))?;
-    verify_ml_dsa(&sig, &msg, &pk).map_err(|_| AcceptanceError::Freeze(FREEZE_POP_INVALID))?;
 
     Ok(())
 }

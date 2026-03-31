@@ -1,16 +1,13 @@
 //! Canonical witness structures and structural validation helpers.
 
+use cityg_pqc::{
+    ML_DSA_65_PUBLIC_KEY_BYTES as ML_DSA65_PUBLIC_KEY_LEN,
+    ML_DSA_65_SIGNATURE_BYTES as ML_DSA65_SIGNATURE_LEN, MlDsa65VerifyError,
+    verify_ml_dsa_65_detached_signature,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{MsphfError, WitnessValidationError, ds, hash, instance::AnchorInstance, merkle};
-use pqcrypto_dilithium::dilithium5::{
-    DetachedSignature as MlDsaDetachedSignature, PublicKey as MlDsaPublicKey,
-    public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
-    verify_detached_signature as verify_ml_dsa,
-};
-
-const ML_DSA65_PUBLIC_KEY_LEN: usize = ml_dsa_public_key_bytes();
-const ML_DSA65_SIGNATURE_LEN: usize = ml_dsa_signature_bytes();
 const MAX_MERKLE_DEPTH: usize = 64;
 
 /// Enumeration describing which branch of the language a witness targets.
@@ -401,14 +398,8 @@ impl CanonicalWitness {
                 epoch: &anchor.we_epoch_id,
             },
         )?;
-        let pk = <MlDsaPublicKey as pqcrypto_traits::sign::PublicKey>::from_bytes(&raw.public_key)
-            .map_err(|_| MsphfError::Witness(WitnessValidationError::CborMalformed))?;
-        let sig = <MlDsaDetachedSignature as pqcrypto_traits::sign::DetachedSignature>::from_bytes(
-            &raw.signature,
-        )
-        .map_err(|_| MsphfError::Witness(WitnessValidationError::CborMalformed))?;
-        verify_ml_dsa(&sig, &msg_bytes, &pk)
-            .map_err(|_| MsphfError::Witness(WitnessValidationError::ProjEvalFail))?;
+        verify_ml_dsa_65_detached_signature(&raw.public_key, &msg_bytes, &raw.signature)
+            .map_err(map_cityg_pop_verify_error)?;
 
         #[derive(Serialize)]
         struct LeafBinding<'a> {
@@ -499,6 +490,17 @@ impl CanonicalWitness {
     ) -> Result<ValidatedNonMembership, MsphfError> {
         Self::validate_nonmembership_against(raw, expected_root)
     }
+}
+
+fn map_cityg_pop_verify_error(error: MlDsa65VerifyError) -> MsphfError {
+    let witness_error = match error {
+        MlDsa65VerifyError::VerificationFailed => WitnessValidationError::ProjEvalFail,
+        MlDsa65VerifyError::InvalidPublicKeyLength
+        | MlDsa65VerifyError::InvalidSignatureLength
+        | MlDsa65VerifyError::InvalidPublicKey
+        | MlDsa65VerifyError::InvalidSignature => WitnessValidationError::CborMalformed,
+    };
+    MsphfError::Witness(witness_error)
 }
 
 #[cfg(test)]

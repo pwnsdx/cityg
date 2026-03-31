@@ -6,13 +6,10 @@ use std::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ciborium::ser::into_writer;
-use hex::FromHexError;
-use pqcrypto_dilithium::dilithium5::{
-    DetachedSignature as MlDsaDetachedSignature, PublicKey as MlDsaPublicKey,
-    public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
-    verify_detached_signature as verify_ml_dsa,
+use cityg_pqc::{
+    ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES, verify_ml_dsa_65_detached_signature,
 };
-use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
+use hex::FromHexError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -314,19 +311,16 @@ impl PolicySignatureSer {
         let public_key = BASE64.decode(self.public_key.as_bytes())?;
         let signature = BASE64.decode(self.signature.as_bytes())?;
 
-        if public_key.len() != ml_dsa_public_key_bytes()
-            || signature.len() != ml_dsa_signature_bytes()
+        if public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES
+            || signature.len() != ML_DSA_65_SIGNATURE_BYTES
         {
             return Err(PolicyError::InvalidSignature);
         }
         if !anchors.contains_ml_dsa(&public_key) {
             return Ok(false);
         }
-        let pk =
-            MlDsaPublicKey::from_bytes(&public_key).map_err(|_| PolicyError::InvalidSignature)?;
-        let sig = MlDsaDetachedSignature::from_bytes(&signature)
+        verify_ml_dsa_65_detached_signature(&public_key, message, &signature)
             .map_err(|_| PolicyError::InvalidSignature)?;
-        verify_ml_dsa(&sig, message, &pk).map_err(|_| PolicyError::InvalidSignature)?;
         Ok(true)
     }
 }
@@ -492,7 +486,10 @@ mod tests {
     use super::*;
     use anyhow::{Context, Result, bail, ensure};
     use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, keypair};
+    use pqcrypto_traits::sign::PublicKey as _;
     use time::Month;
+
+    type MlDsaPublicKey = pqcrypto_dilithium::dilithium5::PublicKey;
 
     fn make_payload(version: &str, params_hex: &str) -> PolicyPayloadSer {
         PolicyPayloadSer {

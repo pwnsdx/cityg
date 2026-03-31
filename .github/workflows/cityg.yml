@@ -14,6 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Install ripgrep
@@ -26,6 +28,10 @@ jobs:
         run: cargo clippy --workspace --all-features --all-targets --no-deps -- -D warnings -A clippy::never_loop -D clippy::panic -D clippy::unwrap_used -D clippy::expect_used -D clippy::todo -D clippy::unimplemented
       - name: Cargo check (workspace)
         run: cargo check --workspace --all-targets
+      - name: Cargo check (cityg-worker cloudflare)
+        run: cargo check -p cityg-worker --features cloudflare --tests
+      - name: Cargo check (cityg-worker cloudflare wasm32)
+        run: cargo check -p cityg-worker --features cloudflare --target wasm32-unknown-unknown
       - name: Cargo nextest (workspace)
         run: cargo nextest run --workspace --profile ci --exclude dudect-harness
       - name: Security verification (server blindness)

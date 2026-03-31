@@ -79,18 +79,19 @@ use std::{
 use ciborium::value::{Integer, Value};
 use cityg_client::witness;
 use cityg_client::{CityGError, ClientEpochBundle, GroupMembership, MembershipDelta};
+use cityg_pqc::{
+    MlDsa65SecretKey, sign_ml_dsa_65_detached_signature, verify_ml_dsa_65_detached_signature,
+};
 use msphf_core::merkle::canonical_set_root;
 use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
 use msphf_core::{hash::h_l, serde_utils::to_cbor_vec};
 use msphf_orchestrator::mhw::{DEFAULT_H_MAX, DEFAULT_T_WINDOW};
 use msphf_orchestrator::process_anchor_or;
 use msphf_orchestrator::{
-    self, AcceptanceContext, AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE,
-    DEFAULT_VRF_ID, PivotParity, ReceiverCache, compute_proofs_commit_bytes, hdr,
+    self, AcceptanceContext, AcceptanceOptions, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, PivotParity,
+    ReceiverCache, compute_proofs_commit_bytes, hdr,
 };
-use pqcrypto_dilithium::dilithium5;
 use pqcrypto_kyber::kyber768;
-use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
@@ -1008,6 +1009,37 @@ impl CityGServer {
 
     pub fn room_uses_explicit_admins(&self, gid: &[u8; 32]) -> bool {
         self.roster.has_explicit_room_admins(gid)
+    }
+
+    /// Export the server runtime metadata that is not recoverable by replaying
+    /// accepted bundles alone.
+    pub fn export_runtime_metadata_bytes(&self) -> Result<Vec<u8>, CityGError> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&self.snapshot_kbroad_state(), &mut bytes)
+            .map_err(|_| CityGError::InvalidInput("failed to encode kbroad state"))?;
+        Ok(bytes)
+    }
+
+    /// Restore persisted runtime metadata into the current server instance.
+    ///
+    /// When `replayed_accepts` is true, the server overlays metadata onto the
+    /// state reconstructed by accepted-bundle replay. Otherwise it applies the
+    /// persisted snapshot as the primary runtime state.
+    pub fn restore_runtime_metadata_bytes(
+        &mut self,
+        bytes: &[u8],
+        replayed_accepts: bool,
+    ) -> Result<(), CityGError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let state: PersistedKbroadState = ciborium::de::from_reader(bytes)
+            .map_err(|_| CityGError::InvalidInput("invalid kbroad state"))?;
+        if replayed_accepts {
+            self.overlay_persisted_runtime_metadata_after_replay(&state)
+        } else {
+            self.apply_persisted_kbroad_state(&state)
+        }
     }
 
     pub fn new(config: ServerConfig) -> Self {
@@ -3940,8 +3972,8 @@ fn encode_history_authority_descriptor(
 
 fn history_authority_secret_key(
     state: &HistoryAuthorityState,
-) -> Result<dilithium5::SecretKey, CityGError> {
-    dilithium5::SecretKey::from_bytes(&state.secret_key)
+) -> Result<MlDsa65SecretKey, CityGError> {
+    MlDsa65SecretKey::from_bytes(&state.secret_key)
         .map_err(|_| CityGError::InvalidInput("invalid history authority secret key"))
 }
 
@@ -3950,9 +3982,8 @@ fn sign_history_authority_message(
     payload: &[u8],
 ) -> Result<Vec<u8>, CityGError> {
     let secret_key = history_authority_secret_key(state)?;
-    Ok(dilithium5::detached_sign(payload, &secret_key)
-        .as_bytes()
-        .to_vec())
+    sign_ml_dsa_65_detached_signature(&secret_key, payload)
+        .map_err(|_| CityGError::InvalidInput("invalid history authority secret key"))
 }
 
 fn verify_history_authority_signature(
@@ -3960,11 +3991,7 @@ fn verify_history_authority_signature(
     payload: &[u8],
     signature: &[u8],
 ) -> Result<(), CityGError> {
-    let public_key = dilithium5::PublicKey::from_bytes(&descriptor.public_key)
-        .map_err(|_| CityGError::InvalidInput("invalid history authority public key"))?;
-    let signature = dilithium5::DetachedSignature::from_bytes(signature)
-        .map_err(|_| CityGError::InvalidInput("invalid history authority signature"))?;
-    dilithium5::verify_detached_signature(&signature, payload, &public_key)
+    verify_ml_dsa_65_detached_signature(&descriptor.public_key, payload, signature)
         .map_err(|_| CityGError::InvalidInput("history authority signature verification failed"))
 }
 
@@ -5577,12 +5604,12 @@ fn validate_history_authority_headers(
             raw_attestation,
             raw_barrier_update,
         )?;
-        let author_pop_pk = dilithium5::PublicKey::from_bytes(author_pop_pk)
-            .map_err(|_| freeze_barrier_updater_invalid_error())?;
-        let signature = dilithium5::DetachedSignature::from_bytes(signature.as_slice())
-            .map_err(|_| freeze_barrier_updater_invalid_error())?;
-        dilithium5::verify_detached_signature(&signature, payload.as_slice(), &author_pop_pk)
-            .map_err(|_| freeze_barrier_updater_invalid_error())?;
+        verify_ml_dsa_65_detached_signature(
+            author_pop_pk,
+            payload.as_slice(),
+            signature.as_slice(),
+        )
+        .map_err(|_| freeze_barrier_updater_invalid_error())?;
     }
     if let Some(raw_witness) = raw_witness {
         let witness = parse_full_verification_witness(raw_witness)?;
@@ -8961,8 +8988,10 @@ mod roster_tests {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod demo {
     use super::*;
+    use msphf_orchestrator::BootstrapPolicy;
 
     /// Build a server configured with the demo KBROAD keypair.
     pub fn demo_server() -> CityGServer {

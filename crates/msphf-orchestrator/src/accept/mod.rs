@@ -17,6 +17,9 @@ use ciborium::{
     de, ser,
     value::{Integer, Value},
 };
+use cityg_pqc::{
+    ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES, verify_ml_dsa_65_detached_signature,
+};
 use msphf_core::serde_utils::to_cbor_vec;
 use msphf_core::{
     MsphfError, WitnessValidationError, ds,
@@ -29,13 +32,7 @@ use msphf_core::{
     },
 };
 use msphf_rlwe::{CapssStrictInputs, recompute_capss_witness};
-use pqcrypto_dilithium::dilithium5::{
-    DetachedSignature as MlDsaDetachedSignature, PublicKey as MlDsaPublicKey,
-    public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
-    verify_detached_signature as verify_ml_dsa,
-};
 use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
-use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
 use serde::{Serialize, de::DeserializeOwned};
 use time::OffsetDateTime;
 use tracing::{debug, info};
@@ -2336,6 +2333,11 @@ fn validate_bootstrap(
                 Some(Value::Bytes(bytes)) => bytes.clone(),
                 _ => return Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID)),
             };
+            if public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES
+                || sig_bytes.len() != ML_DSA_65_SIGNATURE_BYTES
+            {
+                return Err(AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID));
+            }
 
             let digest = build_bootstrap_digest(
                 header,
@@ -2346,12 +2348,12 @@ fn validate_bootstrap(
                 seed_bundle_commit,
             )?;
 
-            let pk = MlDsaPublicKey::from_bytes(public_key.as_slice())
-                .map_err(|_| AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
-            let sig = MlDsaDetachedSignature::from_bytes(sig_bytes.as_slice())
-                .map_err(|_| AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
-            verify_ml_dsa(&sig, &digest, &pk)
-                .map_err(|_| AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
+            verify_ml_dsa_65_detached_signature(
+                public_key.as_slice(),
+                &digest,
+                sig_bytes.as_slice(),
+            )
+            .map_err(|_| AcceptanceError::Freeze(FREEZE_BOOTSTRAP_INVALID))?;
 
             Ok(())
         }

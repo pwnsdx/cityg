@@ -5,14 +5,18 @@ members = [
     "crates/msphf-rlwe",
     "crates/msphf-orchestrator",
     "crates/msphf-lb-vrf",
+    "crates/cityg-pqc",
     "crates/cityg-client",
     "crates/cityg-server",
     "crates/cityg-api",
+    "crates/cityg-api-schema",
     "crates/cityg-api-client",
     "crates/dudect-harness", "crates/capss",
     "crates/cityg-gui", "crates/cityg-config",
     "crates/pqcrypto-kyber",
     "crates/cityg-stress",
+    "crates/cityg-runtime",
+    "crates/cityg-worker",
 ]
 resolver = "2"
 

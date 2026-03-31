@@ -4,7 +4,6 @@ version = "0.1.0"
 license = "MIT"
 authors = ["Sabri Haddouche"]
 edition.workspace = true
-build = "build.rs"
 
 [features]
 default = []
@@ -17,6 +16,7 @@ prost-types = "0.14"
 bytes = "1"
 thiserror = "2"
 cityg-client = { path = "../cityg-client" }
+cityg-api-schema = { path = "../cityg-api-schema" }
 msphf-orchestrator = { path = "../msphf-orchestrator" }
 msphf-core = { path = "../msphf-core" }
 serde = { version = "1", features = ["derive"] }
@@ -32,7 +32,3 @@ pqcrypto-traits = "0.3"
 tokio = { version = "1.49", features = ["macros", "rt-multi-thread"] }
 hex = "0.4"
 axum = "0.8"
-
-[build-dependencies]
-prost-build = "0.14"
-protoc-bin-vendored = "3"

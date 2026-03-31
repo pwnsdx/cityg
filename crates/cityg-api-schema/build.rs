@@ -1,10 +1,8 @@
 use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:rerun-if-changed=proto/cityg.proto");
+    println!("cargo:rerun-if-changed=../cityg-api/proto/cityg.proto");
 
-    // CI runners (and some local setups) might not provide protoc, so default to the
-    // vendored binary if the user hasn't configured PROTOC explicitly.
     if env::var_os("PROTOC").is_none() {
         let protoc = protoc_bin_vendored::protoc_bin_path()?;
         unsafe {
@@ -14,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     prost_build::Config::new()
         .out_dir(env::var("OUT_DIR")?)
-        .compile_protos(&["proto/cityg.proto"], &["proto"])?;
+        .compile_protos(&["../cityg-api/proto/cityg.proto"], &["../cityg-api/proto"])?;
 
     Ok(())
 }

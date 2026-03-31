@@ -102,9 +102,9 @@ pub(crate) fn generate_history_authority_state(
     mode: HistoryAuthorityMode,
     require_full_verification_receipt: bool,
 ) -> Result<HistoryAuthorityState, CityGError> {
-    let (public_key, secret_key) = dilithium5::keypair();
-    let public_key = public_key.as_bytes().to_vec();
-    let secret_key = secret_key.as_bytes().to_vec();
+    let (public_key, secret_key) = cityg_pqc::ml_dsa_65_keypair()
+        .map_err(|_| CityGError::InvalidInput("failed to generate history authority keypair"))?;
+    let secret_key = secret_key.into_bytes();
     Ok(HistoryAuthorityState {
         mode,
         descriptor: HistoryAuthorityDescriptor {

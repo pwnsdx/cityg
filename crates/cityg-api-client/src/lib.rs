@@ -135,12 +135,8 @@
 //! - [`cityg-api`](../cityg_api) - Server implementation
 //! - [`cityg-client`](../cityg_client) - Client bundle generation
 
-#[allow(dead_code)]
-mod pb {
-    include!(concat!(env!("OUT_DIR"), "/cityg.api.v1.rs"));
-}
-
 use ciborium::ser::into_writer;
+use cityg_api_schema::pb;
 use cityg_client::{CityGError as ClientError, ClientEpochBundle, pivot::pivot_parity_from_cbor};
 use msphf_core::hash::h_l;
 use msphf_orchestrator::PivotParity;
@@ -2848,7 +2844,10 @@ impl CitygApiClient {
             let response = req.body(buf.clone()).send().await;
 
             match response {
-                Ok(resp) => return Self::decode_response(resp).await,
+                Ok(resp) => match Self::decode_response(resp).await {
+                    Ok(decoded) => return Ok(decoded),
+                    Err(err) => return Err(err),
+                },
                 Err(e) => {
                     // Only retry on network errors, not on HTTP status errors
                     if !e.is_timeout() && !e.is_connect() && !e.is_request() {

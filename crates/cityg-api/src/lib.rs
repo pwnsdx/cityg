@@ -1,24 +1,16 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
-#[allow(dead_code)]
-mod pb {
-    include!(concat!(env!("OUT_DIR"), "/cityg.api.v1.rs"));
-}
-
 pub mod health;
 mod middleware;
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     convert::TryInto,
     fs,
     hash::{Hash, Hasher},
     net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    path::Path,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -35,26 +27,55 @@ use axum::{
     routing::{get, post},
 };
 use bytes::BytesMut;
-use ciborium::ser::into_writer;
+#[cfg(test)]
+use cityg_api_schema::verify_identity_binding as schema_verify_identity_binding;
+use cityg_api_schema::{
+    API_PROFILE_VERSION, BarrierHelperRequestDecodeError,
+    FullVerificationWitnessRequestDecodeError, IdentityBindingValidationError,
+    MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
+    PreparedIdentityBindingError, RoomAdminProofValidationError,
+    decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
+    decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
+    decode_barrier_resolve_revoked_leaves_request as schema_decode_barrier_resolve_revoked_leaves_request,
+    decode_full_verification_witness_request as schema_decode_full_verification_witness_request,
+    encode_full_verification_witness_response, encode_members_response,
+    encode_prepared_barrier_public_tree_response, encode_prepared_join_ticket_response,
+    encode_prepared_merge_acceptance_lookup_response, encode_prepared_merge_ticket_response,
+    encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
+    encode_room_admin_leaf_pair_payload as schema_encode_room_admin_leaf_pair_payload,
+    encode_search_members_response, encode_telemetry_snapshot_response,
+    encode_window_snapshot_response, pb, pb_member as schema_pb_member,
+    prepare_identity_binding as schema_prepare_identity_binding,
+    room_admin_proof_replay_key as schema_room_admin_proof_replay_key,
+    verify_room_admin_proof as schema_verify_room_admin_proof,
+    verify_room_admin_proof_payload as schema_verify_room_admin_proof_payload,
+};
+use cityg_pqc::ML_DSA_65_PUBLIC_KEY_BYTES;
 use futures::{SinkExt, StreamExt};
 use hex::FromHex;
+#[cfg(test)]
+use pb::IdentityBinding;
+#[cfg(test)]
+use pb::JoinTicketResponse;
+#[cfg(test)]
+use pb::MergeTicketResponse;
 use pb::{
     AcceptEpochRequest, AcceptEpochResponse, BarrierFetchPublicTreeRequest,
-    BarrierFetchPublicTreeResponse, BarrierIssueFullVerificationWitnessRequest,
-    BarrierIssueFullVerificationWitnessResponse, BarrierJoinLeafRecord,
-    BarrierLookupMergeAcceptanceRequest, BarrierLookupMergeAcceptanceResponse,
-    BarrierResolveJoinsSinceRequest, BarrierResolveJoinsSinceResponse,
-    BarrierResolveRevokedLeavesRequest, BarrierResolveRevokedLeavesResponse, BootstrapRoomRequest,
+    BarrierIssueFullVerificationWitnessRequest, BarrierLookupMergeAcceptanceRequest,
+    BarrierResolveJoinsSinceRequest, BarrierResolveRevokedLeavesRequest, BootstrapRoomRequest,
     BootstrapRoomResponse, ChatMessage, ConfigureWindowRequest, ConfigureWindowResponse,
-    ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse, FreezeStat,
-    FsForwardLeapPolicy as PbFsForwardLeapPolicy, GetBundleRequest, GetBundleResponse,
-    GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse, HealthResponse,
-    HistoryCommitment as PbHistoryCommitment, IdentityBinding, JoinTicketRequest,
-    JoinTicketResponse, ListRoomAdminsRequest, ListRoomAdminsResponse, Member, MembersRequest,
-    MembersResponse, MergeAcceptanceStatus, MergeTicketIntent, MergeTicketRequest,
-    MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
+    ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest,
+    GetBundleResponse, GetTelemetryRequest, GetWindowRequest, HealthResponse, JoinTicketRequest,
+    ListRoomAdminsRequest, ListRoomAdminsResponse, Member, MembersRequest, MergeTicketIntent,
+    MergeTicketRequest, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
     RoomAdminMutationResponse, RoomAdminProof, RotateRoomKbroadRequest, RotateRoomKbroadResponse,
-    SendMessageRequest, SendMessageResponse, TelemetryEntry, WindowEntry, WindowHead,
+    SendMessageRequest, SendMessageResponse,
+};
+#[cfg(test)]
+use pb::{
+    BarrierFetchPublicTreeResponse, BarrierLookupMergeAcceptanceResponse,
+    BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesResponse, GetTelemetryResponse,
+    GetWindowResponse, MembersResponse, MergeAcceptanceStatus,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -63,42 +84,54 @@ use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
-use unicode_normalization::UnicodeNormalization;
 
 use cityg_client::{CityGError as ClientError, ClientEpochBundle, GroupMembership};
-use cityg_server::{
-    BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord, CityGServer,
-    FsForwardLeapPolicy as ServerFsForwardLeapPolicy, HistoryCommitment as ServerHistoryCommitment,
-    MergeAcceptanceStatus as ServerMergeAcceptanceStatus, MergeTicketBundle, ServerConfig,
-    ServerOutcome,
+#[cfg(test)]
+use cityg_runtime::StoredBundle;
+#[cfg(test)]
+use cityg_runtime::StoredMessage;
+#[cfg(test)]
+use cityg_runtime::aligned_fs_epoch_base_ts;
+#[cfg(test)]
+use cityg_runtime::ensure_leaf_member_for_epoch as runtime_ensure_leaf_member_for_epoch;
+use cityg_runtime::{
+    AcceptedRoomEpoch, AliasLeafLookup, AliasRegistrationError, AliasRegistry,
+    AppliedBundleIndexes, BarrierPaginationError, EpochScope, MAX_MESSAGE_CIPHERTEXT_BYTES,
+    MemberMetadata, PreparedAcceptedBundle, RoomAcceptEpochError, RoomAuthorizationError,
+    RoomBarrierEnvelopeError, RoomBarrierHelperPreparationError, RoomBundleMaterializationError,
+    RoomFullVerificationWitnessPreparationError, RoomMemberListingError, RoomMessageStoreError,
+    RoomServiceError, RoomTicketPreparationError, RoomVolatileState, alias_entry_for_member,
+    apply_bundle_indexes, apply_room_window_limit_update as runtime_apply_room_window_limit_update,
+    classify_refresh_pivot_conflict,
+    commit_prepared_accepted_bundle as runtime_commit_prepared_accepted_bundle,
+    ensure_leaf_member_for_room as runtime_ensure_leaf_member_for_room,
+    fetch_room_bundle as runtime_fetch_room_bundle,
+    fetch_room_members as runtime_fetch_room_members,
+    fetch_room_messages as runtime_fetch_room_messages, filter_room_members_by_query,
+    lane_state_path, materialize_replayed_bundle as runtime_materialize_replayed_bundle,
+    normalize_alias, paginate_room_members,
+    parse_room_window_limit_update as runtime_parse_room_window_limit_update,
+    prepare_accepted_bundle as runtime_prepare_accepted_bundle,
+    prepare_barrier_public_tree as runtime_prepare_barrier_public_tree,
+    prepare_full_verification_witness as runtime_prepare_full_verification_witness,
+    prepare_join_ticket as runtime_prepare_join_ticket,
+    prepare_merge_acceptance_lookup as runtime_prepare_merge_acceptance_lookup,
+    prepare_merge_ticket as runtime_prepare_merge_ticket,
+    prepare_merge_ticket_from_bundle as runtime_prepare_merge_ticket_from_bundle,
+    prepare_resolved_joins as runtime_prepare_resolved_joins,
+    prepare_resolved_revoked_leaves as runtime_prepare_resolved_revoked_leaves,
+    refresh_room_pivot as runtime_refresh_room_pivot,
+    seed_room_window_head as runtime_seed_room_window_head, server_from_cityg_config_for_lane,
+    snapshot_room_telemetry as runtime_snapshot_room_telemetry,
+    snapshot_room_window as runtime_snapshot_room_window,
+    store_room_message as runtime_store_room_message,
 };
-use msphf_core::{
-    MsphfError,
-    hash::h_l,
-    merkle::canonical_set_root,
-    params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK},
-};
+use cityg_server::{CityGServer, MergeTicketIntent as ServerMergeTicketIntent, ServerOutcome};
+use msphf_core::{MsphfError, merkle::canonical_set_root};
 use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
-use msphf_orchestrator::{
-    AcceptanceOptions, BootstrapPolicy, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID, FsPolicyConfig,
-    LeafIdMode, PivotParity, compute_leaf_id, hdr,
-};
 use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
 use serde::{Deserialize, Serialize};
-use serde_bytes::ByteBuf;
 use serde_json::to_vec as to_json_vec;
-
-#[derive(Clone, Debug)]
-struct AliasBinding {
-    leaf_id: [u8; 32],
-    pop_public_key: Vec<u8>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct MemberMetadata {
-    join_timestamp_ms: u64,
-    last_seen_timestamp_ms: u64,
-}
 
 #[derive(Clone, Debug)]
 enum BroadcastNotification {
@@ -183,7 +216,6 @@ const DEFAULT_EXPENSIVE_RATE_LIMIT_BURST: u32 = 120;
 const DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const DEFAULT_EXPENSIVE_RATE_LIMIT_MAX_KEYS: usize = 100_000;
 const API_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
-const MAX_MESSAGE_CIPHERTEXT_BYTES: usize = 1_048_640;
 const WINDOW_CONFIG_ADMIN_HEADER: &str = "x-cityg-admin-token";
 const WINDOW_CONFIG_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_WINDOW_ADMIN_TOKEN";
 const ROOMS_ADMIN_TOKEN_ENV: &str = "CITYG_SERVER_ROOMS_ADMIN_TOKEN";
@@ -193,12 +225,10 @@ const MESSAGE_AUTH_TOKEN_ENV: &str = "CITYG_SERVER_MESSAGE_AUTH_TOKEN";
 const MESSAGE_PRUNE_INTERVAL_MS: u64 = 1_000;
 const WS_MAX_LAG_ENV: &str = "CITYG_SERVER_WS_MAX_LAG";
 const WS_MAX_LAG_DEFAULT: u64 = 256;
-const API_PROFILE_VERSION: &str = "v0.1.4";
 const GROUP_LANES_ENV: &str = "CITYG_SERVER_GROUP_LANES";
 const DEFAULT_GROUP_LANES: usize = 4;
 const MERGE_COALESCE_TTL_MS: u64 = 2_000;
 const MERGE_COALESCE_MAX_ENTRIES: usize = 8_192;
-const MAX_BARRIER_HELPER_PAGE_ENTRIES: u32 = 512;
 const ACCEPT_EPOCH_MAX_IN_FLIGHT_ENV: &str = "CITYG_SERVER_ACCEPT_EPOCH_MAX_IN_FLIGHT";
 const JOIN_TICKET_MAX_IN_FLIGHT_ENV: &str = "CITYG_SERVER_JOIN_TICKET_MAX_IN_FLIGHT";
 const DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT: usize = 8;
@@ -290,21 +320,15 @@ struct ApiState {
     // Execution lanes keyed by gid hash; write-heavy gid-scoped operations
     // are routed to one lane to reduce cross-group lock contention.
     server_lanes: Arc<Vec<Arc<RwLock<CityGServer>>>>,
-    messages: Arc<RwLock<AHashMap<[u8; 32], Vec<StoredMessage>>>>,
-    bundles: Arc<RwLock<AHashMap<[u8; 32], StoredBundle>>>,
+    room_state: Arc<RwLock<RoomVolatileState>>,
     message_retention: Duration,
     fs_epoch_period_seconds: u64,
     freeze_counts: Arc<RwLock<BTreeMap<(u32, String), u64>>>,
     // Alias registry: alias -> (leaf_id, pop_pk) for TOFU
-    alias_registry: Arc<RwLock<AHashMap<String, AliasBinding>>>,
-    member_metadata: Arc<RwLock<AHashMap<[u8; 32], MemberMetadata>>>,
-    weid_to_leaf: Arc<RwLock<AHashMap<[u8; 32], [u8; 32]>>>,
-    epoch_scopes: Arc<RwLock<AHashMap<[u8; 32], EpochScope>>>,
+    alias_registry: Arc<RwLock<AliasRegistry>>,
     // Broadcast channel for WebSocket notifications
     notification_tx: broadcast::Sender<BroadcastNotification>,
     alias_rate_limiter: AliasRateLimiter,
-    message_prune_due_ms: Arc<AtomicU64>,
-    bundle_prune_due_ms: Arc<AtomicU64>,
     merge_ticket_cache: Arc<RwLock<AHashMap<MergeTicketCacheKey, MergeTicketCacheEntry>>>,
     accept_epoch_limiter: EndpointConcurrencyLimiter,
     join_ticket_limiter: EndpointConcurrencyLimiter,
@@ -316,12 +340,6 @@ struct MessageNotification {
     gid: [u8; 32],
     we_epoch_id: [u8; 32],
     timestamp_ms: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct EpochScope {
-    gid: [u8; 32],
-    membership_root: [u8; 32],
 }
 
 #[derive(Clone, Deserialize)]
@@ -452,7 +470,7 @@ impl ApiState {
         leaf_id: [u8; 32],
         pop_public_key: Vec<u8>,
     ) -> Result<bool, ApiError> {
-        let normalized_alias: String = alias.nfc().collect();
+        let normalized_alias = normalize_alias(alias);
 
         if !self
             .alias_rate_limiter
@@ -464,99 +482,74 @@ impl ApiState {
         }
 
         let mut guard = self.alias_registry.write().await;
-
-        if let Some(existing) = guard.get_mut(normalized_alias.as_str()) {
-            // TOFU: First binding wins
-            if existing.pop_public_key == pop_public_key {
-                if existing.leaf_id != leaf_id {
-                    existing.leaf_id = leaf_id;
-                    info!(
-                        "Alias '{}' verified: updated leaf binding to {}",
-                        normalized_alias,
-                        hex::encode(leaf_id)
-                    );
-                } else {
-                    info!(
-                        "Alias '{}' verified: matches existing binding",
-                        normalized_alias
-                    );
+        match guard.register_alias(normalized_alias.as_str(), leaf_id, pop_public_key) {
+            Ok(outcome) => {
+                match outcome {
+                    cityg_runtime::AliasRegistrationOutcome::Registered => {
+                        info!("Alias '{}' registered with new binding", normalized_alias);
+                    }
+                    cityg_runtime::AliasRegistrationOutcome::MatchedExisting => {
+                        info!(
+                            "Alias '{}' verified: matches existing binding",
+                            normalized_alias
+                        );
+                    }
+                    cityg_runtime::AliasRegistrationOutcome::UpdatedLeafBinding => {
+                        info!(
+                            "Alias '{}' verified: updated leaf binding to {}",
+                            normalized_alias,
+                            hex::encode(leaf_id)
+                        );
+                    }
                 }
-                return Ok(false);
-            } else {
-                // Different device trying to use same alias - TOFU violation
+                Ok(outcome.is_new())
+            }
+            Err(AliasRegistrationError::Conflict) => {
                 error!(
                     "TOFU violation: Alias '{}' already bound to different public key",
                     normalized_alias
                 );
-                return Err(ApiError::InvalidRequest(
+                Err(ApiError::InvalidRequest(
                     "alias already bound to a different identity",
-                ));
+                ))
             }
         }
-
-        // New alias, register it
-        let binding = AliasBinding {
-            leaf_id,
-            pop_public_key: pop_public_key.clone(),
-        };
-        guard.insert(normalized_alias.clone(), binding);
-        info!("Alias '{}' registered with new binding", normalized_alias);
-        Ok(true)
     }
 
+    #[cfg(test)]
     async fn record_member_join(
         &self,
         leaf_id: [u8; 32],
         we_epoch_id: [u8; 32],
         timestamp_ms: u64,
     ) {
-        // Keep metadata and reverse index updates in one critical section.
-        let mut metadata = self.member_metadata.write().await;
-        let mut map = self.weid_to_leaf.write().await;
-        metadata.insert(
-            leaf_id,
-            MemberMetadata {
-                join_timestamp_ms: timestamp_ms,
-                last_seen_timestamp_ms: timestamp_ms,
-            },
-        );
-        map.retain(|_, existing| *existing != leaf_id);
-        map.insert(we_epoch_id, leaf_id);
+        let mut room_state = self.room_state.write().await;
+        room_state.record_member_join(leaf_id, we_epoch_id, timestamp_ms);
     }
 
+    #[cfg(test)]
     async fn record_member_revocations(&self, leaves: &[[u8; 32]]) {
         if leaves.is_empty() {
             return;
         }
-        let revoked: HashSet<[u8; 32]> = leaves.iter().copied().collect();
-        let mut metadata = self.member_metadata.write().await;
-        let mut map = self.weid_to_leaf.write().await;
-        for leaf in &revoked {
-            metadata.remove(leaf);
-        }
-        map.retain(|_, existing| !revoked.contains(existing));
+        let mut room_state = self.room_state.write().await;
+        let revoked = room_state.revoke_members(leaves);
 
         // Unbind aliases whose leaf_id was revoked so the same alias can
         // rejoin with a fresh identity key without triggering a TOFU violation.
         let mut alias_guard = self.alias_registry.write().await;
-        alias_guard.retain(|_, binding| !revoked.contains(&binding.leaf_id));
+        alias_guard.remove_revoked_members(&revoked);
     }
 
+    #[cfg(test)]
     async fn record_epoch_scope(&self, we_epoch_id: [u8; 32], scope: EpochScope) {
-        let mut scopes = self.epoch_scopes.write().await;
-        scopes.insert(we_epoch_id, scope);
+        let mut room_state = self.room_state.write().await;
+        room_state.record_epoch_scope(we_epoch_id, scope);
     }
 
     async fn epoch_scope_for_weid(&self, we_epoch_id: &[u8; 32]) -> Option<EpochScope> {
-        let scopes = self.epoch_scopes.read().await;
-        scopes.get(we_epoch_id).copied()
-    }
-
-    async fn touch_member(&self, leaf_id: [u8; 32], timestamp_ms: u64) {
-        let mut metadata = self.member_metadata.write().await;
-        if let Some(entry) = metadata.get_mut(&leaf_id) {
-            entry.last_seen_timestamp_ms = timestamp_ms;
-        }
+        let room_state = self.room_state.read().await;
+        room_state.epoch_scope_for_weid(we_epoch_id)
     }
 
     fn broadcast_message(&self, notification: MessageNotification) {
@@ -584,20 +577,6 @@ impl ApiState {
     }
 }
 
-#[derive(Clone)]
-struct StoredMessage {
-    we_epoch_id: [u8; 32],
-    ciphertext: Vec<u8>,
-    sender: Vec<u8>,
-    timestamp_ms: u64,
-}
-
-#[derive(Clone)]
-struct StoredBundle {
-    bytes: Vec<u8>,
-    stored_at_ms: u64,
-}
-
 const DEFAULT_FS_MESSAGE_RETENTION_SECS: u64 = 600;
 
 fn current_timestamp_ms() -> u64 {
@@ -609,80 +588,6 @@ fn current_timestamp_ms() -> u64 {
 
 fn message_retention_from_config(config: &cityg_config::CityGConfig) -> Duration {
     Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS.max(config.protocol.fs_policy.h_seconds))
-}
-
-fn prune_expired_messages(
-    store: &mut AHashMap<[u8; 32], Vec<StoredMessage>>,
-    now_ms: u64,
-    retention: Duration,
-) {
-    let retention_ms_u128 = retention.as_millis().min(u128::from(u64::MAX));
-    let retention_ms = retention_ms_u128 as u64;
-    let cutoff = now_ms.saturating_sub(retention_ms);
-
-    store.retain(|_, messages| {
-        messages.retain(|msg| msg.timestamp_ms >= cutoff);
-        !messages.is_empty()
-    });
-}
-
-fn should_prune_messages(prune_due_ms: &AtomicU64, now_ms: u64) -> bool {
-    let due = prune_due_ms.load(Ordering::Relaxed);
-    if now_ms < due {
-        return false;
-    }
-    prune_due_ms
-        .compare_exchange(
-            due,
-            now_ms.saturating_add(MESSAGE_PRUNE_INTERVAL_MS),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        )
-        .is_ok()
-}
-
-fn prune_expired_bundles(
-    store: &mut AHashMap<[u8; 32], StoredBundle>,
-    now_ms: u64,
-    retention: Duration,
-) -> Vec<[u8; 32]> {
-    let retention_ms_u128 = retention.as_millis().min(u128::from(u64::MAX));
-    let retention_ms = retention_ms_u128 as u64;
-    let cutoff = now_ms.saturating_sub(retention_ms);
-    let mut expired = Vec::new();
-
-    store.retain(|weid, bundle| {
-        let keep = bundle.stored_at_ms >= cutoff;
-        if !keep {
-            expired.push(*weid);
-        }
-        keep
-    });
-
-    expired
-}
-
-async fn prune_bundle_indexes(state: &ApiState, expired: &[[u8; 32]]) {
-    if expired.is_empty() {
-        return;
-    }
-    let expired_set: HashSet<[u8; 32]> = expired.iter().copied().collect();
-    let mut scopes = state.epoch_scopes.write().await;
-    scopes.retain(|weid, _| !expired_set.contains(weid));
-    drop(scopes);
-
-    let mut weid_to_leaf = state.weid_to_leaf.write().await;
-    weid_to_leaf.retain(|weid, _| !expired_set.contains(weid));
-}
-
-fn maybe_prune_expired_messages(
-    state: &ApiState,
-    store: &mut AHashMap<[u8; 32], Vec<StoredMessage>>,
-    now_ms: u64,
-) {
-    if should_prune_messages(state.message_prune_due_ms.as_ref(), now_ms) {
-        prune_expired_messages(store, now_ms, state.message_retention);
-    }
 }
 
 #[derive(Debug, Error)]
@@ -776,6 +681,39 @@ fn map_barrier_helper_error(err: ClientError) -> ApiError {
         }
         ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
         other => ApiError::from(other),
+    }
+}
+
+fn map_room_admin_proof_validation_error(err: RoomAdminProofValidationError) -> ApiError {
+    match err {
+        RoomAdminProofValidationError::InvalidPublicKeyLength => {
+            ApiError::InvalidRequest("invalid room admin public key length")
+        }
+        RoomAdminProofValidationError::InvalidSignatureLength => {
+            ApiError::InvalidRequest("invalid room admin signature length")
+        }
+        RoomAdminProofValidationError::MissingRoomId => {
+            ApiError::InvalidRequest("room_id must be provided")
+        }
+        RoomAdminProofValidationError::EncodeProofMessage => {
+            ApiError::InvalidRequest("failed to encode room admin proof message")
+        }
+        RoomAdminProofValidationError::InvalidPublicKey => {
+            ApiError::InvalidRequest("invalid room admin public key")
+        }
+        RoomAdminProofValidationError::InvalidSignature => {
+            ApiError::InvalidRequest("invalid room admin signature")
+        }
+        RoomAdminProofValidationError::VerificationFailed => {
+            ApiError::InvalidRequest("room admin proof verification failed")
+        }
+        RoomAdminProofValidationError::MissingKbroadPublic => {
+            ApiError::InvalidRequest("kbroad_public must be provided")
+        }
+        RoomAdminProofValidationError::EncodePayload => {
+            ApiError::InvalidRequest("failed to encode room admin proof payload")
+        }
+        RoomAdminProofValidationError::ReplayKey(message) => ApiError::server_message(message),
     }
 }
 
@@ -888,100 +826,6 @@ fn parse_hex_32(label: &'static str, value: &str) -> Result<[u8; 32], ApiError> 
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
-}
-
-fn pb_history_commitment(commitment: ServerHistoryCommitment) -> PbHistoryCommitment {
-    PbHistoryCommitment {
-        history_view_id: commitment.history_view_id.to_vec(),
-        history_commitment_id: commitment.history_commitment_id.to_vec(),
-        prev_history_commitment_id: commitment.prev_history_commitment_id.to_vec(),
-        history_seq: commitment.history_seq,
-    }
-}
-
-fn parse_pb_history_commitment(
-    commitment: Option<PbHistoryCommitment>,
-) -> Result<ServerHistoryCommitment, ApiError> {
-    let commitment = commitment.ok_or(ApiError::InvalidRequest(
-        "current_history_commitment must be provided",
-    ))?;
-    if commitment.history_view_id.len() != 32
-        || commitment.history_commitment_id.len() != 32
-        || commitment.prev_history_commitment_id.len() != 32
-    {
-        return Err(ApiError::InvalidRequest(
-            "current_history_commitment fields must be 32 bytes",
-        ));
-    }
-    let mut history_view_id = [0u8; 32];
-    history_view_id.copy_from_slice(&commitment.history_view_id);
-    let mut history_commitment_id = [0u8; 32];
-    history_commitment_id.copy_from_slice(&commitment.history_commitment_id);
-    let mut prev_history_commitment_id = [0u8; 32];
-    prev_history_commitment_id.copy_from_slice(&commitment.prev_history_commitment_id);
-    Ok(ServerHistoryCommitment {
-        history_view_id,
-        history_commitment_id,
-        prev_history_commitment_id,
-        history_seq: commitment.history_seq,
-    })
-}
-
-fn pb_fs_forward_leap_policy(policy: ServerFsForwardLeapPolicy) -> PbFsForwardLeapPolicy {
-    PbFsForwardLeapPolicy {
-        h: policy.h,
-        checkpoint_interval: policy.checkpoint_interval,
-        slack_anchor: policy.slack_anchor,
-        slack_first_device: policy.slack_first_device,
-        slack_device: policy.slack_device,
-    }
-}
-
-fn paginate_barrier_helper_slice<T: Clone>(
-    items: &[T],
-    page_offset: u32,
-    max_entries: u32,
-) -> Result<(Vec<T>, u32, Option<u32>, u32), ApiError> {
-    let page_len = if max_entries == 0 {
-        MAX_BARRIER_HELPER_PAGE_ENTRIES
-    } else {
-        max_entries
-    };
-    if page_len == 0 || page_len > MAX_BARRIER_HELPER_PAGE_ENTRIES {
-        return Err(ApiError::InvalidRequest(
-            "max_entries exceeds MAX_BARRIER_HELPER_PAGE_ENTRIES",
-        ));
-    }
-    let total_entries = u32::try_from(items.len())
-        .map_err(|_| ApiError::server_message("barrier helper total_entries overflow"))?;
-    if total_entries == 0 {
-        if page_offset != 0 {
-            return Err(ApiError::InvalidRequest("page_offset out of range"));
-        }
-        return Ok((Vec::new(), 0, None, 0));
-    }
-    if page_offset >= total_entries {
-        return Err(ApiError::InvalidRequest("page_offset out of range"));
-    }
-    let start = usize::try_from(page_offset)
-        .map_err(|_| ApiError::InvalidRequest("page_offset out of range"))?;
-    let page_len = usize::try_from(page_len)
-        .map_err(|_| ApiError::InvalidRequest("max_entries out of range"))?;
-    let end = items.len().min(start.saturating_add(page_len));
-    let next_page_offset =
-        if end < items.len() {
-            Some(u32::try_from(end).map_err(|_| {
-                ApiError::server_message("barrier helper next_page_offset overflow")
-            })?)
-        } else {
-            None
-        };
-    Ok((
-        items[start..end].to_vec(),
-        page_offset,
-        next_page_offset,
-        total_entries,
-    ))
 }
 
 fn configured_window_admin_token() -> Option<String> {
@@ -1263,16 +1107,6 @@ fn classify_concurrency_pressure(
     None
 }
 
-fn classify_refresh_pivot_conflict(message: &str) -> Option<&'static str> {
-    let reason = message.strip_prefix("invalid input: ").unwrap_or(message);
-    match reason {
-        "pivot parity missing for refresh" => Some("pivot_parity_missing"),
-        "pivot head missing" => Some("pivot_head_missing"),
-        "refresh payload diverges from stored parity" => Some("payload_diverges"),
-        _ => None,
-    }
-}
-
 fn record_concurrency_pressure(endpoint: &'static str, reason: &'static str) {
     metrics::counter!(
         "cityg_concurrency_pressure_total",
@@ -1315,47 +1149,149 @@ fn maybe_record_client_concurrency_error(endpoint: &'static str, err: &ClientErr
     }
 }
 
+fn map_room_ticket_preparation_error(
+    endpoint: &'static str,
+    err: RoomTicketPreparationError,
+) -> ApiError {
+    match err {
+        RoomTicketPreparationError::Client(err) => {
+            maybe_record_client_concurrency_error(endpoint, &err);
+            ApiError::from(err)
+        }
+        other => ApiError::server_message(other.to_string()),
+    }
+}
+
+fn map_room_barrier_envelope_error(
+    endpoint: &'static str,
+    err: RoomBarrierEnvelopeError,
+) -> ApiError {
+    match err {
+        RoomBarrierEnvelopeError::Client(err) => {
+            maybe_record_client_concurrency_error(endpoint, &err);
+            ApiError::from(err)
+        }
+        other => ApiError::server_message(other.to_string()),
+    }
+}
+
+fn map_barrier_pagination_error(err: BarrierPaginationError) -> ApiError {
+    match err {
+        BarrierPaginationError::MaxEntriesExceedsLimit => {
+            ApiError::InvalidRequest("max_entries exceeds MAX_BARRIER_HELPER_PAGE_ENTRIES")
+        }
+        BarrierPaginationError::PageOffsetOutOfRange => {
+            ApiError::InvalidRequest("page_offset out of range")
+        }
+        BarrierPaginationError::MaxEntriesOutOfRange => {
+            ApiError::InvalidRequest("max_entries out of range")
+        }
+        BarrierPaginationError::TotalEntriesOverflow
+        | BarrierPaginationError::NextPageOffsetOverflow => {
+            ApiError::server_message(err.to_string())
+        }
+    }
+}
+
+fn map_room_barrier_helper_preparation_error(
+    endpoint: &'static str,
+    err: RoomBarrierHelperPreparationError,
+) -> ApiError {
+    match err {
+        RoomBarrierHelperPreparationError::Client(err) => map_barrier_helper_error(err),
+        RoomBarrierHelperPreparationError::Envelope(err) => {
+            map_room_barrier_envelope_error(endpoint, err)
+        }
+        RoomBarrierHelperPreparationError::Pagination(err) => map_barrier_pagination_error(err),
+    }
+}
+
+fn map_full_verification_witness_preparation_error(
+    endpoint: &'static str,
+    err: RoomFullVerificationWitnessPreparationError,
+) -> ApiError {
+    match err {
+        RoomFullVerificationWitnessPreparationError::Client(err) => ApiError::from(err),
+        RoomFullVerificationWitnessPreparationError::HelperClient(err) => {
+            map_barrier_helper_error(err)
+        }
+        RoomFullVerificationWitnessPreparationError::Ticket(err) => {
+            map_room_ticket_preparation_error(endpoint, err)
+        }
+        RoomFullVerificationWitnessPreparationError::GroupNotFound => {
+            ApiError::InvalidRequest("group not found")
+        }
+        RoomFullVerificationWitnessPreparationError::CurrentHistoryCommitmentMismatch => {
+            ApiError::InvalidRequest(
+                "current_history_commitment mismatch with authenticated current state",
+            )
+        }
+        RoomFullVerificationWitnessPreparationError::JoinsPrevBarrierVersionMismatch => {
+            ApiError::InvalidRequest(
+                "joins_prev_barrier_version mismatch with authenticated current state",
+            )
+        }
+        RoomFullVerificationWitnessPreparationError::GlobalHistoryAttestationMismatch => {
+            ApiError::InvalidRequest(
+                "current_global_history_attestation mismatch with authenticated current state",
+            )
+        }
+        RoomFullVerificationWitnessPreparationError::DeploymentProfileManifestMismatch => {
+            ApiError::InvalidRequest(
+                "deployment_profile_manifest mismatch with authenticated current state",
+            )
+        }
+        RoomFullVerificationWitnessPreparationError::MergeTicketArtifactMismatch => {
+            ApiError::InvalidRequest(
+                "merge_ticket_artifact mismatch with authenticated current state",
+            )
+        }
+        RoomFullVerificationWitnessPreparationError::RevocationRootsHashMismatch => {
+            ApiError::InvalidRequest(
+                "revocation_roots_hash mismatch with authenticated current state",
+            )
+        }
+        RoomFullVerificationWitnessPreparationError::JoinHelperDataMismatch => {
+            ApiError::InvalidRequest("join helper data mismatch with authenticated current state")
+        }
+        RoomFullVerificationWitnessPreparationError::RevokedHelperDataMismatch => {
+            ApiError::InvalidRequest(
+                "revoked helper data mismatch with authenticated current state",
+            )
+        }
+        RoomFullVerificationWitnessPreparationError::CoverLeafIndexOutOfRange => {
+            ApiError::InvalidRequest("cover_leaf_index out of range")
+        }
+    }
+}
+
 /// Verifies an identity binding signature.
 /// The signature should be over CBOR([alias, pop_public_key])
+#[cfg(test)]
 fn verify_identity_binding(binding: &IdentityBinding) -> Result<(), ApiError> {
-    use pqcrypto_dilithium::dilithium5;
-    use pqcrypto_traits::sign::{
-        DetachedSignature as DetachedSignatureTrait, PublicKey as PublicKeyTrait,
-    };
-    use serde_bytes::ByteBuf;
-
-    // Validate inputs
-    if binding.pop_public_key.len() != dilithium5::public_key_bytes() {
-        return Err(ApiError::InvalidRequest("invalid pop_public_key length"));
-    }
-    if binding.signature.len() != dilithium5::signature_bytes() {
-        return Err(ApiError::InvalidRequest("invalid signature length"));
-    }
-    if binding.alias.is_empty() {
-        return Err(ApiError::InvalidRequest("alias cannot be empty"));
-    }
-
-    // Reconstruct the signed message: CBOR([alias, pop_public_key])
-    let message_data = (
-        ByteBuf::from(binding.alias.as_bytes().to_vec()),
-        ByteBuf::from(binding.pop_public_key.clone()),
-    );
-    let mut message = Vec::new();
-    ciborium::ser::into_writer(&message_data, &mut message)
-        .map_err(|_| ApiError::InvalidRequest("failed to encode message for verification"))?;
-
-    // Parse public key and signature using trait methods
-    let public_key = <dilithium5::PublicKey as PublicKeyTrait>::from_bytes(&binding.pop_public_key)
-        .map_err(|_| ApiError::InvalidRequest("invalid pop_public_key"))?;
-    let signature =
-        <dilithium5::DetachedSignature as DetachedSignatureTrait>::from_bytes(&binding.signature)
-            .map_err(|_| ApiError::InvalidRequest("invalid signature"))?;
-
-    // Verify signature
-    dilithium5::verify_detached_signature(&signature, &message, &public_key)
-        .map_err(|_| ApiError::InvalidRequest("signature verification failed"))?;
-
-    Ok(())
+    schema_verify_identity_binding(binding).map_err(|error| match error {
+        IdentityBindingValidationError::InvalidPublicKeyLength => {
+            ApiError::InvalidRequest("invalid pop_public_key length")
+        }
+        IdentityBindingValidationError::InvalidSignatureLength => {
+            ApiError::InvalidRequest("invalid signature length")
+        }
+        IdentityBindingValidationError::EmptyAlias => {
+            ApiError::InvalidRequest("alias cannot be empty")
+        }
+        IdentityBindingValidationError::EncodeMessage => {
+            ApiError::InvalidRequest("failed to encode message for verification")
+        }
+        IdentityBindingValidationError::InvalidPublicKey => {
+            ApiError::InvalidRequest("invalid pop_public_key")
+        }
+        IdentityBindingValidationError::InvalidSignature => {
+            ApiError::InvalidRequest("invalid signature")
+        }
+        IdentityBindingValidationError::VerificationFailed => {
+            ApiError::InvalidRequest("signature verification failed")
+        }
+    })
 }
 
 fn verify_room_admin_proof_payload(
@@ -1364,39 +1300,8 @@ fn verify_room_admin_proof_payload(
     room_id: &str,
     payload: &[u8],
 ) -> Result<Vec<u8>, ApiError> {
-    use pqcrypto_dilithium::dilithium5;
-    use pqcrypto_traits::sign::{
-        DetachedSignature as DetachedSignatureTrait, PublicKey as PublicKeyTrait,
-    };
-
-    if proof.pop_public_key.len() != dilithium5::public_key_bytes() {
-        return Err(ApiError::InvalidRequest(
-            "invalid room admin public key length",
-        ));
-    }
-    if proof.signature.len() != dilithium5::signature_bytes() {
-        return Err(ApiError::InvalidRequest(
-            "invalid room admin signature length",
-        ));
-    }
-    if room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    let message_data = (operation, room_id, ByteBuf::from(payload.to_vec()));
-    let mut message = Vec::new();
-    into_writer(&message_data, &mut message)
-        .map_err(|_| ApiError::InvalidRequest("failed to encode room admin proof message"))?;
-
-    let public_key = <dilithium5::PublicKey as PublicKeyTrait>::from_bytes(&proof.pop_public_key)
-        .map_err(|_| ApiError::InvalidRequest("invalid room admin public key"))?;
-    let signature =
-        <dilithium5::DetachedSignature as DetachedSignatureTrait>::from_bytes(&proof.signature)
-            .map_err(|_| ApiError::InvalidRequest("invalid room admin signature"))?;
-
-    dilithium5::verify_detached_signature(&signature, &message, &public_key)
-        .map_err(|_| ApiError::InvalidRequest("room admin proof verification failed"))?;
-
-    Ok(proof.pop_public_key.clone())
+    schema_verify_room_admin_proof_payload(proof, operation, room_id, payload)
+        .map_err(map_room_admin_proof_validation_error)
 }
 
 fn verify_room_admin_proof(
@@ -1405,148 +1310,20 @@ fn verify_room_admin_proof(
     room_id: &str,
     kbroad_public: &[u8],
 ) -> Result<Vec<u8>, ApiError> {
-    if kbroad_public.is_empty() {
-        return Err(ApiError::InvalidRequest("kbroad_public must be provided"));
-    }
-    verify_room_admin_proof_payload(proof, operation, room_id, kbroad_public)
-}
-
-#[derive(Serialize)]
-struct RoomAdminProofReplayKeyInput<'a> {
-    #[serde(with = "serde_bytes")]
-    pop_public_key: &'a [u8],
-    #[serde(with = "serde_bytes")]
-    signature: &'a [u8],
+    schema_verify_room_admin_proof(proof, operation, room_id, kbroad_public)
+        .map_err(map_room_admin_proof_validation_error)
 }
 
 fn room_admin_proof_replay_key(proof: &RoomAdminProof) -> Result<[u8; 32], ApiError> {
-    h_l(
-        "room-admin/replay-key",
-        &RoomAdminProofReplayKeyInput {
-            pop_public_key: &proof.pop_public_key,
-            signature: &proof.signature,
-        },
-    )
-    .map_err(|err| ApiError::server_message(err.to_string()))
-}
-
-fn compute_api_revocation_roots_hash(
-    revoked_since_root: &[u8; 32],
-    revoked_root: &[u8; 32],
-) -> Result<[u8; 32], ApiError> {
-    #[derive(Serialize)]
-    struct Preimage<'a>(
-        #[serde(with = "serde_bytes")] &'a [u8; 32],
-        #[serde(with = "serde_bytes")] &'a [u8; 32],
-    );
-    h_l("barrier/roots", &Preimage(revoked_since_root, revoked_root))
-        .map_err(|err| ApiError::server_message(err.to_string()))
+    schema_room_admin_proof_replay_key(proof).map_err(map_room_admin_proof_validation_error)
 }
 
 fn encode_room_admin_leaf_pair_payload(
     author_leaf_id: &[u8; 32],
     target_leaf_id: &[u8; 32],
 ) -> Result<Vec<u8>, ApiError> {
-    let payload = (
-        ByteBuf::from(author_leaf_id.to_vec()),
-        ByteBuf::from(target_leaf_id.to_vec()),
-    );
-    let mut payload_bytes = Vec::new();
-    into_writer(&payload, &mut payload_bytes)
-        .map_err(|_| ApiError::InvalidRequest("failed to encode room admin proof payload"))?;
-    Ok(payload_bytes)
-}
-
-fn encode_merge_ticket_response(
-    bundle: MergeTicketBundle,
-    history_authority_descriptor: Vec<u8>,
-    current_global_history_attestation: Vec<u8>,
-    history_authority_extension: String,
-    merge_ticket_artifact: Vec<u8>,
-    deployment_profile_manifest: Vec<u8>,
-) -> Result<Vec<u8>, ApiError> {
-    let MergeTicketBundle {
-        gid: _,
-        cat,
-        parent_root,
-        leaf_id: _,
-        pivot_we_epoch_id,
-        parities,
-        witness_cbor,
-        srx_cbor,
-        join_delta_root,
-        revoked_since_root,
-        revoked_root,
-        tswe_salt_hash,
-        pox_r_commit,
-        proof_mode,
-        vrf_id,
-        policy_version,
-        msphf_crs_id,
-        msphf_params_id,
-        fs_policy_version,
-        fs_epoch_base_ts,
-        kbroad_public,
-        kbroad_generation,
-        barrier_version,
-        cover_leaf_index,
-        kem_tree_hash_after,
-        current_history_view_id,
-        current_history_commitment,
-        fs_forward_leap_policy,
-        last_accepted_ec,
-        n_max,
-        max_barrier_update_bytes,
-    } = bundle;
-
-    let pivot_parity_cbor = parities
-        .iter()
-        .map(pivot_parity_to_cbor)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let response = MergeTicketResponse {
-        we_epoch_id: pivot_we_epoch_id.to_vec(),
-        pivot_parity_cbor,
-        witness_cbor,
-        proof_mode,
-        vrf_id,
-        policy_version,
-        kbroad_public,
-        cat: cat.to_vec(),
-        parent_root: parent_root.to_vec(),
-        join_delta_root: join_delta_root.to_vec(),
-        revoked_since_root: revoked_since_root.to_vec(),
-        revoked_root: revoked_root.to_vec(),
-        tswe_salt_hash: tswe_salt_hash.to_vec(),
-        pox_r_commit: pox_r_commit.to_vec(),
-        srx_cbor,
-        msphf_crs_id,
-        msphf_params_id,
-        fs_policy_version,
-        fs_epoch_base_ts,
-        kbroad_generation,
-        barrier_version,
-        profile_version: API_PROFILE_VERSION.to_string(),
-        cover_leaf_index,
-        kem_tree_hash_after: kem_tree_hash_after.to_vec(),
-        n_max,
-        max_barrier_update_bytes,
-        current_history_view_id: current_history_view_id.to_vec(),
-        current_history_commitment: Some(pb_history_commitment(current_history_commitment)),
-        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
-        last_accepted_ec,
-        history_authority_descriptor,
-        current_global_history_attestation,
-        history_authority_extension,
-        merge_ticket_artifact,
-        deployment_profile_manifest,
-    };
-
-    let mut response_bytes = Vec::new();
-    response
-        .encode(&mut response_bytes)
-        .map_err(|err| ApiError::server_message(format!("failed to encode merge ticket: {err}")))?;
-    Ok(response_bytes)
+    schema_encode_room_admin_leaf_pair_payload(author_leaf_id, target_leaf_id)
+        .map_err(map_room_admin_proof_validation_error)
 }
 
 async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
@@ -1574,114 +1351,57 @@ async fn apply_bundle(
         .gid()
         .try_into()
         .map_err(|_| ApiError::server_message("invalid gid length in bundle"))?;
-    let mut weid = [0u8; 32];
-    weid.copy_from_slice(&bundle.we_epoch_id);
     let started = Instant::now();
 
-    let (outcome, sanitized_bundle) = {
+    let prepared = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        let outcome = match guard.accept_epoch(bundle) {
-            Ok(outcome) => outcome,
+        match runtime_prepare_accepted_bundle(&mut guard, bundle) {
+            Ok(prepared) => prepared,
             Err(err) => {
                 drop(guard);
-                let mapped = map_accept_error(state, err, None, None).await;
+                let mapped = map_room_accept_error(state, err, None, None).await;
                 maybe_record_api_concurrency_error("accept_epoch", &mapped);
                 metrics::counter!("cityg_accept_epoch_total", "result" => "error").increment(1);
                 metrics::histogram!("cityg_accept_epoch_duration_seconds", "result" => "error")
                     .record(started.elapsed().as_secs_f64());
                 return Err(mapped);
             }
-        };
-        let sanitized_bundle = materialize_stored_bundle(&mut guard, bundle, &outcome)?;
-        (outcome, sanitized_bundle)
+        }
     };
 
-    persist_bundle(state, bundle, weid, sanitized_bundle, outcome.new_root).await?;
+    let accepted = match commit_accepted_bundle(state, bundle, prepared, true).await {
+        Ok(accepted) => accepted,
+        Err(mapped) => {
+            maybe_record_api_concurrency_error("accept_epoch", &mapped);
+            metrics::counter!("cityg_accept_epoch_total", "result" => "error").increment(1);
+            metrics::histogram!("cityg_accept_epoch_duration_seconds", "result" => "error")
+                .record(started.elapsed().as_secs_f64());
+            return Err(mapped);
+        }
+    };
+
     state.clear_merge_ticket_cache_for_gid(gid).await;
     metrics::counter!("cityg_accept_epoch_total", "result" => "ok").increment(1);
     metrics::histogram!("cityg_accept_epoch_duration_seconds", "result" => "ok")
         .record(started.elapsed().as_secs_f64());
-    Ok(accept_response_from(&outcome))
+    Ok(accept_response_from(&accepted.outcome))
 }
 
-fn materialize_stored_bundle(
-    server: &mut CityGServer,
-    bundle: &ClientEpochBundle,
-    outcome: &ServerOutcome,
-) -> Result<Vec<u8>, ApiError> {
-    let mut stored = bundle.clone();
-    if !stored.header_map.contains_key(&hdr::HDR_HP_BYTES)
-        && is_merge_bundle_header(&stored.header_map)
-    {
-        let parity = [outcome.new_root, outcome.parent_root]
-            .into_iter()
-            .find_map(|root| {
-                server
-                    .context_mut()
-                    .pivot_parities_for(bundle.gid(), &root)
-                    .into_iter()
-                    .find(|parity| {
-                        parity.we_epoch_id == outcome.we_epoch_id && !parity.hp_envelope.is_empty()
-                    })
-            })
-            .ok_or_else(|| {
-                ApiError::server_message(
-                    "accepted merge parity missing hp envelope for stored bundle",
-                )
-            })?;
-        let envelope: ciborium::value::Value =
-            ciborium::de::from_reader(parity.hp_envelope.as_ref()).map_err(|_| {
-                ApiError::server_message(
-                    "accepted merge parity hp envelope malformed for stored bundle",
-                )
-            })?;
-        stored.header_map.insert(hdr::HDR_HP_BYTES, envelope);
-    }
-    stored
-        .to_cbor()
-        .map_err(|err| ApiError::server_message(format!("failed to sanitize bundle: {err}")))
-}
-
-fn is_merge_bundle_header(header: &BTreeMap<u64, ciborium::value::Value>) -> bool {
-    header.contains_key(&hdr::HDR_BARRIER_UPDATE)
-        || header.contains_key(&hdr::HDR_BARRIER_UPDATE_REASON)
-        || [
-            hdr::HDR_MH_HEADS,
-            hdr::HDR_ROLLUP_PIVOT_WEID,
-            hdr::HDR_ROLLUP_PROVENANCE_COMMIT,
-            hdr::HDR_ROLLUP_EPOCH_REPLAY,
-            hdr::HDR_ROLLUP_VCK_COMMIT,
-            hdr::HDR_MERGE_DELEGATION_SIG,
-            hdr::HDR_KBROAD_REPLAY,
-            hdr::HDR_ROLLUP_FS_MODE,
-            hdr::HDR_FS_EVOLUTION_BOUNDARY,
-            hdr::HDR_FS_PURGE_TIMES,
-            hdr::HDR_FS_CHECKPOINT_EC,
-        ]
-        .into_iter()
-        .any(|key| header.contains_key(&key))
-}
-
+#[cfg(test)]
 async fn store_bundle_bytes(state: &ApiState, weid: [u8; 32], bytes: Vec<u8>) {
     let now_ms = current_timestamp_ms();
-    let expired = {
-        let mut guard = state.bundles.write().await;
-        let expired = if should_prune_messages(state.bundle_prune_due_ms.as_ref(), now_ms) {
-            prune_expired_bundles(&mut guard, now_ms, state.message_retention)
-        } else {
-            Vec::new()
-        };
-        guard.insert(
-            weid,
-            StoredBundle {
-                bytes,
-                stored_at_ms: now_ms,
-            },
-        );
-        expired
-    };
-    prune_bundle_indexes(state, &expired).await;
+    let mut room_state = state.room_state.write().await;
+    room_state.store_bundle(
+        weid,
+        StoredBundle {
+            bytes,
+            stored_at_ms: now_ms,
+        },
+        now_ms,
+        state.message_retention,
+        MESSAGE_PRUNE_INTERVAL_MS,
+    );
 }
 
 fn load_journal_entries(path: &Path) -> anyhow::Result<Vec<Vec<u8>>> {
@@ -1709,67 +1429,27 @@ fn load_journal_entries(path: &Path) -> anyhow::Result<Vec<Vec<u8>>> {
     Ok(entries)
 }
 
-fn materialize_replayed_bundle(
-    server: &mut CityGServer,
-    bundle: &ClientEpochBundle,
-    membership_root: [u8; 32],
-) -> Result<Vec<u8>, ApiError> {
-    let mut stored = bundle.clone();
-    if !stored.header_map.contains_key(&hdr::HDR_HP_BYTES)
-        && is_merge_bundle_header(&stored.header_map)
-    {
-        let parity = [membership_root, bundle.anchor.parent_root]
-            .into_iter()
-            .find_map(|root| {
-                server
-                    .context_mut()
-                    .pivot_parities_for(bundle.gid(), &root)
-                    .into_iter()
-                    .find(|parity| {
-                        parity.we_epoch_id == bundle.we_epoch_id && !parity.hp_envelope.is_empty()
-                    })
-            })
-            .ok_or_else(|| {
-                ApiError::server_message(
-                    "accepted merge parity missing hp envelope for replayed stored bundle",
-                )
-            })?;
-        let envelope: ciborium::value::Value =
-            ciborium::de::from_reader(parity.hp_envelope.as_ref()).map_err(|_| {
-                ApiError::server_message(
-                    "accepted merge parity hp envelope malformed for replayed stored bundle",
-                )
-            })?;
-        stored.header_map.insert(hdr::HDR_HP_BYTES, envelope);
-    }
-    stored.to_cbor().map_err(|err| {
-        ApiError::server_message(format!("failed to sanitize replayed bundle: {err}"))
-    })
-}
-
-async fn persist_bundle(
+async fn commit_accepted_bundle(
     state: &ApiState,
     bundle: &ClientEpochBundle,
-    weid: [u8; 32],
-    bytes: Vec<u8>,
-    membership_root: [u8; 32],
-) -> Result<(), ApiError> {
-    let gid: [u8; 32] = bundle
-        .gid()
-        .try_into()
-        .map_err(|_| ApiError::server_message("invalid gid length in bundle"))?;
-    state
-        .record_epoch_scope(
-            weid,
-            EpochScope {
-                gid,
-                membership_root,
-            },
+    prepared: PreparedAcceptedBundle,
+    broadcast: bool,
+) -> Result<AcceptedRoomEpoch, ApiError> {
+    let timestamp_ms = current_timestamp_ms();
+    let accepted = {
+        let mut room_state = state.room_state.write().await;
+        runtime_commit_prepared_accepted_bundle(
+            &mut room_state,
+            bundle,
+            prepared,
+            timestamp_ms,
+            state.message_retention,
+            MESSAGE_PRUNE_INTERVAL_MS,
         )
-        .await;
-    record_membership_updates(state, bundle, weid).await?;
-    store_bundle_bytes(state, weid, bytes).await;
-    Ok(())
+        .map_err(|err| map_bundle_index_error(err, "failed to compute membership delta"))?
+    };
+    apply_bundle_side_effects(state, &accepted.applied, broadcast).await;
+    Ok(accepted)
 }
 
 async fn rehydrate_bundle_indexes(
@@ -1779,32 +1459,24 @@ async fn rehydrate_bundle_indexes(
     bytes: Vec<u8>,
     membership_root: [u8; 32],
 ) -> Result<(), ApiError> {
-    let gid: [u8; 32] = bundle
-        .gid()
-        .try_into()
-        .map_err(|_| ApiError::server_message("invalid gid length in bundle"))?;
-    state
-        .record_epoch_scope(
-            weid,
-            EpochScope {
-                gid,
-                membership_root,
-            },
-        )
-        .await;
-    let delta = bundle.membership_delta().map_err(|err| {
-        ApiError::server_message(format!(
-            "failed to compute membership delta during replay: {err}"
-        ))
-    })?;
     let timestamp_ms = current_timestamp_ms();
-    for leaf in &delta.joined {
-        state.record_member_join(*leaf, weid, timestamp_ms).await;
-    }
-    if !delta.revoked.is_empty() {
-        state.record_member_revocations(&delta.revoked).await;
-    }
-    store_bundle_bytes(state, weid, bytes).await;
+    let applied = {
+        let mut room_state = state.room_state.write().await;
+        apply_bundle_indexes(
+            &mut room_state,
+            bundle,
+            weid,
+            bytes,
+            membership_root,
+            timestamp_ms,
+            state.message_retention,
+            MESSAGE_PRUNE_INTERVAL_MS,
+        )
+        .map_err(|err| {
+            map_bundle_index_error(err, "failed to compute membership delta during replay")
+        })?
+    };
+    apply_bundle_side_effects(state, &applied, false).await;
     Ok(())
 }
 
@@ -1842,7 +1514,8 @@ async fn rehydrate_persisted_bundle_indexes(
             let bytes = {
                 let lane = state.server_for_gid(&gid);
                 let mut guard = lane.write().await;
-                materialize_replayed_bundle(&mut guard, &bundle, membership_root)?
+                runtime_materialize_replayed_bundle(&mut guard, &bundle, membership_root)
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
             };
             rehydrate_bundle_indexes(state, &bundle, bundle.we_epoch_id, bytes, membership_root)
                 .await?;
@@ -1852,33 +1525,69 @@ async fn rehydrate_persisted_bundle_indexes(
     Ok(())
 }
 
-async fn record_membership_updates(
-    state: &ApiState,
-    bundle: &ClientEpochBundle,
-    weid: [u8; 32],
-) -> Result<(), ApiError> {
-    let delta = bundle.membership_delta().map_err(|err| {
-        ApiError::server_message(format!("failed to compute membership delta: {err}"))
-    })?;
-    let gid: [u8; 32] = bundle
-        .gid()
-        .try_into()
-        .map_err(|_| ApiError::server_message("invalid gid length in bundle"))?;
-
-    let timestamp_ms = current_timestamp_ms();
-    for leaf in &delta.joined {
-        state.record_member_join(*leaf, weid, timestamp_ms).await;
-        state.broadcast_membership(gid, *leaf, MembershipEventKind::Join, timestamp_ms);
-    }
-    if !delta.revoked.is_empty() {
-        state.record_member_revocations(&delta.revoked).await;
-        for leaf in &delta.revoked {
-            state.broadcast_membership(gid, *leaf, MembershipEventKind::Revoke, timestamp_ms);
+fn map_bundle_index_error(err: RoomServiceError, context: &str) -> ApiError {
+    match err {
+        RoomServiceError::InvalidGidLength => {
+            ApiError::server_message("invalid gid length in bundle")
+        }
+        RoomServiceError::MembershipDelta(message) => {
+            ApiError::server_message(format!("{context}: {message}"))
         }
     }
-    Ok(())
 }
 
+fn map_bundle_materialization_error(err: RoomBundleMaterializationError) -> ApiError {
+    ApiError::server_message(err.to_string())
+}
+
+async fn map_room_accept_error(
+    state: &ApiState,
+    err: RoomAcceptEpochError,
+    error_label: Option<&'static str>,
+    failed_index: Option<u32>,
+) -> ApiError {
+    match err {
+        RoomAcceptEpochError::Client(err) => {
+            map_accept_error(state, err, error_label, failed_index).await
+        }
+        RoomAcceptEpochError::Materialization(err) => map_bundle_materialization_error(err),
+        RoomAcceptEpochError::Service(err) => {
+            map_bundle_index_error(err, "failed to compute membership delta")
+        }
+    }
+}
+
+async fn apply_bundle_side_effects(
+    state: &ApiState,
+    applied: &AppliedBundleIndexes,
+    broadcast: bool,
+) {
+    if !applied.revoked.is_empty() {
+        let mut alias_guard = state.alias_registry.write().await;
+        alias_guard.remove_revoked_slice(applied.revoked.as_slice());
+    }
+    if !broadcast {
+        return;
+    }
+    for leaf in &applied.joined {
+        state.broadcast_membership(
+            applied.gid,
+            *leaf,
+            MembershipEventKind::Join,
+            applied.timestamp_ms,
+        );
+    }
+    for leaf in &applied.revoked {
+        state.broadcast_membership(
+            applied.gid,
+            *leaf,
+            MembershipEventKind::Revoke,
+            applied.timestamp_ms,
+        );
+    }
+}
+
+#[cfg(test)]
 async fn ensure_leaf_member_for_epoch(
     state: &ApiState,
     we_epoch_id: &[u8; 32],
@@ -1888,18 +1597,17 @@ async fn ensure_leaf_member_for_epoch(
         .epoch_scope_for_weid(we_epoch_id)
         .await
         .ok_or(ApiError::NotFound)?;
-    let members = {
-        let lane = state.server_for_gid(&scope.gid);
-        let guard = lane.read().await;
-        guard
-            .members_for_root(&scope.gid, &scope.membership_root)
-            .ok_or(ApiError::NotFound)?
-    };
-    if members.iter().any(|member| member == &leaf_id) {
-        Ok(scope)
-    } else {
-        Err(ApiError::Unauthorized("leaf is not a member for epoch"))
-    }
+    let lane = state.server_for_gid(&scope.gid);
+    let guard = lane.read().await;
+    let room_state = state.room_state.read().await;
+    runtime_ensure_leaf_member_for_epoch(&guard, &room_state, we_epoch_id, leaf_id).map_err(|err| {
+        match err {
+            RoomAuthorizationError::NotFound => ApiError::NotFound,
+            RoomAuthorizationError::Unauthorized => {
+                ApiError::Unauthorized("leaf is not a member for epoch")
+            }
+        }
+    })
 }
 
 async fn ensure_leaf_member_for_room(
@@ -1907,19 +1615,14 @@ async fn ensure_leaf_member_for_room(
     gid: &[u8; 32],
     leaf_id: [u8; 32],
 ) -> Result<(), ApiError> {
-    let members = {
-        let lane = state.server_for_gid(gid);
-        let guard = lane.read().await;
-        let latest_root = guard.latest_parent_root(gid).ok_or(ApiError::NotFound)?;
-        guard
-            .members_for_root(gid, &latest_root)
-            .ok_or(ApiError::NotFound)?
-    };
-    if members.iter().any(|member| member == &leaf_id) {
-        Ok(())
-    } else {
-        Err(ApiError::Unauthorized("leaf is not a member for room"))
-    }
+    let lane = state.server_for_gid(gid);
+    let guard = lane.read().await;
+    runtime_ensure_leaf_member_for_room(&guard, gid, leaf_id).map_err(|err| match err {
+        RoomAuthorizationError::NotFound => ApiError::NotFound,
+        RoomAuthorizationError::Unauthorized => {
+            ApiError::Unauthorized("leaf is not a member for room")
+        }
+    })
 }
 
 fn accept_response_from(outcome: &ServerOutcome) -> AcceptEpochResponse {
@@ -1966,11 +1669,6 @@ async fn map_accept_error(
     }
 }
 
-const MEMBERS_DEFAULT_PAGE_SIZE: u32 = 256;
-const MEMBERS_MAX_PAGE_SIZE: u32 = 2000;
-
-type AliasLookup = AHashMap<[u8; 32], (String, Vec<u8>)>;
-
 async fn members_for_request(
     state: &ApiState,
     gid: &[u8],
@@ -1978,53 +1676,37 @@ async fn members_for_request(
 ) -> Result<(Vec<[u8; 32]>, [u8; 32]), ApiError> {
     let lane = state.server_for_gid_bytes(gid);
     let guard = lane.read().await;
-
-    if parent_root.is_empty() {
-        let latest_root = guard.latest_parent_root(gid).ok_or(ApiError::NotFound)?;
-        let members = guard
-            .members_for_root(gid, &latest_root)
-            .unwrap_or_default();
-        Ok((members, latest_root))
+    let parent_root = if parent_root.is_empty() {
+        None
     } else {
-        if parent_root.len() != 32 {
-            return Err(ApiError::InvalidRequest("parent_root must be 32 bytes"));
-        }
-        let mut root = [0u8; 32];
-        root.copy_from_slice(parent_root);
-        let members = guard
-            .members_for_root(gid, &root)
-            .ok_or(ApiError::NotFound)?;
-        Ok((members, root))
-    }
+        Some(
+            parent_root
+                .try_into()
+                .map_err(|_| ApiError::InvalidRequest("parent_root must be 32 bytes"))?,
+        )
+    };
+
+    let gid: &[u8; 32] = gid.try_into().map_err(|_| ApiError::NotFound)?;
+    runtime_fetch_room_members(&guard, gid, parent_root).map_err(|err| match err {
+        RoomMemberListingError::NotFound => ApiError::NotFound,
+    })
 }
 
-async fn alias_lookup_by_leaf(state: &ApiState) -> AliasLookup {
+async fn alias_lookup_by_leaf(state: &ApiState) -> AliasLeafLookup {
     let registry = state.alias_registry.read().await;
-    let mut lookup = AliasLookup::with_capacity(registry.len());
-    for (alias, binding) in registry.iter() {
-        lookup.insert(
-            binding.leaf_id,
-            (alias.clone(), binding.pop_public_key.clone()),
-        );
-    }
-    lookup
+    registry.leaf_lookup()
 }
 
 fn member_response(
     leaf: &[u8; 32],
-    alias_lookup: &AliasLookup,
+    alias_lookup: &AliasLeafLookup,
     metadata: &AHashMap<[u8; 32], MemberMetadata>,
 ) -> Member {
-    let alias_info = alias_lookup.get(leaf);
-    let metadata_entry = metadata.get(leaf);
-
-    Member {
-        leaf_id: leaf.to_vec(),
-        alias: alias_info.map(|(alias, _)| alias.clone()),
-        pop_public_key: alias_info.map(|(_, pk)| pk.clone()),
-        join_date: metadata_entry.map(|entry| entry.join_timestamp_ms),
-        last_seen: metadata_entry.map(|entry| entry.last_seen_timestamp_ms),
-    }
+    schema_pb_member(
+        leaf,
+        alias_entry_for_member(alias_lookup, leaf),
+        metadata.get(leaf),
+    )
 }
 
 async fn members(
@@ -2051,31 +1733,20 @@ async fn members(
         .clamp(1, MEMBERS_MAX_PAGE_SIZE);
     let (members, root) = members_for_request(&state, &gid, &request.parent_root).await?;
 
-    let total_count = members.len() as u64;
-    let start = offset.min(total_count) as usize;
-    let end = (start as u64 + u64::from(limit)).min(total_count) as usize;
-    let next_offset = if end as u64 >= total_count {
-        total_count
-    } else {
-        end as u64
-    };
-
-    let slice = &members[start..end];
+    let page = paginate_room_members(members.as_slice(), offset, limit);
 
     let alias_lookup = alias_lookup_by_leaf(&state).await;
-    let metadata = state.member_metadata.read().await;
+    let room_state = state.room_state.read().await;
 
-    let reply = MembersResponse {
-        members: slice
+    Ok(protobuf_response_bytes(encode_members_response(
+        page.members
             .iter()
-            .map(|leaf| member_response(leaf, &alias_lookup, &metadata))
+            .map(|leaf| member_response(leaf, &alias_lookup, room_state.member_metadata()))
             .collect(),
-        root: root.to_vec(),
-        total_count,
-        next_offset,
-    };
-
-    Ok(protobuf_response(&reply))
+        root,
+        page.total_count,
+        page.next_offset,
+    )))
 }
 
 async fn search_members(
@@ -2098,7 +1769,6 @@ async fn search_members(
         message_scoped_rate_limit_key(&headers, &gid),
     )
     .await?;
-    let query = request.query.to_lowercase();
     let offset = request.offset.unwrap_or(0);
     let limit = request
         .limit
@@ -2107,48 +1777,21 @@ async fn search_members(
     let (members, root) = members_for_request(&state, &gid, &request.parent_root).await?;
 
     let alias_lookup = alias_lookup_by_leaf(&state).await;
-    let metadata = state.member_metadata.read().await;
+    let room_state = state.room_state.read().await;
 
-    // Filter members by query (alias or leaf_id hex)
-    let filtered_members: Vec<[u8; 32]> = members
-        .iter()
-        .filter(|leaf| {
-            // Check if leaf_id hex matches query
-            let hex = hex::encode(leaf);
-            if hex.contains(&query) {
-                return true;
-            }
+    let filtered_members =
+        filter_room_members_by_query(members.as_slice(), &alias_lookup, request.query.as_str());
+    let page = paginate_room_members(filtered_members.as_slice(), offset, limit);
 
-            // Check if alias matches query
-            alias_lookup
-                .get(*leaf)
-                .is_some_and(|(alias, _)| alias.to_lowercase().contains(&query))
-        })
-        .copied()
-        .collect();
-
-    let total_count = filtered_members.len() as u64;
-    let start = offset.min(total_count) as usize;
-    let end = (start as u64 + u64::from(limit)).min(total_count) as usize;
-    let next_offset = if end as u64 >= total_count {
-        total_count
-    } else {
-        end as u64
-    };
-
-    let slice = &filtered_members[start..end];
-
-    let reply = pb::SearchMembersResponse {
-        members: slice
+    Ok(protobuf_response_bytes(encode_search_members_response(
+        page.members
             .iter()
-            .map(|leaf| member_response(leaf, &alias_lookup, &metadata))
+            .map(|leaf| member_response(leaf, &alias_lookup, room_state.member_metadata()))
             .collect(),
-        root: root.to_vec(),
-        total_count,
-        next_offset,
-    };
-
-    Ok(protobuf_response(&reply))
+        root,
+        page.total_count,
+        page.next_offset,
+    )))
 }
 
 async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
@@ -2162,227 +1805,73 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
     let gid = parse_gid(&request.room_id)?;
 
     // Verify identity binding if provided; persist TOFU alias only after ticket succeeds.
-    let mut requested_leaf_id: Option<[u8; 32]> = None;
-    let confirmed_binding = if let Some(binding) = &request.identity_binding {
-        // Verify the signature
-        verify_identity_binding(binding)?;
+    let prepared_binding = schema_prepare_identity_binding(&gid, request.identity_binding.as_ref())
+        .map_err(|error| match error {
+            PreparedIdentityBindingError::Validation(validation) => match validation {
+                IdentityBindingValidationError::InvalidPublicKeyLength => {
+                    ApiError::InvalidRequest("invalid pop_public_key length")
+                }
+                IdentityBindingValidationError::InvalidSignatureLength => {
+                    ApiError::InvalidRequest("invalid signature length")
+                }
+                IdentityBindingValidationError::EmptyAlias => {
+                    ApiError::InvalidRequest("alias cannot be empty")
+                }
+                IdentityBindingValidationError::EncodeMessage => {
+                    ApiError::InvalidRequest("failed to encode message for verification")
+                }
+                IdentityBindingValidationError::InvalidPublicKey => {
+                    ApiError::InvalidRequest("invalid pop_public_key")
+                }
+                IdentityBindingValidationError::InvalidSignature => {
+                    ApiError::InvalidRequest("invalid signature")
+                }
+                IdentityBindingValidationError::VerificationFailed => {
+                    ApiError::InvalidRequest("signature verification failed")
+                }
+            },
+            PreparedIdentityBindingError::ComputeLeaf(message) => {
+                ApiError::server_message(format!("failed to compute leaf_id: {message}"))
+            }
+        })?;
+    let requested_leaf_id = prepared_binding
+        .as_ref()
+        .map(|binding| binding.requested_leaf_id);
+    let confirmed_binding = prepared_binding.map(|binding| binding.confirmed_binding);
 
-        // Bind the join ticket leaf to the provided PoP public key.
-        let computed_leaf = compute_leaf_id(
-            LeafIdMode::PerGroup,
-            &gid,
-            "ML-DSA-65",
-            &binding.pop_public_key,
-        )
-        .map_err(|e| ApiError::server_message(format!("failed to compute leaf_id: {}", e)))?;
-        requested_leaf_id = Some(computed_leaf);
-
-        Some(binding.clone())
-    } else {
-        None
-    };
-
-    let (
-        ticket,
-        policy_version,
-        fs_policy_version,
-        fs_epoch_base_ts,
-        bootstrap_public,
-        history_authority_descriptor,
-        current_global_history_attestation,
-        current_join_records_completeness_attestation,
-        current_revoked_leaf_indices_completeness_attestation,
-        history_authority_extension,
-    ) = {
+    let prepared = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        let bundle = match guard.build_join_ticket_with_leaf(&gid, requested_leaf_id) {
-            Ok(bundle) => bundle,
+        match runtime_prepare_join_ticket(
+            &mut guard,
+            &gid,
+            requested_leaf_id,
+            SystemTime::now(),
+            state.fs_epoch_period_seconds,
+            API_PROFILE_VERSION,
+        ) {
+            Ok(prepared) => prepared,
             Err(err) => {
-                maybe_record_client_concurrency_error("join_ticket", &err);
                 metrics::counter!("cityg_join_ticket_total", "result" => "error").increment(1);
-                return Err(ApiError::from(err));
+                return Err(map_room_ticket_preparation_error("join_ticket", err));
             }
-        };
-        let policy_version = guard.context().policy_version().to_string();
-        let fs_policy_version = guard
-            .context()
-            .fs_policy_version()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "7".to_string());
-        let fs_epoch_base_ts = match guard.context().fs_base_ts() {
-            Some(base_ts) => base_ts,
-            None => {
-                let base_ts =
-                    aligned_fs_epoch_base_ts(SystemTime::now(), state.fs_epoch_period_seconds);
-                guard.context_mut().set_fs_base_ts(Some(base_ts));
-                base_ts
-            }
-        };
-        let bootstrap_public = guard
-            .context()
-            .bootstrap_public_key()
-            .map(|key| key.to_vec())
-            .unwrap_or_default();
-        let history_authority_descriptor = guard
-            .history_authority_descriptor_bytes()
-            .map_err(ApiError::from)?;
-        let current_global_history_attestation = guard
-            .global_history_attestation_bytes(
-                &gid,
-                &bundle.current_history_commitment,
-                bundle.barrier_version,
-                &bundle.kem_tree_hash_after,
-            )
-            .map_err(ApiError::from)?;
-        let current_join_records_completeness_attestation = guard
-            .helper_completeness_attestation_joins_bytes(
-                &bundle.current_history_commitment,
-                bundle.barrier_version.saturating_sub(1),
-                0,
-                u32::try_from(bundle.current_join_records.len()).map_err(|_| {
-                    ApiError::server_message("join ticket current_join_records length overflow")
-                })?,
-                bundle.current_join_records.as_slice(),
-            )
-            .map_err(ApiError::from)?;
-        let committed_revocation_roots_hash = guard
-            .barrier_roots_hash(&gid)
-            .ok_or_else(|| ApiError::server_message("missing committed barrier roots hash"))?;
-        let current_revoked_leaf_indices_completeness_attestation = guard
-            .helper_completeness_attestation_revoked_bytes(
-                &bundle.current_history_commitment,
-                &committed_revocation_roots_hash,
-                0,
-                u32::try_from(bundle.current_revoked_leaf_indices.len()).map_err(|_| {
-                    ApiError::server_message(
-                        "join ticket current_revoked_leaf_indices length overflow",
-                    )
-                })?,
-                bundle.current_revoked_leaf_indices.as_slice(),
-            )
-            .map_err(ApiError::from)?;
-        (
-            bundle,
-            policy_version,
-            fs_policy_version,
-            fs_epoch_base_ts,
-            bootstrap_public,
-            history_authority_descriptor,
-            current_global_history_attestation,
-            current_join_records_completeness_attestation,
-            current_revoked_leaf_indices_completeness_attestation,
-            guard.history_authority_extension_id().to_string(),
-        )
+        }
     };
+    let ticket_leaf_id = prepared.bundle.leaf_id;
 
     if let Some(binding) = confirmed_binding.as_ref() {
         state
             .register_alias(
                 &binding.alias,
-                ticket.leaf_id,
+                ticket_leaf_id,
                 binding.pop_public_key.clone(),
             )
             .await?;
     }
-
-    let provisioning_artifact = {
-        let lane = state.server_for_gid(&ticket.gid);
-        let guard = lane.read().await;
-        guard
-            .join_provisioning_artifact_bytes(
-                &ticket,
-                API_PROFILE_VERSION,
-                cityg_server::JoinProvisioningAuthorityArtifacts {
-                    history_authority_extension: history_authority_extension.as_str(),
-                    history_authority_descriptor: history_authority_descriptor.as_slice(),
-                    current_global_history_attestation: current_global_history_attestation
-                        .as_slice(),
-                    current_join_records_completeness_attestation:
-                        current_join_records_completeness_attestation.as_slice(),
-                    current_revoked_leaf_indices_completeness_attestation:
-                        current_revoked_leaf_indices_completeness_attestation.as_slice(),
-                },
-            )
-            .map_err(ApiError::from)?
-    };
-    let deployment_profile_manifest = {
-        let lane = state.server_for_gid(&ticket.gid);
-        let guard = lane.read().await;
-        guard
-            .deployment_profile_manifest_bytes(
-                &ticket.gid,
-                API_PROFILE_VERSION,
-                history_authority_extension.as_str(),
-                ticket.n_max,
-                ticket.max_barrier_update_bytes,
-                ticket.fs_forward_leap_policy,
-            )
-            .map_err(ApiError::from)?
-    };
-
-    let response = JoinTicketResponse {
-        gid: ticket.gid.to_vec(),
-        cat: ticket.cat.to_vec(),
-        parent_root: ticket.parent_root.to_vec(),
-        revoked_root: ticket.revoked_root.to_vec(),
-        revoked_since_root: ticket.revoked_since_root.to_vec(),
-        tswe_salt_hash: ticket.tswe_salt_hash.to_vec(),
-        join_delta_root: ticket.join_delta_root.to_vec(),
-        leaf_id: ticket.leaf_id.to_vec(),
-        pox_r_commit: ticket.pox_r_commit.to_vec(),
-        witness_cbor: ticket.witness_cbor,
-        srx_cbor: ticket.srx_cbor,
-        msphf_crs_id: RLWE_CRS_ID_DEFAULT.to_string(),
-        msphf_params_id: RLWE_PARAMS_ID_MOCK.to_string(),
-        proof_mode: DEFAULT_PROOF_MODE.to_string(),
-        vrf_id: DEFAULT_VRF_ID.to_string(),
-        policy_version,
-        fs_policy_version,
-        fs_epoch_base_ts,
-        kbroad_public: ticket.kbroad_public,
-        bootstrap_public,
-        confirmed_binding: confirmed_binding.clone(),
-        kbroad_generation: ticket.kbroad_generation,
-        barrier_version: ticket.barrier_version,
-        profile_version: API_PROFILE_VERSION.to_string(),
-        cover_leaf_index: ticket.cover_leaf_index,
-        kem_tree_hash_after: ticket.kem_tree_hash_after.to_vec(),
-        n_max: ticket.n_max,
-        max_barrier_update_bytes: ticket.max_barrier_update_bytes,
-        current_history_view_id: ticket.current_history_view_id.to_vec(),
-        current_history_commitment: Some(pb_history_commitment(ticket.current_history_commitment)),
-        current_barrier_update: ticket.current_barrier_update,
-        current_predecessor_kem_tree_hash_after: ticket
-            .current_predecessor_kem_tree_hash_after
-            .to_vec(),
-        current_join_records: ticket
-            .current_join_records
-            .into_iter()
-            .map(|record| BarrierJoinLeafRecord {
-                device_pk: record.device_pk,
-                leaf_index: record.leaf_index,
-                ek_leaf: record.ek_leaf,
-            })
-            .collect(),
-        current_revoked_leaf_indices: ticket.current_revoked_leaf_indices,
-        join_finalize_auth_token: ticket.join_finalize_auth_token.to_vec(),
-        provisioning_nonce: ticket.provisioning_nonce.to_vec(),
-        provisioning_issued_at_ms: ticket.provisioning_issued_at_ms,
-        provisioning_expires_at_ms: ticket.provisioning_expires_at_ms,
-        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(ticket.fs_forward_leap_policy)),
-        last_accepted_ec: ticket.last_accepted_ec,
-        history_authority_descriptor,
-        current_global_history_attestation,
-        current_join_records_completeness_attestation,
-        current_revoked_leaf_indices_completeness_attestation,
-        history_authority_extension,
-        provisioning_artifact,
-        deployment_profile_manifest,
-    };
-
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);
-    Ok(protobuf_response(&response))
+    Ok(protobuf_response_bytes(
+        encode_prepared_join_ticket_response(prepared, confirmed_binding),
+    ))
 }
 
 async fn bootstrap_room(
@@ -2486,13 +1975,11 @@ async fn grant_room_admin(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    use pqcrypto_dilithium::dilithium5;
-
     let request = RoomAdminMutationRequest::decode(body)?;
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
     }
-    if request.target_pop_public_key.len() != dilithium5::public_key_bytes() {
+    if request.target_pop_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
         return Err(ApiError::InvalidRequest(
             "target_pop_public_key has unexpected length",
         ));
@@ -2541,13 +2028,11 @@ async fn revoke_room_admin(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    use pqcrypto_dilithium::dilithium5;
-
     let request = RoomAdminMutationRequest::decode(body)?;
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
     }
-    if request.target_pop_public_key.len() != dilithium5::public_key_bytes() {
+    if request.target_pop_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
         return Err(ApiError::InvalidRequest(
             "target_pop_public_key has unexpected length",
         ));
@@ -2671,14 +2156,7 @@ async fn expel_member_ticket(
     )
     .await?;
 
-    let (
-        bundle,
-        history_authority_descriptor,
-        current_global_history_attestation,
-        history_authority_extension,
-        merge_ticket_artifact,
-        deployment_profile_manifest,
-    ) = {
+    let prepared = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         let bundle = guard
@@ -2693,60 +2171,13 @@ async fn expel_member_ticket(
                 maybe_record_client_concurrency_error("expel_member_ticket", &err);
                 ApiError::from(err)
             })?;
-        let history_authority_descriptor = guard
-            .history_authority_descriptor_bytes()
-            .map_err(ApiError::from)?;
-        let current_global_history_attestation = guard
-            .global_history_attestation_bytes(
-                &gid,
-                &bundle.current_history_commitment,
-                bundle.barrier_version,
-                &bundle.kem_tree_hash_after,
-            )
-            .map_err(ApiError::from)?;
-        let pivot_parity_cbor = bundle
-            .parities
-            .iter()
-            .map(pivot_parity_to_cbor)
-            .collect::<Result<Vec<_>, _>>()?;
-        let merge_ticket_artifact = guard
-            .merge_ticket_artifact_bytes(
-                &bundle,
-                API_PROFILE_VERSION,
-                guard.history_authority_extension_id(),
-                history_authority_descriptor.as_slice(),
-                current_global_history_attestation.as_slice(),
-                pivot_parity_cbor.as_slice(),
-            )
-            .map_err(ApiError::from)?;
-        let deployment_profile_manifest = guard
-            .deployment_profile_manifest_bytes(
-                &gid,
-                API_PROFILE_VERSION,
-                guard.history_authority_extension_id(),
-                bundle.n_max,
-                bundle.max_barrier_update_bytes,
-                bundle.fs_forward_leap_policy,
-            )
-            .map_err(ApiError::from)?;
-        (
-            bundle,
-            history_authority_descriptor,
-            current_global_history_attestation,
-            guard.history_authority_extension_id().to_string(),
-            merge_ticket_artifact,
-            deployment_profile_manifest,
-        )
+        runtime_prepare_merge_ticket_from_bundle(&guard, &gid, bundle, API_PROFILE_VERSION)
+            .map_err(|err| map_room_ticket_preparation_error("expel_member_ticket", err))?
     };
 
-    Ok(protobuf_response_bytes(encode_merge_ticket_response(
-        bundle,
-        history_authority_descriptor,
-        current_global_history_attestation,
-        history_authority_extension,
-        merge_ticket_artifact,
-        deployment_profile_manifest,
-    )?))
+    Ok(protobuf_response_bytes(
+        encode_prepared_merge_ticket_response(prepared),
+    ))
 }
 
 async fn merge_ticket(
@@ -2799,86 +2230,33 @@ async fn merge_ticket(
         return Ok(protobuf_response_bytes(cached));
     }
 
-    let (
-        bundle,
-        history_authority_descriptor,
-        current_global_history_attestation,
-        history_authority_extension,
-        merge_ticket_artifact,
-        deployment_profile_manifest,
-    ) = {
+    let prepared = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        let bundle = match intent {
-            MergeTicketIntent::Leave => {
-                guard.build_merge_ticket(&gid, &leaf_id).map_err(|err| {
-                    maybe_record_client_concurrency_error("merge_ticket", &err);
-                    metrics::counter!("cityg_merge_ticket_total", "result" => "error").increment(1);
-                    ApiError::from(err)
-                })?
-            }
-            MergeTicketIntent::Refresh => guard
-                .build_merge_ticket_for_refresh(&gid, &leaf_id)
-                .map_err(|err| {
-                    maybe_record_client_concurrency_error("merge_ticket_refresh", &err);
-                    metrics::counter!("cityg_merge_ticket_total", "result" => "error").increment(1);
-                    ApiError::from(err)
-                })?,
+        let server_intent = match intent {
+            MergeTicketIntent::Leave => ServerMergeTicketIntent::Leave,
+            MergeTicketIntent::Refresh => ServerMergeTicketIntent::Refresh,
         };
-        let history_authority_descriptor = guard
-            .history_authority_descriptor_bytes()
-            .map_err(ApiError::from)?;
-        let current_global_history_attestation = guard
-            .global_history_attestation_bytes(
-                &gid,
-                &bundle.current_history_commitment,
-                bundle.barrier_version,
-                &bundle.kem_tree_hash_after,
-            )
-            .map_err(ApiError::from)?;
-        let pivot_parity_cbor = bundle
-            .parities
-            .iter()
-            .map(pivot_parity_to_cbor)
-            .collect::<Result<Vec<_>, _>>()?;
-        let merge_ticket_artifact = guard
-            .merge_ticket_artifact_bytes(
-                &bundle,
-                API_PROFILE_VERSION,
-                guard.history_authority_extension_id(),
-                history_authority_descriptor.as_slice(),
-                current_global_history_attestation.as_slice(),
-                pivot_parity_cbor.as_slice(),
-            )
-            .map_err(ApiError::from)?;
-        let deployment_profile_manifest = guard
-            .deployment_profile_manifest_bytes(
-                &gid,
-                API_PROFILE_VERSION,
-                guard.history_authority_extension_id(),
-                bundle.n_max,
-                bundle.max_barrier_update_bytes,
-                bundle.fs_forward_leap_policy,
-            )
-            .map_err(ApiError::from)?;
-        (
-            bundle,
-            history_authority_descriptor,
-            current_global_history_attestation,
-            guard.history_authority_extension_id().to_string(),
-            merge_ticket_artifact,
-            deployment_profile_manifest,
-        )
+        match runtime_prepare_merge_ticket(
+            &mut guard,
+            &gid,
+            &leaf_id,
+            server_intent,
+            API_PROFILE_VERSION,
+        ) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                metrics::counter!("cityg_merge_ticket_total", "result" => "error").increment(1);
+                let endpoint = match intent {
+                    MergeTicketIntent::Leave => "merge_ticket",
+                    MergeTicketIntent::Refresh => "merge_ticket_refresh",
+                };
+                return Err(map_room_ticket_preparation_error(endpoint, err));
+            }
+        }
     };
 
-    let response_bytes = encode_merge_ticket_response(
-        bundle,
-        history_authority_descriptor,
-        current_global_history_attestation,
-        history_authority_extension,
-        merge_ticket_artifact,
-        deployment_profile_manifest,
-    )?;
+    let response_bytes = encode_prepared_merge_ticket_response(prepared);
     if intent == MergeTicketIntent::Leave {
         state
             .coalesced_merge_ticket_store(cache_key, response_bytes.clone(), now_ms)
@@ -2898,41 +2276,6 @@ async fn barrier_issue_full_verification_witness(
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
     }
-    if request.author_leaf_id.len() != 32 {
-        return Err(ApiError::InvalidRequest("author_leaf_id must be 32 bytes"));
-    }
-    if request.current_global_history_attestation.is_empty() {
-        return Err(ApiError::InvalidRequest(
-            "current_global_history_attestation must be provided",
-        ));
-    }
-    if request.deployment_profile_manifest.is_empty() {
-        return Err(ApiError::InvalidRequest(
-            "deployment_profile_manifest must be provided",
-        ));
-    }
-    if request.merge_ticket_artifact.is_empty() {
-        return Err(ApiError::InvalidRequest(
-            "merge_ticket_artifact must be provided",
-        ));
-    }
-    if request.barrier_update_reason != 0 && request.barrier_update_reason != 1 {
-        return Err(ApiError::InvalidRequest(
-            "barrier_update_reason must be 0 or 1 for full verification witness",
-        ));
-    }
-    if request.revocation_roots_hash.len() != 32 {
-        return Err(ApiError::InvalidRequest(
-            "revocation_roots_hash must be 32 bytes",
-        ));
-    }
-    if !request.revocation_target_leaf_id.is_empty()
-        && request.revocation_target_leaf_id.len() != 32
-    {
-        return Err(ApiError::InvalidRequest(
-            "revocation_target_leaf_id must be 32 bytes when provided",
-        ));
-    }
     let gid = parse_gid(&request.room_id)?;
     enforce_expensive_rate_limit(
         &state,
@@ -2940,181 +2283,38 @@ async fn barrier_issue_full_verification_witness(
         message_scoped_rate_limit_key(&headers, &gid),
     )
     .await?;
-    let current_history_commitment =
-        parse_pb_history_commitment(request.current_history_commitment)?;
-    let mut author_leaf_id = [0u8; 32];
-    author_leaf_id.copy_from_slice(&request.author_leaf_id);
-    let mut revocation_roots_hash = [0u8; 32];
-    revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
-    let revocation_target_leaf_id = if request.revocation_target_leaf_id.is_empty() {
-        None
-    } else {
-        let mut leaf_id = [0u8; 32];
-        leaf_id.copy_from_slice(&request.revocation_target_leaf_id);
-        Some(leaf_id)
-    };
-
+    let witness_request =
+        schema_decode_full_verification_witness_request(request).map_err(|error| match error {
+            FullVerificationWitnessRequestDecodeError::InvalidAuthorLeafId
+            | FullVerificationWitnessRequestDecodeError::MissingCurrentGlobalHistoryAttestation
+            | FullVerificationWitnessRequestDecodeError::MissingDeploymentProfileManifest
+            | FullVerificationWitnessRequestDecodeError::MissingMergeTicketArtifact
+            | FullVerificationWitnessRequestDecodeError::InvalidBarrierUpdateReason
+            | FullVerificationWitnessRequestDecodeError::InvalidRevocationRootsHash
+            | FullVerificationWitnessRequestDecodeError::InvalidRevocationTargetLeafId
+            | FullVerificationWitnessRequestDecodeError::HistoryCommitment(_) => {
+                ApiError::InvalidRequest(error.api_message())
+            }
+        })?;
     let witness = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        let bundle = if request.barrier_update_reason == 0 {
-            match revocation_target_leaf_id {
-                Some(target_leaf_id) if target_leaf_id != author_leaf_id => guard
-                    .build_merge_ticket_for_targeted_revocation(
-                        &gid,
-                        &author_leaf_id,
-                        &target_leaf_id,
-                    ),
-                _ => guard.build_merge_ticket(&gid, &author_leaf_id),
-            }
-        } else {
-            guard.build_merge_ticket_for_refresh(&gid, &author_leaf_id)
-        }
-        .map_err(ApiError::from)?;
-        let committed_revocation_roots_hash = guard
-            .barrier_roots_hash(&gid)
-            .ok_or(ApiError::InvalidRequest("group not found"))?;
-        if bundle.current_history_commitment != current_history_commitment {
-            return Err(ApiError::InvalidRequest(
-                "current_history_commitment mismatch with authenticated current state",
-            ));
-        }
-        if request.joins_prev_barrier_version != bundle.barrier_version {
-            return Err(ApiError::InvalidRequest(
-                "joins_prev_barrier_version mismatch with authenticated current state",
-            ));
-        }
-        let expected_attestation = guard
-            .global_history_attestation_bytes(
-                &gid,
-                &bundle.current_history_commitment,
-                bundle.barrier_version,
-                &bundle.kem_tree_hash_after,
+        runtime_prepare_full_verification_witness(
+            &mut guard,
+            &gid,
+            witness_request,
+            API_PROFILE_VERSION,
+        )
+        .map_err(|err| {
+            map_full_verification_witness_preparation_error(
+                "barrier_issue_full_verification_witness",
+                err,
             )
-            .map_err(ApiError::from)?;
-        if request.current_global_history_attestation.as_slice() != expected_attestation.as_slice()
-        {
-            return Err(ApiError::InvalidRequest(
-                "current_global_history_attestation mismatch with authenticated current state",
-            ));
-        }
-        let history_authority_descriptor = guard
-            .history_authority_descriptor_bytes()
-            .map_err(ApiError::from)?;
-        let expected_manifest = guard
-            .deployment_profile_manifest_bytes(
-                &gid,
-                API_PROFILE_VERSION,
-                guard.history_authority_extension_id(),
-                bundle.n_max,
-                bundle.max_barrier_update_bytes,
-                bundle.fs_forward_leap_policy,
-            )
-            .map_err(ApiError::from)?;
-        if request.deployment_profile_manifest.as_slice() != expected_manifest.as_slice() {
-            return Err(ApiError::InvalidRequest(
-                "deployment_profile_manifest mismatch with authenticated current state",
-            ));
-        }
-        let pivot_parity_cbor = bundle
-            .parities
-            .iter()
-            .map(pivot_parity_to_cbor)
-            .collect::<Result<Vec<_>, _>>()?;
-        let expected_merge_ticket_artifact = guard
-            .merge_ticket_artifact_bytes(
-                &bundle,
-                API_PROFILE_VERSION,
-                guard.history_authority_extension_id(),
-                history_authority_descriptor.as_slice(),
-                expected_attestation.as_slice(),
-                pivot_parity_cbor.as_slice(),
-            )
-            .map_err(ApiError::from)?;
-        if request.merge_ticket_artifact.as_slice() != expected_merge_ticket_artifact.as_slice() {
-            return Err(ApiError::InvalidRequest(
-                "merge_ticket_artifact mismatch with authenticated current state",
-            ));
-        }
-        let expected_revocation_roots_hash = if request.barrier_update_reason == 0 {
-            compute_api_revocation_roots_hash(&bundle.revoked_since_root, &bundle.revoked_root)?
-        } else {
-            committed_revocation_roots_hash
-        };
-        if revocation_roots_hash != expected_revocation_roots_hash {
-            return Err(ApiError::InvalidRequest(
-                "revocation_roots_hash mismatch with authenticated current state",
-            ));
-        }
-        let resolved_joins = guard
-            .resolve_joins_since(&gid, request.joins_prev_barrier_version)
-            .map_err(map_barrier_helper_error)?;
-        let requested_join_records: Vec<ServerBarrierJoinLeafRecord> = request
-            .join_records
-            .iter()
-            .map(|record| ServerBarrierJoinLeafRecord {
-                device_pk: record.device_pk.clone(),
-                leaf_index: record.leaf_index,
-                ek_leaf: record.ek_leaf.clone(),
-            })
-            .collect();
-        if resolved_joins.history_commitment != bundle.current_history_commitment
-            || requested_join_records != resolved_joins.records
-        {
-            return Err(ApiError::InvalidRequest(
-                "join helper data mismatch with authenticated current state",
-            ));
-        }
-        let expected_revoked_leaf_indices = if request.barrier_update_reason == 0 {
-            let mut leaf_indices = guard
-                .resolve_revoked_leaf_indices(&gid, &committed_revocation_roots_hash)
-                .map_err(map_barrier_helper_error)?
-                .leaf_indices;
-            let cover_leaf_index = u32::try_from(bundle.cover_leaf_index)
-                .map_err(|_| ApiError::InvalidRequest("cover_leaf_index out of range"))?;
-            if let Err(insert_at) = leaf_indices.binary_search(&cover_leaf_index) {
-                leaf_indices.insert(insert_at, cover_leaf_index);
-            }
-            leaf_indices
-        } else {
-            let resolved_revoked = guard
-                .resolve_revoked_leaf_indices(&gid, &revocation_roots_hash)
-                .map_err(map_barrier_helper_error)?;
-            if resolved_revoked.history_commitment != bundle.current_history_commitment {
-                return Err(ApiError::InvalidRequest(
-                    "revoked helper data mismatch with authenticated current state",
-                ));
-            }
-            resolved_revoked.leaf_indices
-        };
-        if request.revoked_leaf_indices != expected_revoked_leaf_indices {
-            return Err(ApiError::InvalidRequest(
-                "revoked helper data mismatch with authenticated current state",
-            ));
-        }
-        guard
-            .full_verification_witness_bytes(
-                &gid,
-                &bundle.current_history_commitment,
-                bundle.barrier_version,
-                &bundle.kem_tree_hash_after,
-                &author_leaf_id,
-                request.barrier_update_reason,
-                bundle.cover_leaf_index,
-                request.barrier_update.as_slice(),
-                request.joins_prev_barrier_version,
-                requested_join_records.as_slice(),
-                &revocation_roots_hash,
-                expected_revoked_leaf_indices.as_slice(),
-                request.deployment_profile_manifest.as_slice(),
-            )
-            .map_err(ApiError::from)?
+        })?
     };
 
-    Ok(protobuf_response(
-        &BarrierIssueFullVerificationWitnessResponse {
-            full_verification_witness: witness,
-        },
+    Ok(protobuf_response_bytes(
+        encode_full_verification_witness_response(witness),
     ))
 }
 
@@ -3128,11 +2328,6 @@ async fn barrier_resolve_revoked_leaves(
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
     }
-    if request.revocation_roots_hash.len() != 32 {
-        return Err(ApiError::InvalidRequest(
-            "revocation_roots_hash must be 32 bytes",
-        ));
-    }
     let gid = parse_gid(&request.room_id)?;
     enforce_expensive_rate_limit(
         &state,
@@ -3140,111 +2335,38 @@ async fn barrier_resolve_revoked_leaves(
         message_scoped_rate_limit_key(&headers, &gid),
     )
     .await?;
-    let mut revocation_roots_hash = [0u8; 32];
-    revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
+    let request = schema_decode_barrier_resolve_revoked_leaves_request(request).map_err(
+        |error| match error {
+            BarrierHelperRequestDecodeError::InvalidRevocationRootsHash => {
+                ApiError::InvalidRequest(error.api_message())
+            }
+            BarrierHelperRequestDecodeError::InvalidKemTreeHashAfter
+            | BarrierHelperRequestDecodeError::InvalidPendingBarrierUpdateDigest
+            | BarrierHelperRequestDecodeError::InvalidPendingWeEpochId => {
+                unreachable!("resolve_revoked_leaves decoder returned unrelated error")
+            }
+        },
+    )?;
 
-    let (
-        resolved,
-        history_authority_descriptor,
-        global_history_attestation,
-        helper_completeness_attestation,
-        history_authority_extension,
-        n_max,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy,
-        deployment_profile_manifest,
-    ) = {
+    let prepared = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        let resolved = guard
-            .resolve_revoked_leaf_indices(&gid, &revocation_roots_hash)
-            .map_err(map_barrier_helper_error)?;
-        let (leaf_indices, page_offset, _next_page_offset, total_entries) =
-            paginate_barrier_helper_slice(
-                resolved.leaf_indices.as_slice(),
-                request.page_offset,
-                request.max_entries,
-            )?;
-        let history_authority_descriptor = guard
-            .history_authority_descriptor_bytes()
-            .map_err(ApiError::from)?;
-        let barrier_version = guard
-            .barrier_version(&gid)
-            .ok_or_else(|| ApiError::server_message("group barrier_version missing"))?;
-        let kem_tree_hash_after = guard
-            .barrier_kem_tree_hash_after(&gid)
-            .ok_or_else(|| ApiError::server_message("group barrier tree hash missing"))?;
-        let global_history_attestation = guard
-            .global_history_attestation_bytes(
-                &gid,
-                &resolved.history_commitment,
-                barrier_version,
-                &kem_tree_hash_after,
-            )
-            .map_err(ApiError::from)?;
-        let helper_completeness_attestation = guard
-            .helper_completeness_attestation_revoked_bytes(
-                &resolved.history_commitment,
-                &revocation_roots_hash,
-                page_offset,
-                total_entries,
-                leaf_indices.as_slice(),
-            )
-            .map_err(ApiError::from)?;
-        let n_max = guard
-            .barrier_n_max(&gid)
-            .ok_or_else(|| ApiError::server_message("group n_max missing"))?;
-        let max_barrier_update_bytes = guard
-            .barrier_max_barrier_update_bytes(&gid)
-            .ok_or_else(|| ApiError::server_message("group max_barrier_update_bytes missing"))?;
-        let fs_forward_leap_policy = guard.fs_forward_leap_policy();
-        let deployment_profile_manifest = guard
-            .deployment_profile_manifest_bytes(
-                &gid,
-                API_PROFILE_VERSION,
-                guard.history_authority_extension_id(),
-                n_max,
-                max_barrier_update_bytes,
-                fs_forward_leap_policy,
-            )
-            .map_err(ApiError::from)?;
-        (
-            resolved,
-            history_authority_descriptor,
-            global_history_attestation,
-            helper_completeness_attestation,
-            guard.history_authority_extension_id().to_string(),
-            n_max,
-            max_barrier_update_bytes,
-            fs_forward_leap_policy,
-            deployment_profile_manifest,
-        )
-    };
-    let (leaf_indices, page_offset, next_page_offset, total_entries) =
-        paginate_barrier_helper_slice(
-            resolved.leaf_indices.as_slice(),
+        runtime_prepare_resolved_revoked_leaves(
+            &mut guard,
+            &gid,
+            &request.revocation_roots_hash,
             request.page_offset,
             request.max_entries,
-        )?;
-
-    let response = BarrierResolveRevokedLeavesResponse {
-        leaf_indices,
-        history_view_id: resolved.history_view_id.to_vec(),
-        history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
-        page_offset,
-        next_page_offset,
-        total_entries,
-        helper_completeness_attestation,
-        history_authority_descriptor,
-        global_history_attestation,
-        history_authority_extension,
-        profile_version: API_PROFILE_VERSION.to_string(),
-        n_max,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
-        deployment_profile_manifest,
+            MAX_BARRIER_HELPER_PAGE_ENTRIES,
+            API_PROFILE_VERSION,
+        )
+        .map_err(|err| {
+            map_room_barrier_helper_preparation_error("barrier_resolve_revoked_leaves", err)
+        })?
     };
-    Ok(protobuf_response(&response))
+    Ok(protobuf_response_bytes(
+        encode_prepared_resolved_revoked_leaves_response(prepared),
+    ))
 }
 
 async fn barrier_resolve_joins_since(
@@ -3265,121 +2387,25 @@ async fn barrier_resolve_joins_since(
     )
     .await?;
 
-    let (
-        resolved,
-        history_authority_descriptor,
-        global_history_attestation,
-        helper_completeness_attestation,
-        history_authority_extension,
-        n_max,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy,
-        deployment_profile_manifest,
-    ) = {
+    let prepared = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        let resolved = guard
-            .resolve_joins_since(&gid, request.prev_barrier_version)
-            .map_err(map_barrier_helper_error)?;
-        let (records_page, page_offset, _next_page_offset, total_entries) =
-            paginate_barrier_helper_slice(
-                resolved.records.as_slice(),
-                request.page_offset,
-                request.max_entries,
-            )?;
-        let history_authority_descriptor = guard
-            .history_authority_descriptor_bytes()
-            .map_err(ApiError::from)?;
-        let barrier_version = guard
-            .barrier_version(&gid)
-            .ok_or_else(|| ApiError::server_message("group barrier_version missing"))?;
-        let kem_tree_hash_after = guard
-            .barrier_kem_tree_hash_after(&gid)
-            .ok_or_else(|| ApiError::server_message("group barrier tree hash missing"))?;
-        let global_history_attestation = guard
-            .global_history_attestation_bytes(
-                &gid,
-                &resolved.history_commitment,
-                barrier_version,
-                &kem_tree_hash_after,
-            )
-            .map_err(ApiError::from)?;
-        let helper_completeness_attestation = guard
-            .helper_completeness_attestation_joins_bytes(
-                &resolved.history_commitment,
-                request.prev_barrier_version,
-                page_offset,
-                total_entries,
-                records_page.as_slice(),
-            )
-            .map_err(ApiError::from)?;
-        let n_max = guard
-            .barrier_n_max(&gid)
-            .ok_or_else(|| ApiError::server_message("group n_max missing"))?;
-        let max_barrier_update_bytes = guard
-            .barrier_max_barrier_update_bytes(&gid)
-            .ok_or_else(|| ApiError::server_message("group max_barrier_update_bytes missing"))?;
-        let fs_forward_leap_policy = guard.fs_forward_leap_policy();
-        let deployment_profile_manifest = guard
-            .deployment_profile_manifest_bytes(
-                &gid,
-                API_PROFILE_VERSION,
-                guard.history_authority_extension_id(),
-                n_max,
-                max_barrier_update_bytes,
-                fs_forward_leap_policy,
-            )
-            .map_err(ApiError::from)?;
-        (
-            resolved,
-            history_authority_descriptor,
-            global_history_attestation,
-            helper_completeness_attestation,
-            guard.history_authority_extension_id().to_string(),
-            n_max,
-            max_barrier_update_bytes,
-            fs_forward_leap_policy,
-            deployment_profile_manifest,
-        )
-    };
-    let (records_page, page_offset, next_page_offset, total_entries) =
-        paginate_barrier_helper_slice(
-            resolved.records.as_slice(),
+        runtime_prepare_resolved_joins(
+            &mut guard,
+            &gid,
+            request.prev_barrier_version,
             request.page_offset,
             request.max_entries,
-        )?;
-
-    let response = BarrierResolveJoinsSinceResponse {
-        records: records_page
-            .into_iter()
-            .map(
-                |ServerBarrierJoinLeafRecord {
-                     device_pk,
-                     leaf_index,
-                     ek_leaf,
-                 }| BarrierJoinLeafRecord {
-                    device_pk,
-                    leaf_index,
-                    ek_leaf,
-                },
-            )
-            .collect(),
-        history_view_id: resolved.history_view_id.to_vec(),
-        history_commitment: Some(pb_history_commitment(resolved.history_commitment)),
-        page_offset,
-        next_page_offset,
-        total_entries,
-        helper_completeness_attestation,
-        history_authority_descriptor,
-        global_history_attestation,
-        history_authority_extension,
-        profile_version: API_PROFILE_VERSION.to_string(),
-        n_max,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
-        deployment_profile_manifest,
+            MAX_BARRIER_HELPER_PAGE_ENTRIES,
+            API_PROFILE_VERSION,
+        )
+        .map_err(|err| {
+            map_room_barrier_helper_preparation_error("barrier_resolve_joins_since", err)
+        })?
     };
-    Ok(protobuf_response(&response))
+    Ok(protobuf_response_bytes(
+        encode_prepared_resolved_joins_response(prepared),
+    ))
 }
 
 async fn barrier_fetch_public_tree(
@@ -3392,11 +2418,6 @@ async fn barrier_fetch_public_tree(
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
     }
-    if request.kem_tree_hash_after.len() != 32 {
-        return Err(ApiError::InvalidRequest(
-            "kem_tree_hash_after must be 32 bytes",
-        ));
-    }
     let gid = parse_gid(&request.room_id)?;
     enforce_expensive_rate_limit(
         &state,
@@ -3404,101 +2425,37 @@ async fn barrier_fetch_public_tree(
         message_scoped_rate_limit_key(&headers, &gid),
     )
     .await?;
-    let mut kem_tree_hash_after = [0u8; 32];
-    kem_tree_hash_after.copy_from_slice(&request.kem_tree_hash_after);
+    let request =
+        schema_decode_barrier_fetch_public_tree_request(request).map_err(|error| match error {
+            BarrierHelperRequestDecodeError::InvalidKemTreeHashAfter => {
+                ApiError::InvalidRequest(error.api_message())
+            }
+            BarrierHelperRequestDecodeError::InvalidRevocationRootsHash
+            | BarrierHelperRequestDecodeError::InvalidPendingBarrierUpdateDigest
+            | BarrierHelperRequestDecodeError::InvalidPendingWeEpochId => {
+                unreachable!("fetch_public_tree decoder returned unrelated error")
+            }
+        })?;
 
-    let (
-        snapshot,
-        history_authority_descriptor,
-        global_history_attestation,
-        helper_completeness_attestation,
-        history_authority_extension,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy,
-        deployment_profile_manifest,
-    ) = {
+    let prepared = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        let snapshot = guard
-            .fetch_barrier_public_tree(&gid, &kem_tree_hash_after)
-            .map_err(map_barrier_helper_error)?;
-        let (pk_entries_page, entry_offset, _next_entry_offset, total_entries) =
-            paginate_barrier_helper_slice(
-                snapshot.pk_entries.as_slice(),
-                request.entry_offset,
-                request.max_entries,
-            )?;
-        let history_authority_descriptor = guard
-            .history_authority_descriptor_bytes()
-            .map_err(ApiError::from)?;
-        let global_history_attestation = guard
-            .global_history_attestation_bytes(
-                &gid,
-                &snapshot.history_commitment,
-                snapshot.barrier_version,
-                &snapshot.kem_tree_hash_after,
-            )
-            .map_err(ApiError::from)?;
-        let helper_completeness_attestation = guard
-            .helper_completeness_attestation_tree_bytes(
-                &snapshot.history_commitment,
-                &snapshot.kem_tree_hash_after,
-                entry_offset,
-                total_entries,
-                pk_entries_page.as_slice(),
-            )
-            .map_err(ApiError::from)?;
-        let max_barrier_update_bytes = guard
-            .barrier_max_barrier_update_bytes(&gid)
-            .ok_or_else(|| ApiError::server_message("group max_barrier_update_bytes missing"))?;
-        let fs_forward_leap_policy = guard.fs_forward_leap_policy();
-        let deployment_profile_manifest = guard
-            .deployment_profile_manifest_bytes(
-                &gid,
-                API_PROFILE_VERSION,
-                guard.history_authority_extension_id(),
-                snapshot.n_max,
-                max_barrier_update_bytes,
-                fs_forward_leap_policy,
-            )
-            .map_err(ApiError::from)?;
-        (
-            snapshot,
-            history_authority_descriptor,
-            global_history_attestation,
-            helper_completeness_attestation,
-            guard.history_authority_extension_id().to_string(),
-            max_barrier_update_bytes,
-            fs_forward_leap_policy,
-            deployment_profile_manifest,
-        )
-    };
-    let (pk_entries, entry_offset, next_entry_offset, total_entries) =
-        paginate_barrier_helper_slice(
-            snapshot.pk_entries.as_slice(),
+        runtime_prepare_barrier_public_tree(
+            &mut guard,
+            &gid,
+            &request.kem_tree_hash_after,
             request.entry_offset,
             request.max_entries,
-        )?;
-
-    let response = BarrierFetchPublicTreeResponse {
-        n_max: snapshot.n_max,
-        kem_tree_hash_after: snapshot.kem_tree_hash_after.to_vec(),
-        pk_entries,
-        history_view_id: snapshot.history_view_id.to_vec(),
-        history_commitment: Some(pb_history_commitment(snapshot.history_commitment)),
-        entry_offset,
-        next_entry_offset,
-        total_entries,
-        helper_completeness_attestation,
-        history_authority_descriptor,
-        global_history_attestation,
-        history_authority_extension,
-        profile_version: API_PROFILE_VERSION.to_string(),
-        max_barrier_update_bytes,
-        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
-        deployment_profile_manifest,
+            MAX_BARRIER_HELPER_PAGE_ENTRIES,
+            API_PROFILE_VERSION,
+        )
+        .map_err(|err| {
+            map_room_barrier_helper_preparation_error("barrier_fetch_public_tree", err)
+        })?
     };
-    Ok(protobuf_response(&response))
+    Ok(protobuf_response_bytes(
+        encode_prepared_barrier_public_tree_response(prepared),
+    ))
 }
 
 async fn barrier_lookup_merge_acceptance(
@@ -3511,16 +2468,6 @@ async fn barrier_lookup_merge_acceptance(
     if request.room_id.is_empty() {
         return Err(ApiError::InvalidRequest("room_id must be provided"));
     }
-    if request.pending_barrier_update_digest.len() != 32 {
-        return Err(ApiError::InvalidRequest(
-            "pending_barrier_update_digest must be 32 bytes",
-        ));
-    }
-    if request.pending_we_epoch_id.len() != 32 {
-        return Err(ApiError::InvalidRequest(
-            "pending_we_epoch_id must be 32 bytes",
-        ));
-    }
     let gid = parse_gid(&request.room_id)?;
     enforce_expensive_rate_limit(
         &state,
@@ -3528,105 +2475,37 @@ async fn barrier_lookup_merge_acceptance(
         message_scoped_rate_limit_key(&headers, request.pending_we_epoch_id.as_slice()),
     )
     .await?;
-
-    let mut pending_barrier_update_digest = [0u8; 32];
-    pending_barrier_update_digest.copy_from_slice(&request.pending_barrier_update_digest);
-    let mut pending_we_epoch_id = [0u8; 32];
-    pending_we_epoch_id.copy_from_slice(&request.pending_we_epoch_id);
-
-    let (
-        record,
-        history_authority_descriptor,
-        global_history_attestation,
-        history_authority_extension,
-        n_max,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy,
-        deployment_profile_manifest,
-    ) = {
-        let lane = state.server_for_gid(&gid);
-        let mut guard = lane.write().await;
-        let record = match guard.lookup_merge_acceptance(
-            &gid,
-            request.pending_barrier_version,
-            &pending_barrier_update_digest,
-            &pending_we_epoch_id,
-        ) {
-            Ok(record) => record,
-            Err(ClientError::InvalidInput("group not found")) => return Err(ApiError::NotFound),
-            Err(err) => return Err(ApiError::from(err)),
-        };
-        let history_authority_descriptor = guard
-            .history_authority_descriptor_bytes()
-            .map_err(ApiError::from)?;
-        let barrier_version = guard
-            .barrier_version(&gid)
-            .ok_or_else(|| ApiError::server_message("group barrier_version missing"))?;
-        let kem_tree_hash_after = guard
-            .barrier_kem_tree_hash_after(&gid)
-            .ok_or_else(|| ApiError::server_message("group barrier tree hash missing"))?;
-        let global_history_attestation = guard
-            .global_history_attestation_bytes(
-                &gid,
-                &record.history_commitment,
-                barrier_version,
-                &kem_tree_hash_after,
-            )
-            .map_err(ApiError::from)?;
-        let n_max = guard
-            .barrier_n_max(&gid)
-            .ok_or_else(|| ApiError::server_message("group n_max missing"))?;
-        let max_barrier_update_bytes = guard
-            .barrier_max_barrier_update_bytes(&gid)
-            .ok_or_else(|| ApiError::server_message("group max_barrier_update_bytes missing"))?;
-        let fs_forward_leap_policy = guard.fs_forward_leap_policy();
-        let deployment_profile_manifest = guard
-            .deployment_profile_manifest_bytes(
-                &gid,
-                API_PROFILE_VERSION,
-                guard.history_authority_extension_id(),
-                n_max,
-                max_barrier_update_bytes,
-                fs_forward_leap_policy,
-            )
-            .map_err(ApiError::from)?;
-        (
-            record,
-            history_authority_descriptor,
-            global_history_attestation,
-            guard.history_authority_extension_id().to_string(),
-            n_max,
-            max_barrier_update_bytes,
-            fs_forward_leap_policy,
-            deployment_profile_manifest,
-        )
-    };
-
-    let response = BarrierLookupMergeAcceptanceResponse {
-        status: match record.status {
-            ServerMergeAcceptanceStatus::Pending => MergeAcceptanceStatus::Pending as i32,
-            ServerMergeAcceptanceStatus::Accepted => MergeAcceptanceStatus::Accepted as i32,
-            ServerMergeAcceptanceStatus::Superseded => MergeAcceptanceStatus::Superseded as i32,
-            ServerMergeAcceptanceStatus::FinalRejected => {
-                MergeAcceptanceStatus::FinalRejected as i32
+    let request = schema_decode_barrier_lookup_merge_acceptance_request(request).map_err(
+        |error| match error {
+            BarrierHelperRequestDecodeError::InvalidPendingBarrierUpdateDigest
+            | BarrierHelperRequestDecodeError::InvalidPendingWeEpochId => {
+                ApiError::InvalidRequest(error.api_message())
+            }
+            BarrierHelperRequestDecodeError::InvalidRevocationRootsHash
+            | BarrierHelperRequestDecodeError::InvalidKemTreeHashAfter => {
+                unreachable!("lookup_merge_acceptance decoder returned unrelated error")
             }
         },
-        history_view_id: record.history_view_id.to_vec(),
-        accepted_barrier_version: record.accepted_barrier_version,
-        accepted_fs_ec: record.accepted_fs_ec,
-        accepted_reason: record.accepted_reason,
-        accepted_digest: record.accepted_digest.map(|digest| digest.to_vec()),
-        history_commitment: Some(pb_history_commitment(record.history_commitment)),
-        history_authority_descriptor,
-        global_history_attestation,
-        history_authority_extension,
-        profile_version: API_PROFILE_VERSION.to_string(),
-        n_max,
-        max_barrier_update_bytes,
-        fs_forward_leap_policy: Some(pb_fs_forward_leap_policy(fs_forward_leap_policy)),
-        deployment_profile_manifest,
+    )?;
+
+    let prepared = {
+        let lane = state.server_for_gid(&gid);
+        let mut guard = lane.write().await;
+        runtime_prepare_merge_acceptance_lookup(
+            &mut guard,
+            &gid,
+            request.pending_barrier_version,
+            &request.pending_barrier_update_digest,
+            &request.pending_we_epoch_id,
+            API_PROFILE_VERSION,
+        )
+        .map_err(|err| {
+            map_room_barrier_helper_preparation_error("barrier_lookup_merge_acceptance", err)
+        })?
     };
-    Ok(protobuf_response(&response))
+    Ok(protobuf_response_bytes(
+        encode_prepared_merge_acceptance_lookup_response(prepared),
+    ))
 }
 
 async fn send_message(
@@ -3658,22 +2537,36 @@ async fn send_message(
     }
     let mut sender_leaf = [0u8; 32];
     sender_leaf.copy_from_slice(&sender);
-    let scope = ensure_leaf_member_for_epoch(&state, &weid, sender_leaf).await?;
-    ensure_leaf_member_for_room(&state, &scope.gid, sender_leaf).await?;
     let timestamp_ms = current_timestamp_ms();
-
-    let stored = StoredMessage {
-        we_epoch_id: weid,
-        ciphertext,
-        sender,
-        timestamp_ms,
+    let scope = {
+        let epoch_scope = state
+            .epoch_scope_for_weid(&weid)
+            .await
+            .ok_or(ApiError::NotFound)?;
+        let lane = state.server_for_gid(&epoch_scope.gid);
+        let guard = lane.read().await;
+        let mut room_state = state.room_state.write().await;
+        runtime_store_room_message(
+            &guard,
+            &mut room_state,
+            weid,
+            sender_leaf,
+            ciphertext,
+            sender,
+            timestamp_ms,
+            state.message_retention,
+            MESSAGE_PRUNE_INTERVAL_MS,
+        )
+        .map_err(|error| match error {
+            RoomMessageStoreError::NotFound => ApiError::NotFound,
+            RoomMessageStoreError::EpochUnauthorized => {
+                ApiError::Unauthorized("leaf is not a member for epoch")
+            }
+            RoomMessageStoreError::RoomUnauthorized => {
+                ApiError::Unauthorized("leaf is not a member for room")
+            }
+        })?
     };
-
-    {
-        let mut guard = state.messages.write().await;
-        guard.entry(weid).or_default().push(stored);
-        maybe_prune_expired_messages(&state, &mut guard, timestamp_ms);
-    }
 
     // Broadcast notification to WebSocket clients
     let notification = MessageNotification {
@@ -3682,8 +2575,6 @@ async fn send_message(
         timestamp_ms,
     };
     state.broadcast_message(notification);
-
-    state.touch_member(sender_leaf, timestamp_ms).await;
 
     let reply = SendMessageResponse {
         status: "stored".to_string(),
@@ -3708,13 +2599,30 @@ async fn fetch_messages(
     weid.copy_from_slice(&request.we_epoch_id);
     let mut leaf_id = [0u8; 32];
     leaf_id.copy_from_slice(&request.leaf_id);
-    ensure_leaf_member_for_epoch(&state, &weid, leaf_id).await?;
-
     let now_ms = current_timestamp_ms();
+    let scope = state
+        .epoch_scope_for_weid(&weid)
+        .await
+        .ok_or(ApiError::NotFound)?;
+    let lane = state.server_for_gid(&scope.gid);
+    let guard = lane.read().await;
     let messages = {
-        let mut guard = state.messages.write().await;
-        maybe_prune_expired_messages(&state, &mut guard, now_ms);
-        guard.get(&weid).cloned().unwrap_or_default()
+        let mut room_state = state.room_state.write().await;
+        runtime_fetch_room_messages(
+            &guard,
+            &mut room_state,
+            &weid,
+            leaf_id,
+            now_ms,
+            state.message_retention,
+            MESSAGE_PRUNE_INTERVAL_MS,
+        )
+        .map_err(|err| match err {
+            RoomAuthorizationError::NotFound => ApiError::NotFound,
+            RoomAuthorizationError::Unauthorized => {
+                ApiError::Unauthorized("leaf is not a member for epoch")
+            }
+        })?
     };
 
     let reply = FetchMessagesResponse {
@@ -3950,16 +2858,16 @@ async fn get_bundle(
     .await?;
 
     let now_ms = current_timestamp_ms();
-    let (bundle, expired) = {
-        let mut guard = state.bundles.write().await;
-        let expired = if should_prune_messages(state.bundle_prune_due_ms.as_ref(), now_ms) {
-            prune_expired_bundles(&mut guard, now_ms, state.message_retention)
-        } else {
-            Vec::new()
-        };
-        (guard.get(&weid).cloned(), expired)
+    let bundle = {
+        let mut room_state = state.room_state.write().await;
+        runtime_fetch_room_bundle(
+            &mut room_state,
+            &weid,
+            now_ms,
+            state.message_retention,
+            MESSAGE_PRUNE_INTERVAL_MS,
+        )
     };
-    prune_bundle_indexes(&state, &expired).await;
     let bytes = bundle.ok_or(ApiError::NotFound)?.bytes;
 
     let reply = GetBundleResponse { bundle_cbor: bytes };
@@ -4033,43 +2941,19 @@ async fn get_window(
         message_scoped_rate_limit_key(&headers, b"window"),
     )
     .await?;
-    let mut snapshot: Vec<WindowEntry> = Vec::new();
+    let mut snapshot = Vec::new();
     for lane in state.all_server_lanes() {
         let guard = lane.read().await;
-        let now = guard.context().current_time();
-        snapshot.extend(
-            guard
-                .context()
-                .mh_window
-                .snapshot()
-                .into_iter()
-                .map(|(wid, heads)| WindowEntry {
-                    wid,
-                    heads: heads
-                        .into_iter()
-                        .map(|record| {
-                            let age_ms =
-                                now.duration_since(record.accept_time())
-                                    .as_millis()
-                                    .min(u64::MAX as u128) as u64;
-                            WindowHead {
-                                we_epoch_id: record.we_epoch_id.to_vec(),
-                                msphf_hp_commit: record.msphf_hp_commit.to_vec(),
-                                seed_ctx_hash: record.seed_ctx_hash.to_vec(),
-                                rho_commit: record.rho_commit.to_vec(),
-                                seed_commit: record.seed_commit.to_vec(),
-                                xk_hash: record.xk_hash.to_vec(),
-                                accept_seq: record.accept_seq,
-                                age_ms,
-                            }
-                        })
-                        .collect(),
-                }),
-        );
+        snapshot.extend(runtime_snapshot_room_window(&guard));
     }
 
-    let reply = GetWindowResponse { entries: snapshot };
-    Ok(protobuf_response(&reply))
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/x-protobuf")
+        .body(axum::body::Body::from(encode_window_snapshot_response(
+            snapshot,
+        )))
+        .expect("protobuf response builder"))
 }
 
 async fn get_telemetry(
@@ -4088,120 +2972,18 @@ async fn get_telemetry(
     let mut report = Vec::new();
     for lane in state.all_server_lanes() {
         let guard = lane.read().await;
-        report.extend(guard.context().telemetry_report());
+        report.extend(runtime_snapshot_room_telemetry(&guard));
     }
 
-    let entries = report
-        .into_iter()
-        .map(|(key, counters)| TelemetryEntry {
-            gid: key.gid.to_vec(),
-            parent_root: key.parent_root.to_vec(),
-            head_attempts: counters.head_attempts,
-            head_insertions: counters.head_insertions,
-            freeze_window_full: counters.freeze_window_full,
-            freeze_rho_replay: counters.freeze_rho_replay,
-            last_active_heads: counters.last_active_heads as u64,
-        })
-        .collect();
-
-    let freeze_stats = state
-        .freeze_stats()
-        .await
-        .into_iter()
-        .map(|(code, reason, count)| FreezeStat {
-            code,
-            reason,
-            count,
-        })
-        .collect();
-
-    let reply = GetTelemetryResponse {
-        entries,
-        freeze_stats,
-    };
-    Ok(protobuf_response(&reply))
-}
-
-fn pivot_parity_to_cbor(parity: &PivotParity) -> Result<Vec<u8>, ApiError> {
-    #[derive(Serialize)]
-    struct PivotParitySerializable {
-        gid: ByteBuf,
-        cat: ByteBuf,
-        parent_root: ByteBuf,
-        we_epoch_id: ByteBuf,
-        rho_commit: ByteBuf,
-        seed_ctx_hash: ByteBuf,
-        seed_commit: ByteBuf,
-        hp_commit: ByteBuf,
-        xk_hash: ByteBuf,
-        join_delta_root: ByteBuf,
-        revoked_since_root: ByteBuf,
-        revoked_root: ByteBuf,
-        accept_seq: u64,
-        crs_id: ByteBuf,
-        params_id: ByteBuf,
-        policy_version: String,
-        proof_mode: String,
-        vrf_id: String,
-        vrf_proof: ByteBuf,
-        vrf_public: ByteBuf,
-        mask_a: ByteBuf,
-        mask_b: ByteBuf,
-        fs_capss: ByteBuf,
-        proofs_commit: ByteBuf,
-        srx_commit: Option<ByteBuf>,
-        srx_root_sw: Option<ByteBuf>,
-        is_join: bool,
-        hp_envelope: ByteBuf,
-        fs_epoch_commit: Option<ByteBuf>,
-        fs_ec: Option<u64>,
-        fs_dev_commit: Option<ByteBuf>,
-    }
-
-    let serializable = PivotParitySerializable {
-        gid: ByteBuf::from(parity.gid.clone()),
-        cat: ByteBuf::from(parity.cat.clone()),
-        parent_root: ByteBuf::from(parity.parent_root.to_vec()),
-        we_epoch_id: ByteBuf::from(parity.we_epoch_id.to_vec()),
-        rho_commit: ByteBuf::from(parity.rho_commit.to_vec()),
-        seed_ctx_hash: ByteBuf::from(parity.seed_ctx_hash.to_vec()),
-        seed_commit: ByteBuf::from(parity.seed_commit.to_vec()),
-        hp_commit: ByteBuf::from(parity.hp_commit.to_vec()),
-        xk_hash: ByteBuf::from(parity.xk_hash.to_vec()),
-        join_delta_root: ByteBuf::from(parity.join_delta_root.to_vec()),
-        revoked_since_root: ByteBuf::from(parity.revoked_since_root.to_vec()),
-        revoked_root: ByteBuf::from(parity.revoked_root.to_vec()),
-        accept_seq: parity.accept_seq,
-        crs_id: ByteBuf::from(parity.crs_id.clone()),
-        params_id: ByteBuf::from(parity.params_id.clone()),
-        policy_version: parity.policy_version.clone(),
-        proof_mode: parity.proof_mode.clone(),
-        vrf_id: parity.vrf_id.clone(),
-        vrf_proof: ByteBuf::from(parity.vrf_proof.clone()),
-        vrf_public: ByteBuf::from(parity.vrf_public.clone()),
-        mask_a: ByteBuf::from(parity.mask_a.to_vec()),
-        mask_b: ByteBuf::from(parity.mask_b.to_vec()),
-        fs_capss: ByteBuf::from(parity.fs_capss.clone()),
-        proofs_commit: ByteBuf::from(parity.proofs_commit.to_vec()),
-        srx_commit: parity
-            .srx_commit
-            .map(|commit| ByteBuf::from(commit.to_vec())),
-        srx_root_sw: parity.srx_root_sw.map(|root| ByteBuf::from(root.to_vec())),
-        is_join: parity.is_join,
-        hp_envelope: ByteBuf::from(parity.hp_envelope.as_ref().to_vec()),
-        fs_epoch_commit: parity
-            .fs_epoch_commit
-            .map(|commit| ByteBuf::from(commit.to_vec())),
-        fs_ec: parity.fs_ec,
-        fs_dev_commit: parity
-            .fs_dev_commit
-            .map(|commit| ByteBuf::from(commit.to_vec())),
-    };
-
-    let mut buf = Vec::new();
-    into_writer(&serializable, &mut buf)
-        .map_err(|_| ApiError::server_message("failed to encode pivot parity"))?;
-    Ok(buf)
+    let freeze_stats = state.freeze_stats().await;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/x-protobuf")
+        .body(axum::body::Body::from(encode_telemetry_snapshot_response(
+            report,
+            freeze_stats,
+        )))
+        .expect("protobuf response builder"))
 }
 
 async fn configure_window(
@@ -4211,36 +2993,16 @@ async fn configure_window(
 ) -> Result<Response, ApiError> {
     enforce_window_config_auth(&headers, configured_window_admin_token().as_deref())?;
     let request = ConfigureWindowRequest::decode(body)?;
-    let h_max = request
-        .h_max
-        .map(|value| {
-            if value == 0 {
-                Err(ApiError::InvalidRequest("h_max must be at least 1"))
-            } else if value > 1024 {
-                Err(ApiError::InvalidRequest("h_max too large"))
-            } else {
-                Ok(value as usize)
-            }
-        })
-        .transpose()?;
-    let ttl = request
-        .ttl_ms
-        .map(|value| {
-            if value == 0 {
-                Err(ApiError::InvalidRequest("ttl_ms must be positive"))
-            } else {
-                Ok(Duration::from_millis(u64::from(value)))
-            }
-        })
-        .transpose()?;
+    let update = runtime_parse_room_window_limit_update(request.h_max, request.ttl_ms)
+        .map_err(|err| ApiError::InvalidRequest(err.api_message()))?;
 
     let (effective_h, effective_ttl) = {
         let mut effective: Option<(usize, Duration)> = None;
         for lane in state.all_server_lanes() {
             let mut guard = lane.write().await;
-            guard.update_window_limits(h_max, ttl);
+            let applied = runtime_apply_room_window_limit_update(&mut guard, update);
             if effective.is_none() {
-                effective = Some(guard.window_limits());
+                effective = Some((applied.h_max, applied.ttl));
             }
         }
         effective.unwrap_or((0, Duration::from_secs(0)))
@@ -4314,94 +3076,6 @@ pub async fn run_with_addr(addr: SocketAddr) -> anyhow::Result<()> {
     run_with_config(addr, config).await
 }
 
-fn server_from_config(cfg: &cityg_config::CityGConfig) -> CityGServer {
-    let mut server_cfg = ServerConfig::new();
-    server_cfg.enable_global_history_authority();
-    server_cfg.h_max = Some(cfg.protocol.max_concurrent_heads);
-    server_cfg.window_ttl = Some(Duration::from_secs(cfg.server.window_ttl_secs));
-    server_cfg.state_path = cfg.server.state_path.clone();
-
-    let mut acceptance = AcceptanceOptions {
-        srx_max_bytes: cfg.protocol.default_srx_max_bytes,
-        fs_policy_config: fs_policy_from_settings(&cfg.protocol.fs_policy),
-        ..AcceptanceOptions::default()
-    };
-
-    if cfg.server.seed_demo_room {
-        acceptance.bootstrap_policy = BootstrapPolicy::CaMlDsa {
-            public_key: cityg_client::demo::bootstrap_public().to_vec(),
-        };
-        let mut registry = BTreeMap::new();
-        registry.insert(
-            cityg_client::demo::DEMO_GID.to_vec(),
-            cityg_client::demo::kbroad_public().to_vec(),
-        );
-        acceptance.kbroad_registry = Some(registry);
-    }
-
-    server_cfg.acceptance_options = Some(acceptance);
-
-    let mut server = CityGServer::new(server_cfg);
-    let version = cfg.protocol.fs_policy_version.clone();
-    {
-        let ctx = server.context_mut();
-        ctx.set_allowed_fs_policy_version(Some(version.clone()));
-        ctx.set_fs_policy_version(Some(version));
-    }
-    server
-}
-
-fn lane_state_path(base: &Path, lane_index: usize, lane_count: usize) -> PathBuf {
-    if lane_count <= 1 {
-        return base.to_path_buf();
-    }
-
-    let stem = base
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("cityg-server");
-    let lane_stem = format!("{stem}.lane-{lane_index:02}");
-    match base.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) if !ext.is_empty() => base.with_file_name(format!("{lane_stem}.{ext}")),
-        _ => base.with_file_name(lane_stem),
-    }
-}
-
-fn server_from_config_for_lane(
-    cfg: &cityg_config::CityGConfig,
-    lane_index: usize,
-    lane_count: usize,
-) -> CityGServer {
-    if lane_count <= 1 || cfg.server.state_path.is_none() {
-        return server_from_config(cfg);
-    }
-
-    let mut lane_cfg = cfg.clone();
-    lane_cfg.server.state_path = cfg
-        .server
-        .state_path
-        .as_ref()
-        .map(|path| lane_state_path(path, lane_index, lane_count));
-    server_from_config(&lane_cfg)
-}
-
-fn aligned_fs_epoch_base_ts(now: SystemTime, period_seconds: u64) -> u64 {
-    let period = period_seconds.max(1);
-    let now_secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    now_secs - (now_secs % period)
-}
-
-fn fs_policy_from_settings(settings: &cityg_config::FsPolicySettings) -> FsPolicyConfig {
-    FsPolicyConfig {
-        h: settings.h_seconds,
-        checkpoint_interval: settings.checkpoint_interval_seconds,
-        checkpoint_head_threshold: settings.checkpoint_head_threshold,
-        slack_anchor: settings.slack_anchor,
-        slack_first_device: settings.slack_first_device,
-        slack_device: settings.slack_device,
-    }
-}
-
 pub async fn run_with_config(
     addr: SocketAddr,
     config: cityg_config::CityGConfig,
@@ -4422,13 +3096,13 @@ pub async fn run_with_config(
     let lane_count = configured_group_lane_count().max(1);
     let server_lanes_vec: Vec<Arc<RwLock<CityGServer>>> = (0..lane_count)
         .map(|lane_index| {
-            Arc::new(RwLock::new(server_from_config_for_lane(
+            Arc::new(RwLock::new(server_from_cityg_config_for_lane(
                 &config, lane_index, lane_count,
             )))
         })
         .collect();
     let server = server_lanes_vec.first().cloned().unwrap_or_else(|| {
-        Arc::new(RwLock::new(server_from_config_for_lane(
+        Arc::new(RwLock::new(server_from_cityg_config_for_lane(
             &config, 0, lane_count,
         )))
     });
@@ -4460,22 +3134,16 @@ pub async fn run_with_config(
     let state = ApiState {
         server,
         server_lanes,
-        messages: Arc::new(RwLock::new(AHashMap::new())),
-        bundles: Arc::new(RwLock::new(AHashMap::new())),
+        room_state: Arc::new(RwLock::new(RoomVolatileState::default())),
         message_retention,
         fs_epoch_period_seconds: config.protocol.fs_policy.h_seconds.max(1),
         freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
-        alias_registry: Arc::new(RwLock::new(AHashMap::new())),
-        member_metadata: Arc::new(RwLock::new(AHashMap::new())),
-        weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
-        epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
+        alias_registry: Arc::new(RwLock::new(AliasRegistry::default())),
         notification_tx,
         alias_rate_limiter: AliasRateLimiter::new(
             ALIAS_RATE_LIMIT_BURST,
             Duration::from_secs(ALIAS_RATE_LIMIT_WINDOW_SECS),
         ),
-        message_prune_due_ms: Arc::new(AtomicU64::new(0)),
-        bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
         merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
         accept_epoch_limiter: EndpointConcurrencyLimiter::new(accept_epoch_max_in_flight),
         join_ticket_limiter: EndpointConcurrencyLimiter::new(join_ticket_max_in_flight),
@@ -4611,20 +3279,6 @@ async fn seed_window_head(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     enforce_window_config_auth(&headers, configured_window_admin_token().as_deref())?;
-    use msphf_core::hash::h_l;
-    use msphf_orchestrator::mhw::HeadRecord;
-    use serde::Serialize;
-
-    #[derive(Serialize)]
-    struct WindowInputs<'a> {
-        #[serde(with = "serde_bytes")]
-        gid: &'a [u8],
-        #[serde(with = "serde_bytes")]
-        parent_root: &'a [u8; 32],
-        #[serde(with = "serde_bytes")]
-        seed_ctx_hash: &'a [u8; 32],
-    }
-
     let request = SeedHeadRequest::decode(body)?;
     if request.bundle_cbor.is_empty() {
         return Err(ApiError::InvalidRequest("bundle_cbor must be provided"));
@@ -4638,16 +3292,6 @@ async fn seed_window_head(
         Err(err) => return Err(ApiError::server_message(err.to_string())),
     };
 
-    let wid = h_l(
-        "mhw/window",
-        &WindowInputs {
-            gid: bundle.gid(),
-            parent_root: &bundle.anchor.parent_root,
-            seed_ctx_hash: &bundle.hp_binding.seed_ctx_hash,
-        },
-    )
-    .map_err(|err| ApiError::server_message(err.to_string()))?;
-
     {
         let gid: [u8; 32] = bundle
             .gid()
@@ -4655,25 +3299,15 @@ async fn seed_window_head(
             .map_err(|_| ApiError::InvalidRequest("bundle gid must be 32 bytes"))?;
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        let accept_time = guard.context_mut().next_accept_instant();
-        let record = HeadRecord::new(
-            bundle.we_epoch_id,
-            bundle.hp_binding.hp_commit,
-            bundle.hp_binding.seed_ctx_hash,
-            bundle.hp_binding.rho_commit,
-            bundle.hp_binding.seed_commit,
-            bundle.hp_binding.xk_hash,
-            bundle.anchor.join_delta_root,
-            bundle.anchor.revoked_since_prev_root,
-            bundle.anchor.revoked_root,
-            0,
-            accept_time,
-        );
-        guard
-            .context_mut()
-            .mh_window
-            .accept_head(&wid, record, accept_time)
-            .map_err(|err| ApiError::server_message(err.reason.to_string()))?;
+        runtime_seed_room_window_head(&mut guard, &bundle).map_err(|err| match err {
+            cityg_runtime::RoomWindowSeedError::InvalidGidLength => {
+                ApiError::InvalidRequest("bundle gid must be 32 bytes")
+            }
+            cityg_runtime::RoomWindowSeedError::ComputeWindowId(message)
+            | cityg_runtime::RoomWindowSeedError::AcceptHead(message) => {
+                ApiError::server_message(message)
+            }
+        })?;
     }
 
     let reply = SeedHeadResponse {};
@@ -4712,7 +3346,7 @@ async fn refresh_pivot(
     {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        guard.refresh_pivot(&bundle).map_err(|err| match err {
+        runtime_refresh_room_pivot(&mut guard, &bundle).map_err(|err| match err {
             ClientError::InvalidInput(
                 "pivot parity missing for refresh"
                 | "pivot head missing"
@@ -4740,29 +3374,49 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::routing::get;
+    use ciborium::value::Integer;
     use cityg_api_client::{
         RoomAdminOperation, build_room_admin_leaf_pair_proof, build_room_admin_listing_proof,
         build_room_admin_proof, build_room_admin_target_proof, generate_room_admin_keypair,
     };
-    use cityg_client::demo::{DEMO_GID, demo_bundle};
-    use cityg_client::witness::SrxInputsOwned;
+    use cityg_client::{
+        CityGClient,
+        demo::{DEMO_GID, demo_bundle},
+        witness::SrxInputsOwned,
+    };
     use cityg_config::CityGConfig;
+    use cityg_runtime::should_prune as runtime_should_prune;
     use futures::{SinkExt, StreamExt};
     use msphf_core::MsphfError;
     use msphf_core::merkle::canonical_set_root;
-    use msphf_orchestrator::hdr;
-    use pqcrypto_dilithium::dilithium5;
+    use msphf_core::params::{RLWE_CRS_ID_DEFAULT, RLWE_PARAMS_ID_MOCK};
+    use msphf_orchestrator::{
+        AnchorInstanceParts, DEFAULT_POLICY_VERSION, DEFAULT_PROOF_MODE, DEFAULT_VRF_ID,
+        FsJoinInputs, FsMergeInputs, LeafIdMode, OrchestrationParams, PopKeypair, SrxMode,
+        compute_leaf_id, hdr, lb,
+    };
+    use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
     use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
     use prost::Message;
     use serde_bytes::ByteBuf;
     use serde_json::Value;
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Mutex, Once, OnceLock};
 
-    fn test_api_state_with_lanes(lane_count: usize) -> ApiState {
+    fn server_from_config(cfg: &CityGConfig) -> CityGServer {
+        server_from_cityg_config_for_lane(cfg, 0, 1)
+    }
+
+    fn test_api_state_with_seeded_lanes(lane_count: usize, seed_demo_room: bool) -> ApiState {
         let mut cfg = CityGConfig::default();
-        cfg.server.seed_demo_room = true;
-        let lanes: Vec<Arc<RwLock<CityGServer>>> = (0..lane_count.max(1))
-            .map(|_| Arc::new(RwLock::new(server_from_config(&cfg))))
+        cfg.server.seed_demo_room = seed_demo_room;
+        let lane_count = lane_count.max(1);
+        let lanes: Vec<Arc<RwLock<CityGServer>>> = (0..lane_count)
+            .map(|lane_index| {
+                Arc::new(RwLock::new(server_from_cityg_config_for_lane(
+                    &cfg, lane_index, lane_count,
+                )))
+            })
             .collect();
         let server = lanes
             .first()
@@ -4771,22 +3425,16 @@ mod tests {
         ApiState {
             server: server.clone(),
             server_lanes: Arc::new(lanes),
-            messages: Arc::new(RwLock::new(AHashMap::new())),
-            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            room_state: Arc::new(RwLock::new(RoomVolatileState::default())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
             fs_epoch_period_seconds: cfg.protocol.fs_policy.h_seconds.max(1),
             freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
-            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
-            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
-            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
-            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
+            alias_registry: Arc::new(RwLock::new(AliasRegistry::default())),
             notification_tx: broadcast::channel(8).0,
             alias_rate_limiter: AliasRateLimiter::new(
                 ALIAS_RATE_LIMIT_BURST,
                 Duration::from_secs(ALIAS_RATE_LIMIT_WINDOW_SECS),
             ),
-            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
-            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
             accept_epoch_limiter: EndpointConcurrencyLimiter::new(
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
@@ -4799,6 +3447,10 @@ mod tests {
         }
     }
 
+    fn test_api_state_with_lanes(lane_count: usize) -> ApiState {
+        test_api_state_with_seeded_lanes(lane_count, true)
+    }
+
     fn test_api_state() -> ApiState {
         test_api_state_with_lanes(1)
     }
@@ -4809,19 +3461,13 @@ mod tests {
         ApiState {
             server: server.clone(),
             server_lanes: Arc::new(vec![server]),
-            messages: Arc::new(RwLock::new(AHashMap::new())),
-            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            room_state: Arc::new(RwLock::new(RoomVolatileState::default())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
             fs_epoch_period_seconds: cfg.protocol.fs_policy.h_seconds.max(1),
             freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
-            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
-            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
-            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
-            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
+            alias_registry: Arc::new(RwLock::new(AliasRegistry::default())),
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
-            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
-            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
             accept_epoch_limiter: EndpointConcurrencyLimiter::new(
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
@@ -4918,6 +3564,164 @@ mod tests {
             pop_public_key: proof.pop_public_key,
             signature: proof.signature,
         }
+    }
+
+    fn test_identity_binding(
+        alias: &str,
+        pop_public_key: &[u8],
+        pop_secret_key: &MlDsaSecretKey,
+    ) -> IdentityBinding {
+        let message_data = (
+            ByteBuf::from(alias.as_bytes().to_vec()),
+            ByteBuf::from(pop_public_key.to_vec()),
+        );
+        let mut message = Vec::new();
+        ciborium::ser::into_writer(&message_data, &mut message)
+            .expect("encode identity binding message");
+        let signature = dilithium5::detached_sign(message.as_slice(), pop_secret_key);
+        IdentityBinding {
+            alias: alias.to_string(),
+            pop_public_key: pop_public_key.to_vec(),
+            signature: signature.as_bytes().to_vec(),
+        }
+    }
+
+    fn demo_vrf_keys_for_seed(seed: u8) -> (Vec<u8>, Vec<u8>) {
+        let params = lb::generate_parameters([seed; 32]).expect("generate demo VRF params");
+        let (sk, pk) = lb::generate_keypair(&params, [seed.wrapping_add(1); 32])
+            .expect("generate demo VRF keypair");
+        (sk, pk)
+    }
+
+    fn build_join_bundle_from_response(
+        ticket: &JoinTicketResponse,
+        pop_public_key: &[u8],
+        pop_secret_key: &MlDsaSecretKey,
+        seed: u8,
+    ) -> ClientEpochBundle {
+        let gid: [u8; 32] = ticket.gid.as_slice().try_into().expect("join ticket gid");
+        let cat: [u8; 32] = ticket.cat.as_slice().try_into().expect("join ticket cat");
+        let parent_root: [u8; 32] = ticket
+            .parent_root
+            .as_slice()
+            .try_into()
+            .expect("join ticket parent_root");
+        let revoked_root: [u8; 32] = ticket
+            .revoked_root
+            .as_slice()
+            .try_into()
+            .expect("join ticket revoked_root");
+        let revoked_since_root: [u8; 32] = ticket
+            .revoked_since_root
+            .as_slice()
+            .try_into()
+            .expect("join ticket revoked_since_root");
+        let tswe_salt_hash: [u8; 32] = ticket
+            .tswe_salt_hash
+            .as_slice()
+            .try_into()
+            .expect("join ticket tswe_salt_hash");
+        let join_delta_root: [u8; 32] = ticket
+            .join_delta_root
+            .as_slice()
+            .try_into()
+            .expect("join ticket join_delta_root");
+        let pox_r_commit: [u8; 32] = ticket
+            .pox_r_commit
+            .as_slice()
+            .try_into()
+            .expect("join ticket pox_r_commit");
+
+        let srx_inputs = SrxInputsOwned::from_cbor(ticket.srx_cbor.as_slice())
+            .expect("decode join ticket srx")
+            .into_srx_inputs();
+        let (vrf_secret_key, vrf_public_key) = demo_vrf_keys_for_seed(seed);
+        let mut fs_state = msphf_orchestrator::ForwardSecrecyState::new([seed.wrapping_add(2); 32]);
+
+        let mut header = BTreeMap::new();
+        header.insert(
+            hdr::HDR_KBROAD_ALG,
+            ciborium::value::Value::Text("ml-kem-768".to_string()),
+        );
+        header.insert(
+            hdr::HDR_KBROAD_PUB,
+            ciborium::value::Value::Bytes(ticket.kbroad_public.clone()),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_VERSION,
+            ciborium::value::Value::Integer(Integer::from(ticket.barrier_version)),
+        );
+        header.insert(
+            hdr::HDR_BARRIER_LEAF_PK,
+            ciborium::value::Value::Bytes(vec![0x42; 1_184]),
+        );
+
+        let parts = AnchorInstanceParts {
+            gid: &gid,
+            cat: &cat,
+            tswe_salt_hash: &tswe_salt_hash,
+            parent_root: &parent_root,
+            join_delta_root: &join_delta_root,
+            revoked_since_prev_root: &revoked_since_root,
+            revoked_root: &revoked_root,
+            pox_r_commit: Some(&pox_r_commit),
+        };
+
+        let params = OrchestrationParams {
+            msphf_crs_id: if ticket.msphf_crs_id.is_empty() {
+                RLWE_CRS_ID_DEFAULT
+            } else {
+                ticket.msphf_crs_id.as_str()
+            },
+            params_id: if ticket.msphf_params_id.is_empty() {
+                RLWE_PARAMS_ID_MOCK
+            } else {
+                ticket.msphf_params_id.as_str()
+            },
+            srx: Some(srx_inputs),
+            srx_mode: SrxMode::Complete,
+            pop_keys: Some(PopKeypair {
+                algorithm: "ML-DSA-65",
+                public_key: pop_public_key,
+                secret_key: pop_secret_key,
+            }),
+            leaf_id_mode: LeafIdMode::PerGroup,
+            proof_mode: if ticket.proof_mode.is_empty() {
+                DEFAULT_PROOF_MODE
+            } else {
+                ticket.proof_mode.as_str()
+            },
+            vrf_id: if ticket.vrf_id.is_empty() {
+                DEFAULT_VRF_ID
+            } else {
+                ticket.vrf_id.as_str()
+            },
+            policy_version: if ticket.policy_version.is_empty() {
+                DEFAULT_POLICY_VERSION
+            } else {
+                ticket.policy_version.as_str()
+            },
+            vrf_secret_key: Some(vrf_secret_key.as_slice()),
+            vrf_public_key: Some(vrf_public_key.as_slice()),
+            fs_policy_version: ticket.fs_policy_version.as_str(),
+            fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+            barrier_version: ticket.barrier_version,
+            fs_join: FsJoinInputs::default(),
+            fs_merge: FsMergeInputs::default(),
+        };
+
+        let witness_bytes = if ticket.witness_cbor.is_empty() {
+            None
+        } else {
+            Some(ticket.witness_cbor.as_slice())
+        };
+        let mut bundle =
+            CityGClient::generate_epoch(header, parts, params, &mut fs_state, witness_bytes)
+                .expect("generate join bundle from ticket");
+        if !ticket.bootstrap_public.is_empty() {
+            cityg_client::demo::attach_bootstrap(&mut bundle).expect("attach bootstrap envelope");
+        }
+        bundle
     }
 
     fn ensure_test_admin_tokens() {
@@ -5100,19 +3904,13 @@ mod tests {
         let state = ApiState {
             server: server.clone(),
             server_lanes: Arc::new(Vec::new()),
-            messages: Arc::new(RwLock::new(AHashMap::new())),
-            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            room_state: Arc::new(RwLock::new(RoomVolatileState::default())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
             fs_epoch_period_seconds: cfg.protocol.fs_policy.h_seconds.max(1),
             freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
-            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
-            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
-            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
-            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
+            alias_registry: Arc::new(RwLock::new(AliasRegistry::default())),
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
-            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
-            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
             accept_epoch_limiter: EndpointConcurrencyLimiter::new(
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
@@ -5595,19 +4393,19 @@ mod tests {
             .expect("register bob");
 
         state.record_member_revocations(&[]).await;
-        assert_eq!(state.member_metadata.read().await.len(), 2);
-        assert_eq!(state.weid_to_leaf.read().await.len(), 2);
+        let indexes = state.room_state.read().await;
+        assert_eq!(indexes.member_metadata().len(), 2);
+        assert_eq!(indexes.weid_to_leaf().len(), 2);
+        drop(indexes);
         assert_eq!(state.alias_registry.read().await.len(), 2);
 
         state.record_member_revocations(&[leaf_a]).await;
-        let metadata = state.member_metadata.read().await;
-        let weid_map = state.weid_to_leaf.read().await;
-        assert!(!metadata.contains_key(&leaf_a));
-        assert!(metadata.contains_key(&leaf_b));
-        assert!(!weid_map.values().any(|leaf| leaf == &leaf_a));
-        assert!(weid_map.values().any(|leaf| leaf == &leaf_b));
-        drop(metadata);
-        drop(weid_map);
+        let indexes = state.room_state.read().await;
+        assert!(!indexes.member_metadata().contains_key(&leaf_a));
+        assert!(indexes.member_metadata().contains_key(&leaf_b));
+        assert!(!indexes.weid_to_leaf().values().any(|leaf| leaf == &leaf_a));
+        assert!(indexes.weid_to_leaf().values().any(|leaf| leaf == &leaf_b));
+        drop(indexes);
 
         // Alias for the revoked leaf must be unbound so the same alias
         // can rejoin with a new identity key.
@@ -5639,19 +4437,13 @@ mod tests {
         let state = ApiState {
             server: server.clone(),
             server_lanes: Arc::new(vec![server]),
-            messages: Arc::new(RwLock::new(AHashMap::new())),
-            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            room_state: Arc::new(RwLock::new(RoomVolatileState::default())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
             fs_epoch_period_seconds: CityGConfig::default().protocol.fs_policy.h_seconds.max(1),
             freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
-            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
-            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
-            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
-            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
+            alias_registry: Arc::new(RwLock::new(AliasRegistry::default())),
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
-            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
-            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
             accept_epoch_limiter: EndpointConcurrencyLimiter::new(
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
@@ -5696,19 +4488,13 @@ mod tests {
         let state = ApiState {
             server: server.clone(),
             server_lanes: Arc::new(vec![server]),
-            messages: Arc::new(RwLock::new(AHashMap::new())),
-            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            room_state: Arc::new(RwLock::new(RoomVolatileState::default())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
             fs_epoch_period_seconds: cfg.protocol.fs_policy.h_seconds.max(1),
             freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
-            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
-            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
-            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
-            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
+            alias_registry: Arc::new(RwLock::new(AliasRegistry::default())),
             notification_tx: broadcast::channel(4).0,
             alias_rate_limiter: AliasRateLimiter::new(100, Duration::from_secs(60)),
-            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
-            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
             accept_epoch_limiter: EndpointConcurrencyLimiter::new(
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,
@@ -7531,6 +6317,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bootstrapped_room_join_keeps_merge_ticket_refresh_available_across_lanes() {
+        ensure_test_admin_tokens();
+        let state = test_api_state_with_seeded_lanes(4, false);
+        let headers = message_auth_headers();
+        let gid = [0x91u8; 32];
+        let room_id = hex::encode(gid);
+        let kbroad_public = cityg_client::demo::kbroad_public().to_vec();
+        let (admin_pop_public_key, admin_pop_secret_key) = generate_room_admin_keypair();
+
+        bootstrap_room(
+            State(state.clone()),
+            HeaderMap::new(),
+            encode_proto_request(&BootstrapRoomRequest {
+                room_id: room_id.clone(),
+                kbroad_public: kbroad_public.clone(),
+                admin_proof: Some(test_room_admin_kbroad_proof(
+                    RoomAdminOperation::Bootstrap,
+                    room_id.as_str(),
+                    kbroad_public.as_slice(),
+                    admin_pop_public_key.as_slice(),
+                    admin_pop_secret_key.as_slice(),
+                )),
+            }),
+        )
+        .await
+        .expect("bootstrap room on routed lane");
+
+        let routed_lane = state.server_for_gid(&gid);
+        {
+            let guard = routed_lane.read().await;
+            assert!(
+                guard
+                    .context()
+                    .kbroad_registry()
+                    .and_then(|registry| registry.get(gid.as_slice()))
+                    .is_some(),
+                "bootstrap must register kbroad on the routed lane"
+            );
+        }
+
+        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let alias = "alice-bootstrapped";
+        let join_response = join_ticket(
+            State(state.clone()),
+            encode_proto_request(&JoinTicketRequest {
+                room_id: room_id.clone(),
+                alias: alias.to_string(),
+                identity_binding: Some(test_identity_binding(alias, pop_pk.as_bytes(), &pop_sk)),
+            }),
+        )
+        .await
+        .expect("join ticket after bootstrap");
+        let join_ticket_response: JoinTicketResponse = decode_proto_response(join_response).await;
+        let join_bundle = build_join_bundle_from_response(
+            &join_ticket_response,
+            pop_pk.as_bytes(),
+            &pop_sk,
+            0x91,
+        );
+        accept_epoch(
+            State(state.clone()),
+            encode_proto_request(&AcceptEpochRequest {
+                bundle_cbor: join_bundle.to_cbor().expect("join bundle cbor"),
+            }),
+        )
+        .await
+        .expect("accept first join into bootstrapped room");
+
+        {
+            let guard = routed_lane.read().await;
+            assert!(
+                guard
+                    .context()
+                    .kbroad_registry()
+                    .and_then(|registry| registry.get(gid.as_slice()))
+                    .is_some(),
+                "accepted first join must not drop the room kbroad registry"
+            );
+        }
+
+        let merge_response = merge_ticket(
+            State(state),
+            headers,
+            encode_proto_request(&MergeTicketRequest {
+                room_id,
+                leaf_id: join_ticket_response.leaf_id.clone(),
+                intent: MergeTicketIntent::Refresh as i32,
+            }),
+        )
+        .await
+        .expect("refresh merge ticket must remain available after first bootstrapped join");
+        let merge_ticket_response: MergeTicketResponse =
+            decode_proto_response(merge_response).await;
+        assert_eq!(
+            merge_ticket_response.kbroad_public, kbroad_public,
+            "merge refresh must still expose the room kbroad key"
+        );
+    }
+
+    #[tokio::test]
     async fn members_handler_covers_validation_notfound_and_alias_metadata() {
         let state = test_api_state();
         let headers = message_auth_headers();
@@ -7729,10 +6615,13 @@ mod tests {
         let decoded: SendMessageResponse = decode_proto_response(response).await;
         assert_eq!(decoded.status, "stored");
 
-        let metadata = state.member_metadata.read().await;
-        let member = metadata.get(&leaf).expect("member metadata");
+        let indexes = state.room_state.read().await;
+        let member = indexes
+            .member_metadata()
+            .get(&leaf)
+            .expect("member metadata");
         assert!(member.last_seen_timestamp_ms >= member.join_timestamp_ms);
-        drop(metadata);
+        drop(indexes);
 
         let err = fetch_messages(
             State(state.clone()),
@@ -8361,7 +7250,7 @@ mod tests {
             }],
         );
 
-        prune_expired_messages(&mut store, 10_000, Duration::from_secs(1));
+        cityg_runtime::prune_expired_messages(&mut store, 10_000, Duration::from_secs(1));
 
         let retained = store.get(&weid_a).expect("weid_a should exist");
         assert_eq!(retained.len(), 2, "old message should be pruned");
@@ -8393,7 +7282,7 @@ mod tests {
             ],
         );
 
-        prune_expired_messages(&mut store, now_ms, Duration::from_secs(0));
+        cityg_runtime::prune_expired_messages(&mut store, now_ms, Duration::from_secs(0));
 
         let retained = store.get(&weid).expect("weid should exist");
         assert_eq!(retained.len(), 1, "only exact-now message should remain");
@@ -8421,26 +7310,37 @@ mod tests {
             .record_member_join(expired_leaf, expired_weid, 0)
             .await;
         {
-            let mut guard = state.bundles.write().await;
-            guard.insert(
+            let mut room_state = state.room_state.write().await;
+            room_state.store_bundle(
                 expired_weid,
                 StoredBundle {
                     bytes: vec![0xAA],
                     stored_at_ms: 0,
                 },
+                0,
+                state.message_retention,
+                MESSAGE_PRUNE_INTERVAL_MS,
             );
         }
 
         store_bundle_bytes(&state, fresh_weid, vec![0xBB]).await;
 
-        let bundles = state.bundles.read().await;
-        assert!(!bundles.contains_key(&expired_weid));
-        let fresh = bundles.get(&fresh_weid).expect("fresh bundle retained");
+        let mut room_state = state.room_state.write().await;
+        assert!(!room_state.contains_bundle(&expired_weid));
+        let fresh = room_state
+            .bundle(
+                &fresh_weid,
+                current_timestamp_ms(),
+                state.message_retention,
+                MESSAGE_PRUNE_INTERVAL_MS,
+            )
+            .expect("fresh bundle retained");
         assert_eq!(fresh.bytes, vec![0xBB]);
-        drop(bundles);
+        drop(room_state);
 
         assert!(state.epoch_scope_for_weid(&expired_weid).await.is_none());
-        assert!(!state.weid_to_leaf.read().await.contains_key(&expired_weid));
+        let indexes = state.room_state.read().await;
+        assert!(!indexes.weid_to_leaf().contains_key(&expired_weid));
     }
 
     #[tokio::test]
@@ -8652,9 +7552,9 @@ mod tests {
     #[test]
     fn should_prune_messages_throttles_global_pruning() {
         let due = AtomicU64::new(0);
-        assert!(should_prune_messages(&due, 1_000));
-        assert!(!should_prune_messages(&due, 1_100));
-        assert!(should_prune_messages(&due, 2_100));
+        assert!(runtime_should_prune(&due, 1_000, 1_000));
+        assert!(!runtime_should_prune(&due, 1_100, 1_000));
+        assert!(runtime_should_prune(&due, 2_100, 1_000));
     }
 
     #[test]
@@ -8694,20 +7594,14 @@ mod tests {
         let state = ApiState {
             server: server.clone(),
             server_lanes: Arc::new(vec![server]),
-            messages: Arc::new(RwLock::new(AHashMap::new())),
-            bundles: Arc::new(RwLock::new(AHashMap::new())),
+            room_state: Arc::new(RwLock::new(RoomVolatileState::default())),
             message_retention: Duration::from_secs(DEFAULT_FS_MESSAGE_RETENTION_SECS),
             fs_epoch_period_seconds: CityGConfig::default().protocol.fs_policy.h_seconds.max(1),
             freeze_counts: Arc::new(RwLock::new(BTreeMap::new())),
-            alias_registry: Arc::new(RwLock::new(AHashMap::new())),
-            member_metadata: Arc::new(RwLock::new(AHashMap::new())),
-            weid_to_leaf: Arc::new(RwLock::new(AHashMap::new())),
-            epoch_scopes: Arc::new(RwLock::new(AHashMap::new())),
+            alias_registry: Arc::new(RwLock::new(AliasRegistry::default())),
             notification_tx: broadcast::channel(4).0,
             // Burst of 1 so the second attempt triggers rate limit
             alias_rate_limiter: AliasRateLimiter::new(1, Duration::from_secs(60)),
-            message_prune_due_ms: Arc::new(AtomicU64::new(0)),
-            bundle_prune_due_ms: Arc::new(AtomicU64::new(0)),
             merge_ticket_cache: Arc::new(RwLock::new(AHashMap::new())),
             accept_epoch_limiter: EndpointConcurrencyLimiter::new(
                 DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT,

@@ -1,23 +1,24 @@
 [package]
-name = "cityg-server"
+name = "cityg-api-schema"
 version = "0.1.0"
 license = "MIT"
 authors = ["Sabri Haddouche"]
 edition.workspace = true
-
-[features]
-debug-api = []
+build = "build.rs"
+readme = "README.md"
 
 [dependencies]
+ciborium = "0.2"
 cityg-pqc = { path = "../cityg-pqc" }
+cityg-runtime = { path = "../cityg-runtime" }
+cityg-server = { path = "../cityg-server" }
+hex = "0.4"
 msphf-core = { path = "../msphf-core" }
 msphf-orchestrator = { path = "../msphf-orchestrator" }
-ciborium = { version = "0.2", features = ["std"] }
-pqcrypto-kyber = { version = "0.8", default-features = false, features = ["std"] }
-rand = "0.10"
-serde = { version = "1.0", features = ["derive"] }
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
-hex = "0.4"
+thiserror = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cityg-client = { path = "../cityg-client" }
@@ -28,5 +29,7 @@ cityg-client = { path = "../cityg-client", default-features = false }
 [dev-dependencies]
 pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
 pqcrypto-traits = "0.3"
-tempfile = "3.24"
-proptest = "1"
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3"

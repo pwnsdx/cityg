@@ -5,14 +5,18 @@ license = "MIT"
 authors = ["Sabri Haddouche"]
 edition.workspace = true
 
+[features]
+default = ["demo-fixtures"]
+demo-fixtures = ["dep:dirs", "dep:pqcrypto-dilithium", "dep:pqcrypto-traits"]
+
 [dependencies]
 msphf-core = { path = "../msphf-core" }
 msphf-orchestrator = { path = "../msphf-orchestrator" }
 ciborium = "0.2"
-pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
-pqcrypto-traits = "0.3"
+pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"], optional = true }
+pqcrypto-traits = { version = "0.3", optional = true }
 pqcrypto-kyber = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
-dirs = "6"
+dirs = { version = "6", optional = true }
 zeroize = "1"

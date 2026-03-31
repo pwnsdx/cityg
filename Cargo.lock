@@ -806,7 +806,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "itoa",
- "matchit",
+ "matchit 0.8.4",
  "memchr",
  "mime",
  "percent-encoding",
@@ -1327,6 +1327,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono"
+version = "0.4.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
+dependencies = [
+ "js-sys",
+ "num-traits",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "ciborium"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1375,8 +1386,11 @@ dependencies = [
  "chacha20poly1305",
  "ciborium",
  "cityg-api-client",
+ "cityg-api-schema",
  "cityg-client",
  "cityg-config",
+ "cityg-pqc",
+ "cityg-runtime",
  "cityg-server",
  "futures",
  "hex",
@@ -1388,9 +1402,7 @@ dependencies = [
  "pqcrypto-kyber",
  "pqcrypto-traits",
  "prost",
- "prost-build",
  "prost-types",
- "protoc-bin-vendored",
  "reqwest",
  "serde",
  "serde_bytes",
@@ -1413,6 +1425,7 @@ dependencies = [
  "axum",
  "bytes",
  "ciborium",
+ "cityg-api-schema",
  "cityg-client",
  "hex",
  "msphf-core",
@@ -1420,9 +1433,7 @@ dependencies = [
  "pqcrypto-dilithium",
  "pqcrypto-traits",
  "prost",
- "prost-build",
  "prost-types",
- "protoc-bin-vendored",
  "reqwest",
  "serde",
  "serde_bytes",
@@ -1430,6 +1441,28 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "cityg-api-schema"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "cityg-client",
+ "cityg-pqc",
+ "cityg-runtime",
+ "cityg-server",
+ "hex",
+ "msphf-core",
+ "msphf-orchestrator",
+ "pqcrypto-dilithium",
+ "pqcrypto-traits",
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1508,11 +1541,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "cityg-pqc"
+version = "0.1.0"
+dependencies = [
+ "fips204",
+ "pqcrypto-dilithium",
+ "pqcrypto-traits",
+ "rand_core 0.6.4",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cityg-runtime"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "ciborium",
+ "cityg-client",
+ "cityg-config",
+ "cityg-server",
+ "hex",
+ "msphf-core",
+ "msphf-orchestrator",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.18",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "cityg-server"
 version = "0.1.0"
 dependencies = [
  "ciborium",
  "cityg-client",
+ "cityg-pqc",
  "hex",
  "msphf-core",
  "msphf-orchestrator",
@@ -1544,6 +1607,33 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.23",
+]
+
+[[package]]
+name = "cityg-worker"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "ciborium",
+ "cityg-api-schema",
+ "cityg-client",
+ "cityg-config",
+ "cityg-pqc",
+ "cityg-runtime",
+ "cityg-server",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.2",
+ "hex",
+ "msphf-core",
+ "msphf-orchestrator",
+ "pqcrypto-kyber",
+ "prost",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wasm-bindgen",
+ "worker",
 ]
 
 [[package]]
@@ -2735,6 +2825,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9844ddc3a6e533d62bba727eb6c28b5d360921d5175e9ff0f1e621a5c590a4d5"
 
 [[package]]
+name = "fips204"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9fb5a367b9846933e271a3c2a992930743f82ae5e8cb7faa780715a80fa0b15"
+dependencies = [
+ "rand_core 0.6.4",
+ "sha2",
+ "sha3 0.10.8",
+ "zeroize",
+]
+
+[[package]]
 name = "fixedbitset"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3083,11 +3185,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.0",
  "wasip2",
  "wasip3",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -4461,6 +4565,12 @@ dependencies = [
 
 [[package]]
 name = "matchit"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
+
+[[package]]
+name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
@@ -4669,6 +4779,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
+ "cityg-pqc",
  "hex-literal",
  "pqcrypto-dilithium",
  "pqcrypto-traits",
@@ -4712,6 +4823,7 @@ dependencies = [
  "chacha20poly1305",
  "ciborium",
  "cityg-client",
+ "cityg-pqc",
  "clap 4.6.0",
  "criterion",
  "dudect-bencher",
@@ -6896,6 +7008,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "serde_bytes"
 version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8745,6 +8868,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-streams"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "wasmparser"
 version = "0.244.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9699,6 +9835,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "worker"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7267f3baa986254a8dace6f6a7c6ab88aef59f00c03aaad6749e048b5faaf6f6"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures-channel",
+ "futures-util",
+ "http",
+ "http-body",
+ "js-sys",
+ "matchit 0.7.3",
+ "pin-project",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "serde_urlencoded",
+ "tokio",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-streams 0.5.0",
+ "web-sys",
+ "worker-macros",
+ "worker-sys",
+]
+
+[[package]]
+name = "worker-macros"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7410081121531ec2fa111ab17b911efc601d7b6d590c0a92b847874ebeff0030"
+dependencies = [
+ "async-trait",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-macro-support",
+ "worker-sys",
+]
+
+[[package]]
+name = "worker-sys"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4777582bf8a04174a034cb336f3702eb0e5cb444a67fdaa4fd44454ff7e2dd95"
+dependencies = [
+ "cfg-if",
+ "js-sys",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10004,7 +10198,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
+ "wasm-streams 0.4.2",
  "web-sys",
  "windows-registry 0.4.0",
 ]

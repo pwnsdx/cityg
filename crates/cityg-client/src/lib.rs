@@ -2001,4 +2001,5 @@ mod tests {
     }
 }
 
+#[cfg(feature = "demo-fixtures")]
 pub mod demo;

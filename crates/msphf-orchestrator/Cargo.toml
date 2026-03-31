@@ -12,6 +12,7 @@ default = ["zkvrf-pq"]
 
 [dependencies]
 anchor-seed = { path = "../anchor-seed" }
+cityg-pqc = { path = "../cityg-pqc" }
 msphf-core = { path = "../msphf-core" }
 msphf-rlwe = { path = "../msphf-rlwe" }
 thiserror = "2.0"
@@ -37,10 +38,12 @@ chacha20poly1305 = { version = "0.10", features = ["std"] }
 blake3 = "1.8"
 subtle = "2.6"
 pqcrypto-kyber = "0.8.1"
-pqcrypto-traits = "0.3"
-pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
 smallvec = "1.15.1"
 ahash = { version = "0.8", features = ["serde"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pqcrypto-traits = "0.3"
+pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 dudect-bencher = "0.6"

@@ -1,0 +1,25 @@
+[package]
+name = "cityg-runtime"
+version = "0.1.0"
+license = "MIT"
+authors = ["Sabri Haddouche"]
+edition.workspace = true
+
+[dependencies]
+ahash = "0.8"
+ciborium = "0.2"
+cityg-config = { path = "../cityg-config" }
+cityg-server = { path = "../cityg-server" }
+hex = "0.4"
+msphf-core = { path = "../msphf-core" }
+msphf-orchestrator = { path = "../msphf-orchestrator" }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+thiserror = "2"
+unicode-normalization = "0.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cityg-client = { path = "../cityg-client" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cityg-client = { path = "../cityg-client", default-features = false }

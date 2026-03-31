@@ -36,12 +36,17 @@ use msphf_rlwe::{
     RlweProjectiveParams, derive_branch_material, derive_drbg_seed, hash_full as rlwe_hash_full,
     hash_proj as rlwe_hash_proj,
 };
-use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign};
-use pqcrypto_traits::sign::DetachedSignature;
 use proofs::{capss, srx_smallwood, zk_vrf};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
+
+#[cfg(target_arch = "wasm32")]
+use cityg_pqc::{MlDsa65SecretKey as MlDsaSecretKey, sign_ml_dsa_65_detached_signature};
+#[cfg(not(target_arch = "wasm32"))]
+use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, detached_sign};
+#[cfg(not(target_arch = "wasm32"))]
+use pqcrypto_traits::sign::DetachedSignature;
 
 mod accept;
 mod time;
@@ -118,6 +123,23 @@ pub(crate) const BARRIER_HP_CONTEXT_AUTHOR_LOCAL: &str = "author-local";
 pub(crate) const BARRIER_HP_CONTEXT_BARRIER_RECOVERY: &str = "barrier-recovery";
 const KBROAD_ML_KEM_ALG: &str = "ml-kem-768";
 const HP_AEAD_SUITE: &str = "chacha20-poly1305";
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sign_cityg_pop_bytes(
+    secret_key: &MlDsaSecretKey,
+    message: &[u8],
+) -> Result<Vec<u8>, MsphfError> {
+    Ok(detached_sign(message, secret_key).as_bytes().to_vec())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sign_cityg_pop_bytes(
+    secret_key: &MlDsaSecretKey,
+    message: &[u8],
+) -> Result<Vec<u8>, MsphfError> {
+    sign_ml_dsa_65_detached_signature(secret_key, message)
+        .map_err(|_| MsphfError::invalid_input("invalid ML-DSA secret key"))
+}
 const BARRIER_HP_INFO_PREFIX: &[u8] = b"city-g|hp/barrier/v1";
 const FS_STEP_INFO: &[u8] = b"city-g|fs/step|v1";
 pub const BASE_PROFILE_VERSION: &str = "v0.1.4";
@@ -2791,11 +2813,11 @@ pub fn joiner_kgen_or<'a>(
                     epoch: &we_epoch_id,
                 },
             )?;
-            let pop_sig = detached_sign(&pop_msg, pop.secret_key);
+            let pop_sig = sign_cityg_pop_bytes(pop.secret_key, &pop_msg)?;
             header_map.insert(107, Value::Text(pop.algorithm.to_string()));
             header_map.insert(108, Value::Bytes(pop.public_key.to_vec()));
-            header_map.insert(109, Value::Bytes(pop_sig.as_bytes().to_vec()));
-            let (rho_raw, rho_commit) = derive_rho_from_pop(pop_sig.as_bytes(), &xk_hash)?;
+            header_map.insert(109, Value::Bytes(pop_sig.clone()));
+            let (rho_raw, rho_commit) = derive_rho_from_pop(&pop_sig, &xk_hash)?;
             (rho_raw, rho_commit)
         }
         None => {
