@@ -8,9 +8,9 @@ use std::{
 use cityg_api_schema::{
     API_PROFILE_VERSION, BundleCborRequestDecodeError, ExpelMemberTicketRequestValidationError,
     FetchMessagesRequestValidationError, FetchPublicTreeRequestDecodeError,
-    GetBundleRequestValidationError, LookupMergeAcceptanceRequestDecodeError,
-    MAX_BARRIER_HELPER_PAGE_ENTRIES, MembersRequestValidationError,
-    MergeTicketRequestValidationError, PreparedIdentityBindingError,
+    GetBundleRequestValidationError, JoinTicketRequestPreparationError,
+    LookupMergeAcceptanceRequestDecodeError, MAX_BARRIER_HELPER_PAGE_ENTRIES,
+    MembersRequestValidationError, MergeTicketRequestValidationError,
     ResolveRevokedLeavesRequestDecodeError, RoomAdminProofValidationError,
     RoomAdminRequestValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
     RoomScopedRoutingKey, SearchMembersRequestValidationError, SendMessageRequestValidationError,
@@ -25,12 +25,13 @@ use cityg_api_schema::{
     encode_prepared_resolved_revoked_leaves_response, encode_room_admin_leaf_pair_payload,
     encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
     encode_search_members_response, extract_room_scoped_request_target, pb,
-    pb_member as schema_pb_member, prepare_identity_binding, room_admin_proof_replay_key,
-    validate_bootstrap_room_request, validate_expel_member_ticket_request,
-    validate_fetch_messages_request, validate_list_room_admins_request, validate_members_request,
-    validate_merge_ticket_request, validate_room_admin_mutation_request,
-    validate_rotate_room_kbroad_request, validate_search_members_request,
-    validate_send_message_request, verify_room_admin_proof, verify_room_admin_proof_payload,
+    pb_member as schema_pb_member, prepare_join_ticket_request_for_gid,
+    room_admin_proof_replay_key, validate_bootstrap_room_request,
+    validate_expel_member_ticket_request, validate_fetch_messages_request,
+    validate_list_room_admins_request, validate_members_request, validate_merge_ticket_request,
+    validate_room_admin_mutation_request, validate_rotate_room_kbroad_request,
+    validate_search_members_request, validate_send_message_request, verify_room_admin_proof,
+    verify_room_admin_proof_payload,
 };
 use cityg_client::CityGError as ClientError;
 use cityg_runtime::{
@@ -1502,20 +1503,10 @@ impl CloudflareRoomDurableObject {
             }
         };
         let gid = route_gid(&target)?;
-        let prepared_binding =
-            match prepare_identity_binding(&gid, request.identity_binding.as_ref()) {
-                Ok(binding) => binding,
-                Err(PreparedIdentityBindingError::Validation(error)) => {
-                    return Response::error(error.to_string(), 400);
-                }
-                Err(PreparedIdentityBindingError::ComputeLeaf(error)) => {
-                    return Response::error(format!("failed to compute leaf_id: {error}"), 500);
-                }
-            };
-        let requested_leaf_id = prepared_binding
-            .as_ref()
-            .map(|binding| binding.requested_leaf_id);
-        let confirmed_binding = prepared_binding.map(|binding| binding.confirmed_binding);
+        let request = match prepare_join_ticket_request_for_gid(gid, request) {
+            Ok(request) => request,
+            Err(error) => return join_ticket_request_preparation_error_response(error),
+        };
 
         let checkpoint = self.load_checkpoint_for_gid(gid)?;
         let bootstrap = configured_room_bootstrap(&self.env)?;
@@ -1537,7 +1528,7 @@ impl CloudflareRoomDurableObject {
         let prepared = match cityg_runtime::prepare_join_ticket(
             &mut server,
             &gid,
-            requested_leaf_id,
+            request.requested_leaf_id,
             SystemTime::now(),
             bootstrap.fs_epoch_period_seconds,
             API_PROFILE_VERSION,
@@ -1554,7 +1545,7 @@ impl CloudflareRoomDurableObject {
             current_timestamp_ms(),
         )?;
 
-        if let Some(binding) = confirmed_binding.as_ref() {
+        if let Some(binding) = request.confirmed_binding.as_ref() {
             match register_alias_binding(
                 &self.env,
                 binding.alias.as_str(),
@@ -1578,7 +1569,7 @@ impl CloudflareRoomDurableObject {
 
         protobuf_response_bytes(encode_prepared_join_ticket_response(
             prepared,
-            confirmed_binding,
+            request.confirmed_binding,
         ))
     }
 
@@ -2984,6 +2975,16 @@ fn search_members_request_validation_error_response(
     err: SearchMembersRequestValidationError,
 ) -> Result<Response> {
     Response::error(err.to_string(), 400)
+}
+
+fn join_ticket_request_preparation_error_response(
+    err: JoinTicketRequestPreparationError,
+) -> Result<Response> {
+    if err.is_client_error() {
+        Response::error(err.api_message().as_ref(), 400)
+    } else {
+        Response::error(err.api_message().into_owned(), 500)
+    }
 }
 
 fn send_message_request_validation_error_response(

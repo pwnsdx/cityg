@@ -33,7 +33,7 @@ use cityg_api_schema::{
     API_PROFILE_VERSION, BundleCborRequestDecodeError, ExpelMemberTicketRequestValidationError,
     FetchMessagesRequestValidationError, FetchPublicTreeRequestDecodeError,
     FullVerificationWitnessRequestDecodeError, GetBundleRequestValidationError,
-    IdentityBindingValidationError, LookupMergeAcceptanceRequestDecodeError,
+    JoinTicketRequestPreparationError, LookupMergeAcceptanceRequestDecodeError,
     MAX_BARRIER_HELPER_PAGE_ENTRIES, MembersRequestValidationError,
     MergeTicketRequestValidationError, PreparedIdentityBindingError,
     ResolveRevokedLeavesRequestDecodeError, RoomAdminProofValidationError,
@@ -53,7 +53,7 @@ use cityg_api_schema::{
     encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
     encode_search_members_response, encode_telemetry_snapshot_response,
     encode_window_snapshot_response, pb, pb_member as schema_pb_member,
-    prepare_identity_binding as schema_prepare_identity_binding,
+    prepare_join_ticket_request as schema_prepare_join_ticket_request,
     room_admin_proof_replay_key as schema_room_admin_proof_replay_key,
     validate_bootstrap_room_request as schema_validate_bootstrap_room_request,
     validate_expel_member_ticket_request as schema_validate_expel_member_ticket_request,
@@ -877,6 +877,29 @@ fn map_search_members_request_validation_error(
     }
 }
 
+fn map_join_ticket_request_preparation_error(err: JoinTicketRequestPreparationError) -> ApiError {
+    match err {
+        JoinTicketRequestPreparationError::MissingRoomId => {
+            ApiError::InvalidRequest("room_id must be provided")
+        }
+        JoinTicketRequestPreparationError::InvalidRoomIdEncoding => {
+            ApiError::InvalidRequest("room_id must be 64 hex characters")
+        }
+        JoinTicketRequestPreparationError::InvalidRoomIdLength => {
+            ApiError::InvalidRequest("room_id must be 32 bytes")
+        }
+        JoinTicketRequestPreparationError::RoomIdMismatch => {
+            ApiError::InvalidRequest("request room_id does not match routed room")
+        }
+        JoinTicketRequestPreparationError::IdentityBinding(
+            PreparedIdentityBindingError::Validation(validation),
+        ) => ApiError::InvalidRequest(validation.api_message()),
+        JoinTicketRequestPreparationError::IdentityBinding(
+            PreparedIdentityBindingError::ComputeLeaf(message),
+        ) => ApiError::server_message(format!("failed to compute leaf_id: {message}")),
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorResponse<'a> {
     message: &'a str,
@@ -1429,29 +1452,8 @@ fn map_full_verification_witness_preparation_error(
 /// The signature should be over CBOR([alias, pop_public_key])
 #[cfg(test)]
 fn verify_identity_binding(binding: &IdentityBinding) -> Result<(), ApiError> {
-    schema_verify_identity_binding(binding).map_err(|error| match error {
-        IdentityBindingValidationError::InvalidPublicKeyLength => {
-            ApiError::InvalidRequest("invalid pop_public_key length")
-        }
-        IdentityBindingValidationError::InvalidSignatureLength => {
-            ApiError::InvalidRequest("invalid signature length")
-        }
-        IdentityBindingValidationError::EmptyAlias => {
-            ApiError::InvalidRequest("alias cannot be empty")
-        }
-        IdentityBindingValidationError::EncodeMessage => {
-            ApiError::InvalidRequest("failed to encode message for verification")
-        }
-        IdentityBindingValidationError::InvalidPublicKey => {
-            ApiError::InvalidRequest("invalid pop_public_key")
-        }
-        IdentityBindingValidationError::InvalidSignature => {
-            ApiError::InvalidRequest("invalid signature")
-        }
-        IdentityBindingValidationError::VerificationFailed => {
-            ApiError::InvalidRequest("signature verification failed")
-        }
-    })
+    schema_verify_identity_binding(binding)
+        .map_err(|error| ApiError::InvalidRequest(error.api_message()))
 }
 
 fn verify_room_admin_proof_payload(
@@ -1929,50 +1931,16 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
     }
     enforce_expensive_rate_limit(&state, "join_ticket", join_ticket_rate_limit_key(&request))
         .await?;
-    let gid = parse_gid(&request.room_id)?;
-
-    // Verify identity binding if provided; persist TOFU alias only after ticket succeeds.
-    let prepared_binding = schema_prepare_identity_binding(&gid, request.identity_binding.as_ref())
-        .map_err(|error| match error {
-            PreparedIdentityBindingError::Validation(validation) => match validation {
-                IdentityBindingValidationError::InvalidPublicKeyLength => {
-                    ApiError::InvalidRequest("invalid pop_public_key length")
-                }
-                IdentityBindingValidationError::InvalidSignatureLength => {
-                    ApiError::InvalidRequest("invalid signature length")
-                }
-                IdentityBindingValidationError::EmptyAlias => {
-                    ApiError::InvalidRequest("alias cannot be empty")
-                }
-                IdentityBindingValidationError::EncodeMessage => {
-                    ApiError::InvalidRequest("failed to encode message for verification")
-                }
-                IdentityBindingValidationError::InvalidPublicKey => {
-                    ApiError::InvalidRequest("invalid pop_public_key")
-                }
-                IdentityBindingValidationError::InvalidSignature => {
-                    ApiError::InvalidRequest("invalid signature")
-                }
-                IdentityBindingValidationError::VerificationFailed => {
-                    ApiError::InvalidRequest("signature verification failed")
-                }
-            },
-            PreparedIdentityBindingError::ComputeLeaf(message) => {
-                ApiError::server_message(format!("failed to compute leaf_id: {message}"))
-            }
-        })?;
-    let requested_leaf_id = prepared_binding
-        .as_ref()
-        .map(|binding| binding.requested_leaf_id);
-    let confirmed_binding = prepared_binding.map(|binding| binding.confirmed_binding);
+    let request = schema_prepare_join_ticket_request(request)
+        .map_err(map_join_ticket_request_preparation_error)?;
 
     let prepared = {
-        let lane = state.server_for_gid(&gid);
+        let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
         match runtime_prepare_join_ticket(
             &mut guard,
-            &gid,
-            requested_leaf_id,
+            &request.gid,
+            request.requested_leaf_id,
             SystemTime::now(),
             state.fs_epoch_period_seconds,
             API_PROFILE_VERSION,
@@ -1986,7 +1954,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
     };
     let ticket_leaf_id = prepared.bundle.leaf_id;
 
-    if let Some(binding) = confirmed_binding.as_ref() {
+    if let Some(binding) = request.confirmed_binding.as_ref() {
         state
             .register_alias(
                 &binding.alias,
@@ -1997,7 +1965,7 @@ async fn join_ticket(State(state): State<ApiState>, body: Bytes) -> Result<Respo
     }
     metrics::counter!("cityg_join_ticket_total", "result" => "ok").increment(1);
     Ok(protobuf_response_bytes(
-        encode_prepared_join_ticket_response(prepared, confirmed_binding),
+        encode_prepared_join_ticket_response(prepared, request.confirmed_binding),
     ))
 }
 

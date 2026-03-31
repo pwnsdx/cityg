@@ -5,7 +5,7 @@ pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/cityg.api.v1.rs"));
 }
 
-use std::convert::TryInto;
+use std::{borrow::Cow, convert::TryInto};
 
 use ciborium::ser::into_writer;
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
@@ -50,6 +50,15 @@ pub const ML_KEM_768_PUBLIC_KEY_BYTES: usize = 1_184;
 pub struct PreparedIdentityBinding {
     pub confirmed_binding: pb::IdentityBinding,
     pub requested_leaf_id: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedJoinTicketRequest {
+    pub room_id: String,
+    pub alias: String,
+    pub gid: [u8; 32],
+    pub confirmed_binding: Option<pb::IdentityBinding>,
+    pub requested_leaf_id: Option<[u8; 32]>,
 }
 
 /// Encode a prepared join-ticket response using the shared protobuf schema.
@@ -558,12 +567,82 @@ pub enum IdentityBindingValidationError {
     VerificationFailed,
 }
 
+impl IdentityBindingValidationError {
+    #[must_use]
+    pub const fn api_message(&self) -> &'static str {
+        match self {
+            Self::InvalidPublicKeyLength => "invalid pop_public_key length",
+            Self::InvalidSignatureLength => "invalid signature length",
+            Self::EmptyAlias => "alias cannot be empty",
+            Self::EncodeMessage => "failed to encode message for verification",
+            Self::InvalidPublicKey => "invalid pop_public_key",
+            Self::InvalidSignature => "invalid signature",
+            Self::VerificationFailed => "signature verification failed",
+        }
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PreparedIdentityBindingError {
     #[error(transparent)]
     Validation(#[from] IdentityBindingValidationError),
     #[error("failed to compute leaf_id: {0}")]
     ComputeLeaf(String),
+}
+
+impl PreparedIdentityBindingError {
+    #[must_use]
+    pub const fn is_client_error(&self) -> bool {
+        matches!(self, Self::Validation(_))
+    }
+
+    #[must_use]
+    pub fn api_message(&self) -> Cow<'static, str> {
+        match self {
+            Self::Validation(error) => Cow::Borrowed(error.api_message()),
+            Self::ComputeLeaf(message) => {
+                Cow::Owned(format!("failed to compute leaf_id: {message}"))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum JoinTicketRequestPreparationError {
+    #[error("room_id must be provided")]
+    MissingRoomId,
+    #[error("room_id must be 64 hex characters")]
+    InvalidRoomIdEncoding,
+    #[error("room_id must be 32 bytes")]
+    InvalidRoomIdLength,
+    #[error("request room_id does not match routed room")]
+    RoomIdMismatch,
+    #[error(transparent)]
+    IdentityBinding(#[from] PreparedIdentityBindingError),
+}
+
+impl JoinTicketRequestPreparationError {
+    #[must_use]
+    pub const fn is_client_error(&self) -> bool {
+        match self {
+            Self::MissingRoomId
+            | Self::InvalidRoomIdEncoding
+            | Self::InvalidRoomIdLength
+            | Self::RoomIdMismatch => true,
+            Self::IdentityBinding(error) => error.is_client_error(),
+        }
+    }
+
+    #[must_use]
+    pub fn api_message(&self) -> Cow<'static, str> {
+        match self {
+            Self::MissingRoomId => Cow::Borrowed("room_id must be provided"),
+            Self::InvalidRoomIdEncoding => Cow::Borrowed("room_id must be 64 hex characters"),
+            Self::InvalidRoomIdLength => Cow::Borrowed("room_id must be 32 bytes"),
+            Self::RoomIdMismatch => Cow::Borrowed("request room_id does not match routed room"),
+            Self::IdentityBinding(error) => error.api_message(),
+        }
+    }
 }
 
 /// Verifies an identity binding signature over `CBOR([alias, pop_public_key])`.
@@ -632,6 +711,55 @@ pub fn prepare_identity_binding(
         confirmed_binding: binding.clone(),
         requested_leaf_id,
     }))
+}
+
+pub fn prepare_join_ticket_request(
+    request: pb::JoinTicketRequest,
+) -> Result<PreparedJoinTicketRequest, JoinTicketRequestPreparationError> {
+    prepare_join_ticket_request_inner(None, request)
+}
+
+pub fn prepare_join_ticket_request_for_gid(
+    gid: [u8; 32],
+    request: pb::JoinTicketRequest,
+) -> Result<PreparedJoinTicketRequest, JoinTicketRequestPreparationError> {
+    prepare_join_ticket_request_inner(Some(gid), request)
+}
+
+fn prepare_join_ticket_request_inner(
+    expected_gid: Option<[u8; 32]>,
+    request: pb::JoinTicketRequest,
+) -> Result<PreparedJoinTicketRequest, JoinTicketRequestPreparationError> {
+    if request.room_id.is_empty() {
+        return Err(JoinTicketRequestPreparationError::MissingRoomId);
+    }
+
+    let gid = parse_join_ticket_room_id(request.room_id.as_str())?;
+    if expected_gid.is_some_and(|expected| expected != gid) {
+        return Err(JoinTicketRequestPreparationError::RoomIdMismatch);
+    }
+
+    let prepared_binding = prepare_identity_binding(&gid, request.identity_binding.as_ref())?;
+    let requested_leaf_id = prepared_binding
+        .as_ref()
+        .map(|binding| binding.requested_leaf_id);
+    let confirmed_binding = prepared_binding.map(|binding| binding.confirmed_binding);
+
+    Ok(PreparedJoinTicketRequest {
+        room_id: request.room_id,
+        alias: request.alias,
+        gid,
+        confirmed_binding,
+        requested_leaf_id,
+    })
+}
+
+fn parse_join_ticket_room_id(room_id: &str) -> Result<[u8; 32], JoinTicketRequestPreparationError> {
+    let bytes = hex::decode(room_id)
+        .map_err(|_| JoinTicketRequestPreparationError::InvalidRoomIdEncoding)?;
+    bytes
+        .try_into()
+        .map_err(|_| JoinTicketRequestPreparationError::InvalidRoomIdLength)
 }
 
 #[must_use]
@@ -2487,6 +2615,88 @@ mod tests {
         assert_eq!(merge.pending_barrier_version, 31);
         assert_eq!(merge.pending_barrier_update_digest, [0x32; 32]);
         assert_eq!(merge.pending_we_epoch_id, [0x33; 32]);
+    }
+
+    #[test]
+    fn prepare_join_ticket_request_projects_gid_and_binding() {
+        let (pop_pk, pop_sk) = dilithium5::keypair();
+        let binding = signed_identity_binding("alice", pop_pk.as_bytes(), &pop_sk);
+        let prepared = prepare_join_ticket_request(pb::JoinTicketRequest {
+            room_id: hex::encode(DEMO_GID),
+            alias: "alice".to_string(),
+            identity_binding: Some(binding.clone()),
+        })
+        .expect("prepare join ticket request");
+
+        assert_eq!(prepared.room_id, hex::encode(DEMO_GID));
+        assert_eq!(prepared.alias, "alice");
+        assert_eq!(prepared.gid, DEMO_GID);
+        assert_eq!(prepared.confirmed_binding, Some(binding.clone()));
+        assert_eq!(
+            prepared.requested_leaf_id,
+            Some(
+                msphf_orchestrator::compute_leaf_id(
+                    msphf_orchestrator::LeafIdMode::PerGroup,
+                    &DEMO_GID,
+                    ML_DSA_65_ALGORITHM,
+                    pop_pk.as_bytes(),
+                )
+                .expect("compute leaf")
+            )
+        );
+    }
+
+    #[test]
+    fn prepare_join_ticket_request_rejects_bad_room_id_binding_and_mismatch() {
+        assert_eq!(
+            prepare_join_ticket_request(pb::JoinTicketRequest::default()),
+            Err(JoinTicketRequestPreparationError::MissingRoomId)
+        );
+        assert_eq!(
+            prepare_join_ticket_request(pb::JoinTicketRequest {
+                room_id: "not-hex".to_string(),
+                alias: "alice".to_string(),
+                identity_binding: None,
+            }),
+            Err(JoinTicketRequestPreparationError::InvalidRoomIdEncoding)
+        );
+        assert_eq!(
+            prepare_join_ticket_request(pb::JoinTicketRequest {
+                room_id: hex::encode([0x11; 31]),
+                alias: "alice".to_string(),
+                identity_binding: None,
+            }),
+            Err(JoinTicketRequestPreparationError::InvalidRoomIdLength)
+        );
+
+        let invalid_binding = pb::IdentityBinding {
+            alias: String::new(),
+            pop_public_key: vec![0x22; ML_DSA_65_PUBLIC_KEY_BYTES],
+            signature: vec![0x33; ML_DSA_65_SIGNATURE_BYTES],
+        };
+        assert_eq!(
+            prepare_join_ticket_request(pb::JoinTicketRequest {
+                room_id: hex::encode(DEMO_GID),
+                alias: "alice".to_string(),
+                identity_binding: Some(invalid_binding),
+            }),
+            Err(JoinTicketRequestPreparationError::IdentityBinding(
+                PreparedIdentityBindingError::Validation(
+                    IdentityBindingValidationError::EmptyAlias
+                )
+            ))
+        );
+        assert_eq!(
+            prepare_join_ticket_request_for_gid(
+                [0x44; 32],
+                pb::JoinTicketRequest {
+                    room_id: hex::encode(DEMO_GID),
+                    alias: "alice".to_string(),
+                    identity_binding: None,
+                }
+            ),
+            Err(JoinTicketRequestPreparationError::RoomIdMismatch)
+        );
     }
 
     fn signed_identity_binding(
