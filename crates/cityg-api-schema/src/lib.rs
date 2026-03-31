@@ -1021,6 +1021,16 @@ pub struct ValidatedGetBundleRequest {
     pub we_epoch_id: [u8; 32],
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum BundleCborRequestDecodeError {
+    #[error("bundle_cbor must be provided")]
+    MissingBundleCbor,
+    #[error("invalid bundle encoding")]
+    InvalidBundleEncoding,
+    #[error("{0}")]
+    DecodeFailure(String),
+}
+
 fn validate_room_kbroad_request(
     room_id: String,
     kbroad_public: Vec<u8>,
@@ -1260,6 +1270,20 @@ pub fn validate_get_bundle_request(
         .map_err(|_| GetBundleRequestValidationError::InvalidWeEpochId)?;
 
     Ok(ValidatedGetBundleRequest { we_epoch_id })
+}
+
+pub fn decode_bundle_cbor_request(
+    bundle_cbor: &[u8],
+    require_present: bool,
+) -> Result<ClientEpochBundle, BundleCborRequestDecodeError> {
+    if require_present && bundle_cbor.is_empty() {
+        return Err(BundleCborRequestDecodeError::MissingBundleCbor);
+    }
+
+    ClientEpochBundle::from_cbor(bundle_cbor).map_err(|err| match err {
+        ClientError::InvalidInput(_) => BundleCborRequestDecodeError::InvalidBundleEncoding,
+        other => BundleCborRequestDecodeError::DecodeFailure(other.to_string()),
+    })
 }
 
 /// Verify a room-admin proof over `(operation, room_id, payload)`.
@@ -2138,6 +2162,28 @@ mod tests {
             }),
             Err(GetBundleRequestValidationError::InvalidWeEpochId)
         );
+    }
+
+    #[test]
+    fn decode_bundle_cbor_request_handles_valid_missing_and_invalid_inputs() {
+        let bundle = demo_bundle("alice").expect("demo bundle");
+        let bundle_cbor = bundle.to_cbor().expect("bundle cbor");
+        let decoded =
+            decode_bundle_cbor_request(&bundle_cbor, true).expect("decode bundle request");
+        assert_eq!(decoded.gid(), bundle.gid());
+
+        assert!(matches!(
+            decode_bundle_cbor_request(&[], true),
+            Err(BundleCborRequestDecodeError::MissingBundleCbor)
+        ));
+        assert!(matches!(
+            decode_bundle_cbor_request(&[], false),
+            Err(BundleCborRequestDecodeError::InvalidBundleEncoding)
+        ));
+        assert!(matches!(
+            decode_bundle_cbor_request(&[0xFF], true),
+            Err(BundleCborRequestDecodeError::InvalidBundleEncoding)
+        ));
     }
 
     #[test]

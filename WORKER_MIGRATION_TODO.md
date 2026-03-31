@@ -54,6 +54,8 @@ runtime code.
   Native `cityg-api` and Worker `cloudflare` now share the request-side `we_epoch_id`, `leaf_id`, `sender`, and ciphertext size/presence validation for `/v1/messages` and `/v1/send_message`, so only auth, routing, storage, and room authorization remain adapter-local.
 - [x] Move `get_bundle` request validation into `cityg-api-schema`.
   Native `cityg-api` and Worker `cloudflare` now share the fixed-width `we_epoch_id` validation for `/v1/bundle`, so only auth, routing, rate limiting, and bundle lookup remain adapter-local.
+- [x] Move bundle-CBOR request decoding into `cityg-api-schema`.
+  Native `cityg-api` and Worker `cloudflare` now share the request-side `bundle_cbor` missing/invalid decode path for `/v1/accept_epoch` and `/v1/pivot/refresh`, so only route-local gid handling and state-transition execution remain adapter-local.
 - [x] Define the shared Durable Object storage contract for authoritative room checkpoints and volatile room snapshots.
 - [x] Add room-volatile snapshot/hydration helpers aligned with the shared checkpoint contract.
 - [x] Implement the first Durable Object-backed `RoomStateStore`.

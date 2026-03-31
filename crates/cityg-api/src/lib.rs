@@ -30,15 +30,17 @@ use bytes::BytesMut;
 #[cfg(test)]
 use cityg_api_schema::verify_identity_binding as schema_verify_identity_binding;
 use cityg_api_schema::{
-    API_PROFILE_VERSION, BarrierHelperRequestDecodeError, ExpelMemberTicketRequestValidationError,
-    FetchMessagesRequestValidationError, FullVerificationWitnessRequestDecodeError,
-    GetBundleRequestValidationError, IdentityBindingValidationError,
-    MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
-    MergeTicketRequestValidationError, PreparedIdentityBindingError, RoomAdminProofValidationError,
-    RoomAdminRequestValidationError, SendMessageRequestValidationError,
+    API_PROFILE_VERSION, BarrierHelperRequestDecodeError, BundleCborRequestDecodeError,
+    ExpelMemberTicketRequestValidationError, FetchMessagesRequestValidationError,
+    FullVerificationWitnessRequestDecodeError, GetBundleRequestValidationError,
+    IdentityBindingValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE,
+    MEMBERS_MAX_PAGE_SIZE, MergeTicketRequestValidationError, PreparedIdentityBindingError,
+    RoomAdminProofValidationError, RoomAdminRequestValidationError,
+    SendMessageRequestValidationError,
     decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
     decode_barrier_resolve_revoked_leaves_request as schema_decode_barrier_resolve_revoked_leaves_request,
+    decode_bundle_cbor_request as schema_decode_bundle_cbor_request,
     decode_full_verification_witness_request as schema_decode_full_verification_witness_request,
     encode_bootstrap_room_response, encode_full_verification_witness_response,
     encode_list_room_admins_response, encode_members_response,
@@ -826,6 +828,18 @@ fn map_get_bundle_request_validation_error(err: GetBundleRequestValidationError)
     }
 }
 
+fn map_bundle_cbor_request_decode_error(err: BundleCborRequestDecodeError) -> ApiError {
+    match err {
+        BundleCborRequestDecodeError::MissingBundleCbor => {
+            ApiError::InvalidRequest("bundle_cbor must be provided")
+        }
+        BundleCborRequestDecodeError::InvalidBundleEncoding => {
+            ApiError::InvalidRequest("invalid bundle encoding")
+        }
+        BundleCborRequestDecodeError::DecodeFailure(message) => ApiError::server_message(message),
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorResponse<'a> {
     message: &'a str,
@@ -1438,13 +1452,8 @@ fn encode_room_admin_leaf_pair_payload(
 async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
     let _permit = state.accept_epoch_limiter.try_acquire()?;
     let request = AcceptEpochRequest::decode(body)?;
-    let bundle = match ClientEpochBundle::from_cbor(&request.bundle_cbor) {
-        Ok(bundle) => bundle,
-        Err(ClientError::InvalidInput(_)) => {
-            return Err(ApiError::InvalidRequest("invalid bundle encoding"));
-        }
-        Err(err) => return Err(ApiError::from(err)),
-    };
+    let bundle = schema_decode_bundle_cbor_request(&request.bundle_cbor, false)
+        .map_err(map_bundle_cbor_request_decode_error)?;
     enforce_expensive_rate_limit(&state, "accept_epoch", accept_epoch_rate_limit_key(&bundle))
         .await?;
 
@@ -3312,17 +3321,8 @@ async fn refresh_pivot(
 ) -> Result<Response, ApiError> {
     enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = RefreshPivotRequest::decode(body)?;
-    if request.bundle_cbor.is_empty() {
-        return Err(ApiError::InvalidRequest("bundle_cbor must be provided"));
-    }
-
-    let bundle = match ClientEpochBundle::from_cbor(&request.bundle_cbor) {
-        Ok(bundle) => bundle,
-        Err(ClientError::InvalidInput(_)) => {
-            return Err(ApiError::InvalidRequest("invalid bundle encoding"));
-        }
-        Err(err) => return Err(ApiError::server_message(err.to_string())),
-    };
+    let bundle = schema_decode_bundle_cbor_request(&request.bundle_cbor, true)
+        .map_err(map_bundle_cbor_request_decode_error)?;
     let gid: [u8; 32] = bundle
         .gid()
         .try_into()

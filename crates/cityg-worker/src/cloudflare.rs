@@ -6,29 +6,31 @@ use std::{
 };
 
 use cityg_api_schema::{
-    API_PROFILE_VERSION, BarrierHelperRequestDecodeError, ExpelMemberTicketRequestValidationError,
-    FetchMessagesRequestValidationError, GetBundleRequestValidationError,
-    MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
-    MergeTicketRequestValidationError, PreparedIdentityBindingError, RoomAdminProofValidationError,
-    RoomAdminRequestValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
-    RoomScopedRoutingKey, SendMessageRequestValidationError,
+    API_PROFILE_VERSION, BarrierHelperRequestDecodeError, BundleCborRequestDecodeError,
+    ExpelMemberTicketRequestValidationError, FetchMessagesRequestValidationError,
+    GetBundleRequestValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE,
+    MEMBERS_MAX_PAGE_SIZE, MergeTicketRequestValidationError, PreparedIdentityBindingError,
+    RoomAdminProofValidationError, RoomAdminRequestValidationError, RoomScopedApiRoute,
+    RoomScopedRequestTarget, RoomScopedRoutingKey, SendMessageRequestValidationError,
     decode_barrier_fetch_public_tree_request, decode_barrier_lookup_merge_acceptance_request,
-    decode_barrier_resolve_revoked_leaves_request, decode_full_verification_witness_request,
-    encode_bootstrap_room_response, encode_full_verification_witness_response,
-    encode_list_room_admins_response, encode_members_response,
-    encode_prepared_barrier_public_tree_response, encode_prepared_join_ticket_response,
-    encode_prepared_merge_acceptance_lookup_response, encode_prepared_merge_ticket_response,
-    encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
-    encode_room_admin_leaf_pair_payload, encode_room_admin_mutation_response,
-    encode_rotate_room_kbroad_response, encode_search_members_response,
-    extract_room_scoped_request_target, pb, pb_member as schema_pb_member,
-    prepare_identity_binding, room_admin_proof_replay_key, validate_bootstrap_room_request,
-    validate_expel_member_ticket_request, validate_fetch_messages_request,
-    validate_list_room_admins_request, validate_merge_ticket_request,
-    validate_room_admin_mutation_request, validate_rotate_room_kbroad_request,
-    validate_send_message_request, verify_room_admin_proof, verify_room_admin_proof_payload,
+    decode_barrier_resolve_revoked_leaves_request,
+    decode_bundle_cbor_request as schema_decode_bundle_cbor_request,
+    decode_full_verification_witness_request, encode_bootstrap_room_response,
+    encode_full_verification_witness_response, encode_list_room_admins_response,
+    encode_members_response, encode_prepared_barrier_public_tree_response,
+    encode_prepared_join_ticket_response, encode_prepared_merge_acceptance_lookup_response,
+    encode_prepared_merge_ticket_response, encode_prepared_resolved_joins_response,
+    encode_prepared_resolved_revoked_leaves_response, encode_room_admin_leaf_pair_payload,
+    encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
+    encode_search_members_response, extract_room_scoped_request_target, pb,
+    pb_member as schema_pb_member, prepare_identity_binding, room_admin_proof_replay_key,
+    validate_bootstrap_room_request, validate_expel_member_ticket_request,
+    validate_fetch_messages_request, validate_list_room_admins_request,
+    validate_merge_ticket_request, validate_room_admin_mutation_request,
+    validate_rotate_room_kbroad_request, validate_send_message_request, verify_room_admin_proof,
+    verify_room_admin_proof_payload,
 };
-use cityg_client::{CityGError as ClientError, ClientEpochBundle};
+use cityg_client::CityGError as ClientError;
 use cityg_runtime::{
     AcceptedRoomEpoch, AliasLeafLookup, AliasRegistrationError, AliasRegistry,
     BarrierPaginationError, RoomAcceptEpochError, RoomAuthorizationError, RoomBarrierEnvelopeError,
@@ -432,12 +434,9 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        let bundle = match ClientEpochBundle::from_cbor(&request.bundle_cbor) {
+        let bundle = match schema_decode_bundle_cbor_request(&request.bundle_cbor, false) {
             Ok(bundle) => bundle,
-            Err(ClientError::InvalidInput(_)) => {
-                return Response::error("invalid bundle encoding", 400);
-            }
-            Err(error) => return Response::error(error.to_string(), 500),
+            Err(error) => return bundle_cbor_request_decode_error_response(error),
         };
         let gid = route_gid(&target)?;
         let checkpoint = self.load_checkpoint_for_gid(gid)?;
@@ -1695,16 +1694,9 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        if request.bundle_cbor.is_empty() {
-            return Response::error("bundle_cbor must be provided", 400);
-        }
-
-        let bundle = match ClientEpochBundle::from_cbor(&request.bundle_cbor) {
+        let bundle = match schema_decode_bundle_cbor_request(&request.bundle_cbor, true) {
             Ok(bundle) => bundle,
-            Err(ClientError::InvalidInput(_)) => {
-                return Response::error("invalid bundle encoding", 400);
-            }
-            Err(error) => return Response::error(error.to_string(), 500),
+            Err(error) => return bundle_cbor_request_decode_error_response(error),
         };
         let gid = route_gid(&target)?;
         let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
@@ -3024,6 +3016,20 @@ fn get_bundle_request_validation_error_response(
     err: GetBundleRequestValidationError,
 ) -> Result<Response> {
     Response::error(err.to_string(), 400)
+}
+
+fn bundle_cbor_request_decode_error_response(
+    err: BundleCborRequestDecodeError,
+) -> Result<Response> {
+    match err {
+        BundleCborRequestDecodeError::MissingBundleCbor => {
+            Response::error("bundle_cbor must be provided", 400)
+        }
+        BundleCborRequestDecodeError::InvalidBundleEncoding => {
+            Response::error("invalid bundle encoding", 400)
+        }
+        BundleCborRequestDecodeError::DecodeFailure(message) => Response::error(message, 500),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
