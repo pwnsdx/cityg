@@ -8,12 +8,12 @@ use std::{
 use cityg_api_schema::{
     API_PROFILE_VERSION, BarrierHelperRequestDecodeError, BundleCborRequestDecodeError,
     ExpelMemberTicketRequestValidationError, FetchMessagesRequestValidationError,
-    GetBundleRequestValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE,
-    MEMBERS_MAX_PAGE_SIZE, MergeTicketRequestValidationError, PreparedIdentityBindingError,
+    GetBundleRequestValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES,
+    MembersRequestValidationError, MergeTicketRequestValidationError, PreparedIdentityBindingError,
     RoomAdminProofValidationError, RoomAdminRequestValidationError, RoomScopedApiRoute,
-    RoomScopedRequestTarget, RoomScopedRoutingKey, SendMessageRequestValidationError,
-    decode_barrier_fetch_public_tree_request, decode_barrier_lookup_merge_acceptance_request,
-    decode_barrier_resolve_revoked_leaves_request,
+    RoomScopedRequestTarget, RoomScopedRoutingKey, SearchMembersRequestValidationError,
+    SendMessageRequestValidationError, decode_barrier_fetch_public_tree_request,
+    decode_barrier_lookup_merge_acceptance_request, decode_barrier_resolve_revoked_leaves_request,
     decode_bundle_cbor_request as schema_decode_bundle_cbor_request,
     decode_full_verification_witness_request, encode_bootstrap_room_response,
     encode_full_verification_witness_response, encode_list_room_admins_response,
@@ -25,10 +25,10 @@ use cityg_api_schema::{
     encode_search_members_response, extract_room_scoped_request_target, pb,
     pb_member as schema_pb_member, prepare_identity_binding, room_admin_proof_replay_key,
     validate_bootstrap_room_request, validate_expel_member_ticket_request,
-    validate_fetch_messages_request, validate_list_room_admins_request,
+    validate_fetch_messages_request, validate_list_room_admins_request, validate_members_request,
     validate_merge_ticket_request, validate_room_admin_mutation_request,
-    validate_rotate_room_kbroad_request, validate_send_message_request, verify_room_admin_proof,
-    verify_room_admin_proof_payload,
+    validate_rotate_room_kbroad_request, validate_search_members_request,
+    validate_send_message_request, verify_room_admin_proof, verify_room_admin_proof_payload,
 };
 use cityg_client::CityGError as ClientError;
 use cityg_runtime::{
@@ -846,13 +846,9 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        let parent_root = if request.parent_root.is_empty() {
-            None
-        } else {
-            match parse_bytes_32(request.parent_root.as_slice(), "parent_root") {
-                Ok(root) => Some(root),
-                Err(message) => return Response::error(message, 400),
-            }
+        let request = match validate_members_request(request) {
+            Ok(request) => request,
+            Err(error) => return members_request_validation_error_response(error),
         };
         let gid = route_gid(&target)?;
         let checkpoint = self.load_checkpoint_for_gid(gid)?;
@@ -872,19 +868,14 @@ impl CloudflareRoomDurableObject {
             None => RuntimeRoom::new(cityg_server::CityGServer::new(bootstrap.to_server_config())),
         };
         let (server, room_state) = room.into_parts();
-        let (members, root) = match fetch_room_members(&server, &gid, parent_root) {
+        let (members, root) = match fetch_room_members(&server, &gid, request.parent_root) {
             Ok(result) => result,
             Err(RoomMemberListingError::NotFound) => {
                 return Response::error("resource not found", 404);
             }
         };
 
-        let offset = request.offset.unwrap_or(0);
-        let limit = request
-            .limit
-            .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
-            .clamp(1, MEMBERS_MAX_PAGE_SIZE);
-        let page = paginate_room_members(members.as_slice(), offset, limit);
+        let page = paginate_room_members(members.as_slice(), request.offset, request.limit);
         let alias_lookup =
             match lookup_alias_bindings_by_leaf(&self.env, page.members.as_slice()).await {
                 Ok(lookup) => lookup,
@@ -928,16 +919,9 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        if request.query.is_empty() {
-            return Response::error("query must be provided", 400);
-        }
-        let parent_root = if request.parent_root.is_empty() {
-            None
-        } else {
-            match parse_bytes_32(request.parent_root.as_slice(), "parent_root") {
-                Ok(root) => Some(root),
-                Err(message) => return Response::error(message, 400),
-            }
+        let request = match validate_search_members_request(request) {
+            Ok(request) => request,
+            Err(error) => return search_members_request_validation_error_response(error),
         };
         let gid = route_gid(&target)?;
         let checkpoint = self.load_checkpoint_for_gid(gid)?;
@@ -957,7 +941,7 @@ impl CloudflareRoomDurableObject {
             None => RuntimeRoom::new(cityg_server::CityGServer::new(bootstrap.to_server_config())),
         };
         let (server, room_state) = room.into_parts();
-        let (members, root) = match fetch_room_members(&server, &gid, parent_root) {
+        let (members, root) = match fetch_room_members(&server, &gid, request.parent_root) {
             Ok(result) => result,
             Err(RoomMemberListingError::NotFound) => {
                 return Response::error("resource not found", 404);
@@ -973,12 +957,8 @@ impl CloudflareRoomDurableObject {
 
         let filtered_members =
             filter_room_members_by_query(members.as_slice(), &alias_lookup, request.query.as_str());
-        let offset = request.offset.unwrap_or(0);
-        let limit = request
-            .limit
-            .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
-            .clamp(1, MEMBERS_MAX_PAGE_SIZE);
-        let page = paginate_room_members(filtered_members.as_slice(), offset, limit);
+        let page =
+            paginate_room_members(filtered_members.as_slice(), request.offset, request.limit);
 
         protobuf_response_bytes(encode_search_members_response(
             page.members
@@ -2479,12 +2459,6 @@ struct WebSocketSignalEnvelope {
     last_sequence: u64,
 }
 
-fn parse_bytes_32(value: &[u8], label: &str) -> std::result::Result<[u8; 32], String> {
-    value
-        .try_into()
-        .map_err(|_| format!("{label} must be 32 bytes"))
-}
-
 fn parse_ws_max_lag(raw: Option<&str>) -> u64 {
     raw.and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
@@ -3002,6 +2976,18 @@ fn merge_ticket_request_validation_error_response(
 
 fn fetch_messages_request_validation_error_response(
     err: FetchMessagesRequestValidationError,
+) -> Result<Response> {
+    Response::error(err.to_string(), 400)
+}
+
+fn members_request_validation_error_response(
+    err: MembersRequestValidationError,
+) -> Result<Response> {
+    Response::error(err.to_string(), 400)
+}
+
+fn search_members_request_validation_error_response(
+    err: SearchMembersRequestValidationError,
 ) -> Result<Response> {
     Response::error(err.to_string(), 400)
 }

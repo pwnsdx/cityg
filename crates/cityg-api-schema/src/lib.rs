@@ -1021,6 +1021,23 @@ pub struct ValidatedGetBundleRequest {
     pub we_epoch_id: [u8; 32],
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct ValidatedMembersRequest {
+    pub gid: [u8; 32],
+    pub parent_root: Option<[u8; 32]>,
+    pub offset: u64,
+    pub limit: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ValidatedSearchMembersRequest {
+    pub gid: [u8; 32],
+    pub query: String,
+    pub parent_root: Option<[u8; 32]>,
+    pub offset: u64,
+    pub limit: u32,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum BundleCborRequestDecodeError {
     #[error("bundle_cbor must be provided")]
@@ -1260,6 +1277,28 @@ pub enum GetBundleRequestValidationError {
     InvalidWeEpochId,
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum MembersRequestValidationError {
+    #[error("gid must be provided")]
+    MissingGid,
+    #[error("gid must be 32 bytes")]
+    InvalidGid,
+    #[error("parent_root must be 32 bytes")]
+    InvalidParentRoot,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SearchMembersRequestValidationError {
+    #[error("gid must be provided")]
+    MissingGid,
+    #[error("gid must be 32 bytes")]
+    InvalidGid,
+    #[error("query must be provided")]
+    MissingQuery,
+    #[error("parent_root must be 32 bytes")]
+    InvalidParentRoot,
+}
+
 pub fn validate_get_bundle_request(
     request: pb::GetBundleRequest,
 ) -> Result<ValidatedGetBundleRequest, GetBundleRequestValidationError> {
@@ -1270,6 +1309,40 @@ pub fn validate_get_bundle_request(
         .map_err(|_| GetBundleRequestValidationError::InvalidWeEpochId)?;
 
     Ok(ValidatedGetBundleRequest { we_epoch_id })
+}
+
+pub fn validate_members_request(
+    request: pb::MembersRequest,
+) -> Result<ValidatedMembersRequest, MembersRequestValidationError> {
+    let gid = validate_members_gid(request.gid.as_slice())?;
+    let parent_root = validate_optional_members_parent_root(request.parent_root.as_slice())?;
+    let (offset, limit) = normalize_members_page(request.offset, request.limit);
+
+    Ok(ValidatedMembersRequest {
+        gid,
+        parent_root,
+        offset,
+        limit,
+    })
+}
+
+pub fn validate_search_members_request(
+    request: pb::SearchMembersRequest,
+) -> Result<ValidatedSearchMembersRequest, SearchMembersRequestValidationError> {
+    let gid = validate_search_members_gid(request.gid.as_slice())?;
+    if request.query.is_empty() {
+        return Err(SearchMembersRequestValidationError::MissingQuery);
+    }
+    let parent_root = validate_optional_search_members_parent_root(request.parent_root.as_slice())?;
+    let (offset, limit) = normalize_members_page(request.offset, request.limit);
+
+    Ok(ValidatedSearchMembersRequest {
+        gid,
+        query: request.query,
+        parent_root,
+        offset,
+        limit,
+    })
 }
 
 pub fn decode_bundle_cbor_request(
@@ -1284,6 +1357,57 @@ pub fn decode_bundle_cbor_request(
         ClientError::InvalidInput(_) => BundleCborRequestDecodeError::InvalidBundleEncoding,
         other => BundleCborRequestDecodeError::DecodeFailure(other.to_string()),
     })
+}
+
+fn normalize_members_page(offset: Option<u64>, limit: Option<u32>) -> (u64, u32) {
+    (
+        offset.unwrap_or(0),
+        limit
+            .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
+            .clamp(1, MEMBERS_MAX_PAGE_SIZE),
+    )
+}
+
+fn validate_members_gid(gid: &[u8]) -> Result<[u8; 32], MembersRequestValidationError> {
+    if gid.is_empty() {
+        return Err(MembersRequestValidationError::MissingGid);
+    }
+    gid.try_into()
+        .map_err(|_| MembersRequestValidationError::InvalidGid)
+}
+
+fn validate_search_members_gid(
+    gid: &[u8],
+) -> Result<[u8; 32], SearchMembersRequestValidationError> {
+    if gid.is_empty() {
+        return Err(SearchMembersRequestValidationError::MissingGid);
+    }
+    gid.try_into()
+        .map_err(|_| SearchMembersRequestValidationError::InvalidGid)
+}
+
+fn validate_optional_members_parent_root(
+    parent_root: &[u8],
+) -> Result<Option<[u8; 32]>, MembersRequestValidationError> {
+    if parent_root.is_empty() {
+        return Ok(None);
+    }
+    parent_root
+        .try_into()
+        .map(Some)
+        .map_err(|_| MembersRequestValidationError::InvalidParentRoot)
+}
+
+fn validate_optional_search_members_parent_root(
+    parent_root: &[u8],
+) -> Result<Option<[u8; 32]>, SearchMembersRequestValidationError> {
+    if parent_root.is_empty() {
+        return Ok(None);
+    }
+    parent_root
+        .try_into()
+        .map(Some)
+        .map_err(|_| SearchMembersRequestValidationError::InvalidParentRoot)
 }
 
 /// Verify a room-admin proof over `(operation, room_id, payload)`.
@@ -2141,6 +2265,92 @@ mod tests {
                 sender: vec![0x51; 31],
             }),
             Err(SendMessageRequestValidationError::InvalidSender)
+        );
+    }
+
+    #[test]
+    fn validate_member_requests_project_required_fields() {
+        let members = validate_members_request(pb::MembersRequest {
+            gid: DEMO_GID.to_vec(),
+            parent_root: vec![0x21; 32],
+            offset: Some(7),
+            limit: Some(MEMBERS_MAX_PAGE_SIZE + 10),
+        })
+        .expect("validate members request");
+        assert_eq!(members.gid, DEMO_GID);
+        assert_eq!(members.parent_root, Some([0x21; 32]));
+        assert_eq!(members.offset, 7);
+        assert_eq!(members.limit, MEMBERS_MAX_PAGE_SIZE);
+
+        let search = validate_search_members_request(pb::SearchMembersRequest {
+            gid: DEMO_GID.to_vec(),
+            query: "alice".to_string(),
+            parent_root: Vec::new(),
+            offset: None,
+            limit: Some(0),
+        })
+        .expect("validate search members request");
+        assert_eq!(search.gid, DEMO_GID);
+        assert_eq!(search.query, "alice");
+        assert_eq!(search.parent_root, None);
+        assert_eq!(search.offset, 0);
+        assert_eq!(search.limit, 1);
+    }
+
+    #[test]
+    fn validate_member_requests_reject_invalid_shape() {
+        assert_eq!(
+            validate_members_request(pb::MembersRequest::default()),
+            Err(MembersRequestValidationError::MissingGid)
+        );
+        assert_eq!(
+            validate_members_request(pb::MembersRequest {
+                gid: vec![0x11; 31],
+                parent_root: Vec::new(),
+                offset: None,
+                limit: None,
+            }),
+            Err(MembersRequestValidationError::InvalidGid)
+        );
+        assert_eq!(
+            validate_members_request(pb::MembersRequest {
+                gid: DEMO_GID.to_vec(),
+                parent_root: vec![0x22; 31],
+                offset: None,
+                limit: None,
+            }),
+            Err(MembersRequestValidationError::InvalidParentRoot)
+        );
+
+        assert_eq!(
+            validate_search_members_request(pb::SearchMembersRequest {
+                gid: DEMO_GID.to_vec(),
+                query: String::new(),
+                parent_root: Vec::new(),
+                offset: None,
+                limit: None,
+            }),
+            Err(SearchMembersRequestValidationError::MissingQuery)
+        );
+        assert_eq!(
+            validate_search_members_request(pb::SearchMembersRequest {
+                gid: vec![0x11; 31],
+                query: "alice".to_string(),
+                parent_root: Vec::new(),
+                offset: None,
+                limit: None,
+            }),
+            Err(SearchMembersRequestValidationError::InvalidGid)
+        );
+        assert_eq!(
+            validate_search_members_request(pb::SearchMembersRequest {
+                gid: DEMO_GID.to_vec(),
+                query: "alice".to_string(),
+                parent_root: vec![0x22; 31],
+                offset: None,
+                limit: None,
+            }),
+            Err(SearchMembersRequestValidationError::InvalidParentRoot)
         );
     }
 

@@ -33,9 +33,9 @@ use cityg_api_schema::{
     API_PROFILE_VERSION, BarrierHelperRequestDecodeError, BundleCborRequestDecodeError,
     ExpelMemberTicketRequestValidationError, FetchMessagesRequestValidationError,
     FullVerificationWitnessRequestDecodeError, GetBundleRequestValidationError,
-    IdentityBindingValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE,
-    MEMBERS_MAX_PAGE_SIZE, MergeTicketRequestValidationError, PreparedIdentityBindingError,
-    RoomAdminProofValidationError, RoomAdminRequestValidationError,
+    IdentityBindingValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES, MembersRequestValidationError,
+    MergeTicketRequestValidationError, PreparedIdentityBindingError, RoomAdminProofValidationError,
+    RoomAdminRequestValidationError, SearchMembersRequestValidationError,
     SendMessageRequestValidationError,
     decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
@@ -58,9 +58,11 @@ use cityg_api_schema::{
     validate_fetch_messages_request as schema_validate_fetch_messages_request,
     validate_get_bundle_request as schema_validate_get_bundle_request,
     validate_list_room_admins_request as schema_validate_list_room_admins_request,
+    validate_members_request as schema_validate_members_request,
     validate_merge_ticket_request as schema_validate_merge_ticket_request,
     validate_room_admin_mutation_request as schema_validate_room_admin_mutation_request,
     validate_rotate_room_kbroad_request as schema_validate_rotate_room_kbroad_request,
+    validate_search_members_request as schema_validate_search_members_request,
     validate_send_message_request as schema_validate_send_message_request,
     verify_room_admin_proof as schema_verify_room_admin_proof,
     verify_room_admin_proof_payload as schema_verify_room_admin_proof_payload,
@@ -837,6 +839,39 @@ fn map_bundle_cbor_request_decode_error(err: BundleCborRequestDecodeError) -> Ap
             ApiError::InvalidRequest("invalid bundle encoding")
         }
         BundleCborRequestDecodeError::DecodeFailure(message) => ApiError::server_message(message),
+    }
+}
+
+fn map_members_request_validation_error(err: MembersRequestValidationError) -> ApiError {
+    match err {
+        MembersRequestValidationError::MissingGid => {
+            ApiError::InvalidRequest("gid must be provided")
+        }
+        MembersRequestValidationError::InvalidGid => {
+            ApiError::InvalidRequest("gid must be 32 bytes")
+        }
+        MembersRequestValidationError::InvalidParentRoot => {
+            ApiError::InvalidRequest("parent_root must be 32 bytes")
+        }
+    }
+}
+
+fn map_search_members_request_validation_error(
+    err: SearchMembersRequestValidationError,
+) -> ApiError {
+    match err {
+        SearchMembersRequestValidationError::MissingGid => {
+            ApiError::InvalidRequest("gid must be provided")
+        }
+        SearchMembersRequestValidationError::InvalidGid => {
+            ApiError::InvalidRequest("gid must be 32 bytes")
+        }
+        SearchMembersRequestValidationError::MissingQuery => {
+            ApiError::InvalidRequest("query must be provided")
+        }
+        SearchMembersRequestValidationError::InvalidParentRoot => {
+            ApiError::InvalidRequest("parent_root must be 32 bytes")
+        }
     }
 }
 
@@ -1789,22 +1824,11 @@ async fn map_accept_error(
 
 async fn members_for_request(
     state: &ApiState,
-    gid: &[u8],
-    parent_root: &[u8],
+    gid: &[u8; 32],
+    parent_root: Option<[u8; 32]>,
 ) -> Result<(Vec<[u8; 32]>, [u8; 32]), ApiError> {
     let lane = state.server_for_gid_bytes(gid);
     let guard = lane.read().await;
-    let parent_root = if parent_root.is_empty() {
-        None
-    } else {
-        Some(
-            parent_root
-                .try_into()
-                .map_err(|_| ApiError::InvalidRequest("parent_root must be 32 bytes"))?,
-        )
-    };
-
-    let gid: &[u8; 32] = gid.try_into().map_err(|_| ApiError::NotFound)?;
     runtime_fetch_room_members(&guard, gid, parent_root).map_err(|err| match err {
         RoomMemberListingError::NotFound => ApiError::NotFound,
     })
@@ -1834,24 +1858,17 @@ async fn members(
 ) -> Result<Response, ApiError> {
     enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = MembersRequest::decode(body)?;
-    if request.gid.is_empty() {
-        return Err(ApiError::InvalidRequest("gid must be provided"));
-    }
-    let gid = request.gid;
+    let request =
+        schema_validate_members_request(request).map_err(map_members_request_validation_error)?;
     enforce_expensive_rate_limit(
         &state,
         "members",
-        message_scoped_rate_limit_key(&headers, &gid),
+        message_scoped_rate_limit_key(&headers, request.gid.as_ref()),
     )
     .await?;
-    let offset = request.offset.unwrap_or(0);
-    let limit = request
-        .limit
-        .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
-        .clamp(1, MEMBERS_MAX_PAGE_SIZE);
-    let (members, root) = members_for_request(&state, &gid, &request.parent_root).await?;
+    let (members, root) = members_for_request(&state, &request.gid, request.parent_root).await?;
 
-    let page = paginate_room_members(members.as_slice(), offset, limit);
+    let page = paginate_room_members(members.as_slice(), request.offset, request.limit);
 
     let alias_lookup = alias_lookup_by_leaf(&state).await;
     let room_state = state.room_state.read().await;
@@ -1874,32 +1891,22 @@ async fn search_members(
 ) -> Result<Response, ApiError> {
     enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = pb::SearchMembersRequest::decode(body)?;
-    if request.gid.is_empty() {
-        return Err(ApiError::InvalidRequest("gid must be provided"));
-    }
-    if request.query.is_empty() {
-        return Err(ApiError::InvalidRequest("query must be provided"));
-    }
-    let gid = request.gid;
+    let request = schema_validate_search_members_request(request)
+        .map_err(map_search_members_request_validation_error)?;
     enforce_expensive_rate_limit(
         &state,
         "search_members",
-        message_scoped_rate_limit_key(&headers, &gid),
+        message_scoped_rate_limit_key(&headers, request.gid.as_ref()),
     )
     .await?;
-    let offset = request.offset.unwrap_or(0);
-    let limit = request
-        .limit
-        .unwrap_or(MEMBERS_DEFAULT_PAGE_SIZE)
-        .clamp(1, MEMBERS_MAX_PAGE_SIZE);
-    let (members, root) = members_for_request(&state, &gid, &request.parent_root).await?;
+    let (members, root) = members_for_request(&state, &request.gid, request.parent_root).await?;
 
     let alias_lookup = alias_lookup_by_leaf(&state).await;
     let room_state = state.room_state.read().await;
 
     let filtered_members =
         filter_room_members_by_query(members.as_slice(), &alias_lookup, request.query.as_str());
-    let page = paginate_room_members(filtered_members.as_slice(), offset, limit);
+    let page = paginate_room_members(filtered_members.as_slice(), request.offset, request.limit);
 
     Ok(protobuf_response_bytes(encode_search_members_response(
         page.members
@@ -5443,6 +5450,24 @@ mod tests {
 
         let mut body = Vec::new();
         pb::SearchMembersRequest {
+            gid: vec![0x11; 31],
+            query: "special".to_string(),
+            parent_root: Vec::new(),
+            offset: Some(0),
+            limit: Some(10),
+        }
+        .encode(&mut body)
+        .expect("encode invalid gid length request");
+        let err = search_members(State(state.clone()), headers.clone(), Bytes::from(body))
+            .await
+            .expect_err("invalid gid length should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("gid must be 32 bytes")
+        ));
+
+        let mut body = Vec::new();
+        pb::SearchMembersRequest {
             gid: DEMO_GID.to_vec(),
             query: "x".to_string(),
             parent_root: vec![0x01],
@@ -6444,6 +6469,23 @@ mod tests {
         assert!(matches!(
             err,
             ApiError::InvalidRequest("gid must be provided")
+        ));
+
+        let err = members(
+            State(state.clone()),
+            headers.clone(),
+            encode_proto_request(&MembersRequest {
+                gid: vec![0x44; 31],
+                parent_root: Vec::new(),
+                offset: Some(0),
+                limit: Some(10),
+            }),
+        )
+        .await
+        .expect_err("invalid gid length should fail");
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest("gid must be 32 bytes")
         ));
 
         let err = members(
