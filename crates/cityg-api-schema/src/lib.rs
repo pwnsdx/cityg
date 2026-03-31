@@ -825,23 +825,47 @@ pub fn decode_full_verification_witness_request(
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum BarrierHelperRequestDecodeError {
+pub enum ResolveRevokedLeavesRequestDecodeError {
     #[error("revocation_roots_hash must be 32 bytes")]
     InvalidRevocationRootsHash,
+}
+
+impl ResolveRevokedLeavesRequestDecodeError {
+    #[must_use]
+    pub const fn api_message(&self) -> &'static str {
+        match self {
+            Self::InvalidRevocationRootsHash => "revocation_roots_hash must be 32 bytes",
+        }
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum FetchPublicTreeRequestDecodeError {
     #[error("kem_tree_hash_after must be 32 bytes")]
     InvalidKemTreeHashAfter,
+}
+
+impl FetchPublicTreeRequestDecodeError {
+    #[must_use]
+    pub const fn api_message(&self) -> &'static str {
+        match self {
+            Self::InvalidKemTreeHashAfter => "kem_tree_hash_after must be 32 bytes",
+        }
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum LookupMergeAcceptanceRequestDecodeError {
     #[error("pending_barrier_update_digest must be 32 bytes")]
     InvalidPendingBarrierUpdateDigest,
     #[error("pending_we_epoch_id must be 32 bytes")]
     InvalidPendingWeEpochId,
 }
 
-impl BarrierHelperRequestDecodeError {
+impl LookupMergeAcceptanceRequestDecodeError {
     #[must_use]
     pub const fn api_message(&self) -> &'static str {
         match self {
-            Self::InvalidRevocationRootsHash => "revocation_roots_hash must be 32 bytes",
-            Self::InvalidKemTreeHashAfter => "kem_tree_hash_after must be 32 bytes",
             Self::InvalidPendingBarrierUpdateDigest => {
                 "pending_barrier_update_digest must be 32 bytes"
             }
@@ -873,9 +897,9 @@ pub struct DecodedBarrierLookupMergeAcceptanceRequest {
 
 pub fn decode_barrier_resolve_revoked_leaves_request(
     request: pb::BarrierResolveRevokedLeavesRequest,
-) -> Result<DecodedBarrierResolveRevokedLeavesRequest, BarrierHelperRequestDecodeError> {
+) -> Result<DecodedBarrierResolveRevokedLeavesRequest, ResolveRevokedLeavesRequestDecodeError> {
     if request.revocation_roots_hash.len() != 32 {
-        return Err(BarrierHelperRequestDecodeError::InvalidRevocationRootsHash);
+        return Err(ResolveRevokedLeavesRequestDecodeError::InvalidRevocationRootsHash);
     }
     let mut revocation_roots_hash = [0u8; 32];
     revocation_roots_hash.copy_from_slice(&request.revocation_roots_hash);
@@ -888,9 +912,9 @@ pub fn decode_barrier_resolve_revoked_leaves_request(
 
 pub fn decode_barrier_fetch_public_tree_request(
     request: pb::BarrierFetchPublicTreeRequest,
-) -> Result<DecodedBarrierFetchPublicTreeRequest, BarrierHelperRequestDecodeError> {
+) -> Result<DecodedBarrierFetchPublicTreeRequest, FetchPublicTreeRequestDecodeError> {
     if request.kem_tree_hash_after.len() != 32 {
-        return Err(BarrierHelperRequestDecodeError::InvalidKemTreeHashAfter);
+        return Err(FetchPublicTreeRequestDecodeError::InvalidKemTreeHashAfter);
     }
     let mut kem_tree_hash_after = [0u8; 32];
     kem_tree_hash_after.copy_from_slice(&request.kem_tree_hash_after);
@@ -903,12 +927,12 @@ pub fn decode_barrier_fetch_public_tree_request(
 
 pub fn decode_barrier_lookup_merge_acceptance_request(
     request: pb::BarrierLookupMergeAcceptanceRequest,
-) -> Result<DecodedBarrierLookupMergeAcceptanceRequest, BarrierHelperRequestDecodeError> {
+) -> Result<DecodedBarrierLookupMergeAcceptanceRequest, LookupMergeAcceptanceRequestDecodeError> {
     if request.pending_barrier_update_digest.len() != 32 {
-        return Err(BarrierHelperRequestDecodeError::InvalidPendingBarrierUpdateDigest);
+        return Err(LookupMergeAcceptanceRequestDecodeError::InvalidPendingBarrierUpdateDigest);
     }
     if request.pending_we_epoch_id.len() != 32 {
-        return Err(BarrierHelperRequestDecodeError::InvalidPendingWeEpochId);
+        return Err(LookupMergeAcceptanceRequestDecodeError::InvalidPendingWeEpochId);
     }
     let mut pending_barrier_update_digest = [0u8; 32];
     pending_barrier_update_digest.copy_from_slice(&request.pending_barrier_update_digest);

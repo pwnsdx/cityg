@@ -6,14 +6,16 @@ use std::{
 };
 
 use cityg_api_schema::{
-    API_PROFILE_VERSION, BarrierHelperRequestDecodeError, BundleCborRequestDecodeError,
-    ExpelMemberTicketRequestValidationError, FetchMessagesRequestValidationError,
-    GetBundleRequestValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES,
-    MembersRequestValidationError, MergeTicketRequestValidationError, PreparedIdentityBindingError,
-    RoomAdminProofValidationError, RoomAdminRequestValidationError, RoomScopedApiRoute,
-    RoomScopedRequestTarget, RoomScopedRoutingKey, SearchMembersRequestValidationError,
-    SendMessageRequestValidationError, decode_barrier_fetch_public_tree_request,
-    decode_barrier_lookup_merge_acceptance_request, decode_barrier_resolve_revoked_leaves_request,
+    API_PROFILE_VERSION, BundleCborRequestDecodeError, ExpelMemberTicketRequestValidationError,
+    FetchMessagesRequestValidationError, FetchPublicTreeRequestDecodeError,
+    GetBundleRequestValidationError, LookupMergeAcceptanceRequestDecodeError,
+    MAX_BARRIER_HELPER_PAGE_ENTRIES, MembersRequestValidationError,
+    MergeTicketRequestValidationError, PreparedIdentityBindingError,
+    ResolveRevokedLeavesRequestDecodeError, RoomAdminProofValidationError,
+    RoomAdminRequestValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
+    RoomScopedRoutingKey, SearchMembersRequestValidationError, SendMessageRequestValidationError,
+    decode_barrier_fetch_public_tree_request, decode_barrier_lookup_merge_acceptance_request,
+    decode_barrier_resolve_revoked_leaves_request,
     decode_bundle_cbor_request as schema_decode_bundle_cbor_request,
     decode_full_verification_witness_request, encode_bootstrap_room_response,
     encode_full_verification_witness_response, encode_list_room_admins_response,
@@ -1200,14 +1202,12 @@ impl CloudflareRoomDurableObject {
         };
         let request = match decode_barrier_resolve_revoked_leaves_request(request) {
             Ok(request) => request,
-            Err(BarrierHelperRequestDecodeError::InvalidRevocationRootsHash) => {
-                return Response::error("revocation_roots_hash must be 32 bytes", 400);
+            Err(error) => {
+                return Response::error(
+                    ResolveRevokedLeavesRequestDecodeError::api_message(&error),
+                    400,
+                );
             }
-            Err(
-                BarrierHelperRequestDecodeError::InvalidKemTreeHashAfter
-                | BarrierHelperRequestDecodeError::InvalidPendingBarrierUpdateDigest
-                | BarrierHelperRequestDecodeError::InvalidPendingWeEpochId,
-            ) => unreachable!("resolve_revoked_leaves decoder returned unrelated error"),
         };
         let gid = route_gid(&target)?;
         let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
@@ -1321,14 +1321,12 @@ impl CloudflareRoomDurableObject {
         };
         let request = match decode_barrier_fetch_public_tree_request(request) {
             Ok(request) => request,
-            Err(BarrierHelperRequestDecodeError::InvalidKemTreeHashAfter) => {
-                return Response::error("kem_tree_hash_after must be 32 bytes", 400);
+            Err(error) => {
+                return Response::error(
+                    FetchPublicTreeRequestDecodeError::api_message(&error),
+                    400,
+                );
             }
-            Err(
-                BarrierHelperRequestDecodeError::InvalidRevocationRootsHash
-                | BarrierHelperRequestDecodeError::InvalidPendingBarrierUpdateDigest
-                | BarrierHelperRequestDecodeError::InvalidPendingWeEpochId,
-            ) => unreachable!("fetch_public_tree decoder returned unrelated error"),
         };
         let gid = route_gid(&target)?;
         let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
@@ -1387,16 +1385,12 @@ impl CloudflareRoomDurableObject {
         };
         let request = match decode_barrier_lookup_merge_acceptance_request(request) {
             Ok(request) => request,
-            Err(BarrierHelperRequestDecodeError::InvalidPendingBarrierUpdateDigest) => {
-                return Response::error("pending_barrier_update_digest must be 32 bytes", 400);
+            Err(error) => {
+                return Response::error(
+                    LookupMergeAcceptanceRequestDecodeError::api_message(&error),
+                    400,
+                );
             }
-            Err(BarrierHelperRequestDecodeError::InvalidPendingWeEpochId) => {
-                return Response::error("pending_we_epoch_id must be 32 bytes", 400);
-            }
-            Err(
-                BarrierHelperRequestDecodeError::InvalidRevocationRootsHash
-                | BarrierHelperRequestDecodeError::InvalidKemTreeHashAfter,
-            ) => unreachable!("lookup_merge_acceptance decoder returned unrelated error"),
         };
         let gid = route_gid(&target)?;
         let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {

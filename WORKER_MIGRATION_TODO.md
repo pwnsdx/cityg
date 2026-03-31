@@ -58,6 +58,8 @@ runtime code.
   Native `cityg-api` and Worker `cloudflare` now share the request-side `bundle_cbor` missing/invalid decode path for `/v1/accept_epoch` and `/v1/pivot/refresh`, so only route-local gid handling and state-transition execution remain adapter-local.
 - [x] Move member-list request validation into `cityg-api-schema`.
   Native `cityg-api` and Worker `cloudflare` now share the request-side `gid`, `query`, `parent_root`, and page-bound normalization for `/v1/members` and `/v1/members/search`, so only auth, alias lookup, routing, and room execution remain adapter-local.
+- [x] Replace generic barrier-helper decode errors with endpoint-typed schema errors.
+  Native `cityg-api` and Worker `cloudflare` now consume decoder errors that only expose the fields each barrier-helper endpoint can actually reject, which removes adapter-local `unreachable!()` arms around the shared schema decoders.
 - [x] Define the shared Durable Object storage contract for authoritative room checkpoints and volatile room snapshots.
 - [x] Add room-volatile snapshot/hydration helpers aligned with the shared checkpoint contract.
 - [x] Implement the first Durable Object-backed `RoomStateStore`.

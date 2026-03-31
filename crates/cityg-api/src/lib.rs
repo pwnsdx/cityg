@@ -30,11 +30,13 @@ use bytes::BytesMut;
 #[cfg(test)]
 use cityg_api_schema::verify_identity_binding as schema_verify_identity_binding;
 use cityg_api_schema::{
-    API_PROFILE_VERSION, BarrierHelperRequestDecodeError, BundleCborRequestDecodeError,
-    ExpelMemberTicketRequestValidationError, FetchMessagesRequestValidationError,
+    API_PROFILE_VERSION, BundleCborRequestDecodeError, ExpelMemberTicketRequestValidationError,
+    FetchMessagesRequestValidationError, FetchPublicTreeRequestDecodeError,
     FullVerificationWitnessRequestDecodeError, GetBundleRequestValidationError,
-    IdentityBindingValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES, MembersRequestValidationError,
-    MergeTicketRequestValidationError, PreparedIdentityBindingError, RoomAdminProofValidationError,
+    IdentityBindingValidationError, LookupMergeAcceptanceRequestDecodeError,
+    MAX_BARRIER_HELPER_PAGE_ENTRIES, MembersRequestValidationError,
+    MergeTicketRequestValidationError, PreparedIdentityBindingError,
+    ResolveRevokedLeavesRequestDecodeError, RoomAdminProofValidationError,
     RoomAdminRequestValidationError, SearchMembersRequestValidationError,
     SendMessageRequestValidationError,
     decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
@@ -2377,15 +2379,8 @@ async fn barrier_resolve_revoked_leaves(
     )
     .await?;
     let request = schema_decode_barrier_resolve_revoked_leaves_request(request).map_err(
-        |error| match error {
-            BarrierHelperRequestDecodeError::InvalidRevocationRootsHash => {
-                ApiError::InvalidRequest(error.api_message())
-            }
-            BarrierHelperRequestDecodeError::InvalidKemTreeHashAfter
-            | BarrierHelperRequestDecodeError::InvalidPendingBarrierUpdateDigest
-            | BarrierHelperRequestDecodeError::InvalidPendingWeEpochId => {
-                unreachable!("resolve_revoked_leaves decoder returned unrelated error")
-            }
+        |error: ResolveRevokedLeavesRequestDecodeError| {
+            ApiError::InvalidRequest(error.api_message())
         },
     )?;
 
@@ -2466,17 +2461,9 @@ async fn barrier_fetch_public_tree(
         message_scoped_rate_limit_key(&headers, &gid),
     )
     .await?;
-    let request =
-        schema_decode_barrier_fetch_public_tree_request(request).map_err(|error| match error {
-            BarrierHelperRequestDecodeError::InvalidKemTreeHashAfter => {
-                ApiError::InvalidRequest(error.api_message())
-            }
-            BarrierHelperRequestDecodeError::InvalidRevocationRootsHash
-            | BarrierHelperRequestDecodeError::InvalidPendingBarrierUpdateDigest
-            | BarrierHelperRequestDecodeError::InvalidPendingWeEpochId => {
-                unreachable!("fetch_public_tree decoder returned unrelated error")
-            }
-        })?;
+    let request = schema_decode_barrier_fetch_public_tree_request(request).map_err(
+        |error: FetchPublicTreeRequestDecodeError| ApiError::InvalidRequest(error.api_message()),
+    )?;
 
     let prepared = {
         let lane = state.server_for_gid(&gid);
@@ -2517,15 +2504,8 @@ async fn barrier_lookup_merge_acceptance(
     )
     .await?;
     let request = schema_decode_barrier_lookup_merge_acceptance_request(request).map_err(
-        |error| match error {
-            BarrierHelperRequestDecodeError::InvalidPendingBarrierUpdateDigest
-            | BarrierHelperRequestDecodeError::InvalidPendingWeEpochId => {
-                ApiError::InvalidRequest(error.api_message())
-            }
-            BarrierHelperRequestDecodeError::InvalidRevocationRootsHash
-            | BarrierHelperRequestDecodeError::InvalidKemTreeHashAfter => {
-                unreachable!("lookup_merge_acceptance decoder returned unrelated error")
-            }
+        |error: LookupMergeAcceptanceRequestDecodeError| {
+            ApiError::InvalidRequest(error.api_message())
         },
     )?;
 
