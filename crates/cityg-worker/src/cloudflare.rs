@@ -8,8 +8,8 @@ use std::{
 use cityg_api_schema::{
     API_PROFILE_VERSION, BarrierHelperRequestDecodeError, MAX_BARRIER_HELPER_PAGE_ENTRIES,
     MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE, PreparedIdentityBindingError,
-    RoomAdminProofValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
-    RoomScopedRoutingKey, decode_barrier_fetch_public_tree_request,
+    RoomAdminProofValidationError, RoomAdminRequestValidationError, RoomScopedApiRoute,
+    RoomScopedRequestTarget, RoomScopedRoutingKey, decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request, decode_barrier_resolve_revoked_leaves_request,
     decode_full_verification_witness_request, encode_bootstrap_room_response,
     encode_full_verification_witness_response, encode_list_room_admins_response,
@@ -20,10 +20,11 @@ use cityg_api_schema::{
     encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
     encode_search_members_response, extract_room_scoped_request_target, pb,
     pb_member as schema_pb_member, prepare_identity_binding, room_admin_proof_replay_key,
+    validate_bootstrap_room_request, validate_list_room_admins_request,
+    validate_room_admin_mutation_request, validate_rotate_room_kbroad_request,
     verify_room_admin_proof, verify_room_admin_proof_payload,
 };
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
-use cityg_pqc::ML_DSA_65_PUBLIC_KEY_BYTES;
 use cityg_runtime::{
     AcceptedRoomEpoch, AliasLeafLookup, AliasRegistrationError, AliasRegistry,
     BarrierPaginationError, MAX_MESSAGE_CIPHERTEXT_BYTES, RoomAcceptEpochError,
@@ -40,7 +41,6 @@ use cityg_runtime::{
 use cityg_server::MergeTicketIntent as ServerMergeTicketIntent;
 use msphf_core::MsphfError;
 use msphf_orchestrator::AcceptanceError;
-use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use worker::{
@@ -524,20 +524,14 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        if request.kbroad_public.is_empty() {
-            return Response::error("kbroad_public must be provided", 400);
-        }
-        if request.kbroad_public.len() != ml_kem_public_key_bytes() {
-            return Response::error("kbroad_public has unexpected length", 400);
-        }
+        let request = match validate_bootstrap_room_request(request) {
+            Ok(request) => request,
+            Err(error) => return room_admin_request_validation_error_response(error),
+        };
 
         let gid = route_gid(&target)?;
-        let proof = match request.admin_proof.as_ref() {
-            Some(proof) => proof,
-            None => return Response::error("room admin proof is required", 401),
-        };
         let initial_room_admin_pop_key = match verify_room_admin_proof(
-            proof,
+            &request.admin_proof,
             "bootstrap_room_v1",
             &request.room_id,
             &request.kbroad_public,
@@ -603,23 +597,17 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        if request.kbroad_public.is_empty() {
-            return Response::error("kbroad_public must be provided", 400);
-        }
-        if request.kbroad_public.len() != ml_kem_public_key_bytes() {
-            return Response::error("kbroad_public has unexpected length", 400);
-        }
-
-        let proof = match request.admin_proof.as_ref() {
-            Some(proof) => proof,
-            None => return Response::error("room admin proof is required", 401),
+        let request = match validate_rotate_room_kbroad_request(request) {
+            Ok(request) => request,
+            Err(error) => return room_admin_request_validation_error_response(error),
         };
-        let replay_key = match room_admin_proof_replay_key(proof) {
+
+        let replay_key = match room_admin_proof_replay_key(&request.admin_proof) {
             Ok(replay_key) => replay_key,
             Err(error) => return room_admin_proof_validation_error_response(error),
         };
         let actor_pop_key = match verify_room_admin_proof(
-            proof,
+            &request.admin_proof,
             "rotate_room_kbroad_v1",
             &request.room_id,
             &request.kbroad_public,
@@ -707,20 +695,17 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        if request.target_pop_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
-            return Response::error("target_pop_public_key has unexpected length", 400);
-        }
-
-        let proof = match request.admin_proof.as_ref() {
-            Some(proof) => proof,
-            None => return Response::error("room admin proof is required", 401),
+        let request = match validate_room_admin_mutation_request(request) {
+            Ok(request) => request,
+            Err(error) => return room_admin_request_validation_error_response(error),
         };
-        let replay_key = match room_admin_proof_replay_key(proof) {
+
+        let replay_key = match room_admin_proof_replay_key(&request.admin_proof) {
             Ok(replay_key) => replay_key,
             Err(error) => return room_admin_proof_validation_error_response(error),
         };
         let actor_pop_key = match verify_room_admin_proof_payload(
-            proof,
+            &request.admin_proof,
             kind.operation(),
             &request.room_id,
             &request.target_pop_public_key,
@@ -798,12 +783,12 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        let proof = match request.admin_proof.as_ref() {
-            Some(proof) => proof,
-            None => return Response::error("room admin proof is required", 401),
+        let request = match validate_list_room_admins_request(request) {
+            Ok(request) => request,
+            Err(error) => return room_admin_request_validation_error_response(error),
         };
         let actor_pop_key = match verify_room_admin_proof_payload(
-            proof,
+            &request.admin_proof,
             "list_room_admins_v1",
             &request.room_id,
             &[],
@@ -3002,6 +2987,16 @@ fn room_admin_proof_validation_error_response(
             Response::error("failed to encode room admin proof payload", 400)
         }
         RoomAdminProofValidationError::ReplayKey(message) => Response::error(message, 500),
+    }
+}
+
+fn room_admin_request_validation_error_response(
+    err: RoomAdminRequestValidationError,
+) -> Result<Response> {
+    if err.is_unauthorized() {
+        Response::error(err.to_string(), 401)
+    } else {
+        Response::error(err.to_string(), 400)
     }
 }
 

@@ -43,6 +43,7 @@ pub const API_PROFILE_VERSION: &str = "v0.1.4";
 pub const MAX_BARRIER_HELPER_PAGE_ENTRIES: u32 = 512;
 pub const MEMBERS_DEFAULT_PAGE_SIZE: u32 = 256;
 pub const MEMBERS_MAX_PAGE_SIZE: u32 = 2000;
+pub const ML_KEM_768_PUBLIC_KEY_BYTES: usize = 1_184;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedIdentityBinding {
@@ -943,6 +944,118 @@ pub enum RoomAdminProofValidationError {
     ReplayKey(String),
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RoomAdminRequestValidationError {
+    #[error("room_id must be provided")]
+    MissingRoomId,
+    #[error("kbroad_public must be provided")]
+    MissingKbroadPublic,
+    #[error("kbroad_public has unexpected length")]
+    InvalidKbroadPublicLength,
+    #[error("target_pop_public_key has unexpected length")]
+    InvalidTargetPopPublicKeyLength,
+    #[error("room admin proof is required")]
+    MissingAdminProof,
+}
+
+impl RoomAdminRequestValidationError {
+    #[must_use]
+    pub const fn is_unauthorized(&self) -> bool {
+        matches!(self, Self::MissingAdminProof)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedRoomKbroadRequest {
+    pub room_id: String,
+    pub kbroad_public: Vec<u8>,
+    pub admin_proof: pb::RoomAdminProof,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedRoomAdminMutationRequest {
+    pub room_id: String,
+    pub target_pop_public_key: Vec<u8>,
+    pub admin_proof: pb::RoomAdminProof,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedListRoomAdminsRequest {
+    pub room_id: String,
+    pub admin_proof: pb::RoomAdminProof,
+}
+
+fn validate_room_kbroad_request(
+    room_id: String,
+    kbroad_public: Vec<u8>,
+    admin_proof: Option<pb::RoomAdminProof>,
+) -> Result<ValidatedRoomKbroadRequest, RoomAdminRequestValidationError> {
+    if room_id.is_empty() {
+        return Err(RoomAdminRequestValidationError::MissingRoomId);
+    }
+    if kbroad_public.is_empty() {
+        return Err(RoomAdminRequestValidationError::MissingKbroadPublic);
+    }
+    if kbroad_public.len() != ML_KEM_768_PUBLIC_KEY_BYTES {
+        return Err(RoomAdminRequestValidationError::InvalidKbroadPublicLength);
+    }
+    let admin_proof = admin_proof.ok_or(RoomAdminRequestValidationError::MissingAdminProof)?;
+
+    Ok(ValidatedRoomKbroadRequest {
+        room_id,
+        kbroad_public,
+        admin_proof,
+    })
+}
+
+pub fn validate_bootstrap_room_request(
+    request: pb::BootstrapRoomRequest,
+) -> Result<ValidatedRoomKbroadRequest, RoomAdminRequestValidationError> {
+    validate_room_kbroad_request(request.room_id, request.kbroad_public, request.admin_proof)
+}
+
+pub fn validate_rotate_room_kbroad_request(
+    request: pb::RotateRoomKbroadRequest,
+) -> Result<ValidatedRoomKbroadRequest, RoomAdminRequestValidationError> {
+    validate_room_kbroad_request(request.room_id, request.kbroad_public, request.admin_proof)
+}
+
+pub fn validate_room_admin_mutation_request(
+    request: pb::RoomAdminMutationRequest,
+) -> Result<ValidatedRoomAdminMutationRequest, RoomAdminRequestValidationError> {
+    if request.room_id.is_empty() {
+        return Err(RoomAdminRequestValidationError::MissingRoomId);
+    }
+    if request.target_pop_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
+        return Err(RoomAdminRequestValidationError::InvalidTargetPopPublicKeyLength);
+    }
+    let admin_proof = request
+        .admin_proof
+        .ok_or(RoomAdminRequestValidationError::MissingAdminProof)?;
+
+    Ok(ValidatedRoomAdminMutationRequest {
+        room_id: request.room_id,
+        target_pop_public_key: request.target_pop_public_key,
+        admin_proof,
+    })
+}
+
+pub fn validate_list_room_admins_request(
+    request: pb::ListRoomAdminsRequest,
+) -> Result<ValidatedListRoomAdminsRequest, RoomAdminRequestValidationError> {
+    if request.room_id.is_empty() {
+        return Err(RoomAdminRequestValidationError::MissingRoomId);
+    }
+    let admin_proof = request
+        .admin_proof
+        .ok_or(RoomAdminRequestValidationError::MissingAdminProof)?;
+
+    Ok(ValidatedListRoomAdminsRequest {
+        room_id: request.room_id,
+        admin_proof,
+    })
+}
+
 /// Verify a room-admin proof over `(operation, room_id, payload)`.
 pub fn verify_room_admin_proof_payload(
     proof: &pb::RoomAdminProof,
@@ -1600,6 +1713,63 @@ mod tests {
         )
         .expect("decode list-admins response");
         assert_eq!(decoded_list.admin_pop_public_keys, admin_pop_public_keys);
+    }
+
+    #[test]
+    fn validate_room_admin_requests_projects_required_fields() {
+        let proof = pb::RoomAdminProof {
+            pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES],
+            signature: vec![0x22; ML_DSA_65_SIGNATURE_BYTES],
+        };
+
+        let bootstrap = validate_bootstrap_room_request(pb::BootstrapRoomRequest {
+            room_id: hex::encode(DEMO_GID),
+            kbroad_public: vec![0x33; ML_KEM_768_PUBLIC_KEY_BYTES],
+            admin_proof: Some(proof.clone()),
+        })
+        .expect("validate bootstrap");
+        assert_eq!(bootstrap.kbroad_public.len(), ML_KEM_768_PUBLIC_KEY_BYTES);
+
+        let mutation = validate_room_admin_mutation_request(pb::RoomAdminMutationRequest {
+            room_id: hex::encode(DEMO_GID),
+            target_pop_public_key: vec![0x44; ML_DSA_65_PUBLIC_KEY_BYTES],
+            admin_proof: Some(proof.clone()),
+        })
+        .expect("validate mutation");
+        assert_eq!(
+            mutation.target_pop_public_key.len(),
+            ML_DSA_65_PUBLIC_KEY_BYTES
+        );
+
+        let listed = validate_list_room_admins_request(pb::ListRoomAdminsRequest {
+            room_id: hex::encode(DEMO_GID),
+            admin_proof: Some(proof),
+        })
+        .expect("validate list admins");
+        assert_eq!(listed.room_id, hex::encode(DEMO_GID));
+    }
+
+    #[test]
+    fn validate_room_admin_requests_reject_missing_required_fields() {
+        assert_eq!(
+            validate_bootstrap_room_request(pb::BootstrapRoomRequest::default()),
+            Err(RoomAdminRequestValidationError::MissingRoomId)
+        );
+        assert_eq!(
+            validate_room_admin_mutation_request(pb::RoomAdminMutationRequest {
+                room_id: hex::encode(DEMO_GID),
+                target_pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES - 1],
+                admin_proof: None,
+            }),
+            Err(RoomAdminRequestValidationError::InvalidTargetPopPublicKeyLength)
+        );
+        assert_eq!(
+            validate_list_room_admins_request(pb::ListRoomAdminsRequest {
+                room_id: hex::encode(DEMO_GID),
+                admin_proof: None,
+            }),
+            Err(RoomAdminRequestValidationError::MissingAdminProof)
+        );
     }
 
     #[test]

@@ -44,6 +44,8 @@ runtime code.
   Native `cityg-api` and Worker `cloudflare` now share the protobuf response shaping for `/v1/members` and `/v1/members/search`, so those adapters only keep alias lookup, paging, and request validation locally.
 - [x] Move room-admin and bootstrap response encoding into `cityg-api-schema`.
   Native `cityg-api` and Worker `cloudflare` now share the protobuf response shaping for `/v1/rooms/bootstrap`, `/v1/rooms/rotate_kbroad`, `/v1/rooms/grant_admin`, `/v1/rooms/revoke_admin`, and `/v1/rooms/list_admins`, so those adapters no longer rebuild the same room-admin envelopes inline.
+- [x] Move room-admin and bootstrap request validation into `cityg-api-schema`.
+  Native `cityg-api` and Worker `cloudflare` now share the request-side `room_id`, kbroad length, target POP key length, and missing-proof validation for `/v1/rooms/bootstrap`, `/v1/rooms/rotate_kbroad`, `/v1/rooms/grant_admin`, `/v1/rooms/revoke_admin`, and `/v1/rooms/list_admins`, so only proof verification, routing, and server execution remain adapter-local.
 - [x] Define the shared Durable Object storage contract for authoritative room checkpoints and volatile room snapshots.
 - [x] Add room-volatile snapshot/hydration helpers aligned with the shared checkpoint contract.
 - [x] Implement the first Durable Object-backed `RoomStateStore`.

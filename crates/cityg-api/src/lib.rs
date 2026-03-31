@@ -33,7 +33,7 @@ use cityg_api_schema::{
     API_PROFILE_VERSION, BarrierHelperRequestDecodeError,
     FullVerificationWitnessRequestDecodeError, IdentityBindingValidationError,
     MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
-    PreparedIdentityBindingError, RoomAdminProofValidationError,
+    PreparedIdentityBindingError, RoomAdminProofValidationError, RoomAdminRequestValidationError,
     decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
     decode_barrier_resolve_revoked_leaves_request as schema_decode_barrier_resolve_revoked_leaves_request,
@@ -49,10 +49,13 @@ use cityg_api_schema::{
     encode_window_snapshot_response, pb, pb_member as schema_pb_member,
     prepare_identity_binding as schema_prepare_identity_binding,
     room_admin_proof_replay_key as schema_room_admin_proof_replay_key,
+    validate_bootstrap_room_request as schema_validate_bootstrap_room_request,
+    validate_list_room_admins_request as schema_validate_list_room_admins_request,
+    validate_room_admin_mutation_request as schema_validate_room_admin_mutation_request,
+    validate_rotate_room_kbroad_request as schema_validate_rotate_room_kbroad_request,
     verify_room_admin_proof as schema_verify_room_admin_proof,
     verify_room_admin_proof_payload as schema_verify_room_admin_proof_payload,
 };
-use cityg_pqc::ML_DSA_65_PUBLIC_KEY_BYTES;
 use futures::{SinkExt, StreamExt};
 use hex::FromHex;
 #[cfg(test)]
@@ -131,6 +134,7 @@ use cityg_runtime::{
 use cityg_server::{CityGServer, MergeTicketIntent as ServerMergeTicketIntent, ServerOutcome};
 use msphf_core::{MsphfError, merkle::canonical_set_root};
 use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
+#[cfg(test)]
 use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::to_vec as to_json_vec;
@@ -716,6 +720,26 @@ fn map_room_admin_proof_validation_error(err: RoomAdminProofValidationError) -> 
             ApiError::InvalidRequest("failed to encode room admin proof payload")
         }
         RoomAdminProofValidationError::ReplayKey(message) => ApiError::server_message(message),
+    }
+}
+
+fn map_room_admin_request_validation_error(err: RoomAdminRequestValidationError) -> ApiError {
+    match err {
+        RoomAdminRequestValidationError::MissingRoomId => {
+            ApiError::InvalidRequest("room_id must be provided")
+        }
+        RoomAdminRequestValidationError::MissingKbroadPublic => {
+            ApiError::InvalidRequest("kbroad_public must be provided")
+        }
+        RoomAdminRequestValidationError::InvalidKbroadPublicLength => {
+            ApiError::InvalidRequest("kbroad_public has unexpected length")
+        }
+        RoomAdminRequestValidationError::InvalidTargetPopPublicKeyLength => {
+            ApiError::InvalidRequest("target_pop_public_key has unexpected length")
+        }
+        RoomAdminRequestValidationError::MissingAdminProof => {
+            ApiError::Unauthorized("room admin proof is required")
+        }
     }
 }
 
@@ -1881,27 +1905,11 @@ async fn bootstrap_room(
     _headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let request = BootstrapRoomRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    if request.kbroad_public.is_empty() {
-        return Err(ApiError::InvalidRequest("kbroad_public must be provided"));
-    }
-
-    if request.kbroad_public.len() != ml_kem_public_key_bytes() {
-        return Err(ApiError::InvalidRequest(
-            "kbroad_public has unexpected length",
-        ));
-    }
-
+    let request = schema_validate_bootstrap_room_request(BootstrapRoomRequest::decode(body)?)
+        .map_err(map_room_admin_request_validation_error)?;
     let gid = parse_gid(&request.room_id)?;
-    let proof = request
-        .admin_proof
-        .as_ref()
-        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
     let initial_room_admin_pop_key = verify_room_admin_proof(
-        proof,
+        &request.admin_proof,
         "bootstrap_room_v1",
         &request.room_id,
         &request.kbroad_public,
@@ -1928,30 +1936,16 @@ async fn rotate_room_kbroad(
     _headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let request = RotateRoomKbroadRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    if request.kbroad_public.is_empty() {
-        return Err(ApiError::InvalidRequest("kbroad_public must be provided"));
-    }
-    if request.kbroad_public.len() != ml_kem_public_key_bytes() {
-        return Err(ApiError::InvalidRequest(
-            "kbroad_public has unexpected length",
-        ));
-    }
-
+    let request =
+        schema_validate_rotate_room_kbroad_request(RotateRoomKbroadRequest::decode(body)?)
+            .map_err(map_room_admin_request_validation_error)?;
     let gid = parse_gid(&request.room_id)?;
-    let proof = request
-        .admin_proof
-        .as_ref()
-        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
-    let replay_key = room_admin_proof_replay_key(proof)?;
+    let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
     let kbroad_generation = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
         let actor_pop_key = verify_room_admin_proof(
-            proof,
+            &request.admin_proof,
             "rotate_room_kbroad_v1",
             &request.room_id,
             &request.kbroad_public,
@@ -1974,24 +1968,13 @@ async fn grant_room_admin(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let request = RoomAdminMutationRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    if request.target_pop_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
-        return Err(ApiError::InvalidRequest(
-            "target_pop_public_key has unexpected length",
-        ));
-    }
-
+    let request =
+        schema_validate_room_admin_mutation_request(RoomAdminMutationRequest::decode(body)?)
+            .map_err(map_room_admin_request_validation_error)?;
     let gid = parse_gid(&request.room_id)?;
-    let proof = request
-        .admin_proof
-        .as_ref()
-        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
-    let replay_key = room_admin_proof_replay_key(proof)?;
+    let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
     let actor_pop_key = verify_room_admin_proof_payload(
-        proof,
+        &request.admin_proof,
         "grant_room_admin_v1",
         &request.room_id,
         &request.target_pop_public_key,
@@ -2028,24 +2011,13 @@ async fn revoke_room_admin(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let request = RoomAdminMutationRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    if request.target_pop_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
-        return Err(ApiError::InvalidRequest(
-            "target_pop_public_key has unexpected length",
-        ));
-    }
-
+    let request =
+        schema_validate_room_admin_mutation_request(RoomAdminMutationRequest::decode(body)?)
+            .map_err(map_room_admin_request_validation_error)?;
     let gid = parse_gid(&request.room_id)?;
-    let proof = request
-        .admin_proof
-        .as_ref()
-        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
-    let replay_key = room_admin_proof_replay_key(proof)?;
+    let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
     let actor_pop_key = verify_room_admin_proof_payload(
-        proof,
+        &request.admin_proof,
         "revoke_room_admin_v1",
         &request.room_id,
         &request.target_pop_public_key,
@@ -2082,18 +2054,15 @@ async fn list_room_admins(
     State(state): State<ApiState>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let request = ListRoomAdminsRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-
+    let request = schema_validate_list_room_admins_request(ListRoomAdminsRequest::decode(body)?)
+        .map_err(map_room_admin_request_validation_error)?;
     let gid = parse_gid(&request.room_id)?;
-    let proof = request
-        .admin_proof
-        .as_ref()
-        .ok_or(ApiError::Unauthorized("room admin proof is required"))?;
-    let actor_pop_key =
-        verify_room_admin_proof_payload(proof, "list_room_admins_v1", &request.room_id, &[])?;
+    let actor_pop_key = verify_room_admin_proof_payload(
+        &request.admin_proof,
+        "list_room_admins_v1",
+        &request.room_id,
+        &[],
+    )?;
     let admin_pop_public_keys = {
         let lane = state.server_for_gid(&gid);
         let guard = lane.read().await;
