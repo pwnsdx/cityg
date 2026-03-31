@@ -33,7 +33,8 @@ use cityg_api_schema::{
     API_PROFILE_VERSION, BarrierHelperRequestDecodeError, ExpelMemberTicketRequestValidationError,
     FullVerificationWitnessRequestDecodeError, IdentityBindingValidationError,
     MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
-    PreparedIdentityBindingError, RoomAdminProofValidationError, RoomAdminRequestValidationError,
+    MergeTicketRequestValidationError, PreparedIdentityBindingError, RoomAdminProofValidationError,
+    RoomAdminRequestValidationError,
     decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
     decode_barrier_resolve_revoked_leaves_request as schema_decode_barrier_resolve_revoked_leaves_request,
@@ -52,6 +53,7 @@ use cityg_api_schema::{
     validate_bootstrap_room_request as schema_validate_bootstrap_room_request,
     validate_expel_member_ticket_request as schema_validate_expel_member_ticket_request,
     validate_list_room_admins_request as schema_validate_list_room_admins_request,
+    validate_merge_ticket_request as schema_validate_merge_ticket_request,
     validate_room_admin_mutation_request as schema_validate_room_admin_mutation_request,
     validate_rotate_room_kbroad_request as schema_validate_rotate_room_kbroad_request,
     verify_room_admin_proof as schema_verify_room_admin_proof,
@@ -762,6 +764,20 @@ fn map_expel_member_ticket_request_validation_error(
         ),
         ExpelMemberTicketRequestValidationError::MissingAdminProof => {
             ApiError::Unauthorized("room admin proof is required")
+        }
+    }
+}
+
+fn map_merge_ticket_request_validation_error(err: MergeTicketRequestValidationError) -> ApiError {
+    match err {
+        MergeTicketRequestValidationError::MissingRoomId => {
+            ApiError::InvalidRequest("room_id must be provided")
+        }
+        MergeTicketRequestValidationError::InvalidLeafId => {
+            ApiError::InvalidRequest("leaf_id must be 32 bytes")
+        }
+        MergeTicketRequestValidationError::InvalidIntent => {
+            ApiError::InvalidRequest("merge ticket intent is invalid")
         }
     }
 }
@@ -2161,17 +2177,9 @@ async fn merge_ticket(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = MergeTicketRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    if request.leaf_id.len() != 32 {
-        return Err(ApiError::InvalidRequest("leaf_id must be 32 bytes"));
-    }
-
+    let request = schema_validate_merge_ticket_request(MergeTicketRequest::decode(body)?)
+        .map_err(map_merge_ticket_request_validation_error)?;
     let gid = parse_gid(&request.room_id)?;
-    let mut leaf_id = [0u8; 32];
-    leaf_id.copy_from_slice(&request.leaf_id);
     enforce_expensive_rate_limit(
         &state,
         "merge_ticket",
@@ -2181,19 +2189,17 @@ async fn merge_ticket(
                 .map(HeaderValue::as_bytes)
                 .unwrap_or_default(),
             &gid,
-            &leaf_id,
+            &request.leaf_id,
         ]),
     )
     .await?;
-    let intent = MergeTicketIntent::try_from(request.intent)
-        .map_err(|_| ApiError::InvalidRequest("merge ticket intent is invalid"))?;
     let cache_key = MergeTicketCacheKey {
         gid,
-        leaf_id,
-        intent: request.intent,
+        leaf_id: request.leaf_id,
+        intent: request.intent_value,
     };
     let now_ms = current_timestamp_ms();
-    if intent == MergeTicketIntent::Leave
+    if request.intent == MergeTicketIntent::Leave
         && let Some(cached) = state.coalesced_merge_ticket_lookup(cache_key, now_ms).await
     {
         metrics::counter!(
@@ -2208,21 +2214,21 @@ async fn merge_ticket(
     let prepared = {
         let lane = state.server_for_gid(&gid);
         let mut guard = lane.write().await;
-        let server_intent = match intent {
+        let server_intent = match request.intent {
             MergeTicketIntent::Leave => ServerMergeTicketIntent::Leave,
             MergeTicketIntent::Refresh => ServerMergeTicketIntent::Refresh,
         };
         match runtime_prepare_merge_ticket(
             &mut guard,
             &gid,
-            &leaf_id,
+            &request.leaf_id,
             server_intent,
             API_PROFILE_VERSION,
         ) {
             Ok(prepared) => prepared,
             Err(err) => {
                 metrics::counter!("cityg_merge_ticket_total", "result" => "error").increment(1);
-                let endpoint = match intent {
+                let endpoint = match request.intent {
                     MergeTicketIntent::Leave => "merge_ticket",
                     MergeTicketIntent::Refresh => "merge_ticket_refresh",
                 };
@@ -2232,7 +2238,7 @@ async fn merge_ticket(
     };
 
     let response_bytes = encode_prepared_merge_ticket_response(prepared);
-    if intent == MergeTicketIntent::Leave {
+    if request.intent == MergeTicketIntent::Leave {
         state
             .coalesced_merge_ticket_store(cache_key, response_bytes.clone(), now_ms)
             .await;

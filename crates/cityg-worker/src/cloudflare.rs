@@ -8,20 +8,21 @@ use std::{
 use cityg_api_schema::{
     API_PROFILE_VERSION, BarrierHelperRequestDecodeError, ExpelMemberTicketRequestValidationError,
     MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
-    PreparedIdentityBindingError, RoomAdminProofValidationError, RoomAdminRequestValidationError,
-    RoomScopedApiRoute, RoomScopedRequestTarget, RoomScopedRoutingKey,
-    decode_barrier_fetch_public_tree_request, decode_barrier_lookup_merge_acceptance_request,
-    decode_barrier_resolve_revoked_leaves_request, decode_full_verification_witness_request,
-    encode_bootstrap_room_response, encode_full_verification_witness_response,
-    encode_list_room_admins_response, encode_members_response,
-    encode_prepared_barrier_public_tree_response, encode_prepared_join_ticket_response,
-    encode_prepared_merge_acceptance_lookup_response, encode_prepared_merge_ticket_response,
-    encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
-    encode_room_admin_leaf_pair_payload, encode_room_admin_mutation_response,
-    encode_rotate_room_kbroad_response, encode_search_members_response,
-    extract_room_scoped_request_target, pb, pb_member as schema_pb_member,
-    prepare_identity_binding, room_admin_proof_replay_key, validate_bootstrap_room_request,
-    validate_expel_member_ticket_request, validate_list_room_admins_request,
+    MergeTicketRequestValidationError, PreparedIdentityBindingError, RoomAdminProofValidationError,
+    RoomAdminRequestValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
+    RoomScopedRoutingKey, decode_barrier_fetch_public_tree_request,
+    decode_barrier_lookup_merge_acceptance_request, decode_barrier_resolve_revoked_leaves_request,
+    decode_full_verification_witness_request, encode_bootstrap_room_response,
+    encode_full_verification_witness_response, encode_list_room_admins_response,
+    encode_members_response, encode_prepared_barrier_public_tree_response,
+    encode_prepared_join_ticket_response, encode_prepared_merge_acceptance_lookup_response,
+    encode_prepared_merge_ticket_response, encode_prepared_resolved_joins_response,
+    encode_prepared_resolved_revoked_leaves_response, encode_room_admin_leaf_pair_payload,
+    encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
+    encode_search_members_response, extract_room_scoped_request_target, pb,
+    pb_member as schema_pb_member, prepare_identity_binding, room_admin_proof_replay_key,
+    validate_bootstrap_room_request, validate_expel_member_ticket_request,
+    validate_list_room_admins_request, validate_merge_ticket_request,
     validate_room_admin_mutation_request, validate_rotate_room_kbroad_request,
     verify_room_admin_proof, verify_room_admin_proof_payload,
 };
@@ -1626,9 +1627,10 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        if request.leaf_id.len() != 32 {
-            return Response::error("leaf_id must be 32 bytes", 400);
-        }
+        let request = match validate_merge_ticket_request(request) {
+            Ok(request) => request,
+            Err(error) => return merge_ticket_request_validation_error_response(error),
+        };
         let gid = route_gid(&target)?;
         let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
             return Response::error("room checkpoint not found", 404);
@@ -1644,18 +1646,15 @@ impl CloudflareRoomDurableObject {
             }
         };
         let (mut server, _) = room.into_parts();
-        let mut leaf_id = [0u8; 32];
-        leaf_id.copy_from_slice(&request.leaf_id);
-        let intent = match pb::MergeTicketIntent::try_from(request.intent) {
-            Ok(pb::MergeTicketIntent::Leave) => ServerMergeTicketIntent::Leave,
-            Ok(pb::MergeTicketIntent::Refresh) => ServerMergeTicketIntent::Refresh,
-            Err(_) => return Response::error("merge ticket intent is invalid", 400),
+        let intent = match request.intent {
+            pb::MergeTicketIntent::Leave => ServerMergeTicketIntent::Leave,
+            pb::MergeTicketIntent::Refresh => ServerMergeTicketIntent::Refresh,
         };
 
         let prepared = match cityg_runtime::prepare_merge_ticket(
             &mut server,
             &gid,
-            &leaf_id,
+            &request.leaf_id,
             intent,
             API_PROFILE_VERSION,
         ) {
@@ -2995,6 +2994,12 @@ fn expel_member_ticket_request_validation_error_response(
     } else {
         Response::error(err.to_string(), 400)
     }
+}
+
+fn merge_ticket_request_validation_error_response(
+    err: MergeTicketRequestValidationError,
+) -> Result<Response> {
+    Response::error(err.to_string(), 400)
 }
 
 #[derive(Clone, Copy, Debug)]

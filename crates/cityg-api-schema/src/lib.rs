@@ -993,6 +993,14 @@ pub struct ValidatedExpelMemberTicketRequest {
     pub admin_proof: pb::RoomAdminProof,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedMergeTicketRequest {
+    pub room_id: String,
+    pub leaf_id: [u8; 32],
+    pub intent: pb::MergeTicketIntent,
+    pub intent_value: i32,
+}
+
 fn validate_room_kbroad_request(
     room_id: String,
     kbroad_public: Vec<u8>,
@@ -1113,6 +1121,38 @@ pub fn validate_expel_member_ticket_request(
         author_leaf_id,
         target_leaf_id,
         admin_proof,
+    })
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum MergeTicketRequestValidationError {
+    #[error("room_id must be provided")]
+    MissingRoomId,
+    #[error("leaf_id must be 32 bytes")]
+    InvalidLeafId,
+    #[error("merge ticket intent is invalid")]
+    InvalidIntent,
+}
+
+pub fn validate_merge_ticket_request(
+    request: pb::MergeTicketRequest,
+) -> Result<ValidatedMergeTicketRequest, MergeTicketRequestValidationError> {
+    if request.room_id.is_empty() {
+        return Err(MergeTicketRequestValidationError::MissingRoomId);
+    }
+    let leaf_id: [u8; 32] = request
+        .leaf_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| MergeTicketRequestValidationError::InvalidLeafId)?;
+    let intent = pb::MergeTicketIntent::try_from(request.intent)
+        .map_err(|_| MergeTicketRequestValidationError::InvalidIntent)?;
+
+    Ok(ValidatedMergeTicketRequest {
+        room_id: request.room_id,
+        leaf_id,
+        intent,
+        intent_value: request.intent,
     })
 }
 
@@ -1873,6 +1913,48 @@ mod tests {
                 admin_proof: Some(pb::RoomAdminProof::default()),
             }),
             Err(ExpelMemberTicketRequestValidationError::MatchingLeafIds)
+        );
+    }
+
+    #[test]
+    fn validate_merge_ticket_request_projects_required_fields() {
+        let validated = validate_merge_ticket_request(pb::MergeTicketRequest {
+            room_id: hex::encode(DEMO_GID),
+            leaf_id: vec![0x33; 32],
+            intent: pb::MergeTicketIntent::Refresh as i32,
+        })
+        .expect("validate merge ticket request");
+
+        assert_eq!(validated.room_id, hex::encode(DEMO_GID));
+        assert_eq!(validated.leaf_id, [0x33; 32]);
+        assert_eq!(validated.intent, pb::MergeTicketIntent::Refresh);
+        assert_eq!(
+            validated.intent_value,
+            pb::MergeTicketIntent::Refresh as i32
+        );
+    }
+
+    #[test]
+    fn validate_merge_ticket_request_rejects_invalid_shape() {
+        assert_eq!(
+            validate_merge_ticket_request(pb::MergeTicketRequest::default()),
+            Err(MergeTicketRequestValidationError::MissingRoomId)
+        );
+        assert_eq!(
+            validate_merge_ticket_request(pb::MergeTicketRequest {
+                room_id: hex::encode(DEMO_GID),
+                leaf_id: vec![0x11; 31],
+                intent: pb::MergeTicketIntent::Leave as i32,
+            }),
+            Err(MergeTicketRequestValidationError::InvalidLeafId)
+        );
+        assert_eq!(
+            validate_merge_ticket_request(pb::MergeTicketRequest {
+                room_id: hex::encode(DEMO_GID),
+                leaf_id: vec![0x11; 32],
+                intent: 99,
+            }),
+            Err(MergeTicketRequestValidationError::InvalidIntent)
         );
     }
 
