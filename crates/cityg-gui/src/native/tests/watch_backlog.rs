@@ -151,10 +151,11 @@ async fn watch_reconnect_fetches_offline_backlog_and_resumes_live_notifications(
             break;
         };
         match event {
-            WebSocketEvent::Message => {
+            WebSocketEvent::Message(signal) if !signal.replayed => {
                 saw_live_notification = true;
                 break;
             }
+            WebSocketEvent::Message(_) => {}
             WebSocketEvent::Connected
             | WebSocketEvent::Disconnected
             | WebSocketEvent::Membership(_) => {}
@@ -435,10 +436,11 @@ async fn dual_restarted_watchers_fetch_offline_backlog_and_resume_live_notificat
             break;
         };
         match event {
-            WebSocketEvent::Message => {
+            WebSocketEvent::Message(signal) if !signal.replayed => {
                 alice_saw_live_notification = true;
                 break;
             }
+            WebSocketEvent::Message(_) => {}
             WebSocketEvent::Connected
             | WebSocketEvent::Disconnected
             | WebSocketEvent::Membership(_) => {}
@@ -451,10 +453,11 @@ async fn dual_restarted_watchers_fetch_offline_backlog_and_resume_live_notificat
             break;
         };
         match event {
-            WebSocketEvent::Message => {
+            WebSocketEvent::Message(signal) if !signal.replayed => {
                 bob_saw_live_notification = true;
                 break;
             }
+            WebSocketEvent::Message(_) => {}
             WebSocketEvent::Connected
             | WebSocketEvent::Disconnected
             | WebSocketEvent::Membership(_) => {}

@@ -1,5 +1,31 @@
 use super::*;
 
+#[test]
+fn websocket_control_messages_encode_expected_shapes() {
+    assert_eq!(
+        websocket_ack_message(12),
+        r#"{"last_sequence":12,"type":"ack"}"#
+    );
+    assert_eq!(
+        websocket_resume_message(34),
+        r#"{"last_sequence":34,"type":"resume"}"#
+    );
+    assert_eq!(
+        websocket_notification_sequence(&serde_json::json!({
+            "type": "message",
+            "sequence": 56,
+        })),
+        Some(56)
+    );
+    assert!(websocket_notification_replayed(&serde_json::json!({
+        "type": "message",
+        "replayed": true,
+    })));
+    assert!(!websocket_notification_replayed(&serde_json::json!({
+        "type": "message",
+    })));
+}
+
 #[tokio::test]
 async fn websocket_worker_reports_revoke_membership_event() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -42,12 +68,80 @@ async fn websocket_worker_reports_revoke_membership_event() -> Result<(), Box<dy
             && signal.gid == membership_gid
             && signal.leaf_id == Some(membership_leaf)
             && signal.kind == Some(MembershipSignalKind::Revoke)
+            && signal.sequence.is_none()
+            && !signal.replayed
         {
             saw_revoke = true;
             break;
         }
     }
     assert!(saw_revoke, "expected revoke membership event");
+
+    drop(rx);
+    tokio::time::timeout(Duration::from_secs(1), server).await???;
+    tokio::time::timeout(Duration::from_secs(1), worker).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_worker_acks_sequences_and_resumes_on_reconnect()
+-> Result<(), Box<dyn std::error::Error>> {
+    use tokio_tungstenite::tungstenite::Message as ServerMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut ws = tokio_tungstenite::accept_async(stream).await?;
+        ws.send(ServerMessage::Text(
+            r#"{"type":"message","sequence":12}"#.to_string().into(),
+        ))
+        .await?;
+        let ack = ws.next().await.expect("ack frame").expect("ack frame ok");
+        let ack_text = ack.into_text().expect("ack text frame");
+        let ack_json: serde_json::Value = serde_json::from_str(&ack_text).expect("ack json");
+        assert_eq!(ack_json["type"], "ack");
+        assert_eq!(ack_json["last_sequence"], 12);
+        ws.close(None).await?;
+
+        let (stream, _) = listener.accept().await?;
+        let mut ws = tokio_tungstenite::accept_async(stream).await?;
+        let resume = ws
+            .next()
+            .await
+            .expect("resume frame")
+            .expect("resume frame ok");
+        let resume_text = resume.into_text().expect("resume text frame");
+        let resume_json: serde_json::Value =
+            serde_json::from_str(&resume_text).expect("resume json");
+        assert_eq!(resume_json["type"], "resume");
+        assert_eq!(resume_json["last_sequence"], 12);
+        ws.close(None).await?;
+
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+    let worker = tokio::spawn(run_websocket_worker(
+        format!("ws://{addr}/v1/ws"),
+        None,
+        Duration::from_millis(20),
+        tx,
+    ));
+
+    let mut connected_count = 0usize;
+    while connected_count < 2 {
+        let next = tokio::time::timeout(Duration::from_secs(1), rx.next()).await?;
+        match next {
+            Some(WebSocketEvent::Connected) => connected_count += 1,
+            Some(WebSocketEvent::Disconnected)
+            | Some(WebSocketEvent::Message(_))
+            | Some(WebSocketEvent::Membership(_)) => {}
+            None => break,
+        }
+    }
+    assert_eq!(connected_count, 2, "expected reconnect with resume");
 
     drop(rx);
     tokio::time::timeout(Duration::from_secs(1), server).await???;
@@ -101,9 +195,7 @@ async fn websocket_worker_emits_membership_and_message_events()
         ws.send(WsMessage::Text(r#"{"type":"message"}"#.to_string().into()))
             .await?;
         ws.send(WsMessage::Text(
-            format!(
-                r#"{{"type":"membership","gid":"{membership_gid_hex}","leaf_id":"{membership_leaf_hex}","event":"join","timestamp_ms":12345}}"#
-            )
+            format!(r#"{{"type":"membership","gid":"{membership_gid_hex}","leaf_id":"{membership_leaf_hex}","event":"join","timestamp_ms":12345,"sequence":9,"replayed":true}}"#)
             .into(),
         ))
         .await?;
@@ -139,11 +231,15 @@ async fn websocket_worker_emits_membership_and_message_events()
 
         match event {
             WebSocketEvent::Connected => saw_connected = true,
-            WebSocketEvent::Message => saw_message = true,
+            WebSocketEvent::Message(signal) => {
+                saw_message = !signal.replayed && signal.sequence.is_none();
+            }
             WebSocketEvent::Membership(signal) => {
                 if signal.gid == membership_gid
                     && signal.leaf_id == Some(membership_leaf)
                     && signal.kind == Some(MembershipSignalKind::Join)
+                    && signal.sequence == Some(9)
+                    && signal.replayed
                 {
                     saw_membership = true;
                 }
@@ -211,7 +307,8 @@ async fn websocket_worker_parses_unknown_membership_and_ping()
             && signal.gid == membership_gid
             && signal.leaf_id == Some(membership_leaf)
         {
-            saw_unknown_kind = signal.kind.is_none();
+            saw_unknown_kind =
+                signal.kind.is_none() && signal.sequence.is_none() && !signal.replayed;
             break;
         }
     }
@@ -330,7 +427,7 @@ async fn websocket_worker_ignores_invalid_json_and_unknown_notification_type()
                 saw_disconnected = true;
                 break;
             }
-            WebSocketEvent::Message | WebSocketEvent::Membership(_) => {
+            WebSocketEvent::Message(_) | WebSocketEvent::Membership(_) => {
                 return Err(anyhow!("unexpected event from invalid payloads").into());
             }
         }

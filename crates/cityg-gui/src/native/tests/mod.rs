@@ -3150,16 +3150,30 @@ fn gpui_handle_websocket_event_updates_state(cx: &mut TestAppContext) {
         model.handle_websocket_event(WebSocketEvent::Connected, view_cx);
         assert!(model.ws_connected);
 
-        model.handle_websocket_event(WebSocketEvent::Message, view_cx);
+        model.handle_websocket_event(
+            WebSocketEvent::Message(WebSocketMessageSignal {
+                sequence: Some(7),
+                replayed: false,
+            }),
+            view_cx,
+        );
         assert!(model.epoch_sync_task.is_some());
         assert!(!model.fetch_in_flight);
         assert!(matches!(model.fetch_status, FetchStatus::Idle));
+        assert!(
+            model
+                .activity_events
+                .iter()
+                .any(|event| event.summary.contains("New message notification"))
+        );
 
         model.handle_websocket_event(
             WebSocketEvent::Membership(MembershipSignal {
                 gid: session.gid,
                 leaf_id: Some(session.leaf_id),
                 kind: Some(MembershipSignalKind::Join),
+                sequence: Some(8),
+                replayed: true,
                 timestamp_ms: Some(42),
             }),
             view_cx,
@@ -3168,7 +3182,7 @@ fn gpui_handle_websocket_event_updates_state(cx: &mut TestAppContext) {
             model
                 .activity_events
                 .iter()
-                .any(|event| event.summary.contains("Roster join"))
+                .any(|event| event.summary.contains("Replayed roster join"))
         );
 
         model.handle_websocket_event(WebSocketEvent::Disconnected, view_cx);
@@ -3197,9 +3211,20 @@ fn gpui_message_event_fetches_after_epoch_sync_even_when_head_is_unchanged(
     view.update(cx, |model, view_cx| {
         model.session = Some(session.clone());
 
-        model.handle_websocket_event(WebSocketEvent::Message, view_cx);
+        model.handle_websocket_event(
+            WebSocketEvent::Message(WebSocketMessageSignal {
+                sequence: Some(12),
+                replayed: true,
+            }),
+            view_cx,
+        );
         assert!(model.epoch_sync_task.is_some());
         assert!(model.fetch_after_epoch_sync);
+        assert!(model.activity_events.iter().any(|event| {
+            event
+                .summary
+                .contains("Replayed message notification after reconnect")
+        }));
 
         model.epoch_sync_task = None;
         model.handle_epoch_sync_result(
@@ -8847,23 +8872,45 @@ fn sender_resolution_membership_activity_and_security_persist()
         gid: [0x11; 32],
         leaf_id: Some(leaf),
         kind: Some(MembershipSignalKind::Join),
+        sequence: Some(1),
+        replayed: false,
         timestamp_ms: Some(1234),
     });
     model.record_membership_activity(&MembershipSignal {
         gid: [0x11; 32],
         leaf_id: Some(leaf),
         kind: Some(MembershipSignalKind::Revoke),
+        sequence: Some(2),
+        replayed: true,
         timestamp_ms: None,
     });
     model.record_membership_activity(&MembershipSignal {
         gid: [0x11; 32],
         leaf_id: None,
         kind: None,
+        sequence: None,
+        replayed: false,
         timestamp_ms: None,
     });
     assert_eq!(model.activity_events.len(), 3);
     assert!(model.activity_events[0].summary.contains("Roster join"));
-    assert!(model.activity_events[1].summary.contains("Roster revoke"));
+    assert!(
+        model.activity_events[0]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("sequence 1"))
+    );
+    assert!(
+        model.activity_events[1]
+            .summary
+            .contains("Replayed roster revoke")
+    );
+    assert!(
+        model.activity_events[1]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("replayed after reconnect"))
+    );
     assert!(model.activity_events[2].summary.contains("Roster changed"));
 
     let session = build_test_session(

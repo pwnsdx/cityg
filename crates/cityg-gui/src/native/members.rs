@@ -49,17 +49,26 @@ impl AppModel {
         if session.gid != signal.gid {
             return;
         }
+        let change_label = if signal.replayed {
+            "replayed membership change"
+        } else {
+            "membership change"
+        };
         if matches!(self.members_status, MembersStatus::Loading(_)) {
-            self.schedule_epoch_sync(cx, "Syncing latest epoch after membership change…");
+            let reason = format!("Syncing latest epoch after {change_label}…");
+            self.schedule_epoch_sync(cx, &reason);
             return;
         }
         let mode = self.members_mode.clone();
         let message = match &mode {
-            MembersMode::Full => "Syncing roster after membership change…".to_string(),
-            MembersMode::Search { query } => format!("Updating search for \"{}\"…", query),
+            MembersMode::Full => format!("Syncing roster after {change_label}…"),
+            MembersMode::Search { query } => {
+                format!("Updating search for \"{}\" after {change_label}…", query)
+            }
         };
         self.refresh_members_for_mode(cx, mode, true, true, message);
-        self.schedule_epoch_sync(cx, "Syncing latest epoch after membership change…");
+        let reason = format!("Syncing latest epoch after {change_label}…");
+        self.schedule_epoch_sync(cx, &reason);
     }
 
     pub(super) fn refresh_members(&mut self, cx: &mut ViewContext<Self>) {

@@ -1,4 +1,4 @@
-use super::websocket::{MembershipSignal, MembershipSignalKind};
+use super::websocket::{MembershipSignal, MembershipSignalKind, WebSocketMessageSignal};
 use super::*;
 
 impl AppModel {
@@ -241,6 +241,16 @@ impl AppModel {
         self.record_activity_with_detail(kind, summary, None);
     }
 
+    pub(super) fn record_websocket_message_activity(&mut self, signal: &WebSocketMessageSignal) {
+        let summary = if signal.replayed {
+            "Replayed message notification after reconnect"
+        } else {
+            "New message notification"
+        };
+        let detail = websocket_activity_detail(signal.sequence, signal.replayed, None);
+        self.record_activity_with_detail(ActivityKind::Message, summary, detail);
+    }
+
     pub(super) fn record_activity_with_detail(
         &mut self,
         kind: ActivityKind,
@@ -260,21 +270,36 @@ impl AppModel {
     }
 
     pub(super) fn record_membership_activity(&mut self, signal: &MembershipSignal) {
-        let summary = match (signal.kind, signal.leaf_id) {
+        let summary = match (signal.kind, signal.leaf_id, signal.replayed) {
+            (Some(MembershipSignalKind::Join), Some(leaf), true) => {
+                format!("Replayed roster join: {}", short_leaf_display(&leaf))
+            }
+            (Some(MembershipSignalKind::Revoke), Some(leaf), true) => {
+                format!("Replayed roster revoke: {}", short_leaf_display(&leaf))
+            }
             (Some(MembershipSignalKind::Join), Some(leaf)) => {
                 format!("Roster join: {}", short_leaf_display(&leaf))
             }
             (Some(MembershipSignalKind::Revoke), Some(leaf)) => {
                 format!("Roster revoke: {}", short_leaf_display(&leaf))
             }
+            (Some(MembershipSignalKind::Join), None, true) => {
+                "Replayed roster join detected".to_string()
+            }
+            (Some(MembershipSignalKind::Revoke), None, true) => {
+                "Replayed roster revoke detected".to_string()
+            }
             (Some(MembershipSignalKind::Join), None) => "Roster join detected".to_string(),
             (Some(MembershipSignalKind::Revoke), None) => "Roster revoke detected".to_string(),
-            (None, Some(leaf)) => format!("Roster changed: {}", short_leaf_display(&leaf)),
-            (None, None) => "Roster changed".to_string(),
+            (None, Some(leaf), true) => {
+                format!("Replayed roster change: {}", short_leaf_display(&leaf))
+            }
+            (None, Some(leaf), false) => format!("Roster changed: {}", short_leaf_display(&leaf)),
+            (None, None, true) => "Replayed roster changed".to_string(),
+            (None, None, false) => "Roster changed".to_string(),
         };
-        let detail = signal
-            .timestamp_ms
-            .map(|ts| format!("server timestamp {}", format_timestamp(ts)));
+        let detail =
+            websocket_activity_detail(signal.sequence, signal.replayed, signal.timestamp_ms);
         self.record_activity_with_detail(ActivityKind::Roster, summary, detail);
     }
 
@@ -296,5 +321,30 @@ impl AppModel {
 
     pub(super) fn scroll_chat_to_bottom(&self) {
         self.chat_scroll_handle.scroll_to_bottom();
+    }
+}
+
+fn websocket_activity_detail(
+    sequence: Option<u64>,
+    replayed: bool,
+    timestamp_ms: Option<u64>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if replayed {
+        parts.push("replayed after reconnect".to_string());
+    }
+    if let Some(sequence) = sequence {
+        parts.push(format!("sequence {}", sequence));
+    }
+    if let Some(timestamp_ms) = timestamp_ms {
+        parts.push(format!(
+            "server timestamp {}",
+            format_timestamp(timestamp_ms)
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
     }
 }

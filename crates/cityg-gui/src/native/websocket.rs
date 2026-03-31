@@ -1,4 +1,4 @@
-use futures::{StreamExt, channel::mpsc as futures_mpsc};
+use futures::{SinkExt, StreamExt, channel::mpsc as futures_mpsc};
 use tokio::time::sleep;
 use tokio_tungstenite::{
     connect_async,
@@ -14,8 +14,14 @@ use super::*;
 pub(super) enum WebSocketEvent {
     Connected,
     Disconnected,
-    Message,
+    Message(WebSocketMessageSignal),
     Membership(MembershipSignal),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WebSocketMessageSignal {
+    pub(super) sequence: Option<u64>,
+    pub(super) replayed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,11 +30,13 @@ pub(super) enum MembershipSignalKind {
     Revoke,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct MembershipSignal {
     pub(super) gid: [u8; 32],
     pub(super) leaf_id: Option<[u8; 32]>,
     pub(super) kind: Option<MembershipSignalKind>,
+    pub(super) sequence: Option<u64>,
+    pub(super) replayed: bool,
     pub(super) timestamp_ms: Option<u64>,
 }
 
@@ -38,6 +46,7 @@ pub(super) async fn run_websocket_worker(
     reconnect_delay: Duration,
     tx: futures_mpsc::UnboundedSender<WebSocketEvent>,
 ) -> Result<()> {
+    let mut last_sequence_seen = 0u64;
     loop {
         debug!("Attempting WebSocket connection to {}", ws_url);
 
@@ -49,7 +58,14 @@ pub(super) async fn run_websocket_worker(
                     return Ok(());
                 }
 
-                let (_write, mut read) = ws_stream.split();
+                let (mut write, mut read) = ws_stream.split();
+                if last_sequence_seen > 0 {
+                    let resume = websocket_resume_message(last_sequence_seen);
+                    if let Err(error) = write.send(WsMessage::Text(resume.into())).await {
+                        warn!("failed to send websocket resume frame: {}", error);
+                        break;
+                    }
+                }
                 while let Some(msg_result) = read.next().await {
                     match msg_result {
                         Ok(WsMessage::Text(text)) => {
@@ -57,9 +73,32 @@ pub(super) async fn run_websocket_worker(
                             if let Ok(notification) =
                                 serde_json::from_str::<serde_json::Value>(&text)
                             {
+                                if let Some(sequence) =
+                                    websocket_notification_sequence(&notification)
+                                {
+                                    last_sequence_seen = last_sequence_seen.max(sequence);
+                                    let ack = websocket_ack_message(last_sequence_seen);
+                                    if let Err(error) =
+                                        write.send(WsMessage::Text(ack.into())).await
+                                    {
+                                        warn!("failed to send websocket ack frame: {}", error);
+                                        break;
+                                    }
+                                }
                                 match notification.get("type").and_then(|t| t.as_str()) {
                                     Some("message") => {
-                                        if tx.unbounded_send(WebSocketEvent::Message).is_err() {
+                                        let signal = WebSocketMessageSignal {
+                                            sequence: websocket_notification_sequence(
+                                                &notification,
+                                            ),
+                                            replayed: websocket_notification_replayed(
+                                                &notification,
+                                            ),
+                                        };
+                                        if tx
+                                            .unbounded_send(WebSocketEvent::Message(signal))
+                                            .is_err()
+                                        {
                                             return Ok(());
                                         }
                                     }
@@ -86,6 +125,12 @@ pub(super) async fn run_websocket_worker(
                                                     }
                                                     _ => None,
                                                 },
+                                                sequence: websocket_notification_sequence(
+                                                    &notification,
+                                                ),
+                                                replayed: websocket_notification_replayed(
+                                                    &notification,
+                                                ),
                                                 timestamp_ms: notification
                                                     .get("timestamp_ms")
                                                     .and_then(|v| v.as_u64()),
@@ -100,6 +145,10 @@ pub(super) async fn run_websocket_worker(
                                     }
                                     Some("lag") => {
                                         warn!("WebSocket lag notification: {}", text);
+                                    }
+                                    Some("lag_disconnect") => {
+                                        warn!("WebSocket lag disconnect notification: {}", text);
+                                        break;
                                     }
                                     _ => {}
                                 }
@@ -147,4 +196,33 @@ fn websocket_request(ws_url: &str, token: Option<&str>) -> Result<Request<()>> {
         request.headers_mut().insert("x-cityg-message-token", token);
     }
     Ok(request)
+}
+
+fn websocket_notification_sequence(notification: &serde_json::Value) -> Option<u64> {
+    notification
+        .get("sequence")
+        .and_then(|value| value.as_u64())
+}
+
+fn websocket_notification_replayed(notification: &serde_json::Value) -> bool {
+    notification
+        .get("replayed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn websocket_ack_message(last_sequence: u64) -> String {
+    serde_json::json!({
+        "type": "ack",
+        "last_sequence": last_sequence,
+    })
+    .to_string()
+}
+
+fn websocket_resume_message(last_sequence: u64) -> String {
+    serde_json::json!({
+        "type": "resume",
+        "last_sequence": last_sequence,
+    })
+    .to_string()
 }

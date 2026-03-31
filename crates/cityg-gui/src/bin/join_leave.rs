@@ -5,6 +5,10 @@ use std::{
     convert::TryInto,
     fs,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -47,7 +51,7 @@ use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
 use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{CityGClient, ClientEpochBundle};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use hex::decode as hex_decode;
 use message_crypto::{MessageCryptoContext, encrypt_message_v2};
 #[cfg(test)]
@@ -2512,8 +2516,9 @@ async fn run_watch_mode(params: WatchModeParams<'_>) -> Result<()> {
     let message_token = configured_client_message_token()
         .ok_or_else(|| anyhow!("message auth token is not configured"))?;
     let ws_url = websocket_url(server_url, &first_session.gid, &first_session.leaf_id);
+    let notification_cursor = NotificationReplayCursor::default();
     let (mut event_rx, ws_handle) =
-        spawn_notification_listener(&ws_url, Some(&message_token)).await?;
+        spawn_notification_listener(&ws_url, Some(&message_token), notification_cursor).await?;
     sessions.push(first_session);
 
     for i in 1..count {
@@ -2723,6 +2728,7 @@ async fn send_message_burst(
             expect_message_event(
                 rx,
                 &session.we_epoch_id,
+                false,
                 format!("dummy message delivery {}", idx + 1),
             )
             .await?;
@@ -2750,23 +2756,44 @@ fn websocket_request(ws_url: &str, token: Option<&str>) -> Result<Request<()>> {
 async fn spawn_notification_listener(
     ws_url: &str,
     token: Option<&str>,
+    cursor: NotificationReplayCursor,
 ) -> Result<(mpsc::Receiver<Notification>, tokio::task::JoinHandle<()>)> {
     let request = websocket_request(ws_url, token)?;
     let (stream, _) = connect_async(request)
         .await
         .with_context(|| format!("failed to connect to websocket {ws_url}"))?;
-    let (_write, mut read) = stream.split();
+    let (mut write, mut read) = stream.split();
+    if cursor.last_sequence() > 0 {
+        write
+            .send(WsMessage::Text(
+                websocket_resume_message(cursor.last_sequence()).into(),
+            ))
+            .await
+            .context("failed to send websocket resume frame")?;
+    }
     let (tx, rx) = mpsc::channel(64);
     let handle = tokio::spawn(async move {
-        let mut _writer_guard = _write;
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(WsMessage::Text(text)) => {
                     if let Ok(value) = serde_json::from_str::<JsonValue>(&text)
                         && let Some(notification) = Notification::from_json(&value)
-                        && tx.send(notification).await.is_err()
                     {
-                        break;
+                        if let Some(sequence) = notification.sequence() {
+                            cursor.observe(sequence);
+                            let ack = websocket_ack_message(cursor.last_sequence());
+                            if let Err(err) = write.send(WsMessage::Text(ack.into())).await {
+                                eprintln!("websocket ack error: {err}");
+                                break;
+                            }
+                        }
+                        let should_disconnect = notification.should_disconnect();
+                        if tx.send(notification).await.is_err() {
+                            break;
+                        }
+                        if should_disconnect {
+                            break;
+                        }
                     }
                 }
                 Ok(WsMessage::Close(_)) => break,
@@ -2777,7 +2804,6 @@ async fn spawn_notification_listener(
                 }
             }
         }
-        drop(_writer_guard);
     });
     Ok((rx, handle))
 }
@@ -2797,12 +2823,18 @@ async fn expect_membership_event(
                     gid: event_gid,
                     leaf_id: event_leaf,
                     event,
+                    sequence,
+                    replayed,
                     timestamp_ms,
                 } => {
                     println!(
-                        "membership event type={event} gid={} leaf={} ts={}",
+                        "membership event type={event} gid={} leaf={} seq={} replayed={} ts={}",
                         hex::encode(event_gid),
                         hex::encode(event_leaf),
+                        sequence
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        replayed,
                         timestamp_ms
                     );
                     if event == expected_kind && event_gid == *gid && event_leaf == *leaf_id {
@@ -2811,6 +2843,9 @@ async fn expect_membership_event(
                 }
                 Notification::Lag { lagged_messages } => {
                     println!("websocket lag notice: dropped {lagged_messages} messages");
+                }
+                Notification::LagDisconnect { lagged_messages } => {
+                    println!("websocket lag disconnect: dropped {lagged_messages} messages");
                 }
                 _ => {}
             }
@@ -2825,6 +2860,7 @@ async fn expect_membership_event(
 async fn expect_message_event(
     rx: &mut mpsc::Receiver<Notification>,
     we_epoch_id: &[u8; 32],
+    require_live: bool,
     label: String,
 ) -> Result<()> {
     timeout(EVENT_TIMEOUT, async {
@@ -2832,19 +2868,28 @@ async fn expect_message_event(
             match event {
                 Notification::Message {
                     we_epoch_id: event_weid,
+                    sequence,
+                    replayed,
                     timestamp_ms,
                 } => {
                     println!(
-                        "message event weid={} ts={}",
+                        "message event weid={} seq={} replayed={} ts={}",
                         hex::encode(event_weid),
+                        sequence
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        replayed,
                         timestamp_ms
                     );
-                    if event_weid == *we_epoch_id {
+                    if event_weid == *we_epoch_id && (!require_live || !replayed) {
                         return Ok(());
                     }
                 }
                 Notification::Lag { lagged_messages } => {
                     println!("websocket lag notice: dropped {lagged_messages} messages");
+                }
+                Notification::LagDisconnect { lagged_messages } => {
+                    println!("websocket lag disconnect: dropped {lagged_messages} messages");
                 }
                 _ => {}
             }
@@ -2875,15 +2920,22 @@ fn websocket_url(server_url: &str, gid: &[u8; 32], leaf_id: &[u8; 32]) -> String
 enum Notification {
     Message {
         we_epoch_id: [u8; 32],
+        sequence: Option<u64>,
+        replayed: bool,
         timestamp_ms: u64,
     },
     Membership {
         gid: [u8; 32],
         leaf_id: [u8; 32],
         event: String,
+        sequence: Option<u64>,
+        replayed: bool,
         timestamp_ms: u64,
     },
     Lag {
+        lagged_messages: u64,
+    },
+    LagDisconnect {
         lagged_messages: u64,
     },
     Other,
@@ -2901,6 +2953,8 @@ impl Notification {
                     .unwrap_or(0);
                 Some(Notification::Message {
                     we_epoch_id: weid,
+                    sequence: notification_sequence(value),
+                    replayed: notification_replayed(value),
                     timestamp_ms: timestamp,
                 })
             }
@@ -2916,6 +2970,8 @@ impl Notification {
                     gid,
                     leaf_id: leaf,
                     event,
+                    sequence: notification_sequence(value),
+                    replayed: notification_replayed(value),
                     timestamp_ms: timestamp,
                 })
             }
@@ -2928,8 +2984,32 @@ impl Notification {
                     lagged_messages: lagged,
                 })
             }
+            "lag_disconnect" => {
+                let lagged = value
+                    .get("lagged_messages")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                Some(Notification::LagDisconnect {
+                    lagged_messages: lagged,
+                })
+            }
             _ => Some(Notification::Other),
         }
+    }
+
+    fn sequence(&self) -> Option<u64> {
+        match self {
+            Notification::Message { sequence, .. } | Notification::Membership { sequence, .. } => {
+                *sequence
+            }
+            Notification::Lag { .. } | Notification::LagDisconnect { .. } | Notification::Other => {
+                None
+            }
+        }
+    }
+
+    fn should_disconnect(&self) -> bool {
+        matches!(self, Notification::LagDisconnect { .. })
     }
 }
 
@@ -2937,6 +3017,52 @@ fn parse_hex32_field(value: &JsonValue, key: &str) -> Option<[u8; 32]> {
     let hex_str = value.get(key)?.as_str()?;
     let bytes = hex_decode(hex_str).ok()?;
     bytes.as_slice().try_into().ok()
+}
+
+fn notification_sequence(value: &JsonValue) -> Option<u64> {
+    value.get("sequence").and_then(|field| field.as_u64())
+}
+
+fn notification_replayed(value: &JsonValue) -> bool {
+    value
+        .get("replayed")
+        .and_then(|field| field.as_bool())
+        .unwrap_or(false)
+}
+
+fn websocket_ack_message(last_sequence: u64) -> String {
+    serde_json::json!({
+        "type": "ack",
+        "last_sequence": last_sequence,
+    })
+    .to_string()
+}
+
+fn websocket_resume_message(last_sequence: u64) -> String {
+    serde_json::json!({
+        "type": "resume",
+        "last_sequence": last_sequence,
+    })
+    .to_string()
+}
+
+#[derive(Clone, Debug, Default)]
+struct NotificationReplayCursor {
+    last_sequence: Arc<AtomicU64>,
+}
+
+impl NotificationReplayCursor {
+    fn last_sequence(&self) -> u64 {
+        self.last_sequence.load(Ordering::Relaxed)
+    }
+
+    fn observe(&self, sequence: u64) {
+        let _ = self
+            .last_sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (sequence > current).then_some(sequence)
+            });
+    }
 }
 
 fn extract_bytes(header: &BTreeMap<u64, Value>, key: u64) -> Result<Vec<u8>> {
@@ -5114,6 +5240,8 @@ mod tests {
         let message = serde_json::json!({
             "type": "message",
             "we_epoch_id": hex::encode(weid),
+            "sequence": 7u64,
+            "replayed": true,
             "timestamp_ms": 42u64
         });
         let membership = serde_json::json!({
@@ -5121,6 +5249,8 @@ mod tests {
             "gid": hex::encode(gid),
             "leaf_id": hex::encode(leaf_id),
             "event": "join",
+            "sequence": 9u64,
+            "replayed": true,
             "timestamp_ms": 99u64
         });
 
@@ -5128,10 +5258,14 @@ mod tests {
         assert!(matches!(parsed_message, Some(Notification::Message { .. })));
         if let Some(Notification::Message {
             we_epoch_id,
+            sequence,
+            replayed,
             timestamp_ms,
         }) = parsed_message
         {
             assert_eq!(we_epoch_id, weid);
+            assert_eq!(sequence, Some(7));
+            assert!(replayed);
             assert_eq!(timestamp_ms, 42);
         }
 
@@ -5144,12 +5278,16 @@ mod tests {
             gid: parsed_gid,
             leaf_id: parsed_leaf,
             event,
+            sequence,
+            replayed,
             timestamp_ms,
         }) = parsed_membership
         {
             assert_eq!(parsed_gid, gid);
             assert_eq!(parsed_leaf, leaf_id);
             assert_eq!(event, "join");
+            assert_eq!(sequence, Some(9));
+            assert!(replayed);
             assert_eq!(timestamp_ms, 99);
         }
     }
@@ -5171,6 +5309,10 @@ mod tests {
             "type": "lag",
             "lagged_messages": 17u64
         });
+        let lag_disconnect = serde_json::json!({
+            "type": "lag_disconnect",
+            "lagged_messages": 23u64
+        });
         let unknown = serde_json::json!({
             "type": "custom",
             "foo": "bar"
@@ -5180,6 +5322,15 @@ mod tests {
         assert!(matches!(parsed_lag, Some(Notification::Lag { .. })));
         if let Some(Notification::Lag { lagged_messages }) = parsed_lag {
             assert_eq!(lagged_messages, 17);
+        }
+
+        let parsed_disconnect = Notification::from_json(&lag_disconnect);
+        assert!(matches!(
+            parsed_disconnect,
+            Some(Notification::LagDisconnect { .. })
+        ));
+        if let Some(Notification::LagDisconnect { lagged_messages }) = parsed_disconnect {
+            assert_eq!(lagged_messages, 23);
         }
 
         assert!(matches!(
@@ -6219,8 +6370,10 @@ mod tests {
         let message_token = configured_client_message_token()
             .ok_or_else(|| anyhow!("message auth token is not configured"))?;
         let ws_url = websocket_url(&server_url, &alice.gid, &alice.leaf_id);
+        let notification_cursor = NotificationReplayCursor::default();
         let (mut first_rx, first_handle) =
-            spawn_notification_listener(&ws_url, Some(&message_token)).await?;
+            spawn_notification_listener(&ws_url, Some(&message_token), notification_cursor.clone())
+                .await?;
         let mut bob = perform_join(&server_url, &room_id, "watch-reconnect-bob").await?;
         expect_membership_event(
             &mut first_rx,
@@ -6235,6 +6388,7 @@ mod tests {
         expect_message_event(
             &mut first_rx,
             &bob.we_epoch_id,
+            false,
             "message before reconnect #1".to_string(),
         )
         .await?;
@@ -6242,6 +6396,7 @@ mod tests {
         expect_message_event(
             &mut first_rx,
             &bob.we_epoch_id,
+            false,
             "message before reconnect #2".to_string(),
         )
         .await?;
@@ -6252,11 +6407,12 @@ mod tests {
         send_text_message(&mut bob, "bob-while-disconnected").await?;
 
         let (mut second_rx, second_handle) =
-            spawn_notification_listener(&ws_url, Some(&message_token)).await?;
+            spawn_notification_listener(&ws_url, Some(&message_token), notification_cursor).await?;
         send_text_message(&mut bob, "bob-after-reconnect").await?;
         expect_message_event(
             &mut second_rx,
             &bob.we_epoch_id,
+            true,
             "message after reconnect".to_string(),
         )
         .await?;
@@ -6264,6 +6420,7 @@ mod tests {
         expect_message_event(
             &mut second_rx,
             &bob.we_epoch_id,
+            true,
             "second message after reconnect".to_string(),
         )
         .await?;
@@ -6675,6 +6832,8 @@ mod tests {
             gid: [0xFF; 32],
             leaf_id: leaf,
             event: "join".to_string(),
+            sequence: Some(1),
+            replayed: true,
             timestamp_ms: 1,
         })
         .await?;
@@ -6682,6 +6841,8 @@ mod tests {
             gid,
             leaf_id: leaf,
             event: "join".to_string(),
+            sequence: Some(2),
+            replayed: false,
             timestamp_ms: 2,
         })
         .await?;
@@ -6715,16 +6876,20 @@ mod tests {
         tx.send(Notification::Other).await?;
         tx.send(Notification::Message {
             we_epoch_id: [0x44; 32],
+            sequence: Some(1),
+            replayed: true,
             timestamp_ms: 7,
         })
         .await?;
         tx.send(Notification::Message {
             we_epoch_id: weid,
+            sequence: Some(2),
+            replayed: false,
             timestamp_ms: 8,
         })
         .await?;
 
-        expect_message_event(&mut rx, &weid, "message".to_string()).await?;
+        expect_message_event(&mut rx, &weid, true, "message".to_string()).await?;
         Ok(())
     }
 
@@ -6732,7 +6897,7 @@ mod tests {
     async fn expect_message_event_errors_on_closed_channel() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(1);
         drop(tx);
-        let err = expect_message_event(&mut rx, &[0u8; 32], "closed".to_string())
+        let err = expect_message_event(&mut rx, &[0u8; 32], false, "closed".to_string())
             .await
             .expect_err("closed channel should produce an error");
         assert!(err.to_string().contains("websocket channel closed"));
@@ -6748,9 +6913,13 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_notification_listener_rejects_unreachable_server() -> Result<()> {
-        let err = spawn_notification_listener("ws://127.0.0.1:9/v1/ws", None)
-            .await
-            .expect_err("connecting to unreachable websocket endpoint should fail");
+        let err = spawn_notification_listener(
+            "ws://127.0.0.1:9/v1/ws",
+            None,
+            NotificationReplayCursor::default(),
+        )
+        .await
+        .expect_err("connecting to unreachable websocket endpoint should fail");
         assert!(err.to_string().contains("failed to connect to websocket"));
         Ok(())
     }
@@ -6774,18 +6943,26 @@ mod tests {
             Ok::<(), anyhow::Error>(())
         });
 
-        let (mut rx, handle) =
-            spawn_notification_listener(&format!("ws://{addr}/v1/ws"), None).await?;
+        let (mut rx, handle) = spawn_notification_listener(
+            &format!("ws://{addr}/v1/ws"),
+            None,
+            NotificationReplayCursor::default(),
+        )
+        .await?;
         let event = timeout(Duration::from_secs(2), rx.recv())
             .await?
             .ok_or(anyhow!("notification channel closed unexpectedly"))?;
         let mut seen_message = false;
         if let Notification::Message {
             we_epoch_id,
+            sequence,
+            replayed,
             timestamp_ms,
         } = event
         {
             assert_eq!(we_epoch_id, weid);
+            assert_eq!(sequence, None);
+            assert!(!replayed);
             assert_eq!(timestamp_ms, 42);
             seen_message = true;
         }
@@ -6794,6 +6971,72 @@ mod tests {
         drop(rx);
         handle.abort();
         let _ = handle.await;
+        tokio::time::timeout(Duration::from_secs(1), server).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn spawn_notification_listener_acks_sequences_and_resumes_on_reconnect() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let cursor = NotificationReplayCursor::default();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            ws.send(WsMessage::Text(
+                r#"{"type":"message","we_epoch_id":"abababababababababababababababababababababababababababababababab","sequence":12,"timestamp_ms":42}"#
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+            let ack = ws.next().await.expect("ack frame").expect("ack frame ok");
+            let ack_text = ack.into_text().expect("ack text frame");
+            let ack_json: JsonValue = serde_json::from_str(&ack_text).expect("ack json");
+            assert_eq!(ack_json["type"], "ack");
+            assert_eq!(ack_json["last_sequence"], 12);
+            ws.close(None).await?;
+
+            let (stream, _) = listener.accept().await?;
+            let mut ws = tokio_tungstenite::accept_async(stream).await?;
+            let resume = ws
+                .next()
+                .await
+                .expect("resume frame")
+                .expect("resume frame ok");
+            let resume_text = resume.into_text().expect("resume text frame");
+            let resume_json: JsonValue = serde_json::from_str(&resume_text).expect("resume json");
+            assert_eq!(resume_json["type"], "resume");
+            assert_eq!(resume_json["last_sequence"], 12);
+            ws.close(None).await?;
+
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let (mut first_rx, first_handle) =
+            spawn_notification_listener(&format!("ws://{addr}/v1/ws"), None, cursor.clone())
+                .await?;
+        let event = timeout(Duration::from_secs(2), first_rx.recv())
+            .await?
+            .ok_or_else(|| anyhow!("notification channel closed unexpectedly"))?;
+        assert!(matches!(
+            event,
+            Notification::Message {
+                sequence: Some(12),
+                replayed: false,
+                ..
+            }
+        ));
+        drop(first_rx);
+        first_handle.abort();
+        let _ = first_handle.await;
+
+        let (second_rx, second_handle) =
+            spawn_notification_listener(&format!("ws://{addr}/v1/ws"), None, cursor).await?;
+        drop(second_rx);
+        second_handle.abort();
+        let _ = second_handle.await;
+
         tokio::time::timeout(Duration::from_secs(1), server).await???;
         Ok(())
     }
@@ -6811,8 +7054,12 @@ mod tests {
             Ok::<(), anyhow::Error>(())
         });
 
-        let (mut rx, handle) =
-            spawn_notification_listener(&format!("ws://{addr}/v1/ws"), None).await?;
+        let (mut rx, handle) = spawn_notification_listener(
+            &format!("ws://{addr}/v1/ws"),
+            None,
+            NotificationReplayCursor::default(),
+        )
+        .await?;
         let event = timeout(Duration::from_secs(2), rx.recv()).await?;
         assert!(
             event.is_none(),

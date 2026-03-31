@@ -103,10 +103,15 @@ impl AppModel {
                 );
                 cx.notify();
             }
-            WebSocketEvent::Message => {
-                self.record_activity(ActivityKind::Message, "New message notification");
+            WebSocketEvent::Message(signal) => {
+                self.record_websocket_message_activity(&signal);
                 self.fetch_after_epoch_sync = true;
-                self.schedule_epoch_sync(cx, "Syncing latest epoch after message notification…");
+                let reason = if signal.replayed {
+                    "Syncing latest epoch after replayed message notification…"
+                } else {
+                    "Syncing latest epoch after message notification…"
+                };
+                self.schedule_epoch_sync(cx, reason);
                 cx.notify();
             }
             WebSocketEvent::Membership(signal) => {
