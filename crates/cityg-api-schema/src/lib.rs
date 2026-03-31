@@ -393,6 +393,40 @@ pub fn encode_full_verification_witness_response(full_verification_witness: Vec<
 }
 
 #[must_use]
+pub fn encode_bootstrap_room_response(status: &str) -> Vec<u8> {
+    pb::BootstrapRoomResponse {
+        status: status.to_string(),
+    }
+    .encode_to_vec()
+}
+
+#[must_use]
+pub fn encode_rotate_room_kbroad_response(status: &str, kbroad_generation: u64) -> Vec<u8> {
+    pb::RotateRoomKbroadResponse {
+        status: status.to_string(),
+        kbroad_generation,
+    }
+    .encode_to_vec()
+}
+
+#[must_use]
+pub fn encode_room_admin_mutation_response(status: &str, admin_count: u64) -> Vec<u8> {
+    pb::RoomAdminMutationResponse {
+        status: status.to_string(),
+        admin_count,
+    }
+    .encode_to_vec()
+}
+
+#[must_use]
+pub fn encode_list_room_admins_response(admin_pop_public_keys: Vec<Vec<u8>>) -> Vec<u8> {
+    pb::ListRoomAdminsResponse {
+        admin_pop_public_keys,
+    }
+    .encode_to_vec()
+}
+
+#[must_use]
 pub fn encode_members_response(
     members: Vec<pb::Member>,
     root: [u8; 32],
@@ -1536,6 +1570,36 @@ mod tests {
         .expect("decode response");
 
         assert_eq!(decoded.full_verification_witness, payload);
+    }
+
+    #[test]
+    fn encode_room_admin_responses_round_trip() {
+        let decoded_bootstrap = pb::BootstrapRoomResponse::decode(
+            encode_bootstrap_room_response("registered").as_slice(),
+        )
+        .expect("decode bootstrap response");
+        assert_eq!(decoded_bootstrap.status, "registered");
+
+        let decoded_rotate = pb::RotateRoomKbroadResponse::decode(
+            encode_rotate_room_kbroad_response("rotated", 42).as_slice(),
+        )
+        .expect("decode rotate response");
+        assert_eq!(decoded_rotate.status, "rotated");
+        assert_eq!(decoded_rotate.kbroad_generation, 42);
+
+        let decoded_mutation = pb::RoomAdminMutationResponse::decode(
+            encode_room_admin_mutation_response("granted", 7).as_slice(),
+        )
+        .expect("decode mutation response");
+        assert_eq!(decoded_mutation.status, "granted");
+        assert_eq!(decoded_mutation.admin_count, 7);
+
+        let admin_pop_public_keys = vec![vec![0x11; 4], vec![0x22; 4]];
+        let decoded_list = pb::ListRoomAdminsResponse::decode(
+            encode_list_room_admins_response(admin_pop_public_keys.clone()).as_slice(),
+        )
+        .expect("decode list-admins response");
+        assert_eq!(decoded_list.admin_pop_public_keys, admin_pop_public_keys);
     }
 
     #[test]

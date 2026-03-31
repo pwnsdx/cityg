@@ -11,11 +11,13 @@ use cityg_api_schema::{
     RoomAdminProofValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
     RoomScopedRoutingKey, decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request, decode_barrier_resolve_revoked_leaves_request,
-    decode_full_verification_witness_request, encode_full_verification_witness_response,
+    decode_full_verification_witness_request, encode_bootstrap_room_response,
+    encode_full_verification_witness_response, encode_list_room_admins_response,
     encode_members_response, encode_prepared_barrier_public_tree_response,
     encode_prepared_join_ticket_response, encode_prepared_merge_acceptance_lookup_response,
     encode_prepared_merge_ticket_response, encode_prepared_resolved_joins_response,
     encode_prepared_resolved_revoked_leaves_response, encode_room_admin_leaf_pair_payload,
+    encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
     encode_search_members_response, extract_room_scoped_request_target, pb,
     pb_member as schema_pb_member, prepare_identity_binding, room_admin_proof_replay_key,
     verify_room_admin_proof, verify_room_admin_proof_payload,
@@ -579,9 +581,7 @@ impl CloudflareRoomDurableObject {
             persisted_at_ms,
         )?;
 
-        protobuf_response(&pb::BootstrapRoomResponse {
-            status: "registered".to_string(),
-        })
+        protobuf_response_bytes(encode_bootstrap_room_response("registered"))
     }
 
     async fn handle_rotate_room_kbroad(
@@ -661,10 +661,10 @@ impl CloudflareRoomDurableObject {
             current_timestamp_ms(),
         )?;
 
-        protobuf_response(&pb::RotateRoomKbroadResponse {
-            status: "rotated".to_string(),
+        protobuf_response_bytes(encode_rotate_room_kbroad_response(
+            "rotated",
             kbroad_generation,
-        })
+        ))
     }
 
     async fn handle_grant_room_admin(
@@ -773,10 +773,10 @@ impl CloudflareRoomDurableObject {
             current_timestamp_ms(),
         )?;
 
-        protobuf_response(&pb::RoomAdminMutationResponse {
-            status: kind.status(applied).to_string(),
+        protobuf_response_bytes(encode_room_admin_mutation_response(
+            kind.status(applied),
             admin_count,
-        })
+        ))
     }
 
     async fn handle_list_room_admins(
@@ -832,9 +832,7 @@ impl CloudflareRoomDurableObject {
             Err(error) => return client_error_response(error),
         };
 
-        protobuf_response(&pb::ListRoomAdminsResponse {
-            admin_pop_public_keys,
-        })
+        protobuf_response_bytes(encode_list_room_admins_response(admin_pop_public_keys))
     }
 
     async fn handle_members(

@@ -38,11 +38,13 @@ use cityg_api_schema::{
     decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
     decode_barrier_resolve_revoked_leaves_request as schema_decode_barrier_resolve_revoked_leaves_request,
     decode_full_verification_witness_request as schema_decode_full_verification_witness_request,
-    encode_full_verification_witness_response, encode_members_response,
+    encode_bootstrap_room_response, encode_full_verification_witness_response,
+    encode_list_room_admins_response, encode_members_response,
     encode_prepared_barrier_public_tree_response, encode_prepared_join_ticket_response,
     encode_prepared_merge_acceptance_lookup_response, encode_prepared_merge_ticket_response,
     encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
     encode_room_admin_leaf_pair_payload as schema_encode_room_admin_leaf_pair_payload,
+    encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
     encode_search_members_response, encode_telemetry_snapshot_response,
     encode_window_snapshot_response, pb, pb_member as schema_pb_member,
     prepare_identity_binding as schema_prepare_identity_binding,
@@ -63,19 +65,19 @@ use pb::{
     AcceptEpochRequest, AcceptEpochResponse, BarrierFetchPublicTreeRequest,
     BarrierIssueFullVerificationWitnessRequest, BarrierLookupMergeAcceptanceRequest,
     BarrierResolveJoinsSinceRequest, BarrierResolveRevokedLeavesRequest, BootstrapRoomRequest,
-    BootstrapRoomResponse, ChatMessage, ConfigureWindowRequest, ConfigureWindowResponse,
-    ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest,
-    GetBundleResponse, GetTelemetryRequest, GetWindowRequest, HealthResponse, JoinTicketRequest,
-    ListRoomAdminsRequest, ListRoomAdminsResponse, Member, MembersRequest, MergeTicketIntent,
-    MergeTicketRequest, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
-    RoomAdminMutationResponse, RoomAdminProof, RotateRoomKbroadRequest, RotateRoomKbroadResponse,
-    SendMessageRequest, SendMessageResponse,
+    ChatMessage, ConfigureWindowRequest, ConfigureWindowResponse, ExpelMemberTicketRequest,
+    FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest, GetBundleResponse,
+    GetTelemetryRequest, GetWindowRequest, HealthResponse, JoinTicketRequest,
+    ListRoomAdminsRequest, Member, MembersRequest, MergeTicketIntent, MergeTicketRequest,
+    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest, RoomAdminProof,
+    RotateRoomKbroadRequest, SendMessageRequest, SendMessageResponse,
 };
 #[cfg(test)]
 use pb::{
     BarrierFetchPublicTreeResponse, BarrierLookupMergeAcceptanceResponse,
-    BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesResponse, GetTelemetryResponse,
-    GetWindowResponse, MembersResponse, MergeAcceptanceStatus,
+    BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesResponse, BootstrapRoomResponse,
+    GetTelemetryResponse, GetWindowResponse, ListRoomAdminsResponse, MembersResponse,
+    MergeAcceptanceStatus, RoomAdminMutationResponse, RotateRoomKbroadResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -1916,11 +1918,9 @@ async fn bootstrap_room(
             })?;
     }
 
-    let response = BootstrapRoomResponse {
-        status: "registered".to_string(),
-    };
-
-    Ok(protobuf_response(&response))
+    Ok(protobuf_response_bytes(encode_bootstrap_room_response(
+        "registered",
+    )))
 }
 
 async fn rotate_room_kbroad(
@@ -1964,11 +1964,10 @@ async fn rotate_room_kbroad(
             })?
     };
 
-    let response = RotateRoomKbroadResponse {
-        status: "rotated".to_string(),
+    Ok(protobuf_response_bytes(encode_rotate_room_kbroad_response(
+        "rotated",
         kbroad_generation,
-    };
-    Ok(protobuf_response(&response))
+    )))
 }
 
 async fn grant_room_admin(
@@ -2013,15 +2012,16 @@ async fn grant_room_admin(
             })?
     };
 
-    let response = RoomAdminMutationResponse {
-        status: if granted {
-            "granted".to_string()
-        } else {
-            "already_granted".to_string()
-        },
-        admin_count,
-    };
-    Ok(protobuf_response(&response))
+    Ok(protobuf_response_bytes(
+        encode_room_admin_mutation_response(
+            if granted {
+                "granted"
+            } else {
+                "already_granted"
+            },
+            admin_count,
+        ),
+    ))
 }
 
 async fn revoke_room_admin(
@@ -2066,15 +2066,16 @@ async fn revoke_room_admin(
             })?
     };
 
-    let response = RoomAdminMutationResponse {
-        status: if revoked {
-            "revoked".to_string()
-        } else {
-            "already_revoked".to_string()
-        },
-        admin_count,
-    };
-    Ok(protobuf_response(&response))
+    Ok(protobuf_response_bytes(
+        encode_room_admin_mutation_response(
+            if revoked {
+                "revoked"
+            } else {
+                "already_revoked"
+            },
+            admin_count,
+        ),
+    ))
 }
 
 async fn list_room_admins(
@@ -2104,10 +2105,9 @@ async fn list_room_admins(
             })?
     };
 
-    let response = ListRoomAdminsResponse {
+    Ok(protobuf_response_bytes(encode_list_room_admins_response(
         admin_pop_public_keys,
-    };
-    Ok(protobuf_response(&response))
+    )))
 }
 
 async fn expel_member_ticket(
