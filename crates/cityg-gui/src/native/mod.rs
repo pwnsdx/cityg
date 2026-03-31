@@ -89,6 +89,11 @@ use tracing::{debug, info, warn};
 use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(test)]
+pub(crate) use crate::websocket_replay::{
+    websocket_ack_message, websocket_notification_replayed, websocket_notification_sequence,
+    websocket_resume_message,
+};
+#[cfg(test)]
 use cityg_client::demo;
 #[cfg(test)]
 use futures::StreamExt;

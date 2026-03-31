@@ -5,10 +5,6 @@ use std::{
     convert::TryInto,
     fs,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
     time::Duration,
 };
 
@@ -18,6 +14,8 @@ mod barrier_shared;
 #[allow(dead_code)]
 #[path = "../message_crypto.rs"]
 mod message_crypto;
+#[path = "../websocket_replay.rs"]
+mod websocket_replay;
 
 use anchor_seed::{
     SeedCommitFields, build_anchor_seed_ctx, compute_seed_bundle_commit, compute_seed_commit,
@@ -83,15 +81,12 @@ use tokio::{
     sync::mpsc,
     time::{sleep, timeout},
 };
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{
-        client::IntoClientRequest,
-        http::{HeaderValue, Request},
-        protocol::Message as WsMessage,
-    },
-};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tracing::warn;
+use websocket_replay::{
+    WebSocketReplayCursor, websocket_ack_message, websocket_notification_replayed,
+    websocket_notification_sequence, websocket_request, websocket_resume_message,
+};
 
 fn random_room_id() -> String {
     let mut rng = rng();
@@ -2516,7 +2511,7 @@ async fn run_watch_mode(params: WatchModeParams<'_>) -> Result<()> {
     let message_token = configured_client_message_token()
         .ok_or_else(|| anyhow!("message auth token is not configured"))?;
     let ws_url = websocket_url(server_url, &first_session.gid, &first_session.leaf_id);
-    let notification_cursor = NotificationReplayCursor::default();
+    let notification_cursor = WebSocketReplayCursor::default();
     let (mut event_rx, ws_handle) =
         spawn_notification_listener(&ws_url, Some(&message_token), notification_cursor).await?;
     sessions.push(first_session);
@@ -2741,24 +2736,12 @@ async fn send_message_burst(
     Ok(())
 }
 
-fn websocket_request(ws_url: &str, token: Option<&str>) -> Result<Request<()>> {
-    let mut request = ws_url
-        .into_client_request()
-        .map_err(|err| anyhow!("failed to build websocket handshake request: {err}"))?;
-    if let Some(token) = token {
-        let token =
-            HeaderValue::from_str(token).context("message auth token is not a valid header")?;
-        request.headers_mut().insert(MESSAGE_AUTH_HEADER, token);
-    }
-    Ok(request)
-}
-
 async fn spawn_notification_listener(
     ws_url: &str,
     token: Option<&str>,
-    cursor: NotificationReplayCursor,
+    cursor: WebSocketReplayCursor,
 ) -> Result<(mpsc::Receiver<Notification>, tokio::task::JoinHandle<()>)> {
-    let request = websocket_request(ws_url, token)?;
+    let request = websocket_request(ws_url, MESSAGE_AUTH_HEADER, token)?;
     let (stream, _) = connect_async(request)
         .await
         .with_context(|| format!("failed to connect to websocket {ws_url}"))?;
@@ -2953,8 +2936,8 @@ impl Notification {
                     .unwrap_or(0);
                 Some(Notification::Message {
                     we_epoch_id: weid,
-                    sequence: notification_sequence(value),
-                    replayed: notification_replayed(value),
+                    sequence: websocket_notification_sequence(value),
+                    replayed: websocket_notification_replayed(value),
                     timestamp_ms: timestamp,
                 })
             }
@@ -2970,8 +2953,8 @@ impl Notification {
                     gid,
                     leaf_id: leaf,
                     event,
-                    sequence: notification_sequence(value),
-                    replayed: notification_replayed(value),
+                    sequence: websocket_notification_sequence(value),
+                    replayed: websocket_notification_replayed(value),
                     timestamp_ms: timestamp,
                 })
             }
@@ -3017,52 +3000,6 @@ fn parse_hex32_field(value: &JsonValue, key: &str) -> Option<[u8; 32]> {
     let hex_str = value.get(key)?.as_str()?;
     let bytes = hex_decode(hex_str).ok()?;
     bytes.as_slice().try_into().ok()
-}
-
-fn notification_sequence(value: &JsonValue) -> Option<u64> {
-    value.get("sequence").and_then(|field| field.as_u64())
-}
-
-fn notification_replayed(value: &JsonValue) -> bool {
-    value
-        .get("replayed")
-        .and_then(|field| field.as_bool())
-        .unwrap_or(false)
-}
-
-fn websocket_ack_message(last_sequence: u64) -> String {
-    serde_json::json!({
-        "type": "ack",
-        "last_sequence": last_sequence,
-    })
-    .to_string()
-}
-
-fn websocket_resume_message(last_sequence: u64) -> String {
-    serde_json::json!({
-        "type": "resume",
-        "last_sequence": last_sequence,
-    })
-    .to_string()
-}
-
-#[derive(Clone, Debug, Default)]
-struct NotificationReplayCursor {
-    last_sequence: Arc<AtomicU64>,
-}
-
-impl NotificationReplayCursor {
-    fn last_sequence(&self) -> u64 {
-        self.last_sequence.load(Ordering::Relaxed)
-    }
-
-    fn observe(&self, sequence: u64) {
-        let _ = self
-            .last_sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                (sequence > current).then_some(sequence)
-            });
-    }
 }
 
 fn extract_bytes(header: &BTreeMap<u64, Value>, key: u64) -> Result<Vec<u8>> {
@@ -6370,7 +6307,7 @@ mod tests {
         let message_token = configured_client_message_token()
             .ok_or_else(|| anyhow!("message auth token is not configured"))?;
         let ws_url = websocket_url(&server_url, &alice.gid, &alice.leaf_id);
-        let notification_cursor = NotificationReplayCursor::default();
+        let notification_cursor = WebSocketReplayCursor::default();
         let (mut first_rx, first_handle) =
             spawn_notification_listener(&ws_url, Some(&message_token), notification_cursor.clone())
                 .await?;
@@ -6916,7 +6853,7 @@ mod tests {
         let err = spawn_notification_listener(
             "ws://127.0.0.1:9/v1/ws",
             None,
-            NotificationReplayCursor::default(),
+            WebSocketReplayCursor::default(),
         )
         .await
         .expect_err("connecting to unreachable websocket endpoint should fail");
@@ -6946,7 +6883,7 @@ mod tests {
         let (mut rx, handle) = spawn_notification_listener(
             &format!("ws://{addr}/v1/ws"),
             None,
-            NotificationReplayCursor::default(),
+            WebSocketReplayCursor::default(),
         )
         .await?;
         let event = timeout(Duration::from_secs(2), rx.recv())
@@ -6979,7 +6916,7 @@ mod tests {
     async fn spawn_notification_listener_acks_sequences_and_resumes_on_reconnect() -> Result<()> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let cursor = NotificationReplayCursor::default();
+        let cursor = WebSocketReplayCursor::default();
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
@@ -7057,7 +6994,7 @@ mod tests {
         let (mut rx, handle) = spawn_notification_listener(
             &format!("ws://{addr}/v1/ws"),
             None,
-            NotificationReplayCursor::default(),
+            WebSocketReplayCursor::default(),
         )
         .await?;
         let event = timeout(Duration::from_secs(2), rx.recv()).await?;

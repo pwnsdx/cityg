@@ -1,15 +1,12 @@
 use futures::{SinkExt, StreamExt, channel::mpsc as futures_mpsc};
 use tokio::time::sleep;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{
-        client::IntoClientRequest,
-        http::{HeaderValue, Request},
-        protocol::Message as WsMessage,
-    },
-};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 
 use super::*;
+use crate::websocket_replay::{
+    WebSocketReplayCursor, websocket_ack_message, websocket_notification_replayed,
+    websocket_notification_sequence, websocket_request, websocket_resume_message,
+};
 
 pub(super) enum WebSocketEvent {
     Connected,
@@ -46,11 +43,12 @@ pub(super) async fn run_websocket_worker(
     reconnect_delay: Duration,
     tx: futures_mpsc::UnboundedSender<WebSocketEvent>,
 ) -> Result<()> {
-    let mut last_sequence_seen = 0u64;
+    let sequence_cursor = WebSocketReplayCursor::default();
     loop {
         debug!("Attempting WebSocket connection to {}", ws_url);
 
-        let request = websocket_request(&ws_url, message_token.as_deref())?;
+        let request =
+            websocket_request(&ws_url, "x-cityg-message-token", message_token.as_deref())?;
         match connect_async(request).await {
             Ok((ws_stream, _)) => {
                 info!("WebSocket connected successfully");
@@ -59,8 +57,8 @@ pub(super) async fn run_websocket_worker(
                 }
 
                 let (mut write, mut read) = ws_stream.split();
-                if last_sequence_seen > 0 {
-                    let resume = websocket_resume_message(last_sequence_seen);
+                if sequence_cursor.last_sequence() > 0 {
+                    let resume = websocket_resume_message(sequence_cursor.last_sequence());
                     if let Err(error) = write.send(WsMessage::Text(resume.into())).await {
                         warn!("failed to send websocket resume frame: {}", error);
                         break;
@@ -76,8 +74,9 @@ pub(super) async fn run_websocket_worker(
                                 if let Some(sequence) =
                                     websocket_notification_sequence(&notification)
                                 {
-                                    last_sequence_seen = last_sequence_seen.max(sequence);
-                                    let ack = websocket_ack_message(last_sequence_seen);
+                                    sequence_cursor.observe(sequence);
+                                    let ack =
+                                        websocket_ack_message(sequence_cursor.last_sequence());
                                     if let Err(error) =
                                         write.send(WsMessage::Text(ack.into())).await
                                     {
@@ -184,45 +183,4 @@ pub(super) async fn run_websocket_worker(
 
         sleep(reconnect_delay).await;
     }
-}
-
-fn websocket_request(ws_url: &str, token: Option<&str>) -> Result<Request<()>> {
-    let mut request = ws_url
-        .into_client_request()
-        .map_err(|err| anyhow!("failed to build websocket handshake request: {err}"))?;
-    if let Some(token) = token {
-        let token =
-            HeaderValue::from_str(token).context("message auth token is not a valid header")?;
-        request.headers_mut().insert("x-cityg-message-token", token);
-    }
-    Ok(request)
-}
-
-fn websocket_notification_sequence(notification: &serde_json::Value) -> Option<u64> {
-    notification
-        .get("sequence")
-        .and_then(|value| value.as_u64())
-}
-
-fn websocket_notification_replayed(notification: &serde_json::Value) -> bool {
-    notification
-        .get("replayed")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-}
-
-fn websocket_ack_message(last_sequence: u64) -> String {
-    serde_json::json!({
-        "type": "ack",
-        "last_sequence": last_sequence,
-    })
-    .to_string()
-}
-
-fn websocket_resume_message(last_sequence: u64) -> String {
-    serde_json::json!({
-        "type": "resume",
-        "last_sequence": last_sequence,
-    })
-    .to_string()
 }

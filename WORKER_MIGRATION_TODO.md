@@ -102,6 +102,8 @@ runtime code.
   The GUI websocket worker now surfaces `sequence` and `replayed` metadata on message and membership notifications, the session/activity layer distinguishes replayed reconnect traffic from live traffic, and the backlog watcher tests only treat non-replayed notifications as fresh live traffic.
 - [x] Extend the Worker replay websocket contract to the `join_leave` client path too.
   The `join_leave` notification listener now keeps a reusable sequence cursor, sends `resume` on reconnect and `ack` on sequenced notifications, exposes `sequence`/`replayed` on parsed events, and its watch-mode helpers can explicitly wait for live post-reconnect traffic instead of treating replayed backlog as fresh delivery.
+- [x] Deduplicate the GUI-side Worker replay websocket client helper.
+  The native GUI worker and the `join_leave` watcher now share one crate-local helper for websocket request setup, replay cursor tracking, and `ack` / `resume` / `sequence` / `replayed` protocol handling instead of carrying two drifting copies.
 
 ## In Progress
 

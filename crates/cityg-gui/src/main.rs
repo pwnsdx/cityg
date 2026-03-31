@@ -1,6 +1,8 @@
 #[cfg(feature = "native-app")]
 mod barrier_shared;
 mod message_crypto;
+#[cfg(any(feature = "native-app", test))]
+mod websocket_replay;
 
 #[cfg(not(feature = "native-app"))]
 fn main() {
