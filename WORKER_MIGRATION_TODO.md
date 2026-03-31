@@ -50,6 +50,8 @@ runtime code.
   Native `cityg-api` and Worker `cloudflare` now share the request-side `room_id`, fixed-width leaf IDs, same-leaf rejection, and missing-proof validation for `/v1/rooms/expel_member_ticket`, so only proof verification, rate limiting, routing, and ticket execution remain adapter-local.
 - [x] Move `merge_ticket` request validation into `cityg-api-schema`.
   Native `cityg-api` and Worker `cloudflare` now share the request-side `room_id`, fixed-width `leaf_id`, and merge-intent validation for `/v1/rooms/merge_ticket`, so only auth, rate limiting, coalescing, routing, and ticket execution remain adapter-local.
+- [x] Move message fetch/store request validation into `cityg-api-schema`.
+  Native `cityg-api` and Worker `cloudflare` now share the request-side `we_epoch_id`, `leaf_id`, `sender`, and ciphertext size/presence validation for `/v1/messages` and `/v1/send_message`, so only auth, routing, storage, and room authorization remain adapter-local.
 - [x] Define the shared Durable Object storage contract for authoritative room checkpoints and volatile room snapshots.
 - [x] Add room-volatile snapshot/hydration helpers aligned with the shared checkpoint contract.
 - [x] Implement the first Durable Object-backed `RoomStateStore`.

@@ -15,9 +15,10 @@ use cityg_pqc::{
 };
 use cityg_runtime::{
     AliasLeafEntry, FullVerificationWitnessRequest as RuntimeFullVerificationWitnessRequest,
-    MemberMetadata, PreparedBarrierEnvelope, PreparedBarrierPublicTree, PreparedJoinTicket,
-    PreparedMergeAcceptanceLookup, PreparedMergeTicket, PreparedResolvedJoins,
-    PreparedResolvedRevokedLeaves, RoomTelemetrySnapshotEntry, RoomWindowEntrySnapshot,
+    MAX_MESSAGE_CIPHERTEXT_BYTES, MemberMetadata, PreparedBarrierEnvelope,
+    PreparedBarrierPublicTree, PreparedJoinTicket, PreparedMergeAcceptanceLookup,
+    PreparedMergeTicket, PreparedResolvedJoins, PreparedResolvedRevokedLeaves,
+    RoomTelemetrySnapshotEntry, RoomWindowEntrySnapshot,
 };
 use cityg_server::{
     BarrierJoinLeafRecord as ServerBarrierJoinLeafRecord,
@@ -1001,6 +1002,20 @@ pub struct ValidatedMergeTicketRequest {
     pub intent_value: i32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedFetchMessagesRequest {
+    pub we_epoch_id: [u8; 32],
+    pub leaf_id: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedSendMessageRequest {
+    pub we_epoch_id: [u8; 32],
+    pub ciphertext: Vec<u8>,
+    pub sender: Vec<u8>,
+    pub sender_leaf: [u8; 32],
+}
+
 fn validate_room_kbroad_request(
     room_id: String,
     kbroad_public: Vec<u8>,
@@ -1153,6 +1168,74 @@ pub fn validate_merge_ticket_request(
         leaf_id,
         intent,
         intent_value: request.intent,
+    })
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum FetchMessagesRequestValidationError {
+    #[error("we_epoch_id must be 32 bytes")]
+    InvalidWeEpochId,
+    #[error("leaf_id must be 32 bytes")]
+    InvalidLeafId,
+}
+
+pub fn validate_fetch_messages_request(
+    request: pb::FetchMessagesRequest,
+) -> Result<ValidatedFetchMessagesRequest, FetchMessagesRequestValidationError> {
+    let we_epoch_id: [u8; 32] = request
+        .we_epoch_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| FetchMessagesRequestValidationError::InvalidWeEpochId)?;
+    let leaf_id: [u8; 32] = request
+        .leaf_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| FetchMessagesRequestValidationError::InvalidLeafId)?;
+
+    Ok(ValidatedFetchMessagesRequest {
+        we_epoch_id,
+        leaf_id,
+    })
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SendMessageRequestValidationError {
+    #[error("we_epoch_id must be 32 bytes")]
+    InvalidWeEpochId,
+    #[error("ciphertext must be provided")]
+    MissingCiphertext,
+    #[error("ciphertext exceeds MAX_PAYLOAD_ENVELOPE_BYTES")]
+    CiphertextTooLarge,
+    #[error("sender must be 32 bytes")]
+    InvalidSender,
+}
+
+pub fn validate_send_message_request(
+    request: pb::SendMessageRequest,
+) -> Result<ValidatedSendMessageRequest, SendMessageRequestValidationError> {
+    let we_epoch_id: [u8; 32] = request
+        .we_epoch_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| SendMessageRequestValidationError::InvalidWeEpochId)?;
+    if request.ciphertext.is_empty() {
+        return Err(SendMessageRequestValidationError::MissingCiphertext);
+    }
+    if request.ciphertext.len() > MAX_MESSAGE_CIPHERTEXT_BYTES {
+        return Err(SendMessageRequestValidationError::CiphertextTooLarge);
+    }
+    let sender_leaf: [u8; 32] = request
+        .sender
+        .as_slice()
+        .try_into()
+        .map_err(|_| SendMessageRequestValidationError::InvalidSender)?;
+
+    Ok(ValidatedSendMessageRequest {
+        we_epoch_id,
+        ciphertext: request.ciphertext,
+        sender: request.sender,
+        sender_leaf,
     })
 }
 
@@ -1955,6 +2038,62 @@ mod tests {
                 intent: 99,
             }),
             Err(MergeTicketRequestValidationError::InvalidIntent)
+        );
+    }
+
+    #[test]
+    fn validate_message_requests_project_required_fields() {
+        let fetch = validate_fetch_messages_request(pb::FetchMessagesRequest {
+            we_epoch_id: vec![0x11; 32],
+            leaf_id: vec![0x22; 32],
+        })
+        .expect("validate fetch messages request");
+        assert_eq!(fetch.we_epoch_id, [0x11; 32]);
+        assert_eq!(fetch.leaf_id, [0x22; 32]);
+
+        let send = validate_send_message_request(pb::SendMessageRequest {
+            we_epoch_id: vec![0x31; 32],
+            ciphertext: vec![0x41, 0x42],
+            sender: vec![0x51; 32],
+        })
+        .expect("validate send message request");
+        assert_eq!(send.we_epoch_id, [0x31; 32]);
+        assert_eq!(send.ciphertext, vec![0x41, 0x42]);
+        assert_eq!(send.sender_leaf, [0x51; 32]);
+    }
+
+    #[test]
+    fn validate_message_requests_reject_invalid_shape() {
+        assert_eq!(
+            validate_fetch_messages_request(pb::FetchMessagesRequest {
+                we_epoch_id: vec![0x11; 31],
+                leaf_id: vec![0x22; 32],
+            }),
+            Err(FetchMessagesRequestValidationError::InvalidWeEpochId)
+        );
+        assert_eq!(
+            validate_send_message_request(pb::SendMessageRequest {
+                we_epoch_id: vec![0x31; 32],
+                ciphertext: Vec::new(),
+                sender: vec![0x51; 32],
+            }),
+            Err(SendMessageRequestValidationError::MissingCiphertext)
+        );
+        assert_eq!(
+            validate_send_message_request(pb::SendMessageRequest {
+                we_epoch_id: vec![0x31; 32],
+                ciphertext: vec![0x41; MAX_MESSAGE_CIPHERTEXT_BYTES + 1],
+                sender: vec![0x51; 32],
+            }),
+            Err(SendMessageRequestValidationError::CiphertextTooLarge)
+        );
+        assert_eq!(
+            validate_send_message_request(pb::SendMessageRequest {
+                we_epoch_id: vec![0x31; 32],
+                ciphertext: vec![0x41],
+                sender: vec![0x51; 31],
+            }),
+            Err(SendMessageRequestValidationError::InvalidSender)
         );
     }
 

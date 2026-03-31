@@ -7,10 +7,11 @@ use std::{
 
 use cityg_api_schema::{
     API_PROFILE_VERSION, BarrierHelperRequestDecodeError, ExpelMemberTicketRequestValidationError,
-    MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
-    MergeTicketRequestValidationError, PreparedIdentityBindingError, RoomAdminProofValidationError,
-    RoomAdminRequestValidationError, RoomScopedApiRoute, RoomScopedRequestTarget,
-    RoomScopedRoutingKey, decode_barrier_fetch_public_tree_request,
+    FetchMessagesRequestValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES,
+    MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE, MergeTicketRequestValidationError,
+    PreparedIdentityBindingError, RoomAdminProofValidationError, RoomAdminRequestValidationError,
+    RoomScopedApiRoute, RoomScopedRequestTarget, RoomScopedRoutingKey,
+    SendMessageRequestValidationError, decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request, decode_barrier_resolve_revoked_leaves_request,
     decode_full_verification_witness_request, encode_bootstrap_room_response,
     encode_full_verification_witness_response, encode_list_room_admins_response,
@@ -22,23 +23,23 @@ use cityg_api_schema::{
     encode_search_members_response, extract_room_scoped_request_target, pb,
     pb_member as schema_pb_member, prepare_identity_binding, room_admin_proof_replay_key,
     validate_bootstrap_room_request, validate_expel_member_ticket_request,
-    validate_list_room_admins_request, validate_merge_ticket_request,
-    validate_room_admin_mutation_request, validate_rotate_room_kbroad_request,
-    verify_room_admin_proof, verify_room_admin_proof_payload,
+    validate_fetch_messages_request, validate_list_room_admins_request,
+    validate_merge_ticket_request, validate_room_admin_mutation_request,
+    validate_rotate_room_kbroad_request, validate_send_message_request, verify_room_admin_proof,
+    verify_room_admin_proof_payload,
 };
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
 use cityg_runtime::{
     AcceptedRoomEpoch, AliasLeafLookup, AliasRegistrationError, AliasRegistry,
-    BarrierPaginationError, MAX_MESSAGE_CIPHERTEXT_BYTES, RoomAcceptEpochError,
-    RoomAuthorizationError, RoomBarrierEnvelopeError, RoomBarrierHelperPreparationError,
-    RoomFullVerificationWitnessPreparationError, RoomMemberListingError, RoomMessageStoreError,
-    RoomRoutingEntry, RoomServiceError, RoomSnapshot, RoomStateCheckpoint,
-    RoomTicketPreparationError, RoomVolatileState, RuntimeRoom, accept_room_epoch,
-    alias_entry_for_member, classify_refresh_pivot_conflict, derive_room_routing_entries,
-    fetch_room_bundle, fetch_room_members, fetch_room_messages, filter_room_members_by_query,
-    paginate_room_members, prepare_barrier_public_tree, prepare_full_verification_witness,
-    prepare_merge_acceptance_lookup, prepare_resolved_joins, prepare_resolved_revoked_leaves,
-    refresh_room_pivot, store_room_message,
+    BarrierPaginationError, RoomAcceptEpochError, RoomAuthorizationError, RoomBarrierEnvelopeError,
+    RoomBarrierHelperPreparationError, RoomFullVerificationWitnessPreparationError,
+    RoomMemberListingError, RoomMessageStoreError, RoomRoutingEntry, RoomServiceError,
+    RoomSnapshot, RoomStateCheckpoint, RoomTicketPreparationError, RoomVolatileState, RuntimeRoom,
+    accept_room_epoch, alias_entry_for_member, classify_refresh_pivot_conflict,
+    derive_room_routing_entries, fetch_room_bundle, fetch_room_members, fetch_room_messages,
+    filter_room_members_by_query, paginate_room_members, prepare_barrier_public_tree,
+    prepare_full_verification_witness, prepare_merge_acceptance_lookup, prepare_resolved_joins,
+    prepare_resolved_revoked_leaves, refresh_room_pivot, store_room_message,
 };
 use cityg_server::MergeTicketIntent as ServerMergeTicketIntent;
 use msphf_core::MsphfError;
@@ -1015,9 +1016,9 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        let leaf_id = match parse_bytes_32(request.leaf_id.as_slice(), "leaf_id") {
-            Ok(leaf_id) => leaf_id,
-            Err(message) => return Response::error(message, 400),
+        let request = match validate_fetch_messages_request(request) {
+            Ok(request) => request,
+            Err(error) => return fetch_messages_request_validation_error_response(error),
         };
 
         let Some(checkpoint) = self.load_checkpoint_for_target(&target)? else {
@@ -1040,7 +1041,7 @@ impl CloudflareRoomDurableObject {
             &server,
             &mut room_state,
             &we_epoch_id,
-            leaf_id,
+            request.leaf_id,
             now_ms,
             message_retention(),
             MESSAGE_PRUNE_INTERVAL_MS,
@@ -1092,19 +1093,11 @@ impl CloudflareRoomDurableObject {
                 );
             }
         };
-        let we_epoch_id = route_we_epoch_id(&target)?;
-        let ciphertext = request.ciphertext;
-        if ciphertext.is_empty() {
-            return Response::error("ciphertext must be provided", 400);
-        }
-        if ciphertext.len() > MAX_MESSAGE_CIPHERTEXT_BYTES {
-            return Response::error("ciphertext exceeds MAX_PAYLOAD_ENVELOPE_BYTES", 400);
-        }
-        let sender = request.sender;
-        let sender_leaf = match parse_bytes_32(sender.as_slice(), "sender") {
-            Ok(sender_leaf) => sender_leaf,
-            Err(message) => return Response::error(message, 400),
+        let request = match validate_send_message_request(request) {
+            Ok(request) => request,
+            Err(error) => return send_message_request_validation_error_response(error),
         };
+        let we_epoch_id = route_we_epoch_id(&target)?;
 
         let Some(checkpoint) = self.load_checkpoint_for_target(&target)? else {
             return Response::error("room checkpoint not found", 404);
@@ -1127,9 +1120,9 @@ impl CloudflareRoomDurableObject {
             &server,
             &mut room_state,
             we_epoch_id,
-            sender_leaf,
-            ciphertext,
-            sender,
+            request.sender_leaf,
+            request.ciphertext,
+            request.sender,
             timestamp_ms,
             message_retention(),
             MESSAGE_PRUNE_INTERVAL_MS,
@@ -2998,6 +2991,18 @@ fn expel_member_ticket_request_validation_error_response(
 
 fn merge_ticket_request_validation_error_response(
     err: MergeTicketRequestValidationError,
+) -> Result<Response> {
+    Response::error(err.to_string(), 400)
+}
+
+fn fetch_messages_request_validation_error_response(
+    err: FetchMessagesRequestValidationError,
+) -> Result<Response> {
+    Response::error(err.to_string(), 400)
+}
+
+fn send_message_request_validation_error_response(
+    err: SendMessageRequestValidationError,
 ) -> Result<Response> {
     Response::error(err.to_string(), 400)
 }

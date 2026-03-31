@@ -31,10 +31,11 @@ use bytes::BytesMut;
 use cityg_api_schema::verify_identity_binding as schema_verify_identity_binding;
 use cityg_api_schema::{
     API_PROFILE_VERSION, BarrierHelperRequestDecodeError, ExpelMemberTicketRequestValidationError,
-    FullVerificationWitnessRequestDecodeError, IdentityBindingValidationError,
-    MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE, MEMBERS_MAX_PAGE_SIZE,
-    MergeTicketRequestValidationError, PreparedIdentityBindingError, RoomAdminProofValidationError,
-    RoomAdminRequestValidationError,
+    FetchMessagesRequestValidationError, FullVerificationWitnessRequestDecodeError,
+    IdentityBindingValidationError, MAX_BARRIER_HELPER_PAGE_ENTRIES, MEMBERS_DEFAULT_PAGE_SIZE,
+    MEMBERS_MAX_PAGE_SIZE, MergeTicketRequestValidationError, PreparedIdentityBindingError,
+    RoomAdminProofValidationError, RoomAdminRequestValidationError,
+    SendMessageRequestValidationError,
     decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
     decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
     decode_barrier_resolve_revoked_leaves_request as schema_decode_barrier_resolve_revoked_leaves_request,
@@ -52,10 +53,12 @@ use cityg_api_schema::{
     room_admin_proof_replay_key as schema_room_admin_proof_replay_key,
     validate_bootstrap_room_request as schema_validate_bootstrap_room_request,
     validate_expel_member_ticket_request as schema_validate_expel_member_ticket_request,
+    validate_fetch_messages_request as schema_validate_fetch_messages_request,
     validate_list_room_admins_request as schema_validate_list_room_admins_request,
     validate_merge_ticket_request as schema_validate_merge_ticket_request,
     validate_room_admin_mutation_request as schema_validate_room_admin_mutation_request,
     validate_rotate_room_kbroad_request as schema_validate_rotate_room_kbroad_request,
+    validate_send_message_request as schema_validate_send_message_request,
     verify_room_admin_proof as schema_verify_room_admin_proof,
     verify_room_admin_proof_payload as schema_verify_room_admin_proof_payload,
 };
@@ -95,6 +98,8 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 use cityg_client::{CityGError as ClientError, ClientEpochBundle, GroupMembership};
 #[cfg(test)]
+use cityg_runtime::MAX_MESSAGE_CIPHERTEXT_BYTES;
+#[cfg(test)]
 use cityg_runtime::StoredBundle;
 #[cfg(test)]
 use cityg_runtime::StoredMessage;
@@ -104,9 +109,9 @@ use cityg_runtime::aligned_fs_epoch_base_ts;
 use cityg_runtime::ensure_leaf_member_for_epoch as runtime_ensure_leaf_member_for_epoch;
 use cityg_runtime::{
     AcceptedRoomEpoch, AliasLeafLookup, AliasRegistrationError, AliasRegistry,
-    AppliedBundleIndexes, BarrierPaginationError, EpochScope, MAX_MESSAGE_CIPHERTEXT_BYTES,
-    MemberMetadata, PreparedAcceptedBundle, RoomAcceptEpochError, RoomAuthorizationError,
-    RoomBarrierEnvelopeError, RoomBarrierHelperPreparationError, RoomBundleMaterializationError,
+    AppliedBundleIndexes, BarrierPaginationError, EpochScope, MemberMetadata,
+    PreparedAcceptedBundle, RoomAcceptEpochError, RoomAuthorizationError, RoomBarrierEnvelopeError,
+    RoomBarrierHelperPreparationError, RoomBundleMaterializationError,
     RoomFullVerificationWitnessPreparationError, RoomMemberListingError, RoomMessageStoreError,
     RoomServiceError, RoomTicketPreparationError, RoomVolatileState, alias_entry_for_member,
     apply_bundle_indexes, apply_room_window_limit_update as runtime_apply_room_window_limit_update,
@@ -778,6 +783,36 @@ fn map_merge_ticket_request_validation_error(err: MergeTicketRequestValidationEr
         }
         MergeTicketRequestValidationError::InvalidIntent => {
             ApiError::InvalidRequest("merge ticket intent is invalid")
+        }
+    }
+}
+
+fn map_fetch_messages_request_validation_error(
+    err: FetchMessagesRequestValidationError,
+) -> ApiError {
+    match err {
+        FetchMessagesRequestValidationError::InvalidWeEpochId => {
+            ApiError::InvalidRequest("we_epoch_id must be 32 bytes")
+        }
+        FetchMessagesRequestValidationError::InvalidLeafId => {
+            ApiError::InvalidRequest("leaf_id must be 32 bytes")
+        }
+    }
+}
+
+fn map_send_message_request_validation_error(err: SendMessageRequestValidationError) -> ApiError {
+    match err {
+        SendMessageRequestValidationError::InvalidWeEpochId => {
+            ApiError::InvalidRequest("we_epoch_id must be 32 bytes")
+        }
+        SendMessageRequestValidationError::MissingCiphertext => {
+            ApiError::InvalidRequest("ciphertext must be provided")
+        }
+        SendMessageRequestValidationError::CiphertextTooLarge => {
+            ApiError::InvalidRequest("ciphertext exceeds MAX_PAYLOAD_ENVELOPE_BYTES")
+        }
+        SendMessageRequestValidationError::InvalidSender => {
+            ApiError::InvalidRequest("sender must be 32 bytes")
         }
     }
 }
@@ -2495,33 +2530,12 @@ async fn send_message(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = SendMessageRequest::decode(body)?;
-    if request.we_epoch_id.len() != 32 {
-        return Err(ApiError::InvalidRequest("we_epoch_id must be 32 bytes"));
-    }
-
-    let mut weid = [0u8; 32];
-    weid.copy_from_slice(&request.we_epoch_id);
-    let ciphertext = request.ciphertext;
-    if ciphertext.is_empty() {
-        return Err(ApiError::InvalidRequest("ciphertext must be provided"));
-    }
-    if ciphertext.len() > MAX_MESSAGE_CIPHERTEXT_BYTES {
-        return Err(ApiError::InvalidRequest(
-            "ciphertext exceeds MAX_PAYLOAD_ENVELOPE_BYTES",
-        ));
-    }
-
-    let sender = request.sender;
-    if sender.len() != 32 {
-        return Err(ApiError::InvalidRequest("sender must be 32 bytes"));
-    }
-    let mut sender_leaf = [0u8; 32];
-    sender_leaf.copy_from_slice(&sender);
+    let request = schema_validate_send_message_request(SendMessageRequest::decode(body)?)
+        .map_err(map_send_message_request_validation_error)?;
     let timestamp_ms = current_timestamp_ms();
     let scope = {
         let epoch_scope = state
-            .epoch_scope_for_weid(&weid)
+            .epoch_scope_for_weid(&request.we_epoch_id)
             .await
             .ok_or(ApiError::NotFound)?;
         let lane = state.server_for_gid(&epoch_scope.gid);
@@ -2530,10 +2544,10 @@ async fn send_message(
         runtime_store_room_message(
             &guard,
             &mut room_state,
-            weid,
-            sender_leaf,
-            ciphertext,
-            sender,
+            request.we_epoch_id,
+            request.sender_leaf,
+            request.ciphertext,
+            request.sender,
             timestamp_ms,
             state.message_retention,
             MESSAGE_PRUNE_INTERVAL_MS,
@@ -2552,7 +2566,7 @@ async fn send_message(
     // Broadcast notification to WebSocket clients
     let notification = MessageNotification {
         gid: scope.gid,
-        we_epoch_id: weid,
+        we_epoch_id: request.we_epoch_id,
         timestamp_ms,
     };
     state.broadcast_message(notification);
@@ -2569,20 +2583,11 @@ async fn fetch_messages(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = FetchMessagesRequest::decode(body)?;
-    if request.we_epoch_id.len() != 32 {
-        return Err(ApiError::InvalidRequest("we_epoch_id must be 32 bytes"));
-    }
-    if request.leaf_id.len() != 32 {
-        return Err(ApiError::InvalidRequest("leaf_id must be 32 bytes"));
-    }
-    let mut weid = [0u8; 32];
-    weid.copy_from_slice(&request.we_epoch_id);
-    let mut leaf_id = [0u8; 32];
-    leaf_id.copy_from_slice(&request.leaf_id);
+    let request = schema_validate_fetch_messages_request(FetchMessagesRequest::decode(body)?)
+        .map_err(map_fetch_messages_request_validation_error)?;
     let now_ms = current_timestamp_ms();
     let scope = state
-        .epoch_scope_for_weid(&weid)
+        .epoch_scope_for_weid(&request.we_epoch_id)
         .await
         .ok_or(ApiError::NotFound)?;
     let lane = state.server_for_gid(&scope.gid);
@@ -2592,8 +2597,8 @@ async fn fetch_messages(
         runtime_fetch_room_messages(
             &guard,
             &mut room_state,
-            &weid,
-            leaf_id,
+            &request.we_epoch_id,
+            request.leaf_id,
             now_ms,
             state.message_retention,
             MESSAGE_PRUNE_INTERVAL_MS,
