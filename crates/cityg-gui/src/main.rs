@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 #[cfg(feature = "native-app")]
 mod barrier_shared;
 mod message_crypto;

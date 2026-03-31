@@ -483,10 +483,12 @@ pub fn load_policy_journal_from_bytes(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use super::*;
     use anyhow::{Context, Result, bail, ensure};
     use pqcrypto_dilithium::dilithium5::{SecretKey as MlDsaSecretKey, keypair};
-    use pqcrypto_traits::sign::PublicKey as _;
+    use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
     use time::Month;
 
     type MlDsaPublicKey = pqcrypto_dilithium::dilithium5::PublicKey;

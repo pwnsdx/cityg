@@ -172,6 +172,8 @@ pub fn normalize_alias(alias: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use super::*;
 
     #[test]

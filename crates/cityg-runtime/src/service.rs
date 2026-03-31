@@ -21,6 +21,32 @@ use crate::{
 /// Maximum accepted chat ciphertext payload size.
 pub const MAX_MESSAGE_CIPHERTEXT_BYTES: usize = 1_048_640;
 
+/// Shared retention policy for room-local volatile backlogs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomRetentionPolicy {
+    pub retention: Duration,
+    pub prune_interval_ms: u64,
+}
+
+/// Accepted bundle metadata needed to update shared room indexes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleIndexUpdate {
+    pub we_epoch_id: [u8; 32],
+    pub bytes: Vec<u8>,
+    pub membership_root: [u8; 32],
+    pub timestamp_ms: u64,
+}
+
+/// Room-scoped chat payload ready to be stored in the volatile backlog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomMessageWrite {
+    pub we_epoch_id: [u8; 32],
+    pub sender_leaf: [u8; 32],
+    pub ciphertext: Vec<u8>,
+    pub sender: Vec<u8>,
+    pub timestamp_ms: u64,
+}
+
 /// Outcome of applying a bundle to the shared volatile room indexes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppliedBundleIndexes {
@@ -441,12 +467,8 @@ impl RoomFullVerificationWitnessPreparationError {
 pub fn apply_bundle_indexes(
     room_state: &mut RoomVolatileState,
     bundle: &ClientEpochBundle,
-    we_epoch_id: [u8; 32],
-    bytes: Vec<u8>,
-    membership_root: [u8; 32],
-    timestamp_ms: u64,
-    retention: Duration,
-    prune_interval_ms: u64,
+    update: BundleIndexUpdate,
+    retention_policy: RoomRetentionPolicy,
 ) -> Result<AppliedBundleIndexes, RoomServiceError> {
     let gid: [u8; 32] = bundle
         .gid()
@@ -459,36 +481,36 @@ pub fn apply_bundle_indexes(
     let revoked = delta.revoked.clone();
 
     room_state.record_epoch_scope(
-        we_epoch_id,
+        update.we_epoch_id,
         EpochScope {
             gid,
-            membership_root,
+            membership_root: update.membership_root,
         },
     );
     for leaf in &joined {
-        room_state.record_member_join(*leaf, we_epoch_id, timestamp_ms);
+        room_state.record_member_join(*leaf, update.we_epoch_id, update.timestamp_ms);
     }
     if !revoked.is_empty() {
         let _ = room_state.revoke_members(&revoked);
     }
     room_state.store_bundle(
-        we_epoch_id,
+        update.we_epoch_id,
         StoredBundle {
-            bytes,
-            stored_at_ms: timestamp_ms,
+            bytes: update.bytes,
+            stored_at_ms: update.timestamp_ms,
         },
-        timestamp_ms,
-        retention,
-        prune_interval_ms,
+        update.timestamp_ms,
+        retention_policy.retention,
+        retention_policy.prune_interval_ms,
     );
 
     Ok(AppliedBundleIndexes {
         gid,
-        we_epoch_id,
-        membership_root,
+        we_epoch_id: update.we_epoch_id,
+        membership_root: update.membership_root,
         joined,
         revoked,
-        timestamp_ms,
+        timestamp_ms: update.timestamp_ms,
     })
 }
 
@@ -579,18 +601,18 @@ pub fn commit_prepared_accepted_bundle(
     bundle: &ClientEpochBundle,
     prepared: PreparedAcceptedBundle,
     timestamp_ms: u64,
-    retention: Duration,
-    prune_interval_ms: u64,
+    retention_policy: RoomRetentionPolicy,
 ) -> Result<AcceptedRoomEpoch, RoomServiceError> {
     let applied = apply_bundle_indexes(
         room_state,
         bundle,
-        prepared.outcome.we_epoch_id,
-        prepared.stored_bundle_bytes.clone(),
-        prepared.outcome.new_root,
-        timestamp_ms,
-        retention,
-        prune_interval_ms,
+        BundleIndexUpdate {
+            we_epoch_id: prepared.outcome.we_epoch_id,
+            bytes: prepared.stored_bundle_bytes.clone(),
+            membership_root: prepared.outcome.new_root,
+            timestamp_ms,
+        },
+        retention_policy,
     )?;
     Ok(AcceptedRoomEpoch {
         outcome: prepared.outcome,
@@ -605,19 +627,11 @@ pub fn accept_room_epoch(
     room_state: &mut RoomVolatileState,
     bundle: &ClientEpochBundle,
     timestamp_ms: u64,
-    retention: Duration,
-    prune_interval_ms: u64,
+    retention_policy: RoomRetentionPolicy,
 ) -> Result<AcceptedRoomEpoch, RoomAcceptEpochError> {
     let prepared = prepare_accepted_bundle(server, bundle)?;
-    commit_prepared_accepted_bundle(
-        room_state,
-        bundle,
-        prepared,
-        timestamp_ms,
-        retention,
-        prune_interval_ms,
-    )
-    .map_err(RoomAcceptEpochError::from)
+    commit_prepared_accepted_bundle(room_state, bundle, prepared, timestamp_ms, retention_policy)
+        .map_err(RoomAcceptEpochError::from)
 }
 
 /// Build a join ticket and all authority/profile artifacts needed to serialize it.
@@ -1396,37 +1410,39 @@ pub fn fetch_room_bundle(
 pub fn store_room_message(
     server: &CityGServer,
     room_state: &mut RoomVolatileState,
-    we_epoch_id: [u8; 32],
-    sender_leaf: [u8; 32],
-    ciphertext: Vec<u8>,
-    sender: Vec<u8>,
-    timestamp_ms: u64,
-    retention: Duration,
-    prune_interval_ms: u64,
+    message: RoomMessageWrite,
+    retention_policy: RoomRetentionPolicy,
 ) -> Result<EpochScope, RoomMessageStoreError> {
-    let scope = ensure_leaf_member_for_epoch(server, room_state, &we_epoch_id, sender_leaf)
-        .map_err(|error| match error {
-            RoomAuthorizationError::NotFound => RoomMessageStoreError::NotFound,
-            RoomAuthorizationError::Unauthorized => RoomMessageStoreError::EpochUnauthorized,
-        })?;
-    ensure_leaf_member_for_room(server, &scope.gid, sender_leaf).map_err(|error| match error {
+    let scope = ensure_leaf_member_for_epoch(
+        server,
+        room_state,
+        &message.we_epoch_id,
+        message.sender_leaf,
+    )
+    .map_err(|error| match error {
         RoomAuthorizationError::NotFound => RoomMessageStoreError::NotFound,
-        RoomAuthorizationError::Unauthorized => RoomMessageStoreError::RoomUnauthorized,
+        RoomAuthorizationError::Unauthorized => RoomMessageStoreError::EpochUnauthorized,
+    })?;
+    ensure_leaf_member_for_room(server, &scope.gid, message.sender_leaf).map_err(|error| {
+        match error {
+            RoomAuthorizationError::NotFound => RoomMessageStoreError::NotFound,
+            RoomAuthorizationError::Unauthorized => RoomMessageStoreError::RoomUnauthorized,
+        }
     })?;
 
     room_state.store_message(
-        we_epoch_id,
+        message.we_epoch_id,
         StoredMessage {
-            we_epoch_id,
-            ciphertext,
-            sender,
-            timestamp_ms,
+            we_epoch_id: message.we_epoch_id,
+            ciphertext: message.ciphertext,
+            sender: message.sender,
+            timestamp_ms: message.timestamp_ms,
         },
-        timestamp_ms,
-        retention,
-        prune_interval_ms,
+        message.timestamp_ms,
+        retention_policy.retention,
+        retention_policy.prune_interval_ms,
     );
-    room_state.touch_member(sender_leaf, timestamp_ms);
+    room_state.touch_member(message.sender_leaf, message.timestamp_ms);
     Ok(scope)
 }
 
@@ -1608,6 +1624,8 @@ fn pivot_parity_to_cbor(parity: &PivotParity) -> Result<Vec<u8>, RoomTicketPrepa
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use std::collections::BTreeMap;
 
     use super::*;
@@ -1640,12 +1658,16 @@ mod tests {
         let result = apply_bundle_indexes(
             &mut room_state,
             &bundle,
-            bundle.we_epoch_id,
-            bundle.to_cbor().expect("bundle cbor"),
-            [0x44; 32],
-            55,
-            Duration::from_secs(60),
-            1_000,
+            BundleIndexUpdate {
+                we_epoch_id: bundle.we_epoch_id,
+                bytes: bundle.to_cbor().expect("bundle cbor"),
+                membership_root: [0x44; 32],
+                timestamp_ms: 55,
+            },
+            RoomRetentionPolicy {
+                retention: Duration::from_secs(60),
+                prune_interval_ms: 1_000,
+            },
         )
         .expect("apply bundle indexes");
 
@@ -1683,12 +1705,16 @@ mod tests {
         apply_bundle_indexes(
             &mut room_state,
             &bundle,
-            bundle.we_epoch_id,
-            bundle_bytes,
-            outcome.new_root,
-            55,
-            Duration::from_secs(60),
-            1_000,
+            BundleIndexUpdate {
+                we_epoch_id: bundle.we_epoch_id,
+                bytes: bundle_bytes,
+                membership_root: outcome.new_root,
+                timestamp_ms: 55,
+            },
+            RoomRetentionPolicy {
+                retention: Duration::from_secs(60),
+                prune_interval_ms: 1_000,
+            },
         )
         .expect("apply bundle indexes");
         room_state.store_message(
@@ -1766,25 +1792,33 @@ mod tests {
         apply_bundle_indexes(
             &mut room_state,
             &bundle,
-            bundle.we_epoch_id,
-            bundle_bytes,
-            outcome.new_root,
-            55,
-            Duration::from_secs(60),
-            1_000,
+            BundleIndexUpdate {
+                we_epoch_id: bundle.we_epoch_id,
+                bytes: bundle_bytes,
+                membership_root: outcome.new_root,
+                timestamp_ms: 55,
+            },
+            RoomRetentionPolicy {
+                retention: Duration::from_secs(60),
+                prune_interval_ms: 1_000,
+            },
         )
         .expect("apply bundle indexes");
 
         let scope = store_room_message(
             &server,
             &mut room_state,
-            bundle.we_epoch_id,
-            demo_member_leaf("alice"),
-            vec![1, 2, 3],
-            demo_member_leaf("alice").to_vec(),
-            60,
-            Duration::from_secs(60),
-            1_000,
+            RoomMessageWrite {
+                we_epoch_id: bundle.we_epoch_id,
+                sender_leaf: demo_member_leaf("alice"),
+                ciphertext: vec![1, 2, 3],
+                sender: demo_member_leaf("alice").to_vec(),
+                timestamp_ms: 60,
+            },
+            RoomRetentionPolicy {
+                retention: Duration::from_secs(60),
+                prune_interval_ms: 1_000,
+            },
         )
         .expect("store message");
 
@@ -1901,8 +1935,10 @@ mod tests {
             &bundle,
             prepared,
             55,
-            Duration::from_secs(60),
-            1_000,
+            RoomRetentionPolicy {
+                retention: Duration::from_secs(60),
+                prune_interval_ms: 1_000,
+            },
         )
         .expect("commit accepted bundle");
 

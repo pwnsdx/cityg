@@ -116,12 +116,13 @@ use cityg_runtime::aligned_fs_epoch_base_ts;
 use cityg_runtime::ensure_leaf_member_for_epoch as runtime_ensure_leaf_member_for_epoch;
 use cityg_runtime::{
     AcceptedRoomEpoch, AliasLeafLookup, AliasRegistrationError, AliasRegistry,
-    AppliedBundleIndexes, BarrierPaginationError, EpochScope, MemberMetadata,
+    AppliedBundleIndexes, BarrierPaginationError, BundleIndexUpdate, EpochScope, MemberMetadata,
     PreparedAcceptedBundle, RoomAcceptEpochError, RoomAuthorizationError, RoomBarrierEnvelopeError,
     RoomBarrierHelperPreparationError, RoomBundleMaterializationError,
     RoomFullVerificationWitnessPreparationError, RoomMemberListingError, RoomMessageStoreError,
-    RoomServiceError, RoomTicketPreparationError, RoomVolatileState, alias_entry_for_member,
-    apply_bundle_indexes, apply_room_window_limit_update as runtime_apply_room_window_limit_update,
+    RoomMessageWrite, RoomRetentionPolicy, RoomServiceError, RoomTicketPreparationError,
+    RoomVolatileState, alias_entry_for_member, apply_bundle_indexes,
+    apply_room_window_limit_update as runtime_apply_room_window_limit_update,
     classify_refresh_pivot_conflict,
     commit_prepared_accepted_bundle as runtime_commit_prepared_accepted_bundle,
     ensure_leaf_member_for_room as runtime_ensure_leaf_member_for_room,
@@ -1618,8 +1619,10 @@ async fn commit_accepted_bundle(
             bundle,
             prepared,
             timestamp_ms,
-            state.message_retention,
-            MESSAGE_PRUNE_INTERVAL_MS,
+            RoomRetentionPolicy {
+                retention: state.message_retention,
+                prune_interval_ms: MESSAGE_PRUNE_INTERVAL_MS,
+            },
         )
         .map_err(|err| map_bundle_index_error(err, "failed to compute membership delta"))?
     };
@@ -1640,12 +1643,16 @@ async fn rehydrate_bundle_indexes(
         apply_bundle_indexes(
             &mut room_state,
             bundle,
-            weid,
-            bytes,
-            membership_root,
-            timestamp_ms,
-            state.message_retention,
-            MESSAGE_PRUNE_INTERVAL_MS,
+            BundleIndexUpdate {
+                we_epoch_id: weid,
+                bytes,
+                membership_root,
+                timestamp_ms,
+            },
+            RoomRetentionPolicy {
+                retention: state.message_retention,
+                prune_interval_ms: MESSAGE_PRUNE_INTERVAL_MS,
+            },
         )
         .map_err(|err| {
             map_bundle_index_error(err, "failed to compute membership delta during replay")
@@ -2537,13 +2544,17 @@ async fn send_message(
         runtime_store_room_message(
             &guard,
             &mut room_state,
-            request.we_epoch_id,
-            request.sender_leaf,
-            request.ciphertext,
-            request.sender,
-            timestamp_ms,
-            state.message_retention,
-            MESSAGE_PRUNE_INTERVAL_MS,
+            RoomMessageWrite {
+                we_epoch_id: request.we_epoch_id,
+                sender_leaf: request.sender_leaf,
+                ciphertext: request.ciphertext,
+                sender: request.sender,
+                timestamp_ms,
+            },
+            RoomRetentionPolicy {
+                retention: state.message_retention,
+                prune_interval_ms: MESSAGE_PRUNE_INTERVAL_MS,
+            },
         )
         .map_err(|error| match error {
             RoomMessageStoreError::NotFound => ApiError::NotFound,
@@ -2922,13 +2933,9 @@ async fn get_window(
         snapshot.extend(runtime_snapshot_room_window(&guard));
     }
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "application/x-protobuf")
-        .body(axum::body::Body::from(encode_window_snapshot_response(
-            snapshot,
-        )))
-        .expect("protobuf response builder"))
+    Ok(protobuf_response_bytes(encode_window_snapshot_response(
+        snapshot,
+    )))
 }
 
 async fn get_telemetry(
@@ -2951,14 +2958,10 @@ async fn get_telemetry(
     }
 
     let freeze_stats = state.freeze_stats().await;
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "application/x-protobuf")
-        .body(axum::body::Body::from(encode_telemetry_snapshot_response(
-            report,
-            freeze_stats,
-        )))
-        .expect("protobuf response builder"))
+    Ok(protobuf_response_bytes(encode_telemetry_snapshot_response(
+        report,
+        freeze_stats,
+    )))
 }
 
 async fn configure_window(

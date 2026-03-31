@@ -1999,6 +1999,8 @@ fn bundle_gid(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use cityg_client::demo::{DEMO_GID, demo_bundle};
     use cityg_runtime::{AliasLeafEntry, MemberMetadata};
     use pqcrypto_dilithium::dilithium5;

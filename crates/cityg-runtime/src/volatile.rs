@@ -532,6 +532,8 @@ pub fn should_prune(prune_due_ms: &AtomicU64, now_ms: u64, interval_ms: u64) -> 
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use std::sync::atomic::AtomicU64;
 
     use super::*;

@@ -140,6 +140,8 @@ impl RuntimeRoom {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use cityg_server::ServerConfig;
 
     use super::*;

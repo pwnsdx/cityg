@@ -277,10 +277,10 @@ impl AppModel {
             (Some(MembershipSignalKind::Revoke), Some(leaf), true) => {
                 format!("Replayed roster revoke: {}", short_leaf_display(&leaf))
             }
-            (Some(MembershipSignalKind::Join), Some(leaf)) => {
+            (Some(MembershipSignalKind::Join), Some(leaf), false) => {
                 format!("Roster join: {}", short_leaf_display(&leaf))
             }
-            (Some(MembershipSignalKind::Revoke), Some(leaf)) => {
+            (Some(MembershipSignalKind::Revoke), Some(leaf), false) => {
                 format!("Roster revoke: {}", short_leaf_display(&leaf))
             }
             (Some(MembershipSignalKind::Join), None, true) => {
@@ -289,8 +289,10 @@ impl AppModel {
             (Some(MembershipSignalKind::Revoke), None, true) => {
                 "Replayed roster revoke detected".to_string()
             }
-            (Some(MembershipSignalKind::Join), None) => "Roster join detected".to_string(),
-            (Some(MembershipSignalKind::Revoke), None) => "Roster revoke detected".to_string(),
+            (Some(MembershipSignalKind::Join), None, false) => "Roster join detected".to_string(),
+            (Some(MembershipSignalKind::Revoke), None, false) => {
+                "Roster revoke detected".to_string()
+            }
             (None, Some(leaf), true) => {
                 format!("Replayed roster change: {}", short_leaf_display(&leaf))
             }

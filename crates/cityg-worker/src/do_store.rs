@@ -312,14 +312,17 @@ where
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use std::{collections::BTreeMap, time::Duration};
 
     use cityg_client::demo::{
         DEMO_GID, bootstrap_public, demo_bundle, demo_member_leaf, kbroad_public,
     };
     use cityg_runtime::{
-        AppliedBundleIndexes, EpochLeafBindingRecord, EpochScope, EpochScopeRecord, MemberMetadata,
-        MemberMetadataRecord, RoomStateCheckpoint, RoomVolatileState, StoredBundle,
+        AppliedBundleIndexes, BundleIndexUpdate, EpochLeafBindingRecord, EpochScope,
+        EpochScopeRecord, MemberMetadata, MemberMetadataRecord, RoomMessageWrite,
+        RoomRetentionPolicy, RoomStateCheckpoint, RoomVolatileState, StoredBundle,
         StoredBundleRecord, StoredMessage, apply_bundle_indexes, derive_room_routing_entries,
         fetch_room_bundle, fetch_room_messages, store_room_message,
     };
@@ -409,13 +412,17 @@ mod tests {
         let scope = store_room_message(
             &server,
             &mut room_state,
-            bundle.we_epoch_id,
-            alice_leaf,
-            vec![0x90, 0x91, 0x92],
-            alice_leaf.to_vec(),
-            MESSAGE_AT_MS,
-            retention,
-            PRUNE_INTERVAL_MS,
+            RoomMessageWrite {
+                we_epoch_id: bundle.we_epoch_id,
+                sender_leaf: alice_leaf,
+                ciphertext: vec![0x90, 0x91, 0x92],
+                sender: alice_leaf.to_vec(),
+                timestamp_ms: MESSAGE_AT_MS,
+            },
+            RoomRetentionPolicy {
+                retention,
+                prune_interval_ms: PRUNE_INTERVAL_MS,
+            },
         )
         .expect("store message");
         assert_eq!(scope.gid, gid);
@@ -594,12 +601,16 @@ mod tests {
         let applied = apply_bundle_indexes(
             &mut room_state,
             bundle,
-            bundle.we_epoch_id,
-            bundle_bytes,
-            outcome.new_root,
-            accepted_at_ms,
-            retention,
-            prune_interval_ms,
+            BundleIndexUpdate {
+                we_epoch_id: bundle.we_epoch_id,
+                bytes: bundle_bytes,
+                membership_root: outcome.new_root,
+                timestamp_ms: accepted_at_ms,
+            },
+            RoomRetentionPolicy {
+                retention,
+                prune_interval_ms,
+            },
         )
         .expect("apply bundle indexes");
         (server, room_state, outcome, applied)

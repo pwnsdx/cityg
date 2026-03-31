@@ -82,11 +82,16 @@ fn replay_accepted_bundles(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use std::collections::BTreeMap;
     use std::time::Duration;
 
     use cityg_client::demo::{demo_bundle, demo_member_leaf};
-    use cityg_runtime::{AcceptedBundleRecord, RoomSnapshot, apply_bundle_indexes};
+    use cityg_runtime::{
+        AcceptedBundleRecord, BundleIndexUpdate, RoomRetentionPolicy, RoomSnapshot,
+        apply_bundle_indexes,
+    };
     use msphf_orchestrator::{AcceptanceOptions, BootstrapPolicy};
 
     use super::*;
@@ -124,12 +129,16 @@ mod tests {
         apply_bundle_indexes(
             room.volatile_mut(),
             &bundle,
-            bundle.we_epoch_id,
-            bundle_bytes.clone(),
-            outcome.new_root,
-            55,
-            Duration::from_secs(60),
-            1_000,
+            BundleIndexUpdate {
+                we_epoch_id: bundle.we_epoch_id,
+                bytes: bundle_bytes.clone(),
+                membership_root: outcome.new_root,
+                timestamp_ms: 55,
+            },
+            RoomRetentionPolicy {
+                retention: Duration::from_secs(60),
+                prune_interval_ms: 1_000,
+            },
         )
         .expect("apply bundle indexes");
 

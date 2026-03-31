@@ -207,6 +207,8 @@ mod backend {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use pqcrypto_dilithium::dilithium5;
     use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 

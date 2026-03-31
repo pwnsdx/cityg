@@ -121,6 +121,8 @@ fn apply_demo_seed_acceptance(_acceptance: &mut AcceptanceOptions, _seed_demo_ro
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use super::*;
 
     #[test]

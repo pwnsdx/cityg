@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 #[cfg(all(target_os = "macos", not(test)))]
 use std::ffi::c_void;
 use std::ops::Range;

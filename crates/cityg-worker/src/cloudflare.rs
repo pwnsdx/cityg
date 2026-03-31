@@ -38,13 +38,14 @@ use cityg_runtime::{
     AcceptedRoomEpoch, AliasLeafLookup, AliasRegistrationError, AliasRegistry,
     BarrierPaginationError, RoomAcceptEpochError, RoomAuthorizationError, RoomBarrierEnvelopeError,
     RoomBarrierHelperPreparationError, RoomFullVerificationWitnessPreparationError,
-    RoomMemberListingError, RoomMessageStoreError, RoomRoutingEntry, RoomServiceError,
-    RoomSnapshot, RoomStateCheckpoint, RoomTicketPreparationError, RoomVolatileState, RuntimeRoom,
-    accept_room_epoch, alias_entry_for_member, classify_refresh_pivot_conflict,
-    derive_room_routing_entries, fetch_room_bundle, fetch_room_members, fetch_room_messages,
-    filter_room_members_by_query, paginate_room_members, prepare_barrier_public_tree,
-    prepare_full_verification_witness, prepare_merge_acceptance_lookup, prepare_resolved_joins,
-    prepare_resolved_revoked_leaves, refresh_room_pivot, store_room_message,
+    RoomMemberListingError, RoomMessageStoreError, RoomMessageWrite, RoomRetentionPolicy,
+    RoomRoutingEntry, RoomServiceError, RoomSnapshot, RoomStateCheckpoint,
+    RoomTicketPreparationError, RoomVolatileState, RuntimeRoom, accept_room_epoch,
+    alias_entry_for_member, classify_refresh_pivot_conflict, derive_room_routing_entries,
+    fetch_room_bundle, fetch_room_members, fetch_room_messages, filter_room_members_by_query,
+    paginate_room_members, prepare_barrier_public_tree, prepare_full_verification_witness,
+    prepare_merge_acceptance_lookup, prepare_resolved_joins, prepare_resolved_revoked_leaves,
+    refresh_room_pivot, store_room_message,
 };
 use cityg_server::MergeTicketIntent as ServerMergeTicketIntent;
 use msphf_core::MsphfError;
@@ -394,10 +395,10 @@ impl CloudflareRoomDurableObject {
         ws: WebSocket,
         message: WebSocketIncomingMessage,
     ) -> Result<()> {
-        if let WebSocketIncomingMessage::String(text) = message {
-            if let Some(signal) = parse_websocket_client_signal(text.as_str()) {
-                self.record_websocket_signal(&ws, signal)?;
-            }
+        if let WebSocketIncomingMessage::String(text) = message
+            && let Some(signal) = parse_websocket_client_signal(text.as_str())
+        {
+            self.record_websocket_signal(&ws, signal)?;
         }
         Ok(())
     }
@@ -466,8 +467,10 @@ impl CloudflareRoomDurableObject {
             &mut room_state,
             &bundle,
             timestamp_ms,
-            message_retention(),
-            MESSAGE_PRUNE_INTERVAL_MS,
+            RoomRetentionPolicy {
+                retention: message_retention(),
+                prune_interval_ms: MESSAGE_PRUNE_INTERVAL_MS,
+            },
         ) {
             Ok(accepted) => accepted,
             Err(error) => return accept_epoch_error_response(error),
@@ -1097,13 +1100,17 @@ impl CloudflareRoomDurableObject {
         match store_room_message(
             &server,
             &mut room_state,
-            we_epoch_id,
-            request.sender_leaf,
-            request.ciphertext,
-            request.sender,
-            timestamp_ms,
-            message_retention(),
-            MESSAGE_PRUNE_INTERVAL_MS,
+            RoomMessageWrite {
+                we_epoch_id,
+                sender_leaf: request.sender_leaf,
+                ciphertext: request.ciphertext,
+                sender: request.sender,
+                timestamp_ms,
+            },
+            RoomRetentionPolicy {
+                retention: message_retention(),
+                prune_interval_ms: MESSAGE_PRUNE_INTERVAL_MS,
+            },
         ) {
             Ok(scope) => scope,
             Err(RoomMessageStoreError::NotFound) => {
@@ -1881,7 +1888,7 @@ impl CloudflareRoomDurableObject {
                 .deserialize_attachment::<WebSocketSessionAttachment>()
                 .ok()
                 .flatten()
-                .unwrap_or_else(|| WebSocketSessionAttachment {
+                .unwrap_or(WebSocketSessionAttachment {
                     gid: [0; 32],
                     leaf_id: [0; 32],
                     last_client_activity_ms: timestamp_ms,
@@ -2102,12 +2109,12 @@ impl CloudflareRoomDurableObject {
             .as_ref()
             .ok_or_else(|| worker::Error::from("room storage was not initialized"))?;
         let borrowed = store.borrow();
-        if let Some(existing_gid) = infer_room_gid_from_store(&borrowed)? {
-            if existing_gid != gid {
-                return Err(worker::Error::from(
-                    "room durable object storage is bound to a different gid",
-                ));
-            }
+        if let Some(existing_gid) = infer_room_gid_from_store(&borrowed)?
+            && existing_gid != gid
+        {
+            return Err(worker::Error::from(
+                "room durable object storage is bound to a different gid",
+            ));
         }
         borrowed
             .load_checkpoint(&gid)
@@ -2125,12 +2132,12 @@ impl CloudflareRoomDurableObject {
         let borrowed = store.borrow();
         let gid = match target.key {
             RoomScopedRoutingKey::Gid(gid) => {
-                if let Some(existing_gid) = infer_room_gid_from_store(&borrowed)? {
-                    if existing_gid != gid {
-                        return Err(worker::Error::from(
-                            "room durable object storage is bound to a different gid",
-                        ));
-                    }
+                if let Some(existing_gid) = infer_room_gid_from_store(&borrowed)?
+                    && existing_gid != gid
+                {
+                    return Err(worker::Error::from(
+                        "room durable object storage is bound to a different gid",
+                    ));
                 }
                 Some(gid)
             }
@@ -3076,8 +3083,7 @@ fn protobuf_response_bytes(payload: Vec<u8>) -> Result<Response> {
     let mut response = Response::from_bytes(payload)?;
     response
         .headers_mut()
-        .set("content-type", "application/x-protobuf")
-        .map_err(worker::Error::from)?;
+        .set("content-type", "application/x-protobuf")?;
     Ok(response)
 }
 
@@ -3439,7 +3445,7 @@ impl CloudflareRoomRegistry {
     }
 
     pub fn list_gid_hexes(&self) -> Result<Vec<String>> {
-        let mut rows = self
+        let rows = self
             .sql
             .exec(
                 &format!("SELECT gid_hex FROM {ROOM_REGISTRY_TABLE} ORDER BY gid_hex ASC"),
@@ -3447,7 +3453,7 @@ impl CloudflareRoomRegistry {
             )?
             .raw();
         let mut gids = Vec::new();
-        while let Some(row) = rows.next() {
+        for row in rows {
             match row? {
                 row if matches!(row.as_slice(), [SqlStorageValue::String(_)]) => {
                     let SqlStorageValue::String(gid_hex) = &row.as_slice()[0] else {
@@ -3988,6 +3994,8 @@ async fn decode_json_response<T: for<'de> Deserialize<'de>>(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
     use cityg_api_schema::{RoomScopedApiRoute, is_room_scoped_api_path, pb};
     use cityg_client::demo::demo_bundle;
     use cityg_runtime::RoomVolatileState;
@@ -4478,8 +4486,10 @@ mod tests {
             &mut room_state,
             &bundle,
             55,
-            message_retention(),
-            MESSAGE_PRUNE_INTERVAL_MS,
+            RoomRetentionPolicy {
+                retention: message_retention(),
+                prune_interval_ms: MESSAGE_PRUNE_INTERVAL_MS,
+            },
         )
         .expect("accept room epoch");
 
