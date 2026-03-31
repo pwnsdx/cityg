@@ -743,6 +743,12 @@ fn map_room_admin_request_validation_error(err: RoomAdminRequestValidationError)
         RoomAdminRequestValidationError::MissingRoomId => {
             ApiError::InvalidRequest("room_id must be provided")
         }
+        RoomAdminRequestValidationError::InvalidRoomIdEncoding => {
+            ApiError::InvalidRequest("room_id must be 64 hex characters")
+        }
+        RoomAdminRequestValidationError::InvalidRoomIdLength => {
+            ApiError::InvalidRequest("room_id must be 32 bytes")
+        }
         RoomAdminRequestValidationError::MissingKbroadPublic => {
             ApiError::InvalidRequest("kbroad_public must be provided")
         }
@@ -765,6 +771,12 @@ fn map_expel_member_ticket_request_validation_error(
         ExpelMemberTicketRequestValidationError::MissingRoomId => {
             ApiError::InvalidRequest("room_id must be provided")
         }
+        ExpelMemberTicketRequestValidationError::InvalidRoomIdEncoding => {
+            ApiError::InvalidRequest("room_id must be 64 hex characters")
+        }
+        ExpelMemberTicketRequestValidationError::InvalidRoomIdLength => {
+            ApiError::InvalidRequest("room_id must be 32 bytes")
+        }
         ExpelMemberTicketRequestValidationError::InvalidAuthorLeafId => {
             ApiError::InvalidRequest("author_leaf_id must be 32 bytes")
         }
@@ -784,6 +796,12 @@ fn map_merge_ticket_request_validation_error(err: MergeTicketRequestValidationEr
     match err {
         MergeTicketRequestValidationError::MissingRoomId => {
             ApiError::InvalidRequest("room_id must be provided")
+        }
+        MergeTicketRequestValidationError::InvalidRoomIdEncoding => {
+            ApiError::InvalidRequest("room_id must be 64 hex characters")
+        }
+        MergeTicketRequestValidationError::InvalidRoomIdLength => {
+            ApiError::InvalidRequest("room_id must be 32 bytes")
         }
         MergeTicketRequestValidationError::InvalidLeafId => {
             ApiError::InvalidRequest("leaf_id must be 32 bytes")
@@ -1976,7 +1994,6 @@ async fn bootstrap_room(
 ) -> Result<Response, ApiError> {
     let request = schema_validate_bootstrap_room_request(BootstrapRoomRequest::decode(body)?)
         .map_err(map_room_admin_request_validation_error)?;
-    let gid = parse_gid(&request.room_id)?;
     let initial_room_admin_pop_key = verify_room_admin_proof(
         &request.admin_proof,
         "bootstrap_room_v1",
@@ -1985,10 +2002,14 @@ async fn bootstrap_room(
     )?;
 
     {
-        let lane = state.server_for_gid(&gid);
+        let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
         guard
-            .register_group_with_admin(&gid, request.kbroad_public, initial_room_admin_pop_key)
+            .register_group_with_admin(
+                &request.gid,
+                request.kbroad_public,
+                initial_room_admin_pop_key,
+            )
             .map_err(|err| match err {
                 ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
                 other => ApiError::from(other),
@@ -2008,10 +2029,9 @@ async fn rotate_room_kbroad(
     let request =
         schema_validate_rotate_room_kbroad_request(RotateRoomKbroadRequest::decode(body)?)
             .map_err(map_room_admin_request_validation_error)?;
-    let gid = parse_gid(&request.room_id)?;
     let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
     let kbroad_generation = {
-        let lane = state.server_for_gid(&gid);
+        let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
         let actor_pop_key = verify_room_admin_proof(
             &request.admin_proof,
@@ -2020,7 +2040,12 @@ async fn rotate_room_kbroad(
             &request.kbroad_public,
         )?;
         guard
-            .rotate_group_kbroad_with_actor(&gid, request.kbroad_public, &actor_pop_key, replay_key)
+            .rotate_group_kbroad_with_actor(
+                &request.gid,
+                request.kbroad_public,
+                &actor_pop_key,
+                replay_key,
+            )
             .map_err(|err| match err {
                 ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
                 other => ApiError::from(other),
@@ -2040,7 +2065,6 @@ async fn grant_room_admin(
     let request =
         schema_validate_room_admin_mutation_request(RoomAdminMutationRequest::decode(body)?)
             .map_err(map_room_admin_request_validation_error)?;
-    let gid = parse_gid(&request.room_id)?;
     let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
     let actor_pop_key = verify_room_admin_proof_payload(
         &request.admin_proof,
@@ -2049,11 +2073,11 @@ async fn grant_room_admin(
         &request.target_pop_public_key,
     )?;
     let (granted, admin_count) = {
-        let lane = state.server_for_gid(&gid);
+        let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
         guard
             .grant_room_admin(
-                &gid,
+                &request.gid,
                 &actor_pop_key,
                 request.target_pop_public_key,
                 replay_key,
@@ -2083,7 +2107,6 @@ async fn revoke_room_admin(
     let request =
         schema_validate_room_admin_mutation_request(RoomAdminMutationRequest::decode(body)?)
             .map_err(map_room_admin_request_validation_error)?;
-    let gid = parse_gid(&request.room_id)?;
     let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
     let actor_pop_key = verify_room_admin_proof_payload(
         &request.admin_proof,
@@ -2092,11 +2115,11 @@ async fn revoke_room_admin(
         &request.target_pop_public_key,
     )?;
     let (revoked, admin_count) = {
-        let lane = state.server_for_gid(&gid);
+        let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
         guard
             .revoke_room_admin(
-                &gid,
+                &request.gid,
                 &actor_pop_key,
                 &request.target_pop_public_key,
                 replay_key,
@@ -2125,7 +2148,6 @@ async fn list_room_admins(
 ) -> Result<Response, ApiError> {
     let request = schema_validate_list_room_admins_request(ListRoomAdminsRequest::decode(body)?)
         .map_err(map_room_admin_request_validation_error)?;
-    let gid = parse_gid(&request.room_id)?;
     let actor_pop_key = verify_room_admin_proof_payload(
         &request.admin_proof,
         "list_room_admins_v1",
@@ -2133,10 +2155,10 @@ async fn list_room_admins(
         &[],
     )?;
     let admin_pop_public_keys = {
-        let lane = state.server_for_gid(&gid);
+        let lane = state.server_for_gid(&request.gid);
         let guard = lane.read().await;
         guard
-            .list_room_admins(&gid, &actor_pop_key)
+            .list_room_admins(&request.gid, &actor_pop_key)
             .map_err(|err| match err {
                 ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
                 other => ApiError::from(other),
@@ -2155,7 +2177,6 @@ async fn expel_member_ticket(
     let request =
         schema_validate_expel_member_ticket_request(ExpelMemberTicketRequest::decode(body)?)
             .map_err(map_expel_member_ticket_request_validation_error)?;
-    let gid = parse_gid(&request.room_id)?;
     let payload =
         encode_room_admin_leaf_pair_payload(&request.author_leaf_id, &request.target_leaf_id)?;
     let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
@@ -2169,7 +2190,7 @@ async fn expel_member_ticket(
         &state,
         "expel_member_ticket",
         fingerprint_rate_limit_parts(&[
-            &gid,
+            &request.gid,
             &request.author_leaf_id,
             &request.target_leaf_id,
             actor_pop_key.as_slice(),
@@ -2178,11 +2199,11 @@ async fn expel_member_ticket(
     .await?;
 
     let prepared = {
-        let lane = state.server_for_gid(&gid);
+        let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
         let bundle = guard
             .build_admin_expel_ticket(
-                &gid,
+                &request.gid,
                 &actor_pop_key,
                 &request.author_leaf_id,
                 &request.target_leaf_id,
@@ -2192,7 +2213,7 @@ async fn expel_member_ticket(
                 maybe_record_client_concurrency_error("expel_member_ticket", &err);
                 ApiError::from(err)
             })?;
-        runtime_prepare_merge_ticket_from_bundle(&guard, &gid, bundle, API_PROFILE_VERSION)
+        runtime_prepare_merge_ticket_from_bundle(&guard, &request.gid, bundle, API_PROFILE_VERSION)
             .map_err(|err| map_room_ticket_preparation_error("expel_member_ticket", err))?
     };
 
@@ -2209,7 +2230,6 @@ async fn merge_ticket(
     enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
     let request = schema_validate_merge_ticket_request(MergeTicketRequest::decode(body)?)
         .map_err(map_merge_ticket_request_validation_error)?;
-    let gid = parse_gid(&request.room_id)?;
     enforce_expensive_rate_limit(
         &state,
         "merge_ticket",
@@ -2218,13 +2238,13 @@ async fn merge_ticket(
                 .get(MESSAGE_AUTH_HEADER)
                 .map(HeaderValue::as_bytes)
                 .unwrap_or_default(),
-            &gid,
+            &request.gid,
             &request.leaf_id,
         ]),
     )
     .await?;
     let cache_key = MergeTicketCacheKey {
-        gid,
+        gid: request.gid,
         leaf_id: request.leaf_id,
         intent: request.intent_value,
     };
@@ -2242,7 +2262,7 @@ async fn merge_ticket(
     }
 
     let prepared = {
-        let lane = state.server_for_gid(&gid);
+        let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
         let server_intent = match request.intent {
             MergeTicketIntent::Leave => ServerMergeTicketIntent::Leave,
@@ -2250,7 +2270,7 @@ async fn merge_ticket(
         };
         match runtime_prepare_merge_ticket(
             &mut guard,
-            &gid,
+            &request.gid,
             &request.leaf_id,
             server_intent,
             API_PROFILE_VERSION,

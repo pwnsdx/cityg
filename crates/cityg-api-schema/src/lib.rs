@@ -1101,6 +1101,10 @@ pub enum RoomAdminProofValidationError {
 pub enum RoomAdminRequestValidationError {
     #[error("room_id must be provided")]
     MissingRoomId,
+    #[error("room_id must be 64 hex characters")]
+    InvalidRoomIdEncoding,
+    #[error("room_id must be 32 bytes")]
+    InvalidRoomIdLength,
     #[error("kbroad_public must be provided")]
     MissingKbroadPublic,
     #[error("kbroad_public has unexpected length")]
@@ -1121,6 +1125,7 @@ impl RoomAdminRequestValidationError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedRoomKbroadRequest {
     pub room_id: String,
+    pub gid: [u8; 32],
     pub kbroad_public: Vec<u8>,
     pub admin_proof: pb::RoomAdminProof,
 }
@@ -1128,6 +1133,7 @@ pub struct ValidatedRoomKbroadRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedRoomAdminMutationRequest {
     pub room_id: String,
+    pub gid: [u8; 32],
     pub target_pop_public_key: Vec<u8>,
     pub admin_proof: pb::RoomAdminProof,
 }
@@ -1135,12 +1141,14 @@ pub struct ValidatedRoomAdminMutationRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedListRoomAdminsRequest {
     pub room_id: String,
+    pub gid: [u8; 32],
     pub admin_proof: pb::RoomAdminProof,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedExpelMemberTicketRequest {
     pub room_id: String,
+    pub gid: [u8; 32],
     pub author_leaf_id: [u8; 32],
     pub target_leaf_id: [u8; 32],
     pub admin_proof: pb::RoomAdminProof,
@@ -1149,6 +1157,7 @@ pub struct ValidatedExpelMemberTicketRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedMergeTicketRequest {
     pub room_id: String,
+    pub gid: [u8; 32],
     pub leaf_id: [u8; 32],
     pub intent: pb::MergeTicketIntent,
     pub intent_value: i32,
@@ -1205,9 +1214,7 @@ fn validate_room_kbroad_request(
     kbroad_public: Vec<u8>,
     admin_proof: Option<pb::RoomAdminProof>,
 ) -> Result<ValidatedRoomKbroadRequest, RoomAdminRequestValidationError> {
-    if room_id.is_empty() {
-        return Err(RoomAdminRequestValidationError::MissingRoomId);
-    }
+    let gid = parse_room_id_for_room_admin(room_id.as_str())?;
     if kbroad_public.is_empty() {
         return Err(RoomAdminRequestValidationError::MissingKbroadPublic);
     }
@@ -1218,6 +1225,7 @@ fn validate_room_kbroad_request(
 
     Ok(ValidatedRoomKbroadRequest {
         room_id,
+        gid,
         kbroad_public,
         admin_proof,
     })
@@ -1238,9 +1246,7 @@ pub fn validate_rotate_room_kbroad_request(
 pub fn validate_room_admin_mutation_request(
     request: pb::RoomAdminMutationRequest,
 ) -> Result<ValidatedRoomAdminMutationRequest, RoomAdminRequestValidationError> {
-    if request.room_id.is_empty() {
-        return Err(RoomAdminRequestValidationError::MissingRoomId);
-    }
+    let gid = parse_room_id_for_room_admin(request.room_id.as_str())?;
     if request.target_pop_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
         return Err(RoomAdminRequestValidationError::InvalidTargetPopPublicKeyLength);
     }
@@ -1250,6 +1256,7 @@ pub fn validate_room_admin_mutation_request(
 
     Ok(ValidatedRoomAdminMutationRequest {
         room_id: request.room_id,
+        gid,
         target_pop_public_key: request.target_pop_public_key,
         admin_proof,
     })
@@ -1258,15 +1265,14 @@ pub fn validate_room_admin_mutation_request(
 pub fn validate_list_room_admins_request(
     request: pb::ListRoomAdminsRequest,
 ) -> Result<ValidatedListRoomAdminsRequest, RoomAdminRequestValidationError> {
-    if request.room_id.is_empty() {
-        return Err(RoomAdminRequestValidationError::MissingRoomId);
-    }
+    let gid = parse_room_id_for_room_admin(request.room_id.as_str())?;
     let admin_proof = request
         .admin_proof
         .ok_or(RoomAdminRequestValidationError::MissingAdminProof)?;
 
     Ok(ValidatedListRoomAdminsRequest {
         room_id: request.room_id,
+        gid,
         admin_proof,
     })
 }
@@ -1275,6 +1281,10 @@ pub fn validate_list_room_admins_request(
 pub enum ExpelMemberTicketRequestValidationError {
     #[error("room_id must be provided")]
     MissingRoomId,
+    #[error("room_id must be 64 hex characters")]
+    InvalidRoomIdEncoding,
+    #[error("room_id must be 32 bytes")]
+    InvalidRoomIdLength,
     #[error("author_leaf_id must be 32 bytes")]
     InvalidAuthorLeafId,
     #[error("target_leaf_id must be 32 bytes")]
@@ -1295,9 +1305,7 @@ impl ExpelMemberTicketRequestValidationError {
 pub fn validate_expel_member_ticket_request(
     request: pb::ExpelMemberTicketRequest,
 ) -> Result<ValidatedExpelMemberTicketRequest, ExpelMemberTicketRequestValidationError> {
-    if request.room_id.is_empty() {
-        return Err(ExpelMemberTicketRequestValidationError::MissingRoomId);
-    }
+    let gid = parse_room_id_for_expel_member_ticket(request.room_id.as_str())?;
     let author_leaf_id: [u8; 32] = request
         .author_leaf_id
         .as_slice()
@@ -1317,6 +1325,7 @@ pub fn validate_expel_member_ticket_request(
 
     Ok(ValidatedExpelMemberTicketRequest {
         room_id: request.room_id,
+        gid,
         author_leaf_id,
         target_leaf_id,
         admin_proof,
@@ -1327,6 +1336,10 @@ pub fn validate_expel_member_ticket_request(
 pub enum MergeTicketRequestValidationError {
     #[error("room_id must be provided")]
     MissingRoomId,
+    #[error("room_id must be 64 hex characters")]
+    InvalidRoomIdEncoding,
+    #[error("room_id must be 32 bytes")]
+    InvalidRoomIdLength,
     #[error("leaf_id must be 32 bytes")]
     InvalidLeafId,
     #[error("merge ticket intent is invalid")]
@@ -1336,9 +1349,7 @@ pub enum MergeTicketRequestValidationError {
 pub fn validate_merge_ticket_request(
     request: pb::MergeTicketRequest,
 ) -> Result<ValidatedMergeTicketRequest, MergeTicketRequestValidationError> {
-    if request.room_id.is_empty() {
-        return Err(MergeTicketRequestValidationError::MissingRoomId);
-    }
+    let gid = parse_room_id_for_merge_ticket(request.room_id.as_str())?;
     let leaf_id: [u8; 32] = request
         .leaf_id
         .as_slice()
@@ -1349,6 +1360,7 @@ pub fn validate_merge_ticket_request(
 
     Ok(ValidatedMergeTicketRequest {
         room_id: request.room_id,
+        gid,
         leaf_id,
         intent,
         intent_value: request.intent,
@@ -1495,6 +1507,63 @@ pub fn validate_search_members_request(
         offset,
         limit,
     })
+}
+
+fn parse_room_id_for_room_admin(
+    room_id: &str,
+) -> Result<[u8; 32], RoomAdminRequestValidationError> {
+    let bytes = parse_validated_room_id(room_id).map_err(|error| match error {
+        ParsedRoomIdError::Missing => RoomAdminRequestValidationError::MissingRoomId,
+        ParsedRoomIdError::InvalidEncoding => {
+            RoomAdminRequestValidationError::InvalidRoomIdEncoding
+        }
+        ParsedRoomIdError::InvalidLength => RoomAdminRequestValidationError::InvalidRoomIdLength,
+    })?;
+    Ok(bytes)
+}
+
+fn parse_room_id_for_expel_member_ticket(
+    room_id: &str,
+) -> Result<[u8; 32], ExpelMemberTicketRequestValidationError> {
+    let bytes = parse_validated_room_id(room_id).map_err(|error| match error {
+        ParsedRoomIdError::Missing => ExpelMemberTicketRequestValidationError::MissingRoomId,
+        ParsedRoomIdError::InvalidEncoding => {
+            ExpelMemberTicketRequestValidationError::InvalidRoomIdEncoding
+        }
+        ParsedRoomIdError::InvalidLength => {
+            ExpelMemberTicketRequestValidationError::InvalidRoomIdLength
+        }
+    })?;
+    Ok(bytes)
+}
+
+fn parse_room_id_for_merge_ticket(
+    room_id: &str,
+) -> Result<[u8; 32], MergeTicketRequestValidationError> {
+    let bytes = parse_validated_room_id(room_id).map_err(|error| match error {
+        ParsedRoomIdError::Missing => MergeTicketRequestValidationError::MissingRoomId,
+        ParsedRoomIdError::InvalidEncoding => {
+            MergeTicketRequestValidationError::InvalidRoomIdEncoding
+        }
+        ParsedRoomIdError::InvalidLength => MergeTicketRequestValidationError::InvalidRoomIdLength,
+    })?;
+    Ok(bytes)
+}
+
+fn parse_validated_room_id(room_id: &str) -> Result<[u8; 32], ParsedRoomIdError> {
+    if room_id.is_empty() {
+        return Err(ParsedRoomIdError::Missing);
+    }
+    let bytes = hex::decode(room_id).map_err(|_| ParsedRoomIdError::InvalidEncoding)?;
+    bytes
+        .try_into()
+        .map_err(|_| ParsedRoomIdError::InvalidLength)
+}
+
+enum ParsedRoomIdError {
+    Missing,
+    InvalidEncoding,
+    InvalidLength,
 }
 
 pub fn decode_bundle_cbor_request(
@@ -2234,6 +2303,7 @@ mod tests {
             admin_proof: Some(proof.clone()),
         })
         .expect("validate bootstrap");
+        assert_eq!(bootstrap.gid, DEMO_GID);
         assert_eq!(bootstrap.kbroad_public.len(), ML_KEM_768_PUBLIC_KEY_BYTES);
 
         let mutation = validate_room_admin_mutation_request(pb::RoomAdminMutationRequest {
@@ -2242,6 +2312,7 @@ mod tests {
             admin_proof: Some(proof.clone()),
         })
         .expect("validate mutation");
+        assert_eq!(mutation.gid, DEMO_GID);
         assert_eq!(
             mutation.target_pop_public_key.len(),
             ML_DSA_65_PUBLIC_KEY_BYTES
@@ -2252,6 +2323,7 @@ mod tests {
             admin_proof: Some(proof),
         })
         .expect("validate list admins");
+        assert_eq!(listed.gid, DEMO_GID);
         assert_eq!(listed.room_id, hex::encode(DEMO_GID));
     }
 
@@ -2263,9 +2335,25 @@ mod tests {
         );
         assert_eq!(
             validate_room_admin_mutation_request(pb::RoomAdminMutationRequest {
-                room_id: hex::encode(DEMO_GID),
+                room_id: "not-hex".to_string(),
+                target_pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES],
+                admin_proof: Some(pb::RoomAdminProof::default()),
+            }),
+            Err(RoomAdminRequestValidationError::InvalidRoomIdEncoding)
+        );
+        assert_eq!(
+            validate_room_admin_mutation_request(pb::RoomAdminMutationRequest {
+                room_id: hex::encode([0x11; 31]),
                 target_pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES - 1],
                 admin_proof: None,
+            }),
+            Err(RoomAdminRequestValidationError::InvalidRoomIdLength)
+        );
+        assert_eq!(
+            validate_room_admin_mutation_request(pb::RoomAdminMutationRequest {
+                room_id: hex::encode(DEMO_GID),
+                target_pop_public_key: vec![0x11; ML_DSA_65_PUBLIC_KEY_BYTES - 1],
+                admin_proof: Some(pb::RoomAdminProof::default()),
             }),
             Err(RoomAdminRequestValidationError::InvalidTargetPopPublicKeyLength)
         );
@@ -2292,6 +2380,7 @@ mod tests {
         })
         .expect("validate expel request");
 
+        assert_eq!(validated.gid, DEMO_GID);
         assert_eq!(validated.author_leaf_id, [0x33; 32]);
         assert_eq!(validated.target_leaf_id, [0x44; 32]);
     }
@@ -2301,6 +2390,24 @@ mod tests {
         assert_eq!(
             validate_expel_member_ticket_request(pb::ExpelMemberTicketRequest::default()),
             Err(ExpelMemberTicketRequestValidationError::MissingRoomId)
+        );
+        assert_eq!(
+            validate_expel_member_ticket_request(pb::ExpelMemberTicketRequest {
+                room_id: "not-hex".to_string(),
+                author_leaf_id: vec![0x11; 32],
+                target_leaf_id: vec![0x22; 32],
+                admin_proof: Some(pb::RoomAdminProof::default()),
+            }),
+            Err(ExpelMemberTicketRequestValidationError::InvalidRoomIdEncoding)
+        );
+        assert_eq!(
+            validate_expel_member_ticket_request(pb::ExpelMemberTicketRequest {
+                room_id: hex::encode([0x11; 31]),
+                author_leaf_id: vec![0x11; 32],
+                target_leaf_id: vec![0x22; 32],
+                admin_proof: Some(pb::RoomAdminProof::default()),
+            }),
+            Err(ExpelMemberTicketRequestValidationError::InvalidRoomIdLength)
         );
         assert_eq!(
             validate_expel_member_ticket_request(pb::ExpelMemberTicketRequest {
@@ -2331,6 +2438,7 @@ mod tests {
         })
         .expect("validate merge ticket request");
 
+        assert_eq!(validated.gid, DEMO_GID);
         assert_eq!(validated.room_id, hex::encode(DEMO_GID));
         assert_eq!(validated.leaf_id, [0x33; 32]);
         assert_eq!(validated.intent, pb::MergeTicketIntent::Refresh);
@@ -2345,6 +2453,22 @@ mod tests {
         assert_eq!(
             validate_merge_ticket_request(pb::MergeTicketRequest::default()),
             Err(MergeTicketRequestValidationError::MissingRoomId)
+        );
+        assert_eq!(
+            validate_merge_ticket_request(pb::MergeTicketRequest {
+                room_id: "not-hex".to_string(),
+                leaf_id: vec![0x11; 32],
+                intent: pb::MergeTicketIntent::Leave as i32,
+            }),
+            Err(MergeTicketRequestValidationError::InvalidRoomIdEncoding)
+        );
+        assert_eq!(
+            validate_merge_ticket_request(pb::MergeTicketRequest {
+                room_id: hex::encode([0x11; 31]),
+                leaf_id: vec![0x11; 32],
+                intent: pb::MergeTicketIntent::Leave as i32,
+            }),
+            Err(MergeTicketRequestValidationError::InvalidRoomIdLength)
         );
         assert_eq!(
             validate_merge_ticket_request(pb::MergeTicketRequest {

@@ -534,7 +534,6 @@ impl CloudflareRoomDurableObject {
             Err(error) => return room_admin_request_validation_error_response(error),
         };
 
-        let gid = route_gid(&target)?;
         let initial_room_admin_pop_key = match verify_room_admin_proof(
             &request.admin_proof,
             "bootstrap_room_v1",
@@ -545,7 +544,7 @@ impl CloudflareRoomDurableObject {
             Err(error) => return room_admin_proof_validation_error_response(error),
         };
 
-        let checkpoint = self.load_checkpoint_for_gid(gid)?;
+        let checkpoint = self.load_checkpoint_for_gid(request.gid)?;
         let bootstrap = configured_room_bootstrap(&self.env)?;
         let room = match checkpoint.as_ref() {
             Some(checkpoint) => {
@@ -563,7 +562,7 @@ impl CloudflareRoomDurableObject {
         };
         let (mut server, room_state) = room.into_parts();
         match server.register_group_with_admin(
-            &gid,
+            &request.gid,
             request.kbroad_public,
             initial_room_admin_pop_key,
         ) {
@@ -573,7 +572,7 @@ impl CloudflareRoomDurableObject {
 
         let persisted_at_ms = current_timestamp_ms();
         self.persist_room_runtime_state(
-            gid,
+            request.gid,
             checkpoint.as_ref(),
             &server,
             room_state.snapshot(),
@@ -621,8 +620,7 @@ impl CloudflareRoomDurableObject {
             Err(error) => return room_admin_proof_validation_error_response(error),
         };
 
-        let gid = route_gid(&target)?;
-        let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
+        let Some(checkpoint) = self.load_checkpoint_for_gid(request.gid)? else {
             return Response::error("room checkpoint not found", 404);
         };
         let bootstrap = configured_room_bootstrap(&self.env)?;
@@ -637,7 +635,7 @@ impl CloudflareRoomDurableObject {
         };
         let (mut server, room_state) = room.into_parts();
         let kbroad_generation = match server.rotate_group_kbroad_with_actor(
-            &gid,
+            &request.gid,
             request.kbroad_public,
             &actor_pop_key,
             replay_key,
@@ -647,7 +645,7 @@ impl CloudflareRoomDurableObject {
         };
 
         self.persist_room_runtime_state(
-            gid,
+            request.gid,
             Some(&checkpoint),
             &server,
             room_state.snapshot(),
@@ -719,8 +717,7 @@ impl CloudflareRoomDurableObject {
             Err(error) => return room_admin_proof_validation_error_response(error),
         };
 
-        let gid = route_gid(&target)?;
-        let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
+        let Some(checkpoint) = self.load_checkpoint_for_gid(request.gid)? else {
             return Response::error("room checkpoint not found", 404);
         };
         let bootstrap = configured_room_bootstrap(&self.env)?;
@@ -736,7 +733,7 @@ impl CloudflareRoomDurableObject {
         let (mut server, room_state) = room.into_parts();
         let (applied, admin_count) = match kind {
             RoomAdminMutationKind::Grant => match server.grant_room_admin(
-                &gid,
+                &request.gid,
                 &actor_pop_key,
                 request.target_pop_public_key,
                 replay_key,
@@ -745,7 +742,7 @@ impl CloudflareRoomDurableObject {
                 Err(error) => return client_error_response(error),
             },
             RoomAdminMutationKind::Revoke => match server.revoke_room_admin(
-                &gid,
+                &request.gid,
                 &actor_pop_key,
                 &request.target_pop_public_key,
                 replay_key,
@@ -756,7 +753,7 @@ impl CloudflareRoomDurableObject {
         };
 
         self.persist_room_runtime_state(
-            gid,
+            request.gid,
             Some(&checkpoint),
             &server,
             room_state.snapshot(),
@@ -802,8 +799,7 @@ impl CloudflareRoomDurableObject {
             Err(error) => return room_admin_proof_validation_error_response(error),
         };
 
-        let gid = route_gid(&target)?;
-        let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
+        let Some(checkpoint) = self.load_checkpoint_for_gid(request.gid)? else {
             return Response::error("room checkpoint not found", 404);
         };
         let bootstrap = configured_room_bootstrap(&self.env)?;
@@ -817,7 +813,7 @@ impl CloudflareRoomDurableObject {
             }
         };
         let (server, _) = room.into_parts();
-        let admin_pop_public_keys = match server.list_room_admins(&gid, &actor_pop_key) {
+        let admin_pop_public_keys = match server.list_room_admins(&request.gid, &actor_pop_key) {
             Ok(admin_pop_public_keys) => admin_pop_public_keys,
             Err(error) => return client_error_response(error),
         };
@@ -1601,8 +1597,7 @@ impl CloudflareRoomDurableObject {
             Ok(request) => request,
             Err(error) => return merge_ticket_request_validation_error_response(error),
         };
-        let gid = route_gid(&target)?;
-        let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
+        let Some(checkpoint) = self.load_checkpoint_for_gid(request.gid)? else {
             return Response::error("room checkpoint not found", 404);
         };
         let bootstrap = configured_room_bootstrap(&self.env)?;
@@ -1623,7 +1618,7 @@ impl CloudflareRoomDurableObject {
 
         let prepared = match cityg_runtime::prepare_merge_ticket(
             &mut server,
-            &gid,
+            &request.gid,
             &request.leaf_id,
             intent,
             API_PROFILE_VERSION,
@@ -1739,8 +1734,7 @@ impl CloudflareRoomDurableObject {
             Err(error) => return room_admin_proof_validation_error_response(error),
         };
 
-        let gid = route_gid(&target)?;
-        let Some(checkpoint) = self.load_checkpoint_for_gid(gid)? else {
+        let Some(checkpoint) = self.load_checkpoint_for_gid(request.gid)? else {
             return Response::error("room checkpoint not found", 404);
         };
         let bootstrap = configured_room_bootstrap(&self.env)?;
@@ -1755,7 +1749,7 @@ impl CloudflareRoomDurableObject {
         };
         let (mut server, _) = room.into_parts();
         let bundle = match server.build_admin_expel_ticket(
-            &gid,
+            &request.gid,
             &actor_pop_key,
             &request.author_leaf_id,
             &request.target_leaf_id,
@@ -1767,7 +1761,7 @@ impl CloudflareRoomDurableObject {
         };
         let prepared = match cityg_runtime::prepare_merge_ticket_from_bundle(
             &server,
-            &gid,
+            &request.gid,
             bundle,
             API_PROFILE_VERSION,
         ) {

@@ -62,6 +62,8 @@ runtime code.
   Native `cityg-api` and Worker `cloudflare` now consume decoder errors that only expose the fields each barrier-helper endpoint can actually reject, which removes adapter-local `unreachable!()` arms around the shared schema decoders.
 - [x] Move `join_ticket` request preparation into `cityg-api-schema`.
   Native `cityg-api` and Worker `cloudflare` now share the `room_id` parse, route/gid consistency check, and `identity_binding` verification/leaf-derivation path for `/v1/rooms/join_ticket`, so the adapters only keep rate limiting, room execution, and alias persistence locally.
+- [x] Parse `room_id` into `gid` inside the shared room-admin / ticket validators.
+  Native `cityg-api` and Worker `cloudflare` no longer reparse `room_id` after validating bootstrap/rotate/admin/list-admins, `expel_member_ticket`, and `merge_ticket`; the shared schema validators now produce `gid` directly while preserving the existing `room_id` string for proof payloads and rate-limit keys.
 - [x] Define the shared Durable Object storage contract for authoritative room checkpoints and volatile room snapshots.
 - [x] Add room-volatile snapshot/hydration helpers aligned with the shared checkpoint contract.
 - [x] Implement the first Durable Object-backed `RoomStateStore`.
