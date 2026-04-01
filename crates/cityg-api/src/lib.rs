@@ -4,6 +4,7 @@ mod accept_helpers;
 mod config_auth;
 mod error_mapping;
 pub mod health;
+mod member_listing;
 mod middleware;
 mod proof_validation;
 
@@ -45,7 +46,7 @@ use cityg_api_schema::{
     encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
     encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
     encode_search_members_response, encode_telemetry_snapshot_response,
-    encode_window_snapshot_response, pb, pb_member as schema_pb_member,
+    encode_window_snapshot_response, pb,
     prepare_join_ticket_request as schema_prepare_join_ticket_request,
     validate_bootstrap_room_request as schema_validate_bootstrap_room_request,
     validate_expel_member_ticket_request as schema_validate_expel_member_ticket_request,
@@ -72,7 +73,7 @@ use pb::{
     BarrierResolveRevokedLeavesRequest, BootstrapRoomRequest, ChatMessage, ConfigureWindowRequest,
     ConfigureWindowResponse, ExpelMemberTicketRequest, FetchMessagesRequest, FetchMessagesResponse,
     GetBundleRequest, GetBundleResponse, GetTelemetryRequest, GetWindowRequest, HealthResponse,
-    JoinTicketRequest, ListRoomAdminsRequest, Member, MembersRequest, MergeTicketIntent,
+    JoinTicketRequest, ListRoomAdminsRequest, MembersRequest, MergeTicketIntent,
     MergeTicketRequest, RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationRequest,
     RoomAdminProof, RotateRoomKbroadRequest, SendMessageRequest, SendMessageResponse,
 };
@@ -100,13 +101,11 @@ use cityg_runtime::StoredMessage;
 #[cfg(test)]
 use cityg_runtime::aligned_fs_epoch_base_ts;
 use cityg_runtime::{
-    AliasLeafLookup, AliasRegistrationError, AliasRegistry, EpochScope, MemberMetadata,
-    RoomAuthorizationError, RoomMemberListingError, RoomMessageStoreError, RoomMessageWrite,
-    RoomRetentionPolicy, RoomVolatileState, alias_entry_for_member,
+    AliasRegistrationError, AliasRegistry, EpochScope, RoomAuthorizationError,
+    RoomMessageStoreError, RoomMessageWrite, RoomRetentionPolicy, RoomVolatileState,
     apply_room_window_limit_update as runtime_apply_room_window_limit_update,
     bootstrap_room_with_admin as runtime_bootstrap_room_with_admin,
     classify_refresh_pivot_conflict, fetch_room_bundle as runtime_fetch_room_bundle,
-    fetch_room_members as runtime_fetch_room_members,
     fetch_room_messages as runtime_fetch_room_messages, filter_room_members_by_query,
     grant_room_admin as runtime_grant_room_admin, list_room_admins as runtime_list_room_admins,
     normalize_alias, paginate_room_members,
@@ -137,6 +136,7 @@ use serde::Deserialize;
 pub(crate) use accept_helpers::*;
 use config_auth::*;
 pub(crate) use error_mapping::*;
+pub(crate) use member_listing::*;
 pub(crate) use proof_validation::*;
 
 #[derive(Clone, Debug)]
@@ -664,35 +664,6 @@ async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Resp
 
     let response = apply_bundle(&state, &bundle).await?;
     Ok(protobuf_response(&response))
-}
-
-async fn members_for_request(
-    state: &ApiState,
-    gid: &[u8; 32],
-    parent_root: Option<[u8; 32]>,
-) -> Result<(Vec<[u8; 32]>, [u8; 32]), ApiError> {
-    let lane = state.server_for_gid_bytes(gid);
-    let guard = lane.read().await;
-    runtime_fetch_room_members(&guard, gid, parent_root).map_err(|err| match err {
-        RoomMemberListingError::NotFound => ApiError::NotFound,
-    })
-}
-
-async fn alias_lookup_by_leaf(state: &ApiState) -> AliasLeafLookup {
-    let registry = state.alias_registry.read().await;
-    registry.leaf_lookup()
-}
-
-fn member_response(
-    leaf: &[u8; 32],
-    alias_lookup: &AliasLeafLookup,
-    metadata: &AHashMap<[u8; 32], MemberMetadata>,
-) -> Member {
-    schema_pb_member(
-        leaf,
-        alias_entry_for_member(alias_lookup, leaf),
-        metadata.get(leaf),
-    )
 }
 
 async fn members(
