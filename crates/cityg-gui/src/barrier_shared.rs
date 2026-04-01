@@ -3,18 +3,21 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow};
 use ciborium::Value;
 use cityg_api_client::{BarrierJoinRecord, HistoryCommitment};
-use msphf_core::serde_utils::to_cbor_vec;
-use msphf_orchestrator::hdr;
-use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)]
 pub use cityg_client::barrier::{
-    BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
-    DEFAULT_BARRIER_N_MAX, MAX_BARRIER_N_MAX, TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS,
-    TICKET_RETRY_MAX_ATTEMPTS, TICKET_RETRY_MAX_DELAY_MS, apply_revoked_set_to_snapshot,
-    barrier_path_nodes, blank_internal_path_from_leaf, blank_leaf_and_path,
-    collect_resolution_targets, compute_barrier_pkhash, compute_barrier_tree_hash,
-    compute_revocation_roots_hash, encode_full_verification_receipt, expected_barrier_tree_nodes,
+    BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierHistoryCommitment,
+    BarrierTreePathSaltPreimage, DEFAULT_BARRIER_N_MAX, MAX_BARRIER_N_MAX,
+    TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS, TICKET_RETRY_MAX_ATTEMPTS,
+    TICKET_RETRY_MAX_DELAY_MS, apply_revoked_set_to_snapshot, barrier_path_nodes,
+    blank_internal_path_from_leaf, blank_leaf_and_path, collect_resolution_targets,
+    compute_barrier_pkhash, compute_barrier_tree_hash, compute_revocation_roots_hash,
+    decode_history_commitment_header as decode_core_history_commitment_header,
+    encode_full_verification_receipt,
+    encode_history_commitment_header as encode_core_history_commitment_header,
+    expected_barrier_tree_nodes, header_history_commitment as header_core_history_commitment,
+    require_current_state_history_commitment as require_core_current_state_history_commitment,
+    require_same_history_commitment as require_core_same_history_commitment,
     should_retry_ticket_http_error, sibling_node, ticket_retry_delay, validate_barrier_n_max,
     verify_full_verification_receipt,
 };
@@ -23,12 +26,10 @@ pub fn require_same_history_commitment(
     lhs: &HistoryCommitment,
     rhs: &HistoryCommitment,
 ) -> Result<()> {
-    if lhs.history_view_id == [0u8; 32] || lhs.history_commitment_id == [0u8; 32] || lhs != rhs {
-        return Err(anyhow!(
-            "authenticated history commitment mismatch across barrier dependencies"
-        ));
-    }
-    Ok(())
+    require_core_same_history_commitment(
+        &to_core_history_commitment(lhs),
+        &to_core_history_commitment(rhs),
+    )
 }
 
 pub fn require_current_state_history_commitment(
@@ -36,68 +37,43 @@ pub fn require_current_state_history_commitment(
     joins: &HistoryCommitment,
     revoked: &HistoryCommitment,
 ) -> Result<()> {
-    require_same_history_commitment(snapshot, joins)?;
-    require_same_history_commitment(snapshot, revoked)?;
-    Ok(())
+    require_core_current_state_history_commitment(
+        &to_core_history_commitment(snapshot),
+        &to_core_history_commitment(joins),
+        &to_core_history_commitment(revoked),
+    )
 }
 
-#[derive(Serialize)]
-struct BarrierHistoryCommitmentHeader<'a>(
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    #[serde(with = "serde_bytes")] &'a [u8; 32],
-    u64,
-);
+fn to_core_history_commitment(commitment: &HistoryCommitment) -> BarrierHistoryCommitment {
+    BarrierHistoryCommitment {
+        history_view_id: commitment.history_view_id,
+        history_commitment_id: commitment.history_commitment_id,
+        prev_history_commitment_id: commitment.prev_history_commitment_id,
+        history_seq: commitment.history_seq,
+    }
+}
 
-#[derive(Serialize, Deserialize)]
-struct BarrierHistoryCommitmentHeaderOwned(
-    #[serde(with = "serde_bytes")] Vec<u8>,
-    #[serde(with = "serde_bytes")] Vec<u8>,
-    #[serde(with = "serde_bytes")] Vec<u8>,
-    u64,
-);
+fn from_core_history_commitment(commitment: BarrierHistoryCommitment) -> HistoryCommitment {
+    HistoryCommitment {
+        history_view_id: commitment.history_view_id,
+        history_commitment_id: commitment.history_commitment_id,
+        prev_history_commitment_id: commitment.prev_history_commitment_id,
+        history_seq: commitment.history_seq,
+    }
+}
 
 pub fn encode_history_commitment_header(commitment: &HistoryCommitment) -> Result<Vec<u8>> {
-    to_cbor_vec(&BarrierHistoryCommitmentHeader(
-        &commitment.history_view_id,
-        &commitment.history_commitment_id,
-        &commitment.prev_history_commitment_id,
-        commitment.history_seq,
-    ))
-    .map_err(|err| anyhow!("encode barrier history commitment header: {err}"))
+    encode_core_history_commitment_header(&to_core_history_commitment(commitment))
 }
 
 pub fn decode_history_commitment_header(raw: &[u8]) -> Result<HistoryCommitment> {
-    let decoded: BarrierHistoryCommitmentHeaderOwned = ciborium::de::from_reader(raw)
-        .map_err(|err| anyhow!("failed to parse barrier history commitment header: {err}"))?;
-    let canonical = to_cbor_vec(&decoded).map_err(|err| {
-        anyhow!("failed to re-encode canonical barrier history commitment header: {err}")
-    })?;
-    if canonical.as_slice() != raw {
-        return Err(anyhow!("non-canonical barrier history commitment header"));
-    }
-    Ok(HistoryCommitment {
-        history_view_id: decoded.0.as_slice().try_into().map_err(|_| {
-            anyhow!("barrier history commitment header history_view_id must be 32 bytes")
-        })?,
-        history_commitment_id: decoded.1.as_slice().try_into().map_err(|_| {
-            anyhow!("barrier history commitment header history_commitment_id must be 32 bytes")
-        })?,
-        prev_history_commitment_id: decoded.2.as_slice().try_into().map_err(|_| {
-            anyhow!("barrier history commitment header prev_history_commitment_id must be 32 bytes")
-        })?,
-        history_seq: decoded.3,
-    })
+    decode_core_history_commitment_header(raw).map(from_core_history_commitment)
 }
 
 pub fn header_history_commitment(
     header_map: &BTreeMap<u64, Value>,
 ) -> Result<Option<HistoryCommitment>> {
-    match header_map.get(&hdr::HDR_BARRIER_HISTORY_COMMITMENT) {
-        Some(Value::Bytes(raw)) => decode_history_commitment_header(raw).map(Some),
-        Some(_) => Err(anyhow!("barrier history commitment header must be bytes")),
-        None => Ok(None),
-    }
+    header_core_history_commitment(header_map).map(|value| value.map(from_core_history_commitment))
 }
 
 pub fn apply_join_set_to_snapshot(
