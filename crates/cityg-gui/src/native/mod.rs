@@ -107,6 +107,7 @@ mod barrier_core;
 mod barrier_ops;
 mod barrier_public_tree_cache;
 mod barrier_runtime;
+mod barrier_state_transitions;
 mod chat_actions;
 mod chat_render;
 mod clipboard_shortcuts;
@@ -165,6 +166,7 @@ use barrier_core::*;
 use barrier_ops::*;
 use barrier_public_tree_cache::*;
 use barrier_runtime::*;
+use barrier_state_transitions::*;
 #[cfg(test)]
 use epoch_sync::*;
 use errors::*;
