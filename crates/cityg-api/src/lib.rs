@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
 mod accept_helpers;
+mod accept_route;
 mod admin_routes;
 mod barrier_routes;
 mod bundle_routes;
@@ -67,7 +68,6 @@ use pb::{
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
-use prost::Message;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -94,6 +94,7 @@ use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
 use serde::Deserialize;
 
 pub(crate) use accept_helpers::*;
+pub(crate) use accept_route::*;
 pub(crate) use admin_routes::*;
 pub(crate) use barrier_routes::*;
 pub(crate) use bundle_routes::*;
@@ -620,18 +621,6 @@ async fn enforce_expensive_rate_limit(
 
 fn should_disconnect_for_lag(lagged_messages: u64, max_lag: u64) -> bool {
     lagged_messages > max_lag
-}
-
-async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
-    let _permit = state.accept_epoch_limiter.try_acquire()?;
-    let request = AcceptEpochRequest::decode(body)?;
-    let bundle = schema_decode_bundle_cbor_request(&request.bundle_cbor, false)
-        .map_err(map_bundle_cbor_request_decode_error)?;
-    enforce_expensive_rate_limit(&state, "accept_epoch", accept_epoch_rate_limit_key(&bundle))
-        .await?;
-
-    let response = apply_bundle(&state, &bundle).await?;
-    Ok(protobuf_response(&response))
 }
 
 pub async fn run() -> anyhow::Result<()> {
