@@ -109,6 +109,7 @@ mod barrier_ops;
 mod barrier_public_tree_cache;
 mod barrier_recovery_runtime;
 mod barrier_state_transitions;
+mod barrier_verification_runtime;
 mod chat_actions;
 mod chat_render;
 mod clipboard_shortcuts;
@@ -169,6 +170,7 @@ use barrier_ops::*;
 use barrier_public_tree_cache::*;
 use barrier_recovery_runtime::*;
 use barrier_state_transitions::*;
+use barrier_verification_runtime::*;
 #[cfg(test)]
 use epoch_sync::*;
 use errors::*;
