@@ -53,12 +53,6 @@ use gpui::{
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
-use ml_kem::{
-    ExpandedDecapsulationKey as MlKemExpandedDecapsulationKey, Seed as MlKemSeed,
-    kem::{Decapsulate as MlKemDecapsulate, KeyExport as MlKemKeyExport},
-    ml_kem_768,
-    ml_kem_768::DecapsulationKey as MlKem768DecapsulationKey,
-};
 use msphf_core::{
     ds, hash::h_l, hkdf::hkdf_blake3, merkle::canonical_set_root, serde_utils::to_cbor_vec,
 };
@@ -105,6 +99,7 @@ mod app_actions;
 mod app_shell;
 mod barrier_core;
 mod barrier_ops;
+mod barrier_public_tree_cache;
 mod barrier_runtime;
 mod chat_actions;
 mod chat_render;
@@ -162,6 +157,7 @@ mod websocket;
 use activity_state::*;
 use barrier_core::*;
 use barrier_ops::*;
+use barrier_public_tree_cache::*;
 use barrier_runtime::*;
 #[cfg(test)]
 use epoch_sync::*;

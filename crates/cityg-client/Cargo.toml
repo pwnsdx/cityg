@@ -14,6 +14,7 @@ anyhow = "1"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 ciborium = "0.2"
 hex = "0.4"
+ml-kem = { version = "0.3.0-rc.0", features = ["getrandom"] }
 msphf-core = { path = "../msphf-core" }
 msphf-orchestrator = { path = "../msphf-orchestrator" }
 pqcrypto-dilithium = { version = "0.5", default-features = false, features = ["std"] }
