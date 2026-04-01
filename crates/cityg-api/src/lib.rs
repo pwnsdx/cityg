@@ -37,12 +37,9 @@ use axum::{
 };
 use cityg_api_schema::{
     API_PROFILE_VERSION, MAX_BARRIER_HELPER_PAGE_ENTRIES,
-    decode_bundle_cbor_request as schema_decode_bundle_cbor_request, encode_members_response,
-    encode_search_members_response, pb,
+    decode_bundle_cbor_request as schema_decode_bundle_cbor_request, pb,
     validate_fetch_messages_request as schema_validate_fetch_messages_request,
     validate_get_bundle_request as schema_validate_get_bundle_request,
-    validate_members_request as schema_validate_members_request,
-    validate_search_members_request as schema_validate_search_members_request,
     validate_send_message_request as schema_validate_send_message_request,
 };
 use futures::{SinkExt, StreamExt};
@@ -89,9 +86,8 @@ use cityg_runtime::aligned_fs_epoch_base_ts;
 use cityg_runtime::classify_refresh_pivot_conflict;
 use cityg_runtime::{
     AliasRegistrationError, AliasRegistry, EpochScope, RoomVolatileState,
-    fetch_room_bundle as runtime_fetch_room_bundle, filter_room_members_by_query, normalize_alias,
-    paginate_room_members, prepare_accepted_bundle as runtime_prepare_accepted_bundle,
-    server_from_cityg_config_for_lane,
+    fetch_room_bundle as runtime_fetch_room_bundle, normalize_alias,
+    prepare_accepted_bundle as runtime_prepare_accepted_bundle, server_from_cityg_config_for_lane,
 };
 use cityg_server::CityGServer;
 use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
@@ -636,74 +632,6 @@ async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Resp
 
     let response = apply_bundle(&state, &bundle).await?;
     Ok(protobuf_response(&response))
-}
-
-async fn members(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = MembersRequest::decode(body)?;
-    let request =
-        schema_validate_members_request(request).map_err(map_members_request_validation_error)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "members",
-        message_scoped_rate_limit_key(&headers, request.gid.as_ref()),
-    )
-    .await?;
-    let (members, root) = members_for_request(&state, &request.gid, request.parent_root).await?;
-
-    let page = paginate_room_members(members.as_slice(), request.offset, request.limit);
-
-    let alias_lookup = alias_lookup_by_leaf(&state).await;
-    let room_state = state.room_state.read().await;
-
-    Ok(protobuf_response_bytes(encode_members_response(
-        page.members
-            .iter()
-            .map(|leaf| member_response(leaf, &alias_lookup, room_state.member_metadata()))
-            .collect(),
-        root,
-        page.total_count,
-        page.next_offset,
-    )))
-}
-
-async fn search_members(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = pb::SearchMembersRequest::decode(body)?;
-    let request = schema_validate_search_members_request(request)
-        .map_err(map_search_members_request_validation_error)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "search_members",
-        message_scoped_rate_limit_key(&headers, request.gid.as_ref()),
-    )
-    .await?;
-    let (members, root) = members_for_request(&state, &request.gid, request.parent_root).await?;
-
-    let alias_lookup = alias_lookup_by_leaf(&state).await;
-    let room_state = state.room_state.read().await;
-
-    let filtered_members =
-        filter_room_members_by_query(members.as_slice(), &alias_lookup, request.query.as_str());
-    let page = paginate_room_members(filtered_members.as_slice(), request.offset, request.limit);
-
-    Ok(protobuf_response_bytes(encode_search_members_response(
-        page.members
-            .iter()
-            .map(|leaf| member_response(leaf, &alias_lookup, room_state.member_metadata()))
-            .collect(),
-        root,
-        page.total_count,
-        page.next_offset,
-    )))
 }
 
 async fn websocket_handler(
