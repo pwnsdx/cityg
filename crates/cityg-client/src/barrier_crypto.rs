@@ -6,6 +6,8 @@ use ml_kem::{
     ml_kem_768::DecapsulationKey as MlKem768DecapsulationKey,
 };
 use msphf_core::{hash::h_l, hkdf::hkdf_blake3};
+use pqcrypto_kyber::kyber768;
+use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey};
 use serde::Serialize;
 
 use crate::barrier::compute_barrier_pkhash;
@@ -44,6 +46,14 @@ pub fn derive_k_fs_after_pcs(
     )
     .map_err(|err| anyhow!("derive fs pcs salt: {err}"))?;
     Ok(hkdf_blake3(&salt, &ikm, FS_PCS_INFO))
+}
+
+pub fn generate_kbroad_keypair() -> (Vec<u8>, Vec<u8>) {
+    let (public, secret) = kyber768::keypair();
+    (
+        KemPublicKey::as_bytes(&public).to_vec(),
+        KemSecretKey::as_bytes(&secret).to_vec(),
+    )
 }
 
 pub fn derive_internal_node_key_material(

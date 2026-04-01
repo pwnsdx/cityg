@@ -1,4 +1,9 @@
 use super::*;
+pub(super) use cityg_client::barrier_crypto::generate_kbroad_keypair;
+pub(super) use cityg_client::bundle_headers::{
+    compute_fs_fingerprint_from_header, derive_fs_fingerprint_from_fields, recompute_proofs_commit,
+    recompute_srx_commit,
+};
 
 pub(super) fn hex_encode_prefix(bytes: &[u8; 32], prefix_len: usize) -> String {
     let hex = hex_encode(bytes);
@@ -53,40 +58,6 @@ pub(super) fn format_fs_fingerprint(value: Option<&[u8; 32]>, fs_ec: u64) -> Str
         Some(bytes) => format!("{} · fs_ec {}", fingerprint_preview_hex(bytes), fs_ec),
         None => "Not available".to_string(),
     }
-}
-
-#[derive(Serialize)]
-pub(super) struct FsFingerprintInputs<'a> {
-    pub(super) fs_policy_version: &'a str,
-    pub(super) fs_ec: u64,
-    #[serde(with = "serde_bytes")]
-    pub(super) fs_epoch_commit: &'a [u8],
-    pub(super) fs_epoch_base_ts: u64,
-}
-
-pub(super) fn derive_fs_fingerprint_from_fields(
-    fs_policy_version: &str,
-    fs_ec: u64,
-    fs_epoch_commit: &[u8; 32],
-    fs_epoch_base_ts: u64,
-) -> Option<[u8; 32]> {
-    let inputs = FsFingerprintInputs {
-        fs_policy_version,
-        fs_ec,
-        fs_epoch_commit,
-        fs_epoch_base_ts,
-    };
-    h_l("fs/fingerprint", &inputs).ok()
-}
-
-pub(super) fn compute_fs_fingerprint_from_header(
-    header: &BTreeMap<u64, Value>,
-) -> Option<[u8; 32]> {
-    let policy = header_policy_version(header, hdr::HDR_FS_POLICY_VERSION)?;
-    let fs_ec = header_u64(header, hdr::HDR_FS_EC)?;
-    let fs_epoch_commit = header_bytes32(header, hdr::HDR_FS_EPOCH_COMMIT)?;
-    let fs_epoch_base_ts = header_u64(header, hdr::HDR_FS_EPOCH_BASE_TS)?;
-    derive_fs_fingerprint_from_fields(policy.as_str(), fs_ec, &fs_epoch_commit, fs_epoch_base_ts)
 }
 
 pub(super) fn header_policy_version(header: &BTreeMap<u64, Value>, key: u64) -> Option<String> {
@@ -175,39 +146,19 @@ pub(super) fn configured_hex_from_env(var_name: &str) -> Result<Option<Vec<u8>>>
     Ok(Some(bytes))
 }
 
-pub(super) fn generate_kbroad_keypair() -> (Vec<u8>, Vec<u8>) {
-    let (public, secret) = kyber768::keypair();
-    (
-        KemPublicKey::as_bytes(&public).to_vec(),
-        KemSecretKey::as_bytes(&secret).to_vec(),
-    )
-}
-
 pub(super) fn build_identity_binding(
     alias: &str,
     pop_public_key: &[u8],
     pop_secret_key: &[u8],
 ) -> Result<cityg_api_client::IdentityBinding> {
-    use ciborium::ser::into_writer;
     use cityg_api_client::IdentityBinding;
-    use pqcrypto_traits::sign::DetachedSignature as _;
-    use serde_bytes::ByteBuf;
-
-    let pop_secret = dilithium5::SecretKey::from_bytes(pop_secret_key)
-        .context("invalid persisted room identity secret key")?;
-    let message_data = (
-        ByteBuf::from(alias.as_bytes().to_vec()),
-        ByteBuf::from(pop_public_key.to_vec()),
-    );
-    let mut message = Vec::new();
-    into_writer(&message_data, &mut message)
-        .context("failed to encode identity binding message")?;
-    let signature = dilithium5::detached_sign(&message, &pop_secret);
+    let signature =
+        cityg_client::message_auth::sign_identity_binding(alias, pop_public_key, pop_secret_key)?;
 
     Ok(IdentityBinding {
         alias: alias.to_string(),
         pop_public_key: pop_public_key.to_vec(),
-        signature: signature.as_bytes().to_vec(),
+        signature,
     })
 }
 
@@ -235,35 +186,7 @@ pub(super) fn short_leaf_display(leaf: &[u8; 32]) -> String {
     format!("{}…", hex_encode(&leaf[..4]))
 }
 
-pub(super) fn recompute_proofs_commit(header: &BTreeMap<u64, Value>) -> Result<[u8; 32]> {
-    let vrf = header_bytes(header, hdr::HDR_VRF_PROOF, "vrf_proof")?;
-    let fs = header_bytes(header, hdr::HDR_FS_CAPSS, "fs_capss")?;
-    let srx_root = header_bytes32_opt(header, hdr::HDR_SRX_ROOT_SW)?;
-    let srx_smallwood = header_bytes_opt(header, hdr::HDR_SRX_SMALLWOOD)?;
-    compute_proofs_commit_bytes(
-        &vrf,
-        &fs,
-        srx_root.as_ref().map(|arr| arr.as_slice()),
-        srx_smallwood.as_deref(),
-    )
-    .map_err(|err| anyhow!("compute proofs commit: {err}"))
-}
-
-pub(super) fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]>> {
-    let payload = match header.get(&hdr::HDR_SRX_PAYLOAD) {
-        Some(Value::Bytes(bytes)) => bytes.as_slice(),
-        Some(Value::Null) | None => return Ok(None),
-        Some(_) => return Err(anyhow!("srx_payload must be bytes")),
-    };
-
-    #[derive(Serialize)]
-    struct SrxCommit<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
-
-    let commit = h_l(ds::MSPHF_SRX_COMMIT, &SrxCommit(payload))
-        .map_err(|err| anyhow!("compute srx commit: {err}"))?;
-    Ok(Some(commit))
-}
-
+#[cfg(test)]
 pub(super) fn header_bytes(
     header: &BTreeMap<u64, Value>,
     key: u64,
@@ -276,6 +199,7 @@ pub(super) fn header_bytes(
     }
 }
 
+#[cfg(test)]
 pub(super) fn header_bytes_opt(header: &BTreeMap<u64, Value>, key: u64) -> Result<Option<Vec<u8>>> {
     match header.get(&key) {
         Some(Value::Bytes(bytes)) => Ok(Some(bytes.clone())),
@@ -284,6 +208,7 @@ pub(super) fn header_bytes_opt(header: &BTreeMap<u64, Value>, key: u64) -> Resul
     }
 }
 
+#[cfg(test)]
 pub(super) fn header_bytes32_opt(
     header: &BTreeMap<u64, Value>,
     key: u64,

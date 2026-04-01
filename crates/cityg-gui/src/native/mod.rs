@@ -57,16 +57,18 @@ use gpui::{
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
-use msphf_core::{ds, hash::h_l, merkle::canonical_set_root};
+#[cfg(test)]
+use msphf_core::hash::h_l;
+use msphf_core::merkle::canonical_set_root;
 #[cfg(test)]
 use msphf_core::{hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
+#[cfg(test)]
 use msphf_orchestrator::CapssWitnessBundle;
 #[cfg(test)]
 use msphf_orchestrator::compute_fs_dev_commit_v2;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
-    OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_leaf_id,
-    compute_proofs_commit_bytes, derive_we_epoch_id, hdr,
+    OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
 };
 use pqcrypto_dilithium::dilithium5;
 #[cfg(test)]
@@ -77,9 +79,9 @@ use pqcrypto_kyber::kyber768;
 #[cfg(test)]
 use pqcrypto_traits::kem::Ciphertext as KemCiphertext;
 use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey};
-use pqcrypto_traits::sign::{
-    DetachedSignature, PublicKey as DilithiumPublicKey, SecretKey as DilithiumSecretKey,
-};
+#[cfg(test)]
+use pqcrypto_traits::sign::DetachedSignature;
+use pqcrypto_traits::sign::{PublicKey as DilithiumPublicKey, SecretKey as DilithiumSecretKey};
 use rand::{RngExt, rng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::sleep;

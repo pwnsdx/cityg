@@ -54,7 +54,15 @@ use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
 #[cfg(test)]
 use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
-use cityg_client::{CityGClient, ClientEpochBundle};
+use cityg_client::{
+    CityGClient, ClientEpochBundle,
+    bundle_headers::{
+        compute_fs_fingerprint_from_header as compute_fs_fingerprint_from_header_core,
+        derive_fs_fingerprint_from_fields as derive_fs_fingerprint_from_fields_core,
+        recompute_proofs_commit as recompute_proofs_commit_core,
+        recompute_srx_commit as recompute_srx_commit_core,
+    },
+};
 use futures::{SinkExt, StreamExt};
 use hex::decode as hex_decode;
 #[cfg(test)]
@@ -69,7 +77,7 @@ use message_crypto::{
     MsgReplayState, decrypt_message_v2_with_index, derive_msg_replay_context_id,
     derive_msg_replay_tuple_tag,
 };
-use msphf_core::{ds, hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
+use msphf_core::{hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
 #[cfg(test)]
 use msphf_orchestrator::compute_leaf_id;
 use msphf_orchestrator::{
@@ -395,49 +403,22 @@ fn build_barrier_update_bytes(
     })
 }
 
-#[derive(Serialize)]
-struct FsFingerprintInputs<'a> {
-    fs_policy_version: &'a str,
-    fs_ec: u64,
-    #[serde(with = "serde_bytes")]
-    fs_epoch_commit: &'a [u8],
-    fs_epoch_base_ts: u64,
-}
-
 fn derive_fs_fingerprint_from_fields(
     fs_policy_version: &str,
     fs_ec: u64,
     fs_epoch_commit: &[u8; 32],
     fs_epoch_base_ts: u64,
 ) -> Option<[u8; 32]> {
-    let inputs = FsFingerprintInputs {
+    derive_fs_fingerprint_from_fields_core(
         fs_policy_version,
         fs_ec,
         fs_epoch_commit,
         fs_epoch_base_ts,
-    };
-    h_l("fs/fingerprint", &inputs).ok()
+    )
 }
 
 fn compute_fs_fingerprint_from_header(header: &BTreeMap<u64, Value>) -> Option<[u8; 32]> {
-    let policy = match header.get(&hdr::HDR_FS_POLICY_VERSION)? {
-        Value::Text(text) => text.clone(),
-        Value::Integer(value) => u64::try_from(*value).ok()?.to_string(),
-        _ => return None,
-    };
-    let fs_ec = match header.get(&hdr::HDR_FS_EC)? {
-        Value::Integer(int) => (*int).try_into().ok()?,
-        _ => return None,
-    };
-    let fs_epoch_commit = match header.get(&hdr::HDR_FS_EPOCH_COMMIT)? {
-        Value::Bytes(bytes) => bytes.as_slice().try_into().ok()?,
-        _ => return None,
-    };
-    let fs_epoch_base_ts = match header.get(&hdr::HDR_FS_EPOCH_BASE_TS)? {
-        Value::Integer(int) => (*int).try_into().ok()?,
-        _ => return None,
-    };
-    derive_fs_fingerprint_from_fields(&policy, fs_ec, &fs_epoch_commit, fs_epoch_base_ts)
+    compute_fs_fingerprint_from_header_core(header)
 }
 
 fn fingerprint_full_hex(bytes: &[u8; 32]) -> String {
@@ -2360,6 +2341,7 @@ fn extract_bytes(header: &BTreeMap<u64, Value>, key: u64) -> Result<Vec<u8>> {
     }
 }
 
+#[cfg(test)]
 fn extract_bytes_opt(header: &BTreeMap<u64, Value>, key: u64) -> Result<Option<Vec<u8>>> {
     match header.get(&key) {
         Some(Value::Bytes(bytes)) => Ok(Some(bytes.clone())),
@@ -2409,20 +2391,7 @@ fn should_retry_leave_accept_http_error(
 }
 
 fn recompute_proofs_commit(header: &BTreeMap<u64, Value>) -> Result<[u8; 32]> {
-    #[derive(Serialize)]
-    struct ProofVec(Vec<ByteBuf>);
-
-    let mut components = Vec::new();
-    components.push(ByteBuf::from(extract_bytes(header, hdr::HDR_VRF_PROOF)?));
-    components.push(ByteBuf::from(extract_bytes(header, hdr::HDR_FS_CAPSS)?));
-    if let Some(root) = extract_bytes_opt(header, hdr::HDR_SRX_ROOT_SW)? {
-        components.push(ByteBuf::from(root));
-    }
-    if let Some(proof) = extract_bytes_opt(header, hdr::HDR_SRX_SMALLWOOD)? {
-        components.push(ByteBuf::from(proof));
-    }
-
-    msphf_core::hash::h_l("msphf/proofs", &ProofVec(components)).map_err(Into::into)
+    recompute_proofs_commit_core(header)
 }
 
 fn describe_value(value: Option<&Value>) -> String {
@@ -2570,17 +2539,7 @@ fn apply_pivot_alignment(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity)
 }
 
 fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]>> {
-    let payload = match header.get(&hdr::HDR_SRX_PAYLOAD) {
-        Some(Value::Bytes(bytes)) => bytes.as_slice(),
-        Some(Value::Null) | None => return Ok(None),
-        Some(_) => return Err(anyhow!("srx_payload must be bytes")),
-    };
-
-    #[derive(Serialize)]
-    struct SrxCommit<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
-
-    let commit = h_l(ds::MSPHF_SRX_COMMIT, &SrxCommit(payload)).context("compute srx commit")?;
-    Ok(Some(commit))
+    recompute_srx_commit_core(header)
 }
 
 #[cfg(test)]

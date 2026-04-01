@@ -84,6 +84,8 @@ pub mod barrier_recovery;
 pub mod barrier_state_auth;
 pub mod barrier_transition;
 pub mod barrier_update;
+pub mod bundle_headers;
+pub mod message_auth;
 pub mod message_crypto;
 pub mod pivot;
 pub mod witness;
