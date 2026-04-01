@@ -24,6 +24,42 @@ fn websocket_control_messages_encode_expected_shapes() {
     assert!(!websocket_notification_replayed(&serde_json::json!({
         "type": "message",
     })));
+    let sync_required = websocket_sync_required_notice(&serde_json::json!({
+        "type": "sync_required",
+        "lagged_messages": 9,
+        "max_lag": 12,
+        "sequence": 56,
+        "retained_from_sequence": 41,
+        "server_time_ms": 77,
+        "reason": "replay_window_exhausted",
+        "action": "refetch_and_reconnect",
+        "reconcile_via": "http",
+    }))
+    .expect("sync_required notice");
+    assert_eq!(sync_required.lagged_messages, 9);
+    assert_eq!(sync_required.max_lag, Some(12));
+    assert_eq!(sync_required.sequence, Some(56));
+    assert_eq!(sync_required.retained_from_sequence, Some(41));
+    assert_eq!(sync_required.server_time_ms, Some(77));
+    assert_eq!(
+        sync_required.reason.as_deref(),
+        Some("replay_window_exhausted")
+    );
+    assert_eq!(
+        sync_required.action.as_deref(),
+        Some("refetch_and_reconnect")
+    );
+    assert_eq!(sync_required.reconcile_via.as_deref(), Some("http"));
+    let lag_notice = websocket_lag_notice(&serde_json::json!({
+        "type": "lag",
+        "lagged_messages": 3,
+        "max_lag": 8,
+        "sequence": 5,
+    }))
+    .expect("lag notice");
+    assert_eq!(lag_notice.lagged_messages, 3);
+    assert_eq!(lag_notice.max_lag, Some(8));
+    assert_eq!(lag_notice.sequence, Some(5));
 }
 
 #[tokio::test]
@@ -137,7 +173,8 @@ async fn websocket_worker_acks_sequences_and_resumes_on_reconnect()
             Some(WebSocketEvent::Connected) => connected_count += 1,
             Some(WebSocketEvent::Disconnected)
             | Some(WebSocketEvent::Message(_))
-            | Some(WebSocketEvent::Membership(_)) => {}
+            | Some(WebSocketEvent::Membership(_))
+            | Some(WebSocketEvent::SyncRequired(_)) => {}
             None => break,
         }
     }
@@ -250,6 +287,7 @@ async fn websocket_worker_emits_membership_and_message_events()
                     break;
                 }
             }
+            WebSocketEvent::SyncRequired(_) => {}
         }
     }
 
@@ -427,7 +465,9 @@ async fn websocket_worker_ignores_invalid_json_and_unknown_notification_type()
                 saw_disconnected = true;
                 break;
             }
-            WebSocketEvent::Message(_) | WebSocketEvent::Membership(_) => {
+            WebSocketEvent::Message(_)
+            | WebSocketEvent::Membership(_)
+            | WebSocketEvent::SyncRequired(_) => {
                 return Err(anyhow!("unexpected event from invalid payloads").into());
             }
         }
@@ -480,6 +520,80 @@ async fn websocket_worker_handles_stream_protocol_errors() -> Result<(), Box<dyn
         saw_disconnected,
         "protocol errors should produce a disconnected event"
     );
+
+    drop(rx);
+    tokio::time::timeout(Duration::from_secs(1), server).await???;
+    tokio::time::timeout(Duration::from_secs(1), worker).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_worker_emits_sync_required_before_disconnect()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut ws = tokio_tungstenite::accept_async(stream).await?;
+        ws.send(WsMessage::Text(
+            serde_json::json!({
+                "type": "sync_required",
+                "lagged_messages": 23u64,
+                "max_lag": 64u64,
+                "sequence": 55u64,
+                "retained_from_sequence": 40u64,
+                "server_time_ms": 999u64,
+                "reason": "replay_window_exhausted",
+                "action": "refetch_and_reconnect",
+                "reconcile_via": "http",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+        ws.close(None).await?;
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let (tx, mut rx) = futures_mpsc::unbounded::<WebSocketEvent>();
+    let worker = tokio::spawn(run_websocket_worker(
+        format!("ws://{addr}/v1/ws"),
+        None,
+        Duration::from_millis(20),
+        tx,
+    ));
+
+    let mut saw_sync_required = false;
+    let mut saw_disconnected = false;
+    for _ in 0..8 {
+        let next = tokio::time::timeout(Duration::from_secs(1), rx.next()).await?;
+        let Some(event) = next else {
+            break;
+        };
+        match event {
+            WebSocketEvent::SyncRequired(signal) => {
+                saw_sync_required = signal.lagged_messages == 23
+                    && signal.sequence == Some(55)
+                    && signal.retained_from_sequence == Some(40)
+                    && signal.timestamp_ms == Some(999)
+                    && signal.reason.as_deref() == Some("replay_window_exhausted")
+                    && signal.action.as_deref() == Some("refetch_and_reconnect")
+                    && signal.reconcile_via.as_deref() == Some("http");
+            }
+            WebSocketEvent::Disconnected => {
+                saw_disconnected = true;
+                if saw_sync_required {
+                    break;
+                }
+            }
+            WebSocketEvent::Connected
+            | WebSocketEvent::Message(_)
+            | WebSocketEvent::Membership(_) => {}
+        }
+    }
+
+    assert!(saw_sync_required, "expected sync_required control event");
+    assert!(saw_disconnected, "expected disconnect after sync_required");
 
     drop(rx);
     tokio::time::timeout(Duration::from_secs(1), server).await???;

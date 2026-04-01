@@ -97,6 +97,10 @@ const WEBSOCKET_ACK_TYPE: &str = "ack";
 const WEBSOCKET_PING_REQUEST: &str = "ping";
 const WEBSOCKET_PING_RESPONSE: &str = "pong";
 const WEBSOCKET_RESUME_TYPE: &str = "resume";
+const WEBSOCKET_SYNC_REQUIRED_TYPE: &str = "sync_required";
+const WEBSOCKET_SYNC_REQUIRED_REASON_REPLAY_WINDOW_EXHAUSTED: &str = "replay_window_exhausted";
+const WEBSOCKET_SYNC_REQUIRED_ACTION_REFETCH_AND_RECONNECT: &str = "refetch_and_reconnect";
+const WEBSOCKET_SYNC_REQUIRED_RECONCILE_VIA_HTTP: &str = "http";
 
 pub async fn cloudflare_fetch(req: Request, env: Env) -> Result<Response> {
     if req.path() == "/healthz" {
@@ -1901,15 +1905,16 @@ impl CloudflareRoomDurableObject {
             if websocket_gap_is_irrecoverable(&attachment, oldest_retained_sequence) {
                 let lagged_messages =
                     websocket_lagged_messages(&attachment, attachment.last_sent_sequence);
-                if let Ok(text) = serde_json::to_string(&websocket_lag_disconnect_payload(
+                if let Ok(text) = serde_json::to_string(&websocket_sync_required_payload(
                     lagged_messages,
                     max_lag,
                     sequence,
                     timestamp_ms,
+                    oldest_retained_sequence,
                 )) {
                     let _ = websocket.send_with_str(text.as_str());
                 }
-                let _ = websocket.close(Some(1013), Some("websocket replay window exceeded"));
+                let _ = websocket.close(Some(1013), Some("websocket sync required"));
                 continue;
             }
             let lagged_messages = websocket_lagged_messages(&attachment, sequence);
@@ -2024,17 +2029,19 @@ impl CloudflareRoomDurableObject {
         attachment.last_acknowledged_sequence = attachment
             .last_acknowledged_sequence
             .max(signal.acknowledged_sequence());
-        if websocket_gap_is_irrecoverable(&attachment, self.oldest_buffered_websocket_sequence()) {
+        let oldest_retained_sequence = self.oldest_buffered_websocket_sequence();
+        if websocket_gap_is_irrecoverable(&attachment, oldest_retained_sequence) {
             let lagged_messages =
                 websocket_lagged_messages(&attachment, attachment.last_sent_sequence);
-            let payload = websocket_lag_disconnect_payload(
+            let payload = websocket_sync_required_payload(
                 lagged_messages,
                 max_lag,
                 attachment.last_sent_sequence,
                 now_ms,
+                oldest_retained_sequence,
             );
             ws.send_with_str(serde_json::to_string(&payload)?.as_str())?;
-            ws.close(Some(1013), Some("websocket replay window exceeded"))?;
+            ws.close(Some(1013), Some("websocket sync required"))?;
             return Ok(());
         }
         self.replay_websocket_gap(ws, &mut attachment)?;
@@ -2593,17 +2600,22 @@ fn mark_replayed_websocket_payload(payload: serde_json::Value) -> serde_json::Va
     }
 }
 
-fn websocket_lag_disconnect_payload(
+fn websocket_sync_required_payload(
     lagged_messages: u64,
     max_lag: u64,
     sequence: u64,
     timestamp_ms: u64,
+    retained_from_sequence: Option<u64>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "type": "lag_disconnect",
+        "type": WEBSOCKET_SYNC_REQUIRED_TYPE,
+        "reason": WEBSOCKET_SYNC_REQUIRED_REASON_REPLAY_WINDOW_EXHAUSTED,
+        "action": WEBSOCKET_SYNC_REQUIRED_ACTION_REFETCH_AND_RECONNECT,
+        "reconcile_via": WEBSOCKET_SYNC_REQUIRED_RECONCILE_VIA_HTTP,
         "lagged_messages": lagged_messages,
         "max_lag": max_lag,
         "sequence": sequence,
+        "retained_from_sequence": retained_from_sequence,
         "server_time_ms": timestamp_ms,
     })
 }
@@ -4461,6 +4473,20 @@ mod tests {
         assert_eq!(payload["sequence"], 44);
         assert_eq!(payload["server_time_ms"], 88);
         assert_eq!(payload["recommendation"], "consider reconnecting");
+    }
+
+    #[test]
+    fn websocket_sync_required_payload_explains_worker_reconciliation_contract() {
+        let payload = websocket_sync_required_payload(9, 16, 44, 88, Some(33));
+        assert_eq!(payload["type"], "sync_required");
+        assert_eq!(payload["reason"], "replay_window_exhausted");
+        assert_eq!(payload["action"], "refetch_and_reconnect");
+        assert_eq!(payload["reconcile_via"], "http");
+        assert_eq!(payload["lagged_messages"], 9);
+        assert_eq!(payload["max_lag"], 16);
+        assert_eq!(payload["sequence"], 44);
+        assert_eq!(payload["retained_from_sequence"], 33);
+        assert_eq!(payload["server_time_ms"], 88);
     }
 
     #[test]

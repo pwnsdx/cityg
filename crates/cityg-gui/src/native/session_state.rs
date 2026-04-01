@@ -1,4 +1,6 @@
-use super::websocket::{MembershipSignal, MembershipSignalKind, WebSocketMessageSignal};
+use super::websocket::{
+    MembershipSignal, MembershipSignalKind, WebSocketMessageSignal, WebSocketSyncRequiredSignal,
+};
 use super::*;
 
 impl AppModel {
@@ -303,6 +305,46 @@ impl AppModel {
         let detail =
             websocket_activity_detail(signal.sequence, signal.replayed, signal.timestamp_ms);
         self.record_activity_with_detail(ActivityKind::Roster, summary, detail);
+    }
+
+    pub(super) fn record_websocket_sync_required_activity(
+        &mut self,
+        signal: &WebSocketSyncRequiredSignal,
+    ) {
+        let mut detail = Vec::new();
+        detail.push(format!(
+            "{} messages fell outside the Worker replay window",
+            signal.lagged_messages
+        ));
+        if let Some(retained_from_sequence) = signal.retained_from_sequence {
+            detail.push(format!(
+                "buffer now retains notifications from sequence {}",
+                retained_from_sequence
+            ));
+        }
+        if let Some(reason) = signal.reason.as_deref() {
+            detail.push(format!("reason {reason}"));
+        }
+        if let Some(action) = signal.action.as_deref() {
+            detail.push(format!("action {action}"));
+        }
+        if let Some(reconcile_via) = signal.reconcile_via.as_deref() {
+            detail.push(format!("reconcile via {reconcile_via}"));
+        }
+        if let Some(sequence) = signal.sequence {
+            detail.push(format!("sequence {}", sequence));
+        }
+        if let Some(timestamp_ms) = signal.timestamp_ms {
+            detail.push(format!(
+                "server timestamp {}",
+                format_timestamp(timestamp_ms)
+            ));
+        }
+        self.record_activity_with_detail(
+            ActivityKind::Connection,
+            "Worker replay window exhausted; HTTP reconciliation required",
+            Some(detail.join(", ")),
+        );
     }
 
     pub(super) fn acknowledge_security_alerts(&mut self) {

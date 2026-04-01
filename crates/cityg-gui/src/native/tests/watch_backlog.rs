@@ -158,7 +158,8 @@ async fn watch_reconnect_fetches_offline_backlog_and_resumes_live_notifications(
             WebSocketEvent::Message(_) => {}
             WebSocketEvent::Connected
             | WebSocketEvent::Disconnected
-            | WebSocketEvent::Membership(_) => {}
+            | WebSocketEvent::Membership(_)
+            | WebSocketEvent::SyncRequired(_) => {}
         }
     }
     assert!(
@@ -443,7 +444,8 @@ async fn dual_restarted_watchers_fetch_offline_backlog_and_resume_live_notificat
             WebSocketEvent::Message(_) => {}
             WebSocketEvent::Connected
             | WebSocketEvent::Disconnected
-            | WebSocketEvent::Membership(_) => {}
+            | WebSocketEvent::Membership(_)
+            | WebSocketEvent::SyncRequired(_) => {}
         }
     }
     let mut bob_saw_live_notification = false;
@@ -460,7 +462,8 @@ async fn dual_restarted_watchers_fetch_offline_backlog_and_resume_live_notificat
             WebSocketEvent::Message(_) => {}
             WebSocketEvent::Connected
             | WebSocketEvent::Disconnected
-            | WebSocketEvent::Membership(_) => {}
+            | WebSocketEvent::Membership(_)
+            | WebSocketEvent::SyncRequired(_) => {}
         }
     }
     assert!(

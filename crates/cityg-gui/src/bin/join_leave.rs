@@ -84,8 +84,9 @@ use tokio::{
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tracing::warn;
 use websocket_replay::{
-    WebSocketReplayCursor, websocket_ack_message, websocket_notification_replayed,
-    websocket_notification_sequence, websocket_request, websocket_resume_message,
+    WebSocketReplayCursor, websocket_ack_message, websocket_lag_notice,
+    websocket_notification_replayed, websocket_notification_sequence, websocket_request,
+    websocket_resume_message, websocket_sync_required_notice,
 };
 
 fn random_room_id() -> String {
@@ -2827,8 +2828,27 @@ async fn expect_membership_event(
                 Notification::Lag { lagged_messages } => {
                     println!("websocket lag notice: dropped {lagged_messages} messages");
                 }
-                Notification::LagDisconnect { lagged_messages } => {
-                    println!("websocket lag disconnect: dropped {lagged_messages} messages");
+                Notification::SyncRequired {
+                    lagged_messages,
+                    timestamp_ms,
+                    retained_from_sequence,
+                    reason,
+                    action,
+                    reconcile_via,
+                    ..
+                } => {
+                    println!(
+                        "websocket sync required: dropped {lagged_messages} messages reason={} action={} reconcile_via={} retained_from={} ts={}",
+                        reason.as_deref().unwrap_or("-"),
+                        action.as_deref().unwrap_or("-"),
+                        reconcile_via.as_deref().unwrap_or("-"),
+                        retained_from_sequence
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        timestamp_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                    );
                 }
                 _ => {}
             }
@@ -2871,8 +2891,27 @@ async fn expect_message_event(
                 Notification::Lag { lagged_messages } => {
                     println!("websocket lag notice: dropped {lagged_messages} messages");
                 }
-                Notification::LagDisconnect { lagged_messages } => {
-                    println!("websocket lag disconnect: dropped {lagged_messages} messages");
+                Notification::SyncRequired {
+                    lagged_messages,
+                    timestamp_ms,
+                    retained_from_sequence,
+                    reason,
+                    action,
+                    reconcile_via,
+                    ..
+                } => {
+                    println!(
+                        "websocket sync required: dropped {lagged_messages} messages reason={} action={} reconcile_via={} retained_from={} ts={}",
+                        reason.as_deref().unwrap_or("-"),
+                        action.as_deref().unwrap_or("-"),
+                        reconcile_via.as_deref().unwrap_or("-"),
+                        retained_from_sequence
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        timestamp_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                    );
                 }
                 _ => {}
             }
@@ -2918,8 +2957,14 @@ enum Notification {
     Lag {
         lagged_messages: u64,
     },
-    LagDisconnect {
+    SyncRequired {
         lagged_messages: u64,
+        sequence: Option<u64>,
+        timestamp_ms: Option<u64>,
+        retained_from_sequence: Option<u64>,
+        reason: Option<String>,
+        action: Option<String>,
+        reconcile_via: Option<String>,
     },
     Other,
 }
@@ -2958,22 +3003,18 @@ impl Notification {
                     timestamp_ms: timestamp,
                 })
             }
-            "lag" => {
-                let lagged = value
-                    .get("lagged_messages")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                Some(Notification::Lag {
-                    lagged_messages: lagged,
-                })
-            }
-            "lag_disconnect" => {
-                let lagged = value
-                    .get("lagged_messages")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                Some(Notification::LagDisconnect {
-                    lagged_messages: lagged,
+            "lag" => websocket_lag_notice(value).map(|notice| Notification::Lag {
+                lagged_messages: notice.lagged_messages,
+            }),
+            "sync_required" | "lag_disconnect" => {
+                websocket_sync_required_notice(value).map(|notice| Notification::SyncRequired {
+                    lagged_messages: notice.lagged_messages,
+                    sequence: notice.sequence,
+                    timestamp_ms: notice.server_time_ms,
+                    retained_from_sequence: notice.retained_from_sequence,
+                    reason: notice.reason,
+                    action: notice.action,
+                    reconcile_via: notice.reconcile_via,
                 })
             }
             _ => Some(Notification::Other),
@@ -2982,17 +3023,15 @@ impl Notification {
 
     fn sequence(&self) -> Option<u64> {
         match self {
-            Notification::Message { sequence, .. } | Notification::Membership { sequence, .. } => {
-                *sequence
-            }
-            Notification::Lag { .. } | Notification::LagDisconnect { .. } | Notification::Other => {
-                None
-            }
+            Notification::Message { sequence, .. }
+            | Notification::Membership { sequence, .. }
+            | Notification::SyncRequired { sequence, .. } => *sequence,
+            Notification::Lag { .. } | Notification::Other => None,
         }
     }
 
     fn should_disconnect(&self) -> bool {
-        matches!(self, Notification::LagDisconnect { .. })
+        matches!(self, Notification::SyncRequired { .. })
     }
 }
 
@@ -5241,14 +5280,21 @@ mod tests {
     }
 
     #[test]
-    fn notification_from_json_parses_lag_and_other() {
+    fn notification_from_json_parses_lag_sync_required_and_other() {
         let lag = serde_json::json!({
             "type": "lag",
             "lagged_messages": 17u64
         });
-        let lag_disconnect = serde_json::json!({
-            "type": "lag_disconnect",
+        let sync_required = serde_json::json!({
+            "type": "sync_required",
             "lagged_messages": 23u64
+            ,
+            "reason": "replay_window_exhausted",
+            "action": "refetch_and_reconnect",
+            "reconcile_via": "http",
+            "sequence": 44u64,
+            "retained_from_sequence": 31u64,
+            "server_time_ms": 99u64
         });
         let unknown = serde_json::json!({
             "type": "custom",
@@ -5261,13 +5307,28 @@ mod tests {
             assert_eq!(lagged_messages, 17);
         }
 
-        let parsed_disconnect = Notification::from_json(&lag_disconnect);
+        let parsed_disconnect = Notification::from_json(&sync_required);
         assert!(matches!(
             parsed_disconnect,
-            Some(Notification::LagDisconnect { .. })
+            Some(Notification::SyncRequired { .. })
         ));
-        if let Some(Notification::LagDisconnect { lagged_messages }) = parsed_disconnect {
+        if let Some(Notification::SyncRequired {
+            lagged_messages,
+            sequence,
+            timestamp_ms,
+            retained_from_sequence,
+            reason,
+            action,
+            reconcile_via,
+        }) = parsed_disconnect
+        {
             assert_eq!(lagged_messages, 23);
+            assert_eq!(sequence, Some(44));
+            assert_eq!(timestamp_ms, Some(99));
+            assert_eq!(retained_from_sequence, Some(31));
+            assert_eq!(reason.as_deref(), Some("replay_window_exhausted"));
+            assert_eq!(action.as_deref(), Some("refetch_and_reconnect"));
+            assert_eq!(reconcile_via.as_deref(), Some("http"));
         }
 
         assert!(matches!(

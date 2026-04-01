@@ -3185,6 +3185,26 @@ fn gpui_handle_websocket_event_updates_state(cx: &mut TestAppContext) {
                 .any(|event| event.summary.contains("Replayed roster join"))
         );
 
+        model.handle_websocket_event(
+            WebSocketEvent::SyncRequired(WebSocketSyncRequiredSignal {
+                lagged_messages: 5,
+                sequence: Some(11),
+                timestamp_ms: Some(99),
+                retained_from_sequence: Some(8),
+                reason: Some("replay_window_exhausted".to_string()),
+                action: Some("refetch_and_reconnect".to_string()),
+                reconcile_via: Some("http".to_string()),
+            }),
+            view_cx,
+        );
+        assert!(model.epoch_sync_task.is_some());
+        assert!(model.fetch_after_epoch_sync);
+        assert!(model.activity_events.iter().any(|event| {
+            event
+                .summary
+                .contains("Worker replay window exhausted; HTTP reconciliation required")
+        }));
+
         model.handle_websocket_event(WebSocketEvent::Disconnected, view_cx);
         assert!(!model.ws_connected);
     });

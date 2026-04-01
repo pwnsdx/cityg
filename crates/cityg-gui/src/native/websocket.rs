@@ -4,8 +4,9 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessa
 
 use super::*;
 use crate::websocket_replay::{
-    WebSocketReplayCursor, websocket_ack_message, websocket_notification_replayed,
-    websocket_notification_sequence, websocket_request, websocket_resume_message,
+    WebSocketReplayCursor, websocket_ack_message, websocket_lag_notice,
+    websocket_notification_replayed, websocket_notification_sequence, websocket_request,
+    websocket_resume_message, websocket_sync_required_notice,
 };
 
 pub(super) enum WebSocketEvent {
@@ -13,6 +14,7 @@ pub(super) enum WebSocketEvent {
     Disconnected,
     Message(WebSocketMessageSignal),
     Membership(MembershipSignal),
+    SyncRequired(WebSocketSyncRequiredSignal),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +37,17 @@ pub(super) struct MembershipSignal {
     pub(super) sequence: Option<u64>,
     pub(super) replayed: bool,
     pub(super) timestamp_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WebSocketSyncRequiredSignal {
+    pub(super) lagged_messages: u64,
+    pub(super) sequence: Option<u64>,
+    pub(super) timestamp_ms: Option<u64>,
+    pub(super) retained_from_sequence: Option<u64>,
+    pub(super) reason: Option<String>,
+    pub(super) action: Option<String>,
+    pub(super) reconcile_via: Option<String>,
 }
 
 pub(super) async fn run_websocket_worker(
@@ -84,6 +97,35 @@ pub(super) async fn run_websocket_worker(
                                             warn!("failed to send websocket ack frame: {}", error);
                                             break 'connection;
                                         }
+                                    }
+                                    if let Some(signal) =
+                                        websocket_sync_required_notice(&notification)
+                                    {
+                                        if tx
+                                            .unbounded_send(WebSocketEvent::SyncRequired(
+                                                WebSocketSyncRequiredSignal {
+                                                    lagged_messages: signal.lagged_messages,
+                                                    sequence: signal.sequence,
+                                                    timestamp_ms: signal.server_time_ms,
+                                                    retained_from_sequence: signal
+                                                        .retained_from_sequence,
+                                                    reason: signal.reason,
+                                                    action: signal.action,
+                                                    reconcile_via: signal.reconcile_via,
+                                                },
+                                            ))
+                                            .is_err()
+                                        {
+                                            return Ok(());
+                                        }
+                                        break 'connection;
+                                    }
+                                    if let Some(signal) = websocket_lag_notice(&notification) {
+                                        warn!(
+                                            "WebSocket lag notification: lagged_messages={} max_lag={:?} sequence={:?}",
+                                            signal.lagged_messages, signal.max_lag, signal.sequence,
+                                        );
+                                        continue;
                                     }
                                     match notification.get("type").and_then(|t| t.as_str()) {
                                         Some("message") => {
@@ -144,16 +186,6 @@ pub(super) async fn run_websocket_worker(
                                                     return Ok(());
                                                 }
                                             }
-                                        }
-                                        Some("lag") => {
-                                            warn!("WebSocket lag notification: {}", text);
-                                        }
-                                        Some("lag_disconnect") => {
-                                            warn!(
-                                                "WebSocket lag disconnect notification: {}",
-                                                text
-                                            );
-                                            break 'connection;
                                         }
                                         _ => {}
                                     }

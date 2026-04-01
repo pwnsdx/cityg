@@ -118,6 +118,18 @@ impl AppModel {
                 self.record_membership_activity(&signal);
                 self.handle_membership_signal(&signal, cx);
             }
+            WebSocketEvent::SyncRequired(signal) => {
+                self.record_websocket_sync_required_activity(&signal);
+                self.fetch_after_epoch_sync = true;
+                let reason = match signal.reason.as_deref() {
+                    Some("replay_window_exhausted") => {
+                        "Worker replay window exhausted; reconciling latest room state…"
+                    }
+                    _ => "WebSocket requested room reconciliation…",
+                };
+                self.schedule_epoch_sync(cx, reason);
+                cx.notify();
+            }
         }
     }
 

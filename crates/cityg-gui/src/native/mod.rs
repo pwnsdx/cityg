@@ -90,8 +90,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(test)]
 pub(crate) use crate::websocket_replay::{
-    websocket_ack_message, websocket_notification_replayed, websocket_notification_sequence,
-    websocket_resume_message,
+    websocket_ack_message, websocket_lag_notice, websocket_notification_replayed,
+    websocket_notification_sequence, websocket_resume_message, websocket_sync_required_notice,
 };
 #[cfg(test)]
 use cityg_client::demo;
