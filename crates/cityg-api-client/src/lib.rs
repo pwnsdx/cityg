@@ -136,6 +136,7 @@
 //! - [`cityg-client`](../cityg_client) - Client bundle generation
 
 mod member_queries;
+mod observability;
 mod room_admin;
 mod verification;
 
@@ -150,16 +151,12 @@ use pb::{
     BarrierIssueFullVerificationWitnessResponse, BarrierLookupMergeAcceptanceRequest,
     BarrierLookupMergeAcceptanceResponse, BarrierResolveJoinsSinceRequest,
     BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
-    BarrierResolveRevokedLeavesResponse, ConfigureWindowRequest, ConfigureWindowResponse,
-    FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest, GetBundleResponse,
-    GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse,
-    JoinTicketRequest, JoinTicketResponse, ListRoomAdminsResponse, MembersRequest,
-    MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
-    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationResponse, SendMessageRequest,
-    SendMessageResponse,
+    BarrierResolveRevokedLeavesResponse, FetchMessagesRequest, FetchMessagesResponse,
+    GetBundleRequest, GetBundleResponse, JoinTicketRequest, JoinTicketResponse,
+    ListRoomAdminsResponse, MembersRequest, MergeTicketIntent as PbMergeTicketIntent,
+    MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
+    RoomAdminMutationResponse, SendMessageRequest, SendMessageResponse,
 };
-#[cfg(any(debug_assertions, feature = "debug-api"))]
-use pb::{SeedHeadRequest, SeedHeadResponse};
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use prost::Message;
 use reqwest::{Client, StatusCode};
@@ -325,44 +322,6 @@ impl CitygApiClient {
         let token = token.into().trim().to_string();
         self.message_auth_token = if token.is_empty() { None } else { Some(token) };
         self
-    }
-
-    /// Performs a health check on the server.
-    ///
-    /// This endpoint verifies that the server is running and accepting requests.
-    /// It does not validate any cryptographic state or window configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The server is unreachable (network error)
-    /// - The server returns a non-2xx status code
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use cityg_api_client::CitygApiClient;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = CitygApiClient::new("http://localhost:8080");
-    ///
-    /// match client.health().await {
-    ///     Ok(()) => println!("Server is healthy"),
-    ///     Err(e) => eprintln!("Health check failed: {}", e),
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn health(&self) -> Result<(), Error> {
-        let url = format!("{}/health", self.base_url);
-        let response = self.http.get(url).send().await?;
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            let status = response.status();
-            let body = response.bytes().await?.to_vec();
-            Err(build_http_error(status, body))
-        }
     }
 
     /// Submits a client epoch bundle to the server for validation.
@@ -2013,151 +1972,6 @@ impl CitygApiClient {
             we_epoch_id: we_epoch_id.to_vec(),
         };
         self.post_proto("/v1/bundle", request).await
-    }
-
-    /// Retrieves the current multi-head window state.
-    ///
-    /// The window contains all accepted epoch heads, their roots, and metadata.
-    /// This is useful for debugging, monitoring, and understanding the current
-    /// group state.
-    ///
-    /// # Returns
-    ///
-    /// A [`GetWindowResponse`] containing:
-    /// - `heads` - List of all current window heads
-    /// - `h_max` - Maximum number of concurrent heads allowed
-    /// - `ttl_ms` - Time-to-live for window heads (milliseconds)
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use cityg_api_client::CitygApiClient;
-    ///
-    /// # async fn example(client: &CitygApiClient) -> Result<(), Box<dyn std::error::Error>> {
-    /// let window = client.window().await?;
-    ///
-    /// println!("Window snapshot:");
-    /// println!("  Entries: {}", window.entries.len());
-    ///
-    /// for entry in &window.entries {
-    ///     println!("  WID: {} heads", entry.heads.len());
-    ///     for head in &entry.heads {
-    ///         println!("    Head: {}", hex::encode(&head.we_epoch_id));
-    ///     }
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn window(&self) -> Result<GetWindowResponse, Error> {
-        self.post_proto("/v1/window", GetWindowRequest {}).await
-    }
-
-    /// Retrieves server telemetry and statistics.
-    ///
-    /// Provides metrics about server operation, including:
-    /// - Total epochs processed
-    /// - Freeze statistics by code
-    /// - Window utilization
-    /// - Performance metrics
-    ///
-    /// # Returns
-    ///
-    /// A [`GetTelemetryResponse`] containing server metrics and freeze statistics.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use cityg_api_client::CitygApiClient;
-    ///
-    /// # async fn example(client: &CitygApiClient) -> Result<(), Box<dyn std::error::Error>> {
-    /// let telemetry = client.telemetry().await?;
-    ///
-    /// println!("Server telemetry:");
-    /// // Access telemetry fields based on GetTelemetryResponse structure
-    /// // See API documentation for available metrics
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn telemetry(&self) -> Result<GetTelemetryResponse, Error> {
-        self.post_proto("/v1/telemetry", GetTelemetryRequest {})
-            .await
-    }
-
-    /// Configures the multi-head window parameters.
-    ///
-    /// Allows runtime adjustment of window behavior:
-    /// - `h_max`: Maximum number of concurrent heads (concurrency limit)
-    /// - `ttl_ms`: Time-to-live for heads before eviction
-    ///
-    /// # Arguments
-    ///
-    /// * `h_max` - Optional: new maximum head count (e.g., 10, 100)
-    /// * `ttl_ms` - Optional: new TTL in milliseconds (e.g., 3600000 = 1 hour)
-    ///
-    /// # Returns
-    ///
-    /// A [`ConfigureWindowResponse`] with the updated configuration.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use cityg_api_client::CitygApiClient;
-    ///
-    /// # async fn example(client: &CitygApiClient) -> Result<(), Box<dyn std::error::Error>> {
-    /// // Increase concurrency limit to 100 heads
-    /// let response = client.configure_window(Some(100), None).await?;
-    /// println!("Window h_max updated to: {}", response.h_max);
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// ```no_run
-    /// # use cityg_api_client::CitygApiClient;
-    /// # async fn example(client: &CitygApiClient) -> Result<(), Box<dyn std::error::Error>> {
-    /// // Set TTL to 10 minutes
-    /// let response = client.configure_window(None, Some(600_000)).await?;
-    /// println!("Window TTL updated to: {} ms", response.ttl_ms);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn configure_window(
-        &self,
-        h_max: Option<u32>,
-        ttl_ms: Option<u32>,
-    ) -> Result<ConfigureWindowResponse, Error> {
-        let request = ConfigureWindowRequest { h_max, ttl_ms };
-        self.post_proto("/v1/config/window", request).await
-    }
-
-    /// **[Debug Only]** Seeds the window head with a bundle directly.
-    ///
-    /// This endpoint bypasses normal validation and inserts a bundle directly
-    /// into the window. Only available in debug builds or with the `debug-api` feature.
-    ///
-    /// # ⚠️ Warning
-    ///
-    /// This endpoint is for testing only and should NEVER be exposed in production.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # #[cfg(any(debug_assertions, feature = "debug-api"))]
-    /// # async fn example(bundle: &cityg_client::ClientEpochBundle) -> Result<(), Box<dyn std::error::Error>> {
-    /// use cityg_api_client::CitygApiClient;
-    ///
-    /// let client = CitygApiClient::new("http://localhost:8080");
-    /// // Generate test bundle (implementation not shown)
-    ///
-    /// client.debug_seed_window_head(&bundle).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(any(debug_assertions, feature = "debug-api"))]
-    pub async fn debug_seed_window_head(&self, bundle: &ClientEpochBundle) -> Result<(), Error> {
-        let bytes = bundle.to_cbor()?;
-        let request = SeedHeadRequest { bundle_cbor: bytes };
-        let _: SeedHeadResponse = self.post_proto("/v1/debug/window/seed", request).await?;
-        Ok(())
     }
 
     /// Refreshes the pivot for forward secrecy epoch rotation.
