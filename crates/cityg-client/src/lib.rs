@@ -75,6 +75,7 @@
 //! - [Client Operations](../../docs/protocol/08-client-operations.md) protocol documentation
 
 pub mod barrier;
+pub mod barrier_activation;
 pub mod barrier_build;
 pub mod barrier_crypto;
 pub mod barrier_prevalidation;

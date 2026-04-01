@@ -1,7 +1,4 @@
-use std::collections::BTreeMap;
-
 use anyhow::Result;
-use ciborium::Value;
 use cityg_api_client::{BarrierJoinRecord, HistoryCommitment};
 
 #[allow(unused_imports)]
@@ -16,7 +13,7 @@ pub use cityg_client::barrier::{
     decode_history_commitment_header as decode_core_history_commitment_header,
     encode_full_verification_receipt,
     encode_history_commitment_header as encode_core_history_commitment_header,
-    expected_barrier_tree_nodes, header_history_commitment as header_core_history_commitment,
+    expected_barrier_tree_nodes,
     require_current_state_history_commitment as require_core_current_state_history_commitment,
     require_same_history_commitment as require_core_same_history_commitment,
     should_retry_ticket_http_error, sibling_node, ticket_retry_delay, validate_barrier_n_max,
@@ -56,6 +53,7 @@ pub(crate) fn to_core_history_commitment(
     }
 }
 
+#[allow(dead_code)]
 fn from_core_history_commitment(commitment: BarrierHistoryCommitment) -> HistoryCommitment {
     HistoryCommitment {
         history_view_id: commitment.history_view_id,
@@ -79,12 +77,6 @@ pub fn encode_history_commitment_header(commitment: &HistoryCommitment) -> Resul
 #[allow(dead_code)]
 pub fn decode_history_commitment_header(raw: &[u8]) -> Result<HistoryCommitment> {
     decode_core_history_commitment_header(raw).map(from_core_history_commitment)
-}
-
-pub fn header_history_commitment(
-    header_map: &BTreeMap<u64, Value>,
-) -> Result<Option<HistoryCommitment>> {
-    header_core_history_commitment(header_map).map(|value| value.map(from_core_history_commitment))
 }
 
 pub fn apply_join_set_to_snapshot(

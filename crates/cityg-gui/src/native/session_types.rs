@@ -58,31 +58,6 @@ pub(super) struct FsForwardLeapPolicy {
     pub(super) slack_device: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct FsForwardLeapCaps {
-    pub(super) anchor_max: u64,
-    pub(super) first_device_max: u64,
-    pub(super) device_max: u64,
-}
-
-impl FsForwardLeapPolicy {
-    pub(super) fn caps(self) -> Result<FsForwardLeapCaps> {
-        if self.h == 0 || self.checkpoint_interval == 0 || self.checkpoint_interval < self.h {
-            return Err(anyhow!(
-                "invalid fs forward-leap policy window ({}, {})",
-                self.h,
-                self.checkpoint_interval
-            ));
-        }
-        let window_periods = self.checkpoint_interval.div_ceil(self.h);
-        Ok(FsForwardLeapCaps {
-            anchor_max: window_periods.saturating_add(self.slack_anchor),
-            first_device_max: window_periods.saturating_add(self.slack_first_device),
-            device_max: window_periods.saturating_add(self.slack_device),
-        })
-    }
-}
-
 #[derive(Clone)]
 pub(super) struct BarrierSecretState {
     pub(super) barrier_initialized: bool,

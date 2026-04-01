@@ -1,6 +1,10 @@
 use super::*;
-use crate::barrier_shared::{
-    header_history_commitment, require_same_history_commitment, verify_full_verification_receipt,
+use crate::barrier_shared::to_core_history_commitment;
+use cityg_client::barrier_activation::{
+    ClientVisibleBarrierActivationInput,
+    bundle_authored_by_local_device as bundle_authored_by_local_device_core,
+    extract_barrier_update_digest as extract_barrier_update_digest_core,
+    validate_client_visible_activation_guards as validate_client_visible_activation_guards_core,
 };
 use cityg_client::barrier_build::{
     BarrierUpdateBuildResult as CoreBarrierUpdateBuildResult,
@@ -12,8 +16,6 @@ use cityg_client::barrier_recovery::{
     BarrierRecoveryNodeMaterialRef as CoreBarrierRecoveryNodeMaterialRef,
     recover_barrier_update as recover_barrier_update_core,
 };
-use msphf_orchestrator::{LeafIdMode, compute_leaf_id};
-
 pub(super) fn clear_join_finalize_bootstrap_artifact(state: &mut BarrierSecretState) {
     state.bootstrap_history_commitment = None;
     state.bootstrap_predecessor_kem_tree_hash_after = [0u8; 32];
@@ -258,11 +260,7 @@ pub(super) fn try_recover_barrier_from_header(
 pub(super) fn extract_barrier_update_digest(
     header: &BTreeMap<u64, Value>,
 ) -> Result<Option<[u8; 32]>> {
-    match header.get(&hdr::HDR_BARRIER_UPDATE) {
-        Some(Value::Bytes(raw)) => Ok(Some(compute_barrier_update_digest(raw)?)),
-        Some(_) => Err(anyhow!("header barrier_update must be bytes")),
-        None => Ok(None),
-    }
+    extract_barrier_update_digest_core(header)
 }
 
 pub(super) fn apply_forward_state_k_fs(session: &mut AppSession, k_fs: [u8; 32]) {
@@ -330,297 +328,48 @@ pub(super) fn validate_client_visible_activation_guards(
     session: &AppSession,
     header_map: &BTreeMap<u64, Value>,
 ) -> Result<()> {
-    let has_barrier_update = matches!(
-        header_map.get(&hdr::HDR_BARRIER_UPDATE),
-        Some(Value::Bytes(_))
-    );
-    let global_history_attestation = match header_map
-        .get(&hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION)
-    {
-        Some(Value::Bytes(raw)) => Some(raw),
-        Some(_) => {
-            return Err(anyhow!(
-                "client-side activation guard failed (960.7): header[182] global_history_attestation must be bytes"
-            ));
-        }
-        None => None,
-    };
-    if !session
+    let current_history_commitment = session
         .barrier_state
-        .current_global_history_attestation_bytes
-        .is_empty()
-    {
-        if session
-            .barrier_state
-            .current_history_authority_extension
-            .is_none()
-        {
-            return Err(anyhow!(
-                "client-side activation guard failed (960.7): unsupported or missing history authority extension for local attested current state"
-            ));
-        }
-        let supplied = global_history_attestation.ok_or_else(|| {
-            anyhow!(
-                "client-side activation guard failed (960.7): missing header[182] global_history_attestation for authority-bound barrier state"
-            )
-        })?;
-        if supplied.as_slice()
-            != session
+        .current_history_commitment
+        .as_ref()
+        .map(to_core_history_commitment);
+
+    validate_client_visible_activation_guards_core(
+        ClientVisibleBarrierActivationInput {
+            gid: &session.gid,
+            local_pop_public_key: session.pop_public_key.as_slice(),
+            local_current_history_commitment: current_history_commitment.as_ref(),
+            local_current_history_view_id: session.barrier_state.current_history_view_id,
+            local_current_history_authority_extension_present: session
+                .barrier_state
+                .current_history_authority_extension
+                .is_some(),
+            local_current_global_history_attestation_bytes: session
                 .barrier_state
                 .current_global_history_attestation_bytes
-                .as_slice()
-        {
-            return Err(anyhow!(
-                "client-side activation guard failed (960.7): header[182] global_history_attestation mismatch with local authenticated current state"
-            ));
-        }
-    } else if global_history_attestation.is_some() && !has_barrier_update {
-        return Err(anyhow!(
-            "client-side activation guard failed (960.7): unexpected header[182] global_history_attestation without pinned local authority state"
-        ));
-    }
-    if global_history_attestation.is_some()
-        && !header_map.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
-    {
-        return Err(anyhow!(
-            "client-side activation guard failed (960.7): missing header[181] full_verification_receipt for authority-bound barrier state"
-        ));
-    }
-    if header_map.contains_key(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT)
-        && global_history_attestation.is_none()
-    {
-        return Err(anyhow!(
-            "client-side activation guard failed (960.7): header[181] full_verification_receipt requires header[182] global_history_attestation"
-        ));
-    }
-    if let Some(global_history_attestation) = global_history_attestation {
-        verify_client_visible_full_verification_receipt(
-            session,
-            header_map,
-            global_history_attestation.as_slice(),
-        )?;
-    }
-    let fs_policy_version = header_policy_version(header_map, hdr::HDR_FS_POLICY_VERSION)
-        .ok_or_else(|| {
-            anyhow!("client-side activation guard failed (944.6): missing fs_policy_version")
-        })?;
-    if !session.fs_policy_version.is_empty() && fs_policy_version != session.fs_policy_version {
-        return Err(anyhow!(
-            "client-side activation guard failed (944.6): fs_policy_version mismatch"
-        ));
-    }
-    let fs_epoch_base_ts = header_u64(header_map, hdr::HDR_FS_EPOCH_BASE_TS).ok_or_else(|| {
-        anyhow!("client-side activation guard failed (945.0): missing fs_epoch_base_ts")
-    })?;
-    if session.fs_epoch_base_ts != 0 && fs_epoch_base_ts != session.fs_epoch_base_ts {
-        return Err(anyhow!(
-            "client-side activation guard failed (945.0): fs_epoch_base_ts mismatch"
-        ));
-    }
-
-    let author_device_pk = header_map
-        .get(&hdr::HDR_POP_PK)
-        .and_then(Value::as_bytes)
-        .ok_or_else(|| {
-            anyhow!("client-side activation guard failed (947.2): missing author_device_pk")
-        })?;
-    let fs_ec = header_u64(header_map, hdr::HDR_FS_EC)
-        .ok_or_else(|| anyhow!("client-side activation guard failed (947.2): missing fs_ec"))?;
-    let fs_dev_prev_commit =
-        header_bytes32(header_map, hdr::HDR_FS_DEV_PREV_COMMIT).ok_or_else(|| {
-            anyhow!("client-side activation guard failed (947.2): missing fs_dev_prev_commit")
-        })?;
-    let fs_dev_commit = header_bytes32(header_map, hdr::HDR_FS_DEV_COMMIT).ok_or_else(|| {
-        anyhow!("client-side activation guard failed (947.2): missing fs_dev_commit")
-    })?;
-    let barrier_version = header_u64(header_map, hdr::HDR_BARRIER_VERSION).ok_or_else(|| {
-        anyhow!("client-side activation guard failed (947.2): missing barrier_version")
-    })?;
-    let barrier_update_digest = extract_barrier_update_digest(header_map)?.unwrap_or([0u8; 32]);
-    let fs_caps = session.fs_forward_leap_policy.caps().map_err(|_| {
-        anyhow!("client-side activation guard failed (948.0): invalid local fs policy window")
-    })?;
-    if fs_ec > session.last_accepted_ec.saturating_add(fs_caps.anchor_max) {
-        return Err(anyhow!(
-            "client-side activation guard failed (947.6): fs_ec exceeds local group forward-jump window"
-        ));
-    }
-    if fs_dev_prev_commit == [0u8; 32] {
-        if fs_ec
-            > session
-                .last_accepted_ec
-                .saturating_add(fs_caps.first_device_max)
-        {
-            return Err(anyhow!(
-                "client-side activation guard failed (947.5): new-device fs_ec exceeds local first-device forward-jump window"
-            ));
-        }
-    } else if author_device_pk == session.pop_public_key.as_slice()
-        && fs_ec > session.fs_ec.saturating_add(fs_caps.device_max)
-    {
-        return Err(anyhow!(
-            "client-side activation guard failed (947.4): local device fs_ec exceeds local device forward-jump window"
-        ));
-    }
-    let expected_fs_dev_commit = compute_fs_dev_commit_v2(
-        author_device_pk,
-        fs_ec,
-        &fs_dev_prev_commit,
-        barrier_version,
-        &barrier_update_digest,
+                .as_slice(),
+            local_n_max: session.barrier_state.n_max,
+            local_max_barrier_update_bytes: session.barrier_state.max_barrier_update_bytes,
+            local_fs_policy_version: session.fs_policy_version.as_str(),
+            local_fs_epoch_base_ts: session.fs_epoch_base_ts,
+            local_last_accepted_ec: session.last_accepted_ec,
+            local_fs_ec: session.fs_ec,
+            local_fs_dev_prev_commit: session.fs_dev_prev_commit,
+            fs_forward_leap_h: session.fs_forward_leap_policy.h,
+            fs_forward_leap_checkpoint_interval: session.fs_forward_leap_policy.checkpoint_interval,
+            fs_forward_leap_slack_anchor: session.fs_forward_leap_policy.slack_anchor,
+            fs_forward_leap_slack_first_device: session.fs_forward_leap_policy.slack_first_device,
+            fs_forward_leap_slack_device: session.fs_forward_leap_policy.slack_device,
+        },
+        header_map,
     )
-    .map_err(|err| anyhow!("client-side activation guard failed (947.2): {err}"))?;
-    if fs_dev_commit != expected_fs_dev_commit {
-        return Err(anyhow!(
-            "client-side activation guard failed (947.2): fs_dev_chain_bind mismatch"
-        ));
-    }
-
-    if author_device_pk == session.pop_public_key.as_slice()
-        && (fs_dev_prev_commit != session.fs_dev_prev_commit || fs_ec < session.fs_ec)
-    {
-        return Err(anyhow!(
-            "client-side activation guard failed (947.0): local device chain continuity mismatch"
-        ));
-    }
-
-    let Some(bundle_history_commitment) = header_history_commitment(header_map)? else {
-        return Err(anyhow!(
-            "client-side activation guard failed (960.9): missing barrier history commitment header"
-        ));
-    };
-    let authored_by_local_device = bundle_authored_by_local_device(session, header_map);
-    if !authored_by_local_device && session.barrier_state.pending.is_none() {
-        if let Some(current_history_commitment) =
-            session.barrier_state.current_history_commitment.as_ref()
-        {
-            require_same_history_commitment(current_history_commitment, &bundle_history_commitment)
-                .map_err(|_| {
-                    anyhow!(
-                        "client-side activation guard failed (960.9): bundle barrier history commitment mismatch with local authenticated current state"
-                    )
-                })?;
-        } else if session.barrier_state.current_history_view_id != [0u8; 32]
-            && bundle_history_commitment.history_view_id
-                != session.barrier_state.current_history_view_id
-        {
-            return Err(anyhow!(
-                "client-side activation guard failed (960.9): bundle barrier history commitment view mismatch"
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn verify_client_visible_full_verification_receipt(
-    session: &AppSession,
-    header_map: &BTreeMap<u64, Value>,
-    global_history_attestation: &[u8],
-) -> Result<()> {
-    let raw_receipt = match header_map.get(&hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT) {
-        Some(Value::Bytes(raw)) => raw.as_slice(),
-        Some(_) => {
-            return Err(anyhow!(
-                "client-side activation guard failed (960.7): header[181] full_verification_receipt must be bytes"
-            ));
-        }
-        None => {
-            return Err(anyhow!(
-                "client-side activation guard failed (960.7): missing header[181] full_verification_receipt for authority-bound barrier state"
-            ));
-        }
-    };
-    let raw_history_commitment = match header_map.get(&hdr::HDR_BARRIER_HISTORY_COMMITMENT) {
-        Some(Value::Bytes(raw)) => raw.as_slice(),
-        Some(_) => {
-            return Err(anyhow!(
-                "client-side activation guard failed (960.7): barrier history commitment header must be bytes"
-            ));
-        }
-        None => {
-            return Err(anyhow!(
-                "client-side activation guard failed (960.7): missing barrier history commitment header for authority-bound barrier state"
-            ));
-        }
-    };
-    let raw_barrier_update = match header_map.get(&hdr::HDR_BARRIER_UPDATE) {
-        Some(Value::Bytes(raw)) => raw.as_slice(),
-        Some(_) => {
-            return Err(anyhow!(
-                "client-side activation guard failed (960.7): barrier_update must be bytes for authority-bound barrier state"
-            ));
-        }
-        None => {
-            return Err(anyhow!(
-                "client-side activation guard failed (960.7): missing barrier_update for authority-bound barrier state"
-            ));
-        }
-    };
-    let barrier_update_reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON)
-        .ok_or_else(|| {
-            anyhow!(
-                "client-side activation guard failed (960.7): missing barrier_update_reason for authority-bound barrier state"
-            )
-        })?;
-    let max_barrier_update_bytes = normalize_max_barrier_update_bytes(
-        session
-            .barrier_state
-            .max_barrier_update_bytes
-            .max(u64::try_from(raw_barrier_update.len()).unwrap_or(u64::MAX)),
-    )
-    .map_err(|err| anyhow!("client-side activation guard failed (960.7): {err}"))?;
-    let parsed = parse_barrier_update_for_recover(
-        raw_barrier_update,
-        session.barrier_state.n_max,
-        max_barrier_update_bytes,
-    )
-    .map_err(|err| {
-        anyhow!(
-            "client-side activation guard failed (960.7): invalid barrier_update for receipt verification: {err}"
-        )
-    })?;
-    let author_device_pk = header_map
-        .get(&hdr::HDR_POP_PK)
-        .and_then(Value::as_bytes)
-        .ok_or_else(|| {
-            anyhow!("client-side activation guard failed (960.7): missing author_device_pk")
-        })?;
-    let author_leaf_id = compute_leaf_id(
-        LeafIdMode::PerGroup,
-        &session.gid,
-        "ML-DSA-65",
-        author_device_pk,
-    )
-    .map_err(|err| {
-        anyhow!("client-side activation guard failed (960.7): author leaf derivation failed: {err}")
-    })?;
-    verify_full_verification_receipt(
-        raw_receipt,
-        &session.gid,
-        &author_leaf_id,
-        barrier_update_reason,
-        parsed.updater_leaf,
-        raw_history_commitment,
-        global_history_attestation,
-        raw_barrier_update,
-        author_device_pk,
-    )
-    .map_err(|err| {
-        anyhow!(
-            "client-side activation guard failed (960.7): invalid header[181] full_verification_receipt: {err}"
-        )
-    })
 }
 
 pub(super) fn bundle_authored_by_local_device(
     session: &AppSession,
     header: &BTreeMap<u64, Value>,
 ) -> bool {
-    matches!(
-        header.get(&hdr::HDR_POP_PK),
-        Some(Value::Bytes(pop_pk)) if pop_pk.as_slice() == session.pop_public_key.as_slice()
-    )
+    bundle_authored_by_local_device_core(session.pop_public_key.as_slice(), header)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -61,10 +61,12 @@ use msphf_core::{ds, hash::h_l, merkle::canonical_set_root};
 #[cfg(test)]
 use msphf_core::{hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
 use msphf_orchestrator::CapssWitnessBundle;
+#[cfg(test)]
+use msphf_orchestrator::compute_fs_dev_commit_v2;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
-    OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_fs_dev_commit_v2,
-    compute_leaf_id, compute_proofs_commit_bytes, derive_we_epoch_id, hdr,
+    OrchestrationParams, PivotParity, PopKeypair, SrxMode, compute_leaf_id,
+    compute_proofs_commit_bytes, derive_we_epoch_id, hdr,
 };
 use pqcrypto_dilithium::dilithium5;
 #[cfg(test)]
