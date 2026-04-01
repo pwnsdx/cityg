@@ -1,3 +1,4 @@
+use super::endpoint_mode::EndpointMode;
 use super::*;
 
 impl AppModel {
@@ -261,6 +262,9 @@ impl AppModel {
                 self.members_loading_append = false;
                 self.alias_bindings.clear();
                 self.leaf_alias_index.clear();
+                self.endpoint_mode = EndpointMode::Unknown;
+                self.endpoint_mode_server_url = None;
+                self.endpoint_mode_task = None;
                 self.members_auto_page = false;
                 self.members_mode = MembersMode::Full;
                 self.members_search.clear();
@@ -330,6 +334,9 @@ impl AppModel {
         self.send_status = SendStatus::Idle;
         self.fetch_status = FetchStatus::Idle;
         self.session = None;
+        self.endpoint_mode = EndpointMode::Unknown;
+        self.endpoint_mode_server_url = None;
+        self.endpoint_mode_task = None;
         self.stop_websocket();
         self.stop_epoch_sync_task();
         self.stop_members_refresh_task();

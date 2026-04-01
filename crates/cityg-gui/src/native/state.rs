@@ -1,3 +1,4 @@
+use super::endpoint_mode::EndpointMode;
 use super::*;
 
 pub(super) struct AppModel {
@@ -39,7 +40,10 @@ pub(super) struct AppModel {
     pub(super) room_admin_revoke_confirmation: Option<Vec<u8>>,
     pub(super) epoch_sync_task: Option<Task<()>>, // Background task for membership-driven epoch sync
     pub(super) ws_task: Option<Task<()>>,         // WebSocket connection task
-    pub(super) ws_connected: bool,                // WebSocket connection status
+    pub(super) endpoint_mode_task: Option<Task<()>>,
+    pub(super) endpoint_mode_server_url: Option<String>,
+    pub(super) endpoint_mode: EndpointMode,
+    pub(super) ws_connected: bool, // WebSocket connection status
     pub(super) ws_autostart_attempted: bool,
     pub(super) window_active: bool,
     pub(super) restore_epoch_sync_pending: bool,

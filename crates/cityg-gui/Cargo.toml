@@ -42,6 +42,7 @@ msphf-rlwe = { path = "../msphf-rlwe" }
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 ahash = { version = "0.8", features = ["serde"] }
 zeroize = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep core-text aligned with gpui/zed-font-kit's core-graphics expectations.
@@ -57,7 +58,6 @@ cityg-api = { path = "../cityg-api" }
 axum = "0.8"
 prost = "0.14"
 proptest = "1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 [[bin]]
 name = "join_leave"

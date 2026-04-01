@@ -140,7 +140,7 @@ pub(super) fn categorize_error(err: &anyhow::Error, context: &str) -> Categorize
             ErrorCategory::Policy,
             "Admin authentication required",
             technical_details.clone(),
-            "This action requires an operator admin token. Configure CITYG_CLIENT_ADMIN_TOKEN only for server/operator endpoints such as window config or debug APIs.",
+            "This action requires an operator admin token. Most room-scoped actions do not need it; native-only operator routes such as window config or debug APIs are not exposed on the Worker edge.",
             true,
         );
     }

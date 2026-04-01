@@ -2,6 +2,7 @@ use super::*;
 
 impl AppModel {
     pub(super) fn bootstrap_session_runtime(&mut self, cx: &mut ViewContext<Self>) {
+        self.ensure_endpoint_mode_probe(cx);
         if self.barrier_recovery_pending() {
             self.reset_fetch_state();
         } else {

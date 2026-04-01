@@ -1,3 +1,4 @@
+use super::endpoint_mode::EndpointMode;
 use super::*;
 
 #[cfg(not(test))]
@@ -158,6 +159,9 @@ impl AppModel {
             room_admin_revoke_confirmation: None,
             epoch_sync_task: None,
             ws_task: None,
+            endpoint_mode_task: None,
+            endpoint_mode_server_url: None,
+            endpoint_mode: EndpointMode::Unknown,
             ws_connected: false,
             ws_autostart_attempted: false,
             window_active: false,
@@ -212,6 +216,8 @@ impl AppModel {
                 model.fetch_after_epoch_sync = false;
                 model.show_ciphertext = false;
                 model.restore_epoch_sync_pending = true;
+                model.endpoint_mode_server_url = None;
+                model.endpoint_mode = EndpointMode::Unknown;
             }
             Ok(None) => {}
             Err(err) => {

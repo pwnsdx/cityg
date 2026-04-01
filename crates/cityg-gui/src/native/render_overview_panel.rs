@@ -24,6 +24,7 @@ impl AppModel {
                 .child("Session overview"),
         )
         .child(self.session_row("Server", &session.server_url))
+        .child(self.session_row("Endpoint", self.endpoint_mode.label()))
         .child(self.render_copyable_session_row(
             "Room ID",
             &session.room_id,

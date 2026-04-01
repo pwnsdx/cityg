@@ -123,6 +123,7 @@ mod barrier_verification_runtime;
 mod chat_actions;
 mod chat_render;
 mod clipboard_shortcuts;
+mod endpoint_mode;
 mod epoch_sync;
 mod errors;
 mod fault_injection;

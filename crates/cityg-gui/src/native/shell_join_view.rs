@@ -36,7 +36,7 @@ impl AppModel {
                         .text_size(px(11.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(UI_ACCENT_TEXT))
-                        .child("Native desktop shell"),
+                        .child("Desktop client"),
                 )
                 .child(
                     div()
@@ -46,13 +46,13 @@ impl AppModel {
                         .child("Join a City-G Room"),
                 )
                 .child(div().text_size(px(14.0)).text_color(subtext_color).child(
-                    "Connect to a City-G server, pick your alias, and request a join ticket.",
+                    "Connect to a City-G endpoint or Worker edge, pick your alias, and request a join ticket.",
                 )),
         )
         .child(self.render_field(
             "Server URL",
             &self.join_form.server,
-            "https://server.example",
+            "https://edge.example.com",
             ActiveField::Server,
             cx,
         ))
