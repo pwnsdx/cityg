@@ -1,7 +1,11 @@
+use std::{future::Future, pin::Pin};
+
 use super::*;
 
-pub(super) async fn perform_epoch_sync(session: AppSession) -> Result<EpochSyncOutcome> {
-    Box::pin(perform_epoch_sync_inner(session)).await
+pub(super) fn perform_epoch_sync(
+    session: AppSession,
+) -> Pin<Box<dyn Future<Output = Result<EpochSyncOutcome>> + Send>> {
+    Box::pin(perform_epoch_sync_inner(session))
 }
 
 async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOutcome> {

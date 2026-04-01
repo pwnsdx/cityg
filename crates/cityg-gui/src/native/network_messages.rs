@@ -1,4 +1,5 @@
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{future::Future, pin::Pin};
 
 use pqcrypto_dilithium::dilithium5::{
     public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
@@ -11,7 +12,13 @@ use crate::message_crypto::{
 
 use super::*;
 
-pub(super) async fn perform_send(params: SendParams) -> Result<ChatMessageEntry> {
+pub(super) fn perform_send(
+    params: SendParams,
+) -> Pin<Box<dyn Future<Output = Result<ChatMessageEntry>> + Send>> {
+    Box::pin(perform_send_inner(params))
+}
+
+async fn perform_send_inner(params: SendParams) -> Result<ChatMessageEntry> {
     let SendParams {
         server_url,
         gid,
@@ -82,7 +89,13 @@ pub(super) async fn perform_send(params: SendParams) -> Result<ChatMessageEntry>
     })
 }
 
-pub(super) async fn perform_fetch(params: FetchParams) -> Result<FetchOutcome> {
+pub(super) fn perform_fetch(
+    params: FetchParams,
+) -> Pin<Box<dyn Future<Output = Result<FetchOutcome>> + Send>> {
+    Box::pin(perform_fetch_inner(params))
+}
+
+async fn perform_fetch_inner(params: FetchParams) -> Result<FetchOutcome> {
     let FetchParams {
         server_url,
         gid,
