@@ -4,6 +4,7 @@ mod config_auth;
 mod error_mapping;
 pub mod health;
 mod middleware;
+mod proof_validation;
 
 use std::{
     collections::BTreeMap,
@@ -29,8 +30,6 @@ use axum::{
     routing::{get, post},
 };
 use bytes::BytesMut;
-#[cfg(test)]
-use cityg_api_schema::verify_identity_binding as schema_verify_identity_binding;
 use cityg_api_schema::{
     API_PROFILE_VERSION, FetchPublicTreeRequestDecodeError,
     FullVerificationWitnessRequestDecodeError, LookupMergeAcceptanceRequestDecodeError,
@@ -45,12 +44,10 @@ use cityg_api_schema::{
     encode_prepared_barrier_public_tree_response, encode_prepared_join_ticket_response,
     encode_prepared_merge_acceptance_lookup_response, encode_prepared_merge_ticket_response,
     encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
-    encode_room_admin_leaf_pair_payload as schema_encode_room_admin_leaf_pair_payload,
     encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
     encode_search_members_response, encode_telemetry_snapshot_response,
     encode_window_snapshot_response, pb, pb_member as schema_pb_member,
     prepare_join_ticket_request as schema_prepare_join_ticket_request,
-    room_admin_proof_replay_key as schema_room_admin_proof_replay_key,
     validate_bootstrap_room_request as schema_validate_bootstrap_room_request,
     validate_expel_member_ticket_request as schema_validate_expel_member_ticket_request,
     validate_fetch_messages_request as schema_validate_fetch_messages_request,
@@ -62,8 +59,6 @@ use cityg_api_schema::{
     validate_rotate_room_kbroad_request as schema_validate_rotate_room_kbroad_request,
     validate_search_members_request as schema_validate_search_members_request,
     validate_send_message_request as schema_validate_send_message_request,
-    verify_room_admin_proof as schema_verify_room_admin_proof,
-    verify_room_admin_proof_payload as schema_verify_room_admin_proof_payload,
 };
 use futures::{SinkExt, StreamExt};
 #[cfg(test)]
@@ -152,7 +147,8 @@ use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
 use serde::Deserialize;
 
 use config_auth::*;
-use error_mapping::*;
+pub(crate) use error_mapping::*;
+pub(crate) use proof_validation::*;
 
 #[derive(Clone, Debug)]
 enum BroadcastNotification {
@@ -667,46 +663,6 @@ async fn enforce_expensive_rate_limit(
 
 fn should_disconnect_for_lag(lagged_messages: u64, max_lag: u64) -> bool {
     lagged_messages > max_lag
-}
-
-/// Verifies an identity binding signature.
-/// The signature should be over CBOR([alias, pop_public_key])
-#[cfg(test)]
-fn verify_identity_binding(binding: &IdentityBinding) -> Result<(), ApiError> {
-    schema_verify_identity_binding(binding)
-        .map_err(|error| ApiError::InvalidRequest(error.api_message()))
-}
-
-fn verify_room_admin_proof_payload(
-    proof: &RoomAdminProof,
-    operation: &'static str,
-    room_id: &str,
-    payload: &[u8],
-) -> Result<Vec<u8>, ApiError> {
-    schema_verify_room_admin_proof_payload(proof, operation, room_id, payload)
-        .map_err(map_room_admin_proof_validation_error)
-}
-
-fn verify_room_admin_proof(
-    proof: &RoomAdminProof,
-    operation: &'static str,
-    room_id: &str,
-    kbroad_public: &[u8],
-) -> Result<Vec<u8>, ApiError> {
-    schema_verify_room_admin_proof(proof, operation, room_id, kbroad_public)
-        .map_err(map_room_admin_proof_validation_error)
-}
-
-fn room_admin_proof_replay_key(proof: &RoomAdminProof) -> Result<[u8; 32], ApiError> {
-    schema_room_admin_proof_replay_key(proof).map_err(map_room_admin_proof_validation_error)
-}
-
-fn encode_room_admin_leaf_pair_payload(
-    author_leaf_id: &[u8; 32],
-    target_leaf_id: &[u8; 32],
-) -> Result<Vec<u8>, ApiError> {
-    schema_encode_room_admin_leaf_pair_payload(author_leaf_id, target_leaf_id)
-        .map_err(map_room_admin_proof_validation_error)
 }
 
 async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Response, ApiError> {
