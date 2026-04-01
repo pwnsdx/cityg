@@ -135,27 +135,26 @@
 //! - [`cityg-api`](../cityg_api) - Server implementation
 //! - [`cityg-client`](../cityg_client) - Client bundle generation
 
+mod epoch_routes;
 mod member_queries;
 mod observability;
 mod room_admin;
 mod verification;
 
 use cityg_api_schema::pb;
-use cityg_client::{CityGError as ClientError, ClientEpochBundle, pivot::pivot_parity_from_cbor};
+use cityg_client::{CityGError as ClientError, pivot::pivot_parity_from_cbor};
 use msphf_orchestrator::PivotParity;
 pub use pb::IdentityBinding;
 pub use pb::RoomAdminProof;
 use pb::{
-    AcceptEpochRequest, AcceptEpochResponse, BarrierFetchPublicTreeRequest,
-    BarrierFetchPublicTreeResponse, BarrierIssueFullVerificationWitnessRequest,
-    BarrierIssueFullVerificationWitnessResponse, BarrierLookupMergeAcceptanceRequest,
-    BarrierLookupMergeAcceptanceResponse, BarrierResolveJoinsSinceRequest,
-    BarrierResolveJoinsSinceResponse, BarrierResolveRevokedLeavesRequest,
-    BarrierResolveRevokedLeavesResponse, FetchMessagesRequest, FetchMessagesResponse,
-    GetBundleRequest, GetBundleResponse, JoinTicketRequest, JoinTicketResponse,
-    ListRoomAdminsResponse, MembersRequest, MergeTicketIntent as PbMergeTicketIntent,
-    MergeTicketRequest, MergeTicketResponse, RefreshPivotRequest, RefreshPivotResponse,
-    RoomAdminMutationResponse, SendMessageRequest, SendMessageResponse,
+    BarrierFetchPublicTreeRequest, BarrierFetchPublicTreeResponse,
+    BarrierIssueFullVerificationWitnessRequest, BarrierIssueFullVerificationWitnessResponse,
+    BarrierLookupMergeAcceptanceRequest, BarrierLookupMergeAcceptanceResponse,
+    BarrierResolveJoinsSinceRequest, BarrierResolveJoinsSinceResponse,
+    BarrierResolveRevokedLeavesRequest, BarrierResolveRevokedLeavesResponse, JoinTicketRequest,
+    JoinTicketResponse, ListRoomAdminsResponse, MembersRequest,
+    MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
+    RoomAdminMutationResponse,
 };
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use prost::Message;
@@ -370,15 +369,6 @@ impl CitygApiClient {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn accept_epoch_bundle(
-        &self,
-        bundle: &ClientEpochBundle,
-    ) -> Result<AcceptEpochResponse, Error> {
-        let bytes = bundle.to_cbor()?;
-        let request = AcceptEpochRequest { bundle_cbor: bytes };
-        self.post_proto("/v1/accept_epoch", request).await
-    }
-
     /// Requests a join ticket for a new member.
     ///
     /// Join tickets allow clients to create their first epoch and join the group.
@@ -1878,134 +1868,6 @@ impl CitygApiClient {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn send_message(
-        &self,
-        we_epoch_id: &[u8; 32],
-        ciphertext: &[u8],
-        sender: Option<&[u8]>,
-    ) -> Result<SendMessageResponse, Error> {
-        let request = SendMessageRequest {
-            we_epoch_id: we_epoch_id.to_vec(),
-            ciphertext: ciphertext.to_vec(),
-            sender: sender.unwrap_or_default().to_vec(),
-        };
-        self.post_proto("/v1/send_message", request).await
-    }
-
-    /// Retrieves all messages stored for a specific epoch.
-    ///
-    /// Returns all messages that were stored using [`send_message`](Self::send_message)
-    /// for the given epoch ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `we_epoch_id` - The 32-byte witness extraction epoch ID
-    ///
-    /// # Returns
-    ///
-    /// A [`FetchMessagesResponse`] containing:
-    /// - `messages` - List of stored messages with ciphertext and metadata
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use cityg_api_client::CitygApiClient;
-    ///
-    /// # async fn example(client: &CitygApiClient, epoch_id: &[u8; 32]) -> Result<(), Box<dyn std::error::Error>> {
-    /// let leaf_id = [0u8; 32];
-    /// let response = client.fetch_messages(epoch_id, &leaf_id).await?;
-    ///
-    /// for msg in response.messages {
-    ///     println!(
-    ///         "Message: {} bytes (sent: {} ms)",
-    ///         msg.ciphertext.len(),
-    ///         msg.timestamp_ms
-    ///     );
-    ///     // Decrypt using your epoch key...
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn fetch_messages(
-        &self,
-        we_epoch_id: &[u8; 32],
-        leaf_id: &[u8; 32],
-    ) -> Result<FetchMessagesResponse, Error> {
-        let request = FetchMessagesRequest {
-            we_epoch_id: we_epoch_id.to_vec(),
-            leaf_id: leaf_id.to_vec(),
-        };
-        self.post_proto("/v1/messages", request).await
-    }
-
-    /// Retrieves a stored client epoch bundle by its ID.
-    ///
-    /// This allows clients to fetch the CBOR-encoded bundle for any epoch
-    /// that was previously accepted by the server.
-    ///
-    /// # Arguments
-    ///
-    /// * `we_epoch_id` - The 32-byte epoch identifier
-    ///
-    /// # Returns
-    ///
-    /// A [`GetBundleResponse`] containing:
-    /// - `bundle_cbor` - The complete CBOR-encoded epoch bundle
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use cityg_api_client::CitygApiClient;
-    /// use cityg_client::ClientEpochBundle;
-    ///
-    /// # async fn example(client: &CitygApiClient, epoch_id: &[u8; 32]) -> Result<(), Box<dyn std::error::Error>> {
-    /// let response = client.get_bundle(epoch_id).await?;
-    ///
-    /// // Deserialize the bundle
-    /// let bundle = ClientEpochBundle::from_cbor(&response.bundle_cbor)?;
-    /// println!("Retrieved bundle for epoch: {}", hex::encode(&bundle.we_epoch_id));
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get_bundle(&self, we_epoch_id: &[u8; 32]) -> Result<GetBundleResponse, Error> {
-        let request = GetBundleRequest {
-            we_epoch_id: we_epoch_id.to_vec(),
-        };
-        self.post_proto("/v1/bundle", request).await
-    }
-
-    /// Refreshes the pivot for forward secrecy epoch rotation.
-    ///
-    /// This endpoint triggers automatic pivot rotation based on the forward
-    /// secrecy policy. It should be called periodically (e.g., every hour)
-    /// to maintain forward secrecy guarantees.
-    ///
-    /// # Arguments
-    ///
-    /// * `bundle` - A client epoch bundle containing the new pivot commitment
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use cityg_api_client::CitygApiClient;
-    /// use cityg_client::ClientEpochBundle;
-    ///
-    /// # async fn example(client: &CitygApiClient, bundle: &ClientEpochBundle) -> Result<(), Box<dyn std::error::Error>> {
-    /// // Generate fresh pivot bundle (implementation not shown)
-    ///
-    /// client.refresh_pivot(&bundle).await?;
-    /// println!("Pivot refreshed for forward secrecy");
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn refresh_pivot(&self, bundle: &ClientEpochBundle) -> Result<(), Error> {
-        let bytes = bundle.to_cbor()?;
-        let request = RefreshPivotRequest { bundle_cbor: bytes };
-        self.post_proto::<RefreshPivotResponse>("/v1/pivot/refresh", request)
-            .await
-            .map(|_| ())
-    }
-
     async fn post_proto<R>(&self, path: &str, request: impl Message) -> Result<R, Error>
     where
         R: Message + Default,
