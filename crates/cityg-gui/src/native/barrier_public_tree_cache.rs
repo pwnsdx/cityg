@@ -1,22 +1,20 @@
 use super::*;
+use cityg_client::barrier_state_auth::{
+    ensure_non_regressing_authenticated_current_state as ensure_non_regressing_authenticated_current_state_core,
+    validate_barrier_tree_snapshot_auth as validate_barrier_tree_snapshot_auth_core,
+};
 
 pub(super) fn validate_barrier_tree_snapshot_auth(
     expected_hash: &[u8; 32],
     expected_n_max: u64,
     snapshot: &BarrierPublicTree,
 ) -> Result<()> {
-    if snapshot.kem_tree_hash_after != *expected_hash {
-        return Err(anyhow!(
-            "barrier tree snapshot auth failure (960.9): hash mismatch"
-        ));
-    }
-    let computed_hash = compute_barrier_tree_hash(expected_n_max, snapshot.pk_entries.as_slice())?;
-    if computed_hash != *expected_hash {
-        return Err(anyhow!(
-            "barrier tree snapshot auth failure (960.9): tree hash mismatch"
-        ));
-    }
-    Ok(())
+    validate_barrier_tree_snapshot_auth_core(
+        expected_hash,
+        expected_n_max,
+        &snapshot.kem_tree_hash_after,
+        snapshot.pk_entries.as_slice(),
+    )
 }
 
 pub(super) fn current_public_tree_cache_matches(
@@ -168,46 +166,21 @@ pub(super) fn ensure_non_regressing_authenticated_current_state(
     advertised_history_authority_extension: Option<HistoryAuthorityExtension>,
     context: &str,
 ) -> Result<()> {
-    if advertised_barrier_version < local_barrier_version {
-        return Err(anyhow!(
-            "{context} current barrier_version regressed below locally authenticated state (960.9)"
-        ));
-    }
-
-    let Some(local_history_commitment) = local_history_commitment else {
-        return Ok(());
-    };
-
-    if advertised_history_commitment.history_seq < local_history_commitment.history_seq {
-        return Err(anyhow!(
-            "{context} current history commitment regressed below locally authenticated state (960.9)"
-        ));
-    }
-
-    if advertised_history_commitment.history_seq == local_history_commitment.history_seq {
-        if advertised_history_commitment != local_history_commitment {
-            return Err(anyhow!(
-                "{context} current history commitment conflicts with locally authenticated state (960.9)"
-            ));
-        }
-        if advertised_barrier_version != local_barrier_version {
-            return Err(anyhow!(
-                "{context} current barrier_version conflicts with locally authenticated current history commitment (960.9)"
-            ));
-        }
-        if advertised_kem_tree_hash_after != local_kem_tree_hash_after {
-            return Err(anyhow!(
-                "{context} current kem_tree_hash_after conflicts with locally authenticated current history commitment (960.9)"
-            ));
-        }
-        if advertised_history_authority_extension != local_history_authority_extension {
-            return Err(anyhow!(
-                "{context} history authority extension conflicts with locally authenticated state (960.9)"
-            ));
-        }
-    }
-
-    Ok(())
+    let local_history_commitment_core =
+        local_history_commitment.map(crate::barrier_shared::to_core_history_commitment);
+    let advertised_history_commitment_core =
+        crate::barrier_shared::to_core_history_commitment(advertised_history_commitment);
+    ensure_non_regressing_authenticated_current_state_core(
+        local_barrier_version,
+        local_kem_tree_hash_after,
+        local_history_commitment_core.as_ref(),
+        local_history_authority_extension.as_ref(),
+        advertised_barrier_version,
+        advertised_kem_tree_hash_after,
+        &advertised_history_commitment_core,
+        advertised_history_authority_extension.as_ref(),
+        context,
+    )
 }
 
 pub(super) fn install_current_public_tree_cache(
