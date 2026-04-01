@@ -147,7 +147,8 @@ runtime code.
 
 ## Open Questions
 
-- [ ] Which endpoints should remain edge-only in the Worker entrypoint versus execute inside the Durable Object.
+- [x] Which endpoints should remain edge-only in the Worker entrypoint versus execute inside the Durable Object.
+  The Worker now exposes an explicit internal route-policy manifest at `/__cloudflare/policy`: health endpoints stay edge-only, room-scoped HTTP plus `/v1/ws` execute in the authoritative room Durable Object, and native-only debug/window/metrics routes are returned as explicit `501` unsupported responses on Worker.
 - [ ] Whether the internal Cloudflare room route should stay URL-addressed (`/__cloudflare/rooms/:gid/...`) or eventually be replaced by shared protobuf-aware edge routing.
 - [ ] Whether `CITYG_WORKER_CONFIG_JSON` is sufficient as the long-term delivery mechanism, or should be replaced by typed object bindings / signed policy documents.
 - [ ] Whether the global alias registry should stay single-object for parity or be sharded once cross-room alias semantics are revisited explicitly.

@@ -77,6 +77,7 @@ pub const CLOUDFLARE_ROOM_REGISTRY_NAMESPACE_BINDING: &str = "CITYG_ROOM_REGISTR
 pub const CLOUDFLARE_ROOM_REGISTRY_ROUTE_PREFIX: &str = "/__cloudflare/room-registry";
 pub const CLOUDFLARE_ALIAS_NAMESPACE_BINDING: &str = "CITYG_ALIAS_INDEX";
 pub const CLOUDFLARE_ALIAS_ROUTE_PREFIX: &str = "/__cloudflare/aliases";
+pub const CLOUDFLARE_POLICY_ROUTE: &str = "/__cloudflare/policy";
 const ROOM_STATE_TABLE: &str = "cityg_room_state";
 const ROUTING_INDEX_TABLE: &str = "cityg_epoch_scope_index";
 const ROOM_REGISTRY_TABLE: &str = "cityg_room_registry";
@@ -105,8 +106,18 @@ const WEBSOCKET_SYNC_REQUIRED_ACTION_REFETCH_AND_RECONNECT: &str = "refetch_and_
 const WEBSOCKET_SYNC_REQUIRED_RECONCILE_VIA_HTTP: &str = "http";
 
 pub async fn cloudflare_fetch(req: Request, env: Env) -> Result<Response> {
-    if req.path() == "/healthz" {
-        return Response::ok("ok");
+    if let Some(response) = edge_health_response(&req)? {
+        return Ok(response);
+    }
+    if req.path() == CLOUDFLARE_POLICY_ROUTE {
+        return if req.method() == Method::Get {
+            Response::from_json(&worker_route_policy_manifest())
+        } else {
+            Response::error("method not allowed", 405)
+        };
+    }
+    if let Some(message) = unsupported_native_worker_route_message(req.path().as_str()) {
+        return Response::error(message, 501);
     }
 
     let path = req.path();
@@ -2756,6 +2767,56 @@ fn websocket_upgrade_requested_value(value: Option<&str>) -> bool {
     value.is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
 }
 
+fn edge_health_response(req: &Request) -> Result<Option<Response>> {
+    if req.method() != Method::Get {
+        return Ok(None);
+    }
+    match req.path().as_str() {
+        "/healthz" => Ok(Some(Response::ok("ok")?)),
+        "/health" => Ok(Some(protobuf_response(&pb::HealthResponse {
+            status: "ok".to_string(),
+        })?)),
+        "/health/live" => Ok(Some(Response::from_json(&serde_json::json!({
+            "alive": true
+        }))?)),
+        "/health/ready" => Ok(Some(Response::from_json(&serde_json::json!({
+            "ready": true
+        }))?)),
+        "/health/detailed" => Ok(Some(Response::from_json(&serde_json::json!({
+            "status": "healthy",
+            "timestamp": current_timestamp_ms() / 1_000,
+            "version": env!("CARGO_PKG_VERSION"),
+            "checks": [{
+                "name": "worker-edge",
+                "status": "healthy",
+                "message": "Cloudflare Worker entrypoint is responsive"
+            }]
+        }))?)),
+        _ => Ok(None),
+    }
+}
+
+fn unsupported_native_worker_route_message(path: &str) -> Option<&'static str> {
+    match path {
+        "/v1/window" => {
+            Some("window snapshot stays native-only; it is not exposed on the Worker edge")
+        }
+        "/v1/telemetry" => {
+            Some("telemetry snapshot stays native-only; it is not exposed on the Worker edge")
+        }
+        "/v1/config/window" => {
+            Some("window configuration stays native-only; it is not exposed on the Worker edge")
+        }
+        "/metrics" => Some(
+            "Prometheus metrics are native-only; use Worker logs, analytics, or the internal policy/status routes instead",
+        ),
+        "/v1/debug/window/seed" => {
+            Some("debug window seeding stays native-only; it is not exposed on the Worker edge")
+        }
+        _ => None,
+    }
+}
+
 fn export_server_runtime_metadata_bytes(server: &cityg_server::CityGServer) -> Result<Vec<u8>> {
     server
         .export_runtime_metadata_bytes()
@@ -3679,6 +3740,21 @@ struct RoomStatusResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct WorkerRoutePolicyManifest {
+    edge_only_routes: Vec<WorkerRoutePolicyEntry>,
+    room_durable_object_routes: Vec<WorkerRoutePolicyEntry>,
+    unsupported_native_routes: Vec<WorkerRoutePolicyEntry>,
+    internal_worker_routes: Vec<WorkerRoutePolicyEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkerRoutePolicyEntry {
+    path: &'static str,
+    methods: &'static [&'static str],
+    note: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 struct RoomRealtimeSummary {
     active_websocket_count: usize,
     next_sequence: u64,
@@ -3716,6 +3792,130 @@ struct RoomCheckpointSummary {
     epoch_scope_count: usize,
     message_count: usize,
     stored_bundle_count: usize,
+}
+
+const ROOM_SCOPED_API_ROUTES: [RoomScopedApiRoute; 20] = [
+    RoomScopedApiRoute::AcceptEpoch,
+    RoomScopedApiRoute::Members,
+    RoomScopedApiRoute::SearchMembers,
+    RoomScopedApiRoute::SendMessage,
+    RoomScopedApiRoute::FetchMessages,
+    RoomScopedApiRoute::GetBundle,
+    RoomScopedApiRoute::BootstrapRoom,
+    RoomScopedApiRoute::RotateRoomKbroad,
+    RoomScopedApiRoute::GrantRoomAdmin,
+    RoomScopedApiRoute::RevokeRoomAdmin,
+    RoomScopedApiRoute::ListRoomAdmins,
+    RoomScopedApiRoute::ExpelMemberTicket,
+    RoomScopedApiRoute::JoinTicket,
+    RoomScopedApiRoute::MergeTicket,
+    RoomScopedApiRoute::BarrierResolveRevokedLeaves,
+    RoomScopedApiRoute::BarrierResolveJoinsSince,
+    RoomScopedApiRoute::BarrierFetchPublicTree,
+    RoomScopedApiRoute::BarrierIssueFullVerificationWitness,
+    RoomScopedApiRoute::BarrierLookupMergeAcceptance,
+    RoomScopedApiRoute::RefreshPivot,
+];
+
+fn worker_route_policy_manifest() -> WorkerRoutePolicyManifest {
+    WorkerRoutePolicyManifest {
+        edge_only_routes: vec![
+            WorkerRoutePolicyEntry {
+                path: "/healthz",
+                methods: &["GET"],
+                note: "Edge-only Worker liveness shortcut",
+            },
+            WorkerRoutePolicyEntry {
+                path: "/health",
+                methods: &["GET"],
+                note: "Edge-only native health compatibility response",
+            },
+            WorkerRoutePolicyEntry {
+                path: "/health/live",
+                methods: &["GET"],
+                note: "Edge-only native health compatibility response",
+            },
+            WorkerRoutePolicyEntry {
+                path: "/health/ready",
+                methods: &["GET"],
+                note: "Edge-only native health compatibility response",
+            },
+            WorkerRoutePolicyEntry {
+                path: "/health/detailed",
+                methods: &["GET"],
+                note: "Edge-only Worker health summary",
+            },
+        ],
+        room_durable_object_routes: std::iter::once(WorkerRoutePolicyEntry {
+            path: NATIVE_WEBSOCKET_PATH,
+            methods: &["GET"],
+            note: "Realtime room subscriptions execute in the authoritative room Durable Object",
+        })
+        .chain(
+            ROOM_SCOPED_API_ROUTES
+                .into_iter()
+                .map(|route| WorkerRoutePolicyEntry {
+                    path: route.path(),
+                    methods: &["POST"],
+                    note: "Room-scoped request executes in the authoritative room Durable Object",
+                }),
+        )
+        .collect(),
+        unsupported_native_routes: vec![
+            WorkerRoutePolicyEntry {
+                path: "/v1/window",
+                methods: &["POST"],
+                note: "Native-only debug/window snapshot route",
+            },
+            WorkerRoutePolicyEntry {
+                path: "/v1/telemetry",
+                methods: &["POST"],
+                note: "Native-only telemetry snapshot route",
+            },
+            WorkerRoutePolicyEntry {
+                path: "/v1/config/window",
+                methods: &["POST"],
+                note: "Native-only debug/window mutation route",
+            },
+            WorkerRoutePolicyEntry {
+                path: "/metrics",
+                methods: &["GET"],
+                note: "Prometheus metrics stay native-only; Worker uses logs/analytics/status routes",
+            },
+            WorkerRoutePolicyEntry {
+                path: "/v1/debug/window/seed",
+                methods: &["POST"],
+                note: "Native-only debug route",
+            },
+        ],
+        internal_worker_routes: vec![
+            WorkerRoutePolicyEntry {
+                path: CLOUDFLARE_POLICY_ROUTE,
+                methods: &["GET"],
+                note: "Worker route-policy manifest",
+            },
+            WorkerRoutePolicyEntry {
+                path: CLOUDFLARE_ROOM_ROUTE_PREFIX,
+                methods: &["GET", "POST"],
+                note: "Internal room Durable Object status/checkpoint/sync-routing surface",
+            },
+            WorkerRoutePolicyEntry {
+                path: CLOUDFLARE_ROUTING_ROUTE_PREFIX,
+                methods: &["GET", "POST"],
+                note: "Internal global we_epoch_id routing index Durable Object surface",
+            },
+            WorkerRoutePolicyEntry {
+                path: CLOUDFLARE_ROOM_REGISTRY_ROUTE_PREFIX,
+                methods: &["POST"],
+                note: "Internal known-room registry Durable Object surface",
+            },
+            WorkerRoutePolicyEntry {
+                path: CLOUDFLARE_ALIAS_ROUTE_PREFIX,
+                methods: &["POST"],
+                note: "Internal global alias registry Durable Object surface",
+            },
+        ],
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -4131,6 +4331,56 @@ mod tests {
             "/__cloudflare/rooms/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/accept"
         )
         .is_none());
+    }
+
+    #[test]
+    fn worker_route_policy_manifest_lists_edge_room_and_unsupported_routes() {
+        let manifest = worker_route_policy_manifest();
+        assert!(
+            manifest
+                .edge_only_routes
+                .iter()
+                .any(|route| route.path == "/health")
+        );
+        assert!(
+            manifest
+                .room_durable_object_routes
+                .iter()
+                .any(|route| route.path == NATIVE_WEBSOCKET_PATH)
+        );
+        assert!(
+            manifest
+                .room_durable_object_routes
+                .iter()
+                .any(|route| route.path == RoomScopedApiRoute::AcceptEpoch.path())
+        );
+        assert!(
+            manifest
+                .unsupported_native_routes
+                .iter()
+                .any(|route| route.path == "/metrics")
+        );
+        assert!(
+            manifest
+                .internal_worker_routes
+                .iter()
+                .any(|route| route.path == CLOUDFLARE_POLICY_ROUTE)
+        );
+    }
+
+    #[test]
+    fn unsupported_native_worker_routes_return_explicit_messages() {
+        assert!(
+            unsupported_native_worker_route_message("/metrics")
+                .expect("metrics unsupported")
+                .contains("Prometheus metrics")
+        );
+        assert!(
+            unsupported_native_worker_route_message("/v1/window")
+                .expect("window unsupported")
+                .contains("native-only")
+        );
+        assert_eq!(unsupported_native_worker_route_message("/health"), None);
     }
 
     #[test]
