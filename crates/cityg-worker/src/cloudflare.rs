@@ -93,6 +93,8 @@ const ROOM_SNAPSHOT_FORMAT_VERSION: u32 = 1;
 const NATIVE_WEBSOCKET_PATH: &str = "/v1/ws";
 const WS_MAX_LAG_ENV: &str = "CITYG_SERVER_WS_MAX_LAG";
 const WS_MAX_LAG_DEFAULT: u64 = 256;
+const WS_REPLAY_WINDOW_ENV: &str = "CITYG_WORKER_WS_REPLAY_WINDOW";
+const WS_LAG_NOTICE_THRESHOLD_ENV: &str = "CITYG_WORKER_WS_LAG_NOTICE_THRESHOLD";
 const WEBSOCKET_ACK_TYPE: &str = "ack";
 const WEBSOCKET_PING_REQUEST: &str = "ping";
 const WEBSOCKET_PING_RESPONSE: &str = "pong";
@@ -242,6 +244,7 @@ impl CloudflareRoomDurableObject {
                         storage_backend: "cloudflare-do-sqlite",
                         sqlite_database_size_bytes: store.borrow().storage().database_size_bytes(),
                         routing_entry_count,
+                        realtime: self.realtime_status_summary(),
                         rehydration,
                         checkpoint: checkpoint.as_ref().map(RoomCheckpointSummary::from),
                     })
@@ -1881,7 +1884,8 @@ impl CloudflareRoomDurableObject {
         let sequence = self.next_websocket_sequence();
         let timestamp_ms = current_timestamp_ms();
         let max_lag = configured_ws_max_lag(&self.env);
-        let replay_capacity = websocket_replay_buffer_capacity(max_lag);
+        let replay_capacity = configured_ws_replay_window(&self.env, max_lag);
+        let lag_notice_threshold = configured_ws_lag_notice_threshold(&self.env, max_lag);
         self.record_websocket_replay_event(
             payload.clone(),
             sequence,
@@ -1919,7 +1923,12 @@ impl CloudflareRoomDurableObject {
             }
             let lagged_messages = websocket_lagged_messages(&attachment, sequence);
 
-            if should_emit_websocket_lag_notice(&attachment, lagged_messages, max_lag) {
+            if should_emit_websocket_lag_notice(
+                &attachment,
+                lagged_messages,
+                max_lag,
+                lag_notice_threshold,
+            ) {
                 if let Ok(text) = serde_json::to_string(&websocket_lag_payload(
                     lagged_messages,
                     max_lag,
@@ -1940,6 +1949,31 @@ impl CloudflareRoomDurableObject {
                 continue;
             };
             let _ = websocket.send_with_str(text.as_str());
+        }
+    }
+
+    fn realtime_status_summary(&self) -> RoomRealtimeSummary {
+        let max_lag = configured_ws_max_lag(&self.env);
+        let replay_window_capacity = configured_ws_replay_window(&self.env, max_lag);
+        let lag_notice_threshold = configured_ws_lag_notice_threshold(&self.env, max_lag);
+        let realtime = self.realtime.borrow();
+        let active_websocket_count = self.state.get_websockets().len();
+        let oldest = realtime.replay_buffer.front();
+        let newest = realtime.replay_buffer.back();
+        RoomRealtimeSummary {
+            active_websocket_count,
+            next_sequence: realtime.next_sequence,
+            replay_buffer_len: realtime.replay_buffer.len(),
+            replay_window_capacity,
+            oldest_retained_sequence: oldest.map(|event| event.sequence),
+            newest_retained_sequence: newest.map(|event| event.sequence),
+            oldest_retained_timestamp_ms: oldest.map(|event| event.timestamp_ms),
+            newest_retained_timestamp_ms: newest.map(|event| event.timestamp_ms),
+            max_lag,
+            lag_notice_threshold,
+            sync_required_reason: WEBSOCKET_SYNC_REQUIRED_REASON_REPLAY_WINDOW_EXHAUSTED,
+            sync_required_action: WEBSOCKET_SYNC_REQUIRED_ACTION_REFETCH_AND_RECONNECT,
+            reconcile_via: WEBSOCKET_SYNC_REQUIRED_RECONCILE_VIA_HTTP,
         }
     }
 
@@ -2460,9 +2494,40 @@ fn parse_ws_max_lag(raw: Option<&str>) -> u64 {
         .unwrap_or(WS_MAX_LAG_DEFAULT)
 }
 
+fn parse_ws_replay_window(raw: Option<&str>, max_lag: u64) -> usize {
+    let window = raw
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(max_lag.max(1));
+    usize::try_from(window).unwrap_or(usize::MAX)
+}
+
+fn parse_ws_lag_notice_threshold(raw: Option<&str>, max_lag: u64) -> u64 {
+    raw.and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(max_lag.max(1)))
+        .unwrap_or_else(|| websocket_lag_warning_threshold(max_lag))
+}
+
 fn configured_ws_max_lag(env: &Env) -> u64 {
     let raw = env.var(WS_MAX_LAG_ENV).ok().map(|value| value.to_string());
     parse_ws_max_lag(raw.as_deref())
+}
+
+fn configured_ws_replay_window(env: &Env, max_lag: u64) -> usize {
+    let raw = env
+        .var(WS_REPLAY_WINDOW_ENV)
+        .ok()
+        .map(|value| value.to_string());
+    parse_ws_replay_window(raw.as_deref(), max_lag)
+}
+
+fn configured_ws_lag_notice_threshold(env: &Env, max_lag: u64) -> u64 {
+    let raw = env
+        .var(WS_LAG_NOTICE_THRESHOLD_ENV)
+        .ok()
+        .map(|value| value.to_string());
+    parse_ws_lag_notice_threshold(raw.as_deref(), max_lag)
 }
 
 fn parse_websocket_client_signal(text: &str) -> Option<WebSocketClientSignal> {
@@ -2512,10 +2577,6 @@ fn websocket_lag_warning_threshold(max_lag: u64) -> u64 {
     (max_lag / 2).max(1)
 }
 
-fn websocket_replay_buffer_capacity(max_lag: u64) -> usize {
-    usize::try_from(max_lag.max(1)).unwrap_or(usize::MAX)
-}
-
 fn push_websocket_replay_event(
     replay_buffer: &mut VecDeque<BufferedWebSocketEvent>,
     event: BufferedWebSocketEvent,
@@ -2549,9 +2610,10 @@ fn should_emit_websocket_lag_notice(
     attachment: &WebSocketSessionAttachment,
     lagged_messages: u64,
     max_lag: u64,
+    lag_notice_threshold: u64,
 ) -> bool {
     attachment.last_acknowledged_sequence > 0
-        && lagged_messages >= websocket_lag_warning_threshold(max_lag)
+        && lagged_messages >= lag_notice_threshold
         && lagged_messages <= max_lag
         && attachment.last_lag_notice_acknowledged_sequence != attachment.last_acknowledged_sequence
 }
@@ -3611,8 +3673,26 @@ struct RoomStatusResponse {
     storage_backend: &'static str,
     sqlite_database_size_bytes: usize,
     routing_entry_count: usize,
+    realtime: RoomRealtimeSummary,
     rehydration: Option<RoomRehydrationSummary>,
     checkpoint: Option<RoomCheckpointSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct RoomRealtimeSummary {
+    active_websocket_count: usize,
+    next_sequence: u64,
+    replay_buffer_len: usize,
+    replay_window_capacity: usize,
+    oldest_retained_sequence: Option<u64>,
+    newest_retained_sequence: Option<u64>,
+    oldest_retained_timestamp_ms: Option<u64>,
+    newest_retained_timestamp_ms: Option<u64>,
+    max_lag: u64,
+    lag_notice_threshold: u64,
+    sync_required_reason: &'static str,
+    sync_required_action: &'static str,
+    reconcile_via: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -4273,6 +4353,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_ws_replay_window_defaults_to_max_lag_and_accepts_overrides() {
+        assert_eq!(parse_ws_replay_window(None, 256), 256);
+        assert_eq!(parse_ws_replay_window(Some("0"), 256), 256);
+        assert_eq!(parse_ws_replay_window(Some("nope"), 256), 256);
+        assert_eq!(parse_ws_replay_window(Some("1024"), 256), 1024);
+    }
+
+    #[test]
+    fn parse_ws_lag_notice_threshold_clamps_to_positive_max_lag() {
+        assert_eq!(parse_ws_lag_notice_threshold(None, 256), 128);
+        assert_eq!(parse_ws_lag_notice_threshold(Some("0"), 256), 128);
+        assert_eq!(parse_ws_lag_notice_threshold(Some("nope"), 256), 128);
+        assert_eq!(parse_ws_lag_notice_threshold(Some("8"), 256), 8);
+        assert_eq!(parse_ws_lag_notice_threshold(Some("999"), 12), 12);
+    }
+
+    #[test]
     fn websocket_lag_warning_threshold_halves_max_with_floor() {
         assert_eq!(websocket_lag_warning_threshold(1), 1);
         assert_eq!(websocket_lag_warning_threshold(2), 1);
@@ -4367,14 +4464,14 @@ mod tests {
             last_sent_sequence: 20,
             last_lag_notice_acknowledged_sequence: 0,
         };
-        assert!(should_emit_websocket_lag_notice(&attachment, 8, 12));
+        assert!(should_emit_websocket_lag_notice(&attachment, 8, 12, 6));
 
         let warned = WebSocketSessionAttachment {
             last_lag_notice_acknowledged_sequence: 10,
             ..attachment.clone()
         };
-        assert!(!should_emit_websocket_lag_notice(&warned, 8, 12));
-        assert!(!should_emit_websocket_lag_notice(&attachment, 3, 12));
+        assert!(!should_emit_websocket_lag_notice(&warned, 8, 12, 6));
+        assert!(!should_emit_websocket_lag_notice(&attachment, 3, 12, 6));
         assert!(!should_emit_websocket_lag_notice(
             &WebSocketSessionAttachment {
                 last_acknowledged_sequence: 0,
@@ -4382,6 +4479,7 @@ mod tests {
             },
             8,
             12,
+            6,
         ));
     }
 

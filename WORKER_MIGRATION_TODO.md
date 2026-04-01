@@ -131,6 +131,8 @@ runtime code.
 
 - [x] Stabilize the Worker websocket contract around sequenced hints plus HTTP reconciliation.
   The DO-native `/v1/ws` path now carries per-socket attachment metadata, explicit `ack` / `resume` parsing, per-room fanout sequences, a bounded replay buffer, `lag` warnings, replay of still-retained notifications, and an explicit `sync_required` control frame once the replay window is exhausted. The native GUI path and the `join_leave` client both treat the Worker websocket as a low-latency hint stream that reconciles through HTTP epoch sync and message fetch instead of trying to preserve the native in-process broadcast semantics exactly.
+- [x] Make the Worker websocket policy tunable and observable.
+  The room Durable Object status route now reports realtime replay-window state and the effective `lag` / `sync_required` policy, and the replay window plus lag-notice threshold can now be tuned independently through `CITYG_WORKER_WS_REPLAY_WINDOW` and `CITYG_WORKER_WS_LAG_NOTICE_THRESHOLD`.
 
 ## Next
 
@@ -150,4 +152,4 @@ runtime code.
 - [ ] Whether `CITYG_WORKER_CONFIG_JSON` is sufficient as the long-term delivery mechanism, or should be replaced by typed object bindings / signed policy documents.
 - [ ] Whether the global alias registry should stay single-object for parity or be sharded once cross-room alias semantics are revisited explicitly.
 - [ ] Whether the protocol should keep the historical `"ML-DSA-65"` label while using Dilithium5-compatible key/signature sizes, or whether that wire-level naming mismatch should be corrected in a versioned migration.
-- [ ] Whether the current Worker replay-window size and `sync_required` threshold are sufficient once real traffic patterns are measured.
+- [ ] Whether the current Worker replay-window size and `sync_required` thresholds are sufficient once real traffic patterns are measured.
