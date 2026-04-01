@@ -1,21 +1,24 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use ciborium::Value;
 use cityg_api_client::{BarrierJoinRecord, HistoryCommitment};
 
 #[allow(unused_imports)]
 pub use cityg_client::barrier::{
     BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierHistoryCommitment,
-    BarrierTreePathSaltPreimage, DEFAULT_BARRIER_N_MAX, MAX_BARRIER_N_MAX,
-    TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS, TICKET_RETRY_MAX_ATTEMPTS,
-    TICKET_RETRY_MAX_DELAY_MS, apply_revoked_set_to_snapshot, barrier_path_nodes,
-    blank_internal_path_from_leaf, blank_leaf_and_path, collect_resolution_targets,
-    compute_barrier_pkhash, compute_barrier_tree_hash, compute_revocation_roots_hash,
+    BarrierJoinSnapshotRecord, BarrierTreePathSaltPreimage, DEFAULT_BARRIER_N_MAX,
+    MAX_BARRIER_N_MAX, TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS,
+    TICKET_RETRY_MAX_ATTEMPTS, TICKET_RETRY_MAX_DELAY_MS, apply_revoked_set_to_snapshot,
+    barrier_path_nodes, blank_internal_path_from_leaf, blank_leaf_and_path,
+    collect_resolution_targets, compute_barrier_pkhash, compute_barrier_tree_hash,
+    compute_revocation_roots_hash,
     decode_history_commitment_header as decode_core_history_commitment_header,
     encode_full_verification_receipt,
     encode_history_commitment_header as encode_core_history_commitment_header,
-    expected_barrier_tree_nodes, header_history_commitment as header_core_history_commitment,
+    expected_barrier_tree_nodes,
+    expected_same_rrh_barrier_reason as expected_core_same_rrh_barrier_reason,
+    header_history_commitment as header_core_history_commitment,
     require_current_state_history_commitment as require_core_current_state_history_commitment,
     require_same_history_commitment as require_core_same_history_commitment,
     should_retry_ticket_http_error, sibling_node, ticket_retry_delay, validate_barrier_n_max,
@@ -62,10 +65,18 @@ fn from_core_history_commitment(commitment: BarrierHistoryCommitment) -> History
     }
 }
 
+fn to_core_join_snapshot_record(record: &BarrierJoinRecord) -> BarrierJoinSnapshotRecord {
+    BarrierJoinSnapshotRecord {
+        leaf_index: record.leaf_index,
+        ek_leaf: record.ek_leaf.clone(),
+    }
+}
+
 pub fn encode_history_commitment_header(commitment: &HistoryCommitment) -> Result<Vec<u8>> {
     encode_core_history_commitment_header(&to_core_history_commitment(commitment))
 }
 
+#[allow(dead_code)]
 pub fn decode_history_commitment_header(raw: &[u8]) -> Result<HistoryCommitment> {
     decode_core_history_commitment_header(raw).map(from_core_history_commitment)
 }
@@ -81,18 +92,22 @@ pub fn apply_join_set_to_snapshot(
     n_max: u64,
     join_records: &[BarrierJoinRecord],
 ) -> Result<()> {
-    let leaf_base = n_max.saturating_sub(1);
-    for record in join_records {
-        let leaf_node = leaf_base.saturating_add(u64::from(record.leaf_index));
-        let index =
-            usize::try_from(leaf_node).map_err(|_| anyhow!("barrier node index out of range"))?;
-        let slot = snapshot
-            .get_mut(index)
-            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
-        *slot = record.ek_leaf.clone();
-        blank_internal_path_from_leaf(snapshot, leaf_node)?;
-    }
-    Ok(())
+    let core_records: Vec<_> = join_records
+        .iter()
+        .map(to_core_join_snapshot_record)
+        .collect();
+    cityg_client::barrier::apply_join_set_to_snapshot(snapshot, n_max, core_records.as_slice())
+}
+
+pub fn expected_same_rrh_barrier_reason(
+    join_records: &[BarrierJoinRecord],
+    updater_leaf: u64,
+) -> u64 {
+    let core_records: Vec<_> = join_records
+        .iter()
+        .map(to_core_join_snapshot_record)
+        .collect();
+    expected_core_same_rrh_barrier_reason(core_records.as_slice(), updater_leaf)
 }
 
 #[cfg(test)]

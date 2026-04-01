@@ -1,6 +1,13 @@
 use super::*;
 use crate::barrier_shared::{
-    require_current_state_history_commitment, require_same_history_commitment,
+    expected_same_rrh_barrier_reason, require_current_state_history_commitment,
+    require_same_history_commitment,
+};
+#[allow(unused_imports)]
+pub(super) use cityg_client::barrier_update::{
+    BarrierUpdateWire, KemTreeCoverPayloadWire, NewPublicKeyWire, NodeCiphertextWire,
+    ParsedBarrierUpdate, ParsedNodeCiphertext, compute_barrier_update_digest,
+    normalize_max_barrier_update_bytes, parse_barrier_update_for_recover,
 };
 
 pub(super) const BARRIER_KEYGEN_D_INFO: &[u8] = b"city-g|barrier/keygen-d|v1";
@@ -10,9 +17,6 @@ pub(super) const ML_KEM_SEED_BYTES: usize = 64;
 pub(super) const ML_KEM_EXPANDED_DK_BYTES: usize = 2400;
 pub(super) const BARRIER_CODE_RECOVER_NO_MATCH: u32 = 9606;
 pub(super) const BARRIER_CODE_SNAPSHOT_AUTH_FAILURE: u32 = 9609;
-
-#[derive(Serialize)]
-struct BarrierUpdateDigestPreimage<'a>(#[serde(with = "serde_bytes")] &'a [u8]);
 
 #[derive(Serialize)]
 pub(super) struct BarrierWrapNoncePreimage(pub(super) u64, pub(super) u64);
@@ -44,65 +48,6 @@ struct BarrierKeygenSaltPreimage<'a>(
     u64,
 );
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct BarrierUpdateWire(
-    pub(super) String,
-    pub(super) u64,
-    pub(super) u64,
-    pub(super) u64,
-    #[serde(with = "serde_bytes")] pub(super) Vec<u8>,
-    #[serde(with = "serde_bytes")] pub(super) Vec<u8>,
-    #[serde(with = "serde_bytes")] pub(super) Vec<u8>,
-    #[serde(with = "serde_bytes")] pub(super) Vec<u8>,
-);
-
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct KemTreeCoverPayloadWire(
-    pub(super) u64,
-    pub(super) Vec<u64>,
-    pub(super) Option<Vec<u64>>,
-    pub(super) Vec<NodeCiphertextWire>,
-    pub(super) Vec<NewPublicKeyWire>,
-);
-
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct NodeCiphertextWire(
-    pub(super) u64,
-    pub(super) u64,
-    #[serde(with = "serde_bytes")] pub(super) Vec<u8>,
-    #[serde(with = "serde_bytes")] pub(super) Vec<u8>,
-    #[serde(with = "serde_bytes")] pub(super) Vec<u8>,
-);
-
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct NewPublicKeyWire(
-    pub(super) u64,
-    #[serde(with = "serde_bytes")] pub(super) Vec<u8>,
-);
-
-#[derive(Clone, Debug)]
-pub(super) struct ParsedNodeCiphertext {
-    pub(super) source_node: u64,
-    pub(super) target_node: u64,
-    pub(super) target_pk_hash: [u8; 16],
-    pub(super) kem_ct: Vec<u8>,
-    pub(super) wrapped_ps: Vec<u8>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct ParsedBarrierUpdate {
-    pub(super) barrier_version: u64,
-    pub(super) prev_barrier_version: u64,
-    pub(super) tree_size: u64,
-    pub(super) revocation_roots_hash: [u8; 32],
-    pub(super) kem_tree_hash_before: [u8; 32],
-    pub(super) kem_tree_hash_after: [u8; 32],
-    pub(super) updater_leaf: u64,
-    pub(super) path_nodes: Vec<u64>,
-    pub(super) node_ciphertexts: Vec<ParsedNodeCiphertext>,
-    pub(super) new_public_keys: BTreeMap<u64, Vec<u8>>,
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct BarrierRecoverResult {
     pub(super) barrier_version: u64,
@@ -126,14 +71,6 @@ pub(super) struct BarrierUpdateBuildResult {
 pub(super) struct FullChainCheckResult {
     pub(super) expected_before: [u8; 32],
     pub(super) snapshot_post: Arc<BarrierPublicTree>,
-}
-
-pub(super) fn compute_barrier_update_digest(raw_update: &[u8]) -> Result<[u8; 32]> {
-    h_l(
-        "barrier/update/digest",
-        &BarrierUpdateDigestPreimage(raw_update),
-    )
-    .map_err(|err| anyhow!("compute barrier_update_digest: {err}"))
 }
 
 pub(super) fn validate_barrier_tree_snapshot_auth(
@@ -394,228 +331,10 @@ pub(super) fn install_authenticated_current_state(
     }
 }
 
-pub(super) fn expected_same_rrh_barrier_reason(
-    join_records: &[BarrierJoinRecord],
-    updater_leaf: u64,
-) -> u64 {
-    if join_records
-        .iter()
-        .any(|record| u64::from(record.leaf_index) == updater_leaf)
-    {
-        2
-    } else {
-        1
-    }
-}
-
 pub(super) fn zeroize_path_secret_map(path_secrets: &mut BTreeMap<u64, [u8; 32]>) {
     for secret in path_secrets.values_mut() {
         secret.zeroize();
     }
-}
-
-pub(super) fn parse_deterministic_cbor<T>(raw: &[u8], label: &str) -> Result<T>
-where
-    T: DeserializeOwned + Serialize,
-{
-    let decoded: T =
-        ciborium::de::from_reader(raw).map_err(|err| anyhow!("failed to parse {label}: {err}"))?;
-    let canonical = to_cbor_vec(&decoded)
-        .map_err(|err| anyhow!("failed to re-encode canonical {label}: {err}"))?;
-    if canonical.as_slice() != raw {
-        return Err(anyhow!("non-canonical {label} encoding"));
-    }
-    Ok(decoded)
-}
-
-pub(super) fn to_array32(label: &str, bytes: Vec<u8>) -> Result<[u8; 32]> {
-    bytes
-        .try_into()
-        .map_err(|_| anyhow!("{label} must be 32 bytes"))
-}
-
-pub(super) fn to_array16(label: &str, bytes: Vec<u8>) -> Result<[u8; 16]> {
-    bytes
-        .try_into()
-        .map_err(|_| anyhow!("{label} must be 16 bytes"))
-}
-
-pub(super) fn normalize_max_barrier_update_bytes(limit: u64) -> Result<usize> {
-    if limit == 0 {
-        return Err(anyhow!("max_barrier_update_bytes must be positive"));
-    }
-    usize::try_from(limit).map_err(|_| anyhow!("max_barrier_update_bytes is too large"))
-}
-
-pub(super) fn parse_barrier_update_for_recover(
-    raw_update: &[u8],
-    expected_n_max: u64,
-    max_barrier_update_bytes: usize,
-) -> Result<ParsedBarrierUpdate> {
-    if raw_update.len() > max_barrier_update_bytes {
-        return Err(anyhow!(
-            "barrier_update exceeds max_barrier_update_bytes: {} > {}",
-            raw_update.len(),
-            max_barrier_update_bytes
-        ));
-    }
-    let expected_n_max = validate_barrier_n_max(expected_n_max)?;
-
-    let BarrierUpdateWire(
-        mode,
-        barrier_version,
-        prev_barrier_version,
-        tree_size,
-        revocation_roots_hash,
-        kem_tree_hash_before,
-        kem_tree_hash_after,
-        cover_payload,
-    ) = parse_deterministic_cbor(raw_update, "barrier_update")?;
-
-    if mode != "barrier-v1" {
-        return Err(anyhow!("unsupported barrier update mode: {mode}"));
-    }
-    if tree_size != expected_n_max {
-        return Err(anyhow!(
-            "barrier tree_size mismatch: expected {expected_n_max}, got {tree_size}"
-        ));
-    }
-
-    let KemTreeCoverPayloadWire(
-        updater_leaf,
-        path_nodes,
-        _revoked_leaf_indices_hint,
-        node_ciphertexts_wire,
-        new_public_keys,
-    ) = parse_deterministic_cbor(cover_payload.as_slice(), "barrier cover payload")?;
-
-    if updater_leaf >= expected_n_max {
-        return Err(anyhow!("barrier updater_leaf out of range"));
-    }
-
-    let expected_nodes = expected_n_max
-        .checked_mul(2)
-        .and_then(|v| v.checked_sub(1))
-        .ok_or_else(|| anyhow!("barrier tree size overflow"))?;
-    let max_index = expected_nodes.saturating_sub(1);
-    let leaf_base = expected_n_max.saturating_sub(1);
-    let expected_leaf = leaf_base.saturating_add(updater_leaf);
-
-    if path_nodes.is_empty() {
-        return Err(anyhow!("barrier path_nodes must be non-empty"));
-    }
-    if path_nodes.first().copied() != Some(expected_leaf) {
-        return Err(anyhow!(
-            "barrier path_nodes must start at updater leaf node"
-        ));
-    }
-    if path_nodes.last().copied() != Some(0) {
-        return Err(anyhow!("barrier path_nodes must end at root node"));
-    }
-    let mut path_seen = HashSet::new();
-    for &node in &path_nodes {
-        if node > max_index {
-            return Err(anyhow!("barrier path node out of range"));
-        }
-        if !path_seen.insert(node) {
-            return Err(anyhow!("barrier path_nodes contains duplicate nodes"));
-        }
-    }
-    for pair in path_nodes.windows(2) {
-        let child = pair[0];
-        let parent = pair[1];
-        if child == 0 || (child - 1) / 2 != parent {
-            return Err(anyhow!("barrier path_nodes parent chain is invalid"));
-        }
-    }
-
-    let expected_public_nodes: HashSet<u64> = path_nodes.iter().copied().skip(1).collect();
-    if new_public_keys.len() != expected_public_nodes.len() {
-        return Err(anyhow!(
-            "barrier new_public_keys length does not match ExpectedNodeSet"
-        ));
-    }
-    let mut seen_public_nodes = HashSet::new();
-    let mut prev_public_node: Option<u64> = None;
-    let mut parsed_new_public_keys = BTreeMap::new();
-    for NewPublicKeyWire(node_index, ek) in &new_public_keys {
-        if *node_index > max_index {
-            return Err(anyhow!("barrier new_public_keys node out of range"));
-        }
-        if *node_index >= leaf_base {
-            return Err(anyhow!(
-                "barrier new_public_keys may reference only internal nodes"
-            ));
-        }
-        if ek.len() != kyber768::public_key_bytes() {
-            return Err(anyhow!(
-                "barrier new_public_keys ek must be ML-KEM-768 length"
-            ));
-        }
-        if prev_public_node.is_some_and(|prev| prev >= *node_index) {
-            return Err(anyhow!(
-                "barrier new_public_keys must be sorted by node index"
-            ));
-        }
-        prev_public_node = Some(*node_index);
-        if !seen_public_nodes.insert(*node_index) {
-            return Err(anyhow!(
-                "barrier new_public_keys contains duplicate node index"
-            ));
-        }
-        parsed_new_public_keys.insert(*node_index, ek.clone());
-    }
-    if seen_public_nodes != expected_public_nodes {
-        return Err(anyhow!(
-            "barrier new_public_keys must match ExpectedNodeSet exactly"
-        ));
-    }
-
-    let mut node_ciphertexts = Vec::with_capacity(node_ciphertexts_wire.len());
-    let mut prev_pair: Option<(u64, u64)> = None;
-    for NodeCiphertextWire(source_node, target_node, target_pk_hash, kem_ct, wrapped_ps) in
-        node_ciphertexts_wire
-    {
-        if source_node > max_index || target_node > max_index {
-            return Err(anyhow!("barrier node_ciphertext index out of range"));
-        }
-        if target_pk_hash.len() != 16 {
-            return Err(anyhow!("barrier target_pk_hash must be 16 bytes"));
-        }
-        if kem_ct.len() != kyber768::ciphertext_bytes() {
-            return Err(anyhow!("barrier kem_ct length mismatch"));
-        }
-        if wrapped_ps.len() != 48 {
-            return Err(anyhow!("barrier wrapped_ps must be 48 bytes"));
-        }
-        let pair = (source_node, target_node);
-        if prev_pair.is_some_and(|prev| prev >= pair) {
-            return Err(anyhow!(
-                "barrier node_ciphertexts must be sorted and duplicate-free"
-            ));
-        }
-        prev_pair = Some(pair);
-        node_ciphertexts.push(ParsedNodeCiphertext {
-            source_node,
-            target_node,
-            target_pk_hash: to_array16("target_pk_hash", target_pk_hash)?,
-            kem_ct,
-            wrapped_ps,
-        });
-    }
-
-    Ok(ParsedBarrierUpdate {
-        barrier_version,
-        prev_barrier_version,
-        tree_size,
-        revocation_roots_hash: to_array32("revocation_roots_hash", revocation_roots_hash)?,
-        kem_tree_hash_before: to_array32("kem_tree_hash_before", kem_tree_hash_before)?,
-        kem_tree_hash_after: to_array32("kem_tree_hash_after", kem_tree_hash_after)?,
-        updater_leaf,
-        path_nodes,
-        node_ciphertexts,
-        new_public_keys: parsed_new_public_keys,
-    })
 }
 
 pub(super) async fn full_chain_check_barrier_update(

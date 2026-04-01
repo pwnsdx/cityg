@@ -26,6 +26,13 @@ pub struct BarrierHistoryCommitment {
     pub history_seq: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BarrierJoinSnapshotRecord {
+    pub leaf_index: u32,
+    #[serde(with = "serde_bytes")]
+    pub ek_leaf: Vec<u8>,
+}
+
 #[derive(Serialize)]
 struct BarrierRootsPreimage<'a>(
     #[serde(with = "serde_bytes")] &'a [u8; 32],
@@ -456,6 +463,39 @@ pub fn apply_revoked_set_to_snapshot(
     Ok(())
 }
 
+pub fn apply_join_set_to_snapshot(
+    snapshot: &mut [Vec<u8>],
+    n_max: u64,
+    join_records: &[BarrierJoinSnapshotRecord],
+) -> Result<()> {
+    let leaf_base = n_max.saturating_sub(1);
+    for record in join_records {
+        let leaf_node = leaf_base.saturating_add(u64::from(record.leaf_index));
+        let index =
+            usize::try_from(leaf_node).map_err(|_| anyhow!("barrier node index out of range"))?;
+        let slot = snapshot
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
+        *slot = record.ek_leaf.clone();
+        blank_internal_path_from_leaf(snapshot, leaf_node)?;
+    }
+    Ok(())
+}
+
+pub fn expected_same_rrh_barrier_reason(
+    join_records: &[BarrierJoinSnapshotRecord],
+    updater_leaf: u64,
+) -> u64 {
+    if join_records
+        .iter()
+        .any(|record| u64::from(record.leaf_index) == updater_leaf)
+    {
+        2
+    } else {
+        1
+    }
+}
+
 pub fn collect_resolution_targets(
     snapshot: &[Vec<u8>],
     node: u64,
@@ -611,6 +651,47 @@ mod tests {
         collect_resolution_targets(snapshot.as_slice(), 0, 3, &mut targets)?;
         assert_eq!(targets, vec![3, 2]);
         Ok(())
+    }
+
+    #[test]
+    fn apply_join_set_to_snapshot_installs_leaf_and_blanks_internal_path() -> Result<()> {
+        let mut snapshot = vec![
+            vec![0xA0],
+            vec![0xA1],
+            vec![0xA2],
+            vec![0xA3],
+            vec![0xA4],
+            vec![0xA5],
+            vec![0xA6],
+        ];
+        apply_join_set_to_snapshot(
+            snapshot.as_mut_slice(),
+            4,
+            &[BarrierJoinSnapshotRecord {
+                leaf_index: 1,
+                ek_leaf: vec![0xCC; 8],
+            }],
+        )?;
+        assert_eq!(snapshot[4], vec![0xCC; 8]);
+        assert!(snapshot[1].is_empty());
+        assert!(snapshot[0].is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn expected_same_rrh_barrier_reason_tracks_joiner_vs_refresh() {
+        let join_records = vec![BarrierJoinSnapshotRecord {
+            leaf_index: 3,
+            ek_leaf: vec![0xAA; 8],
+        }];
+        assert_eq!(
+            expected_same_rrh_barrier_reason(join_records.as_slice(), 3),
+            2
+        );
+        assert_eq!(
+            expected_same_rrh_barrier_reason(join_records.as_slice(), 4),
+            1
+        );
     }
 
     #[test]
