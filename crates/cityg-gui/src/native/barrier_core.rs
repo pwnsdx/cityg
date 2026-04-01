@@ -3,6 +3,8 @@ use crate::barrier_shared::{
     expected_same_rrh_barrier_reason, require_current_state_history_commitment,
     require_same_history_commitment,
 };
+#[allow(unused_imports)]
+pub(super) use cityg_client::barrier_build::{BarrierWrapAadPreimage, BarrierWrapNoncePreimage};
 pub(super) use cityg_client::barrier_crypto::{
     ML_KEM_EXPANDED_DK_BYTES, decapsulate_internal_node_shared_secret,
     derive_internal_node_key_material, derive_k_fs_after_pcs,
@@ -16,24 +18,6 @@ pub(super) use cityg_client::barrier_update::{
 
 pub(super) const BARRIER_CODE_RECOVER_NO_MATCH: u32 = 9606;
 pub(super) const BARRIER_CODE_SNAPSHOT_AUTH_FAILURE: u32 = 9609;
-
-#[derive(Serialize)]
-pub(super) struct BarrierWrapNoncePreimage(pub(super) u64, pub(super) u64);
-
-#[derive(Serialize)]
-pub(super) struct BarrierWrapAadPreimage<'a>(
-    #[serde(with = "serde_bytes")] pub(super) &'a [u8; 32],
-    pub(super) u64,
-    pub(super) u64,
-    pub(super) u64,
-    #[serde(with = "serde_bytes")] pub(super) &'a [u8; 32],
-    #[serde(with = "serde_bytes")] pub(super) &'a [u8; 32],
-    #[serde(with = "serde_bytes")] pub(super) &'a [u8; 32],
-    pub(super) u64,
-    pub(super) u64,
-    pub(super) u64,
-    #[serde(with = "serde_bytes")] pub(super) &'a [u8; 32],
-);
 
 #[derive(Clone, Debug)]
 pub(super) struct BarrierRecoverResult {

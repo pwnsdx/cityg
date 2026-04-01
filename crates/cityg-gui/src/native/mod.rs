@@ -9,10 +9,13 @@ use std::{
 use crate::barrier_shared::{
     BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
     DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, apply_join_set_to_snapshot,
-    apply_revoked_set_to_snapshot, barrier_path_nodes, collect_resolution_targets,
-    compute_barrier_pkhash, compute_barrier_tree_hash, compute_revocation_roots_hash,
-    expected_barrier_tree_nodes, should_retry_ticket_http_error, sibling_node, ticket_retry_delay,
+    apply_revoked_set_to_snapshot, compute_barrier_pkhash, compute_barrier_tree_hash,
+    compute_revocation_roots_hash, should_retry_ticket_http_error, ticket_retry_delay,
     validate_barrier_n_max,
+};
+#[cfg(test)]
+use crate::barrier_shared::{
+    barrier_path_nodes, collect_resolution_targets, expected_barrier_tree_nodes, sibling_node,
 };
 #[cfg(test)]
 use crate::message_crypto::{
@@ -68,9 +71,9 @@ use pqcrypto_dilithium::dilithium5::{
     public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
 };
 use pqcrypto_kyber::kyber768;
-use pqcrypto_traits::kem::{
-    Ciphertext as KemCiphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey,
-};
+#[cfg(test)]
+use pqcrypto_traits::kem::Ciphertext as KemCiphertext;
+use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey};
 use pqcrypto_traits::sign::{
     DetachedSignature, PublicKey as DilithiumPublicKey, SecretKey as DilithiumSecretKey,
 };

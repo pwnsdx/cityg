@@ -2,6 +2,10 @@ use super::*;
 use crate::barrier_shared::{
     header_history_commitment, require_same_history_commitment, verify_full_verification_receipt,
 };
+use cityg_client::barrier_build::{
+    BarrierUpdateBuildResult as CoreBarrierUpdateBuildResult,
+    build_barrier_update_bytes as build_barrier_update_bytes_core,
+};
 use msphf_orchestrator::{LeafIdMode, compute_leaf_id};
 
 pub(super) fn clear_join_finalize_bootstrap_artifact(state: &mut BarrierSecretState) {
@@ -1059,196 +1063,41 @@ pub(super) fn build_barrier_update_bytes(
     kem_tree_hash_before: [u8; 32],
     snapshot_pre: &[Vec<u8>],
 ) -> Result<BarrierUpdateBuildResult> {
-    let n_max = validate_barrier_n_max(n_max)?;
-    if updater_leaf >= n_max {
-        return Err(anyhow!("invalid barrier update tree parameters"));
-    }
-    let expected_nodes = expected_barrier_tree_nodes(n_max)?;
-    if snapshot_pre.len() != expected_nodes {
-        return Err(anyhow!(
-            "barrier snapshot size mismatch: expected {expected_nodes}, got {}",
-            snapshot_pre.len()
-        ));
-    }
-
-    let leaf_base = n_max.saturating_sub(1);
-    let path_nodes = barrier_path_nodes(n_max, updater_leaf)?;
-
-    let mut path_secrets = BTreeMap::new();
-    let mut ps_leaf = [0u8; 32];
-    rng().fill(&mut ps_leaf);
-    path_secrets.insert(path_nodes[0], ps_leaf);
-    ps_leaf.zeroize();
-    for k in 1..path_nodes.len() {
-        let parent_node = path_nodes[k];
-        let child_node = path_nodes[k - 1];
-        let child_secret = path_secrets
-            .get(&child_node)
-            .ok_or_else(|| anyhow!("barrier path secret derivation missing child"))?;
-        let salt = h_l(
-            "barrier/tree/path",
-            &BarrierTreePathSaltPreimage(gid.as_slice(), parent_node),
-        )
-        .map_err(|err| anyhow!("derive barrier tree/path salt: {err}"))?;
-        let parent_secret = hkdf_blake3(&salt, child_secret, BARRIER_TREE_INFO);
-        path_secrets.insert(parent_node, parent_secret);
-    }
-
-    let root_secret = path_secrets
-        .get(&0)
-        .ok_or_else(|| anyhow!("barrier path secret derivation missing root"))?;
-    let barrier_salt = h_l(
-        "barrier/derive/salt",
-        &BarrierDeriveSaltPreimage(gid.as_slice(), barrier_version, &revocation_roots_hash),
-    )
-    .map_err(|err| anyhow!("derive barrier/derive/salt: {err}"))?;
-    let k_barrier_new = hkdf_blake3(&barrier_salt, root_secret, BARRIER_KEY_INFO);
-
-    let mut expected_nodes: Vec<u64> = path_nodes.iter().copied().skip(1).collect();
-    expected_nodes.sort_unstable();
-    let mut on_path_key_material = BTreeMap::new();
-    let mut new_public_keys = Vec::with_capacity(expected_nodes.len());
-    for node in expected_nodes {
-        let path_secret = path_secrets
-            .get(&node)
-            .ok_or_else(|| anyhow!("missing path secret for node {node}"))?;
-        let (dk_bytes, pkhash, ek_bytes) = derive_internal_node_key_material(
-            gid.as_slice(),
-            path_secret,
-            barrier_version,
-            &revocation_roots_hash,
-            n_max,
-            node,
-        )?;
-        let node_index = u32::try_from(node).map_err(|_| anyhow!("barrier node index overflow"))?;
-        on_path_key_material.insert(
-            node_index,
-            BarrierNodeKeyMaterial {
-                dk: Zeroizing::new(dk_bytes),
-                pkhash,
-            },
-        );
-        new_public_keys.push(NewPublicKeyWire(node, ek_bytes));
-    }
-
-    let mut snapshot_post = snapshot_pre.to_vec();
-    for NewPublicKeyWire(node, ek) in &new_public_keys {
-        let idx = usize::try_from(*node).map_err(|_| anyhow!("barrier node index out of range"))?;
-        let slot = snapshot_post
-            .get_mut(idx)
-            .ok_or_else(|| anyhow!("barrier node index out of range"))?;
-        *slot = ek.clone();
-    }
-    let kem_tree_hash_after = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
-
-    let mut node_ciphertexts = Vec::new();
-    for step in 0..path_nodes.len().saturating_sub(1) {
-        let child_node = path_nodes[step];
-        let source_node = path_nodes[step + 1];
-        let sibling =
-            sibling_node(child_node).ok_or_else(|| anyhow!("barrier sibling missing for root"))?;
-        let mut targets = Vec::new();
-        collect_resolution_targets(snapshot_pre, sibling, leaf_base, &mut targets)?;
-        targets.sort_unstable();
-        for target_node in targets {
-            let target_index = usize::try_from(target_node)
-                .map_err(|_| anyhow!("barrier node index out of range"))?;
-            let target_pk = snapshot_pre
-                .get(target_index)
-                .ok_or_else(|| anyhow!("barrier node index out of range"))?;
-            if target_pk.is_empty() {
-                return Err(anyhow!("barrier resolution produced blank target node"));
-            }
-            let target_pkhash = compute_barrier_pkhash(target_pk.as_slice())?;
-            let target_ek = kyber768::PublicKey::from_bytes(target_pk.as_slice())
-                .map_err(|_| anyhow!("invalid ML-KEM target public key in snapshot_pre"))?;
-            let (ss, kem_ct) = kyber768::encapsulate(&target_ek);
-            let mut ss_bytes = [0u8; 32];
-            ss_bytes.copy_from_slice(ss.as_bytes());
-
-            let aad = to_cbor_vec(&BarrierWrapAadPreimage(
-                gid,
-                barrier_version,
-                prev_barrier_version,
-                n_max,
-                &revocation_roots_hash,
-                &kem_tree_hash_before,
-                &kem_tree_hash_after,
-                updater_leaf,
-                source_node,
-                target_node,
-                &target_pkhash,
-            ))
-            .map_err(|err| anyhow!("encode barrier wrap aad: {err}"))?;
-            let nonce_full = h_l(
-                "barrier/wrap/nonce",
-                &BarrierWrapNoncePreimage(source_node, target_node),
-            )
-            .map_err(|err| anyhow!("derive barrier wrap nonce: {err}"))?;
-            let mut nonce = [0u8; 12];
-            nonce.copy_from_slice(&nonce_full[..12]);
-
-            let source_secret = path_secrets
-                .get(&source_node)
-                .ok_or_else(|| anyhow!("missing path secret for source node {source_node}"))?;
-            use chacha20poly1305::{
-                ChaCha20Poly1305,
-                aead::{Aead, KeyInit, Payload},
-            };
-            let cipher = ChaCha20Poly1305::new((&ss_bytes).into());
-            let wrapped_ps = match cipher.encrypt(
-                (&nonce).into(),
-                Payload {
-                    msg: source_secret.as_slice(),
-                    aad: aad.as_slice(),
-                },
-            ) {
-                Ok(wrapped_ps) => wrapped_ps,
-                Err(_) => {
-                    ss_bytes.zeroize();
-                    return Err(anyhow!("barrier wrap encrypt failed"));
-                }
-            };
-            ss_bytes.zeroize();
-            node_ciphertexts.push(NodeCiphertextWire(
-                source_node,
-                target_node,
-                target_pkhash[..16].to_vec(),
-                KemCiphertext::as_bytes(&kem_ct).to_vec(),
-                wrapped_ps,
-            ));
-        }
-    }
-    node_ciphertexts.sort_by_key(|entry| (entry.0, entry.1));
-
-    let cover_payload = KemTreeCoverPayloadWire(
+    let CoreBarrierUpdateBuildResult {
+        raw_update,
+        barrier_update_digest,
+        kem_tree_hash_after,
+        k_barrier_new,
+        on_path_key_material,
+        snapshot_post,
+    } = build_barrier_update_bytes_core(
+        gid,
+        n_max,
         updater_leaf,
-        path_nodes,
-        None,
-        node_ciphertexts,
-        new_public_keys,
-    );
-    let cover_bytes = to_cbor_vec(&cover_payload).context("encode barrier cover payload")?;
-
-    let update = BarrierUpdateWire(
-        "barrier-v1".to_string(),
         barrier_version,
         prev_barrier_version,
-        n_max,
-        revocation_roots_hash.to_vec(),
-        kem_tree_hash_before.to_vec(),
-        kem_tree_hash_after.to_vec(),
-        cover_bytes,
-    );
-    let raw_update = to_cbor_vec(&update).context("encode barrier update")?;
-    let barrier_update_digest = compute_barrier_update_digest(raw_update.as_slice())?;
-    zeroize_path_secret_map(&mut path_secrets);
+        revocation_roots_hash,
+        kem_tree_hash_before,
+        snapshot_pre,
+    )?;
+
     Ok(BarrierUpdateBuildResult {
         raw_update,
         barrier_update_digest,
         kem_tree_hash_after,
-        k_barrier_new: Zeroizing::new(k_barrier_new),
-        on_path_key_material,
+        k_barrier_new,
+        on_path_key_material: on_path_key_material
+            .into_iter()
+            .map(|(node, material)| {
+                (
+                    node,
+                    BarrierNodeKeyMaterial {
+                        dk: material.dk,
+                        pkhash: material.pkhash,
+                    },
+                )
+            })
+            .collect(),
         snapshot_post: Arc::new(BarrierPublicTree {
             n_max,
             kem_tree_hash_after,
