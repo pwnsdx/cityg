@@ -65,8 +65,9 @@ use worker::{
 
 use crate::{
     DurableObjectRoomStateStore, DurableObjectStorage, RoomStateStore, WORKER_CONFIG_JSON_ENV,
-    WORKER_KNOWN_GIDS_JSON_ENV, WorkerHistoryAuthority, WorkerRoomBootstrap,
-    rehydrate_runtime_room_from_checkpoint,
+    WORKER_FS_EPOCH_PERIOD_SECS_ENV, WORKER_FS_POLICY_VERSION_ENV, WORKER_H_MAX_ENV,
+    WORKER_HISTORY_AUTHORITY_ENV, WORKER_KNOWN_GIDS_JSON_ENV, WORKER_WINDOW_TTL_SECS_ENV,
+    WorkerHistoryAuthority, WorkerRoomBootstrap, rehydrate_runtime_room_from_checkpoint,
 };
 
 pub const CLOUDFLARE_ROOM_NAMESPACE_BINDING: &str = "CITYG_ROOM";
@@ -229,12 +230,16 @@ impl CloudflareRoomDurableObject {
                         .borrow()
                         .load_checkpoint(&gid)
                         .map_err(|error| worker::Error::from(error.to_string()))?;
+                    let bootstrap_resolution =
+                        resolve_room_bootstrap(|name| env_var_string(&self.env, name));
                     let routing_entry_count = checkpoint
                         .as_ref()
                         .map(|checkpoint| derive_room_routing_entries(checkpoint).len())
                         .unwrap_or(0);
                     let rehydration = checkpoint.as_ref().map(|checkpoint| {
-                        let bootstrap = configured_room_bootstrap(&self.env)
+                        let bootstrap = bootstrap_resolution
+                            .as_ref()
+                            .map(|resolved| resolved.bootstrap.clone())
                             .unwrap_or_else(|_| rehydration_bootstrap());
                         match rehydrate_runtime_room_from_checkpoint(checkpoint, &bootstrap) {
                             Ok(_) => RoomRehydrationSummary {
@@ -255,6 +260,7 @@ impl CloudflareRoomDurableObject {
                         storage_backend: "cloudflare-do-sqlite",
                         sqlite_database_size_bytes: store.borrow().storage().database_size_bytes(),
                         routing_entry_count,
+                        bootstrap: bootstrap_summary(bootstrap_resolution),
                         realtime: self.realtime_status_summary(),
                         rehydration,
                         checkpoint: checkpoint.as_ref().map(RoomCheckpointSummary::from),
@@ -480,7 +486,7 @@ impl CloudflareRoomDurableObject {
                     }
                 }
             }
-            None => RuntimeRoom::new(cityg_server::CityGServer::new(bootstrap.to_server_config())),
+            None => RuntimeRoom::new(bootstrap.build_server()),
         };
         let (mut server, mut room_state) = room.into_parts();
 
@@ -584,7 +590,7 @@ impl CloudflareRoomDurableObject {
                     }
                 }
             }
-            None => RuntimeRoom::new(cityg_server::CityGServer::new(bootstrap.to_server_config())),
+            None => RuntimeRoom::new(bootstrap.build_server()),
         };
         let (mut server, room_state) = room.into_parts();
         match runtime_bootstrap_room_with_admin(
@@ -895,7 +901,7 @@ impl CloudflareRoomDurableObject {
                     }
                 }
             }
-            None => RuntimeRoom::new(cityg_server::CityGServer::new(bootstrap.to_server_config())),
+            None => RuntimeRoom::new(bootstrap.build_server()),
         };
         let (server, room_state) = room.into_parts();
         let (members, root) = match fetch_room_members(&server, &gid, request.parent_root) {
@@ -968,7 +974,7 @@ impl CloudflareRoomDurableObject {
                     }
                 }
             }
-            None => RuntimeRoom::new(cityg_server::CityGServer::new(bootstrap.to_server_config())),
+            None => RuntimeRoom::new(bootstrap.build_server()),
         };
         let (server, room_state) = room.into_parts();
         let (members, root) = match fetch_room_members(&server, &gid, request.parent_root) {
@@ -1553,7 +1559,7 @@ impl CloudflareRoomDurableObject {
                     }
                 }
             }
-            None => RuntimeRoom::new(cityg_server::CityGServer::new(bootstrap.to_server_config())),
+            None => RuntimeRoom::new(bootstrap.build_server()),
         };
         let (mut server, room_state) = room.into_parts();
         let prepared = match cityg_runtime::prepare_join_ticket(
@@ -3734,9 +3740,26 @@ struct RoomStatusResponse {
     storage_backend: &'static str,
     sqlite_database_size_bytes: usize,
     routing_entry_count: usize,
+    bootstrap: WorkerBootstrapSummary,
     realtime: RoomRealtimeSummary,
     rehydration: Option<RoomRehydrationSummary>,
     checkpoint: Option<RoomCheckpointSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkerBootstrapSummary {
+    source: &'static str,
+    history_authority: &'static str,
+    h_max: Option<usize>,
+    window_ttl_secs: Option<u64>,
+    fs_epoch_period_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fs_policy_version: Option<String>,
+    acceptance_policy_source: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    typed_override_envs: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4095,13 +4118,25 @@ fn rehydration_bootstrap() -> WorkerRoomBootstrap {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerBootstrapSource {
+    RehydrationDefault,
+    ConfigJson,
+    TypedBindings,
+    TypedBindingsWithConfigJsonBase,
+}
+
+struct ResolvedWorkerBootstrap {
+    bootstrap: WorkerRoomBootstrap,
+    source: WorkerBootstrapSource,
+    config_json_present: bool,
+    typed_override_envs: Vec<&'static str>,
+}
+
 fn configured_room_bootstrap(env: &Env) -> Result<WorkerRoomBootstrap> {
-    match env.var(WORKER_CONFIG_JSON_ENV) {
-        Ok(value) => WorkerRoomBootstrap::from_config_json(&value.to_string()).map_err(|error| {
-            worker::Error::from(format!("invalid {WORKER_CONFIG_JSON_ENV}: {error}"))
-        }),
-        Err(_) => Ok(rehydration_bootstrap()),
-    }
+    resolve_room_bootstrap(|name| env_var_string(env, name))
+        .map(|resolved| resolved.bootstrap)
+        .map_err(worker::Error::from)
 }
 
 fn configured_known_room_gids(env: &Env) -> Result<Vec<[u8; 32]>> {
@@ -4124,6 +4159,165 @@ fn parse_known_room_gids_json(json: &str) -> std::result::Result<Vec<[u8; 32]>, 
             parse_gid(gid_hex.as_str()).map_err(|error| format!("entry {index}: {error}"))
         })
         .collect()
+}
+
+fn env_var_string(env: &Env, name: &str) -> Option<String> {
+    env.var(name).ok().map(|value| value.to_string())
+}
+
+fn resolve_room_bootstrap<F>(mut lookup: F) -> std::result::Result<ResolvedWorkerBootstrap, String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let config_json = lookup(WORKER_CONFIG_JSON_ENV);
+    let mut bootstrap = if let Some(config_json) = config_json.as_deref() {
+        WorkerRoomBootstrap::from_config_json(config_json)
+            .map_err(|error| format!("invalid {WORKER_CONFIG_JSON_ENV}: {error}"))?
+    } else {
+        rehydration_bootstrap()
+    };
+    let config_json_present = config_json.is_some();
+    let mut typed_override_envs = Vec::new();
+
+    if let Some(raw) = lookup(WORKER_HISTORY_AUTHORITY_ENV) {
+        bootstrap.history_authority =
+            parse_worker_history_authority(raw.as_str(), WORKER_HISTORY_AUTHORITY_ENV)?;
+        typed_override_envs.push(WORKER_HISTORY_AUTHORITY_ENV);
+    }
+    if let Some(raw) = lookup(WORKER_H_MAX_ENV) {
+        bootstrap.h_max = Some(parse_positive_usize_env(raw.as_str(), WORKER_H_MAX_ENV)?);
+        typed_override_envs.push(WORKER_H_MAX_ENV);
+    }
+    if let Some(raw) = lookup(WORKER_WINDOW_TTL_SECS_ENV) {
+        bootstrap.window_ttl = Some(Duration::from_secs(parse_positive_u64_env(
+            raw.as_str(),
+            WORKER_WINDOW_TTL_SECS_ENV,
+        )?));
+        typed_override_envs.push(WORKER_WINDOW_TTL_SECS_ENV);
+    }
+    if let Some(raw) = lookup(WORKER_FS_EPOCH_PERIOD_SECS_ENV) {
+        bootstrap.fs_epoch_period_seconds =
+            parse_positive_u64_env(raw.as_str(), WORKER_FS_EPOCH_PERIOD_SECS_ENV)?;
+        typed_override_envs.push(WORKER_FS_EPOCH_PERIOD_SECS_ENV);
+    }
+    if let Some(raw) = lookup(WORKER_FS_POLICY_VERSION_ENV) {
+        let version = raw.trim();
+        if version.is_empty() {
+            return Err(format!("{WORKER_FS_POLICY_VERSION_ENV} must not be empty"));
+        }
+        bootstrap.fs_policy_version = Some(version.to_string());
+        typed_override_envs.push(WORKER_FS_POLICY_VERSION_ENV);
+    }
+
+    let source = match (config_json_present, typed_override_envs.is_empty()) {
+        (false, true) => WorkerBootstrapSource::RehydrationDefault,
+        (true, true) => WorkerBootstrapSource::ConfigJson,
+        (false, false) => WorkerBootstrapSource::TypedBindings,
+        (true, false) => WorkerBootstrapSource::TypedBindingsWithConfigJsonBase,
+    };
+
+    Ok(ResolvedWorkerBootstrap {
+        bootstrap,
+        source,
+        config_json_present,
+        typed_override_envs,
+    })
+}
+
+fn parse_worker_history_authority(
+    raw: &str,
+    env_name: &str,
+) -> std::result::Result<WorkerHistoryAuthority, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "disabled" => Ok(WorkerHistoryAuthority::Disabled),
+        "local" => Ok(WorkerHistoryAuthority::Local),
+        "global" => Ok(WorkerHistoryAuthority::Global),
+        _ => Err(format!(
+            "{env_name} must be one of: disabled, local, global"
+        )),
+    }
+}
+
+fn parse_positive_usize_env(raw: &str, env_name: &str) -> std::result::Result<usize, String> {
+    let value = raw
+        .trim()
+        .parse::<usize>()
+        .map_err(|error| format!("{env_name} must be a positive integer: {error}"))?;
+    if value == 0 {
+        return Err(format!("{env_name} must be greater than 0"));
+    }
+    Ok(value)
+}
+
+fn parse_positive_u64_env(raw: &str, env_name: &str) -> std::result::Result<u64, String> {
+    let value = raw
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("{env_name} must be a positive integer: {error}"))?;
+    if value == 0 {
+        return Err(format!("{env_name} must be greater than 0"));
+    }
+    Ok(value)
+}
+
+fn bootstrap_summary(
+    resolution: std::result::Result<ResolvedWorkerBootstrap, String>,
+) -> WorkerBootstrapSummary {
+    match resolution {
+        Ok(resolved) => WorkerBootstrapSummary::from_resolved(&resolved, None),
+        Err(error) => WorkerBootstrapSummary::from_resolved(
+            &ResolvedWorkerBootstrap {
+                bootstrap: rehydration_bootstrap(),
+                source: WorkerBootstrapSource::RehydrationDefault,
+                config_json_present: false,
+                typed_override_envs: Vec::new(),
+            },
+            Some(error),
+        ),
+    }
+}
+
+impl WorkerBootstrapSummary {
+    fn from_resolved(resolved: &ResolvedWorkerBootstrap, config_error: Option<String>) -> Self {
+        Self {
+            source: bootstrap_source_label(resolved.source, config_error.is_some()),
+            history_authority: history_authority_label(resolved.bootstrap.history_authority),
+            h_max: resolved.bootstrap.h_max,
+            window_ttl_secs: resolved.bootstrap.window_ttl.map(|ttl| ttl.as_secs()),
+            fs_epoch_period_seconds: resolved.bootstrap.fs_epoch_period_seconds,
+            fs_policy_version: resolved.bootstrap.fs_policy_version.clone(),
+            acceptance_policy_source: if resolved.config_json_present {
+                "cityg_config_json"
+            } else {
+                "server_defaults"
+            },
+            typed_override_envs: resolved.typed_override_envs.clone(),
+            config_error,
+        }
+    }
+}
+
+fn bootstrap_source_label(
+    source: WorkerBootstrapSource,
+    config_error_present: bool,
+) -> &'static str {
+    if config_error_present {
+        return "invalid_config_fallback";
+    }
+    match source {
+        WorkerBootstrapSource::RehydrationDefault => "rehydration_default",
+        WorkerBootstrapSource::ConfigJson => "cityg_config_json",
+        WorkerBootstrapSource::TypedBindings => "typed_bindings",
+        WorkerBootstrapSource::TypedBindingsWithConfigJsonBase => "typed_bindings_over_config_json",
+    }
+}
+
+fn history_authority_label(authority: WorkerHistoryAuthority) -> &'static str {
+    match authority {
+        WorkerHistoryAuthority::Disabled => "disabled",
+        WorkerHistoryAuthority::Local => "local",
+        WorkerHistoryAuthority::Global => "global",
+    }
 }
 
 fn room_member_response(
@@ -4289,6 +4483,8 @@ async fn decode_json_response<T: for<'de> Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+    use std::collections::BTreeMap;
 
     use cityg_api_schema::{RoomScopedApiRoute, is_room_scoped_api_path, pb};
     use cityg_client::demo::demo_bundle;
@@ -4522,6 +4718,117 @@ mod tests {
             WorkerHistoryAuthority::Disabled
         );
         assert!(bootstrap.acceptance_options.is_none());
+    }
+
+    fn resolve_bootstrap_from_pairs(
+        pairs: &[(&str, &str)],
+    ) -> std::result::Result<ResolvedWorkerBootstrap, String> {
+        let vars = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect::<BTreeMap<_, _>>();
+        resolve_room_bootstrap(|name| vars.get(name).cloned())
+    }
+
+    #[test]
+    fn resolve_room_bootstrap_defaults_to_rehydration_without_bindings() {
+        let resolved = resolve_bootstrap_from_pairs(&[]).expect("bootstrap");
+        assert_eq!(resolved.source, WorkerBootstrapSource::RehydrationDefault);
+        assert_eq!(
+            resolved.bootstrap.history_authority,
+            WorkerHistoryAuthority::Disabled
+        );
+        assert_eq!(resolved.bootstrap.fs_epoch_period_seconds, 1);
+        assert!(resolved.bootstrap.fs_policy_version.is_none());
+    }
+
+    #[test]
+    fn resolve_room_bootstrap_accepts_typed_bindings_without_json() {
+        let resolved = resolve_bootstrap_from_pairs(&[
+            (WORKER_HISTORY_AUTHORITY_ENV, "local"),
+            (WORKER_H_MAX_ENV, "12"),
+            (WORKER_WINDOW_TTL_SECS_ENV, "90"),
+            (WORKER_FS_EPOCH_PERIOD_SECS_ENV, "300"),
+            (WORKER_FS_POLICY_VERSION_ENV, "worker-policy-v3"),
+        ])
+        .expect("typed bootstrap");
+
+        assert_eq!(resolved.source, WorkerBootstrapSource::TypedBindings);
+        assert_eq!(
+            resolved.bootstrap.history_authority,
+            WorkerHistoryAuthority::Local
+        );
+        assert_eq!(resolved.bootstrap.h_max, Some(12));
+        assert_eq!(resolved.bootstrap.window_ttl, Some(Duration::from_secs(90)));
+        assert_eq!(resolved.bootstrap.fs_epoch_period_seconds, 300);
+        assert_eq!(
+            resolved.bootstrap.fs_policy_version.as_deref(),
+            Some("worker-policy-v3")
+        );
+        assert_eq!(
+            resolved.typed_override_envs,
+            vec![
+                WORKER_HISTORY_AUTHORITY_ENV,
+                WORKER_H_MAX_ENV,
+                WORKER_WINDOW_TTL_SECS_ENV,
+                WORKER_FS_EPOCH_PERIOD_SECS_ENV,
+                WORKER_FS_POLICY_VERSION_ENV,
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_room_bootstrap_applies_typed_overrides_on_config_json_base() {
+        let mut config = cityg_config::CityGConfig::default();
+        config.protocol.max_concurrent_heads = 7;
+        config.server.window_ttl_secs = 45;
+        config.protocol.fs_policy.h_seconds = 600;
+        config.protocol.fs_policy_version = "repo-policy".to_string();
+        let config_json = serde_json::to_string(&config).expect("config json");
+
+        let resolved = resolve_bootstrap_from_pairs(&[
+            (WORKER_CONFIG_JSON_ENV, config_json.as_str()),
+            (WORKER_H_MAX_ENV, "21"),
+            (WORKER_HISTORY_AUTHORITY_ENV, "disabled"),
+        ])
+        .expect("bootstrap");
+
+        assert_eq!(
+            resolved.source,
+            WorkerBootstrapSource::TypedBindingsWithConfigJsonBase
+        );
+        assert_eq!(resolved.bootstrap.h_max, Some(21));
+        assert_eq!(
+            resolved.bootstrap.window_ttl,
+            Some(Duration::from_secs(config.server.window_ttl_secs))
+        );
+        assert_eq!(resolved.bootstrap.fs_epoch_period_seconds, 600);
+        assert_eq!(
+            resolved.bootstrap.fs_policy_version.as_deref(),
+            Some("repo-policy")
+        );
+        assert!(resolved.bootstrap.acceptance_options.is_some());
+    }
+
+    #[test]
+    fn resolve_room_bootstrap_rejects_invalid_history_authority_binding() {
+        let err = match resolve_bootstrap_from_pairs(&[(WORKER_HISTORY_AUTHORITY_ENV, "edge")]) {
+            Ok(_) => panic!("expected invalid history authority"),
+            Err(err) => err,
+        };
+        assert!(err.contains(WORKER_HISTORY_AUTHORITY_ENV));
+    }
+
+    #[test]
+    fn bootstrap_summary_surfaces_invalid_config_fallback() {
+        let summary = bootstrap_summary(resolve_bootstrap_from_pairs(&[(
+            WORKER_CONFIG_JSON_ENV,
+            "{\"server\":",
+        )]));
+        assert_eq!(summary.source, "invalid_config_fallback");
+        assert_eq!(summary.history_authority, "disabled");
+        assert_eq!(summary.acceptance_policy_source, "server_defaults");
+        assert!(summary.config_error.is_some());
     }
 
     #[test]
@@ -4855,7 +5162,7 @@ mod tests {
             cfg.server.seed_demo_room = true;
             cfg
         });
-        let room = RuntimeRoom::new(cityg_server::CityGServer::new(bootstrap.to_server_config()));
+        let room = RuntimeRoom::new(bootstrap.build_server());
         let (mut server, mut room_state) = room.into_parts();
         let accepted = accept_room_epoch(
             &mut server,

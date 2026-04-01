@@ -60,6 +60,16 @@ pub const RECOMMENDED_COORDINATION_MODEL: RoomCoordinationModel =
 
 /// Optional Worker binding carrying a serialized `CityGConfig`.
 pub const WORKER_CONFIG_JSON_ENV: &str = "CITYG_WORKER_CONFIG_JSON";
+/// Optional Worker binding overriding the room history authority mode.
+pub const WORKER_HISTORY_AUTHORITY_ENV: &str = "CITYG_WORKER_HISTORY_AUTHORITY";
+/// Optional Worker binding overriding the room multi-head window size.
+pub const WORKER_H_MAX_ENV: &str = "CITYG_WORKER_H_MAX";
+/// Optional Worker binding overriding the room window TTL in seconds.
+pub const WORKER_WINDOW_TTL_SECS_ENV: &str = "CITYG_WORKER_WINDOW_TTL_SECS";
+/// Optional Worker binding overriding the room FS epoch period in seconds.
+pub const WORKER_FS_EPOCH_PERIOD_SECS_ENV: &str = "CITYG_WORKER_FS_EPOCH_PERIOD_SECS";
+/// Optional Worker binding overriding the expected FS policy version label.
+pub const WORKER_FS_POLICY_VERSION_ENV: &str = "CITYG_WORKER_FS_POLICY_VERSION";
 /// Optional Worker binding carrying a JSON array of legacy room gids to seed the room registry.
 pub const WORKER_KNOWN_GIDS_JSON_ENV: &str = "CITYG_WORKER_KNOWN_GIDS_JSON";
 
@@ -83,6 +93,7 @@ pub struct WorkerRoomBootstrap {
     pub window_ttl: Option<Duration>,
     pub history_authority: WorkerHistoryAuthority,
     pub fs_epoch_period_seconds: u64,
+    pub fs_policy_version: Option<String>,
     pub acceptance_options: Option<AcceptanceOptions>,
 }
 
@@ -93,6 +104,7 @@ impl Default for WorkerRoomBootstrap {
             window_ttl: None,
             history_authority: WorkerHistoryAuthority::Global,
             fs_epoch_period_seconds: 1,
+            fs_policy_version: None,
             acceptance_options: None,
         }
     }
@@ -104,6 +116,7 @@ impl WorkerRoomBootstrap {
     pub fn from_cityg_config(cfg: &cityg_config::CityGConfig) -> Self {
         let mut bootstrap = Self::from_server_config(&server_config_from_cityg_config(cfg));
         bootstrap.fs_epoch_period_seconds = cfg.protocol.fs_policy.h_seconds.max(1);
+        bootstrap.fs_policy_version = Some(cfg.protocol.fs_policy_version.clone());
         bootstrap
     }
 
@@ -120,6 +133,7 @@ impl WorkerRoomBootstrap {
             window_ttl: config.window_ttl,
             history_authority,
             fs_epoch_period_seconds: 1,
+            fs_policy_version: None,
             acceptance_options: config.acceptance_options.clone(),
         }
     }
@@ -149,6 +163,18 @@ impl WorkerRoomBootstrap {
         }
         config
     }
+
+    /// Build a `CityGServer` and apply bootstrap-only acceptance context fields.
+    #[must_use]
+    pub fn build_server(&self) -> CityGServer {
+        let mut server = CityGServer::new(self.to_server_config());
+        if let Some(version) = self.fs_policy_version.as_ref() {
+            let ctx = server.context_mut();
+            ctx.set_allowed_fs_policy_version(Some(version.clone()));
+            ctx.set_fs_policy_version(Some(version.clone()));
+        }
+        server
+    }
 }
 
 /// Room-scoped engine that will eventually sit behind a Worker runtime adapter.
@@ -164,7 +190,7 @@ impl WorkerRoomEngine {
     #[must_use]
     pub fn new(bootstrap: WorkerRoomBootstrap) -> Self {
         Self {
-            room: RuntimeRoom::new(CityGServer::new(bootstrap.to_server_config())),
+            room: RuntimeRoom::new(bootstrap.build_server()),
         }
     }
 
@@ -334,6 +360,7 @@ mod tests {
             window_ttl: Some(Duration::from_secs(45)),
             history_authority: WorkerHistoryAuthority::Local,
             fs_epoch_period_seconds: 60,
+            fs_policy_version: Some("worker-policy-v1".to_string()),
             acceptance_options: None,
         });
     }
@@ -372,6 +399,28 @@ mod tests {
             bootstrap.window_ttl,
             Some(Duration::from_secs(config.server.window_ttl_secs))
         );
+        assert_eq!(
+            bootstrap.fs_policy_version.as_deref(),
+            Some(config.protocol.fs_policy_version.as_str())
+        );
         assert!(bootstrap.acceptance_options.is_some());
+    }
+
+    #[test]
+    fn build_server_applies_fs_policy_version_to_context() {
+        let bootstrap = WorkerRoomBootstrap {
+            fs_policy_version: Some("worker-policy-v2".to_string()),
+            ..WorkerRoomBootstrap::default()
+        };
+
+        let server = bootstrap.build_server();
+        assert_eq!(
+            server.context().fs_policy_version(),
+            Some("worker-policy-v2")
+        );
+        assert_eq!(
+            server.context().allowed_fs_policy_version(),
+            Some("worker-policy-v2")
+        );
     }
 }

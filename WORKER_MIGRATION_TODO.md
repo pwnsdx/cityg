@@ -150,7 +150,8 @@ runtime code.
 - [x] Which endpoints should remain edge-only in the Worker entrypoint versus execute inside the Durable Object.
   The Worker now exposes an explicit internal route-policy manifest at `/__cloudflare/policy`: health endpoints stay edge-only, room-scoped HTTP plus `/v1/ws` execute in the authoritative room Durable Object, and native-only debug/window/metrics routes are returned as explicit `501` unsupported responses on Worker.
 - [ ] Whether the internal Cloudflare room route should stay URL-addressed (`/__cloudflare/rooms/:gid/...`) or eventually be replaced by shared protobuf-aware edge routing.
-- [ ] Whether `CITYG_WORKER_CONFIG_JSON` is sufficient as the long-term delivery mechanism, or should be replaced by typed object bindings / signed policy documents.
+- [x] Whether `CITYG_WORKER_CONFIG_JSON` is sufficient as the long-term delivery mechanism, or should be replaced by typed object bindings / signed policy documents.
+  The Worker bootstrap is now layered: typed bindings (`CITYG_WORKER_HISTORY_AUTHORITY`, `CITYG_WORKER_H_MAX`, `CITYG_WORKER_WINDOW_TTL_SECS`, `CITYG_WORKER_FS_EPOCH_PERIOD_SECS`, `CITYG_WORKER_FS_POLICY_VERSION`) are the primary operator surface, while `CITYG_WORKER_CONFIG_JSON` remains as a parity fallback for advanced acceptance-policy material. The room status route exposes the effective source and any fallback-causing config error.
 - [ ] Whether the global alias registry should stay single-object for parity or be sharded once cross-room alias semantics are revisited explicitly.
 - [ ] Whether the protocol should keep the historical `"ML-DSA-65"` label while using Dilithium5-compatible key/signature sizes, or whether that wire-level naming mismatch should be corrected in a versioned migration.
 - [ ] Whether the current Worker replay-window size and `sync_required` thresholds are sufficient once real traffic patterns are measured.

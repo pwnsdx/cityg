@@ -595,7 +595,7 @@ mod tests {
         ServerOutcome,
         AppliedBundleIndexes,
     ) {
-        let mut server = CityGServer::new(bootstrap.to_server_config());
+        let mut server = bootstrap.build_server();
         let outcome = server.accept_epoch(bundle).expect("accept bundle");
         let mut room_state = RoomVolatileState::default();
         let applied = apply_bundle_indexes(

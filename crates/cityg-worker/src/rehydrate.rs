@@ -1,6 +1,5 @@
 use cityg_client::ClientEpochBundle;
 use cityg_runtime::{RoomStateCheckpoint, RoomVolatileState, RuntimeRoom};
-use cityg_server::CityGServer;
 use thiserror::Error;
 
 use crate::WorkerRoomBootstrap;
@@ -34,7 +33,7 @@ pub fn rehydrate_runtime_room_from_checkpoint(
     checkpoint: &RoomStateCheckpoint,
     bootstrap: &WorkerRoomBootstrap,
 ) -> Result<RuntimeRoom, WorkerRoomRehydrationError> {
-    let mut room = RuntimeRoom::new(CityGServer::new(bootstrap.to_server_config()));
+    let mut room = RuntimeRoom::new(bootstrap.build_server());
     replay_accepted_bundles(&mut room, checkpoint)?;
     room.server_mut()
         .restore_runtime_metadata_bytes(
@@ -121,7 +120,7 @@ mod tests {
         let gid: [u8; 32] = bundle.gid().try_into().expect("gid");
         let bundle_bytes = bundle.to_cbor().expect("bundle cbor");
 
-        let mut room = RuntimeRoom::new(CityGServer::new(test_bootstrap().to_server_config()));
+        let mut room = RuntimeRoom::new(test_bootstrap().build_server());
         let outcome = room
             .server_mut()
             .accept_epoch(&bundle)
@@ -187,7 +186,7 @@ mod tests {
     fn checkpoint_rehydrates_runtime_metadata_without_replayed_bundles() {
         let gid = [0x7A; 32];
         let admin_pop_key = vec![0x55; 32];
-        let mut server = CityGServer::new(test_bootstrap().to_server_config());
+        let mut server = test_bootstrap().build_server();
         server
             .register_group_with_admin(&gid, vec![0x44; 32], admin_pop_key.clone())
             .expect("register group with admin");

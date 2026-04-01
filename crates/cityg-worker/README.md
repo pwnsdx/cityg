@@ -121,7 +121,8 @@ The `cloudflare` feature also exposes the first Worker runtime surface:
 - a global routing-index Durable Object bound under `CITYG_ROUTING_INDEX`
 - a global known-room registry Durable Object bound under `CITYG_ROOM_REGISTRY`
 - a global alias-registry Durable Object bound under `CITYG_ALIAS_INDEX`
-- a config hook, `CITYG_WORKER_CONFIG_JSON`, for replay/bootstrap parity from serialized `CityGConfig`
+- typed Worker bootstrap bindings for the common room-runtime knobs: `CITYG_WORKER_HISTORY_AUTHORITY`, `CITYG_WORKER_H_MAX`, `CITYG_WORKER_WINDOW_TTL_SECS`, `CITYG_WORKER_FS_EPOCH_PERIOD_SECS`, and `CITYG_WORKER_FS_POLICY_VERSION`
+- a parity fallback hook, `CITYG_WORKER_CONFIG_JSON`, for replay/bootstrap alignment from serialized `CityGConfig` when the advanced acceptance policy should match the native deployment
 - an optional backfill hook, `CITYG_WORKER_KNOWN_GIDS_JSON`, for seeding legacy room gids into the known-room registry
 - an internal room route prefix, `/__cloudflare/rooms/:gid/...`
 - shared protobuf route classification via `cityg-api-schema`
@@ -155,9 +156,10 @@ The current edge/runtime split now looks like this:
 - the Worker websocket contract is now explicit rather than native-broadcast-shaped: `/v1/ws` is treated as a sequenced hint stream with `ack` / `resume`, bounded replay, `lag` warnings, and a `sync_required` control frame that tells clients to reconcile through HTTP and reconnect when the replay window is exhausted
 - the Worker realtime policy is now tunable instead of hard-wired: `CITYG_SERVER_WS_MAX_LAG` still controls the soft lag budget, while `CITYG_WORKER_WS_REPLAY_WINDOW` and `CITYG_WORKER_WS_LAG_NOTICE_THRESHOLD` can widen retention or move the warning threshold without changing the core DO logic
 - the internal room status route now exposes realtime diagnostics too, including active websocket count, next sequence, retained replay-window range, and the effective `lag` / `sync_required` policy, so operators can inspect the current DO behavior without attaching a debugger
+- the internal room status route also exposes the effective Worker bootstrap source, typed overrides, and any config-fallback error, so operators can see whether a room is running from typed bindings, `CITYG_WORKER_CONFIG_JSON`, or the minimal rehydration fallback
 - the Worker edge policy is now explicit too: `/health*` stays edge-only, room-scoped API calls plus `/v1/ws` execute in the authoritative room DO, and native-only routes like `/v1/window`, `/v1/telemetry`, `/v1/config/window`, `/metrics`, and `/v1/debug/window/seed` return explicit `501` responses instead of falling through as generic 404s
 - `/__cloudflare/policy` now publishes that route topology directly from the Worker, so operators can inspect the current execution model without reading the source tree
-- rehydration can now use `CITYG_WORKER_CONFIG_JSON` to reconstruct `WorkerRoomBootstrap` from the shared `CityGConfig`, instead of relying only on a hardcoded fallback bootstrap
+- rehydration no longer depends solely on `CITYG_WORKER_CONFIG_JSON`: the Worker now layers typed bootstrap bindings first, keeps `CITYG_WORKER_CONFIG_JSON` as a parity fallback for advanced acceptance-policy material, and only falls back to the minimal rehydration bootstrap if neither is present
 - the remaining live-routing gap is narrower now: accepted epochs update the global `we_epoch_id -> gid` index immediately, while replay-only rebuild still relies on checkpoint-derived resync
 - the routing fallback is stronger now: if the global routing index misses, the Worker can ask the known-room registry to resync registered rooms and retry the lookup before returning 404
 - historical rooms can now be backfilled explicitly too: `CITYG_WORKER_KNOWN_GIDS_JSON` accepts a JSON array of 32-byte hex gids, and the Worker will seed those rooms into the known-room registry before running the miss-driven routing convergence path
@@ -169,7 +171,7 @@ The current edge/runtime split now looks like this:
 - `cityg-client` demo fixtures are now feature-gated off for `wasm32`, and the remaining production ML-DSA paths in `msphf-core`, `msphf-orchestrator`, and `cityg-server` now route through `cityg-pqc`, so `cargo check -p cityg-worker --features cloudflare --target wasm32-unknown-unknown` now succeeds
 - CI now guards both host and Wasm Worker builds: the main workflow compiles `cityg-worker` with `--features cloudflare` on the native test target and on `wasm32-unknown-unknown`
 - the Worker crate now also has a higher-level memory-backed checkpoint integration test that exercises the intended Durable Object flow end-to-end: accept a real demo bundle, persist the checkpoint, derive routing entries, rehydrate `RuntimeRoom`, and verify restored message/bundle state
-- the remaining replay gap is not the config hook itself anymore, but how far that hook should remain a raw JSON env binding versus evolving into typed/signed Worker-native policy delivery
+- the Worker config delivery model is now explicit: common room-runtime knobs come from typed bindings, while advanced acceptance-policy parity can still come from `CITYG_WORKER_CONFIG_JSON`; any future signed-policy delivery should layer on top of that split rather than replacing it with another monolithic runtime blob
 
 ## Why the crate is intentionally small today
 
