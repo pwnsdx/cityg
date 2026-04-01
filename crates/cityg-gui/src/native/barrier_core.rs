@@ -65,41 +65,15 @@ pub(super) async fn full_chain_check_barrier_update(
     let barrier_reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON).ok_or_else(|| {
         anyhow!("barrier full chain-check prevalidation failed (960.7): missing barrier_update_reason")
     })?;
-    let (mut snapshot_prev, mut snapshot_prev_history_commitment) = if let Some(snapshot_prev) =
-        (session.barrier_state.kem_tree_hash_after == parsed.kem_tree_hash_before)
-            .then(|| current_public_tree_cache(session))
-            .flatten()
-    {
-        let current_history_commitment = session
-            .barrier_state
-            .current_history_commitment
-            .ok_or_else(|| {
-                anyhow!(
-                    "barrier tree snapshot auth failure (960.9): missing authenticated current-state history commitment for cached current public tree"
-                )
-            })?;
-        ((*snapshot_prev).clone(), current_history_commitment)
-    } else if let Some((snapshot_prev, current_history_commitment)) =
-        (session.barrier_state.kem_tree_hash_after == parsed.kem_tree_hash_before)
-            .then(|| retained_authenticated_current_public_tree_cache(session))
-            .flatten()
-    {
-        ((*snapshot_prev).clone(), current_history_commitment)
-    } else {
-        let snapshot_prev_response = client
-            .barrier_fetch_public_tree(room_id, &parsed.kem_tree_hash_before)
-            .await
-            .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
-        let snapshot_prev = snapshot_prev_response.tree;
-        if snapshot_prev.n_max != n_max {
-            return Err(anyhow!(
-                "barrier tree snapshot auth failure (960.9): n_max mismatch (expected {n_max}, got {})",
-                snapshot_prev.n_max
-            ));
-        }
-        validate_barrier_tree_snapshot_auth(&parsed.kem_tree_hash_before, n_max, &snapshot_prev)?;
-        (snapshot_prev, snapshot_prev_response.history_commitment)
-    };
+    let (snapshot_prev, snapshot_prev_history_commitment) =
+        resolve_authenticated_snapshot_for_hash(
+            client,
+            room_id,
+            session,
+            &parsed.kem_tree_hash_before,
+            n_max,
+        )
+        .await?;
 
     let revoked_since_root =
         header_bytes32(header_map, hdr::HDR_REVOKED_SINCE_ROOT).ok_or_else(|| {
@@ -127,31 +101,18 @@ pub(super) async fn full_chain_check_barrier_update(
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
     let join_record_count = join_resolution.records.len();
     let revoked_leaf_count = revoked_resolution.leaf_indices.len();
-    if require_current_state_history_commitment(
-        &snapshot_prev_history_commitment,
-        &join_resolution.history_commitment,
-        &revoked_resolution.history_commitment,
-    )
-    .is_err()
-    {
-        let snapshot_prev_response = client
-            .barrier_fetch_public_tree(room_id, &prevalidated.expected_snapshot_hash)
-            .await
-            .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
-        if snapshot_prev_response.tree.n_max != n_max {
-            return Err(anyhow!(
-                "barrier tree snapshot auth failure (960.9): n_max mismatch (expected {n_max}, got {})",
-                snapshot_prev_response.tree.n_max
-            ));
-        }
-        validate_barrier_tree_snapshot_auth(
+    let (snapshot_prev, snapshot_prev_history_commitment) =
+        ensure_current_state_commitment_aligned_snapshot(
+            client,
+            room_id,
             &prevalidated.expected_snapshot_hash,
             n_max,
-            &snapshot_prev_response.tree,
-        )?;
-        snapshot_prev = snapshot_prev_response.tree;
-        snapshot_prev_history_commitment = snapshot_prev_response.history_commitment;
-    }
+            snapshot_prev,
+            snapshot_prev_history_commitment,
+            &join_resolution.history_commitment,
+            &revoked_resolution.history_commitment,
+        )
+        .await?;
     if require_current_state_history_commitment(
         &snapshot_prev_history_commitment,
         &join_resolution.history_commitment,
@@ -284,22 +245,7 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
     })?;
 
     let current_snapshot =
-        if let Some((snapshot, _)) = retained_authenticated_current_public_tree_cache(session) {
-            (*snapshot).clone()
-        } else {
-            let current_snapshot_response = client
-                .barrier_fetch_public_tree(room_id, &session.barrier_state.kem_tree_hash_after)
-                .await
-                .map_err(|err| {
-                    anyhow!("join_finalize bootstrap snapshot auth failure (960.9): {err}")
-                })?;
-            if current_snapshot_response.tree.n_max != n_max {
-                return Err(anyhow!(
-                    "join_finalize bootstrap snapshot auth failure (960.9): current n_max mismatch"
-                ));
-            }
-            current_snapshot_response.tree
-        };
+        resolve_bootstrap_current_snapshot(client, room_id, session, n_max).await?;
     if current_snapshot.n_max != n_max {
         return Err(anyhow!(
             "join_finalize bootstrap snapshot auth failure (960.9): current n_max mismatch"
@@ -314,34 +260,15 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
     // tree hash. After the JOIN itself is accepted, the same current tree can
     // legitimately be re-attested under a later local HistoryCommitment.
 
-    let snapshot_base = if let Some(snapshot) =
-        retained_public_tree_cache(session, &predecessor_hash, n_max)
-    {
-        (*snapshot).clone()
-    } else {
-        let snapshot_base_response = client
-            .barrier_fetch_public_tree(room_id, &predecessor_hash)
-            .await
-            .map_err(|err| {
-                anyhow!("join_finalize bootstrap snapshot auth failure (960.9): {err}")
-            })?;
-        if snapshot_base_response.tree.n_max != n_max {
-            return Err(anyhow!(
-                "join_finalize bootstrap snapshot auth failure (960.9): predecessor n_max mismatch"
-            ));
-        }
-        validate_barrier_tree_snapshot_auth(
-            &predecessor_hash,
-            n_max,
-            &snapshot_base_response.tree,
-        )?;
-        retain_tree_hash_authenticated_public_tree(
-            &mut session.barrier_state,
-            parsed.prev_barrier_version,
-            Arc::new(snapshot_base_response.tree.clone()),
-        );
-        snapshot_base_response.tree
-    };
+    let snapshot_base = resolve_bootstrap_predecessor_snapshot(
+        client,
+        room_id,
+        session,
+        &predecessor_hash,
+        parsed.prev_barrier_version,
+        n_max,
+    )
+    .await?;
     if snapshot_base.n_max != n_max {
         return Err(anyhow!(
             "join_finalize bootstrap snapshot auth failure (960.9): predecessor n_max mismatch"

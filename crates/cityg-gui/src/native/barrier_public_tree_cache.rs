@@ -1,4 +1,5 @@
 use super::*;
+use crate::barrier_shared::require_current_state_history_commitment;
 use cityg_client::barrier_state_auth::{
     ensure_non_regressing_authenticated_current_state as ensure_non_regressing_authenticated_current_state_core,
     validate_barrier_tree_snapshot_auth as validate_barrier_tree_snapshot_auth_core,
@@ -120,6 +121,28 @@ pub(super) fn retained_authenticated_current_public_tree_cache(
         .map(|entry| (entry.snapshot.clone(), current_history_commitment))
 }
 
+fn cached_authenticated_snapshot_for_hash(
+    session: &AppSession,
+    expected_hash: &[u8; 32],
+) -> Result<Option<(BarrierPublicTree, HistoryCommitment)>> {
+    if session.barrier_state.kem_tree_hash_after != *expected_hash {
+        return Ok(None);
+    }
+    if let Some(snapshot) = current_public_tree_cache(session) {
+        let current_history_commitment = session
+            .barrier_state
+            .current_history_commitment
+            .ok_or_else(|| {
+                anyhow!(
+                    "missing authenticated current-state history commitment for cached current public tree"
+                )
+            })?;
+        return Ok(Some(((*snapshot).clone(), current_history_commitment)));
+    }
+    Ok(retained_authenticated_current_public_tree_cache(session)
+        .map(|(snapshot, history_commitment)| ((*snapshot).clone(), history_commitment)))
+}
+
 pub(super) fn retained_public_tree_cache(
     session: &AppSession,
     expected_hash: &[u8; 32],
@@ -143,6 +166,133 @@ pub(super) fn retained_public_tree_cache(
                 })
                 .map(|entry| entry.snapshot.clone())
         })
+}
+
+async fn fetch_validated_public_tree(
+    client: &CitygApiClient,
+    room_id: &str,
+    expected_hash: &[u8; 32],
+    expected_n_max: u64,
+) -> Result<(BarrierPublicTree, HistoryCommitment)> {
+    let snapshot_response = client
+        .barrier_fetch_public_tree(room_id, expected_hash)
+        .await?;
+    if snapshot_response.tree.n_max != expected_n_max {
+        return Err(anyhow!(
+            "n_max mismatch (expected {expected_n_max}, got {})",
+            snapshot_response.tree.n_max
+        ));
+    }
+    validate_barrier_tree_snapshot_auth(expected_hash, expected_n_max, &snapshot_response.tree)?;
+    Ok((snapshot_response.tree, snapshot_response.history_commitment))
+}
+
+pub(super) async fn resolve_authenticated_snapshot_for_hash(
+    client: &CitygApiClient,
+    room_id: &str,
+    session: &AppSession,
+    expected_hash: &[u8; 32],
+    expected_n_max: u64,
+) -> Result<(BarrierPublicTree, HistoryCommitment)> {
+    if let Some(snapshot) = cached_authenticated_snapshot_for_hash(session, expected_hash)? {
+        return Ok(snapshot);
+    }
+    fetch_validated_public_tree(client, room_id, expected_hash, expected_n_max)
+        .await
+        .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))
+}
+
+pub(super) async fn ensure_current_state_commitment_aligned_snapshot(
+    client: &CitygApiClient,
+    room_id: &str,
+    expected_hash: &[u8; 32],
+    expected_n_max: u64,
+    snapshot: BarrierPublicTree,
+    snapshot_history_commitment: HistoryCommitment,
+    join_history_commitment: &HistoryCommitment,
+    revoked_history_commitment: &HistoryCommitment,
+) -> Result<(BarrierPublicTree, HistoryCommitment)> {
+    if require_current_state_history_commitment(
+        &snapshot_history_commitment,
+        join_history_commitment,
+        revoked_history_commitment,
+    )
+    .is_ok()
+    {
+        return Ok((snapshot, snapshot_history_commitment));
+    }
+
+    let (snapshot, snapshot_history_commitment) =
+        fetch_validated_public_tree(client, room_id, expected_hash, expected_n_max)
+            .await
+            .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
+
+    if require_current_state_history_commitment(
+        &snapshot_history_commitment,
+        join_history_commitment,
+        revoked_history_commitment,
+    )
+    .is_err()
+    {
+        return Err(anyhow!(
+            "barrier full chain-check prevalidation failed (960.9): before={} snapshot={}#{} joins={}#{} revoked={}#{}",
+            hex_encode(expected_hash),
+            hex_encode(snapshot_history_commitment.history_commitment_id),
+            snapshot_history_commitment.history_seq,
+            hex_encode(join_history_commitment.history_commitment_id),
+            join_history_commitment.history_seq,
+            hex_encode(revoked_history_commitment.history_commitment_id),
+            revoked_history_commitment.history_seq,
+        ));
+    }
+
+    Ok((snapshot, snapshot_history_commitment))
+}
+
+pub(super) async fn resolve_bootstrap_current_snapshot(
+    client: &CitygApiClient,
+    room_id: &str,
+    session: &AppSession,
+    expected_n_max: u64,
+) -> Result<BarrierPublicTree> {
+    if let Some((snapshot, _)) = retained_authenticated_current_public_tree_cache(session) {
+        return Ok((*snapshot).clone());
+    }
+    let (snapshot, _) = fetch_validated_public_tree(
+        client,
+        room_id,
+        &session.barrier_state.kem_tree_hash_after,
+        expected_n_max,
+    )
+    .await
+    .map_err(|err| anyhow!("join_finalize bootstrap snapshot auth failure (960.9): {err}"))?;
+    Ok(snapshot)
+}
+
+pub(super) async fn resolve_bootstrap_predecessor_snapshot(
+    client: &CitygApiClient,
+    room_id: &str,
+    session: &mut AppSession,
+    predecessor_hash: &[u8; 32],
+    predecessor_barrier_version: u64,
+    expected_n_max: u64,
+) -> Result<BarrierPublicTree> {
+    if let Some(snapshot) = retained_public_tree_cache(session, predecessor_hash, expected_n_max) {
+        return Ok((*snapshot).clone());
+    }
+
+    let (snapshot, _) =
+        fetch_validated_public_tree(client, room_id, predecessor_hash, expected_n_max)
+            .await
+            .map_err(|err| {
+                anyhow!("join_finalize bootstrap snapshot auth failure (960.9): {err}")
+            })?;
+    retain_tree_hash_authenticated_public_tree(
+        &mut session.barrier_state,
+        predecessor_barrier_version,
+        Arc::new(snapshot.clone()),
+    );
+    Ok(snapshot)
 }
 
 pub(super) fn clear_current_public_tree_cache(state: &mut BarrierSecretState) {
