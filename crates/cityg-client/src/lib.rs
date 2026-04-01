@@ -78,6 +78,7 @@ pub mod barrier;
 pub mod barrier_activation;
 pub mod barrier_build;
 pub mod barrier_crypto;
+pub mod barrier_pending;
 pub mod barrier_prevalidation;
 pub mod barrier_recovery;
 pub mod barrier_state_auth;

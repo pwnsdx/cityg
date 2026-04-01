@@ -10,6 +10,15 @@ use cityg_client::barrier_build::{
     BarrierUpdateBuildResult as CoreBarrierUpdateBuildResult,
     build_barrier_update_bytes as build_barrier_update_bytes_core,
 };
+use cityg_client::barrier_pending::{
+    PendingBarrierHistoryInput as CorePendingBarrierHistoryInput,
+    PendingBarrierHistoryResolution as CorePendingBarrierHistoryResolution,
+    PendingBarrierLookupStatus as CorePendingBarrierLookupStatus,
+    PendingBarrierObservation as CorePendingBarrierObservation,
+    PendingBarrierRecoveryReason as CorePendingBarrierRecoveryReason,
+    pending_activation_source_matches, pending_barrier_matches_observation,
+    resolve_pending_barrier_history,
+};
 use cityg_client::barrier_recovery::{
     BarrierRecoverResult as CoreBarrierRecoverResult,
     BarrierRecoveryInput as CoreBarrierRecoveryInput,
@@ -133,6 +142,22 @@ fn mark_barrier_recovery_required(
     session.barrier_state.barrier_recovery_issue = Some(issue);
     session.barrier_state.current_barrier_full_verified = false;
     PendingBarrierHistoryOutcome::RecoveryRequired(issue)
+}
+
+fn map_pending_barrier_recovery_reason(
+    reason: CorePendingBarrierRecoveryReason,
+) -> BarrierRecoveryIssue {
+    match reason {
+        CorePendingBarrierRecoveryReason::InsufficientAuthenticatedHistory => {
+            BarrierRecoveryIssue::InsufficientAuthenticatedHistory
+        }
+        CorePendingBarrierRecoveryReason::ContradictoryAuthenticatedHistory => {
+            BarrierRecoveryIssue::ContradictoryAuthenticatedHistory
+        }
+        CorePendingBarrierRecoveryReason::LegacyPendingLocatorMissing => {
+            BarrierRecoveryIssue::LegacyPendingLocatorMissing
+        }
+    }
 }
 
 pub(super) fn try_recover_barrier_inner(
@@ -311,11 +336,7 @@ fn validate_pending_activation_source_state(
     current_source: &BarrierPendingActivationSource,
     pending: &BarrierPendingState,
 ) -> Result<()> {
-    let Some(expected_source) = pending.activation_source.as_ref() else {
-        return Ok(());
-    };
-
-    if current_source != expected_source {
+    if !pending_activation_source_matches(current_source, pending.activation_source.as_ref()) {
         return Err(anyhow!(
             "pending barrier activation preconditions no longer match the locally persisted pre-publish state (960.9)"
         ));
@@ -415,12 +436,18 @@ pub(super) fn apply_pending_barrier_activation_with_source(
         return Ok(false);
     }
 
-    if let Some(digest) = accepted_digest
-        && digest == pending.barrier_update_digest
-        && observed_barrier_version == pending.barrier_version
-        && observed_fs_ec == Some(pending.fs_ec)
-        && observed_barrier_update_reason == pending.barrier_update_reason
-    {
+    if pending_barrier_matches_observation(
+        pending.barrier_version,
+        pending.fs_ec,
+        pending.barrier_update_reason,
+        pending.barrier_update_digest,
+        CorePendingBarrierObservation {
+            observed_barrier_version,
+            observed_fs_ec,
+            observed_barrier_update_reason,
+            accepted_digest,
+        },
+    ) {
         validate_pending_activation_source_state(current_source, &pending)?;
         let BarrierPendingState {
             barrier_version,
@@ -483,93 +510,115 @@ pub(super) async fn apply_pending_barrier_activation_from_history(
         return Ok(PendingBarrierHistoryOutcome::Unchanged);
     };
 
-    if pending.we_epoch_id == [0u8; 32] {
-        if current_barrier_version > pending.barrier_version {
-            warn!(
-                code = BARRIER_CODE_SNAPSHOT_AUTH_FAILURE,
-                pending_barrier_version = pending.barrier_version,
-                current_barrier_version,
-                "pending barrier state predates pending we_epoch_id persistence; entering recovery-required state after newer barrier version observed"
-            );
-            return Ok(mark_barrier_recovery_required(
-                session,
-                BarrierRecoveryIssue::LegacyPendingLocatorMissing,
-            ));
-        }
-        return Ok(PendingBarrierHistoryOutcome::Unchanged);
-    }
-
-    match client
-        .barrier_lookup_merge_acceptance(
-            &session.room_id,
-            pending.barrier_version,
-            &pending.barrier_update_digest,
-            &pending.we_epoch_id,
-        )
-        .await
-    {
-        Ok(lookup) => match lookup.status {
-            MergeAcceptanceStatus::Accepted => {
-                let observed_barrier_version =
-                    lookup.accepted_barrier_version.ok_or_else(|| {
-                        anyhow!(
-                            "pending barrier activation history missing accepted barrier_version (960.9)"
-                        )
-                    });
-                let Some(observed_barrier_version) = observed_barrier_version.ok() else {
-                    return Ok(mark_barrier_recovery_required(
-                        session,
-                        BarrierRecoveryIssue::ContradictoryAuthenticatedHistory,
-                    ));
+    let lookup_resolution = if pending.we_epoch_id == [0u8; 32] {
+        resolve_pending_barrier_history(CorePendingBarrierHistoryInput {
+            current_barrier_version,
+            pending_barrier_version: pending.barrier_version,
+            pending_we_epoch_id: pending.we_epoch_id,
+            status: CorePendingBarrierLookupStatus::Pending,
+            accepted_barrier_version: None,
+            accepted_fs_ec: None,
+            accepted_reason: None,
+            accepted_digest: None,
+        })?
+    } else {
+        match client
+            .barrier_lookup_merge_acceptance(
+                &session.room_id,
+                pending.barrier_version,
+                &pending.barrier_update_digest,
+                &pending.we_epoch_id,
+            )
+            .await
+        {
+            Ok(lookup) => {
+                let status = match lookup.status {
+                    MergeAcceptanceStatus::Pending => CorePendingBarrierLookupStatus::Pending,
+                    MergeAcceptanceStatus::Accepted => CorePendingBarrierLookupStatus::Accepted,
+                    MergeAcceptanceStatus::Superseded => CorePendingBarrierLookupStatus::Superseded,
+                    MergeAcceptanceStatus::FinalRejected => {
+                        CorePendingBarrierLookupStatus::FinalRejected
+                    }
                 };
-                let activation_source = pending
-                    .activation_source
-                    .clone()
-                    .unwrap_or_else(|| capture_barrier_pending_activation_source(session));
-                if apply_pending_barrier_activation_with_source(
-                    session,
-                    &activation_source,
-                    observed_barrier_version,
-                    lookup.accepted_fs_ec,
-                    lookup.accepted_reason,
-                    lookup.accepted_digest,
-                )? {
-                    return Ok(PendingBarrierHistoryOutcome::Activated(pending.we_epoch_id));
-                }
+                resolve_pending_barrier_history(CorePendingBarrierHistoryInput {
+                    current_barrier_version,
+                    pending_barrier_version: pending.barrier_version,
+                    pending_we_epoch_id: pending.we_epoch_id,
+                    status,
+                    accepted_barrier_version: lookup.accepted_barrier_version,
+                    accepted_fs_ec: lookup.accepted_fs_ec,
+                    accepted_reason: lookup.accepted_reason,
+                    accepted_digest: lookup.accepted_digest,
+                })?
+            }
+            Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
+                resolve_pending_barrier_history(CorePendingBarrierHistoryInput {
+                    current_barrier_version,
+                    pending_barrier_version: pending.barrier_version,
+                    pending_we_epoch_id: pending.we_epoch_id,
+                    status: CorePendingBarrierLookupStatus::NotFound,
+                    accepted_barrier_version: None,
+                    accepted_fs_ec: None,
+                    accepted_reason: None,
+                    accepted_digest: None,
+                })?
+            }
+            Err(err) => {
+                return Err(anyhow!(
+                    "pending barrier activation history lookup failed (960.9): {err}"
+                ));
+            }
+        }
+    };
+
+    match lookup_resolution {
+        CorePendingBarrierHistoryResolution::Unchanged => {
+            Ok(PendingBarrierHistoryOutcome::Unchanged)
+        }
+        CorePendingBarrierHistoryResolution::Discard => {
+            session.barrier_state.pending = None;
+            session.barrier_state.barrier_recovery_issue = None;
+            Ok(PendingBarrierHistoryOutcome::Discarded)
+        }
+        CorePendingBarrierHistoryResolution::RecoveryRequired(reason) => {
+            let issue = map_pending_barrier_recovery_reason(reason);
+            if matches!(
+                reason,
+                CorePendingBarrierRecoveryReason::LegacyPendingLocatorMissing
+            ) {
+                warn!(
+                    code = BARRIER_CODE_SNAPSHOT_AUTH_FAILURE,
+                    pending_barrier_version = pending.barrier_version,
+                    current_barrier_version,
+                    "pending barrier state predates pending we_epoch_id persistence; entering recovery-required state after newer barrier version observed"
+                );
+            }
+            Ok(mark_barrier_recovery_required(session, issue))
+        }
+        CorePendingBarrierHistoryResolution::Activate {
+            we_epoch_id,
+            observation,
+        } => {
+            let activation_source = pending
+                .activation_source
+                .clone()
+                .unwrap_or_else(|| capture_barrier_pending_activation_source(session));
+            if apply_pending_barrier_activation_with_source(
+                session,
+                &activation_source,
+                observation.observed_barrier_version,
+                observation.observed_fs_ec,
+                observation.observed_barrier_update_reason,
+                observation.accepted_digest,
+            )? {
+                Ok(PendingBarrierHistoryOutcome::Activated(we_epoch_id))
+            } else {
                 Ok(mark_barrier_recovery_required(
                     session,
                     BarrierRecoveryIssue::ContradictoryAuthenticatedHistory,
                 ))
             }
-            MergeAcceptanceStatus::Superseded | MergeAcceptanceStatus::FinalRejected => {
-                session.barrier_state.pending = None;
-                session.barrier_state.barrier_recovery_issue = None;
-                Ok(PendingBarrierHistoryOutcome::Discarded)
-            }
-            MergeAcceptanceStatus::Pending => {
-                Ok(if current_barrier_version > pending.barrier_version {
-                    mark_barrier_recovery_required(
-                        session,
-                        BarrierRecoveryIssue::InsufficientAuthenticatedHistory,
-                    )
-                } else {
-                    PendingBarrierHistoryOutcome::Unchanged
-                })
-            }
-        },
-        Err(ApiClientError::HttpStatus { status, .. }) if status.as_u16() == 404 => {
-            Ok(if current_barrier_version > pending.barrier_version {
-                mark_barrier_recovery_required(
-                    session,
-                    BarrierRecoveryIssue::InsufficientAuthenticatedHistory,
-                )
-            } else {
-                PendingBarrierHistoryOutcome::Unchanged
-            })
         }
-        Err(err) => Err(anyhow!(
-            "pending barrier activation history lookup failed (960.9): {err}"
-        )),
     }
 }
 
