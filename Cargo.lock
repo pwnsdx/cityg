@@ -1469,8 +1469,11 @@ dependencies = [
 name = "cityg-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "chacha20poly1305",
  "ciborium",
  "dirs 6.0.0",
+ "hex",
  "msphf-core",
  "msphf-orchestrator",
  "pqcrypto-dilithium",

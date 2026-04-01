@@ -101,7 +101,9 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessa
 use tracing::warn;
 #[cfg(test)]
 use watch_mode::fetch_and_decrypt_messages;
-use watch_mode::{run_watch_mode, send_dummy_message, send_message_burst, send_text_message};
+use watch_mode::{run_watch_mode, send_message_burst};
+#[cfg(test)]
+use watch_mode::{send_dummy_message, send_text_message};
 use websocket_replay::{
     WebSocketReplayCursor, websocket_ack_message, websocket_lag_notice,
     websocket_notification_replayed, websocket_notification_sequence, websocket_request,
