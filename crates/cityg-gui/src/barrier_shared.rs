@@ -16,9 +16,7 @@ pub use cityg_client::barrier::{
     decode_history_commitment_header as decode_core_history_commitment_header,
     encode_full_verification_receipt,
     encode_history_commitment_header as encode_core_history_commitment_header,
-    expected_barrier_tree_nodes,
-    expected_same_rrh_barrier_reason as expected_core_same_rrh_barrier_reason,
-    header_history_commitment as header_core_history_commitment,
+    expected_barrier_tree_nodes, header_history_commitment as header_core_history_commitment,
     require_current_state_history_commitment as require_core_current_state_history_commitment,
     require_same_history_commitment as require_core_same_history_commitment,
     should_retry_ticket_http_error, sibling_node, ticket_retry_delay, validate_barrier_n_max,
@@ -47,7 +45,9 @@ pub fn require_current_state_history_commitment(
     )
 }
 
-fn to_core_history_commitment(commitment: &HistoryCommitment) -> BarrierHistoryCommitment {
+pub(crate) fn to_core_history_commitment(
+    commitment: &HistoryCommitment,
+) -> BarrierHistoryCommitment {
     BarrierHistoryCommitment {
         history_view_id: commitment.history_view_id,
         history_commitment_id: commitment.history_commitment_id,
@@ -97,17 +97,6 @@ pub fn apply_join_set_to_snapshot(
         .map(to_core_join_snapshot_record)
         .collect();
     cityg_client::barrier::apply_join_set_to_snapshot(snapshot, n_max, core_records.as_slice())
-}
-
-pub fn expected_same_rrh_barrier_reason(
-    join_records: &[BarrierJoinRecord],
-    updater_leaf: u64,
-) -> u64 {
-    let core_records: Vec<_> = join_records
-        .iter()
-        .map(to_core_join_snapshot_record)
-        .collect();
-    expected_core_same_rrh_barrier_reason(core_records.as_slice(), updater_leaf)
 }
 
 #[cfg(test)]

@@ -1,7 +1,6 @@
 use super::*;
 use crate::barrier_shared::{
-    BarrierJoinSnapshotRecord, expected_same_rrh_barrier_reason,
-    require_current_state_history_commitment, require_same_history_commitment,
+    BarrierJoinSnapshotRecord, require_current_state_history_commitment, to_core_history_commitment,
 };
 #[allow(unused_imports)]
 pub(super) use cityg_client::barrier_build::{BarrierWrapAadPreimage, BarrierWrapNoncePreimage};
@@ -9,6 +8,10 @@ pub(super) use cityg_client::barrier_build::{BarrierWrapAadPreimage, BarrierWrap
 pub(super) use cityg_client::barrier_crypto::{
     ML_KEM_EXPANDED_DK_BYTES, decapsulate_internal_node_shared_secret,
     derive_internal_node_key_material, derive_k_fs_after_pcs,
+};
+use cityg_client::barrier_prevalidation::{
+    BootstrapCurrentStateInput, prevalidate_bootstrap_current_state, prevalidate_full_chain_update,
+    validate_bootstrap_provisioning, validate_full_chain_reason,
 };
 pub(super) use cityg_client::barrier_transition::compute_barrier_snapshot_transition;
 #[allow(unused_imports)]
@@ -62,22 +65,8 @@ pub(super) async fn full_chain_check_barrier_update(
     let barrier_reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON).ok_or_else(|| {
         anyhow!("barrier full chain-check prevalidation failed (960.7): missing barrier_update_reason")
     })?;
-    let genesis_local_case = !local_barrier_initialized
-        && parsed.prev_barrier_version == 0
-        && parsed.barrier_version == 0;
-    let valid_local_progression = genesis_local_case
-        || (local_barrier_initialized
-            && parsed.prev_barrier_version == local_barrier_version
-            && parsed.barrier_version == local_barrier_version.saturating_add(1));
-    if !valid_local_progression {
-        return Err(anyhow!(
-            "barrier full chain-check prevalidation failed (960.7): local barrier version progression mismatch"
-        ));
-    }
-
-    let expected_snapshot_hash = parsed.kem_tree_hash_before;
     let (mut snapshot_prev, mut snapshot_prev_history_commitment) = if let Some(snapshot_prev) =
-        (session.barrier_state.kem_tree_hash_after == expected_snapshot_hash)
+        (session.barrier_state.kem_tree_hash_after == parsed.kem_tree_hash_before)
             .then(|| current_public_tree_cache(session))
             .flatten()
     {
@@ -91,14 +80,14 @@ pub(super) async fn full_chain_check_barrier_update(
             })?;
         ((*snapshot_prev).clone(), current_history_commitment)
     } else if let Some((snapshot_prev, current_history_commitment)) =
-        (session.barrier_state.kem_tree_hash_after == expected_snapshot_hash)
+        (session.barrier_state.kem_tree_hash_after == parsed.kem_tree_hash_before)
             .then(|| retained_authenticated_current_public_tree_cache(session))
             .flatten()
     {
         ((*snapshot_prev).clone(), current_history_commitment)
     } else {
         let snapshot_prev_response = client
-            .barrier_fetch_public_tree(room_id, &expected_snapshot_hash)
+            .barrier_fetch_public_tree(room_id, &parsed.kem_tree_hash_before)
             .await
             .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
         let snapshot_prev = snapshot_prev_response.tree;
@@ -108,7 +97,7 @@ pub(super) async fn full_chain_check_barrier_update(
                 snapshot_prev.n_max
             ));
         }
-        validate_barrier_tree_snapshot_auth(&expected_snapshot_hash, n_max, &snapshot_prev)?;
+        validate_barrier_tree_snapshot_auth(&parsed.kem_tree_hash_before, n_max, &snapshot_prev)?;
         (snapshot_prev, snapshot_prev_response.history_commitment)
     };
 
@@ -121,18 +110,19 @@ pub(super) async fn full_chain_check_barrier_update(
     let revoked_root = header_bytes32(header_map, hdr::HDR_REVOKED_ROOT).ok_or_else(|| {
         anyhow!("barrier full chain-check prevalidation failed (960.7): missing revoked_root")
     })?;
-    let revocation_roots_hash = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
-    if parsed.revocation_roots_hash != revocation_roots_hash {
-        return Err(anyhow!(
-            "barrier full chain-check prevalidation failed (960.7): revocation_roots_hash mismatch"
-        ));
-    }
+    let prevalidated = prevalidate_full_chain_update(
+        &parsed,
+        local_barrier_initialized,
+        local_barrier_version,
+        revoked_since_root,
+        revoked_root,
+    )?;
     let join_resolution = client
         .barrier_resolve_joins_since(room_id, parsed.prev_barrier_version)
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
     let revoked_resolution = client
-        .barrier_resolve_revoked_leaves(room_id, &revocation_roots_hash)
+        .barrier_resolve_revoked_leaves(room_id, &prevalidated.revocation_roots_hash)
         .await
         .map_err(|err| anyhow!("barrier full chain-check dependency failure (960.8): {err}"))?;
     let join_record_count = join_resolution.records.len();
@@ -145,7 +135,7 @@ pub(super) async fn full_chain_check_barrier_update(
     .is_err()
     {
         let snapshot_prev_response = client
-            .barrier_fetch_public_tree(room_id, &expected_snapshot_hash)
+            .barrier_fetch_public_tree(room_id, &prevalidated.expected_snapshot_hash)
             .await
             .map_err(|err| anyhow!("barrier tree snapshot auth failure (960.9): {err}"))?;
         if snapshot_prev_response.tree.n_max != n_max {
@@ -155,7 +145,7 @@ pub(super) async fn full_chain_check_barrier_update(
             ));
         }
         validate_barrier_tree_snapshot_auth(
-            &expected_snapshot_hash,
+            &prevalidated.expected_snapshot_hash,
             n_max,
             &snapshot_prev_response.tree,
         )?;
@@ -181,26 +171,6 @@ pub(super) async fn full_chain_check_barrier_update(
         ));
     }
 
-    if !genesis_local_case {
-        if session.barrier_state.barrier_roots_hash == parsed.revocation_roots_hash {
-            let expected_reason = expected_same_rrh_barrier_reason(
-                join_resolution.records.as_slice(),
-                parsed.updater_leaf,
-            );
-            if barrier_reason != expected_reason {
-                return Err(anyhow!(
-                    "barrier full chain-check prevalidation failed (960.7): local barrier_roots_hash unchanged but barrier_update_reason != {expected_reason}"
-                ));
-            }
-        } else if barrier_reason != 0 {
-            return Err(anyhow!(
-                "barrier full chain-check prevalidation failed (960.7): local barrier_roots_hash changed but barrier_update_reason != 0"
-            ));
-        }
-    }
-
-    let parsed_for_hash = parsed.clone();
-    let snapshot_prev_entries = snapshot_prev.pk_entries.clone();
     let join_records_core: Vec<_> = join_resolution
         .records
         .iter()
@@ -209,6 +179,17 @@ pub(super) async fn full_chain_check_barrier_update(
             ek_leaf: record.ek_leaf.clone(),
         })
         .collect();
+    validate_full_chain_reason(
+        prevalidated.genesis_local_case,
+        session.barrier_state.barrier_roots_hash,
+        parsed.revocation_roots_hash,
+        barrier_reason,
+        join_records_core.as_slice(),
+        parsed.updater_leaf,
+    )?;
+
+    let parsed_for_hash = parsed.clone();
+    let snapshot_prev_entries = snapshot_prev.pk_entries.clone();
     let revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
     let (expected_before, expected_after, snapshot_post) =
         tokio::task::spawn_blocking(move || -> Result<([u8; 32], [u8; 32], BarrierPublicTree)> {
@@ -241,7 +222,7 @@ pub(super) async fn full_chain_check_barrier_update(
             revoked_leaf_count,
             expected_before = %hex_encode(expected_before),
             parsed_before = %hex_encode(parsed.kem_tree_hash_before),
-            snapshot_prev_hash = %hex_encode(expected_snapshot_hash),
+            snapshot_prev_hash = %hex_encode(prevalidated.expected_snapshot_hash),
             "barrier full chain-check pre-state hash mismatch"
         );
         return Err(anyhow!(
@@ -280,61 +261,27 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
     let predecessor_hash = session
         .barrier_state
         .bootstrap_predecessor_kem_tree_hash_after;
-    require_same_history_commitment(current_commitment, &expected_commitment)
-        .map_err(|_| anyhow!("join_finalize bootstrap current_history_commitment mismatch"))?;
-    if session
-        .barrier_state
-        .current_global_history_attestation_bytes
-        .is_empty()
-    {
-        if expected_extension.is_some() {
-            return Err(anyhow!(
-                "join_finalize bootstrap missing current global history attestation bytes for authority-bound current state"
-            ));
-        }
-    } else if expected_extension.is_none() {
-        return Err(anyhow!(
-            "join_finalize bootstrap uses unsupported or missing history authority extension for attested current state"
-        ));
-    }
-    if predecessor_hash == [0u8; 32] {
-        return Err(anyhow!(
-            "join_finalize bootstrap missing predecessor committed kem_tree_hash_after"
-        ));
-    }
-    if session
-        .barrier_state
-        .bootstrap_current_barrier_update
-        .is_empty()
-    {
-        return Err(anyhow!(
-            "join_finalize bootstrap missing current barrier_update bytes"
-        ));
-    }
-
     let n_max = session.barrier_state.n_max.max(1);
-    let max_barrier_update_bytes =
-        normalize_max_barrier_update_bytes(session.barrier_state.max_barrier_update_bytes.max(1))?;
-    let parsed = parse_barrier_update_for_recover(
-        session
+    let expected_commitment_core = to_core_history_commitment(&expected_commitment);
+    let current_commitment_core = to_core_history_commitment(current_commitment);
+    let parsed = prevalidate_bootstrap_current_state(BootstrapCurrentStateInput {
+        expected_commitment: &expected_commitment_core,
+        current_commitment: &current_commitment_core,
+        expected_extension_present: expected_extension.is_some(),
+        current_global_history_attestation_bytes: session
+            .barrier_state
+            .current_global_history_attestation_bytes
+            .as_slice(),
+        predecessor_hash,
+        raw_update: session
             .barrier_state
             .bootstrap_current_barrier_update
             .as_slice(),
-        n_max,
-        max_barrier_update_bytes,
-    )
-    .map_err(|err| anyhow!("join_finalize bootstrap verification failed (960.7): {err}"))?;
-
-    if parsed.barrier_version != session.barrier_state.barrier_version {
-        return Err(anyhow!(
-            "join_finalize bootstrap verification failed (960.7): current barrier_version mismatch"
-        ));
-    }
-    if parsed.kem_tree_hash_after != session.barrier_state.kem_tree_hash_after {
-        return Err(anyhow!(
-            "join_finalize bootstrap verification failed (960.7): current kem_tree_hash_after mismatch"
-        ));
-    }
+        local_barrier_version: session.barrier_state.barrier_version,
+        local_kem_tree_hash_after: session.barrier_state.kem_tree_hash_after,
+        local_n_max: session.barrier_state.n_max,
+        local_max_barrier_update_bytes: session.barrier_state.max_barrier_update_bytes,
+    })?;
 
     let current_snapshot =
         if let Some((snapshot, _)) = retained_authenticated_current_public_tree_cache(session) {
@@ -402,23 +349,8 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
     }
     validate_barrier_tree_snapshot_auth(&predecessor_hash, n_max, &snapshot_base)?;
 
-    if session.barrier_state.bootstrap_join_records.is_empty()
-        && session
-            .barrier_state
-            .bootstrap_revoked_leaf_indices
-            .is_empty()
-        && (parsed.prev_barrier_version != 0 || parsed.revocation_roots_hash != [0u8; 32])
-    {
-        return Err(anyhow!(
-            "join_finalize bootstrap missing authenticated JoinSet / RevokedLeafSet provisioning"
-        ));
-    }
-
     let join_records = session.barrier_state.bootstrap_join_records.clone();
     let revoked_leaf_indices = session.barrier_state.bootstrap_revoked_leaf_indices.clone();
-
-    let parsed_for_hash = parsed.clone();
-    let snapshot_base_entries = snapshot_base.pk_entries.clone();
     let join_records_core: Vec<_> = join_records
         .iter()
         .map(|record| BarrierJoinSnapshotRecord {
@@ -426,6 +358,14 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
             ek_leaf: record.ek_leaf.clone(),
         })
         .collect();
+    validate_bootstrap_provisioning(
+        join_records_core.as_slice(),
+        revoked_leaf_indices.as_slice(),
+        &parsed,
+    )?;
+
+    let parsed_for_hash = parsed.clone();
+    let snapshot_base_entries = snapshot_base.pk_entries.clone();
     let (expected_before, expected_after) =
         tokio::task::spawn_blocking(move || -> Result<([u8; 32], [u8; 32])> {
             let transition = compute_barrier_snapshot_transition(
