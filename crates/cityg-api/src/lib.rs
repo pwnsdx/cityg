@@ -7,6 +7,7 @@ mod config_auth;
 mod error_mapping;
 pub mod health;
 mod member_listing;
+mod message_routes;
 mod middleware;
 mod observability_routes;
 mod pivot_routes;
@@ -90,16 +91,12 @@ use cityg_runtime::aligned_fs_epoch_base_ts;
 #[cfg(test)]
 use cityg_runtime::classify_refresh_pivot_conflict;
 use cityg_runtime::{
-    AliasRegistrationError, AliasRegistry, EpochScope, RoomAuthorizationError,
-    RoomMessageStoreError, RoomMessageWrite, RoomRetentionPolicy, RoomVolatileState,
+    AliasRegistrationError, AliasRegistry, EpochScope, RoomVolatileState,
     bootstrap_room_with_admin as runtime_bootstrap_room_with_admin,
-    fetch_room_bundle as runtime_fetch_room_bundle,
-    fetch_room_messages as runtime_fetch_room_messages, filter_room_members_by_query,
-    normalize_alias, paginate_room_members,
-    prepare_accepted_bundle as runtime_prepare_accepted_bundle,
+    fetch_room_bundle as runtime_fetch_room_bundle, filter_room_members_by_query, normalize_alias,
+    paginate_room_members, prepare_accepted_bundle as runtime_prepare_accepted_bundle,
     prepare_join_ticket as runtime_prepare_join_ticket,
     prepare_merge_ticket as runtime_prepare_merge_ticket, server_from_cityg_config_for_lane,
-    store_room_message as runtime_store_room_message,
 };
 use cityg_server::{CityGServer, MergeTicketIntent as ServerMergeTicketIntent};
 use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
@@ -113,6 +110,7 @@ pub(crate) use barrier_routes::*;
 use config_auth::*;
 pub(crate) use error_mapping::*;
 pub(crate) use member_listing::*;
+pub(crate) use message_routes::*;
 pub(crate) use observability_routes::*;
 pub(crate) use pivot_routes::*;
 pub(crate) use proof_validation::*;
@@ -865,112 +863,6 @@ async fn merge_ticket(
     }
     metrics::counter!("cityg_merge_ticket_total", "result" => "ok").increment(1);
     Ok(protobuf_response_bytes(response_bytes))
-}
-
-async fn send_message(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = schema_validate_send_message_request(SendMessageRequest::decode(body)?)
-        .map_err(map_send_message_request_validation_error)?;
-    let timestamp_ms = current_timestamp_ms();
-    let scope = {
-        let epoch_scope = state
-            .epoch_scope_for_weid(&request.we_epoch_id)
-            .await
-            .ok_or(ApiError::NotFound)?;
-        let lane = state.server_for_gid(&epoch_scope.gid);
-        let guard = lane.read().await;
-        let mut room_state = state.room_state.write().await;
-        runtime_store_room_message(
-            &guard,
-            &mut room_state,
-            RoomMessageWrite {
-                we_epoch_id: request.we_epoch_id,
-                sender_leaf: request.sender_leaf,
-                ciphertext: request.ciphertext,
-                sender: request.sender,
-                timestamp_ms,
-            },
-            RoomRetentionPolicy {
-                retention: state.message_retention,
-                prune_interval_ms: MESSAGE_PRUNE_INTERVAL_MS,
-            },
-        )
-        .map_err(|error| match error {
-            RoomMessageStoreError::NotFound => ApiError::NotFound,
-            RoomMessageStoreError::EpochUnauthorized => {
-                ApiError::Unauthorized("leaf is not a member for epoch")
-            }
-            RoomMessageStoreError::RoomUnauthorized => {
-                ApiError::Unauthorized("leaf is not a member for room")
-            }
-        })?
-    };
-
-    // Broadcast notification to WebSocket clients
-    let notification = MessageNotification {
-        gid: scope.gid,
-        we_epoch_id: request.we_epoch_id,
-        timestamp_ms,
-    };
-    state.broadcast_message(notification);
-
-    let reply = SendMessageResponse {
-        status: "stored".to_string(),
-    };
-    Ok(protobuf_response(&reply))
-}
-
-async fn fetch_messages(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = schema_validate_fetch_messages_request(FetchMessagesRequest::decode(body)?)
-        .map_err(map_fetch_messages_request_validation_error)?;
-    let now_ms = current_timestamp_ms();
-    let scope = state
-        .epoch_scope_for_weid(&request.we_epoch_id)
-        .await
-        .ok_or(ApiError::NotFound)?;
-    let lane = state.server_for_gid(&scope.gid);
-    let guard = lane.read().await;
-    let messages = {
-        let mut room_state = state.room_state.write().await;
-        runtime_fetch_room_messages(
-            &guard,
-            &mut room_state,
-            &request.we_epoch_id,
-            request.leaf_id,
-            now_ms,
-            state.message_retention,
-            MESSAGE_PRUNE_INTERVAL_MS,
-        )
-        .map_err(|err| match err {
-            RoomAuthorizationError::NotFound => ApiError::NotFound,
-            RoomAuthorizationError::Unauthorized => {
-                ApiError::Unauthorized("leaf is not a member for epoch")
-            }
-        })?
-    };
-
-    let reply = FetchMessagesResponse {
-        messages: messages
-            .into_iter()
-            .map(|msg| ChatMessage {
-                ciphertext: msg.ciphertext,
-                we_epoch_id: msg.we_epoch_id.to_vec(),
-                sender: msg.sender,
-                timestamp_ms: msg.timestamp_ms,
-            })
-            .collect(),
-    };
-
-    Ok(protobuf_response(&reply))
 }
 
 async fn websocket_handler(
