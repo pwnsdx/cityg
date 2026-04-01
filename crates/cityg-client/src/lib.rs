@@ -74,6 +74,7 @@
 //! - [`pivot`] module for forward secrecy rotation
 //! - [Client Operations](../../docs/protocol/08-client-operations.md) protocol documentation
 
+pub mod barrier;
 pub mod message_crypto;
 pub mod pivot;
 pub mod witness;
