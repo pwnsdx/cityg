@@ -571,3 +571,36 @@ fn merge_ticket_encodes_requester_self_revocation_delta() -> Result<(), CityGErr
     assert_eq!(ticket.revoked_root, expected_since_root);
     Ok(())
 }
+
+#[test]
+fn bootstrapped_room_keeps_kbroad_registry_after_first_join() -> Result<(), CityGError> {
+    let mut config = ServerConfig::new();
+    config.enable_global_history_authority();
+    let mut server = CityGServer::new(config);
+    let gid = [0x91u8; 32];
+    server.register_group_with_admin(
+        &gid,
+        cityg_client::demo::kbroad_public().to_vec(),
+        vec![0xA5; 32],
+    )?;
+
+    let joined = build_join_member_from_server_ticket(&mut server, &gid, 0x91, false)?;
+    server.accept_epoch(&joined.bundle)?;
+
+    assert!(
+        server
+            .context()
+            .kbroad_registry()
+            .and_then(|registry| registry.get(gid.as_slice()))
+            .is_some(),
+        "first accepted join must not drop the room kbroad registry",
+    );
+
+    let refresh = server.build_merge_ticket_for_refresh(&gid, &joined.leaf_id)?;
+    assert_eq!(
+        refresh.kbroad_public,
+        cityg_client::demo::kbroad_public().to_vec(),
+        "refresh ticket must still expose the registered room kbroad key"
+    );
+    Ok(())
+}

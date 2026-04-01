@@ -1,7 +1,4 @@
-#[cfg(test)]
-use std::cell::RefCell;
 use std::path::PathBuf;
-#[cfg(not(test))]
 use std::sync::{LazyLock, Mutex};
 
 use super::*;
@@ -36,12 +33,6 @@ pub(super) fn last_session_pointer_path() -> Result<PathBuf> {
 }
 
 pub(super) fn session_dir() -> Result<PathBuf> {
-    #[cfg(test)]
-    if let Some(path) = CONFIG_DIR_OVERRIDE.with(|override_path| override_path.borrow().clone()) {
-        return Ok(path);
-    }
-
-    #[cfg(not(test))]
     if let Some(path) = CONFIG_DIR_OVERRIDE
         .lock()
         .map_err(|_| anyhow!("Failed to acquire config dir lock"))?
@@ -61,38 +52,40 @@ pub(super) fn session_dir() -> Result<PathBuf> {
     Ok(base.join("cityg").join("gui"))
 }
 
-#[cfg(not(test))]
 static CONFIG_DIR_OVERRIDE: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
 
 #[cfg(test)]
-thread_local! {
-    static CONFIG_DIR_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
+static CONFIG_DIR_OVERRIDE_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 pub(super) fn set_config_dir_override_for_tests(path: Option<PathBuf>) -> ConfigDirGuard {
-    let previous = CONFIG_DIR_OVERRIDE.with(|override_path| {
-        let mut slot = override_path.borrow_mut();
+    let serial = CONFIG_DIR_OVERRIDE_SERIAL
+        .lock()
+        .expect("test config dir serial lock");
+    let previous = {
+        let mut slot = CONFIG_DIR_OVERRIDE.lock().expect("test config dir lock");
         let previous = slot.clone();
         *slot = path;
         previous
-    });
-    ConfigDirGuard { previous }
+    };
+    ConfigDirGuard {
+        previous,
+        _serial: serial,
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 pub(super) struct ConfigDirGuard {
     previous: Option<PathBuf>,
+    _serial: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 impl Drop for ConfigDirGuard {
     fn drop(&mut self) {
-        CONFIG_DIR_OVERRIDE.with(|override_path| {
-            *override_path.borrow_mut() = self.previous.clone();
-        });
+        *CONFIG_DIR_OVERRIDE.lock().expect("test config dir lock") = self.previous.clone();
     }
 }

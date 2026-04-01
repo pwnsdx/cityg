@@ -7,9 +7,8 @@
 > If a chapter here conflicts with the unified spec or implementation
 > behavior/tests, follow the unified spec and the live code/tests.
 >
-> Several companion chapters still preserve earlier "Alpha (0.1.0)" blueprint
-> labels or historical framing in their explanatory text. Read those as
-> historical companion terminology, not as a competing current profile claim.
+> Several companion chapters still preserve earlier "Alpha (0.1.0)" labels or
+> historical framing in explanatory text. Treat those as citations only.
 
 ## Current Role of This Directory
 

@@ -181,7 +181,7 @@ See [workflows.md#policy-vs-cryptography](docs/workflows.md#policy-vs-cryptograp
 ## Read next
 
 * **Unified spec (v0.1.4):** publisher‑blind acceptance, offline admission, joins that self-finalize without another client online, merges/rollups, FS-hybrid, and PRS barrier — [`docs/specs.md`](docs/specs.md).
-* **Protocol companion docs:** chapterized companion and historical material — [`docs/protocol/`](docs/protocol/00-README.md).
+* **Protocol companion index:** explanatory and historical material — [`docs/protocol/`](docs/protocol/00-README.md).
 * **Workflows & diagrams:** visual sequence diagrams for common operations — [`docs/workflows.md`](docs/workflows.md).
 
 ---

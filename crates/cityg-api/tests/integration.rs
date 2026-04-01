@@ -166,6 +166,7 @@ struct RawRoomAdminMutationRequest {
 
 struct JoinedMember {
     bundle: ClientEpochBundle,
+    leaf_id: [u8; 32],
 }
 
 fn array32(name: &str, bytes: &[u8]) -> Result<[u8; 32]> {
@@ -354,7 +355,39 @@ async fn join_room_member_with_identity(
         cityg_client::demo::attach_bootstrap(&mut bundle)?;
     }
 
-    Ok(JoinedMember { bundle })
+    Ok(JoinedMember { bundle, leaf_id })
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn bootstrapped_room_join_keeps_merge_ticket_refresh_available() -> Result<()> {
+    let port = next_free_local_port();
+    let handle = spawn_server_with_seed_demo_room(port, false).await;
+    sleep(Duration::from_millis(250)).await;
+
+    let client = test_client(format!("http://127.0.0.1:{port}"));
+    let room_id = hex::encode([0x91u8; 32]);
+    bootstrap_room(&client, &room_id, kbroad_public()).await?;
+
+    let alice = join_room_member(&client, &room_id, "alice", 0x91).await?;
+    client
+        .accept_epoch_bundle(&alice.bundle)
+        .await
+        .expect("accept alice into bootstrapped room");
+
+    let refresh = client
+        .merge_ticket_refresh(&room_id, &alice.leaf_id)
+        .await
+        .expect("bootstrapped room must keep merge refresh ticket available after first join");
+    assert_eq!(
+        refresh.kbroad_public,
+        kbroad_public(),
+        "merge refresh ticket must still carry the registered room kbroad key"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
 }
 
 #[tokio::test]

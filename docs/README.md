@@ -31,7 +31,7 @@ Building applications with City-G:
 Implementing the City-G protocol:
 
 - **[Unified Specification](./specs.md)** - Authoritative normative source
-- **[Protocol Companion Index](./protocol/00-README.md)** - Chapterized companion material, indexed by role and mapped back to the spec
+- **[Protocol Companion Index](./protocol/00-README.md)** - Chapterized companion material mapped back to the spec
 - **[Implementation Guide](./protocol/11-implementation-guide.md)** - Current code walkthrough and module map
 - **[Testing Guide](./protocol/13-testing-guide.md)** - Tests, manifests, CI expectations, and local validation flows
 - **[Protocol Checklist](./protocol/20-protocol-checklist.md)** - Guarantee-to-flow coverage matrix for the current profile
