@@ -7,6 +7,7 @@ pub mod health;
 mod member_listing;
 mod middleware;
 mod observability_routes;
+mod pivot_routes;
 mod proof_validation;
 
 use std::{
@@ -99,11 +100,13 @@ use cityg_runtime::StoredBundle;
 use cityg_runtime::StoredMessage;
 #[cfg(test)]
 use cityg_runtime::aligned_fs_epoch_base_ts;
+#[cfg(test)]
+use cityg_runtime::classify_refresh_pivot_conflict;
 use cityg_runtime::{
     AliasRegistrationError, AliasRegistry, EpochScope, RoomAuthorizationError,
     RoomMessageStoreError, RoomMessageWrite, RoomRetentionPolicy, RoomVolatileState,
     bootstrap_room_with_admin as runtime_bootstrap_room_with_admin,
-    classify_refresh_pivot_conflict, fetch_room_bundle as runtime_fetch_room_bundle,
+    fetch_room_bundle as runtime_fetch_room_bundle,
     fetch_room_messages as runtime_fetch_room_messages, filter_room_members_by_query,
     grant_room_admin as runtime_grant_room_admin, list_room_admins as runtime_list_room_admins,
     normalize_alias, paginate_room_members,
@@ -116,10 +119,8 @@ use cityg_runtime::{
     prepare_merge_ticket as runtime_prepare_merge_ticket,
     prepare_resolved_joins as runtime_prepare_resolved_joins,
     prepare_resolved_revoked_leaves as runtime_prepare_resolved_revoked_leaves,
-    refresh_room_pivot as runtime_refresh_room_pivot,
     revoke_room_admin as runtime_revoke_room_admin,
-    rotate_room_kbroad as runtime_rotate_room_kbroad,
-    seed_room_window_head as runtime_seed_room_window_head, server_from_cityg_config_for_lane,
+    rotate_room_kbroad as runtime_rotate_room_kbroad, server_from_cityg_config_for_lane,
     store_room_message as runtime_store_room_message,
 };
 use cityg_server::{CityGServer, MergeTicketIntent as ServerMergeTicketIntent};
@@ -133,6 +134,7 @@ use config_auth::*;
 pub(crate) use error_mapping::*;
 pub(crate) use member_listing::*;
 pub(crate) use observability_routes::*;
+pub(crate) use pivot_routes::*;
 pub(crate) use proof_validation::*;
 
 #[derive(Clone, Debug)]
@@ -1865,93 +1867,6 @@ fn init_logging() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(any(debug_assertions, feature = "debug-api"))]
-async fn seed_window_head(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_window_config_auth(&headers, configured_window_admin_token().as_deref())?;
-    let request = SeedHeadRequest::decode(body)?;
-    if request.bundle_cbor.is_empty() {
-        return Err(ApiError::InvalidRequest("bundle_cbor must be provided"));
-    }
-
-    let bundle = match ClientEpochBundle::from_cbor(&request.bundle_cbor) {
-        Ok(bundle) => bundle,
-        Err(ClientError::InvalidInput(_)) => {
-            return Err(ApiError::InvalidRequest("invalid bundle encoding"));
-        }
-        Err(err) => return Err(ApiError::server_message(err.to_string())),
-    };
-
-    {
-        let gid: [u8; 32] = bundle
-            .gid()
-            .try_into()
-            .map_err(|_| ApiError::InvalidRequest("bundle gid must be 32 bytes"))?;
-        let lane = state.server_for_gid(&gid);
-        let mut guard = lane.write().await;
-        runtime_seed_room_window_head(&mut guard, &bundle).map_err(|err| match err {
-            cityg_runtime::RoomWindowSeedError::InvalidGidLength => {
-                ApiError::InvalidRequest("bundle gid must be 32 bytes")
-            }
-            cityg_runtime::RoomWindowSeedError::ComputeWindowId(message)
-            | cityg_runtime::RoomWindowSeedError::AcceptHead(message) => {
-                ApiError::server_message(message)
-            }
-        })?;
-    }
-
-    let reply = SeedHeadResponse {};
-    Ok(protobuf_response(&reply))
-}
-
-async fn refresh_pivot(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = RefreshPivotRequest::decode(body)?;
-    let bundle = schema_decode_bundle_cbor_request(&request.bundle_cbor, true)
-        .map_err(map_bundle_cbor_request_decode_error)?;
-    let gid: [u8; 32] = bundle
-        .gid()
-        .try_into()
-        .map_err(|_| ApiError::InvalidRequest("bundle gid must be 32 bytes"))?;
-    enforce_expensive_rate_limit(
-        &state,
-        "refresh_pivot",
-        message_scoped_rate_limit_key(&headers, &gid),
-    )
-    .await?;
-
-    {
-        let lane = state.server_for_gid(&gid);
-        let mut guard = lane.write().await;
-        runtime_refresh_room_pivot(&mut guard, &bundle).map_err(|err| match err {
-            ClientError::InvalidInput(
-                "pivot parity missing for refresh"
-                | "pivot head missing"
-                | "refresh payload diverges from stored parity",
-            ) => {
-                if let Some(reason) = classify_refresh_pivot_conflict(&err.to_string()) {
-                    metrics::counter!(
-                        "cityg_refresh_pivot_conflict_total",
-                        "reason" => reason.to_string()
-                    )
-                    .increment(1);
-                }
-                ApiError::conflict(err.to_string())
-            }
-            other => ApiError::server_message(other.to_string()),
-        })?;
-    }
-
-    let reply = RefreshPivotResponse {};
-    Ok(protobuf_response(&reply))
-}
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
