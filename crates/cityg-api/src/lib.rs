@@ -6,6 +6,7 @@ mod error_mapping;
 pub mod health;
 mod member_listing;
 mod middleware;
+mod observability_routes;
 mod proof_validation;
 
 use std::{
@@ -24,12 +25,11 @@ use axum::{
     body::Bytes,
     extract::ws::{Message as WsMessage, WebSocket},
     extract::{DefaultBodyLimit, Query, State, WebSocketUpgrade},
-    http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderMap, HeaderValue, StatusCode},
     middleware as axum_middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use bytes::BytesMut;
 use cityg_api_schema::{
     API_PROFILE_VERSION, FetchPublicTreeRequestDecodeError,
     FullVerificationWitnessRequestDecodeError, LookupMergeAcceptanceRequestDecodeError,
@@ -45,8 +45,7 @@ use cityg_api_schema::{
     encode_prepared_merge_acceptance_lookup_response, encode_prepared_merge_ticket_response,
     encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
     encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
-    encode_search_members_response, encode_telemetry_snapshot_response,
-    encode_window_snapshot_response, pb,
+    encode_search_members_response, pb,
     prepare_join_ticket_request as schema_prepare_join_ticket_request,
     validate_bootstrap_room_request as schema_validate_bootstrap_room_request,
     validate_expel_member_ticket_request as schema_validate_expel_member_ticket_request,
@@ -103,13 +102,11 @@ use cityg_runtime::aligned_fs_epoch_base_ts;
 use cityg_runtime::{
     AliasRegistrationError, AliasRegistry, EpochScope, RoomAuthorizationError,
     RoomMessageStoreError, RoomMessageWrite, RoomRetentionPolicy, RoomVolatileState,
-    apply_room_window_limit_update as runtime_apply_room_window_limit_update,
     bootstrap_room_with_admin as runtime_bootstrap_room_with_admin,
     classify_refresh_pivot_conflict, fetch_room_bundle as runtime_fetch_room_bundle,
     fetch_room_messages as runtime_fetch_room_messages, filter_room_members_by_query,
     grant_room_admin as runtime_grant_room_admin, list_room_admins as runtime_list_room_admins,
     normalize_alias, paginate_room_members,
-    parse_room_window_limit_update as runtime_parse_room_window_limit_update,
     prepare_accepted_bundle as runtime_prepare_accepted_bundle,
     prepare_barrier_public_tree as runtime_prepare_barrier_public_tree,
     prepare_expel_member_ticket as runtime_prepare_expel_member_ticket,
@@ -123,8 +120,6 @@ use cityg_runtime::{
     revoke_room_admin as runtime_revoke_room_admin,
     rotate_room_kbroad as runtime_rotate_room_kbroad,
     seed_room_window_head as runtime_seed_room_window_head, server_from_cityg_config_for_lane,
-    snapshot_room_telemetry as runtime_snapshot_room_telemetry,
-    snapshot_room_window as runtime_snapshot_room_window,
     store_room_message as runtime_store_room_message,
 };
 use cityg_server::{CityGServer, MergeTicketIntent as ServerMergeTicketIntent};
@@ -137,6 +132,7 @@ pub(crate) use accept_helpers::*;
 use config_auth::*;
 pub(crate) use error_mapping::*;
 pub(crate) use member_listing::*;
+pub(crate) use observability_routes::*;
 pub(crate) use proof_validation::*;
 
 #[derive(Clone, Debug)]
@@ -1639,167 +1635,6 @@ async fn get_bundle(
     let reply = GetBundleResponse { bundle_cbor: bytes };
 
     Ok(protobuf_response(&reply))
-}
-
-async fn health_legacy_with_state(State(_state): State<ApiState>) -> Response {
-    let reply = HealthResponse {
-        status: "ok".to_string(),
-    };
-    protobuf_response(&reply)
-}
-
-async fn health_liveness(State(_state): State<ApiState>) -> Response {
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({
-            "alive": true
-        })),
-    )
-        .into_response()
-}
-
-async fn health_readiness(State(_state): State<ApiState>) -> Response {
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({
-            "ready": true
-        })),
-    )
-        .into_response()
-}
-
-async fn health_detailed(State(_state): State<ApiState>) -> Response {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({
-            "status": "healthy",
-            "timestamp": timestamp,
-            "version": env!("CARGO_PKG_VERSION"),
-            "checks": [
-                {
-                    "name": "system",
-                    "status": "healthy",
-                    "message": "Service is running"
-                }
-            ]
-        })),
-    )
-        .into_response()
-}
-
-async fn get_window(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let _ = GetWindowRequest::decode(body)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "get_window",
-        message_scoped_rate_limit_key(&headers, b"window"),
-    )
-    .await?;
-    let mut snapshot = Vec::new();
-    for lane in state.all_server_lanes() {
-        let guard = lane.read().await;
-        snapshot.extend(runtime_snapshot_room_window(&guard));
-    }
-
-    Ok(protobuf_response_bytes(encode_window_snapshot_response(
-        snapshot,
-    )))
-}
-
-async fn get_telemetry(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let _ = GetTelemetryRequest::decode(body)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "get_telemetry",
-        message_scoped_rate_limit_key(&headers, b"telemetry"),
-    )
-    .await?;
-    let mut report = Vec::new();
-    for lane in state.all_server_lanes() {
-        let guard = lane.read().await;
-        report.extend(runtime_snapshot_room_telemetry(&guard));
-    }
-
-    let freeze_stats = state.freeze_stats().await;
-    Ok(protobuf_response_bytes(encode_telemetry_snapshot_response(
-        report,
-        freeze_stats,
-    )))
-}
-
-async fn configure_window(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_window_config_auth(&headers, configured_window_admin_token().as_deref())?;
-    let request = ConfigureWindowRequest::decode(body)?;
-    let update = runtime_parse_room_window_limit_update(request.h_max, request.ttl_ms)
-        .map_err(|err| ApiError::InvalidRequest(err.api_message()))?;
-
-    let (effective_h, effective_ttl) = {
-        let mut effective: Option<(usize, Duration)> = None;
-        for lane in state.all_server_lanes() {
-            let mut guard = lane.write().await;
-            let applied = runtime_apply_room_window_limit_update(&mut guard, update);
-            if effective.is_none() {
-                effective = Some((applied.h_max, applied.ttl));
-            }
-        }
-        effective.unwrap_or((0, Duration::from_secs(0)))
-    };
-
-    let ttl_ms = effective_ttl.as_millis().min(u128::from(u32::MAX)) as u32;
-
-    let reply = ConfigureWindowResponse {
-        h_max: effective_h as u32,
-        ttl_ms,
-    };
-    Ok(protobuf_response(&reply))
-}
-
-fn protobuf_response<M: Message>(message: &M) -> Response {
-    let mut buf = BytesMut::new();
-    buf.reserve(message.encoded_len());
-
-    // Handle encoding error gracefully
-    if let Err(e) = message.encode(&mut buf) {
-        error!("failed to encode protobuf response: {}", e);
-        return ApiError::server_message("Failed to encode response").into_response();
-    }
-
-    let mut response = Response::new(buf.freeze().into());
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/x-protobuf"),
-    );
-    response
-}
-
-fn protobuf_response_bytes(payload: Vec<u8>) -> Response {
-    let mut response = Response::new(payload.into());
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/x-protobuf"),
-    );
-    response
 }
 
 pub async fn run() -> anyhow::Result<()> {
