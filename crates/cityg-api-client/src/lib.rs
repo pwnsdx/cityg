@@ -148,8 +148,8 @@ use cityg_api_schema::pb;
 use cityg_client::CityGError as ClientError;
 use msphf_orchestrator::PivotParity;
 pub use pb::IdentityBinding;
-pub use pb::RoomAdminProof;
 use pb::MergeTicketIntent as PbMergeTicketIntent;
+pub use pb::RoomAdminProof;
 #[cfg(test)]
 use pb::{ListRoomAdminsResponse, MembersRequest, RoomAdminMutationResponse};
 use prost::Message;
