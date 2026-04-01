@@ -14,6 +14,7 @@ mod observability_routes;
 mod pivot_routes;
 mod proof_validation;
 mod ticket_routes;
+mod websocket_routes;
 
 use std::{
     collections::BTreeMap,
@@ -29,8 +30,7 @@ use ahash::{AHashMap, AHasher};
 use axum::{
     Router,
     body::Bytes,
-    extract::ws::{Message as WsMessage, WebSocket},
-    extract::{DefaultBodyLimit, Query, State, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware as axum_middleware,
     response::{IntoResponse, Response},
@@ -42,7 +42,6 @@ use cityg_api_schema::{
     validate_fetch_messages_request as schema_validate_fetch_messages_request,
     validate_send_message_request as schema_validate_send_message_request,
 };
-use futures::{SinkExt, StreamExt};
 #[cfg(test)]
 use pb::IdentityBinding;
 #[cfg(test)]
@@ -70,7 +69,7 @@ use pb::{
 use pb::{SeedHeadRequest, SeedHeadResponse};
 use prost::Message;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use cityg_client::{CityGError as ClientError, ClientEpochBundle};
@@ -106,6 +105,7 @@ pub(crate) use observability_routes::*;
 pub(crate) use pivot_routes::*;
 pub(crate) use proof_validation::*;
 pub(crate) use ticket_routes::*;
+pub(crate) use websocket_routes::*;
 
 #[derive(Clone, Debug)]
 enum BroadcastNotification {
@@ -632,204 +632,6 @@ async fn accept_epoch(State(state): State<ApiState>, body: Bytes) -> Result<Resp
 
     let response = apply_bundle(&state, &bundle).await?;
     Ok(protobuf_response(&response))
-}
-
-async fn websocket_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Query(query): Query<WebSocketSubscriptionQuery>,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_websocket(&headers, configured_message_auth_token().as_deref())?;
-    let gid = parse_gid(&query.gid)?;
-    let leaf_id = parse_hex_32("leaf_id must be 64 hex characters", &query.leaf_id)?;
-    ensure_leaf_member_for_room(&state, &gid, leaf_id).await?;
-    Ok(ws.on_upgrade(move |socket| handle_websocket(socket, state, gid)))
-}
-
-async fn handle_websocket(socket: WebSocket, state: ApiState, subscribed_gid: [u8; 32]) {
-    let (mut sender, mut receiver) = socket.split();
-
-    // Subscribe to server notifications
-    let mut rx = state.notification_tx.subscribe();
-    let max_lag = configured_ws_max_lag();
-
-    debug!(
-        "WebSocket client connected for gid {}",
-        hex::encode(subscribed_gid)
-    );
-
-    // Track connection health for auto-reconnect signaling
-    let connection_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let conn_healthy_clone = connection_healthy.clone();
-
-    // Spawn a task to handle incoming messages from the client (ping/pong)
-    let mut recv_task = tokio::spawn(async move {
-        let mut last_pong = Instant::now();
-        let pong_timeout = Duration::from_secs(60);
-
-        while let Some(result) = receiver.next().await {
-            match result {
-                Ok(WsMessage::Close(_)) => {
-                    debug!("WebSocket client sent close message");
-                    conn_healthy_clone.store(false, std::sync::atomic::Ordering::Relaxed);
-                    break;
-                }
-                Ok(WsMessage::Ping(_)) => {
-                    debug!("WebSocket received ping");
-                    last_pong = Instant::now();
-                }
-                Ok(WsMessage::Pong(_)) => {
-                    debug!("WebSocket received pong");
-                    last_pong = Instant::now();
-                }
-                Ok(_) => {
-                    // Ignore other message types from client
-                }
-                Err(e) => {
-                    warn!("WebSocket receive error: {}", e);
-                    conn_healthy_clone.store(false, std::sync::atomic::Ordering::Relaxed);
-                    break;
-                }
-            }
-
-            // Check for pong timeout
-            if last_pong.elapsed() > pong_timeout {
-                warn!("WebSocket pong timeout, considering connection unhealthy");
-                conn_healthy_clone.store(false, std::sync::atomic::Ordering::Relaxed);
-                break;
-            }
-        }
-    });
-
-    // Main task: forward message notifications to the WebSocket client
-    let mut send_task = tokio::spawn(async move {
-        let ping_interval = Duration::from_secs(30);
-        let mut last_ping = Instant::now();
-
-        loop {
-            // Check connection health
-            if !connection_healthy.load(std::sync::atomic::Ordering::Relaxed) {
-                debug!("WebSocket connection marked unhealthy, closing send loop");
-                break;
-            }
-
-            tokio::select! {
-                // Wait for message notifications
-                result = rx.recv() => {
-                    match result {
-                        Ok(notification) => {
-                            let payload = match notification {
-                                BroadcastNotification::Message(msg) => {
-                                    if msg.gid != subscribed_gid {
-                                        continue;
-                                    }
-                                    serde_json::json!({
-                                        "type": "message",
-                                        "gid": hex::encode(msg.gid),
-                                        "we_epoch_id": hex::encode(msg.we_epoch_id),
-                                        "timestamp_ms": msg.timestamp_ms,
-                                        "connection_healthy": true
-                                    })
-                                }
-                                BroadcastNotification::Membership(event) => {
-                                    if event.gid != subscribed_gid {
-                                        continue;
-                                    }
-                                    let kind = match event.event {
-                                        MembershipEventKind::Join => "join",
-                                        MembershipEventKind::Revoke => "revoke",
-                                    };
-                                    serde_json::json!({
-                                        "type": "membership",
-                                        "gid": hex::encode(event.gid),
-                                        "leaf_id": hex::encode(event.leaf_id),
-                                        "event": kind,
-                                        "timestamp_ms": event.timestamp_ms
-                                    })
-                                }
-                            };
-
-                            let text = match serde_json::to_string(&payload) {
-                                Ok(t) => t,
-                                Err(e) => {
-                                    error!("Failed to serialize notification: {}", e);
-                                    continue;
-                                }
-                            };
-
-                            if let Err(e) = sender.send(WsMessage::Text(text.into())).await {
-                                warn!("Failed to send WebSocket message: {}", e);
-                                connection_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
-                                break;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!(
-                                "WebSocket client lagged by {} messages (max allowed: {})",
-                                n, max_lag
-                            );
-                            if should_disconnect_for_lag(n, max_lag) {
-                                let disconnect_notification = serde_json::json!({
-                                    "type": "lag_disconnect",
-                                    "lagged_messages": n,
-                                    "max_lag": max_lag,
-                                });
-                                if let Ok(text) = serde_json::to_string(&disconnect_notification) {
-                                    let _ = sender.send(WsMessage::Text(text.into())).await;
-                                }
-                                warn!(
-                                    "WebSocket client exceeded lag threshold; disconnecting"
-                                );
-                                connection_healthy
-                                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                                break;
-                            }
-                            // Send lag notification to client
-                            let lag_notification = serde_json::json!({
-                                "type": "lag",
-                                "lagged_messages": n,
-                                "recommendation": "consider reconnecting"
-                            });
-                            if let Ok(text) = serde_json::to_string(&lag_notification) {
-                                let _ = sender.send(WsMessage::Text(text.into())).await;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            info!("Message broadcast channel closed");
-                            break;
-                        }
-                    }
-                }
-
-                // Send periodic ping to keep connection alive
-                _ = tokio::time::sleep(ping_interval) => {
-                    if last_ping.elapsed() >= ping_interval {
-                        if let Err(e) = sender.send(WsMessage::Ping(vec![].into())).await {
-                            warn!("Failed to send ping: {}", e);
-                            connection_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
-                            break;
-                        }
-                        last_ping = Instant::now();
-                    }
-                }
-            }
-        }
-    });
-
-    // Wait for either task to complete
-    tokio::select! {
-        _ = &mut send_task => {
-            debug!("WebSocket send task completed");
-            recv_task.abort();
-        }
-        _ = &mut recv_task => {
-            debug!("WebSocket receive task completed");
-            send_task.abort();
-        }
-    }
-
-    info!("WebSocket client disconnected");
 }
 
 pub async fn run() -> anyhow::Result<()> {
