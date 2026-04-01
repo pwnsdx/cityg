@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
 mod accept_helpers;
+mod barrier_routes;
 mod config_auth;
 mod error_mapping;
 pub mod health;
@@ -32,19 +33,10 @@ use axum::{
     routing::{get, post},
 };
 use cityg_api_schema::{
-    API_PROFILE_VERSION, FetchPublicTreeRequestDecodeError,
-    FullVerificationWitnessRequestDecodeError, LookupMergeAcceptanceRequestDecodeError,
-    MAX_BARRIER_HELPER_PAGE_ENTRIES, ResolveRevokedLeavesRequestDecodeError,
-    decode_barrier_fetch_public_tree_request as schema_decode_barrier_fetch_public_tree_request,
-    decode_barrier_lookup_merge_acceptance_request as schema_decode_barrier_lookup_merge_acceptance_request,
-    decode_barrier_resolve_revoked_leaves_request as schema_decode_barrier_resolve_revoked_leaves_request,
+    API_PROFILE_VERSION, MAX_BARRIER_HELPER_PAGE_ENTRIES,
     decode_bundle_cbor_request as schema_decode_bundle_cbor_request,
-    decode_full_verification_witness_request as schema_decode_full_verification_witness_request,
-    encode_bootstrap_room_response, encode_full_verification_witness_response,
-    encode_list_room_admins_response, encode_members_response,
-    encode_prepared_barrier_public_tree_response, encode_prepared_join_ticket_response,
-    encode_prepared_merge_acceptance_lookup_response, encode_prepared_merge_ticket_response,
-    encode_prepared_resolved_joins_response, encode_prepared_resolved_revoked_leaves_response,
+    encode_bootstrap_room_response, encode_list_room_admins_response, encode_members_response,
+    encode_prepared_join_ticket_response, encode_prepared_merge_ticket_response,
     encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
     encode_search_members_response, pb,
     prepare_join_ticket_request as schema_prepare_join_ticket_request,
@@ -111,14 +103,9 @@ use cityg_runtime::{
     grant_room_admin as runtime_grant_room_admin, list_room_admins as runtime_list_room_admins,
     normalize_alias, paginate_room_members,
     prepare_accepted_bundle as runtime_prepare_accepted_bundle,
-    prepare_barrier_public_tree as runtime_prepare_barrier_public_tree,
     prepare_expel_member_ticket as runtime_prepare_expel_member_ticket,
-    prepare_full_verification_witness as runtime_prepare_full_verification_witness,
     prepare_join_ticket as runtime_prepare_join_ticket,
-    prepare_merge_acceptance_lookup as runtime_prepare_merge_acceptance_lookup,
     prepare_merge_ticket as runtime_prepare_merge_ticket,
-    prepare_resolved_joins as runtime_prepare_resolved_joins,
-    prepare_resolved_revoked_leaves as runtime_prepare_resolved_revoked_leaves,
     revoke_room_admin as runtime_revoke_room_admin,
     rotate_room_kbroad as runtime_rotate_room_kbroad, server_from_cityg_config_for_lane,
     store_room_message as runtime_store_room_message,
@@ -130,6 +117,7 @@ use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
 use serde::Deserialize;
 
 pub(crate) use accept_helpers::*;
+pub(crate) use barrier_routes::*;
 use config_auth::*;
 pub(crate) use error_mapping::*;
 pub(crate) use member_listing::*;
@@ -1080,226 +1068,6 @@ async fn merge_ticket(
     }
     metrics::counter!("cityg_merge_ticket_total", "result" => "ok").increment(1);
     Ok(protobuf_response_bytes(response_bytes))
-}
-
-async fn barrier_issue_full_verification_witness(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = BarrierIssueFullVerificationWitnessRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    let gid = parse_gid(&request.room_id)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "barrier_issue_full_verification_witness",
-        message_scoped_rate_limit_key(&headers, &gid),
-    )
-    .await?;
-    let witness_request =
-        schema_decode_full_verification_witness_request(request).map_err(|error| match error {
-            FullVerificationWitnessRequestDecodeError::InvalidAuthorLeafId
-            | FullVerificationWitnessRequestDecodeError::MissingCurrentGlobalHistoryAttestation
-            | FullVerificationWitnessRequestDecodeError::MissingDeploymentProfileManifest
-            | FullVerificationWitnessRequestDecodeError::MissingMergeTicketArtifact
-            | FullVerificationWitnessRequestDecodeError::InvalidBarrierUpdateReason
-            | FullVerificationWitnessRequestDecodeError::InvalidRevocationRootsHash
-            | FullVerificationWitnessRequestDecodeError::InvalidRevocationTargetLeafId
-            | FullVerificationWitnessRequestDecodeError::HistoryCommitment(_) => {
-                ApiError::InvalidRequest(error.api_message())
-            }
-        })?;
-    let witness = {
-        let lane = state.server_for_gid(&gid);
-        let mut guard = lane.write().await;
-        runtime_prepare_full_verification_witness(
-            &mut guard,
-            &gid,
-            witness_request,
-            API_PROFILE_VERSION,
-        )
-        .map_err(|err| {
-            map_full_verification_witness_preparation_error(
-                "barrier_issue_full_verification_witness",
-                err,
-            )
-        })?
-    };
-
-    Ok(protobuf_response_bytes(
-        encode_full_verification_witness_response(witness),
-    ))
-}
-
-async fn barrier_resolve_revoked_leaves(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = BarrierResolveRevokedLeavesRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    let gid = parse_gid(&request.room_id)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "barrier_resolve_revoked_leaves",
-        message_scoped_rate_limit_key(&headers, &gid),
-    )
-    .await?;
-    let request = schema_decode_barrier_resolve_revoked_leaves_request(request).map_err(
-        |error: ResolveRevokedLeavesRequestDecodeError| {
-            ApiError::InvalidRequest(error.api_message())
-        },
-    )?;
-
-    let prepared = {
-        let lane = state.server_for_gid(&gid);
-        let mut guard = lane.write().await;
-        runtime_prepare_resolved_revoked_leaves(
-            &mut guard,
-            &gid,
-            &request.revocation_roots_hash,
-            request.page_offset,
-            request.max_entries,
-            MAX_BARRIER_HELPER_PAGE_ENTRIES,
-            API_PROFILE_VERSION,
-        )
-        .map_err(|err| {
-            map_room_barrier_helper_preparation_error("barrier_resolve_revoked_leaves", err)
-        })?
-    };
-    Ok(protobuf_response_bytes(
-        encode_prepared_resolved_revoked_leaves_response(prepared),
-    ))
-}
-
-async fn barrier_resolve_joins_since(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = BarrierResolveJoinsSinceRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    let gid = parse_gid(&request.room_id)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "barrier_resolve_joins_since",
-        message_scoped_rate_limit_key(&headers, &gid),
-    )
-    .await?;
-
-    let prepared = {
-        let lane = state.server_for_gid(&gid);
-        let mut guard = lane.write().await;
-        runtime_prepare_resolved_joins(
-            &mut guard,
-            &gid,
-            request.prev_barrier_version,
-            request.page_offset,
-            request.max_entries,
-            MAX_BARRIER_HELPER_PAGE_ENTRIES,
-            API_PROFILE_VERSION,
-        )
-        .map_err(|err| {
-            map_room_barrier_helper_preparation_error("barrier_resolve_joins_since", err)
-        })?
-    };
-    Ok(protobuf_response_bytes(
-        encode_prepared_resolved_joins_response(prepared),
-    ))
-}
-
-async fn barrier_fetch_public_tree(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = BarrierFetchPublicTreeRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    let gid = parse_gid(&request.room_id)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "barrier_fetch_public_tree",
-        message_scoped_rate_limit_key(&headers, &gid),
-    )
-    .await?;
-    let request = schema_decode_barrier_fetch_public_tree_request(request).map_err(
-        |error: FetchPublicTreeRequestDecodeError| ApiError::InvalidRequest(error.api_message()),
-    )?;
-
-    let prepared = {
-        let lane = state.server_for_gid(&gid);
-        let mut guard = lane.write().await;
-        runtime_prepare_barrier_public_tree(
-            &mut guard,
-            &gid,
-            &request.kem_tree_hash_after,
-            request.entry_offset,
-            request.max_entries,
-            MAX_BARRIER_HELPER_PAGE_ENTRIES,
-            API_PROFILE_VERSION,
-        )
-        .map_err(|err| {
-            map_room_barrier_helper_preparation_error("barrier_fetch_public_tree", err)
-        })?
-    };
-    Ok(protobuf_response_bytes(
-        encode_prepared_barrier_public_tree_response(prepared),
-    ))
-}
-
-async fn barrier_lookup_merge_acceptance(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = BarrierLookupMergeAcceptanceRequest::decode(body)?;
-    if request.room_id.is_empty() {
-        return Err(ApiError::InvalidRequest("room_id must be provided"));
-    }
-    let gid = parse_gid(&request.room_id)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "barrier_lookup_merge_acceptance",
-        message_scoped_rate_limit_key(&headers, request.pending_we_epoch_id.as_slice()),
-    )
-    .await?;
-    let request = schema_decode_barrier_lookup_merge_acceptance_request(request).map_err(
-        |error: LookupMergeAcceptanceRequestDecodeError| {
-            ApiError::InvalidRequest(error.api_message())
-        },
-    )?;
-
-    let prepared = {
-        let lane = state.server_for_gid(&gid);
-        let mut guard = lane.write().await;
-        runtime_prepare_merge_acceptance_lookup(
-            &mut guard,
-            &gid,
-            request.pending_barrier_version,
-            &request.pending_barrier_update_digest,
-            &request.pending_we_epoch_id,
-            API_PROFILE_VERSION,
-        )
-        .map_err(|err| {
-            map_room_barrier_helper_preparation_error("barrier_lookup_merge_acceptance", err)
-        })?
-    };
-    Ok(protobuf_response_bytes(
-        encode_prepared_merge_acceptance_lookup_response(prepared),
-    ))
 }
 
 async fn send_message(
