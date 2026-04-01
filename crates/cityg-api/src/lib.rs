@@ -3,6 +3,7 @@
 mod accept_helpers;
 mod admin_routes;
 mod barrier_routes;
+mod bundle_routes;
 mod config_auth;
 mod error_mapping;
 pub mod health;
@@ -39,7 +40,6 @@ use cityg_api_schema::{
     API_PROFILE_VERSION, MAX_BARRIER_HELPER_PAGE_ENTRIES,
     decode_bundle_cbor_request as schema_decode_bundle_cbor_request, pb,
     validate_fetch_messages_request as schema_validate_fetch_messages_request,
-    validate_get_bundle_request as schema_validate_get_bundle_request,
     validate_send_message_request as schema_validate_send_message_request,
 };
 use futures::{SinkExt, StreamExt};
@@ -85,8 +85,7 @@ use cityg_runtime::aligned_fs_epoch_base_ts;
 #[cfg(test)]
 use cityg_runtime::classify_refresh_pivot_conflict;
 use cityg_runtime::{
-    AliasRegistrationError, AliasRegistry, EpochScope, RoomVolatileState,
-    fetch_room_bundle as runtime_fetch_room_bundle, normalize_alias,
+    AliasRegistrationError, AliasRegistry, EpochScope, RoomVolatileState, normalize_alias,
     prepare_accepted_bundle as runtime_prepare_accepted_bundle, server_from_cityg_config_for_lane,
 };
 use cityg_server::CityGServer;
@@ -98,6 +97,7 @@ use serde::Deserialize;
 pub(crate) use accept_helpers::*;
 pub(crate) use admin_routes::*;
 pub(crate) use barrier_routes::*;
+pub(crate) use bundle_routes::*;
 use config_auth::*;
 pub(crate) use error_mapping::*;
 pub(crate) use member_listing::*;
@@ -830,39 +830,6 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, subscribed_gid: [u
     }
 
     info!("WebSocket client disconnected");
-}
-
-async fn get_bundle(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    enforce_message_auth_header(&headers, configured_message_auth_token().as_deref())?;
-    let request = schema_validate_get_bundle_request(GetBundleRequest::decode(body)?)
-        .map_err(map_get_bundle_request_validation_error)?;
-    enforce_expensive_rate_limit(
-        &state,
-        "get_bundle",
-        message_scoped_rate_limit_key(&headers, &request.we_epoch_id),
-    )
-    .await?;
-
-    let now_ms = current_timestamp_ms();
-    let bundle = {
-        let mut room_state = state.room_state.write().await;
-        runtime_fetch_room_bundle(
-            &mut room_state,
-            &request.we_epoch_id,
-            now_ms,
-            state.message_retention,
-            MESSAGE_PRUNE_INTERVAL_MS,
-        )
-    };
-    let bytes = bundle.ok_or(ApiError::NotFound)?.bytes;
-
-    let reply = GetBundleResponse { bundle_cbor: bytes };
-
-    Ok(protobuf_response(&reply))
 }
 
 pub async fn run() -> anyhow::Result<()> {
