@@ -6,16 +6,17 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use crate::barrier_shared::expected_barrier_tree_nodes;
+#[cfg(test)]
 use crate::barrier_shared::{
     BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
+};
+use crate::barrier_shared::{
     DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, apply_join_set_to_snapshot,
     apply_revoked_set_to_snapshot, compute_barrier_pkhash, compute_barrier_tree_hash,
     compute_revocation_roots_hash, should_retry_ticket_http_error, ticket_retry_delay,
     validate_barrier_n_max,
-};
-#[cfg(test)]
-use crate::barrier_shared::{
-    barrier_path_nodes, collect_resolution_targets, expected_barrier_tree_nodes, sibling_node,
 };
 #[cfg(test)]
 use crate::message_crypto::{
@@ -56,9 +57,9 @@ use gpui::{
 };
 use hex::{decode as hex_decode, encode as hex_encode};
 use humantime::format_rfc3339_seconds;
-use msphf_core::{
-    ds, hash::h_l, hkdf::hkdf_blake3, merkle::canonical_set_root, serde_utils::to_cbor_vec,
-};
+use msphf_core::{ds, hash::h_l, merkle::canonical_set_root};
+#[cfg(test)]
+use msphf_core::{hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
 use msphf_orchestrator::CapssWitnessBundle;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,

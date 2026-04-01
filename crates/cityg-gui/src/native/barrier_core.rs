@@ -5,6 +5,7 @@ use crate::barrier_shared::{
 };
 #[allow(unused_imports)]
 pub(super) use cityg_client::barrier_build::{BarrierWrapAadPreimage, BarrierWrapNoncePreimage};
+#[allow(unused_imports)]
 pub(super) use cityg_client::barrier_crypto::{
     ML_KEM_EXPANDED_DK_BYTES, decapsulate_internal_node_shared_secret,
     derive_internal_node_key_material, derive_k_fs_after_pcs,
@@ -42,12 +43,6 @@ pub(super) struct BarrierUpdateBuildResult {
 pub(super) struct FullChainCheckResult {
     pub(super) expected_before: [u8; 32],
     pub(super) snapshot_post: Arc<BarrierPublicTree>,
-}
-
-pub(super) fn zeroize_path_secret_map(path_secrets: &mut BTreeMap<u64, [u8; 32]>) {
-    for secret in path_secrets.values_mut() {
-        secret.zeroize();
-    }
 }
 
 pub(super) async fn full_chain_check_barrier_update(
@@ -476,16 +471,4 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
     retain_authenticated_current_public_tree(session)?;
 
     Ok(())
-}
-
-pub(super) fn self_path_nodes(n_max: u64, cover_leaf_index: u64) -> Vec<u64> {
-    let leaf_base = n_max.saturating_sub(1);
-    let mut path = vec![leaf_base.saturating_add(cover_leaf_index)];
-    while let Some(&node) = path.last() {
-        if node == 0 {
-            break;
-        }
-        path.push((node - 1) / 2);
-    }
-    path
 }

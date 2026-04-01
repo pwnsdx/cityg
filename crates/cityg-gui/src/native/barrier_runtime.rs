@@ -6,6 +6,12 @@ use cityg_client::barrier_build::{
     BarrierUpdateBuildResult as CoreBarrierUpdateBuildResult,
     build_barrier_update_bytes as build_barrier_update_bytes_core,
 };
+use cityg_client::barrier_recovery::{
+    BarrierRecoverResult as CoreBarrierRecoverResult,
+    BarrierRecoveryInput as CoreBarrierRecoveryInput,
+    BarrierRecoveryNodeMaterialRef as CoreBarrierRecoveryNodeMaterialRef,
+    recover_barrier_update as recover_barrier_update_core,
+};
 use msphf_orchestrator::{LeafIdMode, compute_leaf_id};
 
 pub(super) fn clear_join_finalize_bootstrap_artifact(state: &mut BarrierSecretState) {
@@ -136,333 +142,99 @@ pub(super) fn try_recover_barrier_inner(
     expected_before_hash: Option<[u8; 32]>,
     skip_local_checks: bool,
 ) -> Result<Option<BarrierRecoverResult>> {
-    if max_barrier_update_bytes == 0 {
-        return Err(anyhow!("max_barrier_update_bytes must be positive"));
-    }
-
     let raw_update = match header_map.get(&hdr::HDR_BARRIER_UPDATE) {
         Some(Value::Bytes(bytes)) => bytes.as_slice(),
         Some(_) => return Err(anyhow!("header barrier_update must be bytes")),
         None => return Ok(None),
     };
-
-    let n_max = session.barrier_state.n_max.max(1);
-    let parsed = parse_barrier_update_for_recover(raw_update, n_max, max_barrier_update_bytes)?;
-
-    let valid_progression = (parsed.prev_barrier_version == 0 && parsed.barrier_version == 0)
-        || parsed.prev_barrier_version.saturating_add(1) == parsed.barrier_version;
-    if !valid_progression {
-        return Err(anyhow!("barrier version progression is invalid"));
-    }
-
-    if !skip_local_checks {
-        let local_barrier_version = session.barrier_state.barrier_version;
-        let genesis_local_case = !session.barrier_state.barrier_initialized
-            && parsed.prev_barrier_version == 0
-            && parsed.barrier_version == 0;
-        let valid_local_progression = genesis_local_case
-            || (session.barrier_state.barrier_initialized
-                && parsed.prev_barrier_version == local_barrier_version
-                && parsed.barrier_version == local_barrier_version.saturating_add(1));
-        if !valid_local_progression {
-            return Err(anyhow!(
-                "barrier version progression does not match local barrier state"
-            ));
-        }
-    }
-
-    if parsed.tree_size != n_max {
-        return Err(anyhow!("barrier tree_size mismatch for local state"));
-    }
     let reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON)
         .ok_or_else(|| anyhow!("barrier_update_reason is missing or malformed"))?;
-
-    if !skip_local_checks {
-        let required_before_hash =
-            expected_before_hash.unwrap_or(session.barrier_state.kem_tree_hash_after);
-        if reason != 2 && parsed.kem_tree_hash_before != required_before_hash {
-            return Err(anyhow!("barrier hash-chain before-hash mismatch"));
-        }
-    }
-
     let revoked_since_root = header_bytes32(header_map, hdr::HDR_REVOKED_SINCE_ROOT)
         .ok_or_else(|| anyhow!("header revoked_since_prev_root is missing or malformed"))?;
     let revoked_root = header_bytes32(header_map, hdr::HDR_REVOKED_ROOT)
         .ok_or_else(|| anyhow!("header revoked_root is missing or malformed"))?;
-    let expected_rrh = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
-    if parsed.revocation_roots_hash != expected_rrh {
-        return Err(anyhow!("barrier revocation_roots_hash mismatch"));
-    }
-
-    if !skip_local_checks {
-        let genesis_local_case = !session.barrier_state.barrier_initialized
-            && parsed.prev_barrier_version == 0
-            && parsed.barrier_version == 0;
-        if !genesis_local_case {
-            if session.barrier_state.barrier_roots_hash == parsed.revocation_roots_hash {
-                if !matches!(reason, 1 | 2) {
-                    return Err(anyhow!(
-                        "barrier_update_reason must be pcs_refresh (1) or join_finalize (2) when local barrier_roots_hash is unchanged"
-                    ));
-                }
-            } else if reason != 0 {
-                return Err(anyhow!(
-                    "barrier_update_reason must be revocation_or_bootstrap (0) when local barrier_roots_hash changed"
-                ));
-            }
-        }
-    }
-
-    let author_matches = header_map
-        .get(&hdr::HDR_POP_PK)
-        .and_then(Value::as_bytes)
-        .map(|pk| pk == session.pop_public_key.as_slice())
-        .unwrap_or(false);
-    if author_matches && parsed.updater_leaf == session.barrier_state.cover_leaf_index {
-        return Ok(None);
-    }
-
-    let self_path = self_path_nodes(n_max, session.barrier_state.cover_leaf_index);
-    let self_path_set: HashSet<u64> = self_path.iter().copied().collect();
-    let leaf_node = self_path
-        .first()
-        .copied()
-        .ok_or_else(|| anyhow!("local self path is empty"))?;
-
-    let mut matches: Vec<(u64, u64, [u8; 32])> = Vec::new();
-    let mut candidate_decrypt_failure = false;
-    for node in &parsed.node_ciphertexts {
-        if !self_path_set.contains(&node.target_node) {
-            continue;
-        }
-
-        let (dk_bytes, pkhash_t) = if node.target_node == leaf_node {
-            (
-                session.barrier_state.dk_leaf.as_slice(),
-                session.barrier_state.pkhash_leaf,
-            )
-        } else if let Some(material) = session
-            .barrier_state
-            .dk_nodes
-            .get(&(node.target_node as u32))
-        {
-            (material.dk.as_slice(), material.pkhash)
-        } else {
-            continue;
-        };
-
-        let mut target_prefix = [0u8; 16];
-        target_prefix.copy_from_slice(&pkhash_t[..16]);
-        if target_prefix != node.target_pk_hash {
-            continue;
-        }
-
-        let mut ss = if node.target_node == leaf_node {
-            if dk_bytes.len() != kyber768::secret_key_bytes() {
-                continue;
-            }
-            let ct = match kyber768::Ciphertext::from_bytes(node.kem_ct.as_slice()) {
-                Ok(ct) => ct,
-                Err(_) => continue,
-            };
-            let dk = match kyber768::SecretKey::from_bytes(dk_bytes) {
-                Ok(sk) => sk,
-                Err(_) => continue,
-            };
-            let shared = kyber768::decapsulate(&ct, &dk);
-            let mut ss = [0u8; 32];
-            ss.copy_from_slice(shared.as_bytes());
-            ss
-        } else if dk_bytes.len() == ML_KEM_EXPANDED_DK_BYTES {
-            match decapsulate_internal_node_shared_secret(dk_bytes, node.kem_ct.as_slice()) {
-                Ok(ss) => ss,
-                Err(_) => {
-                    candidate_decrypt_failure = true;
-                    continue;
-                }
-            }
-        } else {
-            candidate_decrypt_failure = true;
-            continue;
-        };
-
-        let aad = to_cbor_vec(&BarrierWrapAadPreimage(
-            &session.gid,
-            parsed.barrier_version,
-            parsed.prev_barrier_version,
-            parsed.tree_size,
-            &parsed.revocation_roots_hash,
-            &parsed.kem_tree_hash_before,
-            &parsed.kem_tree_hash_after,
-            parsed.updater_leaf,
-            node.source_node,
-            node.target_node,
-            &pkhash_t,
-        ))
-        .map_err(|err| anyhow!("encode barrier wrap aad: {err}"))?;
-        let nonce_full = h_l(
-            "barrier/wrap/nonce",
-            &BarrierWrapNoncePreimage(node.source_node, node.target_node),
-        )
-        .map_err(|err| anyhow!("derive barrier wrap nonce: {err}"))?;
-        let mut nonce = [0u8; 12];
-        nonce.copy_from_slice(&nonce_full[..12]);
-
-        use chacha20poly1305::{
-            ChaCha20Poly1305,
-            aead::{Aead, KeyInit, Payload},
-        };
-        let cipher = ChaCha20Poly1305::new((&ss).into());
-        let mut plaintext = match cipher.decrypt(
-            (&nonce).into(),
-            Payload {
-                msg: node.wrapped_ps.as_slice(),
-                aad: aad.as_slice(),
-            },
-        ) {
-            Ok(plaintext) => plaintext,
-            Err(_) => {
-                ss.zeroize();
-                candidate_decrypt_failure = true;
-                continue;
-            }
-        };
-        ss.zeroize();
-        if plaintext.len() != 32 {
-            plaintext.zeroize();
-            candidate_decrypt_failure = true;
-            continue;
-        }
-        let mut path_secret = [0u8; 32];
-        path_secret.copy_from_slice(plaintext.as_slice());
-        plaintext.zeroize();
-        matches.push((node.source_node, node.target_node, path_secret));
-    }
-
-    if matches.is_empty() {
-        if candidate_decrypt_failure {
-            return Err(anyhow!(
-                "barrier recover rejected: candidate unwrap/decrypt failure (960.7)"
-            ));
-        }
-        warn!(
-            code = BARRIER_CODE_RECOVER_NO_MATCH,
-            "barrier recover produced no matching ciphertext"
-        );
-        return Ok(None);
-    }
-    if matches.len() > 1 {
-        for (_, _, secret) in &mut matches {
-            secret.zeroize();
-        }
-        return Err(anyhow!("barrier recover rejected: multi-match (960.2)"));
-    }
-
-    let (source_node, target_node, source_secret) = matches.remove(0);
-    if !self_path_set.contains(&source_node) || !self_path_set.contains(&target_node) {
-        return Err(anyhow!(
-            "barrier recover rejected: off-path source/target (960.7)"
-        ));
-    }
-    let source_index = parsed
-        .path_nodes
+    let core_local_node_materials = session
+        .barrier_state
+        .dk_nodes
         .iter()
-        .position(|node| *node == source_node)
-        .ok_or_else(|| {
-            anyhow!("barrier recover rejected: source missing from path_nodes (960.7)")
-        })?;
+        .map(|(node, material)| {
+            (
+                *node,
+                CoreBarrierRecoveryNodeMaterialRef {
+                    dk: material.dk.as_slice(),
+                    pkhash: material.pkhash,
+                },
+            )
+        })
+        .collect();
 
-    let mut path_secrets = BTreeMap::new();
-    path_secrets.insert(source_node, source_secret);
-    for k in (source_index + 1)..parsed.path_nodes.len() {
-        let parent_node = parsed.path_nodes[k];
-        let child_node = parsed.path_nodes[k - 1];
-        let child_secret = path_secrets
-            .get(&child_node)
-            .ok_or_else(|| anyhow!("barrier recover missing child path secret"))?;
-        let salt = h_l(
-            "barrier/tree/path",
-            &BarrierTreePathSaltPreimage(session.gid.as_slice(), parent_node),
-        )
-        .map_err(|err| anyhow!("derive barrier tree salt: {err}"))?;
-        let parent_secret = hkdf_blake3(&salt, child_secret, BARRIER_TREE_INFO);
-        path_secrets.insert(parent_node, parent_secret);
-    }
-
-    let root_secret = path_secrets
-        .get(&0)
-        .ok_or_else(|| anyhow!("barrier recover failed to derive root path secret"))?;
-    let barrier_salt = h_l(
-        "barrier/derive/salt",
-        &BarrierDeriveSaltPreimage(
-            session.gid.as_slice(),
-            parsed.barrier_version,
-            &parsed.revocation_roots_hash,
-        ),
-    )
-    .map_err(|err| anyhow!("derive barrier key salt: {err}"))?;
-    let k_barrier_new = hkdf_blake3(&barrier_salt, root_secret, BARRIER_KEY_INFO);
-
-    let expected_node_set: HashSet<u64> = parsed.path_nodes.iter().copied().skip(1).collect();
-    let mut derived_node_key_material = BTreeMap::new();
-    for node in parsed.path_nodes.iter().copied().skip(source_index) {
-        if node == leaf_node || !self_path_set.contains(&node) {
-            continue;
-        }
-        let path_secret = path_secrets
-            .get(&node)
-            .ok_or_else(|| anyhow!("barrier recover missing path secret for node {node}"))?;
-        let (dk_bytes, pkhash, ek_bytes) = derive_internal_node_key_material(
-            session.gid.as_slice(),
-            path_secret,
-            parsed.barrier_version,
-            &parsed.revocation_roots_hash,
-            parsed.tree_size,
-            node,
-        )?;
-        if expected_node_set.contains(&node) {
-            let announced_ek = parsed.new_public_keys.get(&node).ok_or_else(|| {
-                anyhow!("barrier recover rejected: missing new_public_keys for node {node} (960.7)")
-            })?;
-            if announced_ek.as_slice() != ek_bytes.as_slice() {
-                return Err(anyhow!(
-                    "barrier recover rejected: new_public_keys mismatch for node {node} (960.7)"
-                ));
+    match recover_barrier_update_core(CoreBarrierRecoveryInput {
+        gid: &session.gid,
+        local_n_max: session.barrier_state.n_max,
+        local_cover_leaf_index: session.barrier_state.cover_leaf_index,
+        local_barrier_initialized: session.barrier_state.barrier_initialized,
+        local_barrier_version: session.barrier_state.barrier_version,
+        local_barrier_roots_hash: session.barrier_state.barrier_roots_hash,
+        local_kem_tree_hash_after: session.barrier_state.kem_tree_hash_after,
+        local_pop_public_key: session.pop_public_key.as_slice(),
+        local_leaf_material: CoreBarrierRecoveryNodeMaterialRef {
+            dk: session.barrier_state.dk_leaf.as_slice(),
+            pkhash: session.barrier_state.pkhash_leaf,
+        },
+        local_node_materials: core_local_node_materials,
+        local_k_fs_before: session.forward_state.snapshot().k_fs,
+        weid,
+        fs_ec,
+        raw_update,
+        barrier_update_reason: reason,
+        revoked_since_root,
+        revoked_root,
+        author_pop_public_key: header_map
+            .get(&hdr::HDR_POP_PK)
+            .and_then(Value::as_bytes)
+            .map(Vec::as_slice),
+        max_barrier_update_bytes,
+        expected_before_hash,
+        skip_local_checks,
+    })? {
+        Some(CoreBarrierRecoverResult {
+            barrier_version,
+            k_barrier_new,
+            kem_tree_hash_after,
+            k_fs_after_pcs,
+            derived_node_key_material,
+        }) => Ok(Some(BarrierRecoverResult {
+            barrier_version,
+            k_barrier_new,
+            kem_tree_hash_after,
+            k_fs_after_pcs,
+            derived_node_key_material: derived_node_key_material
+                .into_iter()
+                .map(|(node, material)| {
+                    (
+                        node,
+                        BarrierNodeKeyMaterial {
+                            dk: material.dk,
+                            pkhash: material.pkhash,
+                        },
+                    )
+                })
+                .collect(),
+        })),
+        None => {
+            if header_map
+                .get(&hdr::HDR_POP_PK)
+                .and_then(Value::as_bytes)
+                .is_some_and(|pk| pk != session.pop_public_key.as_slice())
+            {
+                warn!(
+                    code = BARRIER_CODE_RECOVER_NO_MATCH,
+                    "barrier recover produced no matching ciphertext"
+                );
             }
+            Ok(None)
         }
-        let node_index = u32::try_from(node).map_err(|_| anyhow!("barrier node index overflow"))?;
-        derived_node_key_material.insert(
-            node_index,
-            BarrierNodeKeyMaterial {
-                dk: Zeroizing::new(dk_bytes),
-                pkhash,
-            },
-        );
     }
-
-    let reason = header_u64(header_map, hdr::HDR_BARRIER_UPDATE_REASON);
-    let k_fs_after_pcs = if reason == Some(1) {
-        let k_fs_before = session.forward_state.snapshot().k_fs;
-        Some(derive_k_fs_after_pcs(
-            &k_fs_before,
-            weid,
-            fs_ec,
-            parsed.barrier_version,
-            &k_barrier_new,
-        )?)
-    } else {
-        None
-    };
-
-    zeroize_path_secret_map(&mut path_secrets);
-
-    Ok(Some(BarrierRecoverResult {
-        barrier_version: parsed.barrier_version,
-        k_barrier_new: Zeroizing::new(k_barrier_new),
-        kem_tree_hash_after: parsed.kem_tree_hash_after,
-        k_fs_after_pcs: k_fs_after_pcs.map(Zeroizing::new),
-        derived_node_key_material,
-    }))
 }
 
 #[cfg(test)]
