@@ -123,25 +123,30 @@ use cityg_runtime::{
     RoomMessageWrite, RoomRetentionPolicy, RoomServiceError, RoomTicketPreparationError,
     RoomVolatileState, alias_entry_for_member, apply_bundle_indexes,
     apply_room_window_limit_update as runtime_apply_room_window_limit_update,
+    bootstrap_room_with_admin as runtime_bootstrap_room_with_admin,
     classify_refresh_pivot_conflict,
     commit_prepared_accepted_bundle as runtime_commit_prepared_accepted_bundle,
     ensure_leaf_member_for_room as runtime_ensure_leaf_member_for_room,
     fetch_room_bundle as runtime_fetch_room_bundle,
     fetch_room_members as runtime_fetch_room_members,
     fetch_room_messages as runtime_fetch_room_messages, filter_room_members_by_query,
-    lane_state_path, materialize_replayed_bundle as runtime_materialize_replayed_bundle,
-    normalize_alias, paginate_room_members,
+    grant_room_admin as runtime_grant_room_admin, lane_state_path,
+    list_room_admins as runtime_list_room_admins,
+    materialize_replayed_bundle as runtime_materialize_replayed_bundle, normalize_alias,
+    paginate_room_members,
     parse_room_window_limit_update as runtime_parse_room_window_limit_update,
     prepare_accepted_bundle as runtime_prepare_accepted_bundle,
     prepare_barrier_public_tree as runtime_prepare_barrier_public_tree,
+    prepare_expel_member_ticket as runtime_prepare_expel_member_ticket,
     prepare_full_verification_witness as runtime_prepare_full_verification_witness,
     prepare_join_ticket as runtime_prepare_join_ticket,
     prepare_merge_acceptance_lookup as runtime_prepare_merge_acceptance_lookup,
     prepare_merge_ticket as runtime_prepare_merge_ticket,
-    prepare_merge_ticket_from_bundle as runtime_prepare_merge_ticket_from_bundle,
     prepare_resolved_joins as runtime_prepare_resolved_joins,
     prepare_resolved_revoked_leaves as runtime_prepare_resolved_revoked_leaves,
     refresh_room_pivot as runtime_refresh_room_pivot,
+    revoke_room_admin as runtime_revoke_room_admin,
+    rotate_room_kbroad as runtime_rotate_room_kbroad,
     seed_room_window_head as runtime_seed_room_window_head, server_from_cityg_config_for_lane,
     snapshot_room_telemetry as runtime_snapshot_room_telemetry,
     snapshot_room_window as runtime_snapshot_room_window,
@@ -2011,16 +2016,16 @@ async fn bootstrap_room(
     {
         let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
-        guard
-            .register_group_with_admin(
-                &request.gid,
-                request.kbroad_public,
-                initial_room_admin_pop_key,
-            )
-            .map_err(|err| match err {
-                ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
-                other => ApiError::from(other),
-            })?;
+        runtime_bootstrap_room_with_admin(
+            &mut guard,
+            &request.gid,
+            request.kbroad_public,
+            initial_room_admin_pop_key,
+        )
+        .map_err(|err| match err {
+            ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
+            other => ApiError::from(other),
+        })?;
     }
 
     Ok(protobuf_response_bytes(encode_bootstrap_room_response(
@@ -2046,17 +2051,17 @@ async fn rotate_room_kbroad(
             &request.room_id,
             &request.kbroad_public,
         )?;
-        guard
-            .rotate_group_kbroad_with_actor(
-                &request.gid,
-                request.kbroad_public,
-                &actor_pop_key,
-                replay_key,
-            )
-            .map_err(|err| match err {
-                ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
-                other => ApiError::from(other),
-            })?
+        runtime_rotate_room_kbroad(
+            &mut guard,
+            &request.gid,
+            request.kbroad_public,
+            &actor_pop_key,
+            replay_key,
+        )
+        .map_err(|err| match err {
+            ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
+            other => ApiError::from(other),
+        })?
     };
 
     Ok(protobuf_response_bytes(encode_rotate_room_kbroad_response(
@@ -2082,17 +2087,17 @@ async fn grant_room_admin(
     let (granted, admin_count) = {
         let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
-        guard
-            .grant_room_admin(
-                &request.gid,
-                &actor_pop_key,
-                request.target_pop_public_key,
-                replay_key,
-            )
-            .map_err(|err| match err {
-                ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
-                other => ApiError::from(other),
-            })?
+        runtime_grant_room_admin(
+            &mut guard,
+            &request.gid,
+            &actor_pop_key,
+            request.target_pop_public_key,
+            replay_key,
+        )
+        .map_err(|err| match err {
+            ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
+            other => ApiError::from(other),
+        })?
     };
 
     Ok(protobuf_response_bytes(
@@ -2124,17 +2129,17 @@ async fn revoke_room_admin(
     let (revoked, admin_count) = {
         let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
-        guard
-            .revoke_room_admin(
-                &request.gid,
-                &actor_pop_key,
-                &request.target_pop_public_key,
-                replay_key,
-            )
-            .map_err(|err| match err {
-                ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
-                other => ApiError::from(other),
-            })?
+        runtime_revoke_room_admin(
+            &mut guard,
+            &request.gid,
+            &actor_pop_key,
+            &request.target_pop_public_key,
+            replay_key,
+        )
+        .map_err(|err| match err {
+            ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
+            other => ApiError::from(other),
+        })?
     };
 
     Ok(protobuf_response_bytes(
@@ -2164,12 +2169,10 @@ async fn list_room_admins(
     let admin_pop_public_keys = {
         let lane = state.server_for_gid(&request.gid);
         let guard = lane.read().await;
-        guard
-            .list_room_admins(&request.gid, &actor_pop_key)
-            .map_err(|err| match err {
-                ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
-                other => ApiError::from(other),
-            })?
+        runtime_list_room_admins(&guard, &request.gid, &actor_pop_key).map_err(|err| match err {
+            ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
+            other => ApiError::from(other),
+        })?
     };
 
     Ok(protobuf_response_bytes(encode_list_room_admins_response(
@@ -2208,20 +2211,16 @@ async fn expel_member_ticket(
     let prepared = {
         let lane = state.server_for_gid(&request.gid);
         let mut guard = lane.write().await;
-        let bundle = guard
-            .build_admin_expel_ticket(
-                &request.gid,
-                &actor_pop_key,
-                &request.author_leaf_id,
-                &request.target_leaf_id,
-                replay_key,
-            )
-            .map_err(|err| {
-                maybe_record_client_concurrency_error("expel_member_ticket", &err);
-                ApiError::from(err)
-            })?;
-        runtime_prepare_merge_ticket_from_bundle(&guard, &request.gid, bundle, API_PROFILE_VERSION)
-            .map_err(|err| map_room_ticket_preparation_error("expel_member_ticket", err))?
+        runtime_prepare_expel_member_ticket(
+            &mut guard,
+            &request.gid,
+            &actor_pop_key,
+            &request.author_leaf_id,
+            &request.target_leaf_id,
+            replay_key,
+            API_PROFILE_VERSION,
+        )
+        .map_err(|err| map_room_ticket_preparation_error("expel_member_ticket", err))?
     };
 
     Ok(protobuf_response_bytes(

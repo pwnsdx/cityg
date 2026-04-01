@@ -41,11 +41,16 @@ use cityg_runtime::{
     RoomMemberListingError, RoomMessageStoreError, RoomMessageWrite, RoomRetentionPolicy,
     RoomRoutingEntry, RoomServiceError, RoomSnapshot, RoomStateCheckpoint,
     RoomTicketPreparationError, RoomVolatileState, RuntimeRoom, accept_room_epoch,
-    alias_entry_for_member, classify_refresh_pivot_conflict, derive_room_routing_entries,
-    fetch_room_bundle, fetch_room_members, fetch_room_messages, filter_room_members_by_query,
-    paginate_room_members, prepare_barrier_public_tree, prepare_full_verification_witness,
-    prepare_merge_acceptance_lookup, prepare_resolved_joins, prepare_resolved_revoked_leaves,
-    refresh_room_pivot, store_room_message,
+    alias_entry_for_member, bootstrap_room_with_admin as runtime_bootstrap_room_with_admin,
+    classify_refresh_pivot_conflict, derive_room_routing_entries, fetch_room_bundle,
+    fetch_room_members, fetch_room_messages, filter_room_members_by_query,
+    grant_room_admin as runtime_grant_room_admin, list_room_admins as runtime_list_room_admins,
+    paginate_room_members, prepare_barrier_public_tree,
+    prepare_expel_member_ticket as runtime_prepare_expel_member_ticket,
+    prepare_full_verification_witness, prepare_merge_acceptance_lookup, prepare_resolved_joins,
+    prepare_resolved_revoked_leaves, refresh_room_pivot,
+    revoke_room_admin as runtime_revoke_room_admin,
+    rotate_room_kbroad as runtime_rotate_room_kbroad, store_room_message,
 };
 use cityg_server::MergeTicketIntent as ServerMergeTicketIntent;
 use msphf_core::MsphfError;
@@ -564,7 +569,8 @@ impl CloudflareRoomDurableObject {
             None => RuntimeRoom::new(cityg_server::CityGServer::new(bootstrap.to_server_config())),
         };
         let (mut server, room_state) = room.into_parts();
-        match server.register_group_with_admin(
+        match runtime_bootstrap_room_with_admin(
+            &mut server,
             &request.gid,
             request.kbroad_public,
             initial_room_admin_pop_key,
@@ -637,7 +643,8 @@ impl CloudflareRoomDurableObject {
             }
         };
         let (mut server, room_state) = room.into_parts();
-        let kbroad_generation = match server.rotate_group_kbroad_with_actor(
+        let kbroad_generation = match runtime_rotate_room_kbroad(
+            &mut server,
             &request.gid,
             request.kbroad_public,
             &actor_pop_key,
@@ -735,7 +742,8 @@ impl CloudflareRoomDurableObject {
         };
         let (mut server, room_state) = room.into_parts();
         let (applied, admin_count) = match kind {
-            RoomAdminMutationKind::Grant => match server.grant_room_admin(
+            RoomAdminMutationKind::Grant => match runtime_grant_room_admin(
+                &mut server,
                 &request.gid,
                 &actor_pop_key,
                 request.target_pop_public_key,
@@ -744,7 +752,8 @@ impl CloudflareRoomDurableObject {
                 Ok(result) => result,
                 Err(error) => return client_error_response(error),
             },
-            RoomAdminMutationKind::Revoke => match server.revoke_room_admin(
+            RoomAdminMutationKind::Revoke => match runtime_revoke_room_admin(
+                &mut server,
                 &request.gid,
                 &actor_pop_key,
                 &request.target_pop_public_key,
@@ -816,10 +825,11 @@ impl CloudflareRoomDurableObject {
             }
         };
         let (server, _) = room.into_parts();
-        let admin_pop_public_keys = match server.list_room_admins(&request.gid, &actor_pop_key) {
-            Ok(admin_pop_public_keys) => admin_pop_public_keys,
-            Err(error) => return client_error_response(error),
-        };
+        let admin_pop_public_keys =
+            match runtime_list_room_admins(&server, &request.gid, &actor_pop_key) {
+                Ok(admin_pop_public_keys) => admin_pop_public_keys,
+                Err(error) => return client_error_response(error),
+            };
 
         protobuf_response_bytes(encode_list_room_admins_response(admin_pop_public_keys))
     }
@@ -1755,21 +1765,13 @@ impl CloudflareRoomDurableObject {
             }
         };
         let (mut server, _) = room.into_parts();
-        let bundle = match server.build_admin_expel_ticket(
+        let prepared = match runtime_prepare_expel_member_ticket(
+            &mut server,
             &request.gid,
             &actor_pop_key,
             &request.author_leaf_id,
             &request.target_leaf_id,
             replay_key,
-        ) {
-            Ok(bundle) => bundle,
-            Err(ClientError::InvalidInput(message)) => return Response::error(message, 400),
-            Err(error) => return Response::error(error.to_string(), 500),
-        };
-        let prepared = match cityg_runtime::prepare_merge_ticket_from_bundle(
-            &server,
-            &request.gid,
-            bundle,
             API_PROFILE_VERSION,
         ) {
             Ok(prepared) => prepared,

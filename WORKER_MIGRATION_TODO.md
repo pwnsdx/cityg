@@ -137,7 +137,8 @@ runtime code.
 - [x] Move `accept_epoch` persistence/index update flow behind shared runtime functions.
 - [x] Move message and bundle fetch/store operations behind shared room methods/services.
 - [x] Move `join_ticket`, `merge_ticket`, and `refresh_pivot` construction logic behind shared room services.
-- [ ] Repoint the remaining room-scoped `cityg-api` handlers to shared runtime services instead of inline logic.
+- [x] Repoint the remaining room-scoped `cityg-api` handlers to shared runtime services instead of inline logic.
+  The native API and Worker adapter now both route bootstrap, room-admin mutation/listing, and expel-ticket execution through `cityg-runtime`, so those handlers no longer call the raw `CityGServer` room-admin methods inline.
 - [x] Bridge native `cityg-api` room-scoped endpoints onto the Cloudflare room route without duplicating request parsing or `gid` extraction logic.
 - [x] Populate and maintain the Worker routing index from accepted/replayed room state so `we_epoch_id` keyed routes (`/v1/send_message`, `/v1/messages`, `/v1/bundle`) can reach the correct Durable Object.
   Checkpoint-based reconstruction, explicit room-side resync, live accept-path upserts, miss-driven convergence through the known-room registry, and explicit legacy-room seeding through `CITYG_WORKER_KNOWN_GIDS_JSON` now exist.

@@ -813,6 +813,78 @@ pub fn prepare_merge_ticket(
     prepare_merge_ticket_from_bundle(server, gid, bundle, profile_version)
 }
 
+/// Register a room and seed its first explicit room-admin key.
+pub fn bootstrap_room_with_admin(
+    server: &mut CityGServer,
+    gid: &[u8; 32],
+    kbroad_public: Vec<u8>,
+    initial_room_admin_pop_key: Vec<u8>,
+) -> Result<(), CityGError> {
+    server.register_group_with_admin(gid, kbroad_public, initial_room_admin_pop_key)
+}
+
+/// Rotate a room's kbroad key under explicit room-admin authorization.
+pub fn rotate_room_kbroad(
+    server: &mut CityGServer,
+    gid: &[u8; 32],
+    kbroad_public: Vec<u8>,
+    actor_pop_key: &[u8],
+    replay_key: [u8; 32],
+) -> Result<u64, CityGError> {
+    server.rotate_group_kbroad_with_actor(gid, kbroad_public, actor_pop_key, replay_key)
+}
+
+/// Grant an explicit room-admin key under room-admin authorization.
+pub fn grant_room_admin(
+    server: &mut CityGServer,
+    gid: &[u8; 32],
+    actor_pop_key: &[u8],
+    target_pop_public_key: Vec<u8>,
+    replay_key: [u8; 32],
+) -> Result<(bool, u64), CityGError> {
+    server.grant_room_admin(gid, actor_pop_key, target_pop_public_key, replay_key)
+}
+
+/// Revoke an explicit room-admin key under room-admin authorization.
+pub fn revoke_room_admin(
+    server: &mut CityGServer,
+    gid: &[u8; 32],
+    actor_pop_key: &[u8],
+    target_pop_public_key: &[u8],
+    replay_key: [u8; 32],
+) -> Result<(bool, u64), CityGError> {
+    server.revoke_room_admin(gid, actor_pop_key, target_pop_public_key, replay_key)
+}
+
+/// List explicit room-admin keys under room-admin authorization.
+pub fn list_room_admins(
+    server: &CityGServer,
+    gid: &[u8; 32],
+    actor_pop_key: &[u8],
+) -> Result<Vec<Vec<u8>>, CityGError> {
+    server.list_room_admins(gid, actor_pop_key)
+}
+
+/// Build and serialize an expel-member ticket through the shared merge-ticket path.
+pub fn prepare_expel_member_ticket(
+    server: &mut CityGServer,
+    gid: &[u8; 32],
+    actor_pop_key: &[u8],
+    author_leaf_id: &[u8; 32],
+    target_leaf_id: &[u8; 32],
+    replay_key: [u8; 32],
+    profile_version: &str,
+) -> Result<PreparedMergeTicket, RoomTicketPreparationError> {
+    let bundle = server.build_admin_expel_ticket(
+        gid,
+        actor_pop_key,
+        author_leaf_id,
+        target_leaf_id,
+        replay_key,
+    )?;
+    prepare_merge_ticket_from_bundle(server, gid, bundle, profile_version)
+}
+
 /// Prepare merge-ticket artifacts for an already constructed merge bundle.
 pub fn prepare_merge_ticket_from_bundle(
     server: &CityGServer,
