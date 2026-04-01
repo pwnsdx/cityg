@@ -29,7 +29,7 @@ Core security, functional, and performance requirements for the City-G protocol.
 
 ## 3. Performance Targets (Reference Measurements)
 
-| Operation             | Target                | Historical baseline |
+| Operation             | Target                | Reference baseline |
 |-----------------------|-----------------------|-------------------|
 | ZK-VRF verification   | ≤ 2 ms server / ≤ 6 ms mobile | ✅ Met |
 | CAPSS Smallwood verify| ≤ 12 ms mobile        | ✅ Met |
@@ -38,4 +38,4 @@ Core security, functional, and performance requirements for the City-G protocol.
 | Witness size          | O(log N)              | ~2 KB at 1 M |
 | Working set           | ≤ 48 MB               | ✅ Met |
 
-> These figures are historical reference measurements from the early profile bring-up and profiling runs. The current normative profile is defined in [`specs.md`](specs.md); use `docs/evidence/` and current validation runners for fresh empirical results.
+> These figures are reference measurements from early profile bring-up and profiling runs. The current normative profile is defined in [`specs.md`](specs.md); use `docs/evidence/` and current validation runners for fresh empirical results.
