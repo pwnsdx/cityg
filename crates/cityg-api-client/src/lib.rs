@@ -149,11 +149,9 @@ use cityg_client::CityGError as ClientError;
 use msphf_orchestrator::PivotParity;
 pub use pb::IdentityBinding;
 pub use pb::RoomAdminProof;
-use pb::{
-    ListRoomAdminsResponse, MembersRequest, MergeTicketIntent as PbMergeTicketIntent,
-    RoomAdminMutationResponse,
-};
-use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
+use pb::MergeTicketIntent as PbMergeTicketIntent;
+#[cfg(test)]
+use pb::{ListRoomAdminsResponse, MembersRequest, RoomAdminMutationResponse};
 use prost::Message;
 use reqwest::{Client, StatusCode};
 pub use room_admin::*;
