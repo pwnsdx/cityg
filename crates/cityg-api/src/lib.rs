@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
 mod accept_helpers;
+mod admin_routes;
 mod barrier_routes;
 mod config_auth;
 mod error_mapping;
@@ -35,20 +36,14 @@ use axum::{
 use cityg_api_schema::{
     API_PROFILE_VERSION, MAX_BARRIER_HELPER_PAGE_ENTRIES,
     decode_bundle_cbor_request as schema_decode_bundle_cbor_request,
-    encode_bootstrap_room_response, encode_list_room_admins_response, encode_members_response,
-    encode_prepared_join_ticket_response, encode_prepared_merge_ticket_response,
-    encode_room_admin_mutation_response, encode_rotate_room_kbroad_response,
-    encode_search_members_response, pb,
+    encode_bootstrap_room_response, encode_members_response, encode_prepared_join_ticket_response,
+    encode_prepared_merge_ticket_response, encode_search_members_response, pb,
     prepare_join_ticket_request as schema_prepare_join_ticket_request,
     validate_bootstrap_room_request as schema_validate_bootstrap_room_request,
-    validate_expel_member_ticket_request as schema_validate_expel_member_ticket_request,
     validate_fetch_messages_request as schema_validate_fetch_messages_request,
     validate_get_bundle_request as schema_validate_get_bundle_request,
-    validate_list_room_admins_request as schema_validate_list_room_admins_request,
     validate_members_request as schema_validate_members_request,
     validate_merge_ticket_request as schema_validate_merge_ticket_request,
-    validate_room_admin_mutation_request as schema_validate_room_admin_mutation_request,
-    validate_rotate_room_kbroad_request as schema_validate_rotate_room_kbroad_request,
     validate_search_members_request as schema_validate_search_members_request,
     validate_send_message_request as schema_validate_send_message_request,
 };
@@ -100,14 +95,10 @@ use cityg_runtime::{
     bootstrap_room_with_admin as runtime_bootstrap_room_with_admin,
     fetch_room_bundle as runtime_fetch_room_bundle,
     fetch_room_messages as runtime_fetch_room_messages, filter_room_members_by_query,
-    grant_room_admin as runtime_grant_room_admin, list_room_admins as runtime_list_room_admins,
     normalize_alias, paginate_room_members,
     prepare_accepted_bundle as runtime_prepare_accepted_bundle,
-    prepare_expel_member_ticket as runtime_prepare_expel_member_ticket,
     prepare_join_ticket as runtime_prepare_join_ticket,
-    prepare_merge_ticket as runtime_prepare_merge_ticket,
-    revoke_room_admin as runtime_revoke_room_admin,
-    rotate_room_kbroad as runtime_rotate_room_kbroad, server_from_cityg_config_for_lane,
+    prepare_merge_ticket as runtime_prepare_merge_ticket, server_from_cityg_config_for_lane,
     store_room_message as runtime_store_room_message,
 };
 use cityg_server::{CityGServer, MergeTicketIntent as ServerMergeTicketIntent};
@@ -117,6 +108,7 @@ use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
 use serde::Deserialize;
 
 pub(crate) use accept_helpers::*;
+pub(crate) use admin_routes::*;
 pub(crate) use barrier_routes::*;
 use config_auth::*;
 pub(crate) use error_mapping::*;
@@ -798,201 +790,6 @@ async fn bootstrap_room(
     Ok(protobuf_response_bytes(encode_bootstrap_room_response(
         "registered",
     )))
-}
-
-async fn rotate_room_kbroad(
-    State(state): State<ApiState>,
-    _headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    let request =
-        schema_validate_rotate_room_kbroad_request(RotateRoomKbroadRequest::decode(body)?)
-            .map_err(map_room_admin_request_validation_error)?;
-    let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
-    let kbroad_generation = {
-        let lane = state.server_for_gid(&request.gid);
-        let mut guard = lane.write().await;
-        let actor_pop_key = verify_room_admin_proof(
-            &request.admin_proof,
-            "rotate_room_kbroad_v1",
-            &request.room_id,
-            &request.kbroad_public,
-        )?;
-        runtime_rotate_room_kbroad(
-            &mut guard,
-            &request.gid,
-            request.kbroad_public,
-            &actor_pop_key,
-            replay_key,
-        )
-        .map_err(|err| match err {
-            ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
-            other => ApiError::from(other),
-        })?
-    };
-
-    Ok(protobuf_response_bytes(encode_rotate_room_kbroad_response(
-        "rotated",
-        kbroad_generation,
-    )))
-}
-
-async fn grant_room_admin(
-    State(state): State<ApiState>,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    let request =
-        schema_validate_room_admin_mutation_request(RoomAdminMutationRequest::decode(body)?)
-            .map_err(map_room_admin_request_validation_error)?;
-    let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
-    let actor_pop_key = verify_room_admin_proof_payload(
-        &request.admin_proof,
-        "grant_room_admin_v1",
-        &request.room_id,
-        &request.target_pop_public_key,
-    )?;
-    let (granted, admin_count) = {
-        let lane = state.server_for_gid(&request.gid);
-        let mut guard = lane.write().await;
-        runtime_grant_room_admin(
-            &mut guard,
-            &request.gid,
-            &actor_pop_key,
-            request.target_pop_public_key,
-            replay_key,
-        )
-        .map_err(|err| match err {
-            ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
-            other => ApiError::from(other),
-        })?
-    };
-
-    Ok(protobuf_response_bytes(
-        encode_room_admin_mutation_response(
-            if granted {
-                "granted"
-            } else {
-                "already_granted"
-            },
-            admin_count,
-        ),
-    ))
-}
-
-async fn revoke_room_admin(
-    State(state): State<ApiState>,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    let request =
-        schema_validate_room_admin_mutation_request(RoomAdminMutationRequest::decode(body)?)
-            .map_err(map_room_admin_request_validation_error)?;
-    let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
-    let actor_pop_key = verify_room_admin_proof_payload(
-        &request.admin_proof,
-        "revoke_room_admin_v1",
-        &request.room_id,
-        &request.target_pop_public_key,
-    )?;
-    let (revoked, admin_count) = {
-        let lane = state.server_for_gid(&request.gid);
-        let mut guard = lane.write().await;
-        runtime_revoke_room_admin(
-            &mut guard,
-            &request.gid,
-            &actor_pop_key,
-            &request.target_pop_public_key,
-            replay_key,
-        )
-        .map_err(|err| match err {
-            ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
-            other => ApiError::from(other),
-        })?
-    };
-
-    Ok(protobuf_response_bytes(
-        encode_room_admin_mutation_response(
-            if revoked {
-                "revoked"
-            } else {
-                "already_revoked"
-            },
-            admin_count,
-        ),
-    ))
-}
-
-async fn list_room_admins(
-    State(state): State<ApiState>,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    let request = schema_validate_list_room_admins_request(ListRoomAdminsRequest::decode(body)?)
-        .map_err(map_room_admin_request_validation_error)?;
-    let actor_pop_key = verify_room_admin_proof_payload(
-        &request.admin_proof,
-        "list_room_admins_v1",
-        &request.room_id,
-        &[],
-    )?;
-    let admin_pop_public_keys = {
-        let lane = state.server_for_gid(&request.gid);
-        let guard = lane.read().await;
-        runtime_list_room_admins(&guard, &request.gid, &actor_pop_key).map_err(|err| match err {
-            ClientError::InvalidInput(message) => ApiError::InvalidRequest(message),
-            other => ApiError::from(other),
-        })?
-    };
-
-    Ok(protobuf_response_bytes(encode_list_room_admins_response(
-        admin_pop_public_keys,
-    )))
-}
-
-async fn expel_member_ticket(
-    State(state): State<ApiState>,
-    body: Bytes,
-) -> Result<Response, ApiError> {
-    let request =
-        schema_validate_expel_member_ticket_request(ExpelMemberTicketRequest::decode(body)?)
-            .map_err(map_expel_member_ticket_request_validation_error)?;
-    let payload =
-        encode_room_admin_leaf_pair_payload(&request.author_leaf_id, &request.target_leaf_id)?;
-    let replay_key = room_admin_proof_replay_key(&request.admin_proof)?;
-    let actor_pop_key = verify_room_admin_proof_payload(
-        &request.admin_proof,
-        "expel_room_member_v1",
-        &request.room_id,
-        &payload,
-    )?;
-    enforce_expensive_rate_limit(
-        &state,
-        "expel_member_ticket",
-        fingerprint_rate_limit_parts(&[
-            &request.gid,
-            &request.author_leaf_id,
-            &request.target_leaf_id,
-            actor_pop_key.as_slice(),
-        ]),
-    )
-    .await?;
-
-    let prepared = {
-        let lane = state.server_for_gid(&request.gid);
-        let mut guard = lane.write().await;
-        runtime_prepare_expel_member_ticket(
-            &mut guard,
-            &request.gid,
-            &actor_pop_key,
-            &request.author_leaf_id,
-            &request.target_leaf_id,
-            replay_key,
-            API_PROFILE_VERSION,
-        )
-        .map_err(|err| map_room_ticket_preparation_error("expel_member_ticket", err))?
-    };
-
-    Ok(protobuf_response_bytes(
-        encode_prepared_merge_ticket_response(prepared),
-    ))
 }
 
 async fn merge_ticket(
