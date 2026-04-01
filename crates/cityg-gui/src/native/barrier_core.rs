@@ -1,7 +1,7 @@
 use super::*;
 use crate::barrier_shared::{
-    expected_same_rrh_barrier_reason, require_current_state_history_commitment,
-    require_same_history_commitment,
+    BarrierJoinSnapshotRecord, expected_same_rrh_barrier_reason,
+    require_current_state_history_commitment, require_same_history_commitment,
 };
 #[allow(unused_imports)]
 pub(super) use cityg_client::barrier_build::{BarrierWrapAadPreimage, BarrierWrapNoncePreimage};
@@ -10,6 +10,7 @@ pub(super) use cityg_client::barrier_crypto::{
     ML_KEM_EXPANDED_DK_BYTES, decapsulate_internal_node_shared_secret,
     derive_internal_node_key_material, derive_k_fs_after_pcs,
 };
+pub(super) use cityg_client::barrier_transition::compute_barrier_snapshot_transition;
 #[allow(unused_imports)]
 pub(super) use cityg_client::barrier_update::{
     BarrierUpdateWire, KemTreeCoverPayloadWire, NewPublicKeyWire, NodeCiphertextWire,
@@ -200,39 +201,31 @@ pub(super) async fn full_chain_check_barrier_update(
 
     let parsed_for_hash = parsed.clone();
     let snapshot_prev_entries = snapshot_prev.pk_entries.clone();
+    let join_records_core: Vec<_> = join_resolution
+        .records
+        .iter()
+        .map(|record| BarrierJoinSnapshotRecord {
+            leaf_index: record.leaf_index,
+            ek_leaf: record.ek_leaf.clone(),
+        })
+        .collect();
+    let revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
     let (expected_before, expected_after, snapshot_post) =
         tokio::task::spawn_blocking(move || -> Result<([u8; 32], [u8; 32], BarrierPublicTree)> {
-            let mut snapshot_pre = snapshot_prev_entries;
-            apply_join_set_to_snapshot(
-                snapshot_pre.as_mut_slice(),
+            let transition = compute_barrier_snapshot_transition(
                 n_max,
-                join_resolution.records.as_slice(),
+                snapshot_prev_entries.as_slice(),
+                join_records_core.as_slice(),
+                revoked_leaf_indices.as_slice(),
+                &parsed_for_hash,
             )?;
-            apply_revoked_set_to_snapshot(
-                snapshot_pre.as_mut_slice(),
-                n_max,
-                revoked_resolution.leaf_indices.as_slice(),
-            )?;
-            let expected_before = compute_barrier_tree_hash(n_max, snapshot_pre.as_slice())?;
-
-            let mut snapshot_post = snapshot_pre;
-            for (node, ek) in &parsed_for_hash.new_public_keys {
-                let index = usize::try_from(*node)
-                    .map_err(|_| anyhow!("barrier node index out of range"))?;
-                let slot = snapshot_post
-                    .get_mut(index)
-                    .ok_or_else(|| anyhow!("barrier node index out of range"))?;
-                *slot = ek.clone();
-            }
-            let expected_after = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
-
             Ok((
-                expected_before,
-                expected_after,
+                transition.expected_before,
+                transition.expected_after,
                 BarrierPublicTree {
                     n_max,
-                    kem_tree_hash_after: expected_after,
-                    pk_entries: snapshot_post,
+                    kem_tree_hash_after: transition.expected_after,
+                    pk_entries: transition.snapshot_post_entries,
                 },
             ))
         })
@@ -426,32 +419,23 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
 
     let parsed_for_hash = parsed.clone();
     let snapshot_base_entries = snapshot_base.pk_entries.clone();
+    let join_records_core: Vec<_> = join_records
+        .iter()
+        .map(|record| BarrierJoinSnapshotRecord {
+            leaf_index: record.leaf_index,
+            ek_leaf: record.ek_leaf.clone(),
+        })
+        .collect();
     let (expected_before, expected_after) =
         tokio::task::spawn_blocking(move || -> Result<([u8; 32], [u8; 32])> {
-            let mut snapshot_pre = snapshot_base_entries;
-            apply_join_set_to_snapshot(
-                snapshot_pre.as_mut_slice(),
+            let transition = compute_barrier_snapshot_transition(
                 n_max,
-                join_records.as_slice(),
-            )?;
-            apply_revoked_set_to_snapshot(
-                snapshot_pre.as_mut_slice(),
-                n_max,
+                snapshot_base_entries.as_slice(),
+                join_records_core.as_slice(),
                 revoked_leaf_indices.as_slice(),
+                &parsed_for_hash,
             )?;
-            let expected_before = compute_barrier_tree_hash(n_max, snapshot_pre.as_slice())?;
-
-            let mut snapshot_post = snapshot_pre;
-            for (node, ek) in &parsed_for_hash.new_public_keys {
-                let index = usize::try_from(*node)
-                    .map_err(|_| anyhow!("barrier node index out of range"))?;
-                let slot = snapshot_post
-                    .get_mut(index)
-                    .ok_or_else(|| anyhow!("barrier node index out of range"))?;
-                *slot = ek.clone();
-            }
-            let expected_after = compute_barrier_tree_hash(n_max, snapshot_post.as_slice())?;
-            Ok((expected_before, expected_after))
+            Ok((transition.expected_before, transition.expected_after))
         })
         .await
         .map_err(|err| anyhow!("join_finalize bootstrap worker join failure (960.8): {err}"))??;

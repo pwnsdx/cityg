@@ -78,6 +78,7 @@ pub mod barrier;
 pub mod barrier_build;
 pub mod barrier_crypto;
 pub mod barrier_recovery;
+pub mod barrier_transition;
 pub mod barrier_update;
 pub mod message_crypto;
 pub mod pivot;
