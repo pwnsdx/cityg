@@ -135,6 +135,7 @@
 //! - [`cityg-api`](../cityg_api) - Server implementation
 //! - [`cityg-client`](../cityg_client) - Client bundle generation
 
+mod member_queries;
 mod room_admin;
 mod verification;
 
@@ -152,10 +153,10 @@ use pb::{
     BarrierResolveRevokedLeavesResponse, ConfigureWindowRequest, ConfigureWindowResponse,
     FetchMessagesRequest, FetchMessagesResponse, GetBundleRequest, GetBundleResponse,
     GetTelemetryRequest, GetTelemetryResponse, GetWindowRequest, GetWindowResponse,
-    JoinTicketRequest, JoinTicketResponse, ListRoomAdminsResponse, MembersRequest, MembersResponse,
+    JoinTicketRequest, JoinTicketResponse, ListRoomAdminsResponse, MembersRequest,
     MergeTicketIntent as PbMergeTicketIntent, MergeTicketRequest, MergeTicketResponse,
-    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationResponse, SearchMembersRequest,
-    SearchMembersResponse, SendMessageRequest, SendMessageResponse,
+    RefreshPivotRequest, RefreshPivotResponse, RoomAdminMutationResponse, SendMessageRequest,
+    SendMessageResponse,
 };
 #[cfg(any(debug_assertions, feature = "debug-api"))]
 use pb::{SeedHeadRequest, SeedHeadResponse};
@@ -417,169 +418,6 @@ impl CitygApiClient {
         let bytes = bundle.to_cbor()?;
         let request = AcceptEpochRequest { bundle_cbor: bytes };
         self.post_proto("/v1/accept_epoch", request).await
-    }
-
-    /// Retrieves the member roster for a group.
-    ///
-    /// This method returns all members in the group's current state,
-    /// with automatic pagination (default: 256 members per page).
-    ///
-    /// # Arguments
-    ///
-    /// * `gid` - Group identifier (derived from broadcast key)
-    /// * `parent_root` - Optional: filter to members at a specific epoch root
-    ///
-    /// # Returns
-    ///
-    /// A [`MembersResponse`] containing:
-    /// - `members` - List of member records with `leaf_id`, `alias`, and `identity_binding`
-    /// - `total_count` - Total number of members (for pagination)
-    /// - `has_more` - Whether more results exist
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use cityg_api_client::CitygApiClient;
-    ///
-    /// # async fn example(client: &CitygApiClient, gid: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    /// // Fetch all members (paginated automatically)
-    /// let response = client.members(gid, None).await?;
-    ///
-    /// for member in response.members {
-    ///     println!(
-    ///         "Member: {} (leaf_id: {})",
-    ///         member.alias.as_deref().unwrap_or("unknown"),
-    ///         hex::encode(&member.leaf_id)
-    ///     );
-    /// }
-    ///
-    /// if response.next_offset > 0 {
-    ///     // Use members_with_range for pagination
-    ///     println!("More members available at offset: {}", response.next_offset);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn members(
-        &self,
-        gid: &[u8],
-        parent_root: Option<&[u8; 32]>,
-    ) -> Result<MembersResponse, Error> {
-        self.members_with_range(gid, parent_root, None, None).await
-    }
-
-    /// Retrieves the member roster with custom pagination.
-    ///
-    /// Use this method when you need to control pagination for large groups.
-    ///
-    /// # Arguments
-    ///
-    /// * `gid` - Group identifier
-    /// * `parent_root` - Optional: filter to specific epoch root
-    /// * `offset` - Number of members to skip (for pagination)
-    /// * `limit` - Maximum members to return (max: 2000, default: 256)
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use cityg_api_client::CitygApiClient;
-    ///
-    /// # async fn example(client: &CitygApiClient, gid: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    /// // Fetch members 100-199
-    /// let response = client.members_with_range(
-    ///     gid,
-    ///     None,
-    ///     Some(100),  // offset
-    ///     Some(100)   // limit
-    /// ).await?;
-    ///
-    /// println!("Retrieved {} of {} members", response.members.len(), response.total_count);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn members_with_range(
-        &self,
-        gid: &[u8],
-        parent_root: Option<&[u8; 32]>,
-        offset: Option<u64>,
-        limit: Option<u32>,
-    ) -> Result<MembersResponse, Error> {
-        let request = MembersRequest {
-            gid: gid.to_vec(),
-            parent_root: parent_root.map(|root| root.to_vec()).unwrap_or_default(),
-            offset,
-            limit,
-        };
-        self.post_proto("/v1/members", request).await
-    }
-
-    /// Searches for members by alias or leaf ID.
-    ///
-    /// This method performs a substring search on member aliases and
-    /// exact match on hexadecimal leaf IDs.
-    ///
-    /// # Arguments
-    ///
-    /// * `gid` - Group identifier
-    /// * `query` - Search term (alias substring or leaf_id hex string)
-    /// * `parent_root` - Optional: filter to specific epoch root
-    /// * `offset` - Pagination offset
-    /// * `limit` - Maximum results (max: 2000, default: 256)
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use cityg_api_client::CitygApiClient;
-    ///
-    /// # async fn example(client: &CitygApiClient, gid: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    /// // Search by alias substring
-    /// let results = client.search_members(
-    ///     gid,
-    ///     "alice",
-    ///     None,
-    ///     None,
-    ///     None
-    /// ).await?;
-    ///
-    /// for member in results.members {
-    ///     println!("Found: {} ({})",
-    ///         member.alias.as_deref().unwrap_or("unknown"),
-    ///         hex::encode(&member.leaf_id));
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// ```no_run
-    /// # use cityg_api_client::CitygApiClient;
-    /// # async fn example(client: &CitygApiClient, gid: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    /// // Search by exact leaf_id (hex string)
-    /// let results = client.search_members(
-    ///     gid,
-    ///     "a3b5c7d9e1f2...",
-    ///     None,
-    ///     None,
-    ///     None
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn search_members(
-        &self,
-        gid: &[u8],
-        query: &str,
-        parent_root: Option<&[u8; 32]>,
-        offset: Option<u64>,
-        limit: Option<u32>,
-    ) -> Result<SearchMembersResponse, Error> {
-        let request = SearchMembersRequest {
-            gid: gid.to_vec(),
-            query: query.to_string(),
-            parent_root: parent_root.map(|root| root.to_vec()).unwrap_or_default(),
-            offset,
-            limit,
-        };
-        self.post_proto("/v1/members/search", request).await
     }
 
     /// Requests a join ticket for a new member.
