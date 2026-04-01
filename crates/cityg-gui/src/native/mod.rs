@@ -108,6 +108,7 @@ mod barrier_core;
 mod barrier_epoch_sync_runtime;
 mod barrier_finalize_runtime;
 mod barrier_merge_execution_runtime;
+mod barrier_merge_prepare_runtime;
 mod barrier_merge_publish_runtime;
 mod barrier_merge_runtime;
 mod barrier_public_tree_cache;
