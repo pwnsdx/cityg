@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
+mod config_auth;
 pub mod health;
 mod middleware;
 
@@ -70,7 +71,6 @@ use cityg_api_schema::{
     verify_room_admin_proof_payload as schema_verify_room_admin_proof_payload,
 };
 use futures::{SinkExt, StreamExt};
-use hex::FromHex;
 #[cfg(test)]
 use pb::IdentityBinding;
 #[cfg(test)]
@@ -159,6 +159,8 @@ use msphf_orchestrator::{AcceptanceError, mhw::FreezeError};
 use pqcrypto_kyber::kyber768::public_key_bytes as ml_kem_public_key_bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::to_vec as to_json_vec;
+
+use config_auth::*;
 
 #[derive(Clone, Debug)]
 enum BroadcastNotification {
@@ -1012,224 +1014,6 @@ impl IntoResponse for ApiError {
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         response
     }
-}
-
-fn parse_gid(room_id: &str) -> Result<[u8; 32], ApiError> {
-    let bytes = Vec::from_hex(room_id)
-        .map_err(|_| ApiError::InvalidRequest("room_id must be 64 hex characters"))?;
-    if bytes.len() != 32 {
-        return Err(ApiError::InvalidRequest("room_id must be 32 bytes"));
-    }
-    let mut gid = [0u8; 32];
-    gid.copy_from_slice(&bytes);
-    Ok(gid)
-}
-
-fn parse_hex_32(label: &'static str, value: &str) -> Result<[u8; 32], ApiError> {
-    let bytes = Vec::from_hex(value).map_err(|_| ApiError::InvalidRequest(label))?;
-    if bytes.len() != 32 {
-        return Err(ApiError::InvalidRequest(label));
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
-}
-
-fn configured_window_admin_token() -> Option<String> {
-    std::env::var(WINDOW_CONFIG_ADMIN_TOKEN_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn configured_rooms_admin_token() -> Option<String> {
-    std::env::var(ROOMS_ADMIN_TOKEN_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(configured_window_admin_token)
-}
-
-fn configured_message_auth_token() -> Option<String> {
-    std::env::var(MESSAGE_AUTH_TOKEN_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn parse_bool_env(raw: Option<String>) -> bool {
-    raw.map(|value| value.trim().to_ascii_lowercase())
-        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
-}
-
-fn allow_insecure_admin() -> bool {
-    parse_bool_env(std::env::var(ALLOW_INSECURE_ADMIN_ENV).ok())
-}
-
-fn warn_if_admin_auth_is_open() {
-    if !allow_insecure_admin() {
-        return;
-    }
-    if configured_rooms_admin_token().is_none() {
-        warn!(
-            "{}=true with no {} or {} configured; insecure admin bypass is ignored and room admin endpoints remain unavailable",
-            ALLOW_INSECURE_ADMIN_ENV, ROOMS_ADMIN_TOKEN_ENV, WINDOW_CONFIG_ADMIN_TOKEN_ENV
-        );
-    }
-    if configured_window_admin_token().is_none() {
-        warn!(
-            "{}=true with no {} configured; insecure admin bypass is ignored and window admin endpoints remain unavailable",
-            ALLOW_INSECURE_ADMIN_ENV, WINDOW_CONFIG_ADMIN_TOKEN_ENV
-        );
-    }
-}
-
-fn enforce_admin_token_with_policy(
-    headers: &HeaderMap,
-    expected_token: Option<&str>,
-    allow_insecure: bool,
-) -> Result<(), ApiError> {
-    let Some(expected_token) = expected_token else {
-        if allow_insecure {
-            warn!(
-                "{}=true was set without an admin token; refusing unauthenticated admin access",
-                ALLOW_INSECURE_ADMIN_ENV
-            );
-        }
-        return Err(ApiError::Unauthorized("admin token is not configured"));
-    };
-    let provided = headers
-        .get(WINDOW_CONFIG_ADMIN_HEADER)
-        .and_then(|value| value.to_str().ok());
-    if provided == Some(expected_token) {
-        Ok(())
-    } else {
-        Err(ApiError::Unauthorized("missing or invalid admin token"))
-    }
-}
-
-fn enforce_admin_token(headers: &HeaderMap, expected_token: Option<&str>) -> Result<(), ApiError> {
-    enforce_admin_token_with_policy(headers, expected_token, allow_insecure_admin())
-}
-
-fn enforce_window_config_auth(
-    headers: &HeaderMap,
-    expected_token: Option<&str>,
-) -> Result<(), ApiError> {
-    enforce_admin_token(headers, expected_token)
-}
-
-fn enforce_message_auth_header(
-    headers: &HeaderMap,
-    expected_token: Option<&str>,
-) -> Result<(), ApiError> {
-    let Some(expected_token) = expected_token else {
-        return Err(ApiError::Unauthorized(
-            "message auth token is not configured",
-        ));
-    };
-    let provided = headers
-        .get(MESSAGE_AUTH_HEADER)
-        .and_then(|value| value.to_str().ok());
-    if provided == Some(expected_token) {
-        Ok(())
-    } else {
-        Err(ApiError::Unauthorized(
-            "missing or invalid message auth token",
-        ))
-    }
-}
-
-fn enforce_message_auth_query(
-    provided: Option<&str>,
-    expected_token: Option<&str>,
-) -> Result<(), ApiError> {
-    let Some(expected_token) = expected_token else {
-        return Err(ApiError::Unauthorized(
-            "message auth token is not configured",
-        ));
-    };
-    if provided == Some(expected_token) {
-        Ok(())
-    } else {
-        Err(ApiError::Unauthorized(
-            "missing or invalid message auth token",
-        ))
-    }
-}
-
-fn enforce_message_auth_websocket(
-    headers: &HeaderMap,
-    expected_token: Option<&str>,
-) -> Result<(), ApiError> {
-    enforce_message_auth_query(
-        headers
-            .get(MESSAGE_AUTH_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        expected_token,
-    )
-}
-
-fn parse_ws_max_lag(raw: Option<&str>) -> u64 {
-    raw.and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(WS_MAX_LAG_DEFAULT)
-}
-
-fn configured_accept_epoch_max_in_flight() -> usize {
-    std::env::var(ACCEPT_EPOCH_MAX_IN_FLIGHT_ENV)
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_ACCEPT_EPOCH_MAX_IN_FLIGHT)
-}
-
-fn configured_join_ticket_max_in_flight() -> usize {
-    std::env::var(JOIN_TICKET_MAX_IN_FLIGHT_ENV)
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_JOIN_TICKET_MAX_IN_FLIGHT)
-}
-
-fn configured_expensive_rate_limit_burst() -> u32 {
-    std::env::var(EXPENSIVE_RATE_LIMIT_BURST_ENV)
-        .ok()
-        .and_then(|raw| raw.parse::<u32>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_EXPENSIVE_RATE_LIMIT_BURST)
-}
-
-fn configured_expensive_rate_limit_window() -> Duration {
-    Duration::from_secs(
-        std::env::var(EXPENSIVE_RATE_LIMIT_WINDOW_SECS_ENV)
-            .ok()
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_EXPENSIVE_RATE_LIMIT_WINDOW_SECS),
-    )
-}
-
-fn configured_expensive_rate_limit_max_keys() -> usize {
-    std::env::var(EXPENSIVE_RATE_LIMIT_MAX_KEYS_ENV)
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_EXPENSIVE_RATE_LIMIT_MAX_KEYS)
-}
-
-fn configured_ws_max_lag() -> u64 {
-    let raw = std::env::var(WS_MAX_LAG_ENV).ok();
-    parse_ws_max_lag(raw.as_deref())
-}
-
-fn configured_group_lane_count() -> usize {
-    std::env::var(GROUP_LANES_ENV)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_GROUP_LANES)
 }
 
 fn fingerprint_rate_limit_parts(parts: &[&[u8]]) -> u64 {
