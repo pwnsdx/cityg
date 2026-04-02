@@ -151,7 +151,8 @@ use ciborium::Value;
 use cityg_api_schema::pb;
 use cityg_client::{
     CityGError as ClientError, barrier::TICKET_RETRY_MAX_ATTEMPTS,
-    barrier::should_retry_ticket_http_error, barrier::ticket_retry_delay,
+    barrier::compute_revocation_roots_hash, barrier::should_retry_ticket_http_error,
+    barrier::ticket_retry_delay,
     barrier_state_auth::ensure_non_regressing_authenticated_current_state,
     barrier_update::normalize_max_barrier_update_bytes, pivot::hydrate_parities,
 };
@@ -963,6 +964,37 @@ pub struct PreparedRuntimeJoinTicket {
 }
 
 #[derive(Debug, Clone)]
+pub struct PrepareEpochSyncMergeTicketInput<'a> {
+    pub local_barrier_version: u64,
+    pub local_kem_tree_hash_after: [u8; 32],
+    pub local_current_history_commitment: Option<&'a HistoryCommitment>,
+    pub local_current_history_authority_extension: Option<HistoryAuthorityExtension>,
+    pub fs_ec: u64,
+    pub fs_epoch_commit: [u8; 32],
+    pub fs_dev_prev_commit: [u8; 32],
+    pub stored_max_barrier_update_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedEpochSyncMergeTicket {
+    pub we_epoch_id: [u8; 32],
+    pub barrier_version: u64,
+    pub snapshot_hash: [u8; 32],
+    pub barrier_n_max: u64,
+    pub cover_leaf_index: u64,
+    pub max_barrier_update_bytes: u64,
+    pub max_barrier_update_bytes_normalized: usize,
+    pub parities: Vec<PivotParity>,
+    pub witness_bytes: Option<Vec<u8>>,
+    pub last_accepted_ec: u64,
+    pub fs_forward_leap_policy: FsForwardLeapPolicy,
+    pub ticket_history_commitment: HistoryCommitment,
+    pub ticket_history_authority_extension: Option<HistoryAuthorityExtension>,
+    pub current_global_history_attestation_bytes: Vec<u8>,
+    pub ticket_barrier_roots_hash: [u8; 32],
+}
+
+#[derive(Debug, Clone)]
 pub struct PrepareOriginMergeTicketInput<'a> {
     pub operation_label: &'a str,
     pub local_barrier_version: u64,
@@ -1186,6 +1218,61 @@ impl MergeTicket {
                 .clone(),
             merge_ticket_artifact_bytes: self.merge_ticket_artifact_bytes.clone(),
             deployment_profile_manifest_bytes: self.deployment_profile_manifest_bytes.clone(),
+        })
+    }
+
+    pub fn prepare_epoch_sync_runtime(
+        &self,
+        input: PrepareEpochSyncMergeTicketInput<'_>,
+    ) -> Result<PreparedEpochSyncMergeTicket, Error> {
+        let local_current_history_commitment = input
+            .local_current_history_commitment
+            .map(to_core_history_commitment);
+        let ticket_history_commitment =
+            to_core_history_commitment(&self.current_history_commitment);
+        let prepared_runtime = self.prepare_runtime(
+            input.fs_ec,
+            input.fs_epoch_commit,
+            input.fs_dev_prev_commit,
+            input.stored_max_barrier_update_bytes,
+        )?;
+
+        ensure_non_regressing_authenticated_current_state(
+            input.local_barrier_version,
+            &input.local_kem_tree_hash_after,
+            local_current_history_commitment.as_ref(),
+            input.local_current_history_authority_extension.as_ref(),
+            self.barrier_version,
+            &prepared_runtime.snapshot_hash,
+            &ticket_history_commitment,
+            self.history_authority_extension.as_ref(),
+            "epoch sync merge ticket",
+        )
+        .map_err(|err| Error::Parse(err.to_string()))?;
+
+        let ticket_barrier_roots_hash =
+            compute_revocation_roots_hash(&self.revoked_since_root, &self.revoked_root)
+                .map_err(|err| Error::Parse(err.to_string()))?;
+
+        Ok(PreparedEpochSyncMergeTicket {
+            we_epoch_id: self.we_epoch_id,
+            barrier_version: self.barrier_version,
+            snapshot_hash: prepared_runtime.snapshot_hash,
+            barrier_n_max: prepared_runtime.barrier_n_max,
+            cover_leaf_index: prepared_runtime.cover_leaf_index,
+            max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
+            max_barrier_update_bytes_normalized: prepared_runtime
+                .max_barrier_update_bytes_normalized,
+            parities: prepared_runtime.parities,
+            witness_bytes: prepared_runtime.witness_bytes,
+            last_accepted_ec: self.last_accepted_ec,
+            fs_forward_leap_policy: self.fs_forward_leap_policy,
+            ticket_history_commitment: self.current_history_commitment,
+            ticket_history_authority_extension: self.history_authority_extension,
+            current_global_history_attestation_bytes: self
+                .current_global_history_attestation_bytes
+                .clone(),
+            ticket_barrier_roots_hash,
         })
     }
 
@@ -3020,6 +3107,64 @@ mod tests {
         );
         assert!(prepared.srx_inputs.join_leaf_ids.is_empty());
         assert!(prepared.srx_inputs.since_leaf_ids.is_empty());
+    }
+
+    #[test]
+    fn prepare_epoch_sync_runtime_merge_ticket_hydrates_and_validates_state() {
+        let prepared = sample_runtime_merge_ticket()
+            .prepare_epoch_sync_runtime(PrepareEpochSyncMergeTicketInput {
+                local_barrier_version: 9,
+                local_kem_tree_hash_after: [0x0F; 32],
+                local_current_history_commitment: Some(&HistoryCommitment {
+                    history_view_id: [0x90; 32],
+                    history_commitment_id: [0x91; 32],
+                    prev_history_commitment_id: [0x92; 32],
+                    history_seq: 17,
+                }),
+                local_current_history_authority_extension: None,
+                fs_ec: 77,
+                fs_epoch_commit: [0x44; 32],
+                fs_dev_prev_commit: [0x55; 32],
+                stored_max_barrier_update_bytes: 0,
+            })
+            .expect("epoch sync merge ticket preparation must succeed");
+
+        assert_eq!(prepared.we_epoch_id, [0x04; 32]);
+        assert_eq!(prepared.barrier_version, 9);
+        assert_eq!(prepared.snapshot_hash, [0x0F; 32]);
+        assert_eq!(prepared.barrier_n_max, 8);
+        assert_eq!(prepared.max_barrier_update_bytes, 1);
+        assert_eq!(prepared.max_barrier_update_bytes_normalized, 1);
+        assert_eq!(prepared.cover_leaf_index, 1);
+        assert_eq!(prepared.parities.len(), 1);
+        assert_eq!(prepared.last_accepted_ec, 17);
+        assert_eq!(prepared.ticket_history_commitment.history_seq, 17);
+    }
+
+    #[test]
+    fn prepare_epoch_sync_runtime_merge_ticket_rejects_history_regression() {
+        let err = sample_runtime_merge_ticket()
+            .prepare_epoch_sync_runtime(PrepareEpochSyncMergeTicketInput {
+                local_barrier_version: 9,
+                local_kem_tree_hash_after: [0x0F; 32],
+                local_current_history_commitment: Some(&HistoryCommitment {
+                    history_view_id: [0x90; 32],
+                    history_commitment_id: [0x91; 32],
+                    prev_history_commitment_id: [0x92; 32],
+                    history_seq: 18,
+                }),
+                local_current_history_authority_extension: None,
+                fs_ec: 77,
+                fs_epoch_commit: [0x44; 32],
+                fs_dev_prev_commit: [0x55; 32],
+                stored_max_barrier_update_bytes: 0,
+            })
+            .expect_err("history regression must fail");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("epoch sync merge ticket current history commitment regressed")
+        ));
     }
 
     #[test]

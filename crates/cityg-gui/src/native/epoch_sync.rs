@@ -15,52 +15,51 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
         .await
         .context("failed to fetch merge ticket for epoch sync")?;
     let prepared_runtime = ticket
-        .prepare_runtime(
-            session.fs_ec,
-            session.fs_epoch_commit,
-            session.fs_dev_prev_commit,
-            session.barrier_state.max_barrier_update_bytes,
-        )
+        .prepare_epoch_sync_runtime(cityg_api_client::PrepareEpochSyncMergeTicketInput {
+            local_barrier_version: session.barrier_state.barrier_version,
+            local_kem_tree_hash_after: session.barrier_state.kem_tree_hash_after,
+            local_current_history_commitment: session
+                .barrier_state
+                .current_history_commitment
+                .as_ref(),
+            local_current_history_authority_extension: session
+                .barrier_state
+                .current_history_authority_extension,
+            fs_ec: session.fs_ec,
+            fs_epoch_commit: session.fs_epoch_commit,
+            fs_dev_prev_commit: session.fs_dev_prev_commit,
+            stored_max_barrier_update_bytes: session.barrier_state.max_barrier_update_bytes,
+        })
         .map_err(anyhow::Error::from)?;
     let ticket_kem_tree_hash_after = prepared_runtime.snapshot_hash;
-    let ticket_history_commitment = ticket.current_history_commitment;
+    let ticket_history_commitment = prepared_runtime.ticket_history_commitment;
     let ticket_n_max = prepared_runtime.barrier_n_max;
     let ticket_max_barrier_update_bytes_u64 = prepared_runtime.max_barrier_update_bytes;
     let ticket_max_barrier_update_bytes = prepared_runtime.max_barrier_update_bytes_normalized;
     let ticket_cover_leaf_index = prepared_runtime.cover_leaf_index;
-    ensure_non_regressing_authenticated_current_state(
-        session.barrier_state.barrier_version,
-        &session.barrier_state.kem_tree_hash_after,
-        session.barrier_state.current_history_commitment.as_ref(),
-        session.barrier_state.current_history_authority_extension,
-        ticket.barrier_version,
-        &ticket_kem_tree_hash_after,
-        &ticket_history_commitment,
-        ticket.history_authority_extension,
-        "epoch sync merge ticket",
-    )?;
-    let ticket_barrier_roots_hash =
-        compute_revocation_roots_hash(&ticket.revoked_since_root, &ticket.revoked_root)?;
+    let ticket_barrier_roots_hash = prepared_runtime.ticket_barrier_roots_hash;
     let previous_we_epoch_id = session.we_epoch_id;
     let activation_source_before_sync = capture_barrier_pending_activation_source(&session);
     session.fs_forward_leap_policy = FsForwardLeapPolicy {
-        h: ticket.fs_forward_leap_policy.h,
-        checkpoint_interval: ticket.fs_forward_leap_policy.checkpoint_interval,
-        slack_anchor: ticket.fs_forward_leap_policy.slack_anchor,
-        slack_first_device: ticket.fs_forward_leap_policy.slack_first_device,
-        slack_device: ticket.fs_forward_leap_policy.slack_device,
+        h: prepared_runtime.fs_forward_leap_policy.h,
+        checkpoint_interval: prepared_runtime.fs_forward_leap_policy.checkpoint_interval,
+        slack_anchor: prepared_runtime.fs_forward_leap_policy.slack_anchor,
+        slack_first_device: prepared_runtime.fs_forward_leap_policy.slack_first_device,
+        slack_device: prepared_runtime.fs_forward_leap_policy.slack_device,
     };
-    session.last_accepted_ec = session.last_accepted_ec.max(ticket.last_accepted_ec);
+    session.last_accepted_ec = session
+        .last_accepted_ec
+        .max(prepared_runtime.last_accepted_ec);
     session.barrier_state.max_barrier_update_bytes = ticket_max_barrier_update_bytes_u64;
     session.barrier_state.n_max = ticket_n_max;
     session.barrier_state.cover_leaf_index = ticket_cover_leaf_index;
     let pending_history_outcome = apply_pending_barrier_activation_from_history(
         &client,
         &mut session,
-        ticket.barrier_version,
+        prepared_runtime.barrier_version,
     )
     .await?;
-    let barrier_changed = session.barrier_state.barrier_version != ticket.barrier_version
+    let barrier_changed = session.barrier_state.barrier_version != prepared_runtime.barrier_version
         || session.barrier_state.kem_tree_hash_after != ticket_kem_tree_hash_after
         || session.barrier_state.max_barrier_update_bytes != ticket_max_barrier_update_bytes_u64
         || session.barrier_state.n_max != ticket_n_max
@@ -70,16 +69,20 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
         session.xk_hash = pivot.xk_hash;
     }
 
-    if ticket.we_epoch_id == session.we_epoch_id {
-        session.last_accepted_ec = session.last_accepted_ec.max(ticket.last_accepted_ec);
+    if prepared_runtime.we_epoch_id == session.we_epoch_id {
+        session.last_accepted_ec = session
+            .last_accepted_ec
+            .max(prepared_runtime.last_accepted_ec);
         install_authenticated_current_state(
             &mut session,
-            ticket.barrier_version,
+            prepared_runtime.barrier_version,
             ticket_barrier_roots_hash,
             ticket_kem_tree_hash_after,
             ticket_history_commitment,
-            ticket.history_authority_extension,
-            ticket.current_global_history_attestation_bytes.clone(),
+            prepared_runtime.ticket_history_authority_extension,
+            prepared_runtime
+                .current_global_history_attestation_bytes
+                .clone(),
         );
         return Ok(EpochSyncOutcome {
             session,
@@ -92,16 +95,16 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
     }
 
     let bundle_response = client
-        .get_bundle(&ticket.we_epoch_id)
+        .get_bundle(&prepared_runtime.we_epoch_id)
         .await
         .context("failed to fetch latest epoch bundle")?;
     let mut bundle = ClientEpochBundle::from_cbor(&bundle_response.bundle_cbor)
         .context("failed to decode latest epoch bundle")?;
 
-    if bundle.we_epoch_id != ticket.we_epoch_id {
+    if bundle.we_epoch_id != prepared_runtime.we_epoch_id {
         return Err(anyhow!(
             "merge ticket/bundle mismatch: ticket={} bundle={}",
-            hex_encode(ticket.we_epoch_id),
+            hex_encode(prepared_runtime.we_epoch_id),
             hex_encode(bundle.we_epoch_id)
         ));
     }
@@ -199,7 +202,7 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
         &bundle,
         &activation_source_before_sync,
         pending_history_outcome,
-        ticket.barrier_version,
+        prepared_runtime.barrier_version,
         ticket_kem_tree_hash_after,
         ticket_max_barrier_update_bytes,
     ))
@@ -213,12 +216,14 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
     }
     install_authenticated_current_state(
         &mut session,
-        ticket.barrier_version,
+        prepared_runtime.barrier_version,
         ticket_barrier_roots_hash,
         ticket_kem_tree_hash_after,
         ticket_history_commitment,
-        ticket.history_authority_extension,
-        ticket.current_global_history_attestation_bytes.clone(),
+        prepared_runtime.ticket_history_authority_extension,
+        prepared_runtime
+            .current_global_history_attestation_bytes
+            .clone(),
     );
     if session
         .barrier_state
@@ -251,7 +256,7 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
 
     Ok(EpochSyncOutcome {
         session,
-        changed: previous_we_epoch_id != ticket.we_epoch_id
+        changed: previous_we_epoch_id != prepared_runtime.we_epoch_id
             || barrier_changed
             || !matches!(
                 pending_history_outcome,

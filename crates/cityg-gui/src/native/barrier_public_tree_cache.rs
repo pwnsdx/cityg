@@ -1,10 +1,10 @@
 use super::*;
 use crate::barrier_shared::require_current_state_history_commitment;
+#[cfg(test)]
 use cityg_api_client::to_core_history_commitment;
-use cityg_client::barrier_state_auth::{
-    ensure_non_regressing_authenticated_current_state as ensure_non_regressing_authenticated_current_state_core,
-    validate_barrier_tree_snapshot_auth as validate_barrier_tree_snapshot_auth_core,
-};
+#[cfg(test)]
+use cityg_client::barrier_state_auth::ensure_non_regressing_authenticated_current_state as ensure_non_regressing_authenticated_current_state_core;
+use cityg_client::barrier_state_auth::validate_barrier_tree_snapshot_auth as validate_barrier_tree_snapshot_auth_core;
 
 pub(super) fn validate_barrier_tree_snapshot_auth(
     expected_hash: &[u8; 32],
@@ -305,6 +305,7 @@ pub(super) fn clear_all_public_tree_caches(state: &mut BarrierSecretState) {
     state.retained_public_trees.clear();
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn ensure_non_regressing_authenticated_current_state(
     local_barrier_version: u64,
