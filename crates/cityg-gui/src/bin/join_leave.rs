@@ -48,8 +48,6 @@ use cityg_api_client::{
 #[cfg(test)]
 use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
 #[cfg(test)]
-use cityg_client::bundle_headers::recompute_srx_commit as recompute_srx_commit_core;
-#[cfg(test)]
 use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{
@@ -64,10 +62,19 @@ use cityg_client::{
         derive_barrier_snapshot_witness_selection as derive_barrier_snapshot_witness_selection_core,
         prepare_barrier_snapshot_artifacts as prepare_barrier_snapshot_artifacts_core,
     },
+    binary::bytes32,
     bundle_headers::{
         compute_fs_fingerprint_from_header as compute_fs_fingerprint_from_header_core,
         derive_fs_fingerprint_from_fields as derive_fs_fingerprint_from_fields_core,
-        recompute_proofs_commit as recompute_proofs_commit_core,
+        recompute_proofs_commit,
+    },
+    pivot::hydrate_parities,
+};
+#[cfg(test)]
+use cityg_client::{
+    bundle_headers::recompute_srx_commit,
+    pivot::{
+        apply_pivot_alignment, select_pivot_parity, strip_rollup_metadata as strip_srx_and_rollup,
     },
 };
 use cityg_config::CityGConfig;
@@ -236,12 +243,6 @@ fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
         .map_err(|err| anyhow!("generate VRF keypair: {err}"))
 }
 
-fn bytes32(name: &str, input: &[u8]) -> Result<[u8; 32]> {
-    input
-        .try_into()
-        .map_err(|_| anyhow!("{name} must be 32 bytes, got {}", input.len()))
-}
-
 struct BarrierUpdateBuildResult {
     raw_update: Vec<u8>,
     k_barrier_new: [u8; 32],
@@ -376,15 +377,6 @@ fn log_fingerprints(session: &Session) {
         "fingerprints: regular={} (full={}) fs={} (full={} fs_ec={})",
         regular_preview, regular_full, fs_preview, fs_full, session.fs_ec
     );
-}
-
-#[cfg(test)]
-fn select_pivot_parity(parities: &[PivotParity]) -> Option<&PivotParity> {
-    parities.iter().max_by(|a, b| {
-        a.accept_seq
-            .cmp(&b.accept_seq)
-            .then_with(|| b.xk_hash.cmp(&a.xk_hash))
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2137,10 +2129,6 @@ fn should_retry_leave_accept_http_error(
     retryable_freeze && (status == 409 || status >= 500)
 }
 
-fn recompute_proofs_commit(header: &BTreeMap<u64, Value>) -> Result<[u8; 32]> {
-    recompute_proofs_commit_core(header)
-}
-
 fn describe_value(value: Option<&Value>) -> String {
     match value {
         None => "None".to_string(),
@@ -2155,41 +2143,6 @@ fn describe_value(value: Option<&Value>) -> String {
         Some(Value::Tag(tag, _)) => format!("Tag({})", tag),
         Some(_) => "Other".to_string(),
     }
-}
-
-#[cfg(test)]
-fn strip_srx_and_rollup(header: &mut BTreeMap<u64, Value>) {
-    for key in [
-        hdr::HDR_ROLLUP_PROVENANCE_COMMIT,
-        hdr::HDR_ROLLUP_EPOCH_REPLAY,
-        hdr::HDR_ROLLUP_VCK_COMMIT,
-    ] {
-        header.remove(&key);
-    }
-}
-
-fn hydrate_parities(
-    parities: &[PivotParity],
-    fs_ec: u64,
-    fs_epoch_commit: [u8; 32],
-    fs_dev_commit: [u8; 32],
-) -> Vec<PivotParity> {
-    parities
-        .iter()
-        .cloned()
-        .map(|mut parity| {
-            if parity.fs_ec.is_none() {
-                parity.fs_ec = Some(fs_ec);
-            }
-            if parity.fs_epoch_commit.is_none() {
-                parity.fs_epoch_commit = Some(fs_epoch_commit);
-            }
-            if parity.fs_dev_commit.is_none() {
-                parity.fs_dev_commit = Some(fs_dev_commit);
-            }
-            parity
-        })
-        .collect()
 }
 
 fn log_fs_metadata(pivot: &PivotParity, header: &BTreeMap<u64, Value>) {
@@ -2227,69 +2180,6 @@ fn log_fs_metadata(pivot: &PivotParity, header: &BTreeMap<u64, Value>) {
     println!(
         "pivot fs: ec={pivot_ec} epoch={pivot_epoch} dev={pivot_dev}; bundle fs: ec={bundle_ec} epoch={bundle_epoch} dev={bundle_dev}"
     );
-}
-
-#[cfg(test)]
-fn apply_pivot_alignment(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity) {
-    if let Ok(fs_policy_version) = pivot.policy_version.parse::<u64>() {
-        header
-            .entry(hdr::HDR_FS_POLICY_VERSION)
-            .or_insert_with(|| Value::Integer(Integer::from(fs_policy_version)));
-    }
-    header
-        .entry(hdr::HDR_PROOF_MODE)
-        .or_insert_with(|| Value::Text(pivot.proof_mode.clone()));
-    header
-        .entry(hdr::HDR_VRF_ID)
-        .or_insert_with(|| Value::Text(pivot.vrf_id.clone()));
-    header
-        .entry(hdr::HDR_VRF_PROOF)
-        .or_insert_with(|| Value::Bytes(pivot.vrf_proof.clone()));
-    header
-        .entry(hdr::HDR_VRF_PUBLIC_KEY)
-        .or_insert_with(|| Value::Bytes(pivot.vrf_public.clone()));
-    header
-        .entry(hdr::HDR_VRF_MASK_A)
-        .or_insert_with(|| Value::Bytes(pivot.mask_a.to_vec()));
-    header
-        .entry(hdr::HDR_VRF_MASK_B)
-        .or_insert_with(|| Value::Bytes(pivot.mask_b.to_vec()));
-    header
-        .entry(hdr::HDR_FS_CAPSS)
-        .or_insert_with(|| Value::Bytes(pivot.fs_capss.clone()));
-    header
-        .entry(hdr::HDR_PROOFS_COMMIT)
-        .or_insert_with(|| Value::Bytes(pivot.proofs_commit.to_vec()));
-
-    if let Some(fs_ec) = pivot.fs_ec {
-        header
-            .entry(hdr::HDR_FS_EC)
-            .or_insert_with(|| Value::Integer(Integer::from(fs_ec)));
-        header
-            .entry(hdr::HDR_FS_CHECKPOINT_EC)
-            .or_insert_with(|| Value::Integer(Integer::from(fs_ec)));
-    }
-    if let Some(epoch_commit) = pivot.fs_epoch_commit
-        && !header.contains_key(&hdr::HDR_FS_EPOCH_COMMIT)
-    {
-        header.insert(
-            hdr::HDR_FS_EPOCH_COMMIT,
-            Value::Bytes(epoch_commit.to_vec()),
-        );
-    }
-    if let Some(dev_commit) = pivot.fs_dev_commit {
-        header
-            .entry(hdr::HDR_FS_DEV_PREV_COMMIT)
-            .or_insert_with(|| Value::Bytes(dev_commit.to_vec()));
-        header
-            .entry(hdr::HDR_FS_DEV_COMMIT)
-            .or_insert_with(|| Value::Bytes(dev_commit.to_vec()));
-    }
-}
-
-#[cfg(test)]
-fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]>> {
-    recompute_srx_commit_core(header)
 }
 
 #[cfg(test)]
