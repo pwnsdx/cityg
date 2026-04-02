@@ -85,7 +85,9 @@ pub(super) fn parse_join_invite(raw: &str) -> Result<Option<JoinInvitePayload>> 
         ));
     }
     if invite.server_url.trim().is_empty() {
-        return Err(anyhow!("invite server URL is missing"));
+        return Err(anyhow!(
+            "invite worker edge or compatible endpoint URL is missing"
+        ));
     }
     if !JoinFormState::is_valid_room_id(invite.room_id.trim()) {
         return Err(anyhow!("invite room ID is not valid"));

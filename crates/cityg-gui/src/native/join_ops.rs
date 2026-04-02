@@ -65,7 +65,9 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     } = params;
 
     if server_url.is_empty() {
-        return Err(anyhow!("server URL must not be empty"));
+        return Err(anyhow!(
+            "worker edge or compatible endpoint URL must not be empty"
+        ));
     }
     if room_id.is_empty() {
         return Err(anyhow!("room id must not be empty"));
