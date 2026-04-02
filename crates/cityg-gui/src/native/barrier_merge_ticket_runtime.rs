@@ -1,5 +1,7 @@
 use super::*;
-use cityg_api_client::{HistoryAuthorityDescriptor, PrepareOriginMergeTicketInput};
+use cityg_api_client::{
+    BarrierSnapshotPreparationRequest, HistoryAuthorityDescriptor, PrepareOriginMergeTicketInput,
+};
 use cityg_client::barrier_state_auth::{
     BarrierOriginGuard, BarrierOriginMode, ensure_full_barrier_verification_for_origin,
     guard_barrier_origin,
@@ -50,6 +52,47 @@ pub(super) struct PreparedBarrierMergeTicket {
     pub(super) current_global_history_attestation_bytes: Vec<u8>,
     pub(super) merge_ticket_artifact_bytes: Vec<u8>,
     pub(super) deployment_profile_manifest_bytes: Vec<u8>,
+}
+
+impl PreparedBarrierMergeTicket {
+    pub(super) fn snapshot_preparation_request<'a>(
+        &'a self,
+        pop_secret_key: &'a [u8],
+        barrier_update_reason: u64,
+        operation_label: &'a str,
+    ) -> BarrierSnapshotPreparationRequest<'a> {
+        BarrierSnapshotPreparationRequest {
+            room_id: self.room_id.as_str(),
+            gid: &self.gid,
+            leaf_id: &self.leaf_id,
+            barrier_version: self.barrier_version,
+            cover_leaf_index: self.cover_leaf_index,
+            snapshot_hash: self.snapshot_hash,
+            barrier_n_max: self.barrier_n_max,
+            max_barrier_update_bytes: self.max_barrier_update_bytes,
+            header: self.header.clone(),
+            parities: self.parities.as_slice(),
+            cat: &self.cat,
+            pox_r_commit: &self.pox_r_commit,
+            parent_root: &self.parent_root,
+            join_delta_root: &self.join_delta_root,
+            revoked_since_root: &self.revoked_since_root,
+            revoked_root: &self.revoked_root,
+            tswe_salt_hash: &self.tswe_salt_hash,
+            ticket_history_commitment: &self.ticket_history_commitment,
+            ticket_history_authority_extension: self.ticket_history_authority_extension,
+            history_authority: self.history_authority.clone(),
+            current_global_history_attestation_bytes: self
+                .current_global_history_attestation_bytes
+                .as_slice(),
+            merge_ticket_artifact_bytes: self.merge_ticket_artifact_bytes.as_slice(),
+            deployment_profile_manifest_bytes: self.deployment_profile_manifest_bytes.as_slice(),
+            pop_secret_key,
+            full_verification_target_leaf_id: None,
+            barrier_update_reason,
+            operation_label,
+        }
+    }
 }
 
 pub(super) async fn prepare_barrier_merge_ticket(

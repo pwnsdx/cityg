@@ -1,6 +1,6 @@
-use super::barrier_merge_snapshot_runtime::prepare_barrier_merge_snapshot;
 use super::barrier_merge_ticket_runtime::prepare_barrier_merge_ticket;
 use super::*;
+use cityg_api_client::PreparedBarrierSnapshot;
 
 pub(super) struct PreparedBarrierMergeExecution {
     pub(super) persist_request: LeaveRequest,
@@ -52,7 +52,33 @@ pub(super) async fn prepare_barrier_merge_execution(
     allow_pending_recovery: bool,
 ) -> Result<PreparedBarrierMergeExecution> {
     let ticket = prepare_barrier_merge_ticket(request, mode, allow_pending_recovery).await?;
-    let snapshot = prepare_barrier_merge_snapshot(&ticket, mode).await?;
+    let PreparedBarrierSnapshot {
+        header,
+        cat: cat_arr,
+        parent_root: parent_root_arr,
+        join_delta_root: join_delta_root_arr,
+        revoked_since_root: revoked_since_root_arr,
+        revoked_root: revoked_root_arr,
+        tswe_salt_hash: tswe_salt_hash_arr,
+        pox_r_commit: pox_r_commit_arr,
+        pivot,
+        snapshot_hash,
+        committed_revocation_roots_hash,
+        revocation_roots_hash,
+        barrier_update,
+    } = ticket
+        .client
+        .barrier_prepare_snapshot(ticket.snapshot_preparation_request(
+            ticket.room_id.as_str(),
+            &ticket.gid,
+            &ticket.leaf_id,
+            ticket.pop_secret_key.as_slice(),
+            mode.reason(),
+            mode.label(),
+        ))
+        .await
+        .map_err(anyhow::Error::from)?;
+    let barrier_update = BarrierUpdateBuildResult::from_core(ticket.barrier_n_max, barrier_update);
 
     let super::barrier_merge_ticket_runtime::PreparedBarrierMergeTicket {
         persist_request,
@@ -84,21 +110,6 @@ pub(super) async fn prepare_barrier_merge_execution(
         current_global_history_attestation_bytes,
         ..
     } = ticket;
-    let super::barrier_merge_snapshot_runtime::PreparedBarrierMergeSnapshot {
-        header,
-        cat_arr,
-        parent_root_arr,
-        join_delta_root_arr,
-        revoked_since_root_arr,
-        revoked_root_arr,
-        tswe_salt_hash_arr,
-        pox_r_commit_arr,
-        pivot,
-        snapshot_hash,
-        committed_revocation_roots_hash,
-        revocation_roots_hash,
-        barrier_update,
-    } = snapshot;
     let next_barrier_version = barrier_version.saturating_add(1);
 
     Ok(PreparedBarrierMergeExecution {

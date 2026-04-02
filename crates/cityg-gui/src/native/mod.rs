@@ -117,7 +117,6 @@ mod barrier_merge_execution_runtime;
 mod barrier_merge_prepare_runtime;
 mod barrier_merge_publish_runtime;
 mod barrier_merge_runtime;
-mod barrier_merge_snapshot_runtime;
 mod barrier_merge_ticket_runtime;
 mod barrier_public_tree_cache;
 mod barrier_recovery_runtime;

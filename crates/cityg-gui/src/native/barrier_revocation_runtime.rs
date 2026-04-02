@@ -3,12 +3,9 @@ use std::{future::Future, pin::Pin};
 use super::barrier_merge_publish_runtime::{
     BarrierMergePublishInputs, BarrierMergePublishPolicy, publish_barrier_merge,
 };
-use super::barrier_merge_snapshot_runtime::{
-    BarrierSnapshotRuntimeRequest, prepare_barrier_snapshot_runtime,
-};
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
-use cityg_api_client::PrepareRevocationMergeTicketInput;
+use cityg_api_client::{PrepareRevocationMergeTicketInput, PreparedBarrierSnapshot};
 use cityg_client::barrier_orchestration::{
     BarrierOrchestrationInputs, prepare_barrier_orchestration,
 };
@@ -90,93 +87,57 @@ async fn publish_revocation_merge_from_ticket_inner(
             stored_max_barrier_update_bytes,
         })
         .map_err(anyhow::Error::from)?;
+    let client = new_api_client(&server_url);
+    let pop_secret =
+        Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
+    let PreparedBarrierSnapshot {
+        header,
+        cat: cat_arr,
+        parent_root: parent_root_arr,
+        join_delta_root: join_delta_root_arr,
+        revoked_since_root: revoked_since_root_arr,
+        revoked_root: revoked_root_arr,
+        tswe_salt_hash: tswe_salt_hash_arr,
+        pox_r_commit: pox_r_commit_arr,
+        pivot,
+        snapshot_hash,
+        committed_revocation_roots_hash,
+        revocation_roots_hash,
+        barrier_update,
+    } = client
+        .barrier_prepare_snapshot(prepared_runtime.snapshot_preparation_request(
+            &room_id,
+            &gid,
+            &leaf_id,
+            pop_secret_key.as_slice(),
+            Some(revocation_target_leaf_id.unwrap_or(leaf_id)),
+            0,
+            operation_label,
+        ))
+        .await
+        .map_err(anyhow::Error::from)?;
     let cityg_api_client::PreparedRevocationMergeTicket {
         barrier_version,
-        cover_leaf_index: revoked_cover_leaf_index,
-        snapshot_hash,
         barrier_n_max,
-        max_barrier_update_bytes: ticket_max_barrier_update_bytes,
         proof_mode,
         vrf_id,
         policy_version,
-        cat,
-        parent_root,
-        join_delta_root,
-        revoked_since_root,
-        revoked_root,
-        tswe_salt_hash,
-        pox_r_commit,
         msphf_crs_id,
         msphf_params_id,
         fs_policy_version,
         fs_epoch_base_ts,
         fs_forward_leap_policy,
         last_accepted_ec,
-        header,
         parities,
         witness_bytes,
         srx_inputs,
         ticket_history_commitment,
         ticket_history_authority_extension,
-        history_authority,
         current_global_history_attestation_bytes,
-        merge_ticket_artifact_bytes,
-        deployment_profile_manifest_bytes,
+        ..
     } = prepared_runtime;
     let srx_inputs = srx_inputs.into_srx_inputs();
-
-    let client = new_api_client(&server_url);
-    let pop_secret =
-        Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
-    let snapshot = prepare_barrier_snapshot_runtime(
-        BarrierSnapshotRuntimeRequest {
-            client: &client,
-            room_id: &room_id,
-            gid: &gid,
-            leaf_id: &leaf_id,
-            barrier_version,
-            cover_leaf_index: revoked_cover_leaf_index,
-            snapshot_hash,
-            barrier_n_max,
-            max_barrier_update_bytes: ticket_max_barrier_update_bytes,
-            header,
-            parities: &parities,
-            cat: &cat,
-            pox_r_commit: &pox_r_commit,
-            parent_root: &parent_root,
-            join_delta_root: &join_delta_root,
-            revoked_since_root: &revoked_since_root,
-            revoked_root: &revoked_root,
-            tswe_salt_hash: &tswe_salt_hash,
-            ticket_history_commitment: &ticket_history_commitment,
-            ticket_history_authority_extension,
-            history_authority: history_authority.clone(),
-            current_global_history_attestation_bytes: current_global_history_attestation_bytes
-                .as_slice(),
-            merge_ticket_artifact_bytes: merge_ticket_artifact_bytes.as_slice(),
-            deployment_profile_manifest_bytes: deployment_profile_manifest_bytes.as_slice(),
-            pop_secret_key: pop_secret_key.as_slice(),
-            full_verification_target_leaf_id: Some(revocation_target_leaf_id.unwrap_or(leaf_id)),
-        },
-        0,
-        operation_label,
-    )
-    .await?;
-    let super::barrier_merge_snapshot_runtime::PreparedBarrierMergeSnapshot {
-        header,
-        cat_arr,
-        parent_root_arr,
-        join_delta_root_arr,
-        revoked_since_root_arr,
-        revoked_root_arr,
-        tswe_salt_hash_arr,
-        pox_r_commit_arr,
-        pivot,
-        snapshot_hash,
-        committed_revocation_roots_hash,
-        revocation_roots_hash,
-        barrier_update,
-    } = snapshot;
+    let barrier_update = BarrierUpdateBuildResult::from_core(barrier_n_max, barrier_update);
     let next_barrier_version = barrier_version.saturating_add(1);
     let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
         gid: &gid,
