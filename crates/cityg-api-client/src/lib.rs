@@ -1098,6 +1098,48 @@ pub struct PreparedRevocationMergeTicket {
 }
 
 impl PreparedOriginMergeTicket {
+    pub fn prepare_barrier_orchestration<'a>(
+        &'a self,
+        gid: &'a [u8; 32],
+        pop_public_key: &'a [u8],
+        pop_secret_key: &'a dilithium5::SecretKey,
+        vrf_secret_key: &'a [u8],
+        vrf_public_key: &'a [u8],
+        fs_ec: u64,
+        fs_epoch_commit: [u8; 32],
+        fs_dev_prev_commit: [u8; 32],
+        next_barrier_version: u64,
+    ) -> PreparedBarrierOrchestration<'a> {
+        prepare_barrier_orchestration(BarrierOrchestrationInputs {
+            gid,
+            cat: &self.cat,
+            tswe_salt_hash: &self.tswe_salt_hash,
+            parent_root: &self.parent_root,
+            join_delta_root: &self.join_delta_root,
+            revoked_since_root: &self.revoked_since_root,
+            revoked_root: &self.revoked_root,
+            pox_r_commit: &self.pox_r_commit,
+            msphf_crs_id: self.msphf_crs_id.as_str(),
+            msphf_params_id: self.msphf_params_id.as_str(),
+            srx: None,
+            pop_public_key,
+            pop_secret_key,
+            proof_mode: self.proof_mode.as_str(),
+            vrf_id: self.vrf_id.as_str(),
+            policy_version: self.policy_version.as_str(),
+            vrf_secret_key,
+            vrf_public_key,
+            fs_policy_version: self.fs_policy_version.as_str(),
+            fs_epoch_base_ts: self.fs_epoch_base_ts,
+            barrier_version: next_barrier_version,
+            fs_join: msphf_orchestrator::FsJoinInputs {
+                fs_ec,
+                fs_epoch_commit,
+                fs_dev_prev_commit,
+            },
+        })
+    }
+
     pub fn snapshot_preparation_request<'a>(
         &'a self,
         room_id: &'a str,
