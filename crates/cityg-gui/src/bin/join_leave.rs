@@ -66,6 +66,7 @@ use cityg_client::{
         recompute_proofs_commit,
     },
     pivot::hydrate_parities,
+    vrf::generate_vrf_keys,
 };
 #[cfg(test)]
 use cityg_client::{
@@ -228,18 +229,6 @@ fn parse_join_ticket_history_authority_extension(
     Err(anyhow!(
         "join ticket carries unsupported history authority extension: {raw}"
     ))
-}
-
-fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut params_seed = [0u8; 32];
-    let mut key_seed = [0u8; 32];
-    let mut rng = rng();
-    rng.fill(&mut params_seed);
-    rng.fill(&mut key_seed);
-    let params = msphf_orchestrator::lb::generate_parameters(params_seed)
-        .map_err(|err| anyhow!("generate VRF params: {err}"))?;
-    msphf_orchestrator::lb::generate_keypair(&params, key_seed)
-        .map_err(|err| anyhow!("generate VRF keypair: {err}"))
 }
 
 struct BarrierUpdateBuildResult {

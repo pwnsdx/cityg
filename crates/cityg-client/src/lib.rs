@@ -91,6 +91,7 @@ pub mod bundle_headers;
 pub mod message_auth;
 pub mod message_crypto;
 pub mod pivot;
+pub mod vrf;
 pub mod witness;
 
 use std::{

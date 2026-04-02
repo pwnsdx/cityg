@@ -38,7 +38,7 @@ use cityg_api_client::{
     build_room_admin_proof, build_room_admin_target_proof,
 };
 use cityg_client::witness::SrxInputsOwned;
-use cityg_client::{CityGClient, ClientEpochBundle};
+use cityg_client::{CityGClient, ClientEpochBundle, vrf::generate_vrf_keys};
 use cityg_config::CityGConfig;
 #[cfg(not(test))]
 use gpui::Application;
@@ -217,18 +217,6 @@ use storage_paths::*;
 use tokio_bridge::Tokio;
 #[cfg(test)]
 use websocket::*;
-
-fn generate_vrf_keys() -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut params_seed = [0u8; 32];
-    let mut key_seed = [0u8; 32];
-    let mut rng = rng();
-    rng.fill(&mut params_seed);
-    rng.fill(&mut key_seed);
-    let params = msphf_orchestrator::lb::generate_parameters(params_seed)
-        .map_err(|err| anyhow!("generate VRF params: {err}"))?;
-    msphf_orchestrator::lb::generate_keypair(&params, key_seed)
-        .map_err(|err| anyhow!("generate VRF keypair: {err}"))
-}
 
 #[cfg(test)]
 const DEFAULT_MAX_BARRIER_UPDATE_BYTES: u64 = 1_048_576;
