@@ -23,10 +23,6 @@ mod watch_mode;
 #[path = "../websocket_replay.rs"]
 mod websocket_replay;
 
-use anchor_seed::{
-    SeedCommitFields, build_anchor_seed_ctx, compute_seed_bundle_commit, compute_seed_commit,
-    compute_seed_ctx_hash,
-};
 use anyhow::{Context, Result, anyhow};
 use barrier_shared::{
     BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
@@ -52,15 +48,20 @@ use cityg_api_client::{
 #[cfg(test)]
 use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
 #[cfg(test)]
+use cityg_client::bundle_headers::recompute_srx_commit as recompute_srx_commit_core;
+#[cfg(test)]
 use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{
     CityGClient, ClientEpochBundle,
+    barrier_merge_bundle::{
+        BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
+        build_barrier_merge_bundle as build_barrier_merge_bundle_core,
+    },
     bundle_headers::{
         compute_fs_fingerprint_from_header as compute_fs_fingerprint_from_header_core,
         derive_fs_fingerprint_from_fields as derive_fs_fingerprint_from_fields_core,
         recompute_proofs_commit as recompute_proofs_commit_core,
-        recompute_srx_commit as recompute_srx_commit_core,
     },
 };
 use cityg_config::CityGConfig;
@@ -81,7 +82,7 @@ use message_crypto::{
 use msphf_core::{hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
-    OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
+    OrchestrationParams, PivotParity, PopKeypair, SrxMode, hdr,
 };
 #[cfg(test)]
 use notifications::parse_hex32_field;
@@ -1526,100 +1527,35 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         fs_merge: FsMergeInputs::default(),
     };
 
-    let build_join_finalize_bundle = |forward_state: &mut ForwardSecrecyState,
-                                      disable_autonomic_evolve: bool|
-     -> Result<(ClientEpochBundle, ClientEpochBundle)> {
-        let mut bundle = if disable_autonomic_evolve {
-            CityGClient::generate_merge_with_forward_state_without_evolve(
-                header.clone(),
-                parts.clone(),
-                params.clone(),
-                Some(forward_state),
-                &parities,
-                None,
+    let build_join_finalize_bundle =
+        |forward_state: ForwardSecrecyState,
+         disable_autonomic_evolve: bool|
+         -> Result<cityg_client::barrier_merge_bundle::PreparedBarrierMergeBundle> {
+            build_barrier_merge_bundle_core(CoreBarrierMergeBundleInputs {
+                header: header.clone(),
+                parts: parts.clone(),
+                params: params.clone(),
+                forward_state,
+                parities: &parities,
                 witness_bytes,
-            )
-        } else {
-            CityGClient::generate_merge_with_forward_state(
-                header.clone(),
-                parts.clone(),
-                params.clone(),
-                Some(forward_state),
-                &parities,
-                None,
-                witness_bytes,
-            )
-        }
-        .context("generate join finalize bundle")?;
-        let pristine_bundle = bundle.clone();
-        strip_srx_and_rollup(&mut bundle.header_map);
-        apply_pivot_alignment(&mut bundle.header_map, pivot);
-        let computed_anchor_ctx =
-            build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
-        let seed_ctx_hash =
-            compute_seed_ctx_hash(&computed_anchor_ctx).context("compute_seed_ctx_hash")?;
-        let seed_commit = compute_seed_commit(
-            &computed_anchor_ctx,
-            &SeedCommitFields {
+                pivot,
                 gid: &session.gid,
-                cat: cat.as_slice(),
-                we_epoch_id: bundle.we_epoch_id,
-            },
-        )
-        .context("compute_seed_commit")?;
-        let seed_bundle_commit = compute_seed_bundle_commit(
-            &computed_anchor_ctx,
-            &bundle.hp_binding.rho_commit,
-            &session.gid,
-            cat.as_slice(),
-            &parent_root_arr,
-        )
-        .context("compute_seed_bundle_commit")?;
-        let derived_we_epoch_id =
-            derive_we_epoch_id(&session.gid, &parent_root_arr, &seed_ctx_hash)
-                .context("derive we_epoch_id")?;
-
-        bundle.anchor.anchor_hdr_ctx = computed_anchor_ctx;
-        bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
-        bundle.hp_binding.seed_commit = seed_commit;
-        bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
-        bundle.we_epoch_id = derived_we_epoch_id;
-        bundle
-            .seal_local_hp_header_with_barrier_key(&barrier_update.k_barrier_new)
-            .context("seal merge HP envelope for join finalize")?;
-        bundle
-            .header_map
-            .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
-        bundle.header_map.insert(
-            hdr::HDR_RHO_COMMIT,
-            Value::Bytes(bundle.hp_binding.rho_commit.to_vec()),
-        );
-        bundle.header_map.insert(
-            hdr::HDR_SEED_BUNDLE_COMMIT,
-            Value::Bytes(seed_bundle_commit.to_vec()),
-        );
-
-        if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
-            bundle
-                .header_map
-                .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
-        }
-        let stored_commit = extract_bytes(&bundle.header_map, hdr::HDR_PROOFS_COMMIT)
-            .context("join finalize bundle missing proofs_commit")?;
-        let recomputed_commit =
-            recompute_proofs_commit(&bundle.header_map).context("recompute proofs commit")?;
-        if stored_commit.as_slice() != recomputed_commit {
-            bundle.header_map.insert(
-                hdr::HDR_PROOFS_COMMIT,
-                Value::Bytes(recomputed_commit.to_vec()),
-            );
-        }
-
-        Ok((bundle, pristine_bundle))
-    };
+                cat: &cat,
+                parent_root: &parent_root_arr,
+                current_k_fs: None,
+                next_barrier_version,
+                barrier_key: &barrier_update.k_barrier_new,
+                barrier_update_reason: 2,
+                disable_autonomic_evolve,
+            })
+            .context("generate join finalize bundle")
+        };
 
     let pristine_forward_state = forward_state.clone();
-    let (mut bundle, pristine_bundle) = build_join_finalize_bundle(&mut forward_state, false)?;
+    let built = build_join_finalize_bundle(forward_state, false)?;
+    let mut bundle = built.bundle;
+    let pristine_bundle = built.pristine_bundle;
+    forward_state = built.forward_state_after;
 
     match client.refresh_pivot(&bundle).await {
         Ok(_) => {}
@@ -1637,8 +1573,9 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
             ..
         }) if is_fs_forward_jump_group_http_error(freeze_code, freeze_reason.as_deref()) => {
             forward_state = pristine_forward_state;
-            let rebuilt = build_join_finalize_bundle(&mut forward_state, true)?;
-            bundle = rebuilt.0;
+            let rebuilt = build_join_finalize_bundle(forward_state, true)?;
+            bundle = rebuilt.bundle;
+            forward_state = rebuilt.forward_state_after;
             match client.refresh_pivot(&bundle).await {
                 Ok(_) => {}
                 Err(ApiClientError::HttpStatus { message, .. })
@@ -2043,48 +1980,31 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             Some(ticket.witness_cbor.as_slice())
         };
 
-        let mut bundle = CityGClient::generate_merge_with_forward_state(
+        let built = build_barrier_merge_bundle_core(CoreBarrierMergeBundleInputs {
             header,
             parts,
             params,
-            Some(&mut forward_state),
-            &parities,
-            None,
+            forward_state,
+            parities: &parities,
             witness_bytes,
-        )
+            pivot,
+            gid: &session.gid,
+            cat: &cat,
+            parent_root: &parent_root_arr,
+            current_k_fs: None,
+            next_barrier_version,
+            barrier_key: &barrier_update.k_barrier_new,
+            barrier_update_reason: 0,
+            disable_autonomic_evolve: false,
+        })
         .context("generate merge bundle")?;
-        let pristine_bundle = bundle.clone();
-        strip_srx_and_rollup(&mut bundle.header_map);
-        apply_pivot_alignment(&mut bundle.header_map, pivot);
-        if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
-            bundle
-                .header_map
-                .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
-        }
-        let computed_anchor_ctx =
-            build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
-        let seed_ctx_hash =
-            compute_seed_ctx_hash(&computed_anchor_ctx).context("compute_seed_ctx_hash")?;
-        let seed_commit = compute_seed_commit(
-            &computed_anchor_ctx,
-            &SeedCommitFields {
-                gid: &session.gid,
-                cat: cat.as_slice(),
-                we_epoch_id: bundle.we_epoch_id,
-            },
-        )
-        .context("compute_seed_commit")?;
-        let seed_bundle_commit = compute_seed_bundle_commit(
-            &computed_anchor_ctx,
-            &bundle.hp_binding.rho_commit,
-            &session.gid,
-            cat.as_slice(),
-            &parent_root_arr,
-        )
-        .context("compute_seed_bundle_commit")?;
-        let derived_we_epoch_id =
-            derive_we_epoch_id(&session.gid, &parent_root_arr, &seed_ctx_hash)
-                .context("derive we_epoch_id")?;
+        let mut bundle = built.bundle;
+        let pristine_bundle = built.pristine_bundle;
+        forward_state = built.forward_state_after;
+        let computed_anchor_ctx = bundle.anchor.anchor_hdr_ctx.clone();
+        let seed_ctx_hash = bundle.hp_binding.seed_ctx_hash;
+        let seed_commit = bundle.hp_binding.seed_commit;
+        let seed_bundle_commit = bundle.hp_binding.seed_bundle_commit;
 
         if verbose {
             println!(
@@ -2100,26 +2020,6 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
                 bundle.hp_binding.seed_bundle_commit == seed_bundle_commit
             );
         }
-
-        bundle.anchor.anchor_hdr_ctx = computed_anchor_ctx.clone();
-        bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
-        bundle.hp_binding.seed_commit = seed_commit;
-        bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
-        bundle.we_epoch_id = derived_we_epoch_id;
-        bundle
-            .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
-            .context("rebind merge HP envelope for leave")?;
-        bundle
-            .header_map
-            .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
-        bundle.header_map.insert(
-            hdr::HDR_RHO_COMMIT,
-            Value::Bytes(bundle.hp_binding.rho_commit.to_vec()),
-        );
-        bundle.header_map.insert(
-            hdr::HDR_SEED_BUNDLE_COMMIT,
-            Value::Bytes(seed_bundle_commit.to_vec()),
-        );
 
         if verbose {
             println!(
@@ -2421,6 +2321,7 @@ fn describe_value(value: Option<&Value>) -> String {
     }
 }
 
+#[cfg(test)]
 fn strip_srx_and_rollup(header: &mut BTreeMap<u64, Value>) {
     for key in [
         hdr::HDR_ROLLUP_PROVENANCE_COMMIT,
@@ -2492,6 +2393,7 @@ fn log_fs_metadata(pivot: &PivotParity, header: &BTreeMap<u64, Value>) {
     );
 }
 
+#[cfg(test)]
 fn apply_pivot_alignment(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity) {
     if let Ok(fs_policy_version) = pivot.policy_version.parse::<u64>() {
         header
@@ -2549,6 +2451,7 @@ fn apply_pivot_alignment(header: &mut BTreeMap<u64, Value>, pivot: &PivotParity)
     }
 }
 
+#[cfg(test)]
 fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8; 32]>> {
     recompute_srx_commit_core(header)
 }

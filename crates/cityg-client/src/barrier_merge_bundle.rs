@@ -37,6 +37,7 @@ pub struct BarrierMergeBundleInputs<'a> {
 
 pub struct PreparedBarrierMergeBundle {
     pub bundle: ClientEpochBundle,
+    pub pristine_bundle: ClientEpochBundle,
     pub forward_state_after: ForwardSecrecyState,
     pub observed_fs_ec: u64,
     pub k_fs_after_pcs: Option<Zeroizing<[u8; 32]>>,
@@ -91,6 +92,7 @@ pub fn build_barrier_merge_bundle(
             witness_bytes,
         )
     }?;
+    let pristine_bundle = bundle.clone();
 
     strip_rollup_metadata(&mut bundle.header_map);
     apply_pivot_alignment(&mut bundle.header_map, pivot);
@@ -171,6 +173,7 @@ pub fn build_barrier_merge_bundle(
 
     Ok(PreparedBarrierMergeBundle {
         bundle,
+        pristine_bundle,
         forward_state_after: forward_state,
         observed_fs_ec,
         k_fs_after_pcs,
