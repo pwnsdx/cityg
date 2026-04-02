@@ -75,13 +75,13 @@ pub(super) async fn prepare_barrier_merge_execution(
         ))
         .await
         .map_err(anyhow::Error::from)?;
-    let barrier_update = BarrierUpdateBuildResult::from_core(ticket.barrier_n_max, barrier_update);
+    let barrier_update =
+        BarrierUpdateBuildResult::from_core(ticket.prepared_origin.barrier_n_max, barrier_update);
 
     let super::barrier_merge_ticket_runtime::PreparedBarrierMergeTicket {
         persist_request,
         client,
         gid,
-        barrier_version,
         forward_state,
         pop_public_key,
         pop_secret_key,
@@ -92,7 +92,11 @@ pub(super) async fn prepare_barrier_merge_execution(
         fs_dev_prev_commit,
         k_fs_current,
         fs_forward_leap_policy,
-        last_accepted_ec,
+        prepared_origin,
+        ..
+    } = ticket;
+    let cityg_api_client::PreparedOriginMergeTicket {
+        barrier_version,
         proof_mode,
         vrf_id,
         policy_version,
@@ -100,13 +104,14 @@ pub(super) async fn prepare_barrier_merge_execution(
         msphf_params_id,
         fs_policy_version,
         fs_epoch_base_ts,
+        last_accepted_ec,
         parities,
         witness_bytes,
         ticket_history_commitment,
         ticket_history_authority_extension,
         current_global_history_attestation_bytes,
         ..
-    } = ticket;
+    } = prepared_origin;
     let next_barrier_version = barrier_version.saturating_add(1);
 
     Ok(PreparedBarrierMergeExecution {
