@@ -7,14 +7,15 @@ use std::{
 };
 
 #[cfg(test)]
+use crate::barrier_shared::compute_barrier_tree_hash;
+#[cfg(test)]
 use crate::barrier_shared::expected_barrier_tree_nodes;
 #[cfg(test)]
 use crate::barrier_shared::{
     BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
 };
 use crate::barrier_shared::{
-    DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, apply_join_set_to_snapshot,
-    apply_revoked_set_to_snapshot, compute_barrier_pkhash, compute_barrier_tree_hash,
+    DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, compute_barrier_pkhash,
     compute_revocation_roots_hash, should_retry_ticket_http_error, ticket_retry_delay,
     validate_barrier_n_max,
 };

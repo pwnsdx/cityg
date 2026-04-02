@@ -2,9 +2,10 @@ use std::{future::Future, pin::Pin};
 
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
-use crate::barrier_shared::{
-    encode_full_verification_receipt, encode_history_commitment_header,
-    require_current_state_history_commitment, require_same_history_commitment,
+use crate::barrier_shared::{to_core_history_commitment, to_core_join_snapshot_records};
+use cityg_client::barrier_snapshot_prepare::{
+    BarrierSnapshotArtifactsInput as CoreBarrierSnapshotArtifactsInput,
+    prepare_barrier_snapshot_artifacts as prepare_barrier_snapshot_artifacts_core,
 };
 
 pub(super) fn is_fs_forward_jump_group_http_error(
@@ -181,28 +182,6 @@ async fn publish_revocation_merge_from_ticket_inner(
         ));
     }
     validate_barrier_tree_snapshot_auth(&snapshot_hash, barrier_n_max, &barrier_tree_snapshot)?;
-    if require_same_history_commitment(
-        &ticket_history_commitment,
-        &barrier_tree_response.history_commitment,
-    )
-    .is_err()
-    {
-        return Err(anyhow!(
-            "barrier merge ticket history commitment mismatch (960.9): ticket / current snapshot do not share one authenticated current-state commitment"
-        ));
-    }
-    let history_commitment_header =
-        encode_history_commitment_header(&barrier_tree_response.history_commitment)?;
-    header.insert(
-        hdr::HDR_BARRIER_HISTORY_COMMITMENT,
-        Value::Bytes(history_commitment_header.clone()),
-    );
-    if !current_global_history_attestation_bytes.is_empty() {
-        header.insert(
-            hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
-            Value::Bytes(current_global_history_attestation_bytes.clone()),
-        );
-    }
     let join_resolution = client
         .barrier_resolve_joins_since(&room_id, barrier_version)
         .await
@@ -211,57 +190,12 @@ async fn publish_revocation_merge_from_ticket_inner(
         .barrier_resolve_revoked_leaves(&room_id, &committed_revocation_roots_hash)
         .await
         .context("resolve committed barrier revoked leaf indices")?;
-    if require_current_state_history_commitment(
-        &barrier_tree_response.history_commitment,
-        &join_resolution.history_commitment,
-        &revoked_resolution.history_commitment,
-    )
-    .is_err()
-    {
-        return Err(anyhow!(
-            "barrier snapshot-auth history commitment mismatch (960.9): snapshot={}#{} joins={}#{} revoked={}#{}",
-            hex_encode(
-                barrier_tree_response
-                    .history_commitment
-                    .history_commitment_id
-            ),
-            barrier_tree_response.history_commitment.history_seq,
-            hex_encode(join_resolution.history_commitment.history_commitment_id),
-            join_resolution.history_commitment.history_seq,
-            hex_encode(revoked_resolution.history_commitment.history_commitment_id),
-            revoked_resolution.history_commitment.history_seq,
-        ));
-    }
-    let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
     let revoked_cover_leaf_index = u32::try_from(revoked_cover_leaf_index)
         .map_err(|_| anyhow!("cover_leaf_index out of range for barrier tree"))?;
     let mut post_revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
     if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
         post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
     }
-    apply_join_set_to_snapshot(
-        snapshot_pre.as_mut_slice(),
-        barrier_n_max,
-        join_resolution.records.as_slice(),
-    )?;
-    apply_revoked_set_to_snapshot(
-        snapshot_pre.as_mut_slice(),
-        barrier_n_max,
-        post_revoked_leaf_indices.as_slice(),
-    )?;
-    let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
-    let next_barrier_version = barrier_version.saturating_add(1);
-    let updater_leaf = u64::from(revoked_cover_leaf_index);
-    let barrier_update = build_barrier_update_bytes(
-        &gid,
-        barrier_n_max,
-        updater_leaf,
-        next_barrier_version,
-        barrier_version,
-        revocation_roots_hash,
-        kem_tree_hash_before,
-        snapshot_pre.as_slice(),
-    )?;
     let ticket_max_barrier_update_bytes = max_barrier_update_bytes.max(1);
     if stored_max_barrier_update_bytes != 0
         && stored_max_barrier_update_bytes != ticket_max_barrier_update_bytes
@@ -272,38 +206,42 @@ async fn publish_revocation_merge_from_ticket_inner(
             ticket_max_barrier_update_bytes
         ));
     }
-    let max_barrier_update_bytes =
-        normalize_max_barrier_update_bytes(ticket_max_barrier_update_bytes)?;
-    if barrier_update.raw_update.len() > max_barrier_update_bytes {
-        return Err(anyhow!(
-            "barrier_update exceeds max_barrier_update_bytes: {} > {}",
-            barrier_update.raw_update.len(),
-            max_barrier_update_bytes
-        ));
-    }
-    header.insert(
-        hdr::HDR_BARRIER_UPDATE,
-        Value::Bytes(barrier_update.raw_update.clone()),
-    );
-    header.insert(
-        hdr::HDR_BARRIER_UPDATE_REASON,
-        Value::Integer(Integer::from(0u64)),
-    );
-    if !current_global_history_attestation_bytes.is_empty() {
-        let receipt = encode_full_verification_receipt(
-            &gid,
-            &leaf_id,
-            0,
+    let updater_leaf = u64::from(revoked_cover_leaf_index);
+    let ticket_history_commitment_core = to_core_history_commitment(&ticket_history_commitment);
+    let snapshot_history_commitment_core =
+        to_core_history_commitment(&barrier_tree_response.history_commitment);
+    let joins_history_commitment_core =
+        to_core_history_commitment(&join_resolution.history_commitment);
+    let revoked_history_commitment_core =
+        to_core_history_commitment(&revoked_resolution.history_commitment);
+    let join_records_core = to_core_join_snapshot_records(join_resolution.records.as_slice());
+    let prepared_snapshot =
+        prepare_barrier_snapshot_artifacts_core(CoreBarrierSnapshotArtifactsInput {
+            header,
+            gid: &gid,
+            leaf_id: &leaf_id,
             updater_leaf,
-            history_commitment_header.as_slice(),
-            current_global_history_attestation_bytes.as_slice(),
-            barrier_update.raw_update.as_slice(),
-            pop_secret_key.as_slice(),
-        )?;
-        header.insert(
-            hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
-            Value::Bytes(receipt),
-        );
+            barrier_version,
+            barrier_update_reason: 0,
+            barrier_n_max,
+            max_barrier_update_bytes: ticket_max_barrier_update_bytes,
+            ticket_history_commitment: &ticket_history_commitment_core,
+            snapshot_history_commitment: &snapshot_history_commitment_core,
+            joins_history_commitment: &joins_history_commitment_core,
+            revoked_history_commitment: &revoked_history_commitment_core,
+            current_global_history_attestation_bytes: current_global_history_attestation_bytes
+                .as_slice(),
+            snapshot_pk_entries: barrier_tree_snapshot.pk_entries.as_slice(),
+            join_records: join_records_core.as_slice(),
+            witness_revoked_leaf_indices: post_revoked_leaf_indices.as_slice(),
+            revocation_roots_hash,
+            pop_secret_key: pop_secret_key.as_slice(),
+        })?;
+    let mut header = prepared_snapshot.header;
+    let barrier_update =
+        BarrierUpdateBuildResult::from_core(barrier_n_max, prepared_snapshot.barrier_update);
+    let next_barrier_version = barrier_version.saturating_add(1);
+    if !current_global_history_attestation_bytes.is_empty() {
         let history_authority = history_authority.as_ref().ok_or_else(|| {
             anyhow!(
                 "{operation_label} merge ticket missing history_authority descriptor for full verification witness"

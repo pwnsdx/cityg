@@ -34,3 +34,43 @@ pub(super) struct BarrierUpdateBuildResult {
     pub(super) on_path_key_material: BTreeMap<u32, BarrierNodeKeyMaterial>,
     pub(super) snapshot_post: Arc<BarrierPublicTree>,
 }
+
+impl BarrierUpdateBuildResult {
+    pub(super) fn from_core(
+        n_max: u64,
+        core: cityg_client::barrier_build::BarrierUpdateBuildResult,
+    ) -> Self {
+        let cityg_client::barrier_build::BarrierUpdateBuildResult {
+            raw_update,
+            barrier_update_digest,
+            kem_tree_hash_after,
+            k_barrier_new,
+            on_path_key_material,
+            snapshot_post,
+        } = core;
+
+        Self {
+            raw_update,
+            barrier_update_digest,
+            kem_tree_hash_after,
+            k_barrier_new,
+            on_path_key_material: on_path_key_material
+                .into_iter()
+                .map(|(node, material)| {
+                    (
+                        node,
+                        BarrierNodeKeyMaterial {
+                            dk: material.dk,
+                            pkhash: material.pkhash,
+                        },
+                    )
+                })
+                .collect(),
+            snapshot_post: Arc::new(BarrierPublicTree {
+                n_max,
+                kem_tree_hash_after,
+                pk_entries: snapshot_post,
+            }),
+        }
+    }
+}

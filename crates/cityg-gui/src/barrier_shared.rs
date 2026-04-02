@@ -20,6 +20,7 @@ pub use cityg_client::barrier::{
     verify_full_verification_receipt,
 };
 
+#[allow(dead_code)]
 pub fn require_same_history_commitment(
     lhs: &HistoryCommitment,
     rhs: &HistoryCommitment,
@@ -70,6 +71,16 @@ fn to_core_join_snapshot_record(record: &BarrierJoinRecord) -> BarrierJoinSnapsh
     }
 }
 
+pub(crate) fn to_core_join_snapshot_records(
+    join_records: &[BarrierJoinRecord],
+) -> Vec<BarrierJoinSnapshotRecord> {
+    join_records
+        .iter()
+        .map(to_core_join_snapshot_record)
+        .collect()
+}
+
+#[allow(dead_code)]
 pub fn encode_history_commitment_header(commitment: &HistoryCommitment) -> Result<Vec<u8>> {
     encode_core_history_commitment_header(&to_core_history_commitment(commitment))
 }
@@ -79,15 +90,13 @@ pub fn decode_history_commitment_header(raw: &[u8]) -> Result<HistoryCommitment>
     decode_core_history_commitment_header(raw).map(from_core_history_commitment)
 }
 
+#[allow(dead_code)]
 pub fn apply_join_set_to_snapshot(
     snapshot: &mut [Vec<u8>],
     n_max: u64,
     join_records: &[BarrierJoinRecord],
 ) -> Result<()> {
-    let core_records: Vec<_> = join_records
-        .iter()
-        .map(to_core_join_snapshot_record)
-        .collect();
+    let core_records = to_core_join_snapshot_records(join_records);
     cityg_client::barrier::apply_join_set_to_snapshot(snapshot, n_max, core_records.as_slice())
 }
 

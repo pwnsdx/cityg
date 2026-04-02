@@ -1,8 +1,6 @@
 use super::*;
-use cityg_client::barrier_build::{
-    BarrierUpdateBuildResult as CoreBarrierUpdateBuildResult,
-    build_barrier_update_bytes as build_barrier_update_bytes_core,
-};
+#[cfg(test)]
+use cityg_client::barrier_build::build_barrier_update_bytes as build_barrier_update_bytes_core;
 use cityg_client::barrier_recovery::{
     BarrierRecoverResult as CoreBarrierRecoverResult,
     BarrierRecoveryInput as CoreBarrierRecoveryInput,
@@ -173,6 +171,7 @@ pub(super) fn try_recover_barrier_from_header(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_barrier_update_bytes(
     gid: &[u8; 32],
@@ -184,45 +183,17 @@ pub(super) fn build_barrier_update_bytes(
     kem_tree_hash_before: [u8; 32],
     snapshot_pre: &[Vec<u8>],
 ) -> Result<BarrierUpdateBuildResult> {
-    let CoreBarrierUpdateBuildResult {
-        raw_update,
-        barrier_update_digest,
-        kem_tree_hash_after,
-        k_barrier_new,
-        on_path_key_material,
-        snapshot_post,
-    } = build_barrier_update_bytes_core(
-        gid,
+    Ok(BarrierUpdateBuildResult::from_core(
         n_max,
-        updater_leaf,
-        barrier_version,
-        prev_barrier_version,
-        revocation_roots_hash,
-        kem_tree_hash_before,
-        snapshot_pre,
-    )?;
-
-    Ok(BarrierUpdateBuildResult {
-        raw_update,
-        barrier_update_digest,
-        kem_tree_hash_after,
-        k_barrier_new,
-        on_path_key_material: on_path_key_material
-            .into_iter()
-            .map(|(node, material)| {
-                (
-                    node,
-                    BarrierNodeKeyMaterial {
-                        dk: material.dk,
-                        pkhash: material.pkhash,
-                    },
-                )
-            })
-            .collect(),
-        snapshot_post: Arc::new(BarrierPublicTree {
+        build_barrier_update_bytes_core(
+            gid,
             n_max,
-            kem_tree_hash_after,
-            pk_entries: snapshot_post,
-        }),
-    })
+            updater_leaf,
+            barrier_version,
+            prev_barrier_version,
+            revocation_roots_hash,
+            kem_tree_hash_before,
+            snapshot_pre,
+        )?,
+    ))
 }
