@@ -76,6 +76,41 @@ pub struct SrxNonMembershipAnchorOwned {
 }
 
 impl SrxInputsOwned {
+    pub fn as_srx_inputs(&self) -> SrxInputs<'_> {
+        SrxInputs {
+            join_leaf_ids: Cow::Borrowed(self.join_leaf_ids.as_slice()),
+            join_nonmem_parent: self
+                .join_nonmem_parent
+                .iter()
+                .map(|anchor| SrxNonMembershipAnchor {
+                    witness: anchor.witness.clone(),
+                    left_ref: anchor.left_ref,
+                    right_ref: anchor.right_ref,
+                })
+                .collect(),
+            join_nonmem_revoked_since: self
+                .join_nonmem_revoked_since
+                .iter()
+                .map(|anchor| SrxNonMembershipAnchor {
+                    witness: anchor.witness.clone(),
+                    left_ref: anchor.left_ref,
+                    right_ref: anchor.right_ref,
+                })
+                .collect(),
+            since_leaf_ids: Cow::Borrowed(self.since_leaf_ids.as_slice()),
+            since_mem_revoked: Cow::Borrowed(self.since_mem_revoked.as_slice()),
+            anchor_mem_pool: self.anchor_mem_pool.clone(),
+            join_frontier: self
+                .join_frontier
+                .as_ref()
+                .map(|frontier| Cow::Borrowed(frontier.as_slice())),
+            since_frontier: self
+                .since_frontier
+                .as_ref()
+                .map(|frontier| Cow::Borrowed(frontier.as_slice())),
+        }
+    }
+
     pub fn into_srx_inputs(self) -> SrxInputs<'static> {
         SrxInputs {
             join_leaf_ids: Cow::Owned(self.join_leaf_ids),

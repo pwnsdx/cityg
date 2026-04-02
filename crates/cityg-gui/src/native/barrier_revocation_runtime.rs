@@ -6,9 +6,6 @@ use super::barrier_merge_publish_runtime::{
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
 use cityg_api_client::{PrepareRevocationMergeTicketInput, PreparedBarrierSnapshot};
-use cityg_client::barrier_orchestration::{
-    BarrierOrchestrationInputs, prepare_barrier_orchestration,
-};
 
 fn revocation_build_bundle_context(operation_label: &'static str) -> &'static str {
     match operation_label {
@@ -94,11 +91,11 @@ async fn publish_revocation_merge_from_ticket_inner(
         header,
         cat: cat_arr,
         parent_root: parent_root_arr,
-        join_delta_root: join_delta_root_arr,
-        revoked_since_root: revoked_since_root_arr,
-        revoked_root: revoked_root_arr,
-        tswe_salt_hash: tswe_salt_hash_arr,
-        pox_r_commit: pox_r_commit_arr,
+        join_delta_root: _join_delta_root_arr,
+        revoked_since_root: _revoked_since_root_arr,
+        revoked_root: _revoked_root_arr,
+        tswe_salt_hash: _tswe_salt_hash_arr,
+        pox_r_commit: _pox_r_commit_arr,
         pivot,
         snapshot_hash,
         committed_revocation_roots_hash,
@@ -116,57 +113,21 @@ async fn publish_revocation_merge_from_ticket_inner(
         ))
         .await
         .map_err(anyhow::Error::from)?;
-    let cityg_api_client::PreparedRevocationMergeTicket {
-        barrier_version,
-        barrier_n_max,
-        proof_mode,
-        vrf_id,
-        policy_version,
-        msphf_crs_id,
-        msphf_params_id,
-        fs_policy_version,
-        fs_epoch_base_ts,
-        fs_forward_leap_policy,
-        last_accepted_ec,
-        parities,
-        witness_bytes,
-        srx_inputs,
-        ticket_history_commitment,
-        ticket_history_authority_extension,
-        current_global_history_attestation_bytes,
-        ..
-    } = prepared_runtime;
-    let srx_inputs = srx_inputs.into_srx_inputs();
-    let barrier_update = BarrierUpdateBuildResult::from_core(barrier_n_max, barrier_update);
+    let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
+        &gid,
+        pop_public_key.as_slice(),
+        pop_secret.as_ref(),
+        vrf_secret_key.as_slice(),
+        vrf_public_key.as_slice(),
+        fs_ec,
+        fs_epoch_commit,
+        fs_dev_prev_commit,
+        prepared_runtime.barrier_version.saturating_add(1),
+    );
+    let barrier_version = prepared_runtime.barrier_version;
+    let barrier_update =
+        BarrierUpdateBuildResult::from_core(prepared_runtime.barrier_n_max, barrier_update);
     let next_barrier_version = barrier_version.saturating_add(1);
-    let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
-        gid: &gid,
-        cat: &cat_arr,
-        tswe_salt_hash: &tswe_salt_hash_arr,
-        parent_root: &parent_root_arr,
-        join_delta_root: &join_delta_root_arr,
-        revoked_since_root: &revoked_since_root_arr,
-        revoked_root: &revoked_root_arr,
-        pox_r_commit: &pox_r_commit_arr,
-        msphf_crs_id: msphf_crs_id.as_str(),
-        msphf_params_id: msphf_params_id.as_str(),
-        srx: Some(srx_inputs),
-        pop_public_key: pop_public_key.as_slice(),
-        pop_secret_key: pop_secret.as_ref(),
-        proof_mode: proof_mode.as_str(),
-        vrf_id: vrf_id.as_str(),
-        policy_version: policy_version.as_str(),
-        vrf_secret_key: vrf_secret_key.as_slice(),
-        vrf_public_key: vrf_public_key.as_slice(),
-        fs_policy_version: fs_policy_version.as_str(),
-        fs_epoch_base_ts,
-        barrier_version: next_barrier_version,
-        fs_join: FsJoinInputs {
-            fs_ec,
-            fs_epoch_commit,
-            fs_dev_prev_commit,
-        },
-    });
 
     publish_barrier_merge(BarrierMergePublishInputs {
         policy: BarrierMergePublishPolicy {
@@ -190,25 +151,27 @@ async fn publish_revocation_merge_from_ticket_inner(
         parent_root_arr,
         params: prepared_orchestration.params,
         parts: prepared_orchestration.parts,
-        parities: &parities,
-        witness_bytes: witness_bytes.as_deref(),
+        parities: &prepared_runtime.parities,
+        witness_bytes: prepared_runtime.witness_bytes.as_deref(),
         pivot: &pivot,
         snapshot_hash,
         committed_revocation_roots_hash,
         revocation_roots_hash,
-        ticket_history_commitment,
-        ticket_history_authority_extension,
-        current_global_history_attestation_bytes,
+        ticket_history_commitment: prepared_runtime.ticket_history_commitment,
+        ticket_history_authority_extension: prepared_runtime.ticket_history_authority_extension,
+        current_global_history_attestation_bytes: prepared_runtime
+            .current_global_history_attestation_bytes
+            .clone(),
         barrier_update,
         forward_state,
         fs_forward_leap_policy: FsForwardLeapPolicy {
-            h: fs_forward_leap_policy.h,
-            checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
-            slack_anchor: fs_forward_leap_policy.slack_anchor,
-            slack_first_device: fs_forward_leap_policy.slack_first_device,
-            slack_device: fs_forward_leap_policy.slack_device,
+            h: prepared_runtime.fs_forward_leap_policy.h,
+            checkpoint_interval: prepared_runtime.fs_forward_leap_policy.checkpoint_interval,
+            slack_anchor: prepared_runtime.fs_forward_leap_policy.slack_anchor,
+            slack_first_device: prepared_runtime.fs_forward_leap_policy.slack_first_device,
+            slack_device: prepared_runtime.fs_forward_leap_policy.slack_device,
         },
-        last_accepted_ec,
+        last_accepted_ec: prepared_runtime.last_accepted_ec,
     })
     .await
 }
