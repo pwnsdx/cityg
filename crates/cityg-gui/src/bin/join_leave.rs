@@ -55,17 +55,17 @@ use cityg_client::{
         build_barrier_merge_bundle as build_barrier_merge_bundle_core,
     },
     barrier_orchestration::{BarrierOrchestrationInputs, prepare_barrier_orchestration},
-    binary::bytes32,
-    bundle_headers::{
-        compute_fs_fingerprint_from_header, derive_fs_fingerprint_from_fields,
-        recompute_proofs_commit,
+    bundle_headers::recompute_proofs_commit,
+    join_bundle::{
+        JoinEpochBundleInputs, build_join_epoch_bundle, parse_accepted_bundle_runtime_state,
     },
-    join_bundle::{JoinEpochBundleInputs, build_join_epoch_bundle},
     vrf::generate_vrf_keys,
 };
 #[cfg(test)]
 use cityg_client::{
+    binary::bytes32,
     bundle_headers::recompute_srx_commit,
+    bundle_headers::{compute_fs_fingerprint_from_header, derive_fs_fingerprint_from_fields},
     pivot::{
         apply_pivot_alignment, hydrate_parities, select_pivot_parity,
         strip_rollup_metadata as strip_srx_and_rollup,
@@ -856,39 +856,8 @@ async fn prepare_join_session_with_identity(
     let stored =
         ClientEpochBundle::from_cbor(&stored.bundle_cbor).context("invalid stored bundle")?;
 
-    let fs_epoch_commit = bytes32(
-        "fs_epoch_commit",
-        stored
-            .header_map
-            .get(&hdr::HDR_FS_EPOCH_COMMIT)
-            .and_then(Value::as_bytes)
-            .ok_or(anyhow!("stored bundle missing fs_epoch_commit"))?,
-    )?;
-    let fs_dev_prev_commit = bytes32(
-        "fs_dev_prev_commit",
-        stored
-            .header_map
-            .get(&hdr::HDR_FS_DEV_COMMIT)
-            .or_else(|| stored.header_map.get(&hdr::HDR_FS_DEV_PREV_COMMIT))
-            .and_then(Value::as_bytes)
-            .ok_or(anyhow!("stored bundle missing fs_dev commit"))?,
-    )?;
-
-    let snapshot = fs_state.snapshot();
-    let fs_ec = snapshot.fs_ec;
-    let anchor_hdr_ctx = stored.anchor.anchor_hdr_ctx.clone();
-    let seed_ctx_hash = stored.hp_binding.seed_ctx_hash;
-    let seed_commit = stored.hp_binding.seed_commit;
-    let seed_bundle_commit = stored.hp_binding.seed_bundle_commit;
-    let fs_fingerprint = match compute_fs_fingerprint_from_header(&stored.header_map) {
-        Some(fp) => Some(fp),
-        None => derive_fs_fingerprint_from_fields(
-            fs_policy_version.as_str(),
-            fs_ec,
-            &fs_epoch_commit,
-            fs_epoch_base_ts,
-        ),
-    };
+    let accepted_bundle =
+        parse_accepted_bundle_runtime_state(&stored, fs_policy_version.as_str(), fs_epoch_base_ts)?;
     ensure_supported_attested_current_state_extension(
         "join ticket",
         current_history_authority_extension,
@@ -908,15 +877,15 @@ async fn prepare_join_session_with_identity(
         vrf_secret_key,
         vrf_public_key,
         forward_state: fs_state,
-        fs_ec,
-        fs_epoch_commit,
-        fs_dev_prev_commit,
+        fs_ec: accepted_bundle.fs_ec,
+        fs_epoch_commit: accepted_bundle.fs_epoch_commit,
+        fs_dev_prev_commit: accepted_bundle.fs_dev_prev_commit,
         we_epoch_id: bundle.we_epoch_id,
-        anchor_hdr_ctx,
-        seed_ctx_hash,
-        seed_commit,
-        seed_bundle_commit,
-        fs_fingerprint,
+        anchor_hdr_ctx: accepted_bundle.anchor_hdr_ctx,
+        seed_ctx_hash: accepted_bundle.seed_ctx_hash,
+        seed_commit: accepted_bundle.seed_commit,
+        seed_bundle_commit: accepted_bundle.seed_bundle_commit,
+        fs_fingerprint: accepted_bundle.fs_fingerprint,
         join_finalize_auth_token,
         current_history_commitment,
         current_history_authority_extension,
@@ -1189,37 +1158,15 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         Err(err) => return Err(err.into()),
     }
 
-    let fs_ec = match bundle.header_map.get(&hdr::HDR_FS_EC) {
-        Some(Value::Integer(int)) => (*int)
-            .try_into()
-            .map_err(|_| anyhow!("join finalize bundle fs_ec out of range"))?,
-        Some(_) => return Err(anyhow!("join finalize bundle fs_ec has invalid type")),
-        None => session.fs_ec,
-    };
-    let fs_epoch_commit = bytes32(
-        "fs_epoch_commit",
-        bundle
-            .header_map
-            .get(&hdr::HDR_FS_EPOCH_COMMIT)
-            .and_then(Value::as_bytes)
-            .ok_or(anyhow!("join finalize bundle missing fs_epoch_commit"))?,
-    )?;
-    let fs_dev_prev_commit = bytes32(
-        "fs_dev_prev_commit",
-        bundle
-            .header_map
-            .get(&hdr::HDR_FS_DEV_COMMIT)
-            .or_else(|| bundle.header_map.get(&hdr::HDR_FS_DEV_PREV_COMMIT))
-            .and_then(Value::as_bytes)
-            .ok_or(anyhow!("join finalize bundle missing fs_dev commit"))?,
-    )?;
+    let accepted_bundle =
+        parse_accepted_bundle_runtime_state(&bundle, fs_policy_version.as_str(), fs_epoch_base_ts)?;
 
     forward_state.set_last_we_epoch_id(bundle.we_epoch_id);
-    forward_state.set_epoch_base_ts(ticket.fs_epoch_base_ts);
+    forward_state.set_epoch_base_ts(fs_epoch_base_ts);
     session.forward_state = forward_state;
-    session.fs_ec = fs_ec;
-    session.fs_epoch_commit = fs_epoch_commit;
-    session.fs_dev_prev_commit = fs_dev_prev_commit;
+    session.fs_ec = accepted_bundle.fs_ec;
+    session.fs_epoch_commit = accepted_bundle.fs_epoch_commit;
+    session.fs_dev_prev_commit = accepted_bundle.fs_dev_prev_commit;
     session.we_epoch_id = bundle.we_epoch_id;
     session.xk_hash = bundle.hp_binding.xk_hash;
     session.epoch_key = bundle.epoch_key;
@@ -1228,22 +1175,15 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         .k_barrier
         .copy_from_slice(barrier_update.k_barrier_new.as_ref());
     session.kem_tree_hash_after = barrier_update.kem_tree_hash_after;
-    session.anchor_hdr_ctx = bundle.anchor.anchor_hdr_ctx.clone();
-    session.seed_ctx_hash = bundle.hp_binding.seed_ctx_hash;
-    session.seed_commit = bundle.hp_binding.seed_commit;
-    session.seed_bundle_commit = bundle.hp_binding.seed_bundle_commit;
+    session.anchor_hdr_ctx = accepted_bundle.anchor_hdr_ctx;
+    session.seed_ctx_hash = accepted_bundle.seed_ctx_hash;
+    session.seed_commit = accepted_bundle.seed_commit;
+    session.seed_bundle_commit = accepted_bundle.seed_bundle_commit;
     session.join_finalize_auth_token = [0u8; 32];
     session.current_history_commitment = None;
     session.current_history_authority_extension = None;
     session.current_global_history_attestation_bytes.clear();
-    session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
-        derive_fs_fingerprint_from_fields(
-            fs_policy_version.as_str(),
-            session.fs_ec,
-            &session.fs_epoch_commit,
-            fs_epoch_base_ts,
-        )
-    });
+    session.fs_fingerprint = accepted_bundle.fs_fingerprint;
     session.stored_header_map = bundle.header_map.clone();
     Ok(session)
 }

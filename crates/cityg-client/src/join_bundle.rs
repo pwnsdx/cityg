@@ -1,10 +1,13 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, convert::TryInto};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use ciborium::value::Value;
-use msphf_orchestrator::{AnchorInstanceParts, ForwardSecrecyState, OrchestrationParams};
+use msphf_orchestrator::{AnchorInstanceParts, ForwardSecrecyState, OrchestrationParams, hdr};
 
-use crate::{CityGClient, ClientEpochBundle};
+use crate::{
+    CityGClient, ClientEpochBundle,
+    bundle_headers::{compute_fs_fingerprint_from_header, derive_fs_fingerprint_from_fields},
+};
 
 pub struct JoinEpochBundleInputs<'a> {
     pub header: BTreeMap<u64, Value>,
@@ -13,6 +16,80 @@ pub struct JoinEpochBundleInputs<'a> {
     pub fs_state: &'a mut ForwardSecrecyState,
     pub witness_bytes: Option<&'a [u8]>,
     pub disable_autonomic_evolve: bool,
+}
+
+pub struct AcceptedBundleRuntimeState {
+    pub fs_ec: u64,
+    pub fs_epoch_commit: [u8; 32],
+    pub fs_dev_prev_commit: [u8; 32],
+    pub anchor_hdr_ctx: Vec<u8>,
+    pub seed_ctx_hash: [u8; 32],
+    pub seed_commit: [u8; 32],
+    pub seed_bundle_commit: [u8; 32],
+    pub fs_fingerprint: Option<[u8; 32]>,
+}
+
+fn header_required_u64(header: &BTreeMap<u64, Value>, key: u64, label: &str) -> Result<u64> {
+    header
+        .get(&key)
+        .and_then(Value::as_integer)
+        .ok_or_else(|| anyhow!("accepted bundle missing {label}"))?
+        .try_into()
+        .map_err(|_| anyhow!("{label} out of range"))
+}
+
+fn header_required_bytes32(
+    header: &BTreeMap<u64, Value>,
+    key: u64,
+    label: &str,
+) -> Result<[u8; 32]> {
+    header
+        .get(&key)
+        .and_then(Value::as_bytes)
+        .map(|bytes| bytes.as_slice())
+        .ok_or_else(|| anyhow!("accepted bundle missing {label}"))?
+        .try_into()
+        .map_err(|_| anyhow!("{label} length"))
+}
+
+pub fn parse_accepted_bundle_runtime_state(
+    bundle: &ClientEpochBundle,
+    fs_policy_version: &str,
+    fs_epoch_base_ts: u64,
+) -> Result<AcceptedBundleRuntimeState> {
+    let fs_ec = header_required_u64(&bundle.header_map, hdr::HDR_FS_EC, "fs_ec")?;
+    let fs_epoch_commit = header_required_bytes32(
+        &bundle.header_map,
+        hdr::HDR_FS_EPOCH_COMMIT,
+        "fs_epoch_commit",
+    )?;
+    let fs_dev_prev_commit = bundle
+        .header_map
+        .get(&hdr::HDR_FS_DEV_COMMIT)
+        .or_else(|| bundle.header_map.get(&hdr::HDR_FS_DEV_PREV_COMMIT))
+        .and_then(Value::as_bytes)
+        .map(|bytes| bytes.as_slice())
+        .ok_or_else(|| anyhow!("accepted bundle missing fs_dev commit"))?
+        .try_into()
+        .map_err(|_| anyhow!("fs_dev commit length"))?;
+
+    Ok(AcceptedBundleRuntimeState {
+        fs_ec,
+        fs_epoch_commit,
+        fs_dev_prev_commit,
+        anchor_hdr_ctx: bundle.anchor.anchor_hdr_ctx.clone(),
+        seed_ctx_hash: bundle.hp_binding.seed_ctx_hash,
+        seed_commit: bundle.hp_binding.seed_commit,
+        seed_bundle_commit: bundle.hp_binding.seed_bundle_commit,
+        fs_fingerprint: compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
+            derive_fs_fingerprint_from_fields(
+                fs_policy_version,
+                fs_ec,
+                &fs_epoch_commit,
+                fs_epoch_base_ts,
+            )
+        }),
+    })
 }
 
 pub fn build_join_epoch_bundle(inputs: JoinEpochBundleInputs<'_>) -> Result<ClientEpochBundle> {

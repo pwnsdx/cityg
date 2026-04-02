@@ -2,7 +2,9 @@ use super::*;
 use cityg_client::barrier_orchestration::{
     BarrierOrchestrationInputs, prepare_barrier_orchestration,
 };
-use cityg_client::join_bundle::{JoinEpochBundleInputs, build_join_epoch_bundle};
+use cityg_client::join_bundle::{
+    JoinEpochBundleInputs, build_join_epoch_bundle, parse_accepted_bundle_runtime_state,
+};
 
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
 
@@ -288,39 +290,13 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             Err(err) => return Err(err).context("server rejected join bundle"),
         }
         let forward_state = fs_state;
-        let fs_ec: u64 = bundle
-            .header_map
-            .get(&hdr::HDR_FS_EC)
-            .and_then(Value::as_integer)
-            .ok_or_else(|| anyhow!("join bundle missing fs_ec"))?
-            .try_into()
-            .map_err(|_| anyhow!("fs_ec out of range"))?;
-        let fs_epoch_commit: [u8; 32] = bundle
-            .header_map
-            .get(&hdr::HDR_FS_EPOCH_COMMIT)
-            .and_then(Value::as_bytes)
-            .map(|bytes| bytes.as_slice())
-            .ok_or_else(|| anyhow!("join bundle missing fs_epoch_commit"))?
-            .try_into()
-            .map_err(|_| anyhow!("fs_epoch_commit length"))?;
-        let fs_dev_prev_commit: [u8; 32] = bundle
-            .header_map
-            .get(&hdr::HDR_FS_DEV_COMMIT)
-            .or_else(|| bundle.header_map.get(&hdr::HDR_FS_DEV_PREV_COMMIT))
-            .and_then(Value::as_bytes)
-            .map(|bytes| bytes.as_slice())
-            .ok_or_else(|| anyhow!("join bundle missing fs_dev commit"))?
-            .try_into()
-            .map_err(|_| anyhow!("fs_dev commit length"))?;
-        let regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
-        let fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
-            derive_fs_fingerprint_from_fields(
-                fs_policy_version.as_str(),
-                fs_ec,
-                &fs_epoch_commit,
-                fs_epoch_base_ts,
-            )
-        });
+        let accepted_bundle = parse_accepted_bundle_runtime_state(
+            &bundle,
+            fs_policy_version.as_str(),
+            fs_epoch_base_ts,
+        )?;
+        let regular_fingerprint = Some(accepted_bundle.seed_ctx_hash);
+        let fs_fingerprint = accepted_bundle.fs_fingerprint;
         let requires_bootstrap_finalize = barrier_version == 0 && parent_root == [0u8; 32];
         let session = AppSession {
             server_url,
@@ -341,9 +317,9 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             xk_hash: bundle.hp_binding.xk_hash,
             epoch_key: bundle.epoch_key,
             forward_state,
-            fs_ec,
-            fs_epoch_commit,
-            fs_dev_prev_commit,
+            fs_ec: accepted_bundle.fs_ec,
+            fs_epoch_commit: accepted_bundle.fs_epoch_commit,
+            fs_dev_prev_commit: accepted_bundle.fs_dev_prev_commit,
             fs_epoch_created_at: SystemTime::now(),
             fs_epoch_rotation_interval_secs: 300,
             pop_public_key: room_identity.pop_public_key.clone(),
@@ -368,7 +344,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 slack_first_device: fs_forward_leap_policy.slack_first_device,
                 slack_device: fs_forward_leap_policy.slack_device,
             },
-            last_accepted_ec: last_accepted_ec.max(fs_ec),
+            last_accepted_ec: last_accepted_ec.max(accepted_bundle.fs_ec),
             last_fetch_timestamp_ms: None,
             msg_replay_state: MsgReplayState::default(),
             capss_witness: capss_witness_bytes,

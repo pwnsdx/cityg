@@ -69,9 +69,6 @@ pub(super) async fn prepare_barrier_merge_execution(
     } = ticket
         .client
         .barrier_prepare_snapshot(ticket.snapshot_preparation_request(
-            ticket.room_id.as_str(),
-            &ticket.gid,
-            &ticket.leaf_id,
             ticket.pop_secret_key.as_slice(),
             mode.reason(),
             mode.label(),
