@@ -1,4 +1,5 @@
 use super::*;
+use cityg_api_client::is_fs_forward_jump_group_http_error;
 use cityg_client::barrier_merge_bundle::{
     BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
     build_barrier_merge_bundle as build_barrier_merge_bundle_core,

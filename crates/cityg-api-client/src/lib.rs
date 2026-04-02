@@ -152,9 +152,10 @@ use cityg_api_schema::pb;
 use cityg_client::{
     CityGError as ClientError, barrier::TICKET_RETRY_MAX_ATTEMPTS,
     barrier::should_retry_ticket_http_error, barrier::ticket_retry_delay,
+    barrier_state_auth::ensure_non_regressing_authenticated_current_state,
     barrier_update::normalize_max_barrier_update_bytes, pivot::hydrate_parities,
 };
-use msphf_orchestrator::PivotParity;
+use msphf_orchestrator::{PivotParity, hdr};
 pub use pb::IdentityBinding;
 use pb::MergeTicketIntent as PbMergeTicketIntent;
 pub use pb::RoomAdminProof;
@@ -961,6 +962,54 @@ pub struct PreparedRuntimeJoinTicket {
     pub last_accepted_ec: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct PrepareOriginMergeTicketInput<'a> {
+    pub operation_label: &'a str,
+    pub local_barrier_version: u64,
+    pub local_kem_tree_hash_after: [u8; 32],
+    pub local_current_history_commitment: Option<&'a HistoryCommitment>,
+    pub local_current_history_authority_extension: Option<HistoryAuthorityExtension>,
+    pub fs_ec: u64,
+    pub fs_epoch_commit: [u8; 32],
+    pub fs_dev_prev_commit: [u8; 32],
+    pub stored_max_barrier_update_bytes: u64,
+    pub join_finalize_auth_token: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedOriginMergeTicket {
+    pub barrier_version: u64,
+    pub cover_leaf_index: u64,
+    pub snapshot_hash: [u8; 32],
+    pub barrier_n_max: u64,
+    pub max_barrier_update_bytes: u64,
+    pub proof_mode: String,
+    pub vrf_id: String,
+    pub policy_version: String,
+    pub cat: [u8; 32],
+    pub parent_root: [u8; 32],
+    pub join_delta_root: [u8; 32],
+    pub revoked_since_root: [u8; 32],
+    pub revoked_root: [u8; 32],
+    pub tswe_salt_hash: [u8; 32],
+    pub pox_r_commit: [u8; 32],
+    pub msphf_crs_id: String,
+    pub msphf_params_id: String,
+    pub fs_policy_version: String,
+    pub fs_epoch_base_ts: u64,
+    pub fs_forward_leap_policy: FsForwardLeapPolicy,
+    pub last_accepted_ec: u64,
+    pub header: BTreeMap<u64, Value>,
+    pub parities: Vec<PivotParity>,
+    pub witness_bytes: Option<Vec<u8>>,
+    pub ticket_history_commitment: HistoryCommitment,
+    pub ticket_history_authority_extension: Option<HistoryAuthorityExtension>,
+    pub history_authority: Option<HistoryAuthorityDescriptor>,
+    pub current_global_history_attestation_bytes: Vec<u8>,
+    pub merge_ticket_artifact_bytes: Vec<u8>,
+    pub deployment_profile_manifest_bytes: Vec<u8>,
+}
+
 impl MergeTicket {
     pub fn prepare_runtime(
         &self,
@@ -998,6 +1047,97 @@ impl MergeTicket {
             max_barrier_update_bytes_normalized,
             parities: hydrate_parities(&self.parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit),
             witness_bytes: (!self.witness_cbor.is_empty()).then(|| self.witness_cbor.clone()),
+        })
+    }
+
+    pub fn prepare_origin_runtime(
+        &self,
+        input: PrepareOriginMergeTicketInput<'_>,
+    ) -> Result<PreparedOriginMergeTicket, Error> {
+        let local_current_history_commitment = input
+            .local_current_history_commitment
+            .map(to_core_history_commitment);
+        let ticket_history_commitment =
+            to_core_history_commitment(&self.current_history_commitment);
+        let prepared_runtime = self.prepare_runtime(
+            input.fs_ec,
+            input.fs_epoch_commit,
+            input.fs_dev_prev_commit,
+            input.stored_max_barrier_update_bytes,
+        )?;
+
+        ensure_supported_attested_current_state_extension(
+            input.operation_label,
+            self.history_authority_extension,
+            self.current_global_history_attestation_bytes.as_slice(),
+        )?;
+
+        ensure_non_regressing_authenticated_current_state(
+            input.local_barrier_version,
+            &input.local_kem_tree_hash_after,
+            local_current_history_commitment.as_ref(),
+            input.local_current_history_authority_extension.as_ref(),
+            self.barrier_version,
+            &self.kem_tree_hash_after,
+            &ticket_history_commitment,
+            self.history_authority_extension.as_ref(),
+            input.operation_label,
+        )
+        .map_err(|err| Error::Parse(err.to_string()))?;
+
+        if !self.srx_cbor.is_empty() {
+            return Err(Error::Parse(format!(
+                "{} merge ticket unexpectedly contained SRX payload",
+                input.operation_label
+            )));
+        }
+
+        let mut header = BTreeMap::new();
+        header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
+        header.insert(
+            hdr::HDR_KBROAD_PUB,
+            Value::Bytes(self.kbroad_public.clone()),
+        );
+        if let Some(join_finalize_auth_token) = input.join_finalize_auth_token {
+            header.insert(
+                hdr::HDR_JOIN_FINALIZE_AUTH,
+                Value::Bytes(join_finalize_auth_token.to_vec()),
+            );
+        }
+
+        Ok(PreparedOriginMergeTicket {
+            barrier_version: self.barrier_version,
+            cover_leaf_index: self.cover_leaf_index,
+            snapshot_hash: prepared_runtime.snapshot_hash,
+            barrier_n_max: prepared_runtime.barrier_n_max,
+            max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
+            proof_mode: self.proof_mode.clone(),
+            vrf_id: self.vrf_id.clone(),
+            policy_version: self.policy_version.clone(),
+            cat: self.cat,
+            parent_root: self.parent_root,
+            join_delta_root: self.join_delta_root,
+            revoked_since_root: self.revoked_since_root,
+            revoked_root: self.revoked_root,
+            tswe_salt_hash: self.tswe_salt_hash,
+            pox_r_commit: self.pox_r_commit,
+            msphf_crs_id: self.msphf_crs_id.clone(),
+            msphf_params_id: self.msphf_params_id.clone(),
+            fs_policy_version: self.fs_policy_version.clone(),
+            fs_epoch_base_ts: self.fs_epoch_base_ts,
+            fs_forward_leap_policy: self.fs_forward_leap_policy,
+            last_accepted_ec: self.last_accepted_ec,
+            header,
+            parities: prepared_runtime.parities,
+            witness_bytes: prepared_runtime.witness_bytes,
+            ticket_history_commitment: self.current_history_commitment,
+            ticket_history_authority_extension: self.history_authority_extension,
+            history_authority: self.history_authority.clone(),
+            current_global_history_attestation_bytes: self
+                .current_global_history_attestation_bytes
+                .clone(),
+            merge_ticket_artifact_bytes: self.merge_ticket_artifact_bytes.clone(),
+            deployment_profile_manifest_bytes: self.deployment_profile_manifest_bytes.clone(),
         })
     }
 }
@@ -2635,6 +2775,73 @@ mod tests {
             err,
             Error::Parse(message)
                 if message.contains("max_barrier_update_bytes mismatch")
+        ));
+    }
+
+    #[test]
+    fn prepare_origin_runtime_merge_ticket_builds_header_and_validates_state() {
+        let mut ticket = sample_runtime_merge_ticket();
+        ticket.srx_cbor.clear();
+
+        let prepared = ticket
+            .prepare_origin_runtime(PrepareOriginMergeTicketInput {
+                operation_label: "join_finalize",
+                local_barrier_version: 9,
+                local_kem_tree_hash_after: [0x0F; 32],
+                local_current_history_commitment: Some(&HistoryCommitment {
+                    history_view_id: [0x90; 32],
+                    history_commitment_id: [0x91; 32],
+                    prev_history_commitment_id: [0x92; 32],
+                    history_seq: 17,
+                }),
+                local_current_history_authority_extension: None,
+                fs_ec: 77,
+                fs_epoch_commit: [0x44; 32],
+                fs_dev_prev_commit: [0x55; 32],
+                stored_max_barrier_update_bytes: 0,
+                join_finalize_auth_token: Some([0xAB; 32]),
+            })
+            .expect("origin merge ticket preparation must succeed");
+
+        assert_eq!(prepared.barrier_version, 9);
+        assert_eq!(prepared.snapshot_hash, [0x0F; 32]);
+        assert_eq!(prepared.barrier_n_max, 8);
+        assert_eq!(prepared.max_barrier_update_bytes, 1);
+        assert_eq!(prepared.parities.len(), 1);
+        assert_eq!(
+            prepared.header.get(&hdr::HDR_KBROAD_ALG),
+            Some(&Value::Text("ml-kem-768".to_string()))
+        );
+        assert_eq!(
+            prepared.header.get(&hdr::HDR_KBROAD_PUB),
+            Some(&Value::Bytes(vec![0x33; 32]))
+        );
+        assert_eq!(
+            prepared.header.get(&hdr::HDR_JOIN_FINALIZE_AUTH),
+            Some(&Value::Bytes(vec![0xAB; 32]))
+        );
+    }
+
+    #[test]
+    fn prepare_origin_runtime_merge_ticket_rejects_unexpected_srx_payload() {
+        let err = sample_runtime_merge_ticket()
+            .prepare_origin_runtime(PrepareOriginMergeTicketInput {
+                operation_label: "refresh",
+                local_barrier_version: 9,
+                local_kem_tree_hash_after: [0x0F; 32],
+                local_current_history_commitment: None,
+                local_current_history_authority_extension: None,
+                fs_ec: 77,
+                fs_epoch_commit: [0x44; 32],
+                fs_dev_prev_commit: [0x55; 32],
+                stored_max_barrier_update_bytes: 0,
+                join_finalize_auth_token: None,
+            })
+            .expect_err("unexpected SRX payload must fail");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("refresh merge ticket unexpectedly contained SRX payload")
         ));
     }
 

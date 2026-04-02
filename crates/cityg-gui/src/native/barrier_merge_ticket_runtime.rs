@@ -1,5 +1,5 @@
 use super::*;
-use cityg_api_client::HistoryAuthorityDescriptor;
+use cityg_api_client::{HistoryAuthorityDescriptor, PrepareOriginMergeTicketInput};
 use cityg_client::barrier_state_auth::{
     BarrierOriginGuard, BarrierOriginMode, ensure_full_barrier_verification_for_origin,
     guard_barrier_origin,
@@ -104,20 +104,27 @@ pub(super) async fn prepare_barrier_merge_ticket(
         .merge_ticket_refresh_with_retry(&room_id, &leaf_id)
         .await
         .context(format!("failed to obtain {} merge ticket", mode.label()))?;
-    let prepared_runtime = ticket
-        .prepare_runtime(
+    let prepared_origin = ticket
+        .prepare_origin_runtime(PrepareOriginMergeTicketInput {
+            operation_label: mode.label(),
+            local_barrier_version,
+            local_kem_tree_hash_after,
+            local_current_history_commitment: local_current_history_commitment.as_ref(),
+            local_current_history_authority_extension,
             fs_ec,
             fs_epoch_commit,
             fs_dev_prev_commit,
             stored_max_barrier_update_bytes,
-        )
+            join_finalize_auth_token: (mode == BarrierMergeMode::JoinFinalize)
+                .then_some(join_finalize_auth_token),
+        })
         .map_err(anyhow::Error::from)?;
-
-    let MergeTicket {
-        we_epoch_id: _,
-        parities: _,
-        witness_cbor: _,
-        srx_cbor,
+    let cityg_api_client::PreparedOriginMergeTicket {
+        barrier_version,
+        cover_leaf_index,
+        snapshot_hash,
+        barrier_n_max,
+        max_barrier_update_bytes,
         proof_mode,
         vrf_id,
         policy_version,
@@ -128,62 +135,22 @@ pub(super) async fn prepare_barrier_merge_ticket(
         revoked_root,
         tswe_salt_hash,
         pox_r_commit,
-        kbroad_public,
         msphf_crs_id,
         msphf_params_id,
         fs_policy_version,
         fs_epoch_base_ts,
         fs_forward_leap_policy,
         last_accepted_ec,
-        kbroad_generation: _,
-        barrier_version,
-        cover_leaf_index,
-        kem_tree_hash_after,
-        current_history_commitment: ticket_history_commitment,
-        history_authority_extension: ticket_history_authority_extension,
+        header,
+        parities,
+        witness_bytes,
+        ticket_history_commitment,
+        ticket_history_authority_extension,
         history_authority,
         current_global_history_attestation_bytes,
         merge_ticket_artifact_bytes,
         deployment_profile_manifest_bytes,
-        n_max: _,
-        max_barrier_update_bytes: _,
-        ..
-    } = ticket;
-
-    ensure_supported_attested_current_state_extension(
-        mode.label(),
-        ticket_history_authority_extension,
-        current_global_history_attestation_bytes.as_slice(),
-    )?;
-
-    ensure_non_regressing_authenticated_current_state(
-        local_barrier_version,
-        &local_kem_tree_hash_after,
-        local_current_history_commitment.as_ref(),
-        local_current_history_authority_extension,
-        barrier_version,
-        &bytes32("kem_tree_hash_after", &kem_tree_hash_after)?,
-        &ticket_history_commitment,
-        ticket_history_authority_extension,
-        mode.label(),
-    )?;
-
-    if !srx_cbor.is_empty() {
-        return Err(anyhow!(
-            "{} merge ticket unexpectedly contained SRX payload",
-            mode.label()
-        ));
-    }
-
-    let mut header = BTreeMap::new();
-    header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
-    header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public));
-    if mode == BarrierMergeMode::JoinFinalize {
-        header.insert(
-            hdr::HDR_JOIN_FINALIZE_AUTH,
-            Value::Bytes(join_finalize_auth_token.to_vec()),
-        );
-    }
+    } = prepared_origin;
 
     Ok(PreparedBarrierMergeTicket {
         persist_request,
@@ -193,9 +160,9 @@ pub(super) async fn prepare_barrier_merge_ticket(
         leaf_id,
         barrier_version,
         cover_leaf_index,
-        snapshot_hash: prepared_runtime.snapshot_hash,
-        barrier_n_max: prepared_runtime.barrier_n_max,
-        max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
+        snapshot_hash,
+        barrier_n_max,
+        max_barrier_update_bytes,
         forward_state,
         pop_public_key,
         pop_secret_key,
@@ -228,8 +195,8 @@ pub(super) async fn prepare_barrier_merge_ticket(
         fs_policy_version,
         fs_epoch_base_ts,
         header,
-        parities: prepared_runtime.parities,
-        witness_bytes: prepared_runtime.witness_bytes,
+        parities,
+        witness_bytes,
         ticket_history_commitment,
         ticket_history_authority_extension,
         history_authority,
