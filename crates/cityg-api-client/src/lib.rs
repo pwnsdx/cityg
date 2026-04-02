@@ -144,6 +144,7 @@ mod observability;
 mod room_admin;
 mod verification;
 
+use ciborium::Value;
 use cityg_api_schema::pb;
 use cityg_client::CityGError as ClientError;
 use msphf_orchestrator::PivotParity;
@@ -156,6 +157,7 @@ use prost::Message;
 use reqwest::{Client, StatusCode};
 pub use room_admin::*;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::warn;
@@ -560,6 +562,52 @@ pub struct BarrierSnapshotDependencies {
     pub public_tree: BarrierFetchedPublicTree,
     pub joins: BarrierResolvedJoins,
     pub revoked: BarrierResolvedRevokedLeaves,
+}
+
+pub struct BarrierSnapshotPreparationRequest<'a> {
+    pub room_id: &'a str,
+    pub gid: &'a [u8; 32],
+    pub leaf_id: &'a [u8; 32],
+    pub barrier_version: u64,
+    pub cover_leaf_index: u64,
+    pub snapshot_hash: [u8; 32],
+    pub barrier_n_max: u64,
+    pub max_barrier_update_bytes: u64,
+    pub header: BTreeMap<u64, Value>,
+    pub parities: &'a [PivotParity],
+    pub cat: &'a [u8],
+    pub pox_r_commit: &'a [u8],
+    pub parent_root: &'a [u8],
+    pub join_delta_root: &'a [u8],
+    pub revoked_since_root: &'a [u8],
+    pub revoked_root: &'a [u8],
+    pub tswe_salt_hash: &'a [u8],
+    pub ticket_history_commitment: &'a HistoryCommitment,
+    pub ticket_history_authority_extension: Option<HistoryAuthorityExtension>,
+    pub history_authority: Option<HistoryAuthorityDescriptor>,
+    pub current_global_history_attestation_bytes: &'a [u8],
+    pub merge_ticket_artifact_bytes: &'a [u8],
+    pub deployment_profile_manifest_bytes: &'a [u8],
+    pub pop_secret_key: &'a [u8],
+    pub full_verification_target_leaf_id: Option<[u8; 32]>,
+    pub barrier_update_reason: u64,
+    pub operation_label: &'a str,
+}
+
+pub struct PreparedBarrierSnapshot {
+    pub header: BTreeMap<u64, Value>,
+    pub cat: [u8; 32],
+    pub parent_root: [u8; 32],
+    pub join_delta_root: [u8; 32],
+    pub revoked_since_root: [u8; 32],
+    pub revoked_root: [u8; 32],
+    pub tswe_salt_hash: [u8; 32],
+    pub pox_r_commit: [u8; 32],
+    pub pivot: PivotParity,
+    pub snapshot_hash: [u8; 32],
+    pub committed_revocation_roots_hash: [u8; 32],
+    pub revocation_roots_hash: [u8; 32],
+    pub barrier_update: cityg_client::barrier_build::BarrierUpdateBuildResult,
 }
 
 /// Server-local append-only authenticated history commitment carried by A/B/C/D.

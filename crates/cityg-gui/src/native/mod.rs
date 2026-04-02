@@ -7,6 +7,8 @@ use std::{
 };
 
 #[cfg(test)]
+use crate::barrier_shared::compute_barrier_pkhash;
+#[cfg(test)]
 use crate::barrier_shared::compute_barrier_tree_hash;
 #[cfg(test)]
 use crate::barrier_shared::expected_barrier_tree_nodes;
@@ -15,9 +17,8 @@ use crate::barrier_shared::{
     BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
 };
 use crate::barrier_shared::{
-    DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, compute_barrier_pkhash,
-    compute_revocation_roots_hash, should_retry_ticket_http_error, ticket_retry_delay,
-    validate_barrier_n_max,
+    DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, compute_revocation_roots_hash,
+    should_retry_ticket_http_error, ticket_retry_delay, validate_barrier_n_max,
 };
 #[cfg(test)]
 use crate::message_crypto::{
@@ -74,13 +75,17 @@ use pqcrypto_dilithium::dilithium5;
 use pqcrypto_dilithium::dilithium5::{
     public_key_bytes as ml_dsa_public_key_bytes, signature_bytes as ml_dsa_signature_bytes,
 };
+#[cfg(test)]
 use pqcrypto_kyber::kyber768;
 #[cfg(test)]
 use pqcrypto_traits::kem::Ciphertext as KemCiphertext;
+#[cfg(test)]
 use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey};
 #[cfg(test)]
 use pqcrypto_traits::sign::DetachedSignature;
-use pqcrypto_traits::sign::{PublicKey as DilithiumPublicKey, SecretKey as DilithiumSecretKey};
+#[cfg(test)]
+use pqcrypto_traits::sign::PublicKey as DilithiumPublicKey;
+use pqcrypto_traits::sign::SecretKey as DilithiumSecretKey;
 use rand::{RngExt, rng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::sleep;

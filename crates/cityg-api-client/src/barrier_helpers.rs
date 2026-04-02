@@ -7,6 +7,11 @@ use cityg_api_schema::pb::{
     BarrierResolveJoinsSinceRequest, BarrierResolveJoinsSinceResponse,
     BarrierResolveRevokedLeavesRequest, BarrierResolveRevokedLeavesResponse,
 };
+use cityg_client::barrier_snapshot_prepare::{
+    BarrierSnapshotArtifactsInput, derive_barrier_snapshot_ticket_fields,
+    derive_barrier_snapshot_witness_selection, prepare_barrier_snapshot_artifacts,
+};
+use cityg_client::barrier_state_auth::validate_barrier_tree_snapshot_auth;
 
 impl CitygApiClient {
     pub async fn barrier_fetch_snapshot_dependencies(
@@ -40,6 +45,190 @@ impl CitygApiClient {
             public_tree,
             joins,
             revoked,
+        })
+    }
+
+    pub async fn barrier_prepare_snapshot(
+        &self,
+        request: BarrierSnapshotPreparationRequest<'_>,
+    ) -> Result<PreparedBarrierSnapshot, Error> {
+        let BarrierSnapshotPreparationRequest {
+            room_id,
+            gid,
+            leaf_id,
+            barrier_version,
+            cover_leaf_index,
+            snapshot_hash,
+            barrier_n_max,
+            max_barrier_update_bytes,
+            header,
+            parities,
+            cat,
+            pox_r_commit,
+            parent_root,
+            join_delta_root,
+            revoked_since_root,
+            revoked_root,
+            tswe_salt_hash,
+            ticket_history_commitment,
+            ticket_history_authority_extension,
+            history_authority,
+            current_global_history_attestation_bytes,
+            merge_ticket_artifact_bytes,
+            deployment_profile_manifest_bytes,
+            pop_secret_key,
+            full_verification_target_leaf_id,
+            barrier_update_reason,
+            operation_label,
+        } = request;
+
+        let ticket_fields = derive_barrier_snapshot_ticket_fields(
+            parities,
+            cat,
+            pox_r_commit,
+            parent_root,
+            join_delta_root,
+            revoked_since_root,
+            revoked_root,
+            tswe_salt_hash,
+        )
+        .map_err(|err| {
+            Error::Parse(format!(
+                "parse {operation_label} barrier snapshot fields: {err}"
+            ))
+        })?;
+
+        if cover_leaf_index >= barrier_n_max {
+            return Err(Error::Parse(format!(
+                "cover_leaf_index out of range for barrier tree: {cover_leaf_index} >= {barrier_n_max}"
+            )));
+        }
+
+        let BarrierSnapshotDependencies {
+            public_tree: barrier_tree_response,
+            joins: join_resolution,
+            revoked: revoked_resolution,
+        } = self
+            .barrier_fetch_snapshot_dependencies(
+                room_id,
+                barrier_version,
+                &snapshot_hash,
+                &ticket_fields.committed_revocation_roots_hash,
+                Some(&ticket_history_commitment.history_view_id),
+                ticket_history_commitment,
+                operation_label,
+            )
+            .await?;
+        let barrier_tree_snapshot = barrier_tree_response.tree;
+        if barrier_tree_snapshot.n_max != barrier_n_max {
+            return Err(Error::Parse(format!(
+                "barrier tree snapshot n_max mismatch: expected {barrier_n_max}, got {}",
+                barrier_tree_snapshot.n_max
+            )));
+        }
+        validate_barrier_tree_snapshot_auth(
+            &snapshot_hash,
+            barrier_n_max,
+            &barrier_tree_snapshot.kem_tree_hash_after,
+            barrier_tree_snapshot.pk_entries.as_slice(),
+        )
+        .map_err(|err| Error::Parse(err.to_string()))?;
+
+        let witness_selection = derive_barrier_snapshot_witness_selection(
+            barrier_update_reason,
+            cover_leaf_index,
+            revoked_resolution.leaf_indices.as_slice(),
+            ticket_fields.revocation_roots_hash,
+            ticket_fields.committed_revocation_roots_hash,
+        )
+        .map_err(|err| Error::Parse(err.to_string()))?;
+        let ticket_history_commitment_core = to_core_history_commitment(ticket_history_commitment);
+        let snapshot_history_commitment_core =
+            to_core_history_commitment(&barrier_tree_response.history_commitment);
+        let joins_history_commitment_core =
+            to_core_history_commitment(&join_resolution.history_commitment);
+        let revoked_history_commitment_core =
+            to_core_history_commitment(&revoked_resolution.history_commitment);
+        let join_records_core = to_core_join_snapshot_records(join_resolution.records.as_slice());
+        let prepared_snapshot = prepare_barrier_snapshot_artifacts(BarrierSnapshotArtifactsInput {
+            header,
+            gid,
+            leaf_id,
+            updater_leaf: cover_leaf_index,
+            barrier_version,
+            barrier_update_reason,
+            barrier_n_max,
+            max_barrier_update_bytes,
+            ticket_history_commitment: &ticket_history_commitment_core,
+            snapshot_history_commitment: &snapshot_history_commitment_core,
+            joins_history_commitment: &joins_history_commitment_core,
+            revoked_history_commitment: &revoked_history_commitment_core,
+            current_global_history_attestation_bytes,
+            snapshot_pk_entries: barrier_tree_snapshot.pk_entries.as_slice(),
+            join_records: join_records_core.as_slice(),
+            witness_revoked_leaf_indices: witness_selection.witness_revoked_leaf_indices.as_slice(),
+            revocation_roots_hash: ticket_fields.revocation_roots_hash,
+            pop_secret_key,
+        })
+        .map_err(|err| Error::Parse(err.to_string()))?;
+        let mut header = prepared_snapshot.header;
+
+        if !current_global_history_attestation_bytes.is_empty()
+            && (barrier_update_reason == 0 || barrier_update_reason == 1)
+        {
+            let history_authority = history_authority.as_ref().ok_or_else(|| {
+                Error::Parse(format!(
+                    "{operation_label} merge ticket missing history_authority descriptor for full verification witness"
+                ))
+            })?;
+            let history_authority_extension =
+                ticket_history_authority_extension.ok_or_else(|| {
+                    Error::Parse(format!(
+                        "{operation_label} merge ticket missing history_authority_extension for full verification witness"
+                    ))
+                })?;
+            let full_verification_witness = self
+                .barrier_issue_full_verification_witness(
+                    room_id,
+                    leaf_id,
+                    full_verification_target_leaf_id.as_ref(),
+                    merge_ticket_artifact_bytes,
+                    barrier_update_reason,
+                    prepared_snapshot.barrier_update.raw_update.as_slice(),
+                    barrier_n_max,
+                    ticket_history_commitment,
+                    history_authority_extension,
+                    history_authority,
+                    current_global_history_attestation_bytes,
+                    barrier_version,
+                    &snapshot_hash,
+                    barrier_version,
+                    join_resolution.records.as_slice(),
+                    &witness_selection.witness_revocation_roots_hash,
+                    witness_selection.witness_revoked_leaf_indices.as_slice(),
+                    deployment_profile_manifest_bytes,
+                )
+                .await?;
+            header.insert(
+                msphf_orchestrator::hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
+                ciborium::Value::Bytes(full_verification_witness),
+            );
+        }
+
+        Ok(PreparedBarrierSnapshot {
+            header,
+            cat: ticket_fields.cat,
+            parent_root: ticket_fields.parent_root,
+            join_delta_root: ticket_fields.join_delta_root,
+            revoked_since_root: ticket_fields.revoked_since_root,
+            revoked_root: ticket_fields.revoked_root,
+            tswe_salt_hash: ticket_fields.tswe_salt_hash,
+            pox_r_commit: ticket_fields.pox_r_commit,
+            pivot: ticket_fields.pivot,
+            snapshot_hash,
+            committed_revocation_roots_hash: ticket_fields.committed_revocation_roots_hash,
+            revocation_roots_hash: ticket_fields.revocation_roots_hash,
+            barrier_update: prepared_snapshot.barrier_update,
         })
     }
 
