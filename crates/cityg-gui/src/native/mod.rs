@@ -26,10 +26,6 @@ use crate::message_crypto::{
 };
 use crate::message_crypto::{MsgReplayState, PersistedMsgReplayState};
 use ahash::AHashMap;
-use anchor_seed::{
-    SeedCommitFields, build_anchor_seed_ctx, compute_seed_bundle_commit, compute_seed_commit,
-    compute_seed_ctx_hash,
-};
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 #[cfg(test)]
 use ciborium::value::Integer;
@@ -71,7 +67,7 @@ use msphf_orchestrator::CapssWitnessBundle;
 use msphf_orchestrator::compute_fs_dev_commit_v2;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
-    OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
+    OrchestrationParams, PivotParity, PopKeypair, SrxMode, hdr,
 };
 use pqcrypto_dilithium::dilithium5;
 #[cfg(test)]

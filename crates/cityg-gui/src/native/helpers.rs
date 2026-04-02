@@ -2,9 +2,10 @@ use super::*;
 pub(super) use cityg_client::barrier_crypto::generate_kbroad_keypair;
 pub(super) use cityg_client::binary::{bytes32, decode_hex_32, header_bytes32};
 pub(super) use cityg_client::bundle_headers::{
-    compute_fs_fingerprint_from_header, derive_fs_fingerprint_from_fields, recompute_proofs_commit,
-    recompute_srx_commit,
+    compute_fs_fingerprint_from_header, derive_fs_fingerprint_from_fields,
 };
+#[cfg(test)]
+pub(super) use cityg_client::bundle_headers::{recompute_proofs_commit, recompute_srx_commit};
 
 pub(super) fn hex_encode_prefix(bytes: &[u8; 32], prefix_len: usize) -> String {
     let hex = hex_encode(bytes);

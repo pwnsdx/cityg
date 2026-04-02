@@ -1,4 +1,8 @@
 use super::*;
+use cityg_client::barrier_merge_bundle::{
+    BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
+    build_barrier_merge_bundle as build_barrier_merge_bundle_core,
+};
 
 pub(super) struct BarrierMergePublishInputs<'a> {
     pub(super) mode: BarrierMergeMode,
@@ -98,134 +102,41 @@ pub(super) async fn publish_barrier_merge(
     };
 
     let pending_barrier_state_template = pending_barrier_state.clone();
-    let build_published_merge = |mut forward_state: ForwardSecrecyState,
+    let build_published_merge = |forward_state: ForwardSecrecyState,
                                  disable_autonomic_evolve: bool|
      -> Result<PreparedBarrierMerge> {
-        let mut bundle = if disable_autonomic_evolve {
-            CityGClient::generate_merge_with_forward_state_without_evolve(
-                header.clone(),
-                parts.clone(),
-                params.clone(),
-                Some(&mut forward_state),
-                parities,
-                None,
-                witness_bytes,
-            )
-        } else {
-            CityGClient::generate_merge_with_forward_state(
-                header.clone(),
-                parts.clone(),
-                params.clone(),
-                Some(&mut forward_state),
-                parities,
-                None,
-                witness_bytes,
-            )
-        }
+        let built = build_barrier_merge_bundle_core(CoreBarrierMergeBundleInputs {
+            header: header.clone(),
+            parts: parts.clone(),
+            params: params.clone(),
+            forward_state,
+            parities,
+            witness_bytes,
+            pivot,
+            gid,
+            cat: &cat_arr,
+            parent_root: &parent_root_arr,
+            current_k_fs: mode.reseeds_k_fs().then_some(k_fs_current),
+            next_barrier_version,
+            barrier_key: &barrier_update.k_barrier_new,
+            barrier_update_reason: mode.reason(),
+            disable_autonomic_evolve,
+        })
         .context(mode.build_bundle_context())?;
 
-        strip_rollup_metadata(&mut bundle.header_map);
-        apply_pivot_alignment(&mut bundle.header_map, pivot);
-        let anchor_ctx =
-            build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
-        let seed_ctx_hash = compute_seed_ctx_hash(&anchor_ctx).context("compute seed_ctx_hash")?;
-        let seed_commit = compute_seed_commit(
-            &anchor_ctx,
-            &SeedCommitFields {
-                gid,
-                cat: cat_arr.as_slice(),
-                we_epoch_id: bundle.we_epoch_id,
-            },
-        )
-        .context("compute seed_commit")?;
-        let seed_bundle_commit = compute_seed_bundle_commit(
-            &anchor_ctx,
-            &bundle.hp_binding.rho_commit,
-            gid,
-            cat_arr.as_slice(),
-            &parent_root_arr,
-        )
-        .context("compute seed_bundle_commit")?;
-        let derived_we_epoch_id = derive_we_epoch_id(gid, &parent_root_arr, &seed_ctx_hash)
-            .context("derive we_epoch_id")?;
-        let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC)
-            .ok_or_else(|| anyhow!("{} merge bundle missing fs_ec", mode.label()))?;
-        let k_fs_after_pcs = if mode.reseeds_k_fs() {
-            Some(derive_k_fs_after_pcs(
-                k_fs_current,
-                &derived_we_epoch_id,
-                observed_fs_ec,
-                next_barrier_version,
-                &barrier_update.k_barrier_new,
-            )?)
-        } else {
-            None
-        };
-
-        bundle.anchor.anchor_hdr_ctx = anchor_ctx.clone();
-        bundle.hp_binding.seed_ctx_hash = seed_ctx_hash;
-        bundle.hp_binding.seed_commit = seed_commit;
-        bundle.hp_binding.seed_bundle_commit = seed_bundle_commit;
-        bundle.we_epoch_id = derived_we_epoch_id;
-        let has_local_hp_material =
-            !bundle.hp_ciphertext.is_empty() && bundle.hp_aead_key != [0u8; 32];
-        if has_local_hp_material {
-            if mode.reason() == 2 {
-                bundle
-                    .seal_local_hp_header_with_barrier_key(&barrier_update.k_barrier_new)
-                    .context(format!("seal merge HP envelope for {}", mode.label()))?;
-            } else {
-                bundle
-                    .rebind_local_hp_envelope_with_barrier_key(&barrier_update.k_barrier_new)
-                    .context(format!("rebind merge HP envelope for {}", mode.label()))?;
-            }
-        } else {
-            return Err(anyhow!(
-                "{} merge bundle missing local HP material",
-                mode.label()
-            ));
-        }
         let mut pending_barrier_state = pending_barrier_state_template.clone();
-        pending_barrier_state.we_epoch_id = bundle.we_epoch_id;
-        pending_barrier_state.fs_ec = observed_fs_ec;
-        let next_forward = forward_state.snapshot();
+        pending_barrier_state.we_epoch_id = built.bundle.we_epoch_id;
+        pending_barrier_state.fs_ec = built.observed_fs_ec;
+        let next_forward = built.forward_state_after.snapshot();
         pending_barrier_state.next_forward_fs_ec = next_forward.fs_ec;
         pending_barrier_state.next_forward_fs_dev_commit = next_forward.fs_dev_commit;
         pending_barrier_state.next_forward_last_weid = next_forward.last_weid;
-        if let Some(k_fs_after_pcs) = k_fs_after_pcs {
-            pending_barrier_state.k_fs_after_pcs = Some(Zeroizing::new(k_fs_after_pcs));
-        }
-        bundle
-            .header_map
-            .insert(hdr::HDR_SEED_CTX_HASH, Value::Bytes(seed_ctx_hash.to_vec()));
-        bundle.header_map.insert(
-            hdr::HDR_RHO_COMMIT,
-            Value::Bytes(bundle.hp_binding.rho_commit.to_vec()),
-        );
-        bundle.header_map.insert(
-            hdr::HDR_SEED_BUNDLE_COMMIT,
-            Value::Bytes(seed_bundle_commit.to_vec()),
-        );
-
-        if let Some(commit) = recompute_srx_commit(&bundle.header_map)? {
-            bundle
-                .header_map
-                .insert(hdr::HDR_SRX_COMMIT, Value::Bytes(commit.to_vec()));
-        }
-
-        if let Some(recomputed) = recompute_proofs_commit(&bundle.header_map)
-            .ok()
-            .map(|arr| arr.to_vec())
-        {
-            bundle
-                .header_map
-                .insert(hdr::HDR_PROOFS_COMMIT, Value::Bytes(recomputed));
-        }
+        pending_barrier_state.k_fs_after_pcs = built.k_fs_after_pcs;
 
         Ok(PreparedBarrierMerge {
-            bundle,
+            bundle: built.bundle,
             pending_barrier_state,
-            forward_state_after: forward_state,
+            forward_state_after: built.forward_state_after,
         })
     };
 
