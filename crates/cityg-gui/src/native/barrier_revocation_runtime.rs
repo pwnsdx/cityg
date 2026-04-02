@@ -8,16 +8,10 @@ use super::barrier_merge_snapshot_runtime::{
 };
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
+use cityg_api_client::is_fs_forward_jump_group_http_error;
 use cityg_client::barrier_orchestration::{
     BarrierOrchestrationInputs, prepare_barrier_orchestration,
 };
-
-pub(super) fn is_fs_forward_jump_group_http_error(
-    freeze_code: Option<u32>,
-    freeze_reason: Option<&str>,
-) -> bool {
-    freeze_code == Some(9476) || freeze_reason == Some("fs_forward_jump_group")
-}
 
 fn revocation_build_bundle_context(operation_label: &'static str) -> &'static str {
     match operation_label {

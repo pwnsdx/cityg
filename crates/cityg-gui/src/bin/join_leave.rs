@@ -43,7 +43,7 @@ use cityg_api_client::HistoryCommitment;
 use cityg_api_client::{
     BarrierSnapshotPreparationRequest, CitygApiClient, Error as ApiClientError,
     HistoryAuthorityExtension, PreparedBarrierSnapshot,
-    ensure_supported_attested_current_state_extension,
+    ensure_supported_attested_current_state_extension, is_fs_forward_jump_group_http_error,
 };
 #[cfg(test)]
 use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
@@ -60,8 +60,7 @@ use cityg_client::{
     barrier_orchestration::{BarrierOrchestrationInputs, prepare_barrier_orchestration},
     binary::bytes32,
     bundle_headers::{
-        compute_fs_fingerprint_from_header as compute_fs_fingerprint_from_header_core,
-        derive_fs_fingerprint_from_fields as derive_fs_fingerprint_from_fields_core,
+        compute_fs_fingerprint_from_header, derive_fs_fingerprint_from_fields,
         recompute_proofs_commit,
     },
     join_bundle::{JoinEpochBundleInputs, build_join_epoch_bundle},
@@ -216,24 +215,6 @@ fn build_barrier_update_bytes(
         snapshot_pre,
     )?;
     Ok(BarrierUpdateBuildResult::from_core(built))
-}
-
-fn derive_fs_fingerprint_from_fields(
-    fs_policy_version: &str,
-    fs_ec: u64,
-    fs_epoch_commit: &[u8; 32],
-    fs_epoch_base_ts: u64,
-) -> Option<[u8; 32]> {
-    derive_fs_fingerprint_from_fields_core(
-        fs_policy_version,
-        fs_ec,
-        fs_epoch_commit,
-        fs_epoch_base_ts,
-    )
-}
-
-fn compute_fs_fingerprint_from_header(header: &BTreeMap<u64, Value>) -> Option<[u8; 32]> {
-    compute_fs_fingerprint_from_header_core(header)
 }
 
 fn fingerprint_full_hex(bytes: &[u8; 32]) -> String {
@@ -1724,13 +1705,6 @@ fn describe_http_failure(
         }
     }
     detail
-}
-
-fn is_fs_forward_jump_group_http_error(
-    freeze_code: Option<u32>,
-    freeze_reason: Option<&str>,
-) -> bool {
-    freeze_code == Some(9476) || freeze_reason == Some("fs_forward_jump_group")
 }
 
 fn should_retry_leave_accept_http_error(

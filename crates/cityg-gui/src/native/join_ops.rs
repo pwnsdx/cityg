@@ -4,13 +4,6 @@ use cityg_client::barrier_orchestration::{
 };
 use cityg_client::join_bundle::{JoinEpochBundleInputs, build_join_epoch_bundle};
 
-fn is_fs_forward_jump_group_http_error(
-    freeze_code: Option<u32>,
-    freeze_reason: Option<&str>,
-) -> bool {
-    freeze_code == Some(9476) || freeze_reason == Some("fs_forward_jump_group")
-}
-
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
 
 fn generate_room_identity() -> RoomIdentity {
@@ -280,7 +273,11 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 freeze_code,
                 freeze_reason,
                 ..
-            }) if is_fs_forward_jump_group_http_error(freeze_code, freeze_reason.as_deref()) => {
+            }) if cityg_api_client::is_fs_forward_jump_group_http_error(
+                freeze_code,
+                freeze_reason.as_deref(),
+            ) =>
+            {
                 fs_state = pristine_fs_state;
                 bundle = build_join_bundle(&mut fs_state, true)?;
                 client

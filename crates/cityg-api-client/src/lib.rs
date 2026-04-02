@@ -144,6 +144,7 @@ mod observability;
 mod room_admin;
 mod verification;
 
+pub use epoch_routes::is_fs_forward_jump_group_http_error;
 pub use join_ticket::prepare_runtime_join_ticket;
 
 use ciborium::Value;
