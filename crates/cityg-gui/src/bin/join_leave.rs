@@ -44,7 +44,6 @@ use ciborium::value::Value;
 use cityg_api_client::BarrierJoinRecord;
 use cityg_api_client::{
     CitygApiClient, Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment,
-    IdentityBinding,
 };
 #[cfg(test)]
 use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
@@ -835,14 +834,9 @@ async fn prepare_join_session_with_identity(
     let pop_secret =
         Box::new(MlDsaSecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
 
-    let signed_binding =
-        message_auth::build_signed_identity_binding(alias, &pop_public_key, &pop_secret_key)
+    let identity_binding =
+        cityg_api_client::build_identity_binding(alias, &pop_public_key, &pop_secret_key)
             .context("build identity binding")?;
-    let identity_binding = IdentityBinding {
-        alias: signed_binding.alias,
-        pop_public_key: signed_binding.pop_public_key,
-        signature: signed_binding.signature,
-    };
 
     let mut retry_attempt = 0u32;
     let ticket = loop {

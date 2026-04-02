@@ -54,7 +54,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
     let ticket = loop {
         let pop_public_key = room_identity.pop_public_key.clone();
         let pop_secret_key = room_identity.pop_secret_key.clone();
-        let identity_binding = Some(build_identity_binding(
+        let identity_binding = Some(cityg_api_client::build_identity_binding(
             &alias,
             &pop_public_key,
             &pop_secret_key,

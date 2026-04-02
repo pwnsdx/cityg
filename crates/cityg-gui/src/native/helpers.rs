@@ -131,25 +131,6 @@ pub(super) fn configured_hex_from_env(var_name: &str) -> Result<Option<Vec<u8>>>
     Ok(Some(bytes))
 }
 
-pub(super) fn build_identity_binding(
-    alias: &str,
-    pop_public_key: &[u8],
-    pop_secret_key: &[u8],
-) -> Result<cityg_api_client::IdentityBinding> {
-    use cityg_api_client::IdentityBinding;
-    let binding = cityg_client::message_auth::build_signed_identity_binding(
-        alias,
-        pop_public_key,
-        pop_secret_key,
-    )?;
-
-    Ok(IdentityBinding {
-        alias: binding.alias,
-        pop_public_key: binding.pop_public_key,
-        signature: binding.signature,
-    })
-}
-
 pub(super) fn format_member_label(member: &MemberEntry) -> String {
     if let Some(alias) = member.alias.as_ref().filter(|s| !s.is_empty()) {
         format_alias_display(alias, &member.leaf_id)

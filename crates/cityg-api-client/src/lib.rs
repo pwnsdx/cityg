@@ -598,6 +598,25 @@ impl HistoryAuthorityExtension {
     }
 }
 
+pub fn build_identity_binding(
+    alias: &str,
+    pop_public_key: &[u8],
+    pop_secret_key: &[u8],
+) -> Result<IdentityBinding, Error> {
+    let binding = cityg_client::message_auth::build_signed_identity_binding(
+        alias,
+        pop_public_key,
+        pop_secret_key,
+    )
+    .map_err(|err| Error::Parse(err.to_string()))?;
+
+    Ok(IdentityBinding {
+        alias: binding.alias,
+        pop_public_key: binding.pop_public_key,
+        signature: binding.signature,
+    })
+}
+
 pub fn require_base_profile_history_authority_extension(
     raw: &str,
     context: &str,
