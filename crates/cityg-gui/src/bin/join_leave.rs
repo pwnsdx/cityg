@@ -46,6 +46,8 @@ use cityg_api_client::HistoryCommitment;
 use cityg_api_client::{
     BarrierSnapshotPreparationRequest, CitygApiClient, Error as ApiClientError,
     HistoryAuthorityExtension, PreparedBarrierSnapshot,
+    ensure_supported_attested_current_state_extension,
+    require_base_profile_history_authority_extension,
 };
 #[cfg(test)]
 use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
@@ -174,61 +176,6 @@ fn new_api_client(server_url: &str) -> CitygApiClient {
         client = client.with_message_auth_token(token);
     }
     client
-}
-
-fn ensure_supported_attested_current_state_extension(
-    context: &str,
-    extension: Option<HistoryAuthorityExtension>,
-    current_global_history_attestation_bytes: &[u8],
-) -> Result<()> {
-    if current_global_history_attestation_bytes.is_empty() {
-        if extension.is_some() {
-            return Err(anyhow!(
-                "{context} carries history authority extension without current global history attestation"
-            ));
-        }
-        return Ok(());
-    }
-    if extension.is_none() {
-        return Err(anyhow!(
-            "{context} carries attested current state without negotiated history authority extension"
-        ));
-    }
-    Ok(())
-}
-
-fn require_base_profile_global_history_authority_extension(
-    extension: Option<HistoryAuthorityExtension>,
-    context: &str,
-) -> Result<HistoryAuthorityExtension> {
-    match extension {
-        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1) => {
-            Ok(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
-        }
-        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) => Err(anyhow!(
-            "{context} must carry global-history-authority-v1 in the base profile"
-        )),
-        None => Err(anyhow!(
-            "{context} missing required global-history-authority-v1 in the base profile"
-        )),
-    }
-}
-
-fn parse_join_ticket_history_authority_extension(
-    raw: &str,
-) -> Result<Option<HistoryAuthorityExtension>> {
-    if raw.is_empty() {
-        return Ok(None);
-    }
-    if raw == HistoryAuthorityExtension::LocalHistoryAuthorityV1.as_str() {
-        return Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1));
-    }
-    if raw == HistoryAuthorityExtension::GlobalHistoryAuthorityV1.as_str() {
-        return Ok(Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1));
-    }
-    Err(anyhow!(
-        "join ticket carries unsupported history authority extension: {raw}"
-    ))
 }
 
 struct BarrierUpdateBuildResult {
@@ -995,8 +942,8 @@ async fn prepare_join_session_with_identity(
         ),
     };
     let current_history_authority_extension =
-        Some(require_base_profile_global_history_authority_extension(
-            parse_join_ticket_history_authority_extension(&ticket.history_authority_extension)?,
+        Some(require_base_profile_history_authority_extension(
+            &ticket.history_authority_extension,
             "join ticket",
         )?);
     ensure_supported_attested_current_state_extension(

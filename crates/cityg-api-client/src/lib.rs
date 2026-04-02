@@ -755,6 +755,27 @@ pub fn require_base_profile_history_authority_extension(
     }
 }
 
+pub fn ensure_supported_attested_current_state_extension(
+    context: &str,
+    extension: Option<HistoryAuthorityExtension>,
+    current_global_history_attestation_bytes: &[u8],
+) -> Result<(), Error> {
+    if current_global_history_attestation_bytes.is_empty() {
+        if extension.is_some() {
+            return Err(Error::Parse(format!(
+                "{context} carries history authority extension without current global history attestation"
+            )));
+        }
+        return Ok(());
+    }
+    if extension.is_none() {
+        return Err(Error::Parse(format!(
+            "{context} carries attested current state without negotiated history authority extension"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalHistoryAttestation {
     pub scope_id: [u8; 32],
@@ -2331,6 +2352,44 @@ mod tests {
                     "join ticket carries unsupported history authority extension: unknown-extension-v1"
                 )
         ));
+    }
+
+    #[test]
+    fn ensure_supported_attested_current_state_extension_requires_matching_presence() {
+        ensure_supported_attested_current_state_extension("join ticket", None, &[])
+            .expect("empty attestation without extension must be allowed");
+
+        let err = ensure_supported_attested_current_state_extension(
+            "join ticket",
+            Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1),
+            &[],
+        )
+        .expect_err("extension without attestation must be rejected");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains(
+                    "join ticket carries history authority extension without current global history attestation"
+                )
+        ));
+
+        let err =
+            ensure_supported_attested_current_state_extension("join ticket", None, &[1, 2, 3])
+                .expect_err("attestation without extension must be rejected");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains(
+                    "join ticket carries attested current state without negotiated history authority extension"
+                )
+        ));
+
+        ensure_supported_attested_current_state_extension(
+            "join ticket",
+            Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1),
+            &[1, 2, 3],
+        )
+        .expect("matching extension and attestation must be allowed");
     }
 
     #[test]
