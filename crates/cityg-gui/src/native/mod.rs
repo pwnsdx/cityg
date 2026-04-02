@@ -31,7 +31,7 @@ use anchor_seed::{
     compute_seed_ctx_hash,
 };
 use anyhow::{Context as AnyhowContext, Result, anyhow};
-use ciborium::value::{Integer, Value};
+use ciborium::value::Value;
 use cityg_api_client::{
     BarrierJoinRecord, BarrierPublicTree, CitygApiClient, Error as ApiClientError,
     HistoryAuthorityExtension, HistoryCommitment, MergeAcceptanceStatus, MergeTicket,
