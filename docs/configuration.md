@@ -57,7 +57,7 @@ Controls client/GUI connection behavior.
 
 ```toml
 [client]
-default_server_url = "http://127.0.0.1:8080"   # Default server URL
+default_server_url = ""                         # Optional default Worker edge / API URL
 fetch_poll_interval_secs = 3                    # Polling interval for updates
 fetch_retry_interval_secs = 10                  # Retry interval for failures
 websocket_reconnect_delay_secs = 5              # WebSocket reconnect delay
@@ -70,6 +70,8 @@ api_timeout_secs = 30                           # API request timeout
 - `CITYG_CLIENT_FETCH_RETRY_INTERVAL_SECS` - Retry interval
 - `CITYG_CLIENT_WEBSOCKET_RECONNECT_DELAY_SECS` - WebSocket reconnect delay
 - `CITYG_CLIENT_API_TIMEOUT_SECS` - API timeout
+
+Leave `default_server_url` blank if you want the GUI to prompt for an endpoint on first join. For Worker-first deployments, set it explicitly to your edge URL, for example `https://cityg.example.workers.dev`.
 
 ### 3. Protocol Configuration (`[protocol]`)
 

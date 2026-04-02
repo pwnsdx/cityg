@@ -99,7 +99,7 @@ First, make sure you have a City-G server running:
 cargo run --release --bin cityg-api
 ```
 
-The server will start on `http://localhost:8080` by default.
+The local standalone server starts on `http://localhost:8080` by default. In Worker-first deployments, point the GUI at your Worker edge URL instead, for example `https://cityg.example.workers.dev`.
 
 ### 2. Launch the GUI
 
@@ -117,7 +117,7 @@ Fill in the join form:
 
 - **Room ID**: `8f7c...` (must be 64 hexadecimal characters; click "Generate Random" for a valid ID)
 - **Your Alias**: `alice` (your username in the group)
-- **Server URL**: `http://localhost:8080` (default)
+- **Server URL**: your Worker edge or compatible API URL, for example `https://cityg.example.workers.dev`
 
 Click **Join Room** and wait a few seconds for the cryptographic setup to complete.
 
@@ -152,10 +152,11 @@ The join form has three required fields:
 
 #### Server URL
 - **Purpose**: The City-G API server endpoint
-- **Format**: HTTP/HTTPS URL (e.g., `http://localhost:8080`)
-- **Default**: `http://localhost:8080`
+- **Format**: HTTP/HTTPS URL (e.g., `https://cityg.example.workers.dev`)
+- **Default**: blank unless configured via `CITYG_CLIENT_DEFAULT_SERVER_URL`
 - **Tips**:
-  - Use `https://` for production deployments
+  - Prefer your Worker edge URL for hosted deployments
+  - Use `http://localhost:8080` only for local standalone development
   - Make sure the server is reachable before joining
 
 ### Field Navigation

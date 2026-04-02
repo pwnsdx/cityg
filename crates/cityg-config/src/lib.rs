@@ -227,7 +227,7 @@ impl Default for ServerConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            default_server_url: "http://127.0.0.1:8080".to_string(),
+            default_server_url: String::new(),
             fetch_poll_interval_secs: 3,
             fetch_retry_interval_secs: 10,
             websocket_reconnect_delay_secs: 5,
@@ -767,7 +767,7 @@ mod tests {
     fn test_default_config() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let config = CityGConfig::default();
         assert_eq!(config.server.address, "0.0.0.0:8080");
-        assert_eq!(config.client.default_server_url, "http://127.0.0.1:8080");
+        assert!(config.client.default_server_url.is_empty());
         assert_eq!(config.protocol.window_duration_secs, 120);
         assert!(!config.server.seed_demo_room);
         assert_eq!(config.protocol.fs_policy_version, "7");
