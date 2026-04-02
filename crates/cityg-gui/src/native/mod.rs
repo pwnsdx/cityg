@@ -67,8 +67,7 @@ use msphf_orchestrator::CapssWitnessBundle;
 #[cfg(test)]
 use msphf_orchestrator::compute_fs_dev_commit_v2;
 use msphf_orchestrator::{
-    AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
-    OrchestrationParams, PivotParity, PopKeypair, SrxMode, hdr,
+    AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, OrchestrationParams, PivotParity, hdr,
 };
 use pqcrypto_dilithium::dilithium5;
 #[cfg(test)]

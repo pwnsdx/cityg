@@ -1,5 +1,8 @@
 use super::*;
 use cityg_api_client::require_base_profile_history_authority_extension;
+use cityg_client::barrier_orchestration::{
+    BarrierOrchestrationInputs, prepare_barrier_orchestration,
+};
 
 fn is_fs_forward_jump_group_http_error(
     freeze_code: Option<u32>,
@@ -301,39 +304,30 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             ));
         }
 
-        let params = OrchestrationParams {
-            msphf_crs_id: msphf_crs_id.as_str(),
-            params_id: msphf_params_id.as_str(),
-            srx: Some(srx_inputs),
-            srx_mode: SrxMode::Complete,
-            pop_keys: Some(PopKeypair {
-                algorithm: "ML-DSA-65",
-                public_key: room_identity.pop_public_key.as_slice(),
-                secret_key: pop_secret.as_ref(),
-            }),
-            leaf_id_mode: LeafIdMode::PerGroup,
-            proof_mode: proof_mode.as_str(),
-            vrf_id: vrf_id.as_str(),
-            policy_version: policy_version.as_str(),
-            vrf_secret_key: Some(vrf_secret_key.as_slice()),
-            vrf_public_key: Some(vrf_public_key.as_slice()),
-            fs_policy_version: fs_policy_version.as_str(),
-            fs_epoch_base_ts,
-            barrier_version: ticket.barrier_version,
-            fs_join: FsJoinInputs::default(),
-            fs_merge: FsMergeInputs::default(),
-        };
-
-        let parts = AnchorInstanceParts {
+        let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
             gid: &gid,
             cat: &cat,
             tswe_salt_hash: &tswe_salt_hash,
             parent_root: &parent_root,
             join_delta_root: &join_delta_root,
-            revoked_since_prev_root: &revoked_since_root,
+            revoked_since_root: &revoked_since_root,
             revoked_root: &revoked_root,
-            pox_r_commit: Some(&pox_r_commit),
-        };
+            pox_r_commit: &pox_r_commit,
+            msphf_crs_id: msphf_crs_id.as_str(),
+            msphf_params_id: msphf_params_id.as_str(),
+            srx: Some(srx_inputs),
+            pop_public_key: room_identity.pop_public_key.as_slice(),
+            pop_secret_key: pop_secret.as_ref(),
+            proof_mode: proof_mode.as_str(),
+            vrf_id: vrf_id.as_str(),
+            policy_version: policy_version.as_str(),
+            vrf_secret_key: vrf_secret_key.as_slice(),
+            vrf_public_key: vrf_public_key.as_slice(),
+            fs_policy_version: fs_policy_version.as_str(),
+            fs_epoch_base_ts,
+            barrier_version: ticket.barrier_version,
+            fs_join: FsJoinInputs::default(),
+        });
 
         let build_join_bundle = |fs_state: &mut ForwardSecrecyState,
                                  disable_autonomic_evolve: bool|
@@ -341,16 +335,16 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             if disable_autonomic_evolve {
                 CityGClient::generate_epoch_without_evolve(
                     header_map.clone(),
-                    parts.clone(),
-                    params.clone(),
+                    prepared_orchestration.parts.clone(),
+                    prepared_orchestration.params.clone(),
                     fs_state,
                     Some(&witness_bytes),
                 )
             } else {
                 CityGClient::generate_epoch(
                     header_map.clone(),
-                    parts.clone(),
-                    params.clone(),
+                    prepared_orchestration.parts.clone(),
+                    prepared_orchestration.params.clone(),
                     fs_state,
                     Some(&witness_bytes),
                 )

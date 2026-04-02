@@ -8,6 +8,9 @@ use super::barrier_merge_snapshot_runtime::{
 };
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
+use cityg_client::barrier_orchestration::{
+    BarrierOrchestrationInputs, prepare_barrier_orchestration,
+};
 
 pub(super) fn is_fs_forward_jump_group_http_error(
     freeze_code: Option<u32>,
@@ -217,22 +220,25 @@ async fn publish_revocation_merge_from_ticket_inner(
         barrier_update,
     } = snapshot;
     let next_barrier_version = barrier_version.saturating_add(1);
-    let params = OrchestrationParams {
+    let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
+        gid: &gid,
+        cat: &cat_arr,
+        tswe_salt_hash: &tswe_salt_hash_arr,
+        parent_root: &parent_root_arr,
+        join_delta_root: &join_delta_root_arr,
+        revoked_since_root: &revoked_since_root_arr,
+        revoked_root: &revoked_root_arr,
+        pox_r_commit: &pox_r_commit_arr,
         msphf_crs_id: msphf_crs_id.as_str(),
-        params_id: msphf_params_id.as_str(),
+        msphf_params_id: msphf_params_id.as_str(),
         srx: Some(srx_inputs),
-        srx_mode: SrxMode::Complete,
-        pop_keys: Some(PopKeypair {
-            algorithm: "ML-DSA-65",
-            public_key: pop_public_key.as_slice(),
-            secret_key: pop_secret.as_ref(),
-        }),
-        leaf_id_mode: LeafIdMode::PerGroup,
+        pop_public_key: pop_public_key.as_slice(),
+        pop_secret_key: pop_secret.as_ref(),
         proof_mode: proof_mode.as_str(),
         vrf_id: vrf_id.as_str(),
         policy_version: policy_version.as_str(),
-        vrf_secret_key: Some(vrf_secret_key.as_slice()),
-        vrf_public_key: Some(vrf_public_key.as_slice()),
+        vrf_secret_key: vrf_secret_key.as_slice(),
+        vrf_public_key: vrf_public_key.as_slice(),
         fs_policy_version: fs_policy_version.as_str(),
         fs_epoch_base_ts,
         barrier_version: next_barrier_version,
@@ -241,19 +247,7 @@ async fn publish_revocation_merge_from_ticket_inner(
             fs_epoch_commit,
             fs_dev_prev_commit,
         },
-        fs_merge: FsMergeInputs::default(),
-    };
-
-    let parts = AnchorInstanceParts {
-        gid: &gid,
-        cat: cat_arr.as_slice(),
-        tswe_salt_hash: tswe_salt_hash_arr.as_slice(),
-        parent_root: parent_root_arr.as_slice(),
-        join_delta_root: join_delta_root_arr.as_slice(),
-        revoked_since_prev_root: revoked_since_root_arr.as_slice(),
-        revoked_root: revoked_root_arr.as_slice(),
-        pox_r_commit: Some(pox_r_commit_arr.as_slice()),
-    };
+    });
 
     publish_barrier_merge(BarrierMergePublishInputs {
         policy: BarrierMergePublishPolicy {
@@ -275,8 +269,8 @@ async fn publish_revocation_merge_from_ticket_inner(
         header,
         cat_arr,
         parent_root_arr,
-        params,
-        parts,
+        params: prepared_orchestration.params,
+        parts: prepared_orchestration.parts,
         parities: &parities,
         witness_bytes: witness_bytes.as_deref(),
         pivot: &pivot,
