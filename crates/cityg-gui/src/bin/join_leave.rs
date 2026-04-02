@@ -24,21 +24,23 @@ mod watch_mode;
 mod websocket_replay;
 
 use anyhow::{Context, Result, anyhow};
+#[cfg(test)]
 use barrier_shared::{
     BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
-    DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, apply_join_set_to_snapshot,
-    apply_revoked_set_to_snapshot, barrier_path_nodes, collect_resolution_targets,
+    TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS, TICKET_RETRY_MAX_DELAY_MS,
+    apply_join_set_to_snapshot, apply_revoked_set_to_snapshot, barrier_path_nodes,
+    blank_internal_path_from_leaf, blank_leaf_and_path, collect_resolution_targets,
     compute_barrier_pkhash, compute_barrier_tree_hash, compute_revocation_roots_hash,
-    encode_full_verification_receipt, encode_history_commitment_header,
-    expected_barrier_tree_nodes, should_retry_ticket_http_error, sibling_node, ticket_retry_delay,
+    decode_history_commitment_header, expected_barrier_tree_nodes, sibling_node,
+};
+use barrier_shared::{
+    DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, should_retry_ticket_http_error,
+    ticket_retry_delay, to_core_history_commitment, to_core_join_snapshot_records,
     validate_barrier_n_max,
 };
 #[cfg(test)]
-use barrier_shared::{
-    TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS, TICKET_RETRY_MAX_DELAY_MS,
-    blank_internal_path_from_leaf, blank_leaf_and_path, decode_history_commitment_header,
-};
-use ciborium::value::{Integer, Value};
+use ciborium::value::Integer;
+use ciborium::value::Value;
 #[cfg(test)]
 use cityg_api_client::BarrierJoinRecord;
 use cityg_api_client::{
@@ -57,6 +59,12 @@ use cityg_client::{
     barrier_merge_bundle::{
         BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
         build_barrier_merge_bundle as build_barrier_merge_bundle_core,
+    },
+    barrier_snapshot_prepare::{
+        BarrierSnapshotArtifactsInput as CoreBarrierSnapshotArtifactsInput,
+        derive_barrier_snapshot_ticket_fields as derive_barrier_snapshot_ticket_fields_core,
+        derive_barrier_snapshot_witness_selection as derive_barrier_snapshot_witness_selection_core,
+        prepare_barrier_snapshot_artifacts as prepare_barrier_snapshot_artifacts_core,
     },
     bundle_headers::{
         compute_fs_fingerprint_from_header as compute_fs_fingerprint_from_header_core,
@@ -79,6 +87,7 @@ use message_crypto::{
     MsgReplayState, decrypt_message_v2_with_index, derive_msg_replay_context_id,
     derive_msg_replay_tuple_tag,
 };
+#[cfg(test)]
 use msphf_core::{hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
@@ -240,6 +249,21 @@ struct BarrierUpdateBuildResult {
     k_barrier_new: [u8; 32],
 }
 
+impl BarrierUpdateBuildResult {
+    fn from_core(core: cityg_client::barrier_build::BarrierUpdateBuildResult) -> Self {
+        let cityg_client::barrier_build::BarrierUpdateBuildResult {
+            raw_update,
+            k_barrier_new,
+            ..
+        } = core;
+        Self {
+            raw_update,
+            k_barrier_new: *k_barrier_new,
+        }
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_barrier_update_bytes(
     gid: &[u8],
@@ -496,6 +520,7 @@ fn log_fingerprints(session: &Session) {
     );
 }
 
+#[cfg(test)]
 fn select_pivot_parity(parities: &[PivotParity]) -> Option<&PivotParity> {
     parities.iter().max_by(|a, b| {
         a.accept_seq
@@ -1350,8 +1375,27 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         session.fs_epoch_commit,
         session.fs_dev_prev_commit,
     );
-    let pivot = select_pivot_parity(&parities)
-        .ok_or_else(|| anyhow!("merge ticket missing pivot parity entries for join finalize"))?;
+    let core_ticket_fields = derive_barrier_snapshot_ticket_fields_core(
+        &parities,
+        &ticket.cat,
+        &ticket.pox_r_commit,
+        &ticket.parent_root,
+        &ticket.join_delta_root,
+        &ticket.revoked_since_root,
+        &ticket.revoked_root,
+        &ticket.tswe_salt_hash,
+    )
+    .context("parse join finalize merge ticket barrier snapshot fields")?;
+    let cat = core_ticket_fields.cat;
+    let pox_r_commit = core_ticket_fields.pox_r_commit;
+    let pivot = core_ticket_fields.pivot;
+    let parent_root_arr = core_ticket_fields.parent_root;
+    let join_delta_root_arr = core_ticket_fields.join_delta_root;
+    let revoked_since_root_arr = core_ticket_fields.revoked_since_root;
+    let revoked_root_arr = core_ticket_fields.revoked_root;
+    let tswe_salt_hash_arr = core_ticket_fields.tswe_salt_hash;
+    let revocation_roots_hash = core_ticket_fields.revocation_roots_hash;
+    let committed_revocation_roots_hash = core_ticket_fields.committed_revocation_roots_hash;
 
     let mut header = BTreeMap::new();
     header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
@@ -1369,13 +1413,6 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         Value::Bytes(session.join_finalize_auth_token.to_vec()),
     );
 
-    let cat = bytes32("cat", &ticket.cat)?;
-    let pox_r_commit = bytes32("pox_r_commit", &ticket.pox_r_commit)?;
-    let parent_root_arr = bytes32("parent_root", &ticket.parent_root)?;
-    let join_delta_root_arr = bytes32("join_delta_root", &ticket.join_delta_root)?;
-    let revoked_since_root_arr = bytes32("revoked_since_root", &ticket.revoked_since_root)?;
-    let revoked_root_arr = bytes32("revoked_root", &ticket.revoked_root)?;
-    let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
     let snapshot_hash = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
     let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
         DEFAULT_BARRIER_N_MAX
@@ -1389,10 +1426,6 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
             barrier_n_max
         ));
     }
-    let revocation_roots_hash =
-        compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
-    let committed_revocation_roots_hash =
-        compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
     let barrier_tree_response = client
         .barrier_fetch_public_tree(&session.room_id, &snapshot_hash)
         .await
@@ -1423,65 +1456,41 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         &revoked_resolution.history_view_id,
         &revoked_resolution.history_commitment,
     )?;
-    let history_commitment_header =
-        encode_history_commitment_header(&barrier_tree_response.history_commitment)?;
-    header.insert(
-        hdr::HDR_BARRIER_HISTORY_COMMITMENT,
-        Value::Bytes(history_commitment_header.clone()),
-    );
-    if !ticket.current_global_history_attestation_bytes.is_empty() {
-        header.insert(
-            hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
-            Value::Bytes(ticket.current_global_history_attestation_bytes.clone()),
-        );
-    }
-    let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
-    apply_join_set_to_snapshot(
-        snapshot_pre.as_mut_slice(),
-        barrier_n_max,
-        join_resolution.records.as_slice(),
-    )?;
-    apply_revoked_set_to_snapshot(
-        snapshot_pre.as_mut_slice(),
-        barrier_n_max,
-        revoked_resolution.leaf_indices.as_slice(),
-    )?;
-    let kem_tree_hash_before = compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
+    let ticket_history_commitment_core =
+        to_core_history_commitment(&ticket.current_history_commitment);
+    let snapshot_history_commitment_core =
+        to_core_history_commitment(&barrier_tree_response.history_commitment);
+    let joins_history_commitment_core =
+        to_core_history_commitment(&join_resolution.history_commitment);
+    let revoked_history_commitment_core =
+        to_core_history_commitment(&revoked_resolution.history_commitment);
+    let join_records_core = to_core_join_snapshot_records(join_resolution.records.as_slice());
+    let prepared_snapshot =
+        prepare_barrier_snapshot_artifacts_core(CoreBarrierSnapshotArtifactsInput {
+            header,
+            gid: &session.gid,
+            leaf_id: &session.leaf_id,
+            updater_leaf: ticket.cover_leaf_index,
+            barrier_version: ticket.barrier_version,
+            barrier_update_reason: 2,
+            barrier_n_max,
+            max_barrier_update_bytes: ticket.max_barrier_update_bytes,
+            ticket_history_commitment: &ticket_history_commitment_core,
+            snapshot_history_commitment: &snapshot_history_commitment_core,
+            joins_history_commitment: &joins_history_commitment_core,
+            revoked_history_commitment: &revoked_history_commitment_core,
+            current_global_history_attestation_bytes: ticket
+                .current_global_history_attestation_bytes
+                .as_slice(),
+            snapshot_pk_entries: barrier_tree_snapshot.pk_entries.as_slice(),
+            join_records: join_records_core.as_slice(),
+            witness_revoked_leaf_indices: revoked_resolution.leaf_indices.as_slice(),
+            revocation_roots_hash,
+            pop_secret_key: session.pop_secret.as_bytes(),
+        })?;
+    let header = prepared_snapshot.header;
     let next_barrier_version = ticket.barrier_version.saturating_add(1);
-    let barrier_update = build_barrier_update_bytes(
-        &session.gid,
-        barrier_n_max,
-        ticket.cover_leaf_index,
-        next_barrier_version,
-        ticket.barrier_version,
-        revocation_roots_hash,
-        kem_tree_hash_before,
-        snapshot_pre.as_slice(),
-    )?;
-    header.insert(
-        hdr::HDR_BARRIER_UPDATE,
-        Value::Bytes(barrier_update.raw_update.clone()),
-    );
-    header.insert(
-        hdr::HDR_BARRIER_UPDATE_REASON,
-        Value::Integer(Integer::from(2u64)),
-    );
-    if !ticket.current_global_history_attestation_bytes.is_empty() {
-        let receipt = encode_full_verification_receipt(
-            &session.gid,
-            &session.leaf_id,
-            2,
-            ticket.cover_leaf_index,
-            history_commitment_header.as_slice(),
-            ticket.current_global_history_attestation_bytes.as_slice(),
-            barrier_update.raw_update.as_slice(),
-            session.pop_secret.as_bytes(),
-        )?;
-        header.insert(
-            hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
-            Value::Bytes(receipt),
-        );
-    }
+    let barrier_update = BarrierUpdateBuildResult::from_core(prepared_snapshot.barrier_update);
 
     let parts = AnchorInstanceParts {
         gid: &session.gid,
@@ -1538,7 +1547,7 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
                 forward_state,
                 parities: &parities,
                 witness_bytes,
-                pivot,
+                pivot: &pivot,
                 gid: &session.gid,
                 cat: &cat,
                 parent_root: &parent_root_arr,
@@ -1752,21 +1761,27 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             }
         }
 
-        let mut pivot: Option<&PivotParity> = None;
-        for candidate in &parities {
-            let better = match pivot {
-                None => true,
-                Some(current) => {
-                    candidate.accept_seq > current.accept_seq
-                        || (candidate.accept_seq == current.accept_seq
-                            && candidate.xk_hash < current.xk_hash)
-                }
-            };
-            if better {
-                pivot = Some(candidate);
-            }
-        }
-        let pivot = pivot.ok_or(anyhow!("merge ticket missing pivot parity entries"))?;
+        let core_ticket_fields = derive_barrier_snapshot_ticket_fields_core(
+            &parities,
+            &ticket.cat,
+            &ticket.pox_r_commit,
+            &ticket.parent_root,
+            &ticket.join_delta_root,
+            &ticket.revoked_since_root,
+            &ticket.revoked_root,
+            &ticket.tswe_salt_hash,
+        )
+        .context("parse leave merge ticket barrier snapshot fields")?;
+        let cat = core_ticket_fields.cat;
+        let pox_r_commit = core_ticket_fields.pox_r_commit;
+        let pivot = core_ticket_fields.pivot;
+        let parent_root_arr = core_ticket_fields.parent_root;
+        let join_delta_root_arr = core_ticket_fields.join_delta_root;
+        let revoked_since_root_arr = core_ticket_fields.revoked_since_root;
+        let revoked_root_arr = core_ticket_fields.revoked_root;
+        let tswe_salt_hash_arr = core_ticket_fields.tswe_salt_hash;
+        let revocation_roots_hash = core_ticket_fields.revocation_roots_hash;
+        let committed_revocation_roots_hash = core_ticket_fields.committed_revocation_roots_hash;
 
         let srx_inputs = SrxInputsOwned::from_cbor(&ticket.srx_cbor)
             .context("decode SRX inputs")?
@@ -1779,20 +1794,8 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             Value::Bytes(ticket.kbroad_public.clone()),
         );
 
-        let cat = bytes32("cat", &ticket.cat)?;
-        let pox_r_commit = bytes32("pox_r_commit", &ticket.pox_r_commit)?;
-
-        let parent_root_arr = bytes32("parent_root", &ticket.parent_root)?;
-        let join_delta_root_arr = bytes32("join_delta_root", &ticket.join_delta_root)?;
-        let revoked_since_root_arr = bytes32("revoked_since_root", &ticket.revoked_since_root)?;
-        let revoked_root_arr = bytes32("revoked_root", &ticket.revoked_root)?;
-        let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
         let snapshot_hash = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
         let next_barrier_version = ticket.barrier_version.saturating_add(1);
-        let revocation_roots_hash =
-            compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
-        let committed_revocation_roots_hash =
-            compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
         let barrier_tree_response = client
             .barrier_fetch_public_tree(&session.room_id, &snapshot_hash)
             .await
@@ -1835,70 +1838,50 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             &revoked_resolution.history_view_id,
             &revoked_resolution.history_commitment,
         )?;
-        let history_commitment_header =
-            encode_history_commitment_header(&barrier_tree_response.history_commitment)?;
-        header.insert(
-            hdr::HDR_BARRIER_HISTORY_COMMITMENT,
-            Value::Bytes(history_commitment_header.clone()),
-        );
-        if !ticket.current_global_history_attestation_bytes.is_empty() {
-            header.insert(
-                hdr::HDR_BARRIER_GLOBAL_HISTORY_ATTESTATION,
-                Value::Bytes(ticket.current_global_history_attestation_bytes.clone()),
-            );
-        }
-        let mut snapshot_pre = barrier_tree_snapshot.pk_entries.clone();
-        let revoked_cover_leaf_index = u32::try_from(ticket.cover_leaf_index)
-            .map_err(|_| anyhow!("cover_leaf_index out of range for barrier tree"))?;
-        let mut post_revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
-        if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
-            post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
-        }
-        apply_join_set_to_snapshot(
-            snapshot_pre.as_mut_slice(),
-            barrier_n_max,
-            join_resolution.records.as_slice(),
-        )?;
-        apply_revoked_set_to_snapshot(
-            snapshot_pre.as_mut_slice(),
-            barrier_n_max,
-            post_revoked_leaf_indices.as_slice(),
-        )?;
-        let kem_tree_hash_before =
-            compute_barrier_tree_hash(barrier_n_max, snapshot_pre.as_slice())?;
-        let barrier_update = build_barrier_update_bytes(
-            &session.gid,
-            barrier_n_max,
+        let witness_selection = derive_barrier_snapshot_witness_selection_core(
+            0,
             ticket.cover_leaf_index,
-            next_barrier_version,
-            ticket.barrier_version,
+            revoked_resolution.leaf_indices.as_slice(),
             revocation_roots_hash,
-            kem_tree_hash_before,
-            snapshot_pre.as_slice(),
+            committed_revocation_roots_hash,
         )?;
-        header.insert(
-            hdr::HDR_BARRIER_UPDATE,
-            Value::Bytes(barrier_update.raw_update.clone()),
-        );
-        header.insert(
-            hdr::HDR_BARRIER_UPDATE_REASON,
-            Value::Integer(Integer::from(0u64)),
-        );
+        let ticket_history_commitment_core =
+            to_core_history_commitment(&ticket.current_history_commitment);
+        let snapshot_history_commitment_core =
+            to_core_history_commitment(&barrier_tree_response.history_commitment);
+        let joins_history_commitment_core =
+            to_core_history_commitment(&join_resolution.history_commitment);
+        let revoked_history_commitment_core =
+            to_core_history_commitment(&revoked_resolution.history_commitment);
+        let join_records_core = to_core_join_snapshot_records(join_resolution.records.as_slice());
+        let prepared_snapshot =
+            prepare_barrier_snapshot_artifacts_core(CoreBarrierSnapshotArtifactsInput {
+                header,
+                gid: &session.gid,
+                leaf_id: &session.leaf_id,
+                updater_leaf: ticket.cover_leaf_index,
+                barrier_version: ticket.barrier_version,
+                barrier_update_reason: 0,
+                barrier_n_max,
+                max_barrier_update_bytes: ticket.max_barrier_update_bytes,
+                ticket_history_commitment: &ticket_history_commitment_core,
+                snapshot_history_commitment: &snapshot_history_commitment_core,
+                joins_history_commitment: &joins_history_commitment_core,
+                revoked_history_commitment: &revoked_history_commitment_core,
+                current_global_history_attestation_bytes: ticket
+                    .current_global_history_attestation_bytes
+                    .as_slice(),
+                snapshot_pk_entries: barrier_tree_snapshot.pk_entries.as_slice(),
+                join_records: join_records_core.as_slice(),
+                witness_revoked_leaf_indices: witness_selection
+                    .witness_revoked_leaf_indices
+                    .as_slice(),
+                revocation_roots_hash,
+                pop_secret_key: session.pop_secret.as_bytes(),
+            })?;
+        let mut header = prepared_snapshot.header;
+        let barrier_update = BarrierUpdateBuildResult::from_core(prepared_snapshot.barrier_update);
         if !ticket.current_global_history_attestation_bytes.is_empty() {
-            let receipt = encode_full_verification_receipt(
-                &session.gid,
-                &session.leaf_id,
-                0,
-                ticket.cover_leaf_index,
-                history_commitment_header.as_slice(),
-                ticket.current_global_history_attestation_bytes.as_slice(),
-                barrier_update.raw_update.as_slice(),
-                session.pop_secret.as_bytes(),
-            )?;
-            header.insert(
-                hdr::HDR_BARRIER_FULL_VERIFICATION_RECEIPT,
-                Value::Bytes(receipt),
-            );
             let history_authority = ticket.history_authority.as_ref().ok_or_else(|| {
             anyhow!("leave merge ticket missing history_authority descriptor for full verification witness")
         })?;
@@ -1922,8 +1905,8 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
                     &snapshot_hash,
                     ticket.barrier_version,
                     join_resolution.records.as_slice(),
-                    &revocation_roots_hash,
-                    post_revoked_leaf_indices.as_slice(),
+                    &witness_selection.witness_revocation_roots_hash,
+                    witness_selection.witness_revoked_leaf_indices.as_slice(),
                     ticket.deployment_profile_manifest_bytes.as_slice(),
                 )
                 .await
@@ -1987,7 +1970,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             forward_state,
             parities: &parities,
             witness_bytes,
-            pivot,
+            pivot: &pivot,
             gid: &session.gid,
             cat: &cat,
             parent_root: &parent_root_arr,
@@ -2158,7 +2141,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         }
 
         if verbose {
-            log_fs_metadata(pivot, &bundle.header_map);
+            log_fs_metadata(&pivot, &bundle.header_map);
         }
 
         match client.refresh_pivot(&bundle).await {
