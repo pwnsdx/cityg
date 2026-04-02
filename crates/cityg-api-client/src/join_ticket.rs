@@ -1,5 +1,7 @@
 use super::*;
 use cityg_api_schema::pb::{JoinTicketRequest, JoinTicketResponse};
+use cityg_client::barrier::DEFAULT_BARRIER_N_MAX;
+use cityg_client::witness::SrxInputsOwned;
 
 impl CitygApiClient {
     /// Requests a join ticket for a new member.
@@ -263,4 +265,133 @@ impl CitygApiClient {
         })
         .await
     }
+}
+
+pub fn prepare_runtime_join_ticket(
+    response: &JoinTicketResponse,
+) -> Result<PreparedRuntimeJoinTicket, Error> {
+    let gid = array32(&response.gid)?;
+    let cat = array32(&response.cat)?;
+    let parent_root = array32(&response.parent_root)?;
+    let join_delta_root = array32(&response.join_delta_root)?;
+    let revoked_since_root = array32(&response.revoked_since_root)?;
+    let revoked_root = array32(&response.revoked_root)?;
+    let tswe_salt_hash = array32(&response.tswe_salt_hash)?;
+    let leaf_id = array32(&response.leaf_id)?;
+    let pox_r_commit = array32(&response.pox_r_commit)?;
+    let join_finalize_auth_token = array32(&response.join_finalize_auth_token)?;
+    let kem_tree_hash_after = array32(&response.kem_tree_hash_after)?;
+    let current_history_view_id = array32(&response.current_history_view_id)?;
+    let current_history_commitment = response
+        .current_history_commitment
+        .clone()
+        .map(|commitment| parse_history_commitment(current_history_view_id, Some(commitment)))
+        .transpose()?;
+    let current_history_authority_extension = (!response.history_authority_extension.is_empty())
+        .then(|| {
+            require_base_profile_history_authority_extension(
+                response.history_authority_extension.as_str(),
+                "join ticket",
+            )
+        })
+        .transpose()?;
+    let current_predecessor_kem_tree_hash_after =
+        if response.current_predecessor_kem_tree_hash_after.is_empty() {
+            [0u8; 32]
+        } else {
+            array32(&response.current_predecessor_kem_tree_hash_after)?
+        };
+    let barrier_n_max = validate_barrier_n_max(if response.n_max == 0 {
+        DEFAULT_BARRIER_N_MAX
+    } else {
+        response.n_max
+    })?;
+    if response.cover_leaf_index >= barrier_n_max {
+        return Err(Error::Parse(format!(
+            "join ticket cover_leaf_index out of range: {} >= {}",
+            response.cover_leaf_index, barrier_n_max
+        )));
+    }
+    let max_barrier_update_bytes = response.max_barrier_update_bytes.max(1);
+    let _ = normalize_max_barrier_update_bytes(max_barrier_update_bytes)
+        .map_err(|err| Error::Parse(err.to_string()))?;
+    if response.kbroad_public.is_empty() {
+        return Err(Error::Parse(
+            "join ticket missing kbroad_public".to_string(),
+        ));
+    }
+
+    Ok(PreparedRuntimeJoinTicket {
+        gid,
+        cat,
+        parent_root,
+        join_delta_root,
+        revoked_since_root,
+        revoked_root,
+        tswe_salt_hash,
+        leaf_id,
+        pox_r_commit,
+        kbroad_public: response.kbroad_public.clone(),
+        bootstrap_public: response.bootstrap_public.clone(),
+        witness_bytes: (!response.witness_cbor.is_empty()).then(|| response.witness_cbor.clone()),
+        srx_inputs: SrxInputsOwned::from_cbor(&response.srx_cbor)
+            .map_err(|err| Error::Parse(format!("decode join ticket SRX inputs: {err}")))?,
+        msphf_crs_id: if response.msphf_crs_id.is_empty() {
+            "rlwe-merkle/v1".to_string()
+        } else {
+            response.msphf_crs_id.clone()
+        },
+        msphf_params_id: if response.msphf_params_id.is_empty() {
+            "rlwe-params/mock".to_string()
+        } else {
+            response.msphf_params_id.clone()
+        },
+        proof_mode: if response.proof_mode.is_empty() {
+            "lin+zkvrf".to_string()
+        } else {
+            response.proof_mode.clone()
+        },
+        vrf_id: if response.vrf_id.is_empty() {
+            "lb-vrf/v1".to_string()
+        } else {
+            response.vrf_id.clone()
+        },
+        policy_version: if response.policy_version.is_empty() {
+            "0".to_string()
+        } else {
+            response.policy_version.clone()
+        },
+        fs_policy_version: if response.fs_policy_version.is_empty() {
+            "7".to_string()
+        } else {
+            response.fs_policy_version.clone()
+        },
+        fs_epoch_base_ts: response.fs_epoch_base_ts,
+        fs_forward_leap_policy: parse_fs_forward_leap_policy(response.fs_forward_leap_policy)?,
+        barrier_version: response.barrier_version,
+        current_history_view_id,
+        current_history_commitment,
+        current_history_authority_extension,
+        current_global_history_attestation_bytes: response
+            .current_global_history_attestation
+            .clone(),
+        join_finalize_auth_token,
+        barrier_n_max,
+        cover_leaf_index: response.cover_leaf_index,
+        max_barrier_update_bytes,
+        kem_tree_hash_after,
+        current_predecessor_kem_tree_hash_after,
+        current_join_records: response
+            .current_join_records
+            .iter()
+            .map(|record| BarrierJoinRecord {
+                device_pk: record.device_pk.clone(),
+                leaf_index: record.leaf_index,
+                ek_leaf: record.ek_leaf.clone(),
+            })
+            .collect(),
+        current_revoked_leaf_indices: response.current_revoked_leaf_indices.clone(),
+        current_barrier_update: response.current_barrier_update.clone(),
+        last_accepted_ec: response.last_accepted_ec,
+    })
 }

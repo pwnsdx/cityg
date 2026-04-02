@@ -144,6 +144,8 @@ mod observability;
 mod room_admin;
 mod verification;
 
+pub use join_ticket::prepare_runtime_join_ticket;
+
 use ciborium::Value;
 use cityg_api_schema::pb;
 use cityg_client::{
@@ -916,6 +918,46 @@ pub struct PreparedRuntimeMergeTicket {
     pub max_barrier_update_bytes_normalized: usize,
     pub parities: Vec<PivotParity>,
     pub witness_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedRuntimeJoinTicket {
+    pub gid: [u8; 32],
+    pub cat: [u8; 32],
+    pub parent_root: [u8; 32],
+    pub join_delta_root: [u8; 32],
+    pub revoked_since_root: [u8; 32],
+    pub revoked_root: [u8; 32],
+    pub tswe_salt_hash: [u8; 32],
+    pub leaf_id: [u8; 32],
+    pub pox_r_commit: [u8; 32],
+    pub kbroad_public: Vec<u8>,
+    pub bootstrap_public: Vec<u8>,
+    pub witness_bytes: Option<Vec<u8>>,
+    pub srx_inputs: cityg_client::witness::SrxInputsOwned,
+    pub msphf_crs_id: String,
+    pub msphf_params_id: String,
+    pub proof_mode: String,
+    pub vrf_id: String,
+    pub policy_version: String,
+    pub fs_policy_version: String,
+    pub fs_epoch_base_ts: u64,
+    pub fs_forward_leap_policy: FsForwardLeapPolicy,
+    pub barrier_version: u64,
+    pub current_history_view_id: [u8; 32],
+    pub current_history_commitment: Option<HistoryCommitment>,
+    pub current_history_authority_extension: Option<HistoryAuthorityExtension>,
+    pub current_global_history_attestation_bytes: Vec<u8>,
+    pub join_finalize_auth_token: [u8; 32],
+    pub barrier_n_max: u64,
+    pub cover_leaf_index: u64,
+    pub max_barrier_update_bytes: u64,
+    pub kem_tree_hash_after: [u8; 32],
+    pub current_predecessor_kem_tree_hash_after: [u8; 32],
+    pub current_join_records: Vec<BarrierJoinRecord>,
+    pub current_revoked_leaf_indices: Vec<u32>,
+    pub current_barrier_update: Vec<u8>,
+    pub last_accepted_ec: u64,
 }
 
 impl MergeTicket {
@@ -1776,6 +1818,28 @@ mod tests {
         })
     }
 
+    fn empty_srx_inputs_cbor() -> Vec<u8> {
+        cityg_client::witness::SrxInputsOwned {
+            join_leaf_ids: Vec::new(),
+            join_nonmem_parent: Vec::new(),
+            join_nonmem_revoked_since: Vec::new(),
+            since_leaf_ids: Vec::new(),
+            since_mem_revoked: Vec::new(),
+            anchor_mem_pool: Vec::new(),
+            join_frontier: None,
+            since_frontier: None,
+        }
+        .to_cbor()
+        .expect("empty SRX payload should encode")
+    }
+
+    fn runtime_join_ticket_payload() -> JoinTicketResponse {
+        let mut ticket = join_ticket_ok_payload();
+        ticket.parent_root = vec![0x00; 32];
+        ticket.srx_cbor = empty_srx_inputs_cbor();
+        ticket
+    }
+
     fn fs_forward_leap_policy_ok_payload() -> PbFsForwardLeapPolicy {
         PbFsForwardLeapPolicy {
             h: 300,
@@ -2570,6 +2634,58 @@ mod tests {
             err,
             Error::Parse(message)
                 if message.contains("max_barrier_update_bytes mismatch")
+        ));
+    }
+
+    #[test]
+    fn prepare_runtime_join_ticket_parses_fields_and_defaults() {
+        let mut ticket = runtime_join_ticket_payload();
+        ticket.msphf_crs_id.clear();
+        ticket.msphf_params_id.clear();
+        ticket.proof_mode.clear();
+        ticket.vrf_id.clear();
+        ticket.policy_version.clear();
+        ticket.fs_policy_version.clear();
+
+        let prepared = prepare_runtime_join_ticket(&ticket)
+            .expect("join ticket runtime preparation must succeed");
+
+        assert_eq!(prepared.gid, [0x41; 32]);
+        assert_eq!(prepared.cat, [0x42; 32]);
+        assert_eq!(prepared.leaf_id, [0x44; 32]);
+        assert_eq!(prepared.kbroad_public, vec![0x46; 32]);
+        assert_eq!(prepared.bootstrap_public, vec![0x47; 32]);
+        assert_eq!(prepared.msphf_crs_id, "rlwe-merkle/v1");
+        assert_eq!(prepared.msphf_params_id, "rlwe-params/mock");
+        assert_eq!(prepared.proof_mode, "lin+zkvrf");
+        assert_eq!(prepared.vrf_id, "lb-vrf/v1");
+        assert_eq!(prepared.policy_version, "0");
+        assert_eq!(prepared.fs_policy_version, "7");
+        assert_eq!(prepared.barrier_n_max, 1024);
+        assert_eq!(prepared.cover_leaf_index, 0);
+        assert_eq!(prepared.max_barrier_update_bytes, 1_048_576);
+        assert_eq!(prepared.witness_bytes, None);
+        assert_eq!(
+            prepared.current_history_authority_extension,
+            Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
+        );
+        assert_eq!(prepared.last_accepted_ec, 21);
+        assert!(prepared.current_join_records.is_empty());
+        assert!(prepared.current_revoked_leaf_indices.is_empty());
+    }
+
+    #[test]
+    fn prepare_runtime_join_ticket_rejects_cover_leaf_out_of_range() {
+        let mut ticket = runtime_join_ticket_payload();
+        ticket.cover_leaf_index = ticket.n_max;
+
+        let err = prepare_runtime_join_ticket(&ticket)
+            .expect_err("out-of-range join cover leaf must fail");
+
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("join ticket cover_leaf_index out of range")
         ));
     }
 

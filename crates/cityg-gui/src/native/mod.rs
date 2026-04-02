@@ -13,12 +13,14 @@ use crate::barrier_shared::compute_barrier_tree_hash;
 #[cfg(test)]
 use crate::barrier_shared::expected_barrier_tree_nodes;
 #[cfg(test)]
+use crate::barrier_shared::validate_barrier_n_max;
+#[cfg(test)]
 use crate::barrier_shared::{
     BARRIER_KEY_INFO, BARRIER_TREE_INFO, BarrierDeriveSaltPreimage, BarrierTreePathSaltPreimage,
 };
 use crate::barrier_shared::{
     DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, compute_revocation_roots_hash,
-    should_retry_ticket_http_error, ticket_retry_delay, validate_barrier_n_max,
+    should_retry_ticket_http_error, ticket_retry_delay,
 };
 #[cfg(test)]
 use crate::message_crypto::{

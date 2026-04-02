@@ -1,5 +1,4 @@
 use super::*;
-use cityg_api_client::require_base_profile_history_authority_extension;
 use cityg_client::barrier_orchestration::{
     BarrierOrchestrationInputs, prepare_barrier_orchestration,
 };
@@ -156,31 +155,50 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         }
     };
     let (mut session, requires_bootstrap_finalize) = {
-        let gid = bytes32("gid", &ticket.gid)?;
-        let cat = bytes32("cat", &ticket.cat)?;
-        let parent_root = bytes32("parent_root", &ticket.parent_root)?;
-        let revoked_root = bytes32("revoked_root", &ticket.revoked_root)?;
-        let revoked_since_root = bytes32("revoked_since_root", &ticket.revoked_since_root)?;
-        let tswe_salt_hash = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
-        let join_delta_root = bytes32("join_delta_root", &ticket.join_delta_root)?;
-        let leaf_id = bytes32("leaf_id", &ticket.leaf_id)?;
-        let pox_r_commit = bytes32("pox_r_commit", &ticket.pox_r_commit)?;
-        let kbroad_public = if ticket.kbroad_public.is_empty() {
-            return Err(anyhow!("server returned empty KBROAD public key"));
-        } else {
-            ticket.kbroad_public.clone()
-        };
-        let bootstrap_public = ticket.bootstrap_public.clone();
+        let cityg_api_client::PreparedRuntimeJoinTicket {
+            gid,
+            cat,
+            parent_root,
+            join_delta_root,
+            revoked_since_root,
+            revoked_root,
+            tswe_salt_hash,
+            leaf_id,
+            pox_r_commit,
+            kbroad_public,
+            bootstrap_public,
+            witness_bytes,
+            srx_inputs,
+            msphf_crs_id,
+            msphf_params_id,
+            proof_mode,
+            vrf_id,
+            policy_version,
+            fs_policy_version,
+            fs_epoch_base_ts,
+            fs_forward_leap_policy,
+            barrier_version,
+            current_history_view_id,
+            current_history_commitment,
+            current_history_authority_extension,
+            current_global_history_attestation_bytes,
+            join_finalize_auth_token,
+            barrier_n_max,
+            cover_leaf_index,
+            max_barrier_update_bytes,
+            kem_tree_hash_after,
+            current_predecessor_kem_tree_hash_after,
+            current_join_records,
+            current_revoked_leaf_indices,
+            current_barrier_update,
+            last_accepted_ec,
+        } = cityg_api_client::prepare_runtime_join_ticket(&ticket).map_err(anyhow::Error::from)?;
 
-        let witness_bytes = if ticket.witness_cbor.is_empty() {
+        let witness_bytes = if let Some(witness_bytes) = witness_bytes {
+            witness_bytes
+        } else {
             return Err(anyhow!("server did not include canonical witness"));
-        } else {
-            ticket.witness_cbor.clone()
         };
-
-        let srx_inputs = SrxInputsOwned::from_cbor(&ticket.srx_cbor)
-            .context("unable to decode SRX bundle from server")?
-            .into_srx_inputs();
 
         let mut header_map = BTreeMap::new();
         header_map.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
@@ -206,105 +224,6 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         let (vrf_secret_key, vrf_public_key) =
             generate_vrf_keys().context("generate runtime VRF keypair")?;
 
-        let msphf_crs_id = if ticket.msphf_crs_id.is_empty() {
-            "rlwe-merkle/v1".to_string()
-        } else {
-            ticket.msphf_crs_id.clone()
-        };
-        let msphf_params_id = if ticket.msphf_params_id.is_empty() {
-            "rlwe-params/mock".to_string()
-        } else {
-            ticket.msphf_params_id.clone()
-        };
-        let proof_mode = if ticket.proof_mode.is_empty() {
-            "lin+zkvrf".to_string()
-        } else {
-            ticket.proof_mode.clone()
-        };
-        let vrf_id = if ticket.vrf_id.is_empty() {
-            "lb-vrf/v1".to_string()
-        } else {
-            ticket.vrf_id.clone()
-        };
-        let policy_version = if ticket.policy_version.is_empty() {
-            "0".to_string()
-        } else {
-            ticket.policy_version.clone()
-        };
-        let fs_policy_version = if ticket.fs_policy_version.is_empty() {
-            "7".to_string()
-        } else {
-            ticket.fs_policy_version.clone()
-        };
-        let fs_epoch_base_ts = ticket.fs_epoch_base_ts;
-        let fs_forward_leap_policy = ticket
-            .fs_forward_leap_policy
-            .as_ref()
-            .ok_or_else(|| anyhow!("join ticket missing fs_forward_leap_policy"))?;
-        if fs_forward_leap_policy.h == 0
-            || fs_forward_leap_policy.checkpoint_interval < fs_forward_leap_policy.h
-        {
-            return Err(anyhow!(
-                "join ticket carries invalid fs_forward_leap_policy window"
-            ));
-        }
-        let kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
-        let current_predecessor_kem_tree_hash_after =
-            if ticket.current_predecessor_kem_tree_hash_after.is_empty() {
-                [0u8; 32]
-            } else {
-                bytes32(
-                    "current_predecessor_kem_tree_hash_after",
-                    &ticket.current_predecessor_kem_tree_hash_after,
-                )?
-            };
-        let current_history_commitment = ticket
-            .current_history_commitment
-            .clone()
-            .map(|commitment| -> Result<HistoryCommitment> {
-                let history_view_id =
-                    bytes32("current_history_view_id", &commitment.history_view_id)?;
-                let expected_view_id =
-                    bytes32("current_history_view_id", &ticket.current_history_view_id)?;
-                if history_view_id != expected_view_id {
-                    return Err(anyhow!(
-                        "join ticket current_history_commitment.history_view_id mismatch"
-                    ));
-                }
-                Ok(HistoryCommitment {
-                    history_view_id,
-                    history_commitment_id: bytes32(
-                        "current_history_commitment_id",
-                        &commitment.history_commitment_id,
-                    )?,
-                    prev_history_commitment_id: bytes32(
-                        "current_history_commitment.prev_history_commitment_id",
-                        &commitment.prev_history_commitment_id,
-                    )?,
-                    history_seq: commitment.history_seq,
-                })
-            })
-            .transpose()?;
-        let current_history_authority_extension =
-            Some(require_base_profile_history_authority_extension(
-                &ticket.history_authority_extension,
-                "join ticket",
-            )?);
-        let join_finalize_auth_token =
-            bytes32("join_finalize_auth_token", &ticket.join_finalize_auth_token)?;
-        let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
-            DEFAULT_BARRIER_N_MAX
-        } else {
-            ticket.n_max
-        })?;
-        if ticket.cover_leaf_index >= barrier_n_max {
-            return Err(anyhow!(
-                "cover_leaf_index out of range for barrier tree: {} >= {}",
-                ticket.cover_leaf_index,
-                barrier_n_max
-            ));
-        }
-
         let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
             gid: &gid,
             cat: &cat,
@@ -316,7 +235,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             pox_r_commit: &pox_r_commit,
             msphf_crs_id: msphf_crs_id.as_str(),
             msphf_params_id: msphf_params_id.as_str(),
-            srx: Some(srx_inputs),
+            srx: Some(srx_inputs.into_srx_inputs()),
             pop_public_key: room_identity.pop_public_key.as_slice(),
             pop_secret_key: pop_secret.as_ref(),
             proof_mode: proof_mode.as_str(),
@@ -326,7 +245,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             vrf_public_key: vrf_public_key.as_slice(),
             fs_policy_version: fs_policy_version.as_str(),
             fs_epoch_base_ts,
-            barrier_version: ticket.barrier_version,
+            barrier_version,
             fs_join: FsJoinInputs::default(),
         });
 
@@ -405,7 +324,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 fs_epoch_base_ts,
             )
         });
-        let requires_bootstrap_finalize = ticket.barrier_version == 0 && parent_root == [0u8; 32];
+        let requires_bootstrap_finalize = barrier_version == 0 && parent_root == [0u8; 32];
         let session = AppSession {
             server_url,
             room_id,
@@ -452,46 +371,33 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 slack_first_device: fs_forward_leap_policy.slack_first_device,
                 slack_device: fs_forward_leap_policy.slack_device,
             },
-            last_accepted_ec: ticket.last_accepted_ec.max(fs_ec),
+            last_accepted_ec: last_accepted_ec.max(fs_ec),
             last_fetch_timestamp_ms: None,
             msg_replay_state: MsgReplayState::default(),
             capss_witness: capss_witness_bytes,
             barrier_state: BarrierSecretState {
                 barrier_initialized: true,
-                barrier_version: ticket.barrier_version,
+                barrier_version,
                 barrier_roots_hash: compute_revocation_roots_hash(
                     &revoked_since_root,
                     &revoked_root,
                 )?,
-                current_history_view_id: bytes32(
-                    "current_history_view_id",
-                    &ticket.current_history_view_id,
-                )?,
+                current_history_view_id,
                 current_history_commitment,
                 current_history_authority_extension,
-                current_global_history_attestation_bytes: ticket
-                    .current_global_history_attestation
-                    .clone(),
+                current_global_history_attestation_bytes,
                 current_public_tree: None,
                 bootstrap_history_commitment: current_history_commitment,
                 bootstrap_predecessor_kem_tree_hash_after: current_predecessor_kem_tree_hash_after,
-                bootstrap_join_records: ticket
-                    .current_join_records
-                    .iter()
-                    .map(|record| BarrierJoinRecord {
-                        device_pk: record.device_pk.clone(),
-                        leaf_index: record.leaf_index,
-                        ek_leaf: record.ek_leaf.clone(),
-                    })
-                    .collect(),
-                bootstrap_revoked_leaf_indices: ticket.current_revoked_leaf_indices.clone(),
+                bootstrap_join_records: current_join_records,
+                bootstrap_revoked_leaf_indices: current_revoked_leaf_indices,
                 bootstrap_join_finalize_auth_token: join_finalize_auth_token,
                 k_barrier: Zeroizing::new([0u8; 32]),
                 kem_tree_hash_after,
-                bootstrap_current_barrier_update: ticket.current_barrier_update.clone(),
-                max_barrier_update_bytes: ticket.max_barrier_update_bytes.max(1),
+                bootstrap_current_barrier_update: current_barrier_update,
+                max_barrier_update_bytes,
                 n_max: barrier_n_max,
-                cover_leaf_index: ticket.cover_leaf_index,
+                cover_leaf_index,
                 dk_leaf: Zeroizing::new(barrier_leaf_dk_bytes),
                 pkhash_leaf: barrier_pkhash_leaf,
                 barrier_recovery_pending: true,
