@@ -31,6 +31,8 @@ pub(super) enum KeyOutcome {
     Submit,
 }
 
+const LEGACY_STANDALONE_DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8080";
+
 pub(super) fn is_primary_shortcut(keystroke: &Keystroke, key: &str) -> bool {
     if keystroke.modifiers.alt || keystroke.modifiers.function {
         return false;
@@ -48,6 +50,14 @@ pub(super) fn sanitize_clipboard_text(raw: &str) -> String {
             _ => c,
         })
         .collect()
+}
+
+pub(super) fn preferred_join_form_server(default_server_url: &str) -> String {
+    let trimmed = default_server_url.trim();
+    if trimmed.is_empty() || trimmed == LEGACY_STANDALONE_DEFAULT_SERVER_URL {
+        return String::new();
+    }
+    trimmed.to_string()
 }
 
 pub(super) fn build_join_invite(session: &AppSession) -> Result<String> {

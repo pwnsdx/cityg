@@ -117,7 +117,7 @@ impl AppModel {
         let mut model = Self {
             config: config.clone(),
             join_form: JoinFormState {
-                server: config.client.default_server_url.clone(),
+                server: preferred_join_form_server(&config.client.default_server_url),
                 room_id: AppModel::random_room_id(),
                 alias: String::new(),
                 active: Some(ActiveField::Alias),

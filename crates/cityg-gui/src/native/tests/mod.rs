@@ -4550,6 +4550,35 @@ fn app_model_new_restores_saved_session() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
+fn app_model_new_prefers_worker_first_blank_server_for_legacy_default()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let model = AppModel::new(CityGConfig::default());
+    assert!(model.session.is_none());
+    assert!(model.join_form.server.is_empty());
+    Ok(())
+}
+
+#[test]
+fn app_model_new_preserves_explicit_nonlocal_server_default()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let base = temp_dir.path().join("cityg").join("gui");
+    let _override_guard = set_config_dir_override_for_tests(Some(base));
+
+    let mut config = CityGConfig::default();
+    config.client.default_server_url = "https://cityg.example.workers.dev".to_string();
+
+    let model = AppModel::new(config);
+    assert!(model.session.is_none());
+    assert_eq!(model.join_form.server, "https://cityg.example.workers.dev");
+    Ok(())
+}
+
+#[test]
 fn app_model_new_handles_invalid_saved_session_pointer() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
     let base = temp_dir.path().join("cityg").join("gui");
