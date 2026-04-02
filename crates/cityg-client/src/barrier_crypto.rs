@@ -56,6 +56,14 @@ pub fn generate_kbroad_keypair() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
+pub fn generate_barrier_leaf_keypair() -> Result<(Vec<u8>, Vec<u8>, [u8; 32])> {
+    let (public, secret) = kyber768::keypair();
+    let public_key = KemPublicKey::as_bytes(&public).to_vec();
+    let secret_key = KemSecretKey::as_bytes(&secret).to_vec();
+    let pkhash = compute_barrier_pkhash(public_key.as_slice())?;
+    Ok((public_key, secret_key, pkhash))
+}
+
 pub fn derive_internal_node_key_material(
     gid: &[u8],
     path_secret: &[u8; 32],
@@ -139,6 +147,13 @@ mod tests {
         let recovered =
             decapsulate_internal_node_shared_secret(dk_bytes.as_slice(), ct.as_slice())?;
         assert_eq!(recovered.as_slice(), shared.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn generate_barrier_leaf_keypair_reports_matching_pkhash() -> Result<()> {
+        let (public_key, _secret_key, pkhash) = generate_barrier_leaf_keypair()?;
+        assert_eq!(pkhash, compute_barrier_pkhash(public_key.as_slice())?);
         Ok(())
     }
 }

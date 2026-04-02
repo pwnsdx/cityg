@@ -181,10 +181,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         let mut header_map = BTreeMap::new();
         header_map.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
         header_map.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
-        let (barrier_leaf_ek, barrier_leaf_dk) = kyber768::keypair();
-        let barrier_leaf_ek_bytes = KemPublicKey::as_bytes(&barrier_leaf_ek).to_vec();
-        let barrier_leaf_dk_bytes = KemSecretKey::as_bytes(&barrier_leaf_dk).to_vec();
-        let barrier_pkhash_leaf = compute_barrier_pkhash(barrier_leaf_ek_bytes.as_slice())?;
+        let (barrier_leaf_ek_bytes, barrier_leaf_dk_bytes, barrier_pkhash_leaf) =
+            cityg_client::barrier_crypto::generate_barrier_leaf_keypair()?;
         header_map.insert(
             hdr::HDR_BARRIER_LEAF_PK,
             Value::Bytes(barrier_leaf_ek_bytes.clone()),

@@ -54,6 +54,7 @@ use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{
     CityGClient, ClientEpochBundle,
+    barrier_crypto::generate_barrier_leaf_keypair,
     barrier_merge_bundle::{
         BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
         build_barrier_merge_bundle as build_barrier_merge_bundle_core,
@@ -106,12 +107,12 @@ use notifications::{
     Notification, expect_membership_event, expect_message_event, spawn_notification_listener,
     websocket_url,
 };
-use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
-use pqcrypto_kyber::kyber768;
-use pqcrypto_traits::kem::{PublicKey as KemPublicKeyTrait, SecretKey as KemSecretKeyTrait};
-use pqcrypto_traits::sign::{
-    PublicKey as DilithiumPublicKeyTrait, SecretKey as DilithiumSecretKeyTrait,
-};
+#[cfg(test)]
+use pqcrypto_dilithium::dilithium5;
+use pqcrypto_dilithium::dilithium5::SecretKey as MlDsaSecretKey;
+#[cfg(test)]
+use pqcrypto_traits::sign::PublicKey as DilithiumPublicKeyTrait;
+use pqcrypto_traits::sign::SecretKey as DilithiumSecretKeyTrait;
 use rand::{RngExt, rng};
 #[cfg(test)]
 use reqwest::header::CONTENT_TYPE;
@@ -857,13 +858,14 @@ async fn prepare_join_session_with_identity(
     let mut header = BTreeMap::new();
     header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
     header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
-    let (barrier_leaf_ek, barrier_leaf_dk) = kyber768::keypair();
+    let (barrier_leaf_ek_bytes, barrier_leaf_dk_bytes, _barrier_leaf_pkhash) =
+        generate_barrier_leaf_keypair()?;
     header.insert(
         hdr::HDR_BARRIER_LEAF_PK,
-        Value::Bytes(KemPublicKeyTrait::as_bytes(&barrier_leaf_ek).to_vec()),
+        Value::Bytes(barrier_leaf_ek_bytes),
     );
     // Keep the private leaf key material local (future recover path).
-    let _barrier_leaf_dk = KemSecretKeyTrait::as_bytes(&barrier_leaf_dk).to_vec();
+    let _barrier_leaf_dk = barrier_leaf_dk_bytes;
 
     let mut fs_state = ForwardSecrecyState::new({
         let mut seed = [0u8; 32];
