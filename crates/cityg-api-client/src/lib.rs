@@ -598,6 +598,21 @@ impl HistoryAuthorityExtension {
     }
 }
 
+pub fn require_base_profile_history_authority_extension(
+    raw: &str,
+    context: &str,
+) -> Result<HistoryAuthorityExtension, Error> {
+    match parse_history_authority_extension(raw, false) {
+        Ok(extension) => {
+            require_base_profile_global_history_authority_extension(extension, context)
+        }
+        Err(Error::Parse(_)) if !raw.is_empty() => Err(Error::Parse(format!(
+            "{context} carries unsupported history authority extension: {raw}"
+        ))),
+        Err(err) => Err(err),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalHistoryAttestation {
     pub scope_id: [u8; 32],
@@ -2131,6 +2146,48 @@ mod tests {
         assert!(matches!(
             err,
             Error::Parse(message) if message.contains("unsupported history authority extension")
+        ));
+    }
+
+    #[test]
+    fn require_base_profile_history_authority_extension_enforces_global_extension() {
+        assert_eq!(
+            require_base_profile_history_authority_extension(
+                GLOBAL_HISTORY_AUTHORITY_EXTENSION_ID,
+                "join ticket"
+            )
+            .expect("global extension must be accepted"),
+            HistoryAuthorityExtension::GlobalHistoryAuthorityV1
+        );
+
+        let err = require_base_profile_history_authority_extension(
+            LOCAL_HISTORY_AUTHORITY_EXTENSION_ID,
+            "join ticket",
+        )
+        .expect_err("local extension must be rejected in base profile");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("join ticket must carry global-history-authority-v1")
+        ));
+
+        let err = require_base_profile_history_authority_extension("", "join ticket")
+            .expect_err("missing extension must be rejected");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("join ticket missing required global-history-authority-v1")
+        ));
+
+        let err =
+            require_base_profile_history_authority_extension("unknown-extension-v1", "join ticket")
+                .expect_err("unknown extension must be rejected");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains(
+                    "join ticket carries unsupported history authority extension: unknown-extension-v1"
+                )
         ));
     }
 

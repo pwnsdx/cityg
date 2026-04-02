@@ -1,44 +1,11 @@
 use super::*;
+use cityg_api_client::require_base_profile_history_authority_extension;
 
 fn is_fs_forward_jump_group_http_error(
     freeze_code: Option<u32>,
     freeze_reason: Option<&str>,
 ) -> bool {
     freeze_code == Some(9476) || freeze_reason == Some("fs_forward_jump_group")
-}
-
-fn parse_join_ticket_history_authority_extension(
-    raw: &str,
-) -> Result<Option<HistoryAuthorityExtension>> {
-    if raw.is_empty() {
-        return Ok(None);
-    }
-    if raw == HistoryAuthorityExtension::LocalHistoryAuthorityV1.as_str() {
-        return Ok(Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1));
-    }
-    if raw == HistoryAuthorityExtension::GlobalHistoryAuthorityV1.as_str() {
-        return Ok(Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1));
-    }
-    Err(anyhow!(
-        "join ticket carries unsupported history authority extension: {raw}"
-    ))
-}
-
-fn require_base_profile_global_history_authority_extension(
-    extension: Option<HistoryAuthorityExtension>,
-    context: &str,
-) -> Result<HistoryAuthorityExtension> {
-    match extension {
-        Some(HistoryAuthorityExtension::GlobalHistoryAuthorityV1) => {
-            Ok(HistoryAuthorityExtension::GlobalHistoryAuthorityV1)
-        }
-        Some(HistoryAuthorityExtension::LocalHistoryAuthorityV1) => Err(anyhow!(
-            "{context} must carry global-history-authority-v1 in the base profile"
-        )),
-        None => Err(anyhow!(
-            "{context} missing required global-history-authority-v1 in the base profile"
-        )),
-    }
 }
 
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
@@ -318,8 +285,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             })
             .transpose()?;
         let current_history_authority_extension =
-            Some(require_base_profile_global_history_authority_extension(
-                parse_join_ticket_history_authority_extension(&ticket.history_authority_extension)?,
+            Some(require_base_profile_history_authority_extension(
+                &ticket.history_authority_extension,
                 "join ticket",
             )?);
         let join_finalize_auth_token =
