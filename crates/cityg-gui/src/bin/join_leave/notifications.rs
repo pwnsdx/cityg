@@ -298,7 +298,7 @@ impl Notification {
     }
 }
 
-fn parse_hex32_field(value: &JsonValue, key: &str) -> Option<[u8; 32]> {
+pub(crate) fn parse_hex32_field(value: &JsonValue, key: &str) -> Option<[u8; 32]> {
     let hex_str = value.get(key)?.as_str()?;
     let bytes = hex_decode(hex_str).ok()?;
     bytes.as_slice().try_into().ok()

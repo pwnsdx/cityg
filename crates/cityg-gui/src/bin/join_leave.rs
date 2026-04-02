@@ -63,12 +63,13 @@ use cityg_client::{
         recompute_srx_commit as recompute_srx_commit_core,
     },
 };
+use cityg_config::CityGConfig;
 use futures::{SinkExt, StreamExt};
 use hex::decode as hex_decode;
 #[cfg(test)]
 use message_auth::{
-    MESSAGE_PREFIX, MESSAGE_SENDER_DEVICE_PK_ALG, decode_authenticated_message,
-    verify_message_signature, verify_sender_leaf_binding,
+    MESSAGE_PREFIX, decode_authenticated_message, verify_message_signature,
+    verify_sender_leaf_binding,
 };
 use message_auth::{encode_authenticated_message, sign_message};
 use message_crypto::{MessageCryptoContext, encrypt_message_v2};
@@ -78,12 +79,12 @@ use message_crypto::{
     derive_msg_replay_tuple_tag,
 };
 use msphf_core::{hash::h_l, hkdf::hkdf_blake3, serde_utils::to_cbor_vec};
-#[cfg(test)]
-use msphf_orchestrator::compute_leaf_id;
 use msphf_orchestrator::{
     AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, FsMergeInputs, LeafIdMode,
     OrchestrationParams, PivotParity, PopKeypair, SrxMode, derive_we_epoch_id, hdr,
 };
+#[cfg(test)]
+use notifications::parse_hex32_field;
 use notifications::{
     Notification, expect_membership_event, expect_message_event, spawn_notification_listener,
     websocket_url,
@@ -534,6 +535,21 @@ struct WatchModeParams<'a> {
     session_artifact_dir: Option<&'a Path>,
 }
 
+const LEGACY_STANDALONE_DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8080";
+
+fn configured_cli_server_url() -> Option<String> {
+    let config = CityGConfig::load().ok()?;
+    let trimmed = config.client.default_server_url.trim();
+    if trimmed.is_empty() || trimmed == LEGACY_STANDALONE_DEFAULT_SERVER_URL {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn default_cli_server_url() -> String {
+    configured_cli_server_url().unwrap_or_else(|| LEGACY_STANDALONE_DEFAULT_SERVER_URL.to_string())
+}
+
 fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> {
     let mut server_url = None;
     let mut room_id = None;
@@ -605,7 +621,7 @@ fn parse_cli_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> 
         }
     }
 
-    let server_url = server_url.unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+    let server_url = server_url.unwrap_or_else(default_cli_server_url);
     let room_id = room_id.unwrap_or_else(random_room_id);
     let alias_base = alias.unwrap_or_else(|| "cli-joiner".to_string());
 
@@ -2573,6 +2589,30 @@ mod tests {
 
     static TEST_AUTH_ENV: OnceLock<()> = OnceLock::new();
 
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.original.as_deref() {
+                Some(value) => {
+                    unsafe { std::env::set_var(self.key, value) };
+                }
+                None => {
+                    unsafe { std::env::remove_var(self.key) };
+                }
+            }
+        }
+    }
+
+    fn set_env_guard(key: &'static str, value: &str) -> EnvVarGuard {
+        let original = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        EnvVarGuard { key, original }
+    }
+
     fn ensure_test_auth_env() {
         TEST_AUTH_ENV.get_or_init(|| unsafe {
             std::env::set_var("CITYG_SERVER_ROOMS_ADMIN_TOKEN", "join-leave-admin-token");
@@ -4332,7 +4372,7 @@ mod tests {
     #[test]
     fn parse_cli_args_defaults_and_flags() -> Result<()> {
         let opts = parse_cli_args(vec!["--batch".to_string(), "--count=2".to_string()])?;
-        assert_eq!(opts.server_url, "http://127.0.0.1:8080");
+        assert_eq!(opts.server_url, LEGACY_STANDALONE_DEFAULT_SERVER_URL);
         assert_eq!(opts.count, 2);
         assert!(opts.batch_mode);
         assert!(!opts.watch_mode);
@@ -4368,6 +4408,17 @@ mod tests {
             opts.session_artifact_dir,
             Some(PathBuf::from("/tmp/cityg-client-state"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_cli_args_prefers_configured_worker_server_default() -> Result<()> {
+        let _server_guard = set_env_guard(
+            "CITYG_CLIENT_DEFAULT_SERVER_URL",
+            "https://cityg.example.workers.dev",
+        );
+        let opts = parse_cli_args(Vec::<String>::new())?;
+        assert_eq!(opts.server_url, "https://cityg.example.workers.dev");
         Ok(())
     }
 
