@@ -1051,15 +1051,9 @@ async fn prepare_join_session_with_identity(
 }
 
 async fn prepare_join_session(server_url: &str, room_id: &str, alias: &str) -> Result<Session> {
-    let (pop_pk, pop_sk) = dilithium5::keypair();
-    prepare_join_session_with_identity(
-        server_url,
-        room_id,
-        alias,
-        DilithiumPublicKeyTrait::as_bytes(&pop_pk).to_vec(),
-        DilithiumSecretKeyTrait::as_bytes(&pop_sk).to_vec(),
-    )
-    .await
+    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
+    prepare_join_session_with_identity(server_url, room_id, alias, pop_public_key, pop_secret_key)
+        .await
 }
 
 fn is_cover_leaf_index_collision_error(err: &anyhow::Error) -> bool {

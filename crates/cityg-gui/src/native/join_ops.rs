@@ -11,10 +11,10 @@ fn is_fs_forward_jump_group_http_error(
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
 
 fn generate_room_identity() -> RoomIdentity {
-    let (pop_pk, pop_sk) = dilithium5::keypair();
+    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
     RoomIdentity {
-        pop_public_key: pop_pk.as_bytes().to_vec(),
-        pop_secret_key: pop_sk.as_bytes().to_vec(),
+        pop_public_key,
+        pop_secret_key,
     }
 }
 
@@ -198,9 +198,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 .context("invalid POP key")?,
         );
 
-        let (msg_sign_pk, msg_sign_sk) = dilithium5::keypair();
-        let msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
-        let msg_sign_secret_key = msg_sign_sk.as_bytes().to_vec();
+        let (msg_sign_public_key, msg_sign_secret_key) =
+            cityg_client::message_auth::generate_message_signing_keypair();
 
         let (vrf_secret_key, vrf_public_key) =
             generate_vrf_keys().context("generate runtime VRF keypair")?;

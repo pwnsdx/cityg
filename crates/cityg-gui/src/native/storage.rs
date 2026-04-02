@@ -232,10 +232,10 @@ pub(super) fn load_or_create_room_identity(
         return Ok(identity);
     }
 
-    let (pop_pk, pop_sk) = dilithium5::keypair();
+    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
     let identity = RoomIdentity {
-        pop_public_key: pop_pk.as_bytes().to_vec(),
-        pop_secret_key: pop_sk.as_bytes().to_vec(),
+        pop_public_key,
+        pop_secret_key,
     };
     persist_room_identity(server_url, room_id, &identity)?;
     Ok(identity)

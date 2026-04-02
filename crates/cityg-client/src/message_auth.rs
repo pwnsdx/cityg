@@ -105,6 +105,14 @@ pub fn decode_authenticated_message(data: &[u8]) -> Result<AuthenticatedMessage<
     })
 }
 
+pub fn generate_message_signing_keypair() -> (Vec<u8>, Vec<u8>) {
+    let (public_key, secret_key) = dilithium5::keypair();
+    (
+        public_key.as_bytes().to_vec(),
+        secret_key.as_bytes().to_vec(),
+    )
+}
+
 pub fn sign_message(
     leaf_id: &[u8; 32],
     timestamp_ms: u64,
@@ -291,5 +299,12 @@ mod tests {
         assert_eq!(binding.pop_public_key, pk.as_bytes());
         assert!(!binding.signature.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn generate_message_signing_keypair_uses_ml_dsa_lengths() {
+        let (public_key, secret_key) = generate_message_signing_keypair();
+        assert_eq!(public_key.len(), dilithium5::public_key_bytes());
+        assert_eq!(secret_key.len(), dilithium5::secret_key_bytes());
     }
 }
