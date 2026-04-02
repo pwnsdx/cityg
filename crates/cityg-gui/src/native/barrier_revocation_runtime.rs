@@ -5,6 +5,9 @@ use super::*;
 use crate::barrier_shared::{to_core_history_commitment, to_core_join_snapshot_records};
 use cityg_client::barrier_snapshot_prepare::{
     BarrierSnapshotArtifactsInput as CoreBarrierSnapshotArtifactsInput,
+    BarrierSnapshotTicketFields as CoreBarrierSnapshotTicketFields,
+    derive_barrier_snapshot_ticket_fields as derive_barrier_snapshot_ticket_fields_core,
+    derive_barrier_snapshot_witness_selection as derive_barrier_snapshot_witness_selection_core,
     prepare_barrier_snapshot_artifacts as prepare_barrier_snapshot_artifacts_core,
 };
 
@@ -134,9 +137,6 @@ async fn publish_revocation_merge_from_ticket_inner(
     header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
     header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
 
-    let cat_arr = bytes32("cat", &cat)?;
-    let pox_r_commit_arr = bytes32("pox_r_commit", &pox_r_commit)?;
-
     let pop_secret =
         Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
 
@@ -147,18 +147,27 @@ async fn publish_revocation_merge_from_ticket_inner(
     };
 
     let parities = hydrate_parities(&raw_parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit);
-    let pivot = select_pivot_parity(&parities).ok_or_else(|| {
-        anyhow!("{operation_label} merge ticket did not include any pivot parities")
-    })?;
-    let parent_root_arr = bytes32("parent_root", &parent_root)?;
-    let join_delta_root_arr = bytes32("join_delta_root", &join_delta_root)?;
-    let revoked_since_root_arr = bytes32("revoked_since_root", &revoked_since_root)?;
-    let revoked_root_arr = bytes32("revoked_root", &revoked_root)?;
-    let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &tswe_salt_hash)?;
-    let revocation_roots_hash =
-        compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
-    let committed_revocation_roots_hash =
-        compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+    let CoreBarrierSnapshotTicketFields {
+        cat: cat_arr,
+        pox_r_commit: pox_r_commit_arr,
+        pivot,
+        parent_root: parent_root_arr,
+        join_delta_root: join_delta_root_arr,
+        revoked_since_root: revoked_since_root_arr,
+        revoked_root: revoked_root_arr,
+        tswe_salt_hash: tswe_salt_hash_arr,
+        revocation_roots_hash,
+        committed_revocation_roots_hash,
+    } = derive_barrier_snapshot_ticket_fields_core(
+        &parities,
+        &cat,
+        &pox_r_commit,
+        &parent_root,
+        &join_delta_root,
+        &revoked_since_root,
+        &revoked_root,
+        &tswe_salt_hash,
+    )?;
     let snapshot_hash = bytes32("kem_tree_hash_after", &kem_tree_hash_after)?;
     let barrier_tree_response = client
         .barrier_fetch_public_tree(&room_id, &snapshot_hash)
@@ -192,10 +201,13 @@ async fn publish_revocation_merge_from_ticket_inner(
         .context("resolve committed barrier revoked leaf indices")?;
     let revoked_cover_leaf_index = u32::try_from(revoked_cover_leaf_index)
         .map_err(|_| anyhow!("cover_leaf_index out of range for barrier tree"))?;
-    let mut post_revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
-    if let Err(insert_at) = post_revoked_leaf_indices.binary_search(&revoked_cover_leaf_index) {
-        post_revoked_leaf_indices.insert(insert_at, revoked_cover_leaf_index);
-    }
+    let post_revoked_witness_selection = derive_barrier_snapshot_witness_selection_core(
+        0,
+        u64::from(revoked_cover_leaf_index),
+        revoked_resolution.leaf_indices.as_slice(),
+        revocation_roots_hash,
+        committed_revocation_roots_hash,
+    )?;
     let ticket_max_barrier_update_bytes = max_barrier_update_bytes.max(1);
     if stored_max_barrier_update_bytes != 0
         && stored_max_barrier_update_bytes != ticket_max_barrier_update_bytes
@@ -233,7 +245,9 @@ async fn publish_revocation_merge_from_ticket_inner(
                 .as_slice(),
             snapshot_pk_entries: barrier_tree_snapshot.pk_entries.as_slice(),
             join_records: join_records_core.as_slice(),
-            witness_revoked_leaf_indices: post_revoked_leaf_indices.as_slice(),
+            witness_revoked_leaf_indices: post_revoked_witness_selection
+                .witness_revoked_leaf_indices
+                .as_slice(),
             revocation_roots_hash,
             pop_secret_key: pop_secret_key.as_slice(),
         })?;
@@ -270,7 +284,9 @@ async fn publish_revocation_merge_from_ticket_inner(
                 barrier_version,
                 join_resolution.records.as_slice(),
                 &revocation_roots_hash,
-                post_revoked_leaf_indices.as_slice(),
+                post_revoked_witness_selection
+                    .witness_revoked_leaf_indices
+                    .as_slice(),
                 deployment_profile_manifest_bytes.as_slice(),
             )
             .await
@@ -357,7 +373,7 @@ async fn publish_revocation_merge_from_ticket_inner(
     .with_context(|| format!("failed to build {operation_label} merge bundle"))?;
 
     strip_rollup_metadata(&mut bundle.header_map);
-    apply_pivot_alignment(&mut bundle.header_map, pivot);
+    apply_pivot_alignment(&mut bundle.header_map, &pivot);
     let anchor_ctx =
         build_anchor_seed_ctx(&bundle.header_map).context("compute anchor seed ctx")?;
     let seed_ctx_hash = compute_seed_ctx_hash(&anchor_ctx).context("compute seed_ctx_hash")?;

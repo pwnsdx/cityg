@@ -3,16 +3,36 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow};
 use ciborium::Value;
 use hex::encode as hex_encode;
-use msphf_orchestrator::hdr;
+use msphf_orchestrator::{PivotParity, hdr};
 
 use crate::barrier::{
     BarrierHistoryCommitment, BarrierJoinSnapshotRecord, apply_join_set_to_snapshot,
-    apply_revoked_set_to_snapshot, compute_barrier_tree_hash, encode_full_verification_receipt,
-    encode_history_commitment_header, require_current_state_history_commitment,
-    require_same_history_commitment,
+    apply_revoked_set_to_snapshot, compute_barrier_tree_hash, compute_revocation_roots_hash,
+    encode_full_verification_receipt, encode_history_commitment_header,
+    require_current_state_history_commitment, require_same_history_commitment,
 };
 use crate::barrier_build::{BarrierUpdateBuildResult, build_barrier_update_bytes};
 use crate::barrier_update::normalize_max_barrier_update_bytes;
+use crate::binary::bytes32;
+use crate::pivot::select_pivot_parity;
+
+pub struct BarrierSnapshotTicketFields {
+    pub cat: [u8; 32],
+    pub pox_r_commit: [u8; 32],
+    pub pivot: PivotParity,
+    pub parent_root: [u8; 32],
+    pub join_delta_root: [u8; 32],
+    pub revoked_since_root: [u8; 32],
+    pub revoked_root: [u8; 32],
+    pub tswe_salt_hash: [u8; 32],
+    pub revocation_roots_hash: [u8; 32],
+    pub committed_revocation_roots_hash: [u8; 32],
+}
+
+pub struct BarrierSnapshotWitnessSelection {
+    pub witness_revoked_leaf_indices: Vec<u32>,
+    pub witness_revocation_roots_hash: [u8; 32],
+}
 
 pub struct BarrierSnapshotArtifacts {
     pub header: BTreeMap<u64, Value>,
@@ -38,6 +58,68 @@ pub struct BarrierSnapshotArtifactsInput<'a> {
     pub witness_revoked_leaf_indices: &'a [u32],
     pub revocation_roots_hash: [u8; 32],
     pub pop_secret_key: &'a [u8],
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn derive_barrier_snapshot_ticket_fields(
+    parities: &[PivotParity],
+    cat: &[u8],
+    pox_r_commit: &[u8],
+    parent_root: &[u8],
+    join_delta_root: &[u8],
+    revoked_since_root: &[u8],
+    revoked_root: &[u8],
+    tswe_salt_hash: &[u8],
+) -> Result<BarrierSnapshotTicketFields> {
+    let pivot = select_pivot_parity(parities)
+        .ok_or_else(|| anyhow!("merge ticket did not include any pivot parities"))?
+        .clone();
+    let cat = bytes32("cat", cat)?;
+    let pox_r_commit = bytes32("pox_r_commit", pox_r_commit)?;
+    let parent_root = bytes32("parent_root", parent_root)?;
+    let join_delta_root = bytes32("join_delta_root", join_delta_root)?;
+    let revoked_since_root = bytes32("revoked_since_root", revoked_since_root)?;
+    let revoked_root = bytes32("revoked_root", revoked_root)?;
+    let tswe_salt_hash = bytes32("tswe_salt_hash", tswe_salt_hash)?;
+    let revocation_roots_hash = compute_revocation_roots_hash(&revoked_since_root, &revoked_root)?;
+    let committed_revocation_roots_hash =
+        compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+    Ok(BarrierSnapshotTicketFields {
+        cat,
+        pox_r_commit,
+        pivot,
+        parent_root,
+        join_delta_root,
+        revoked_since_root,
+        revoked_root,
+        tswe_salt_hash,
+        revocation_roots_hash,
+        committed_revocation_roots_hash,
+    })
+}
+
+pub fn derive_barrier_snapshot_witness_selection(
+    barrier_update_reason: u64,
+    updater_leaf: u64,
+    resolved_revoked_leaf_indices: &[u32],
+    revocation_roots_hash: [u8; 32],
+    committed_revocation_roots_hash: [u8; 32],
+) -> Result<BarrierSnapshotWitnessSelection> {
+    let mut witness_revoked_leaf_indices = resolved_revoked_leaf_indices.to_vec();
+    let witness_revocation_roots_hash = if barrier_update_reason == 0 {
+        let updater_leaf =
+            u32::try_from(updater_leaf).map_err(|_| anyhow!("cover_leaf_index out of range"))?;
+        if let Err(insert_at) = witness_revoked_leaf_indices.binary_search(&updater_leaf) {
+            witness_revoked_leaf_indices.insert(insert_at, updater_leaf);
+        }
+        revocation_roots_hash
+    } else {
+        committed_revocation_roots_hash
+    };
+    Ok(BarrierSnapshotWitnessSelection {
+        witness_revoked_leaf_indices,
+        witness_revocation_roots_hash,
+    })
 }
 
 pub fn prepare_barrier_snapshot_artifacts(
@@ -167,9 +249,10 @@ pub fn prepare_barrier_snapshot_artifacts(
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::barrier::{compute_revocation_roots_hash, expected_barrier_tree_nodes};
+    use crate::barrier::expected_barrier_tree_nodes;
     use pqcrypto_dilithium::dilithium5;
     use pqcrypto_traits::sign::SecretKey;
+    use std::sync::Arc;
 
     fn sample_commitment() -> BarrierHistoryCommitment {
         BarrierHistoryCommitment {
@@ -184,6 +267,70 @@ mod tests {
         let tree_nodes = usize::try_from(expected_barrier_tree_nodes(n_max)?)
             .expect("expected tree size fits usize");
         Ok(vec![Vec::new(); tree_nodes])
+    }
+
+    fn sample_pivot_parity() -> PivotParity {
+        PivotParity {
+            gid: vec![0x11; 32],
+            cat: vec![0x22; 32],
+            parent_root: [0x33; 32],
+            we_epoch_id: [0x44; 32],
+            rho_commit: [0x45; 32],
+            seed_ctx_hash: [0x46; 32],
+            seed_commit: [0x47; 32],
+            hp_commit: [0x48; 32],
+            xk_hash: [0x49; 32],
+            join_delta_root: [0x4A; 32],
+            revoked_since_root: [0x4B; 32],
+            revoked_root: [0x4C; 32],
+            accept_seq: 7,
+            crs_id: vec![0x4D],
+            params_id: vec![0x4E],
+            policy_version: "9".to_string(),
+            proof_mode: "lin+zkvrf".to_string(),
+            vrf_id: "lb-vrf/mock".to_string(),
+            vrf_proof: vec![0x4F],
+            vrf_public: vec![0x50],
+            mask_a: [0x51; 32],
+            mask_b: [0x52; 32],
+            fs_capss: vec![0x53],
+            proofs_commit: [0x54; 32],
+            srx_commit: Some([0x55; 32]),
+            srx_root_sw: Some([0x56; 32]),
+            is_join: false,
+            hp_envelope: Arc::from(vec![0x57]),
+            fs_epoch_commit: Some([0x58; 32]),
+            fs_ec: Some(59),
+            fs_dev_commit: Some([0x5A; 32]),
+        }
+    }
+
+    #[test]
+    fn derive_ticket_fields_and_witness_selection_cover_revocation_reason() -> Result<()> {
+        let fields = derive_barrier_snapshot_ticket_fields(
+            &[sample_pivot_parity()],
+            &[0xAA; 32],
+            &[0xBB; 32],
+            &[0xCC; 32],
+            &[0xDD; 32],
+            &[0xEE; 32],
+            &[0xEF; 32],
+            &[0xF0; 32],
+        )?;
+        assert_eq!(fields.cat, [0xAA; 32]);
+        let selection = derive_barrier_snapshot_witness_selection(
+            0,
+            4,
+            &[1, 7],
+            fields.revocation_roots_hash,
+            fields.committed_revocation_roots_hash,
+        )?;
+        assert_eq!(selection.witness_revoked_leaf_indices, vec![1, 4, 7]);
+        assert_eq!(
+            selection.witness_revocation_roots_hash,
+            fields.revocation_roots_hash
+        );
+        Ok(())
     }
 
     #[test]

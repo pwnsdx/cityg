@@ -3,6 +3,9 @@ use super::*;
 use crate::barrier_shared::{to_core_history_commitment, to_core_join_snapshot_records};
 use cityg_client::barrier_snapshot_prepare::{
     BarrierSnapshotArtifactsInput as CoreBarrierSnapshotArtifactsInput,
+    BarrierSnapshotTicketFields as CoreBarrierSnapshotTicketFields,
+    derive_barrier_snapshot_ticket_fields as derive_barrier_snapshot_ticket_fields_core,
+    derive_barrier_snapshot_witness_selection as derive_barrier_snapshot_witness_selection_core,
     prepare_barrier_snapshot_artifacts as prepare_barrier_snapshot_artifacts_core,
 };
 
@@ -38,20 +41,27 @@ pub(super) async fn prepare_barrier_merge_snapshot(
     let current_global_history_attestation_bytes =
         ticket.current_global_history_attestation_bytes.as_slice();
 
-    let cat_arr = bytes32("cat", &ticket.cat)?;
-    let pox_r_commit_arr = bytes32("pox_r_commit", &ticket.pox_r_commit)?;
-    let pivot = select_pivot_parity(&ticket.parities)
-        .ok_or_else(|| anyhow!("merge ticket did not include any pivot parities"))?
-        .clone();
-    let parent_root_arr = bytes32("parent_root", &ticket.parent_root)?;
-    let join_delta_root_arr = bytes32("join_delta_root", &ticket.join_delta_root)?;
-    let revoked_since_root_arr = bytes32("revoked_since_root", &ticket.revoked_since_root)?;
-    let revoked_root_arr = bytes32("revoked_root", &ticket.revoked_root)?;
-    let tswe_salt_hash_arr = bytes32("tswe_salt_hash", &ticket.tswe_salt_hash)?;
-    let revocation_roots_hash =
-        compute_revocation_roots_hash(&revoked_since_root_arr, &revoked_root_arr)?;
-    let committed_revocation_roots_hash =
-        compute_revocation_roots_hash(&pivot.revoked_since_root, &pivot.revoked_root)?;
+    let CoreBarrierSnapshotTicketFields {
+        cat: cat_arr,
+        pox_r_commit: pox_r_commit_arr,
+        pivot,
+        parent_root: parent_root_arr,
+        join_delta_root: join_delta_root_arr,
+        revoked_since_root: revoked_since_root_arr,
+        revoked_root: revoked_root_arr,
+        tswe_salt_hash: tswe_salt_hash_arr,
+        revocation_roots_hash,
+        committed_revocation_roots_hash,
+    } = derive_barrier_snapshot_ticket_fields_core(
+        &ticket.parities,
+        &ticket.cat,
+        &ticket.pox_r_commit,
+        &ticket.parent_root,
+        &ticket.join_delta_root,
+        &ticket.revoked_since_root,
+        &ticket.revoked_root,
+        &ticket.tswe_salt_hash,
+    )?;
     let header = ticket.header.clone();
 
     let barrier_tree_response = client
@@ -74,17 +84,13 @@ pub(super) async fn prepare_barrier_merge_snapshot(
         .barrier_resolve_revoked_leaves(room_id, &committed_revocation_roots_hash)
         .await
         .context("resolve committed barrier revoked leaf indices")?;
-    let mut witness_revoked_leaf_indices = revoked_resolution.leaf_indices.clone();
-    let witness_revocation_roots_hash = if mode.reason() == 0 {
-        let cover_leaf_index_u32 = u32::try_from(cover_leaf_index)
-            .map_err(|_| anyhow!("cover_leaf_index out of range"))?;
-        if let Err(insert_at) = witness_revoked_leaf_indices.binary_search(&cover_leaf_index_u32) {
-            witness_revoked_leaf_indices.insert(insert_at, cover_leaf_index_u32);
-        }
-        revocation_roots_hash
-    } else {
-        committed_revocation_roots_hash
-    };
+    let witness_selection = derive_barrier_snapshot_witness_selection_core(
+        mode.reason(),
+        cover_leaf_index,
+        revoked_resolution.leaf_indices.as_slice(),
+        revocation_roots_hash,
+        committed_revocation_roots_hash,
+    )?;
     let ticket_history_commitment_core = to_core_history_commitment(ticket_history_commitment);
     let snapshot_history_commitment_core =
         to_core_history_commitment(&barrier_tree_response.history_commitment);
@@ -110,7 +116,7 @@ pub(super) async fn prepare_barrier_merge_snapshot(
             current_global_history_attestation_bytes,
             snapshot_pk_entries: barrier_tree_snapshot.pk_entries.as_slice(),
             join_records: join_records_core.as_slice(),
-            witness_revoked_leaf_indices: witness_revoked_leaf_indices.as_slice(),
+            witness_revoked_leaf_indices: witness_selection.witness_revoked_leaf_indices.as_slice(),
             revocation_roots_hash,
             pop_secret_key: ticket.pop_secret_key.as_slice(),
         })?;
@@ -153,8 +159,8 @@ pub(super) async fn prepare_barrier_merge_snapshot(
                 &snapshot_hash,
                 barrier_version,
                 join_resolution.records.as_slice(),
-                &witness_revocation_roots_hash,
-                witness_revoked_leaf_indices.as_slice(),
+                &witness_selection.witness_revocation_roots_hash,
+                witness_selection.witness_revoked_leaf_indices.as_slice(),
                 ticket.deployment_profile_manifest_bytes.as_slice(),
             )
             .await
