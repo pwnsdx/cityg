@@ -1,7 +1,8 @@
 use super::barrier_merge_ticket_runtime::PreparedBarrierMergeTicket;
 use super::*;
 use cityg_api_client::{
-    HistoryAuthorityDescriptor, to_core_history_commitment, to_core_join_snapshot_records,
+    BarrierSnapshotDependencies, HistoryAuthorityDescriptor, to_core_history_commitment,
+    to_core_join_snapshot_records,
 };
 use cityg_client::barrier_snapshot_prepare::{
     BarrierSnapshotArtifactsInput as CoreBarrierSnapshotArtifactsInput,
@@ -153,10 +154,22 @@ pub(super) async fn prepare_barrier_snapshot_runtime(
         tswe_salt_hash,
     )?;
 
-    let barrier_tree_response = client
-        .barrier_fetch_public_tree(room_id, &snapshot_hash)
+    let BarrierSnapshotDependencies {
+        public_tree: barrier_tree_response,
+        joins: join_resolution,
+        revoked: revoked_resolution,
+    } = client
+        .barrier_fetch_snapshot_dependencies(
+            room_id,
+            barrier_version,
+            &snapshot_hash,
+            &committed_revocation_roots_hash,
+            Some(&ticket_history_commitment.history_view_id),
+            ticket_history_commitment,
+            operation_label,
+        )
         .await
-        .context("fetch barrier public tree snapshot")?;
+        .context("fetch barrier snapshot dependencies")?;
     let barrier_tree_snapshot = barrier_tree_response.tree;
     if barrier_tree_snapshot.n_max != barrier_n_max {
         return Err(anyhow!(
@@ -165,14 +178,6 @@ pub(super) async fn prepare_barrier_snapshot_runtime(
         ));
     }
     validate_barrier_tree_snapshot_auth(&snapshot_hash, barrier_n_max, &barrier_tree_snapshot)?;
-    let join_resolution = client
-        .barrier_resolve_joins_since(room_id, barrier_version)
-        .await
-        .context("resolve barrier joins since previous version")?;
-    let revoked_resolution = client
-        .barrier_resolve_revoked_leaves(room_id, &committed_revocation_roots_hash)
-        .await
-        .context("resolve committed barrier revoked leaf indices")?;
     let witness_selection = derive_barrier_snapshot_witness_selection_core(
         barrier_update_reason,
         cover_leaf_index,

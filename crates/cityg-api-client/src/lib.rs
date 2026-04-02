@@ -555,6 +555,13 @@ pub struct BarrierFetchedPublicTree {
     pub tree: BarrierPublicTree,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BarrierSnapshotDependencies {
+    pub public_tree: BarrierFetchedPublicTree,
+    pub joins: BarrierResolvedJoins,
+    pub revoked: BarrierResolvedRevokedLeaves,
+}
+
 /// Server-local append-only authenticated history commitment carried by A/B/C/D.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryCommitment {
@@ -562,6 +569,45 @@ pub struct HistoryCommitment {
     pub history_commitment_id: [u8; 32],
     pub prev_history_commitment_id: [u8; 32],
     pub history_seq: u64,
+}
+
+pub fn ensure_matching_barrier_history_dependencies(
+    context: &str,
+    expected_view_id: Option<&[u8; 32]>,
+    expected_commitment: &HistoryCommitment,
+    tree: &BarrierFetchedPublicTree,
+    joins: &BarrierResolvedJoins,
+    revoked: &BarrierResolvedRevokedLeaves,
+) -> Result<(), Error> {
+    if tree.history_view_id == [0u8; 32]
+        || tree.history_view_id != joins.history_view_id
+        || tree.history_view_id != revoked.history_view_id
+    {
+        return Err(Error::Parse(format!(
+            "{context}: public tree / joins / revoked leaves do not share one authenticated history view (960.9)"
+        )));
+    }
+    if tree.history_commitment.history_view_id == [0u8; 32]
+        || tree.history_commitment != joins.history_commitment
+        || tree.history_commitment != revoked.history_commitment
+    {
+        return Err(Error::Parse(format!(
+            "{context}: public tree / joins / revoked leaves do not share one authenticated history commitment (960.9)"
+        )));
+    }
+    if tree.history_commitment != *expected_commitment {
+        return Err(Error::Parse(format!(
+            "{context}: authenticated history commitment does not match ticket/provisioning state (960.9)"
+        )));
+    }
+    if let Some(expected_history_view_id) = expected_view_id
+        && tree.history_view_id != *expected_history_view_id
+    {
+        return Err(Error::Parse(format!(
+            "{context}: authenticated history view does not match provisioning state (960.9)"
+        )));
+    }
+    Ok(())
 }
 
 pub fn to_core_history_commitment(

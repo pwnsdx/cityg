@@ -9,6 +9,40 @@ use cityg_api_schema::pb::{
 };
 
 impl CitygApiClient {
+    pub async fn barrier_fetch_snapshot_dependencies(
+        &self,
+        room_id: &str,
+        barrier_version: u64,
+        snapshot_hash: &[u8; 32],
+        committed_revocation_roots_hash: &[u8; 32],
+        expected_view_id: Option<&[u8; 32]>,
+        expected_commitment: &HistoryCommitment,
+        context: &str,
+    ) -> Result<BarrierSnapshotDependencies, Error> {
+        let public_tree = self
+            .barrier_fetch_public_tree(room_id, snapshot_hash)
+            .await?;
+        let joins = self
+            .barrier_resolve_joins_since(room_id, barrier_version)
+            .await?;
+        let revoked = self
+            .barrier_resolve_revoked_leaves(room_id, committed_revocation_roots_hash)
+            .await?;
+        ensure_matching_barrier_history_dependencies(
+            context,
+            expected_view_id,
+            expected_commitment,
+            &public_tree,
+            &joins,
+            &revoked,
+        )?;
+        Ok(BarrierSnapshotDependencies {
+            public_tree,
+            joins,
+            revoked,
+        })
+    }
+
     /// Requests a full-verification witness for a barrier update.
     #[allow(clippy::too_many_arguments)]
     pub async fn barrier_issue_full_verification_witness(

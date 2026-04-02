@@ -41,9 +41,11 @@ use ciborium::value::Integer;
 use ciborium::value::Value;
 #[cfg(test)]
 use cityg_api_client::BarrierJoinRecord;
+#[cfg(test)]
+use cityg_api_client::HistoryCommitment;
 use cityg_api_client::{
-    CitygApiClient, Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment,
-    to_core_history_commitment, to_core_join_snapshot_records,
+    BarrierSnapshotDependencies, CitygApiClient, Error as ApiClientError,
+    HistoryAuthorityExtension, to_core_history_commitment, to_core_join_snapshot_records,
 };
 #[cfg(test)]
 use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
@@ -321,49 +323,6 @@ fn fingerprint_preview_hex(bytes: &[u8; 32]) -> String {
         &second[..4],
         &second[4..]
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn ensure_matching_history_dependencies(
-    context: &str,
-    expected_view_id: Option<&[u8; 32]>,
-    expected_commitment: &HistoryCommitment,
-    tree_history_view_id: &[u8; 32],
-    tree_history_commitment: &HistoryCommitment,
-    joins_history_view_id: &[u8; 32],
-    joins_history_commitment: &HistoryCommitment,
-    revoked_history_view_id: &[u8; 32],
-    revoked_history_commitment: &HistoryCommitment,
-) -> Result<()> {
-    if *tree_history_view_id == [0u8; 32]
-        || tree_history_view_id != joins_history_view_id
-        || tree_history_view_id != revoked_history_view_id
-    {
-        return Err(anyhow!(
-            "{context}: public tree / joins / revoked leaves do not share one authenticated history view (960.9)"
-        ));
-    }
-    if tree_history_commitment.history_view_id == [0u8; 32]
-        || *tree_history_commitment != *joins_history_commitment
-        || *tree_history_commitment != *revoked_history_commitment
-    {
-        return Err(anyhow!(
-            "{context}: public tree / joins / revoked leaves do not share one authenticated history commitment (960.9)"
-        ));
-    }
-    if *tree_history_commitment != *expected_commitment {
-        return Err(anyhow!(
-            "{context}: authenticated history commitment does not match ticket/provisioning state (960.9)"
-        ));
-    }
-    if let Some(expected_history_view_id) = expected_view_id
-        && tree_history_view_id != expected_history_view_id
-    {
-        return Err(anyhow!(
-            "{context}: authenticated history view does not match provisioning state (960.9)"
-        ));
-    }
-    Ok(())
 }
 
 fn log_fingerprints(session: &Session) {
@@ -1271,10 +1230,22 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
             barrier_n_max
         ));
     }
-    let barrier_tree_response = client
-        .barrier_fetch_public_tree(&session.room_id, &snapshot_hash)
+    let BarrierSnapshotDependencies {
+        public_tree: barrier_tree_response,
+        joins: join_resolution,
+        revoked: revoked_resolution,
+    } = client
+        .barrier_fetch_snapshot_dependencies(
+            &session.room_id,
+            ticket.barrier_version,
+            &snapshot_hash,
+            &committed_revocation_roots_hash,
+            Some(&ticket.current_history_commitment.history_view_id),
+            &ticket.current_history_commitment,
+            "join finalize",
+        )
         .await
-        .context("fetch barrier public tree snapshot for join finalize")?;
+        .context("fetch barrier snapshot dependencies for join finalize")?;
     let barrier_tree_snapshot = barrier_tree_response.tree;
     if barrier_tree_snapshot.n_max != barrier_n_max {
         return Err(anyhow!(
@@ -1282,25 +1253,6 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
             barrier_tree_snapshot.n_max
         ));
     }
-    let join_resolution = client
-        .barrier_resolve_joins_since(&session.room_id, ticket.barrier_version)
-        .await
-        .context("resolve barrier joins since previous version for join finalize")?;
-    let revoked_resolution = client
-        .barrier_resolve_revoked_leaves(&session.room_id, &committed_revocation_roots_hash)
-        .await
-        .context("resolve committed barrier revoked leaves for join finalize")?;
-    ensure_matching_history_dependencies(
-        "join finalize",
-        Some(&ticket.current_history_commitment.history_view_id),
-        &ticket.current_history_commitment,
-        &barrier_tree_response.history_view_id,
-        &barrier_tree_response.history_commitment,
-        &join_resolution.history_view_id,
-        &join_resolution.history_commitment,
-        &revoked_resolution.history_view_id,
-        &revoked_resolution.history_commitment,
-    )?;
     let ticket_history_commitment_core =
         to_core_history_commitment(&ticket.current_history_commitment);
     let snapshot_history_commitment_core =
@@ -1641,10 +1593,22 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
 
         let snapshot_hash = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
         let next_barrier_version = ticket.barrier_version.saturating_add(1);
-        let barrier_tree_response = client
-            .barrier_fetch_public_tree(&session.room_id, &snapshot_hash)
+        let BarrierSnapshotDependencies {
+            public_tree: barrier_tree_response,
+            joins: join_resolution,
+            revoked: revoked_resolution,
+        } = client
+            .barrier_fetch_snapshot_dependencies(
+                &session.room_id,
+                ticket.barrier_version,
+                &snapshot_hash,
+                &committed_revocation_roots_hash,
+                Some(&ticket.current_history_commitment.history_view_id),
+                &ticket.current_history_commitment,
+                "leave",
+            )
             .await
-            .context("fetch barrier public tree snapshot")?;
+            .context("fetch barrier snapshot dependencies for leave")?;
         let barrier_tree_snapshot = barrier_tree_response.tree;
         let barrier_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
             DEFAULT_BARRIER_N_MAX
@@ -1664,25 +1628,6 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
                 barrier_tree_snapshot.n_max
             ));
         }
-        let join_resolution = client
-            .barrier_resolve_joins_since(&session.room_id, ticket.barrier_version)
-            .await
-            .context("resolve barrier joins since previous version")?;
-        let revoked_resolution = client
-            .barrier_resolve_revoked_leaves(&session.room_id, &committed_revocation_roots_hash)
-            .await
-            .context("resolve committed barrier revoked leaf indices")?;
-        ensure_matching_history_dependencies(
-            "leave",
-            Some(&ticket.current_history_commitment.history_view_id),
-            &ticket.current_history_commitment,
-            &barrier_tree_response.history_view_id,
-            &barrier_tree_response.history_commitment,
-            &join_resolution.history_view_id,
-            &join_resolution.history_commitment,
-            &revoked_resolution.history_view_id,
-            &revoked_resolution.history_commitment,
-        )?;
         let witness_selection = derive_barrier_snapshot_witness_selection_core(
             0,
             ticket.cover_leaf_index,
@@ -5744,16 +5689,38 @@ mod tests {
         let mut mismatched = expected;
         mismatched.history_commitment_id[0] ^= 0x5A;
 
-        let err = ensure_matching_history_dependencies(
+        let err = cityg_api_client::ensure_matching_barrier_history_dependencies(
             "leave",
             Some(&expected.history_view_id),
             &expected,
-            &mismatched.history_view_id,
-            &mismatched,
-            &expected.history_view_id,
-            &expected,
-            &expected.history_view_id,
-            &expected,
+            &cityg_api_client::BarrierFetchedPublicTree {
+                history_view_id: mismatched.history_view_id,
+                history_commitment: mismatched,
+                history_authority_extension: None,
+                history_authority: None,
+                global_history_attestation: None,
+                tree: cityg_api_client::BarrierPublicTree {
+                    n_max: 4,
+                    kem_tree_hash_after: [0u8; 32],
+                    pk_entries: Vec::new(),
+                },
+            },
+            &cityg_api_client::BarrierResolvedJoins {
+                history_view_id: expected.history_view_id,
+                history_commitment: expected,
+                history_authority_extension: None,
+                history_authority: None,
+                global_history_attestation: None,
+                records: Vec::new(),
+            },
+            &cityg_api_client::BarrierResolvedRevokedLeaves {
+                history_view_id: expected.history_view_id,
+                history_commitment: expected,
+                history_authority_extension: None,
+                history_authority: None,
+                global_history_attestation: None,
+                leaf_indices: Vec::new(),
+            },
         )
         .expect_err("history commitment mismatch must fail");
         assert!(
