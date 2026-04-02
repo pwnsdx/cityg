@@ -78,7 +78,11 @@ pub fn recompute_srx_commit(header: &BTreeMap<u64, Value>) -> Result<Option<[u8;
     Ok(Some(commit))
 }
 
-fn header_bytes(header: &BTreeMap<u64, Value>, key: u64, label: &'static str) -> Result<Vec<u8>> {
+pub fn header_bytes(
+    header: &BTreeMap<u64, Value>,
+    key: u64,
+    label: &'static str,
+) -> Result<Vec<u8>> {
     match header.get(&key) {
         Some(Value::Bytes(bytes)) => Ok(bytes.clone()),
         Some(_) => Err(anyhow!("{label} must be bytes")),
@@ -86,7 +90,7 @@ fn header_bytes(header: &BTreeMap<u64, Value>, key: u64, label: &'static str) ->
     }
 }
 
-fn header_bytes_opt(header: &BTreeMap<u64, Value>, key: u64) -> Result<Option<Vec<u8>>> {
+pub fn header_bytes_opt(header: &BTreeMap<u64, Value>, key: u64) -> Result<Option<Vec<u8>>> {
     match header.get(&key) {
         Some(Value::Bytes(bytes)) => Ok(Some(bytes.clone())),
         Some(Value::Null) | None => Ok(None),
@@ -94,7 +98,7 @@ fn header_bytes_opt(header: &BTreeMap<u64, Value>, key: u64) -> Result<Option<Ve
     }
 }
 
-fn header_bytes32_opt(header: &BTreeMap<u64, Value>, key: u64) -> Result<Option<[u8; 32]>> {
+pub fn header_bytes32_opt(header: &BTreeMap<u64, Value>, key: u64) -> Result<Option<[u8; 32]>> {
     match header.get(&key) {
         Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
             let mut arr = [0u8; 32];

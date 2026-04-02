@@ -5,7 +5,10 @@ pub(super) use cityg_client::bundle_headers::{
     compute_fs_fingerprint_from_header, derive_fs_fingerprint_from_fields,
 };
 #[cfg(test)]
-pub(super) use cityg_client::bundle_headers::{recompute_proofs_commit, recompute_srx_commit};
+pub(super) use cityg_client::bundle_headers::{
+    header_bytes, header_bytes_opt, header_bytes32_opt, recompute_proofs_commit,
+    recompute_srx_commit,
+};
 
 pub(super) fn hex_encode_prefix(bytes: &[u8; 32], prefix_len: usize) -> String {
     let hex = hex_encode(bytes);
@@ -153,43 +156,4 @@ pub(super) fn current_unix_timestamp_ms() -> u64 {
 
 pub(super) fn short_leaf_display(leaf: &[u8; 32]) -> String {
     format!("{}…", hex_encode(&leaf[..4]))
-}
-
-#[cfg(test)]
-pub(super) fn header_bytes(
-    header: &BTreeMap<u64, Value>,
-    key: u64,
-    label: &'static str,
-) -> Result<Vec<u8>> {
-    match header.get(&key) {
-        Some(Value::Bytes(bytes)) => Ok(bytes.clone()),
-        Some(_) => Err(anyhow!("{label} must be bytes")),
-        None => Err(anyhow!("{label} missing")),
-    }
-}
-
-#[cfg(test)]
-pub(super) fn header_bytes_opt(header: &BTreeMap<u64, Value>, key: u64) -> Result<Option<Vec<u8>>> {
-    match header.get(&key) {
-        Some(Value::Bytes(bytes)) => Ok(Some(bytes.clone())),
-        Some(Value::Null) | None => Ok(None),
-        Some(_) => Err(anyhow!("header {key} must be bytes")),
-    }
-}
-
-#[cfg(test)]
-pub(super) fn header_bytes32_opt(
-    header: &BTreeMap<u64, Value>,
-    key: u64,
-) -> Result<Option<[u8; 32]>> {
-    match header.get(&key) {
-        Some(Value::Bytes(bytes)) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(bytes);
-            Ok(Some(arr))
-        }
-        Some(Value::Bytes(_)) => Err(anyhow!("header {key} must be 32 bytes")),
-        Some(Value::Null) | None => Ok(None),
-        Some(_) => Err(anyhow!("header {key} must be bytes")),
-    }
 }
