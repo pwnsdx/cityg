@@ -2,12 +2,17 @@ use anyhow::Result;
 use msphf_orchestrator::ForwardSecrecyState;
 use rand::{Rng, rng};
 
-use crate::{barrier_crypto::generate_barrier_leaf_keypair, vrf::generate_vrf_keys};
+use crate::{
+    barrier_crypto::generate_barrier_leaf_keypair, message_auth::generate_message_signing_keypair,
+    vrf::generate_vrf_keys,
+};
 
 pub struct JoinRuntimeMaterial {
     pub barrier_leaf_public_key: Vec<u8>,
     pub barrier_leaf_secret_key: Vec<u8>,
     pub barrier_leaf_pkhash: [u8; 32],
+    pub msg_sign_public_key: Vec<u8>,
+    pub msg_sign_secret_key: Vec<u8>,
     pub vrf_secret_key: Vec<u8>,
     pub vrf_public_key: Vec<u8>,
     pub forward_state: ForwardSecrecyState,
@@ -16,6 +21,7 @@ pub struct JoinRuntimeMaterial {
 pub fn generate_join_runtime_material() -> Result<JoinRuntimeMaterial> {
     let (barrier_leaf_public_key, barrier_leaf_secret_key, barrier_leaf_pkhash) =
         generate_barrier_leaf_keypair()?;
+    let (msg_sign_public_key, msg_sign_secret_key) = generate_message_signing_keypair();
     let (vrf_secret_key, vrf_public_key) = generate_vrf_keys()?;
 
     let mut k_fs = [0u8; 32];
@@ -25,6 +31,8 @@ pub fn generate_join_runtime_material() -> Result<JoinRuntimeMaterial> {
         barrier_leaf_public_key,
         barrier_leaf_secret_key,
         barrier_leaf_pkhash,
+        msg_sign_public_key,
+        msg_sign_secret_key,
         vrf_secret_key,
         vrf_public_key,
         forward_state: ForwardSecrecyState::new(k_fs),
@@ -43,6 +51,8 @@ mod tests {
             runtime.barrier_leaf_pkhash,
             compute_barrier_pkhash(runtime.barrier_leaf_public_key.as_slice())?
         );
+        assert!(!runtime.msg_sign_public_key.is_empty());
+        assert!(!runtime.msg_sign_secret_key.is_empty());
         assert!(!runtime.vrf_secret_key.is_empty());
         assert!(!runtime.vrf_public_key.is_empty());
         Ok(())

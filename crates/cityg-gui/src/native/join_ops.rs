@@ -153,8 +153,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 .context("invalid POP key")?,
         );
 
-        let (msg_sign_public_key, msg_sign_secret_key) =
-            cityg_client::message_auth::generate_message_signing_keypair();
+        let msg_sign_public_key = join_runtime.msg_sign_public_key;
+        let msg_sign_secret_key = join_runtime.msg_sign_secret_key;
         let vrf_secret_key = join_runtime.vrf_secret_key;
         let vrf_public_key = join_runtime.vrf_public_key;
 
