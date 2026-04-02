@@ -54,7 +54,6 @@ use cityg_client::{
         BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
         build_barrier_merge_bundle as build_barrier_merge_bundle_core,
     },
-    barrier_orchestration::{BarrierOrchestrationInputs, prepare_barrier_orchestration},
     bundle_headers::recompute_proofs_commit,
     join_bundle::{
         JoinEpochBundleInputs, build_join_epoch_bundle, parse_accepted_bundle_runtime_state,
@@ -88,7 +87,7 @@ use message_crypto::{
 };
 #[cfg(test)]
 use msphf_core::serde_utils::to_cbor_vec;
-use msphf_orchestrator::{ForwardSecrecyState, FsJoinInputs, PivotParity, hdr};
+use msphf_orchestrator::{ForwardSecrecyState, PivotParity, hdr};
 #[cfg(test)]
 use notifications::parse_hex32_field;
 use notifications::{
@@ -731,39 +730,15 @@ async fn prepare_join_session_with_identity(
         Err(err) => return Err(err.into()),
     };
 
-    let cityg_api_client::PreparedRuntimeJoinTicket {
-        gid,
-        cat,
-        parent_root,
-        join_delta_root,
-        revoked_since_root,
-        revoked_root,
-        tswe_salt_hash,
-        leaf_id,
-        pox_r_commit,
-        kbroad_public,
-        bootstrap_public,
-        witness_bytes,
-        srx_inputs,
-        msphf_crs_id,
-        msphf_params_id,
-        proof_mode,
-        vrf_id,
-        policy_version,
-        fs_policy_version,
-        fs_epoch_base_ts,
-        barrier_version,
-        current_history_commitment,
-        current_history_authority_extension,
-        current_global_history_attestation_bytes,
-        join_finalize_auth_token,
-        kem_tree_hash_after,
-        ..
-    } = cityg_api_client::prepare_runtime_join_ticket(&ticket).map_err(anyhow::Error::from)?;
+    let prepared_runtime =
+        cityg_api_client::prepare_runtime_join_ticket(&ticket).map_err(anyhow::Error::from)?;
 
     let mut header = BTreeMap::new();
     header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
-    header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
+    header.insert(
+        hdr::HDR_KBROAD_PUB,
+        Value::Bytes(prepared_runtime.kbroad_public.clone()),
+    );
     let (barrier_leaf_ek_bytes, barrier_leaf_dk_bytes, _barrier_leaf_pkhash) =
         generate_barrier_leaf_keypair()?;
     header.insert(
@@ -782,32 +757,13 @@ async fn prepare_join_session_with_identity(
     let (vrf_secret_key, vrf_public_key) =
         generate_vrf_keys().context("generate runtime VRF keypair")?;
 
-    let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
-        gid: &gid,
-        cat: &cat,
-        tswe_salt_hash: &tswe_salt_hash,
-        parent_root: &parent_root,
-        join_delta_root: &join_delta_root,
-        revoked_since_root: &revoked_since_root,
-        revoked_root: &revoked_root,
-        pox_r_commit: &pox_r_commit,
-        msphf_crs_id: msphf_crs_id.as_str(),
-        msphf_params_id: msphf_params_id.as_str(),
-        srx: Some(srx_inputs.into_srx_inputs()),
-        pop_public_key: pop_public_key.as_slice(),
-        pop_secret_key: pop_secret.as_ref(),
-        proof_mode: proof_mode.as_str(),
-        vrf_id: vrf_id.as_str(),
-        policy_version: policy_version.as_str(),
-        vrf_secret_key: vrf_secret_key.as_slice(),
-        vrf_public_key: vrf_public_key.as_slice(),
-        fs_policy_version: fs_policy_version.as_str(),
-        fs_epoch_base_ts,
-        barrier_version,
-        fs_join: FsJoinInputs::default(),
-    });
-
-    let witness_bytes = witness_bytes.as_deref();
+    let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
+        pop_public_key.as_slice(),
+        pop_secret.as_ref(),
+        vrf_secret_key.as_slice(),
+        vrf_public_key.as_slice(),
+    );
+    let witness_bytes = prepared_runtime.witness_bytes.as_deref();
 
     let build_join_bundle = |fs_state: &mut ForwardSecrecyState,
                              disable_autonomic_evolve: bool|
@@ -826,7 +782,7 @@ async fn prepare_join_session_with_identity(
     let pristine_fs_state = fs_state.clone();
     let mut bundle = build_join_bundle(&mut fs_state, false)?;
 
-    if parent_root == [0u8; 32] && !bootstrap_public.is_empty() {
+    if prepared_runtime.parent_root == [0u8; 32] && !prepared_runtime.bootstrap_public.is_empty() {
         return Err(anyhow!(
             "server requires bootstrap signer for first join; join_leave bootstrap signer support is not configured"
         ));
@@ -856,24 +812,29 @@ async fn prepare_join_session_with_identity(
     let stored =
         ClientEpochBundle::from_cbor(&stored.bundle_cbor).context("invalid stored bundle")?;
 
-    let accepted_bundle =
-        parse_accepted_bundle_runtime_state(&stored, fs_policy_version.as_str(), fs_epoch_base_ts)?;
+    let accepted_bundle = parse_accepted_bundle_runtime_state(
+        &stored,
+        prepared_runtime.fs_policy_version.as_str(),
+        prepared_runtime.fs_epoch_base_ts,
+    )?;
     let accepted_fs_dev_prev_commit = accepted_bundle
         .fs_dev_prev_commit
         .ok_or_else(|| anyhow!("accepted join bundle missing fs_dev commit"))?;
     ensure_supported_attested_current_state_extension(
         "join ticket",
-        current_history_authority_extension,
-        current_global_history_attestation_bytes.as_slice(),
+        prepared_runtime.current_history_authority_extension,
+        prepared_runtime
+            .current_global_history_attestation_bytes
+            .as_slice(),
     )?;
     let session = Session {
         server_url: server_url.to_string(),
         room_id: room_id.to_string(),
-        gid,
-        leaf_id,
+        gid: prepared_runtime.gid,
+        leaf_id: prepared_runtime.leaf_id,
         xk_hash: bundle.hp_binding.xk_hash,
         epoch_key: bundle.epoch_key,
-        barrier_version,
+        barrier_version: prepared_runtime.barrier_version,
         k_barrier: [0u8; 32],
         pop_public_key,
         pop_secret,
@@ -889,11 +850,12 @@ async fn prepare_join_session_with_identity(
         seed_commit: accepted_bundle.seed_commit,
         seed_bundle_commit: accepted_bundle.seed_bundle_commit,
         fs_fingerprint: accepted_bundle.fs_fingerprint,
-        join_finalize_auth_token,
-        current_history_commitment,
-        current_history_authority_extension,
-        current_global_history_attestation_bytes,
-        kem_tree_hash_after,
+        join_finalize_auth_token: prepared_runtime.join_finalize_auth_token,
+        current_history_commitment: prepared_runtime.current_history_commitment,
+        current_history_authority_extension: prepared_runtime.current_history_authority_extension,
+        current_global_history_attestation_bytes: prepared_runtime
+            .current_global_history_attestation_bytes,
+        kem_tree_hash_after: prepared_runtime.kem_tree_hash_after,
         stored_header_map: stored.header_map.clone(),
         #[cfg(test)]
         msg_replay_state: MsgReplayState::default(),
