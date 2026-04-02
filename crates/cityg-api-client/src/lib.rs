@@ -146,7 +146,10 @@ mod verification;
 
 use ciborium::Value;
 use cityg_api_schema::pb;
-use cityg_client::CityGError as ClientError;
+use cityg_client::{
+    CityGError as ClientError, barrier_update::normalize_max_barrier_update_bytes,
+    pivot::hydrate_parities,
+};
 use msphf_orchestrator::PivotParity;
 pub use pb::IdentityBinding;
 use pb::MergeTicketIntent as PbMergeTicketIntent;
@@ -903,6 +906,58 @@ pub struct MergeTicket {
     pub max_barrier_update_bytes: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedRuntimeMergeTicket {
+    pub snapshot_hash: [u8; 32],
+    pub barrier_n_max: u64,
+    pub cover_leaf_index: u64,
+    pub max_barrier_update_bytes: u64,
+    pub max_barrier_update_bytes_normalized: usize,
+    pub parities: Vec<PivotParity>,
+    pub witness_bytes: Option<Vec<u8>>,
+}
+
+impl MergeTicket {
+    pub fn prepare_runtime(
+        &self,
+        fs_ec: u64,
+        fs_epoch_commit: [u8; 32],
+        fs_dev_prev_commit: [u8; 32],
+        stored_max_barrier_update_bytes: u64,
+    ) -> Result<PreparedRuntimeMergeTicket, Error> {
+        let ticket_max_barrier_update_bytes = self.max_barrier_update_bytes.max(1);
+        if stored_max_barrier_update_bytes != 0
+            && stored_max_barrier_update_bytes != ticket_max_barrier_update_bytes
+        {
+            return Err(Error::Parse(format!(
+                "max_barrier_update_bytes mismatch: local={} server={}",
+                stored_max_barrier_update_bytes, ticket_max_barrier_update_bytes
+            )));
+        }
+
+        if self.cover_leaf_index >= self.n_max {
+            return Err(Error::Parse(format!(
+                "merge ticket cover_leaf_index out of range: {} >= {}",
+                self.cover_leaf_index, self.n_max
+            )));
+        }
+
+        let max_barrier_update_bytes_normalized =
+            normalize_max_barrier_update_bytes(ticket_max_barrier_update_bytes)
+                .map_err(|err| Error::Parse(err.to_string()))?;
+
+        Ok(PreparedRuntimeMergeTicket {
+            snapshot_hash: self.kem_tree_hash_after,
+            barrier_n_max: self.n_max,
+            cover_leaf_index: self.cover_leaf_index,
+            max_barrier_update_bytes: ticket_max_barrier_update_bytes,
+            max_barrier_update_bytes_normalized,
+            parities: hydrate_parities(&self.parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit),
+            witness_bytes: (!self.witness_cbor.is_empty()).then(|| self.witness_cbor.clone()),
+        })
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Deserialize)]
 struct ErrorEnvelope {
@@ -970,6 +1025,7 @@ mod tests {
         SeedHeadResponse, SendMessageResponse,
     };
     use pqcrypto_dilithium::dilithium5;
+    use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
     use prost::Message;
     use std::{
         error::Error as StdError,
@@ -2351,6 +2407,126 @@ mod tests {
                 if message.contains(
                     "join ticket carries unsupported history authority extension: unknown-extension-v1"
                 )
+        ));
+    }
+
+    fn sample_runtime_pivot_parity() -> PivotParity {
+        use std::sync::Arc;
+
+        PivotParity {
+            gid: vec![0x01; 32],
+            cat: vec![0x02; 32],
+            parent_root: [0x03; 32],
+            we_epoch_id: [0x04; 32],
+            rho_commit: [0x05; 32],
+            seed_ctx_hash: [0x06; 32],
+            seed_commit: [0x07; 32],
+            hp_commit: [0x08; 32],
+            xk_hash: [0x09; 32],
+            join_delta_root: [0x0A; 32],
+            revoked_since_root: [0x0B; 32],
+            revoked_root: [0x0C; 32],
+            accept_seq: 1,
+            crs_id: b"crs-v1".to_vec(),
+            params_id: b"params-v1".to_vec(),
+            policy_version: "7".to_string(),
+            proof_mode: "lin+zkvrf".to_string(),
+            vrf_id: "lb-vrf".to_string(),
+            vrf_proof: vec![0xDD, 0xEE],
+            vrf_public: vec![0x11, 0x22],
+            mask_a: [0xAA; 32],
+            mask_b: [0xBB; 32],
+            fs_capss: vec![0xCC],
+            proofs_commit: [0xDD; 32],
+            srx_commit: Some([0xEE; 32]),
+            srx_root_sw: Some([0xEF; 32]),
+            is_join: true,
+            hp_envelope: Arc::<[u8]>::from(vec![0x99, 0x88]),
+            fs_epoch_commit: None,
+            fs_ec: None,
+            fs_dev_commit: None,
+        }
+    }
+
+    fn sample_runtime_merge_ticket() -> MergeTicket {
+        MergeTicket {
+            author_leaf_id: [0x55; 32],
+            we_epoch_id: [0x04; 32],
+            parities: vec![sample_runtime_pivot_parity()],
+            witness_cbor: vec![0xA1, 0x01, 0x02],
+            srx_cbor: vec![0xA1, 0x03, 0x04],
+            proof_mode: "lin+zkvrf".to_string(),
+            vrf_id: "lb-vrf".to_string(),
+            policy_version: "7".to_string(),
+            cat: [0x02; 32],
+            parent_root: [0x03; 32],
+            join_delta_root: [0x0A; 32],
+            revoked_since_root: [0x0B; 32],
+            revoked_root: [0x0C; 32],
+            tswe_salt_hash: [0x0D; 32],
+            pox_r_commit: [0x0E; 32],
+            kbroad_public: vec![0x33; 32],
+            msphf_crs_id: "crs-v1".to_string(),
+            msphf_params_id: "params-v1".to_string(),
+            fs_policy_version: "fs-v1".to_string(),
+            fs_epoch_base_ts: 1_717_171_717,
+            fs_forward_leap_policy: FsForwardLeapPolicy {
+                h: 300,
+                checkpoint_interval: 3600,
+                slack_anchor: 0,
+                slack_first_device: 0,
+                slack_device: 4,
+            },
+            last_accepted_ec: 17,
+            kbroad_generation: 3,
+            barrier_version: 9,
+            cover_leaf_index: 1,
+            kem_tree_hash_after: [0x0F; 32],
+            current_history_commitment: HistoryCommitment {
+                history_view_id: [0x90; 32],
+                history_commitment_id: [0x91; 32],
+                prev_history_commitment_id: [0x92; 32],
+                history_seq: 17,
+            },
+            history_authority_extension: None,
+            history_authority_descriptor_bytes: Vec::new(),
+            history_authority: None,
+            current_global_history_attestation_bytes: Vec::new(),
+            current_global_history_attestation: None,
+            merge_ticket_artifact_bytes: Vec::new(),
+            deployment_profile_manifest_bytes: Vec::new(),
+            n_max: 8,
+            max_barrier_update_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn prepare_runtime_merge_ticket_hydrates_fs_fields_and_clamps_limit() {
+        let prepared = sample_runtime_merge_ticket()
+            .prepare_runtime(77, [0x44; 32], [0x55; 32], 0)
+            .expect("runtime merge ticket preparation must succeed");
+
+        assert_eq!(prepared.snapshot_hash, [0x0F; 32]);
+        assert_eq!(prepared.barrier_n_max, 8);
+        assert_eq!(prepared.cover_leaf_index, 1);
+        assert_eq!(prepared.max_barrier_update_bytes, 1);
+        assert_eq!(prepared.max_barrier_update_bytes_normalized, 1);
+        assert_eq!(prepared.witness_bytes, Some(vec![0xA1, 0x01, 0x02]));
+        assert_eq!(prepared.parities.len(), 1);
+        assert_eq!(prepared.parities[0].fs_ec, Some(77));
+        assert_eq!(prepared.parities[0].fs_epoch_commit, Some([0x44; 32]));
+        assert_eq!(prepared.parities[0].fs_dev_commit, Some([0x55; 32]));
+    }
+
+    #[test]
+    fn prepare_runtime_merge_ticket_rejects_stored_max_mismatch() {
+        let err = sample_runtime_merge_ticket()
+            .prepare_runtime(77, [0x44; 32], [0x55; 32], 64)
+            .expect_err("stored max mismatch must fail");
+        assert!(matches!(
+            err,
+            Error::Parse(message)
+                if message.contains("max_barrier_update_bytes mismatch")
         ));
     }
 

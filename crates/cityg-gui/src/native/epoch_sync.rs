@@ -44,32 +44,20 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
             }
         }
     };
-    let ticket_kem_tree_hash_after = bytes32("kem_tree_hash_after", &ticket.kem_tree_hash_after)?;
-    let ticket_history_commitment = ticket.current_history_commitment;
-    let ticket_n_max = validate_barrier_n_max(if ticket.n_max == 0 {
-        DEFAULT_BARRIER_N_MAX
-    } else {
-        ticket.n_max
-    })?;
-    let ticket_max_barrier_update_bytes_u64 = ticket.max_barrier_update_bytes.max(1);
-    let ticket_max_barrier_update_bytes =
-        normalize_max_barrier_update_bytes(ticket_max_barrier_update_bytes_u64)?;
-    if session.barrier_state.max_barrier_update_bytes != 0
-        && session.barrier_state.max_barrier_update_bytes != ticket_max_barrier_update_bytes_u64
-    {
-        return Err(anyhow!(
-            "max_barrier_update_bytes mismatch: local={} server={}",
+    let prepared_runtime = ticket
+        .prepare_runtime(
+            session.fs_ec,
+            session.fs_epoch_commit,
+            session.fs_dev_prev_commit,
             session.barrier_state.max_barrier_update_bytes,
-            ticket_max_barrier_update_bytes_u64
-        ));
-    }
-    if ticket.cover_leaf_index >= ticket_n_max {
-        return Err(anyhow!(
-            "merge ticket cover_leaf_index out of range: {} >= {}",
-            ticket.cover_leaf_index,
-            ticket_n_max
-        ));
-    }
+        )
+        .map_err(anyhow::Error::from)?;
+    let ticket_kem_tree_hash_after = prepared_runtime.snapshot_hash;
+    let ticket_history_commitment = ticket.current_history_commitment;
+    let ticket_n_max = prepared_runtime.barrier_n_max;
+    let ticket_max_barrier_update_bytes_u64 = prepared_runtime.max_barrier_update_bytes;
+    let ticket_max_barrier_update_bytes = prepared_runtime.max_barrier_update_bytes_normalized;
+    let ticket_cover_leaf_index = prepared_runtime.cover_leaf_index;
     ensure_non_regressing_authenticated_current_state(
         session.barrier_state.barrier_version,
         &session.barrier_state.kem_tree_hash_after,
@@ -95,7 +83,7 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
     session.last_accepted_ec = session.last_accepted_ec.max(ticket.last_accepted_ec);
     session.barrier_state.max_barrier_update_bytes = ticket_max_barrier_update_bytes_u64;
     session.barrier_state.n_max = ticket_n_max;
-    session.barrier_state.cover_leaf_index = ticket.cover_leaf_index;
+    session.barrier_state.cover_leaf_index = ticket_cover_leaf_index;
     let pending_history_outcome = apply_pending_barrier_activation_from_history(
         &client,
         &mut session,
@@ -106,9 +94,9 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
         || session.barrier_state.kem_tree_hash_after != ticket_kem_tree_hash_after
         || session.barrier_state.max_barrier_update_bytes != ticket_max_barrier_update_bytes_u64
         || session.barrier_state.n_max != ticket_n_max
-        || session.barrier_state.cover_leaf_index != ticket.cover_leaf_index;
+        || session.barrier_state.cover_leaf_index != ticket_cover_leaf_index;
 
-    if let Some(pivot) = select_pivot_parity(&ticket.parities) {
+    if let Some(pivot) = select_pivot_parity(&prepared_runtime.parities) {
         session.xk_hash = pivot.xk_hash;
     }
 
@@ -148,8 +136,8 @@ async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOu
         ));
     }
 
-    if !ticket.witness_cbor.is_empty() {
-        bundle.witness = Some(ticket.witness_cbor.clone());
+    if let Some(witness_bytes) = prepared_runtime.witness_bytes {
+        bundle.witness = Some(witness_bytes);
     }
 
     let uses_barrier_hp_envelope = matches!(

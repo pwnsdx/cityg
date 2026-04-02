@@ -80,11 +80,19 @@ async fn publish_revocation_merge_from_ticket_inner(
         barrier_recovery_pending,
         current_barrier_full_verified,
     )?;
+    let prepared_runtime = ticket
+        .prepare_runtime(
+            fs_ec,
+            fs_epoch_commit,
+            fs_dev_prev_commit,
+            stored_max_barrier_update_bytes,
+        )
+        .map_err(anyhow::Error::from)?;
 
     let MergeTicket {
         we_epoch_id: _,
-        parities: raw_parities,
-        witness_cbor,
+        parities: _,
+        witness_cbor: _,
         srx_cbor,
         proof_mode,
         vrf_id,
@@ -113,8 +121,8 @@ async fn publish_revocation_merge_from_ticket_inner(
         current_global_history_attestation_bytes,
         merge_ticket_artifact_bytes,
         deployment_profile_manifest_bytes,
-        n_max,
-        max_barrier_update_bytes,
+        n_max: _,
+        max_barrier_update_bytes: _,
         ..
     } = ticket;
 
@@ -154,34 +162,11 @@ async fn publish_revocation_merge_from_ticket_inner(
     let pop_secret =
         Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
 
-    let witness_bytes = if witness_cbor.is_empty() {
-        None
-    } else {
-        Some(witness_cbor.as_slice())
-    };
-
-    let parities = hydrate_parities(&raw_parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit);
-    let snapshot_hash = bytes32("kem_tree_hash_after", &kem_tree_hash_after)?;
-    let barrier_n_max = validate_barrier_n_max(if n_max == 0 {
-        DEFAULT_BARRIER_N_MAX
-    } else {
-        n_max
-    })?;
-    if revoked_cover_leaf_index >= barrier_n_max {
-        return Err(anyhow!(
-            "cover_leaf_index out of range for barrier tree: {revoked_cover_leaf_index} >= {barrier_n_max}"
-        ));
-    }
-    let ticket_max_barrier_update_bytes = max_barrier_update_bytes.max(1);
-    if stored_max_barrier_update_bytes != 0
-        && stored_max_barrier_update_bytes != ticket_max_barrier_update_bytes
-    {
-        return Err(anyhow!(
-            "max_barrier_update_bytes mismatch: local={} server={}",
-            stored_max_barrier_update_bytes,
-            ticket_max_barrier_update_bytes
-        ));
-    }
+    let witness_bytes = prepared_runtime.witness_bytes;
+    let parities = prepared_runtime.parities;
+    let snapshot_hash = prepared_runtime.snapshot_hash;
+    let barrier_n_max = prepared_runtime.barrier_n_max;
+    let ticket_max_barrier_update_bytes = prepared_runtime.max_barrier_update_bytes;
     let snapshot = prepare_barrier_snapshot_runtime(
         BarrierSnapshotRuntimeRequest {
             client: &client,
@@ -293,7 +278,7 @@ async fn publish_revocation_merge_from_ticket_inner(
         params,
         parts,
         parities: &parities,
-        witness_bytes,
+        witness_bytes: witness_bytes.as_deref(),
         pivot: &pivot,
         snapshot_hash,
         committed_revocation_roots_hash,

@@ -131,11 +131,19 @@ pub(super) async fn prepare_barrier_merge_ticket(
             }
         }
     };
+    let prepared_runtime = ticket
+        .prepare_runtime(
+            fs_ec,
+            fs_epoch_commit,
+            fs_dev_prev_commit,
+            stored_max_barrier_update_bytes,
+        )
+        .map_err(anyhow::Error::from)?;
 
     let MergeTicket {
         we_epoch_id: _,
-        parities: raw_parities,
-        witness_cbor,
+        parities: _,
+        witness_cbor: _,
         srx_cbor,
         proof_mode,
         vrf_id,
@@ -164,8 +172,8 @@ pub(super) async fn prepare_barrier_merge_ticket(
         current_global_history_attestation_bytes,
         merge_ticket_artifact_bytes,
         deployment_profile_manifest_bytes,
-        n_max,
-        max_barrier_update_bytes,
+        n_max: _,
+        max_barrier_update_bytes: _,
         ..
     } = ticket;
 
@@ -194,26 +202,6 @@ pub(super) async fn prepare_barrier_merge_ticket(
         ));
     }
 
-    let barrier_n_max = validate_barrier_n_max(if n_max == 0 {
-        DEFAULT_BARRIER_N_MAX
-    } else {
-        n_max
-    })?;
-    if cover_leaf_index >= barrier_n_max {
-        return Err(anyhow!(
-            "cover_leaf_index out of range for barrier tree: {cover_leaf_index} >= {barrier_n_max}"
-        ));
-    }
-    if stored_max_barrier_update_bytes != 0
-        && stored_max_barrier_update_bytes != max_barrier_update_bytes.max(1)
-    {
-        return Err(anyhow!(
-            "max_barrier_update_bytes mismatch: local={} server={}",
-            stored_max_barrier_update_bytes,
-            max_barrier_update_bytes.max(1)
-        ));
-    }
-
     let mut header = BTreeMap::new();
     header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
     header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public));
@@ -232,9 +220,9 @@ pub(super) async fn prepare_barrier_merge_ticket(
         leaf_id,
         barrier_version,
         cover_leaf_index,
-        snapshot_hash: bytes32("kem_tree_hash_after", &kem_tree_hash_after)?,
-        barrier_n_max,
-        max_barrier_update_bytes,
+        snapshot_hash: prepared_runtime.snapshot_hash,
+        barrier_n_max: prepared_runtime.barrier_n_max,
+        max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
         forward_state,
         pop_public_key,
         pop_secret_key,
@@ -267,12 +255,8 @@ pub(super) async fn prepare_barrier_merge_ticket(
         fs_policy_version,
         fs_epoch_base_ts,
         header,
-        parities: hydrate_parities(&raw_parities, fs_ec, fs_epoch_commit, fs_dev_prev_commit),
-        witness_bytes: if witness_cbor.is_empty() {
-            None
-        } else {
-            Some(witness_cbor)
-        },
+        parities: prepared_runtime.parities,
+        witness_bytes: prepared_runtime.witness_bytes,
         ticket_history_commitment,
         ticket_history_authority_extension,
         history_authority,
