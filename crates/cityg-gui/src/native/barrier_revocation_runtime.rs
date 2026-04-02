@@ -1,20 +1,35 @@
 use std::{future::Future, pin::Pin};
 
+use super::barrier_merge_publish_runtime::{
+    BarrierMergePublishInputs, BarrierMergePublishPolicy, publish_barrier_merge,
+};
 use super::barrier_merge_snapshot_runtime::{
     BarrierSnapshotRuntimeRequest, prepare_barrier_snapshot_runtime,
 };
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
-use cityg_client::barrier_merge_bundle::{
-    BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
-    build_barrier_merge_bundle as build_barrier_merge_bundle_core,
-};
 
 pub(super) fn is_fs_forward_jump_group_http_error(
     freeze_code: Option<u32>,
     freeze_reason: Option<&str>,
 ) -> bool {
     freeze_code == Some(9476) || freeze_reason == Some("fs_forward_jump_group")
+}
+
+fn revocation_build_bundle_context(operation_label: &'static str) -> &'static str {
+    match operation_label {
+        "leave" => "failed to build leave merge bundle",
+        "expel" => "failed to build expel merge bundle",
+        _ => "failed to build revocation merge bundle",
+    }
+}
+
+fn revocation_accept_bundle_context(operation_label: &'static str) -> &'static str {
+    match operation_label {
+        "leave" => "server rejected leave merge bundle",
+        "expel" => "server rejected expel merge bundle",
+        _ => "server rejected revocation merge bundle",
+    }
 }
 
 pub(super) fn publish_revocation_merge_from_ticket(
@@ -217,33 +232,6 @@ async fn publish_revocation_merge_from_ticket_inner(
         barrier_update,
     } = snapshot;
     let next_barrier_version = barrier_version.saturating_add(1);
-    let mut pending_barrier_state = BarrierPendingState {
-        barrier_version: next_barrier_version,
-        we_epoch_id: [0u8; 32],
-        fs_ec,
-        next_forward_fs_ec: 0,
-        next_forward_fs_dev_commit: [0u8; 32],
-        next_forward_last_weid: [0u8; 32],
-        revocation_roots_hash,
-        kem_tree_hash_after: barrier_update.kem_tree_hash_after,
-        k_barrier_new: barrier_update.k_barrier_new.clone(),
-        k_fs_after_pcs: None,
-        barrier_update_reason: Some(0),
-        barrier_update_digest: barrier_update.barrier_update_digest,
-        on_path_key_material: barrier_update.on_path_key_material.clone(),
-        activation_source: Some(BarrierPendingActivationSource {
-            barrier_version,
-            barrier_roots_hash: committed_revocation_roots_hash,
-            kem_tree_hash_after: snapshot_hash,
-            current_history_commitment: Some(ticket_history_commitment),
-            current_history_authority_extension: ticket_history_authority_extension,
-            current_global_history_attestation_bytes: current_global_history_attestation_bytes
-                .clone(),
-            fs_ec,
-            fs_dev_prev_commit,
-        }),
-    };
-
     let params = OrchestrationParams {
         msphf_crs_id: msphf_crs_id.as_str(),
         params_id: msphf_params_id.as_str(),
@@ -282,62 +270,39 @@ async fn publish_revocation_merge_from_ticket_inner(
         pox_r_commit: Some(pox_r_commit_arr.as_slice()),
     };
 
-    let built = build_barrier_merge_bundle_core(CoreBarrierMergeBundleInputs {
+    publish_barrier_merge(BarrierMergePublishInputs {
+        policy: BarrierMergePublishPolicy {
+            pending_barrier_update_reason: 0,
+            build_barrier_update_reason: 1,
+            current_k_fs: None,
+            build_bundle_context: revocation_build_bundle_context(operation_label),
+            accept_bundle_context: revocation_accept_bundle_context(operation_label),
+            retry_on_fs_forward_jump_group: false,
+            trigger_before_publish_join_finalize_fault: false,
+        },
+        client: &client,
+        persist_request: &persist_request,
+        gid: &gid,
+        barrier_version,
+        next_barrier_version,
+        fs_ec,
+        fs_dev_prev_commit,
         header,
-        parts,
+        cat_arr,
+        parent_root_arr,
         params,
-        forward_state,
+        parts,
         parities: &parities,
         witness_bytes,
         pivot: &pivot,
-        gid: &gid,
-        cat: &cat_arr,
-        parent_root: &parent_root_arr,
-        current_k_fs: None,
-        next_barrier_version,
-        barrier_key: &barrier_update.k_barrier_new,
-        barrier_update_reason: 1,
-        disable_autonomic_evolve: false,
-    })
-    .with_context(|| format!("failed to build {operation_label} merge bundle"))?;
-
-    let next_forward = built.forward_state_after.snapshot();
-    pending_barrier_state.we_epoch_id = built.bundle.we_epoch_id;
-    pending_barrier_state.fs_ec = built.observed_fs_ec;
-    pending_barrier_state.next_forward_fs_ec = next_forward.fs_ec;
-    pending_barrier_state.next_forward_fs_dev_commit = next_forward.fs_dev_commit;
-    pending_barrier_state.next_forward_last_weid = next_forward.last_weid;
-    let bundle = built.bundle;
-    let forward_state = built.forward_state_after;
-
-    persist_pending_barrier_state_before_publish(&persist_request, pending_barrier_state.clone())?;
-
-    match client.refresh_pivot(&bundle).await {
-        Ok(_) => {}
-        Err(ApiClientError::HttpStatus {
-            status, message, ..
-        }) if is_refresh_pivot_conflict(status.as_u16(), &message) => {
-            debug!(status = status.as_u16(), "refresh pivot skipped: {message}");
-        }
-        Err(err) => return Err(err).context("refresh pivot parity"),
-    }
-
-    client
-        .accept_epoch_bundle(&bundle)
-        .await
-        .with_context(|| format!("server rejected {operation_label} merge bundle"))?;
-
-    Ok(PublishedBarrierMerge {
-        bundle,
-        pending_barrier_state,
-        pre_publish_barrier_version: barrier_version,
-        pre_publish_barrier_roots_hash: committed_revocation_roots_hash,
-        pre_publish_kem_tree_hash_after: snapshot_hash,
-        pre_publish_current_history_commitment: ticket_history_commitment,
-        pre_publish_current_history_authority_extension: ticket_history_authority_extension,
-        pre_publish_current_global_history_attestation_bytes:
-            current_global_history_attestation_bytes,
-        forward_state_after: forward_state,
+        snapshot_hash,
+        committed_revocation_roots_hash,
+        revocation_roots_hash,
+        ticket_history_commitment,
+        ticket_history_authority_extension,
+        current_global_history_attestation_bytes,
+        barrier_update,
+        forward_state,
         fs_forward_leap_policy: FsForwardLeapPolicy {
             h: fs_forward_leap_policy.h,
             checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
@@ -346,8 +311,8 @@ async fn publish_revocation_merge_from_ticket_inner(
             slack_device: fs_forward_leap_policy.slack_device,
         },
         last_accepted_ec,
-        current_public_tree: barrier_update.snapshot_post.clone(),
     })
+    .await
 }
 
 pub(super) fn perform_leave(

@@ -1,7 +1,9 @@
 use super::barrier_merge_prepare_runtime::{
     PreparedBarrierMergeExecution, prepare_barrier_merge_execution,
 };
-use super::barrier_merge_publish_runtime::{BarrierMergePublishInputs, publish_barrier_merge};
+use super::barrier_merge_publish_runtime::{
+    BarrierMergePublishInputs, BarrierMergePublishPolicy, publish_barrier_merge,
+};
 use super::*;
 
 pub(super) async fn perform_barrier_merge_inner(
@@ -95,7 +97,15 @@ pub(super) async fn perform_barrier_merge_inner(
     };
 
     publish_barrier_merge(BarrierMergePublishInputs {
-        mode,
+        policy: BarrierMergePublishPolicy {
+            pending_barrier_update_reason: mode.reason(),
+            build_barrier_update_reason: mode.reason(),
+            current_k_fs: mode.reseeds_k_fs().then_some(&k_fs_current),
+            build_bundle_context: mode.build_bundle_context(),
+            accept_bundle_context: mode.accept_bundle_context(),
+            retry_on_fs_forward_jump_group: true,
+            trigger_before_publish_join_finalize_fault: mode == BarrierMergeMode::JoinFinalize,
+        },
         client: &client,
         persist_request: &persist_request,
         gid: &gid,
@@ -103,7 +113,6 @@ pub(super) async fn perform_barrier_merge_inner(
         next_barrier_version,
         fs_ec,
         fs_dev_prev_commit,
-        k_fs_current: &k_fs_current,
         header,
         cat_arr,
         parent_root_arr,

@@ -5,7 +5,7 @@ use cityg_client::barrier_merge_bundle::{
 };
 
 pub(super) struct BarrierMergePublishInputs<'a> {
-    pub(super) mode: BarrierMergeMode,
+    pub(super) policy: BarrierMergePublishPolicy<'a>,
     pub(super) client: &'a CitygApiClient,
     pub(super) persist_request: &'a LeaveRequest,
     pub(super) gid: &'a [u8; 32],
@@ -13,7 +13,6 @@ pub(super) struct BarrierMergePublishInputs<'a> {
     pub(super) next_barrier_version: u64,
     pub(super) fs_ec: u64,
     pub(super) fs_dev_prev_commit: [u8; 32],
-    pub(super) k_fs_current: &'a [u8; 32],
     pub(super) header: BTreeMap<u64, Value>,
     pub(super) cat_arr: [u8; 32],
     pub(super) parent_root_arr: [u8; 32],
@@ -34,6 +33,16 @@ pub(super) struct BarrierMergePublishInputs<'a> {
     pub(super) last_accepted_ec: u64,
 }
 
+pub(super) struct BarrierMergePublishPolicy<'a> {
+    pub(super) pending_barrier_update_reason: u64,
+    pub(super) build_barrier_update_reason: u64,
+    pub(super) current_k_fs: Option<&'a [u8; 32]>,
+    pub(super) build_bundle_context: &'static str,
+    pub(super) accept_bundle_context: &'static str,
+    pub(super) retry_on_fs_forward_jump_group: bool,
+    pub(super) trigger_before_publish_join_finalize_fault: bool,
+}
+
 #[derive(Clone)]
 struct PreparedBarrierMerge {
     bundle: ClientEpochBundle,
@@ -45,7 +54,7 @@ pub(super) async fn publish_barrier_merge(
     inputs: BarrierMergePublishInputs<'_>,
 ) -> Result<PublishedBarrierMerge> {
     let BarrierMergePublishInputs {
-        mode,
+        policy,
         client,
         persist_request,
         gid,
@@ -53,7 +62,6 @@ pub(super) async fn publish_barrier_merge(
         next_barrier_version,
         fs_ec,
         fs_dev_prev_commit,
-        k_fs_current,
         header,
         cat_arr,
         parent_root_arr,
@@ -73,6 +81,15 @@ pub(super) async fn publish_barrier_merge(
         fs_forward_leap_policy,
         last_accepted_ec,
     } = inputs;
+    let BarrierMergePublishPolicy {
+        pending_barrier_update_reason,
+        build_barrier_update_reason,
+        current_k_fs,
+        build_bundle_context,
+        accept_bundle_context,
+        retry_on_fs_forward_jump_group,
+        trigger_before_publish_join_finalize_fault,
+    } = policy;
 
     let pending_barrier_state = BarrierPendingState {
         barrier_version: next_barrier_version,
@@ -85,7 +102,7 @@ pub(super) async fn publish_barrier_merge(
         kem_tree_hash_after: barrier_update.kem_tree_hash_after,
         k_barrier_new: barrier_update.k_barrier_new.clone(),
         k_fs_after_pcs: None,
-        barrier_update_reason: Some(mode.reason()),
+        barrier_update_reason: Some(pending_barrier_update_reason),
         barrier_update_digest: barrier_update.barrier_update_digest,
         on_path_key_material: barrier_update.on_path_key_material.clone(),
         activation_source: Some(BarrierPendingActivationSource {
@@ -116,13 +133,13 @@ pub(super) async fn publish_barrier_merge(
             gid,
             cat: &cat_arr,
             parent_root: &parent_root_arr,
-            current_k_fs: mode.reseeds_k_fs().then_some(k_fs_current),
+            current_k_fs,
             next_barrier_version,
             barrier_key: &barrier_update.k_barrier_new,
-            barrier_update_reason: mode.reason(),
+            barrier_update_reason: build_barrier_update_reason,
             disable_autonomic_evolve,
         })
-        .context(mode.build_bundle_context())?;
+        .context(build_bundle_context)?;
 
         let mut pending_barrier_state = pending_barrier_state_template.clone();
         pending_barrier_state.we_epoch_id = built.bundle.we_epoch_id;
@@ -149,7 +166,7 @@ pub(super) async fn publish_barrier_merge(
     )?;
 
     #[cfg(test)]
-    if mode == BarrierMergeMode::JoinFinalize {
+    if trigger_before_publish_join_finalize_fault {
         fault_injection::trigger_fault(FaultInjectionCutPoint::BeforePublishJoinFinalize, None)?;
     }
 
@@ -169,7 +186,9 @@ pub(super) async fn publish_barrier_merge(
             freeze_code,
             freeze_reason,
             ..
-        }) if is_fs_forward_jump_group_http_error(freeze_code, freeze_reason.as_deref()) => {
+        }) if retry_on_fs_forward_jump_group
+            && is_fs_forward_jump_group_http_error(freeze_code, freeze_reason.as_deref()) =>
+        {
             prepared = build_published_merge(pristine_forward_state, true)?;
             persist_pending_barrier_state_before_publish(
                 persist_request,
@@ -192,9 +211,9 @@ pub(super) async fn publish_barrier_merge(
             client
                 .accept_epoch_bundle(&prepared.bundle)
                 .await
-                .context(mode.accept_bundle_context())?;
+                .context(accept_bundle_context)?;
         }
-        Err(err) => return Err(err).context(mode.accept_bundle_context()),
+        Err(err) => return Err(err).context(accept_bundle_context),
     }
 
     Ok(PublishedBarrierMerge {
