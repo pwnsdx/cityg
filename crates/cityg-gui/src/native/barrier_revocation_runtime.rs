@@ -8,6 +8,7 @@ use super::barrier_merge_snapshot_runtime::{
 };
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
+use cityg_api_client::PrepareRevocationMergeTicketInput;
 use cityg_client::barrier_orchestration::{
     BarrierOrchestrationInputs, prepare_barrier_orchestration,
 };
@@ -77,19 +78,24 @@ async fn publish_revocation_merge_from_ticket_inner(
         current_barrier_full_verified,
     )?;
     let prepared_runtime = ticket
-        .prepare_runtime(
+        .prepare_revocation_runtime(PrepareRevocationMergeTicketInput {
+            operation_label,
+            local_barrier_version,
+            local_kem_tree_hash_after,
+            local_current_history_commitment: local_current_history_commitment.as_ref(),
+            local_current_history_authority_extension,
             fs_ec,
             fs_epoch_commit,
             fs_dev_prev_commit,
             stored_max_barrier_update_bytes,
-        )
+        })
         .map_err(anyhow::Error::from)?;
-
-    let MergeTicket {
-        we_epoch_id: _,
-        parities: _,
-        witness_cbor: _,
-        srx_cbor,
+    let cityg_api_client::PreparedRevocationMergeTicket {
+        barrier_version,
+        cover_leaf_index: revoked_cover_leaf_index,
+        snapshot_hash,
+        barrier_n_max,
+        max_barrier_update_bytes: ticket_max_barrier_update_bytes,
         proof_mode,
         vrf_id,
         policy_version,
@@ -100,69 +106,28 @@ async fn publish_revocation_merge_from_ticket_inner(
         revoked_root,
         tswe_salt_hash,
         pox_r_commit,
-        kbroad_public,
         msphf_crs_id,
         msphf_params_id,
         fs_policy_version,
         fs_epoch_base_ts,
         fs_forward_leap_policy,
         last_accepted_ec,
-        kbroad_generation: _,
-        barrier_version,
-        cover_leaf_index: revoked_cover_leaf_index,
-        kem_tree_hash_after,
-        current_history_commitment: ticket_history_commitment,
-        history_authority_extension: ticket_history_authority_extension,
+        header,
+        parities,
+        witness_bytes,
+        srx_inputs,
+        ticket_history_commitment,
+        ticket_history_authority_extension,
         history_authority,
         current_global_history_attestation_bytes,
         merge_ticket_artifact_bytes,
         deployment_profile_manifest_bytes,
-        n_max: _,
-        max_barrier_update_bytes: _,
-        ..
-    } = ticket;
-
-    ensure_supported_attested_current_state_extension(
-        operation_label,
-        ticket_history_authority_extension,
-        current_global_history_attestation_bytes.as_slice(),
-    )?;
-
-    ensure_non_regressing_authenticated_current_state(
-        local_barrier_version,
-        &local_kem_tree_hash_after,
-        local_current_history_commitment.as_ref(),
-        local_current_history_authority_extension,
-        barrier_version,
-        &bytes32("kem_tree_hash_after", &kem_tree_hash_after)?,
-        &ticket_history_commitment,
-        ticket_history_authority_extension,
-        operation_label,
-    )?;
-
-    let srx_inputs = if srx_cbor.is_empty() {
-        return Err(anyhow!(
-            "{operation_label} merge ticket missing SRX payload"
-        ));
-    } else {
-        SrxInputsOwned::from_cbor(&srx_cbor)
-            .context("unable to decode SRX bundle from server")?
-            .into_srx_inputs()
-    };
+    } = prepared_runtime;
+    let srx_inputs = srx_inputs.into_srx_inputs();
 
     let client = new_api_client(&server_url);
-    let mut header = BTreeMap::new();
-    header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
-    header.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
-
     let pop_secret =
         Box::new(dilithium5::SecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
-
-    let witness_bytes = prepared_runtime.witness_bytes;
-    let parities = prepared_runtime.parities;
-    let snapshot_hash = prepared_runtime.snapshot_hash;
-    let barrier_n_max = prepared_runtime.barrier_n_max;
-    let ticket_max_barrier_update_bytes = prepared_runtime.max_barrier_update_bytes;
     let snapshot = prepare_barrier_snapshot_runtime(
         BarrierSnapshotRuntimeRequest {
             client: &client,

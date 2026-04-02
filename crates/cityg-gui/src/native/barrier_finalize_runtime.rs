@@ -233,19 +233,6 @@ pub(super) fn ensure_full_barrier_verification_for_origin(
     )
 }
 
-pub(super) fn ensure_supported_attested_current_state_extension(
-    context: &str,
-    extension: Option<HistoryAuthorityExtension>,
-    current_global_history_attestation_bytes: &[u8],
-) -> Result<()> {
-    cityg_api_client::ensure_supported_attested_current_state_extension(
-        context,
-        extension,
-        current_global_history_attestation_bytes,
-    )
-    .map_err(anyhow::Error::from)
-}
-
 pub(super) async fn ensure_join_finalize_bootstrap_verified(
     request: &LeaveRequest,
 ) -> Result<bool> {

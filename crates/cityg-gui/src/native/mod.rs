@@ -39,7 +39,6 @@ use cityg_api_client::{
     RoomAdminOperation, build_room_admin_leaf_pair_proof, build_room_admin_listing_proof,
     build_room_admin_proof, build_room_admin_target_proof,
 };
-use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{ClientEpochBundle, vrf::generate_vrf_keys};
 use cityg_config::CityGConfig;
 #[cfg(not(test))]
