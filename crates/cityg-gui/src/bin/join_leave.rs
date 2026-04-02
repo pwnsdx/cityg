@@ -1008,11 +1008,11 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         header,
         cat,
         parent_root: parent_root_arr,
-        join_delta_root: join_delta_root_arr,
-        revoked_since_root: revoked_since_root_arr,
-        revoked_root: revoked_root_arr,
-        tswe_salt_hash: tswe_salt_hash_arr,
-        pox_r_commit,
+        join_delta_root: _join_delta_root_arr,
+        revoked_since_root: _revoked_since_root_arr,
+        revoked_root: _revoked_root_arr,
+        tswe_salt_hash: _tswe_salt_hash_arr,
+        pox_r_commit: _pox_r_commit,
         pivot,
         snapshot_hash: _prepared_snapshot_hash,
         committed_revocation_roots_hash: _prepared_committed_revocation_roots_hash,
@@ -1022,49 +1022,19 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         .barrier_prepare_snapshot(snapshot_request)
         .await
         .context("prepare join finalize barrier snapshot")?;
-    let cityg_api_client::PreparedOriginMergeTicket {
-        barrier_version,
-        proof_mode,
-        vrf_id,
-        policy_version,
-        msphf_crs_id,
-        msphf_params_id,
-        fs_policy_version,
-        fs_epoch_base_ts,
-        parities,
-        witness_bytes,
-        ..
-    } = prepared_runtime;
-    let next_barrier_version = barrier_version.saturating_add(1);
+    let next_barrier_version = prepared_runtime.barrier_version.saturating_add(1);
     let barrier_update = BarrierUpdateBuildResult::from_core(barrier_update);
-    let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
-        gid: &session.gid,
-        cat: &cat,
-        tswe_salt_hash: &tswe_salt_hash_arr,
-        parent_root: &parent_root_arr,
-        join_delta_root: &join_delta_root_arr,
-        revoked_since_root: &revoked_since_root_arr,
-        revoked_root: &revoked_root_arr,
-        pox_r_commit: &pox_r_commit,
-        msphf_crs_id: msphf_crs_id.as_str(),
-        msphf_params_id: msphf_params_id.as_str(),
-        srx: None,
-        pop_public_key: session.pop_public_key.as_slice(),
-        pop_secret_key: session.pop_secret.as_ref(),
-        proof_mode: proof_mode.as_str(),
-        vrf_id: vrf_id.as_str(),
-        policy_version: policy_version.as_str(),
-        vrf_secret_key: session.vrf_secret_key.as_slice(),
-        vrf_public_key: session.vrf_public_key.as_slice(),
-        fs_policy_version: fs_policy_version.as_str(),
-        fs_epoch_base_ts,
-        barrier_version: next_barrier_version,
-        fs_join: FsJoinInputs {
-            fs_ec: session.fs_ec,
-            fs_epoch_commit: session.fs_epoch_commit,
-            fs_dev_prev_commit: session.fs_dev_prev_commit,
-        },
-    });
+    let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
+        &session.gid,
+        session.pop_public_key.as_slice(),
+        session.pop_secret.as_ref(),
+        session.vrf_secret_key.as_slice(),
+        session.vrf_public_key.as_slice(),
+        session.fs_ec,
+        session.fs_epoch_commit,
+        session.fs_dev_prev_commit,
+        next_barrier_version,
+    );
 
     let build_join_finalize_bundle =
         |forward_state: ForwardSecrecyState,
@@ -1075,8 +1045,8 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
                 parts: prepared_orchestration.parts.clone(),
                 params: prepared_orchestration.params.clone(),
                 forward_state,
-                parities: &parities,
-                witness_bytes: witness_bytes.as_deref(),
+                parities: &prepared_runtime.parities,
+                witness_bytes: prepared_runtime.witness_bytes.as_deref(),
                 pivot: &pivot,
                 gid: &session.gid,
                 cat: &cat,
@@ -1161,8 +1131,11 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         Err(err) => return Err(err.into()),
     }
 
-    let accepted_bundle =
-        parse_accepted_bundle_runtime_state(&bundle, fs_policy_version.as_str(), fs_epoch_base_ts)?;
+    let accepted_bundle = parse_accepted_bundle_runtime_state(
+        &bundle,
+        prepared_runtime.fs_policy_version.as_str(),
+        prepared_runtime.fs_epoch_base_ts,
+    )?;
     let accepted_fs_dev_prev_commit = accepted_bundle
         .fs_dev_prev_commit
         .ok_or_else(|| anyhow!("accepted bundle missing fs_dev commit"))?;
@@ -1258,11 +1231,11 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             header,
             cat,
             parent_root: parent_root_arr,
-            join_delta_root: join_delta_root_arr,
-            revoked_since_root: revoked_since_root_arr,
-            revoked_root: revoked_root_arr,
-            tswe_salt_hash: tswe_salt_hash_arr,
-            pox_r_commit,
+            join_delta_root: _join_delta_root_arr,
+            revoked_since_root: _revoked_since_root_arr,
+            revoked_root: _revoked_root_arr,
+            tswe_salt_hash: _tswe_salt_hash_arr,
+            pox_r_commit: _pox_r_commit,
             pivot,
             snapshot_hash: _prepared_snapshot_hash,
             committed_revocation_roots_hash: _prepared_committed_revocation_roots_hash,
@@ -1272,60 +1245,28 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             .barrier_prepare_snapshot(snapshot_request)
             .await
             .context("prepare leave barrier snapshot")?;
-        let cityg_api_client::PreparedRevocationMergeTicket {
-            barrier_version,
-            proof_mode,
-            vrf_id,
-            policy_version,
-            msphf_crs_id,
-            msphf_params_id,
-            fs_policy_version,
-            fs_epoch_base_ts,
-            parities,
-            witness_bytes,
-            srx_inputs,
-            ..
-        } = prepared_runtime;
-        let srx_inputs = srx_inputs.into_srx_inputs();
-        let next_barrier_version = barrier_version.saturating_add(1);
+        let next_barrier_version = prepared_runtime.barrier_version.saturating_add(1);
         let barrier_update = BarrierUpdateBuildResult::from_core(barrier_update);
 
-        let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
-            gid: &session.gid,
-            cat: &cat,
-            tswe_salt_hash: &tswe_salt_hash_arr,
-            parent_root: &parent_root_arr,
-            join_delta_root: &join_delta_root_arr,
-            revoked_since_root: &revoked_since_root_arr,
-            revoked_root: &revoked_root_arr,
-            pox_r_commit: &pox_r_commit,
-            msphf_crs_id: msphf_crs_id.as_str(),
-            msphf_params_id: msphf_params_id.as_str(),
-            srx: Some(srx_inputs),
-            pop_public_key: session.pop_public_key.as_slice(),
-            pop_secret_key: session.pop_secret.as_ref(),
-            proof_mode: proof_mode.as_str(),
-            vrf_id: vrf_id.as_str(),
-            policy_version: policy_version.as_str(),
-            vrf_secret_key: session.vrf_secret_key.as_slice(),
-            vrf_public_key: session.vrf_public_key.as_slice(),
-            fs_policy_version: fs_policy_version.as_str(),
-            fs_epoch_base_ts,
-            barrier_version: next_barrier_version,
-            fs_join: FsJoinInputs {
-                fs_ec: current_fs_ec,
-                fs_epoch_commit: current_fs_epoch_commit,
-                fs_dev_prev_commit: current_fs_dev_prev_commit,
-            },
-        });
+        let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
+            &session.gid,
+            session.pop_public_key.as_slice(),
+            session.pop_secret.as_ref(),
+            session.vrf_secret_key.as_slice(),
+            session.vrf_public_key.as_slice(),
+            current_fs_ec,
+            current_fs_epoch_commit,
+            current_fs_dev_prev_commit,
+            next_barrier_version,
+        );
 
         let built = build_barrier_merge_bundle_core(CoreBarrierMergeBundleInputs {
             header,
             parts: prepared_orchestration.parts,
             params: prepared_orchestration.params,
             forward_state,
-            parities: &parities,
-            witness_bytes: witness_bytes.as_deref(),
+            parities: &prepared_runtime.parities,
+            witness_bytes: prepared_runtime.witness_bytes.as_deref(),
             pivot: &pivot,
             gid: &session.gid,
             cat: &cat,
