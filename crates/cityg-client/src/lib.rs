@@ -85,6 +85,7 @@ pub mod barrier_snapshot_prepare;
 pub mod barrier_state_auth;
 pub mod barrier_transition;
 pub mod barrier_update;
+pub mod binary;
 pub mod bundle_headers;
 pub mod message_auth;
 pub mod message_crypto;

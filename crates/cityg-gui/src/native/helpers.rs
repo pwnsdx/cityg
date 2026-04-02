@@ -1,5 +1,6 @@
 use super::*;
 pub(super) use cityg_client::barrier_crypto::generate_kbroad_keypair;
+pub(super) use cityg_client::binary::{bytes32, decode_hex_32, header_bytes32};
 pub(super) use cityg_client::bundle_headers::{
     compute_fs_fingerprint_from_header, derive_fs_fingerprint_from_fields, recompute_proofs_commit,
     recompute_srx_commit,
@@ -80,23 +81,6 @@ pub(super) fn header_u64(header: &BTreeMap<u64, Value>, key: u64) -> Option<u64>
         Value::Integer(int) => (*int).try_into().ok(),
         _ => None,
     }
-}
-
-pub(super) fn header_bytes32(header: &BTreeMap<u64, Value>, key: u64) -> Option<[u8; 32]> {
-    match header.get(&key)? {
-        Value::Bytes(bytes) => bytes.as_slice().try_into().ok(),
-        _ => None,
-    }
-}
-
-pub(super) fn decode_hex_32(input: &str) -> Option<[u8; 32]> {
-    let bytes = hex_decode(input).ok()?;
-    if bytes.len() != 32 {
-        return None;
-    }
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&bytes);
-    Some(result)
 }
 
 pub(super) fn decode_room_admin_target_hex(input: &str) -> Result<Vec<u8>> {
@@ -226,9 +210,4 @@ pub(super) fn header_bytes32_opt(
         Some(Value::Null) | None => Ok(None),
         Some(_) => Err(anyhow!("header {key} must be bytes")),
     }
-}
-
-pub(super) fn bytes32(name: &str, data: &[u8]) -> Result<[u8; 32]> {
-    data.try_into()
-        .map_err(|_| anyhow!("{name} must be 32 bytes, received {} bytes", data.len()))
 }
