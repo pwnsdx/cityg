@@ -69,41 +69,19 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                     && !bootstrap_attempted
                 {
                     bootstrap_attempted = true;
-                    let provisioning_public = if let Some(public) = generated_kbroad_public.as_ref()
-                    {
-                        public.clone()
-                    } else {
-                        let public = generate_kbroad_keypair().0;
-                        generated_kbroad_public = Some(public.clone());
-                        public
-                    };
-                    let admin_proof = build_room_admin_proof(
-                        RoomAdminOperation::Bootstrap,
-                        &room_id,
-                        &provisioning_public,
-                        &pop_public_key,
-                        &pop_secret_key,
-                    )
-                    .context("build room bootstrap admin proof")?;
-
-                    match client
-                        .bootstrap_room_as_admin(&room_id, &provisioning_public, admin_proof)
-                        .await
-                    {
-                        Ok(_) => continue,
-                        Err(ApiClientError::HttpStatus {
-                            status: bootstrap_status,
-                            message: bootstrap_message,
-                            ..
-                        }) if bootstrap_status.is_server_error()
-                            && bootstrap_message.contains("kbroad key already registered") =>
-                        {
-                            continue;
-                        }
-                        Err(err) => {
-                            return Err(anyhow!("failed to bootstrap room KBROAD key: {}", err));
-                        }
-                    }
+                    generated_kbroad_public = Some(
+                        client
+                            .bootstrap_room_for_join(
+                                &room_id,
+                                &pop_public_key,
+                                &pop_secret_key,
+                                generated_kbroad_public.take(),
+                            )
+                            .await
+                            .map_err(anyhow::Error::from)
+                            .context("failed to bootstrap room KBROAD key")?,
+                    );
+                    continue;
                 }
 
                 if status.is_server_error()

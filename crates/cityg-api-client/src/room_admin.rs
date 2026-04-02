@@ -4,7 +4,7 @@ use cityg_api_schema::pb::{
     ListRoomAdminsResponse, MergeTicketResponse, RoomAdminMutationRequest,
     RoomAdminMutationResponse, RotateRoomKbroadRequest, RotateRoomKbroadResponse,
 };
-use cityg_client::pivot::pivot_parity_from_cbor;
+use cityg_client::{barrier_crypto::generate_kbroad_keypair, pivot::pivot_parity_from_cbor};
 use pqcrypto_dilithium::dilithium5;
 use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use serde_bytes::ByteBuf;
@@ -141,6 +141,36 @@ pub fn build_room_admin_leaf_pair_proof(
 }
 
 impl CitygApiClient {
+    pub async fn bootstrap_room_for_join(
+        &self,
+        room_id: &str,
+        pop_public_key: &[u8],
+        pop_secret_key: &[u8],
+        kbroad_public: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, Error> {
+        let kbroad_public = kbroad_public.unwrap_or_else(|| generate_kbroad_keypair().0);
+        let admin_proof = build_room_admin_proof(
+            RoomAdminOperation::Bootstrap,
+            room_id,
+            &kbroad_public,
+            pop_public_key,
+            pop_secret_key,
+        )?;
+
+        match self
+            .bootstrap_room_as_admin(room_id, &kbroad_public, admin_proof)
+            .await
+        {
+            Ok(()) => Ok(kbroad_public),
+            Err(Error::HttpStatus {
+                status, message, ..
+            }) if status.is_server_error() && message.contains("kbroad key already registered") => {
+                Ok(kbroad_public)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     pub async fn bootstrap_room(&self, room_id: &str, kbroad_public: &[u8]) -> Result<(), Error> {
         let _ = (room_id, kbroad_public);
         Err(Error::Parse(

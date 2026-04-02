@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(test)]
 pub(super) use cityg_client::barrier_crypto::generate_kbroad_keypair;
 pub(super) use cityg_client::binary::{bytes32, decode_hex_32, header_bytes32};
 #[cfg(test)]
