@@ -49,7 +49,6 @@ use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
 use cityg_client::demo;
 use cityg_client::{
     ClientEpochBundle,
-    barrier_crypto::generate_barrier_leaf_keypair,
     barrier_merge_bundle::{
         BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
         build_barrier_merge_bundle as build_barrier_merge_bundle_core,
@@ -58,7 +57,7 @@ use cityg_client::{
     join_bundle::{
         JoinEpochBundleInputs, build_join_epoch_bundle, parse_accepted_bundle_runtime_state,
     },
-    vrf::generate_vrf_keys,
+    join_runtime::generate_join_runtime_material,
 };
 #[cfg(test)]
 use cityg_client::{
@@ -739,23 +738,17 @@ async fn prepare_join_session_with_identity(
         hdr::HDR_KBROAD_PUB,
         Value::Bytes(prepared_runtime.kbroad_public.clone()),
     );
-    let (barrier_leaf_ek_bytes, barrier_leaf_dk_bytes, _barrier_leaf_pkhash) =
-        generate_barrier_leaf_keypair()?;
+    let join_runtime = generate_join_runtime_material()?;
     header.insert(
         hdr::HDR_BARRIER_LEAF_PK,
-        Value::Bytes(barrier_leaf_ek_bytes),
+        Value::Bytes(join_runtime.barrier_leaf_public_key),
     );
     // Keep the private leaf key material local (future recover path).
-    let _barrier_leaf_dk = barrier_leaf_dk_bytes;
+    let _barrier_leaf_dk = join_runtime.barrier_leaf_secret_key;
 
-    let mut fs_state = ForwardSecrecyState::new({
-        let mut seed = [0u8; 32];
-        rng().fill(&mut seed);
-        seed
-    });
-
-    let (vrf_secret_key, vrf_public_key) =
-        generate_vrf_keys().context("generate runtime VRF keypair")?;
+    let mut fs_state = join_runtime.forward_state;
+    let vrf_secret_key = join_runtime.vrf_secret_key;
+    let vrf_public_key = join_runtime.vrf_public_key;
 
     let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
         pop_public_key.as_slice(),

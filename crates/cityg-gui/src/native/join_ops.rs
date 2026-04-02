@@ -2,6 +2,7 @@ use super::*;
 use cityg_client::join_bundle::{
     JoinEpochBundleInputs, build_join_epoch_bundle, parse_accepted_bundle_runtime_state,
 };
+use cityg_client::join_runtime::generate_join_runtime_material;
 
 const JOIN_IDENTITY_RETRY_MAX_ATTEMPTS: u32 = 8;
 
@@ -162,16 +163,13 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             hdr::HDR_KBROAD_PUB,
             Value::Bytes(prepared_runtime.kbroad_public.clone()),
         );
-        let (barrier_leaf_ek_bytes, barrier_leaf_dk_bytes, barrier_pkhash_leaf) =
-            cityg_client::barrier_crypto::generate_barrier_leaf_keypair()?;
+        let join_runtime = generate_join_runtime_material()?;
         header_map.insert(
             hdr::HDR_BARRIER_LEAF_PK,
-            Value::Bytes(barrier_leaf_ek_bytes.clone()),
+            Value::Bytes(join_runtime.barrier_leaf_public_key.clone()),
         );
 
-        let mut k_fs = [0u8; 32];
-        rand::rng().fill(&mut k_fs);
-        let mut fs_state = ForwardSecrecyState::new(k_fs);
+        let mut fs_state = join_runtime.forward_state;
         let pop_secret = Box::new(
             dilithium5::SecretKey::from_bytes(&room_identity.pop_secret_key)
                 .context("invalid POP key")?,
@@ -179,9 +177,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
 
         let (msg_sign_public_key, msg_sign_secret_key) =
             cityg_client::message_auth::generate_message_signing_keypair();
-
-        let (vrf_secret_key, vrf_public_key) =
-            generate_vrf_keys().context("generate runtime VRF keypair")?;
+        let vrf_secret_key = join_runtime.vrf_secret_key;
+        let vrf_public_key = join_runtime.vrf_public_key;
 
         let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
             room_identity.pop_public_key.as_slice(),
@@ -328,8 +325,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
                 max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
                 n_max: prepared_runtime.barrier_n_max,
                 cover_leaf_index: prepared_runtime.cover_leaf_index,
-                dk_leaf: Zeroizing::new(barrier_leaf_dk_bytes),
-                pkhash_leaf: barrier_pkhash_leaf,
+                dk_leaf: Zeroizing::new(join_runtime.barrier_leaf_secret_key),
+                pkhash_leaf: join_runtime.barrier_leaf_pkhash,
                 barrier_recovery_pending: true,
                 current_barrier_full_verified: false,
                 ..BarrierSecretState::default()

@@ -39,7 +39,9 @@ use cityg_api_client::{
     RoomAdminOperation, build_room_admin_leaf_pair_proof, build_room_admin_listing_proof,
     build_room_admin_proof, build_room_admin_target_proof,
 };
-use cityg_client::{ClientEpochBundle, vrf::generate_vrf_keys};
+use cityg_client::ClientEpochBundle;
+#[cfg(test)]
+use cityg_client::vrf::generate_vrf_keys;
 use cityg_config::CityGConfig;
 #[cfg(not(test))]
 use gpui::Application;
@@ -68,7 +70,7 @@ use msphf_orchestrator::CapssWitnessBundle;
 #[cfg(test)]
 use msphf_orchestrator::compute_fs_dev_commit_v2;
 use msphf_orchestrator::{
-    AnchorInstanceParts, ForwardSecrecyState, FsJoinInputs, OrchestrationParams, PivotParity, hdr,
+    AnchorInstanceParts, ForwardSecrecyState, OrchestrationParams, PivotParity, hdr,
 };
 use pqcrypto_dilithium::dilithium5;
 #[cfg(test)]
