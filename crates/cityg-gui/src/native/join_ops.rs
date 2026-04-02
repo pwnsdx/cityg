@@ -1,7 +1,4 @@
 use super::*;
-use cityg_client::barrier_orchestration::{
-    BarrierOrchestrationInputs, prepare_barrier_orchestration,
-};
 use cityg_client::join_bundle::{
     JoinEpochBundleInputs, build_join_epoch_bundle, parse_accepted_bundle_runtime_state,
 };
@@ -150,46 +147,10 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         }
     };
     let (mut session, requires_bootstrap_finalize) = {
-        let cityg_api_client::PreparedRuntimeJoinTicket {
-            gid,
-            cat,
-            parent_root,
-            join_delta_root,
-            revoked_since_root,
-            revoked_root,
-            tswe_salt_hash,
-            leaf_id,
-            pox_r_commit,
-            kbroad_public,
-            bootstrap_public,
-            witness_bytes,
-            srx_inputs,
-            msphf_crs_id,
-            msphf_params_id,
-            proof_mode,
-            vrf_id,
-            policy_version,
-            fs_policy_version,
-            fs_epoch_base_ts,
-            fs_forward_leap_policy,
-            barrier_version,
-            current_history_view_id,
-            current_history_commitment,
-            current_history_authority_extension,
-            current_global_history_attestation_bytes,
-            join_finalize_auth_token,
-            barrier_n_max,
-            cover_leaf_index,
-            max_barrier_update_bytes,
-            kem_tree_hash_after,
-            current_predecessor_kem_tree_hash_after,
-            current_join_records,
-            current_revoked_leaf_indices,
-            current_barrier_update,
-            last_accepted_ec,
-        } = cityg_api_client::prepare_runtime_join_ticket(&ticket).map_err(anyhow::Error::from)?;
+        let prepared_runtime =
+            cityg_api_client::prepare_runtime_join_ticket(&ticket).map_err(anyhow::Error::from)?;
 
-        let witness_bytes = if let Some(witness_bytes) = witness_bytes {
+        let witness_bytes = if let Some(witness_bytes) = prepared_runtime.witness_bytes.clone() {
             witness_bytes
         } else {
             return Err(anyhow!("server did not include canonical witness"));
@@ -197,7 +158,10 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
 
         let mut header_map = BTreeMap::new();
         header_map.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
-        header_map.insert(hdr::HDR_KBROAD_PUB, Value::Bytes(kbroad_public.clone()));
+        header_map.insert(
+            hdr::HDR_KBROAD_PUB,
+            Value::Bytes(prepared_runtime.kbroad_public.clone()),
+        );
         let (barrier_leaf_ek_bytes, barrier_leaf_dk_bytes, barrier_pkhash_leaf) =
             cityg_client::barrier_crypto::generate_barrier_leaf_keypair()?;
         header_map.insert(
@@ -219,38 +183,22 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         let (vrf_secret_key, vrf_public_key) =
             generate_vrf_keys().context("generate runtime VRF keypair")?;
 
-        let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
-            gid: &gid,
-            cat: &cat,
-            tswe_salt_hash: &tswe_salt_hash,
-            parent_root: &parent_root,
-            join_delta_root: &join_delta_root,
-            revoked_since_root: &revoked_since_root,
-            revoked_root: &revoked_root,
-            pox_r_commit: &pox_r_commit,
-            msphf_crs_id: msphf_crs_id.as_str(),
-            msphf_params_id: msphf_params_id.as_str(),
-            srx: Some(srx_inputs.into_srx_inputs()),
-            pop_public_key: room_identity.pop_public_key.as_slice(),
-            pop_secret_key: pop_secret.as_ref(),
-            proof_mode: proof_mode.as_str(),
-            vrf_id: vrf_id.as_str(),
-            policy_version: policy_version.as_str(),
-            vrf_secret_key: vrf_secret_key.as_slice(),
-            vrf_public_key: vrf_public_key.as_slice(),
-            fs_policy_version: fs_policy_version.as_str(),
-            fs_epoch_base_ts,
-            barrier_version,
-            fs_join: FsJoinInputs::default(),
-        });
+        let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
+            room_identity.pop_public_key.as_slice(),
+            pop_secret.as_ref(),
+            vrf_secret_key.as_slice(),
+            vrf_public_key.as_slice(),
+        );
+        let prepared_parts = prepared_orchestration.parts.clone();
+        let prepared_params = prepared_orchestration.params.clone();
 
         let build_join_bundle = |fs_state: &mut ForwardSecrecyState,
                                  disable_autonomic_evolve: bool|
          -> Result<ClientEpochBundle> {
             build_join_epoch_bundle(JoinEpochBundleInputs {
                 header: header_map.clone(),
-                parts: prepared_orchestration.parts.clone(),
-                params: prepared_orchestration.params.clone(),
+                parts: prepared_parts.clone(),
+                params: prepared_params.clone(),
                 fs_state,
                 witness_bytes: Some(&witness_bytes),
                 disable_autonomic_evolve,
@@ -263,7 +211,9 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
 
         let capss_witness_bytes = encode_capss_witness(&bundle.capss_witness)?;
 
-        if parent_root == [0u8; 32] && !bootstrap_public.is_empty() {
+        if prepared_runtime.parent_root == [0u8; 32]
+            && !prepared_runtime.bootstrap_public.is_empty()
+        {
             return Err(anyhow!(
                 "server requires bootstrap signer for first join; GUI bootstrap signer support is not configured"
             ));
@@ -292,30 +242,31 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         let forward_state = fs_state;
         let accepted_bundle = parse_accepted_bundle_runtime_state(
             &bundle,
-            fs_policy_version.as_str(),
-            fs_epoch_base_ts,
+            prepared_runtime.fs_policy_version.as_str(),
+            prepared_runtime.fs_epoch_base_ts,
         )?;
         let accepted_fs_dev_prev_commit = accepted_bundle
             .fs_dev_prev_commit
             .ok_or_else(|| anyhow!("accepted join bundle missing fs_dev commit"))?;
         let regular_fingerprint = Some(accepted_bundle.seed_ctx_hash);
         let fs_fingerprint = accepted_bundle.fs_fingerprint;
-        let requires_bootstrap_finalize = barrier_version == 0 && parent_root == [0u8; 32];
+        let requires_bootstrap_finalize =
+            prepared_runtime.barrier_version == 0 && prepared_runtime.parent_root == [0u8; 32];
         let session = AppSession {
             server_url,
             room_id,
             alias,
-            gid,
-            cat,
-            leaf_id,
-            parent_root,
-            join_delta_root,
-            revoked_since_root,
-            revoked_root,
+            gid: prepared_runtime.gid,
+            cat: prepared_runtime.cat,
+            leaf_id: prepared_runtime.leaf_id,
+            parent_root: prepared_runtime.parent_root,
+            join_delta_root: prepared_runtime.join_delta_root,
+            revoked_since_root: prepared_runtime.revoked_since_root,
+            revoked_root: prepared_runtime.revoked_root,
             regular_fingerprint,
             fs_fingerprint,
-            tswe_salt_hash,
-            pox_r_commit,
+            tswe_salt_hash: prepared_runtime.tswe_salt_hash,
+            pox_r_commit: prepared_runtime.pox_r_commit,
             we_epoch_id: bundle.we_epoch_id,
             xk_hash: bundle.hp_binding.xk_hash,
             epoch_key: bundle.epoch_key,
@@ -331,49 +282,52 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             msg_sign_secret_key,
             vrf_secret_key,
             vrf_public_key,
-            kbroad_public,
-            bootstrap_public,
-            proof_mode,
-            vrf_id,
-            policy_version,
-            msphf_crs_id,
-            msphf_params_id,
+            kbroad_public: prepared_runtime.kbroad_public.clone(),
+            bootstrap_public: prepared_runtime.bootstrap_public.clone(),
+            proof_mode: prepared_runtime.proof_mode.clone(),
+            vrf_id: prepared_runtime.vrf_id.clone(),
+            policy_version: prepared_runtime.policy_version.clone(),
+            msphf_crs_id: prepared_runtime.msphf_crs_id.clone(),
+            msphf_params_id: prepared_runtime.msphf_params_id.clone(),
             fs_policy_version: accepted_bundle.fs_policy_version,
             fs_epoch_base_ts: accepted_bundle.fs_epoch_base_ts,
             fs_forward_leap_policy: FsForwardLeapPolicy {
-                h: fs_forward_leap_policy.h,
-                checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
-                slack_anchor: fs_forward_leap_policy.slack_anchor,
-                slack_first_device: fs_forward_leap_policy.slack_first_device,
-                slack_device: fs_forward_leap_policy.slack_device,
+                h: prepared_runtime.fs_forward_leap_policy.h,
+                checkpoint_interval: prepared_runtime.fs_forward_leap_policy.checkpoint_interval,
+                slack_anchor: prepared_runtime.fs_forward_leap_policy.slack_anchor,
+                slack_first_device: prepared_runtime.fs_forward_leap_policy.slack_first_device,
+                slack_device: prepared_runtime.fs_forward_leap_policy.slack_device,
             },
-            last_accepted_ec: last_accepted_ec.max(accepted_bundle.fs_ec),
+            last_accepted_ec: prepared_runtime.last_accepted_ec.max(accepted_bundle.fs_ec),
             last_fetch_timestamp_ms: None,
             msg_replay_state: MsgReplayState::default(),
             capss_witness: capss_witness_bytes,
             barrier_state: BarrierSecretState {
                 barrier_initialized: true,
-                barrier_version,
+                barrier_version: prepared_runtime.barrier_version,
                 barrier_roots_hash: compute_revocation_roots_hash(
-                    &revoked_since_root,
-                    &revoked_root,
+                    &prepared_runtime.revoked_since_root,
+                    &prepared_runtime.revoked_root,
                 )?,
-                current_history_view_id,
-                current_history_commitment,
-                current_history_authority_extension,
-                current_global_history_attestation_bytes,
+                current_history_view_id: prepared_runtime.current_history_view_id,
+                current_history_commitment: prepared_runtime.current_history_commitment,
+                current_history_authority_extension: prepared_runtime
+                    .current_history_authority_extension,
+                current_global_history_attestation_bytes: prepared_runtime
+                    .current_global_history_attestation_bytes,
                 current_public_tree: None,
-                bootstrap_history_commitment: current_history_commitment,
-                bootstrap_predecessor_kem_tree_hash_after: current_predecessor_kem_tree_hash_after,
-                bootstrap_join_records: current_join_records,
-                bootstrap_revoked_leaf_indices: current_revoked_leaf_indices,
-                bootstrap_join_finalize_auth_token: join_finalize_auth_token,
+                bootstrap_history_commitment: prepared_runtime.current_history_commitment,
+                bootstrap_predecessor_kem_tree_hash_after: prepared_runtime
+                    .current_predecessor_kem_tree_hash_after,
+                bootstrap_join_records: prepared_runtime.current_join_records,
+                bootstrap_revoked_leaf_indices: prepared_runtime.current_revoked_leaf_indices,
+                bootstrap_join_finalize_auth_token: prepared_runtime.join_finalize_auth_token,
                 k_barrier: Zeroizing::new([0u8; 32]),
-                kem_tree_hash_after,
-                bootstrap_current_barrier_update: current_barrier_update,
-                max_barrier_update_bytes,
-                n_max: barrier_n_max,
-                cover_leaf_index,
+                kem_tree_hash_after: prepared_runtime.kem_tree_hash_after,
+                bootstrap_current_barrier_update: prepared_runtime.current_barrier_update,
+                max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
+                n_max: prepared_runtime.barrier_n_max,
+                cover_leaf_index: prepared_runtime.cover_leaf_index,
                 dk_leaf: Zeroizing::new(barrier_leaf_dk_bytes),
                 pkhash_leaf: barrier_pkhash_leaf,
                 barrier_recovery_pending: true,

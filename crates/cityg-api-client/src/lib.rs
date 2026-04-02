@@ -970,6 +970,41 @@ pub struct PreparedRuntimeJoinTicket {
     pub last_accepted_ec: u64,
 }
 
+impl PreparedRuntimeJoinTicket {
+    pub fn prepare_barrier_orchestration<'a>(
+        &'a self,
+        pop_public_key: &'a [u8],
+        pop_secret_key: &'a dilithium5::SecretKey,
+        vrf_secret_key: &'a [u8],
+        vrf_public_key: &'a [u8],
+    ) -> PreparedBarrierOrchestration<'a> {
+        prepare_barrier_orchestration(BarrierOrchestrationInputs {
+            gid: &self.gid,
+            cat: &self.cat,
+            tswe_salt_hash: &self.tswe_salt_hash,
+            parent_root: &self.parent_root,
+            join_delta_root: &self.join_delta_root,
+            revoked_since_root: &self.revoked_since_root,
+            revoked_root: &self.revoked_root,
+            pox_r_commit: &self.pox_r_commit,
+            msphf_crs_id: self.msphf_crs_id.as_str(),
+            msphf_params_id: self.msphf_params_id.as_str(),
+            srx: Some(self.srx_inputs.as_srx_inputs()),
+            pop_public_key,
+            pop_secret_key,
+            proof_mode: self.proof_mode.as_str(),
+            vrf_id: self.vrf_id.as_str(),
+            policy_version: self.policy_version.as_str(),
+            vrf_secret_key,
+            vrf_public_key,
+            fs_policy_version: self.fs_policy_version.as_str(),
+            fs_epoch_base_ts: self.fs_epoch_base_ts,
+            barrier_version: self.barrier_version,
+            fs_join: msphf_orchestrator::FsJoinInputs::default(),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PrepareEpochSyncMergeTicketInput<'a> {
     pub local_barrier_version: u64,
