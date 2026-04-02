@@ -54,7 +54,7 @@ use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
 use cityg_client::demo;
 use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{
-    CityGClient, ClientEpochBundle,
+    ClientEpochBundle,
     barrier_crypto::generate_barrier_leaf_keypair,
     barrier_merge_bundle::{
         BarrierMergeBundleInputs as CoreBarrierMergeBundleInputs,
@@ -67,6 +67,7 @@ use cityg_client::{
         derive_fs_fingerprint_from_fields as derive_fs_fingerprint_from_fields_core,
         recompute_proofs_commit,
     },
+    join_bundle::{JoinEpochBundleInputs, build_join_epoch_bundle},
     vrf::generate_vrf_keys,
 };
 #[cfg(test)]
@@ -843,23 +844,14 @@ async fn prepare_join_session_with_identity(
     let build_join_bundle = |fs_state: &mut ForwardSecrecyState,
                              disable_autonomic_evolve: bool|
      -> Result<ClientEpochBundle> {
-        if disable_autonomic_evolve {
-            CityGClient::generate_epoch_without_evolve(
-                header.clone(),
-                prepared_orchestration.parts.clone(),
-                prepared_orchestration.params.clone(),
-                fs_state,
-                witness_bytes,
-            )
-        } else {
-            CityGClient::generate_epoch(
-                header.clone(),
-                prepared_orchestration.parts.clone(),
-                prepared_orchestration.params.clone(),
-                fs_state,
-                witness_bytes,
-            )
-        }
+        build_join_epoch_bundle(JoinEpochBundleInputs {
+            header: header.clone(),
+            parts: prepared_orchestration.parts.clone(),
+            params: prepared_orchestration.params.clone(),
+            fs_state,
+            witness_bytes,
+            disable_autonomic_evolve,
+        })
         .context("generate join bundle")
     };
 

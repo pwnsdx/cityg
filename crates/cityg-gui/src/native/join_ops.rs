@@ -3,6 +3,7 @@ use cityg_api_client::require_base_profile_history_authority_extension;
 use cityg_client::barrier_orchestration::{
     BarrierOrchestrationInputs, prepare_barrier_orchestration,
 };
+use cityg_client::join_bundle::{JoinEpochBundleInputs, build_join_epoch_bundle};
 
 fn is_fs_forward_jump_group_http_error(
     freeze_code: Option<u32>,
@@ -332,23 +333,14 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
         let build_join_bundle = |fs_state: &mut ForwardSecrecyState,
                                  disable_autonomic_evolve: bool|
          -> Result<ClientEpochBundle> {
-            if disable_autonomic_evolve {
-                CityGClient::generate_epoch_without_evolve(
-                    header_map.clone(),
-                    prepared_orchestration.parts.clone(),
-                    prepared_orchestration.params.clone(),
-                    fs_state,
-                    Some(&witness_bytes),
-                )
-            } else {
-                CityGClient::generate_epoch(
-                    header_map.clone(),
-                    prepared_orchestration.parts.clone(),
-                    prepared_orchestration.params.clone(),
-                    fs_state,
-                    Some(&witness_bytes),
-                )
-            }
+            build_join_epoch_bundle(JoinEpochBundleInputs {
+                header: header_map.clone(),
+                parts: prepared_orchestration.parts.clone(),
+                params: prepared_orchestration.params.clone(),
+                fs_state,
+                witness_bytes: Some(&witness_bytes),
+                disable_autonomic_evolve,
+            })
             .context("failed to build join anchor")
         };
 

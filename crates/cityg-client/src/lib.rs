@@ -89,6 +89,7 @@ pub mod barrier_transition;
 pub mod barrier_update;
 pub mod binary;
 pub mod bundle_headers;
+pub mod join_bundle;
 pub mod message_auth;
 pub mod message_crypto;
 pub mod pivot;
