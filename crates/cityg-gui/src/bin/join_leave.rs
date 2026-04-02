@@ -24,16 +24,14 @@ mod watch_mode;
 mod websocket_replay;
 
 use anyhow::{Context, Result, anyhow};
+use barrier_shared::ticket_retry_delay;
 #[cfg(test)]
 use barrier_shared::{
     DEFAULT_BARRIER_N_MAX, TICKET_RETRY_BASE_DELAY_MS, TICKET_RETRY_JITTER_MS,
     TICKET_RETRY_MAX_DELAY_MS, apply_join_set_to_snapshot, apply_revoked_set_to_snapshot,
     blank_internal_path_from_leaf, blank_leaf_and_path, collect_resolution_targets,
     compute_barrier_pkhash, compute_barrier_tree_hash, compute_revocation_roots_hash,
-    decode_history_commitment_header, sibling_node,
-};
-use barrier_shared::{
-    TICKET_RETRY_MAX_ATTEMPTS, should_retry_ticket_http_error, ticket_retry_delay,
+    decode_history_commitment_header, should_retry_ticket_http_error, sibling_node,
 };
 #[cfg(test)]
 use ciborium::value::Integer;
@@ -720,51 +718,32 @@ async fn prepare_join_session_with_identity(
         cityg_api_client::build_identity_binding(alias, &pop_public_key, &pop_secret_key)
             .context("build identity binding")?;
 
-    let mut retry_attempt = 0u32;
-    let ticket = loop {
-        match client
-            .join_ticket(room_id, alias, Some(identity_binding.clone()))
-            .await
-        {
-            Ok(ticket) => break ticket,
-            Err(ApiClientError::HttpStatus {
-                status,
-                message,
+    let ticket = match client
+        .join_ticket_with_retry(room_id, alias, Some(identity_binding.clone()))
+        .await
+    {
+        Ok(ticket) => ticket,
+        Err(ApiClientError::HttpStatus {
+            status,
+            message,
+            freeze_code,
+            freeze_reason,
+            ..
+        }) => {
+            let mut detail = describe_http_failure(
+                status.as_str(),
+                &message,
                 freeze_code,
-                freeze_reason,
-                ..
-            }) => {
-                if should_retry_ticket_http_error(status.as_u16(), &message, freeze_code)
-                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                {
-                    let delay = ticket_retry_delay(retry_attempt);
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    warn!(
-                        attempt = retry_attempt,
-                        delay_ms = delay.as_millis() as u64,
-                        status = status.as_u16(),
-                        message = %message,
-                        "join_ticket race/concurrency rejection; retrying"
-                    );
-                    sleep(delay).await;
-                    continue;
-                }
-
-                let mut detail = describe_http_failure(
-                    status.as_str(),
-                    &message,
-                    freeze_code,
-                    freeze_reason.as_deref(),
+                freeze_reason.as_deref(),
+            );
+            if status.is_server_error() && message.contains("kbroad key missing") {
+                detail.push_str(
+                    " (room is not KBROAD-provisioned; bootstrap it first with a room-specific public key)",
                 );
-                if status.is_server_error() && message.contains("kbroad key missing") {
-                    detail.push_str(
-                        " (room is not KBROAD-provisioned; bootstrap it first with a room-specific public key)",
-                    );
-                }
-                return Err(anyhow!(detail));
             }
-            Err(err) => return Err(err.into()),
+            return Err(anyhow!(detail));
         }
+        Err(err) => return Err(err.into()),
     };
 
     let gid = bytes32("gid", &ticket.gid)?;
@@ -1035,40 +1014,10 @@ async fn perform_join_with_identity(
 async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     let client = new_api_client(&session.server_url);
     let mut forward_state = session.forward_state.clone();
-    let mut retry_attempt = 0u32;
-    let ticket = loop {
-        match client
-            .merge_ticket_refresh(&session.room_id, &session.leaf_id)
-            .await
-        {
-            Ok(ticket) => break ticket,
-            Err(err) => {
-                if let ApiClientError::HttpStatus {
-                    status,
-                    message,
-                    freeze_code,
-                    ..
-                } = &err
-                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                {
-                    let delay = ticket_retry_delay(retry_attempt);
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    warn!(
-                        attempt = retry_attempt,
-                        delay_ms = delay.as_millis() as u64,
-                        status = status.as_u16(),
-                        message = %message,
-                        "merge_ticket_refresh race/concurrency rejection during join finalize; retrying"
-                    );
-                    sleep(delay).await;
-                    continue;
-                }
-
-                return Err(err).context("fetch merge ticket for join finalize");
-            }
-        }
-    };
+    let ticket = client
+        .merge_ticket_refresh_with_retry(&session.room_id, &session.leaf_id)
+        .await
+        .context("fetch merge ticket for join finalize")?;
 
     if !ticket.srx_cbor.is_empty() {
         return Err(anyhow!(
@@ -1346,40 +1295,10 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
     let mut accept_retry_attempt = 0u32;
     loop {
         let mut forward_state = session.forward_state.clone();
-        let mut retry_attempt = 0u32;
-        let ticket = loop {
-            match client
-                .merge_ticket(&session.room_id, &session.leaf_id)
-                .await
-            {
-                Ok(ticket) => break ticket,
-                Err(err) => {
-                    if let ApiClientError::HttpStatus {
-                        status,
-                        message,
-                        freeze_code,
-                        ..
-                    } = &err
-                        && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                        && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                    {
-                        let delay = ticket_retry_delay(retry_attempt);
-                        retry_attempt = retry_attempt.saturating_add(1);
-                        warn!(
-                            attempt = retry_attempt,
-                            delay_ms = delay.as_millis() as u64,
-                            status = status.as_u16(),
-                            message = %message,
-                            "merge_ticket race/concurrency rejection; retrying"
-                        );
-                        sleep(delay).await;
-                        continue;
-                    }
-
-                    return Err(err).context("fetch merge ticket");
-                }
-            }
-        };
+        let ticket = client
+            .merge_ticket_with_retry(&session.room_id, &session.leaf_id)
+            .await
+            .context("fetch merge ticket")?;
         ensure_supported_attested_current_state_extension(
             "leave merge ticket",
             ticket.history_authority_extension,

@@ -250,4 +250,17 @@ impl CitygApiClient {
         }
         Ok(response)
     }
+
+    /// Requests a join ticket and retries transient concurrency/rate-limit failures.
+    pub async fn join_ticket_with_retry(
+        &self,
+        room_id: &str,
+        alias: &str,
+        identity_binding: Option<IdentityBinding>,
+    ) -> Result<JoinTicketResponse, Error> {
+        retry_ticket_request("join_ticket", || {
+            self.join_ticket(room_id, alias, identity_binding.clone())
+        })
+        .await
+    }
 }

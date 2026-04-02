@@ -14,8 +14,9 @@ use crate::{
     ensure_profile_version, parse_global_history_attestation_bytes,
     parse_history_authority_descriptor_bytes, parse_history_commitment,
     require_base_profile_global_history_authority_extension,
-    require_history_authority_descriptor_for_extension, validate_local_history_attestation_kind,
-    verify_deployment_profile_manifest, verify_merge_ticket_artifact,
+    require_history_authority_descriptor_for_extension, retry_ticket_request,
+    validate_local_history_attestation_kind, verify_deployment_profile_manifest,
+    verify_merge_ticket_artifact,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -414,5 +415,18 @@ impl CitygApiClient {
             n_max: response.n_max,
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
+    }
+
+    pub async fn expel_member_ticket_with_retry(
+        &self,
+        room_id: &str,
+        author_leaf_id: &[u8; 32],
+        target_leaf_id: &[u8; 32],
+        admin_proof: RoomAdminProof,
+    ) -> Result<MergeTicket, Error> {
+        retry_ticket_request("expel_member_ticket", || {
+            self.expel_member_ticket(room_id, author_leaf_id, target_leaf_id, admin_proof.clone())
+        })
+        .await
     }
 }

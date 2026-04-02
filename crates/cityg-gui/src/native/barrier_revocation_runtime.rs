@@ -309,37 +309,10 @@ async fn perform_leave_inner(request: LeaveRequest) -> Result<()> {
     let client = new_api_client(&request.server_url);
     let room_id = request.room_id.clone();
     let leaf_id = request.leaf_id;
-    let mut retry_attempt = 0u32;
-    let ticket = loop {
-        match client.merge_ticket(&room_id, &leaf_id).await {
-            Ok(ticket) => break ticket,
-            Err(err) => {
-                if let ApiClientError::HttpStatus {
-                    status,
-                    message,
-                    freeze_code,
-                    ..
-                } = &err
-                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                {
-                    let delay = ticket_retry_delay(retry_attempt);
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    warn!(
-                        attempt = retry_attempt,
-                        delay_ms = delay.as_millis() as u64,
-                        status = status.as_u16(),
-                        message = %message,
-                        "merge_ticket race/concurrency rejection; retrying"
-                    );
-                    sleep(delay).await;
-                    continue;
-                }
-
-                return Err(err).context("failed to obtain leave merge ticket");
-            }
-        }
-    };
+    let ticket = client
+        .merge_ticket_with_retry(&room_id, &leaf_id)
+        .await
+        .context("failed to obtain leave merge ticket")?;
 
     let leave_leaf_id = request.leaf_id;
     publish_revocation_merge_from_ticket(request, ticket, "leave", Some(leave_leaf_id)).await?;
@@ -381,45 +354,15 @@ async fn perform_room_admin_expel_inner(
     )
     .context("build expel member room admin proof")?;
 
-    let mut retry_attempt = 0u32;
-    let ticket = loop {
-        match client
-            .expel_member_ticket(
-                &room_id,
-                &author_leaf_id,
-                &target_leaf_id,
-                admin_proof.clone(),
-            )
-            .await
-        {
-            Ok(ticket) => break ticket,
-            Err(err) => {
-                if let ApiClientError::HttpStatus {
-                    status,
-                    message,
-                    freeze_code,
-                    ..
-                } = &err
-                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                {
-                    let delay = ticket_retry_delay(retry_attempt);
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    warn!(
-                        attempt = retry_attempt,
-                        delay_ms = delay.as_millis() as u64,
-                        status = status.as_u16(),
-                        message = %message,
-                        "expel_member_ticket race/concurrency rejection; retrying"
-                    );
-                    sleep(delay).await;
-                    continue;
-                }
-
-                return Err(err).context("failed to obtain expel merge ticket");
-            }
-        }
-    };
+    let ticket = client
+        .expel_member_ticket_with_retry(
+            &room_id,
+            &author_leaf_id,
+            &target_leaf_id,
+            admin_proof.clone(),
+        )
+        .await
+        .context("failed to obtain expel merge ticket")?;
 
     let published =
         publish_revocation_merge_from_ticket(request, ticket, "expel", Some(target_leaf_id))

@@ -10,40 +10,10 @@ pub(super) fn perform_epoch_sync(
 
 async fn perform_epoch_sync_inner(mut session: AppSession) -> Result<EpochSyncOutcome> {
     let client = new_api_client(&session.server_url);
-    let mut retry_attempt = 0u32;
-    let ticket = loop {
-        match client
-            .merge_ticket_refresh(&session.room_id, &session.leaf_id)
-            .await
-        {
-            Ok(ticket) => break ticket,
-            Err(err) => {
-                if let ApiClientError::HttpStatus {
-                    status,
-                    message,
-                    freeze_code,
-                    ..
-                } = &err
-                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
-                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
-                {
-                    let delay = ticket_retry_delay(retry_attempt);
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    warn!(
-                        attempt = retry_attempt,
-                        delay_ms = delay.as_millis() as u64,
-                        status = status.as_u16(),
-                        message = %message,
-                        "merge_ticket_refresh race/concurrency rejection during epoch sync; retrying"
-                    );
-                    sleep(delay).await;
-                    continue;
-                }
-
-                return Err(err).context("failed to fetch merge ticket for epoch sync");
-            }
-        }
-    };
+    let ticket = client
+        .merge_ticket_refresh_with_retry(&session.room_id, &session.leaf_id)
+        .await
+        .context("failed to fetch merge ticket for epoch sync")?;
     let prepared_runtime = ticket
         .prepare_runtime(
             session.fs_ec,

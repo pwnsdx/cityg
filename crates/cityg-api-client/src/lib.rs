@@ -147,8 +147,9 @@ mod verification;
 use ciborium::Value;
 use cityg_api_schema::pb;
 use cityg_client::{
-    CityGError as ClientError, barrier_update::normalize_max_barrier_update_bytes,
-    pivot::hydrate_parities,
+    CityGError as ClientError, barrier::TICKET_RETRY_MAX_ATTEMPTS,
+    barrier::should_retry_ticket_http_error, barrier::ticket_retry_delay,
+    barrier_update::normalize_max_barrier_update_bytes, pivot::hydrate_parities,
 };
 use msphf_orchestrator::PivotParity;
 pub use pb::IdentityBinding;
@@ -160,8 +161,8 @@ use prost::Message;
 use reqwest::{Client, StatusCode};
 pub use room_admin::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{collections::BTreeMap, future::Future};
 use thiserror::Error;
 use tracing::warn;
 use verification::*;
@@ -999,6 +1000,48 @@ fn current_timestamp_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+async fn retry_ticket_request<T, F, Fut>(
+    request_name: &'static str,
+    mut request: F,
+) -> Result<T, Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, Error>>,
+{
+    let mut retry_attempt = 0u32;
+    loop {
+        match request().await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                if let Error::HttpStatus {
+                    status,
+                    message,
+                    freeze_code,
+                    ..
+                } = &err
+                    && should_retry_ticket_http_error(status.as_u16(), message, *freeze_code)
+                    && retry_attempt < TICKET_RETRY_MAX_ATTEMPTS
+                {
+                    let delay = ticket_retry_delay(retry_attempt);
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    warn!(
+                        request = request_name,
+                        attempt = retry_attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        status = status.as_u16(),
+                        message = %message,
+                        "ticket request race/concurrency rejection; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+
+                return Err(err);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

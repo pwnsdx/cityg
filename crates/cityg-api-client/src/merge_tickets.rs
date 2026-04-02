@@ -211,4 +211,25 @@ impl CitygApiClient {
             max_barrier_update_bytes: response.max_barrier_update_bytes,
         })
     }
+
+    /// Requests a leave-intent merge ticket and retries transient concurrency/rate-limit failures.
+    pub async fn merge_ticket_with_retry(
+        &self,
+        room_id: &str,
+        leaf_id: &[u8; 32],
+    ) -> Result<MergeTicket, Error> {
+        retry_ticket_request("merge_ticket", || self.merge_ticket(room_id, leaf_id)).await
+    }
+
+    /// Requests a refresh-intent merge ticket and retries transient concurrency/rate-limit failures.
+    pub async fn merge_ticket_refresh_with_retry(
+        &self,
+        room_id: &str,
+        leaf_id: &[u8; 32],
+    ) -> Result<MergeTicket, Error> {
+        retry_ticket_request("merge_ticket_refresh", || {
+            self.merge_ticket_refresh(room_id, leaf_id)
+        })
+        .await
+    }
 }
