@@ -277,17 +277,6 @@ impl BarrierMergeMode {
         }
     }
 
-    pub(super) fn pending_guard_message(self) -> &'static str {
-        match self {
-            Self::PcsRefresh => {
-                "cannot originate PCS refresh while barrier recovery is pending; complete FULL barrier recovery first"
-            }
-            Self::JoinFinalize => {
-                "cannot originate join finalization while barrier recovery is pending without join-finalize eligibility"
-            }
-        }
-    }
-
     pub(super) fn reseeds_k_fs(self) -> bool {
         matches!(self, Self::PcsRefresh)
     }

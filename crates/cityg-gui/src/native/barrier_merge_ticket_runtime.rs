@@ -1,5 +1,9 @@
 use super::*;
 use cityg_api_client::HistoryAuthorityDescriptor;
+use cityg_client::barrier_state_auth::{
+    BarrierOriginGuard, BarrierOriginMode, ensure_full_barrier_verification_for_origin,
+    guard_barrier_origin,
+};
 
 pub(super) struct PreparedBarrierMergeTicket {
     pub(super) persist_request: LeaveRequest,
@@ -79,26 +83,20 @@ pub(super) async fn prepare_barrier_merge_ticket(
         ..
     } = request;
 
-    if barrier_recovery_pending && !allow_pending_recovery {
-        return Err(anyhow!(mode.pending_guard_message()));
-    }
-    if !current_barrier_full_verified
-        && allow_pending_recovery
-        && barrier_recovery_pending
-        && mode == BarrierMergeMode::JoinFinalize
-    {
+    let origin_guard = guard_barrier_origin(
+        match mode {
+            BarrierMergeMode::PcsRefresh => BarrierOriginMode::PcsRefresh,
+            BarrierMergeMode::JoinFinalize => BarrierOriginMode::JoinFinalize,
+        },
+        barrier_recovery_pending,
+        current_barrier_full_verified,
+        allow_pending_recovery,
+        join_finalize_auth_token != [0u8; 32],
+    )?;
+    if origin_guard == BarrierOriginGuard::RequiresBootstrapVerification {
         current_barrier_full_verified =
             ensure_join_finalize_bootstrap_verified(&persist_request).await?;
-    }
-    if !current_barrier_full_verified {
-        return Err(anyhow!(
-            "cannot originate barrier updates from recover-only barrier state; re-establish FULL barrier verification first"
-        ));
-    }
-    if mode == BarrierMergeMode::JoinFinalize && join_finalize_auth_token == [0u8; 32] {
-        return Err(anyhow!(
-            "cannot originate join_finalize without server-issued join_finalize auth token"
-        ));
+        ensure_full_barrier_verification_for_origin(false, current_barrier_full_verified)?;
     }
 
     let client = new_api_client(&server_url);

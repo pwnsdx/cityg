@@ -227,17 +227,10 @@ pub(super) fn ensure_full_barrier_verification_for_origin(
     barrier_recovery_pending: bool,
     current_barrier_full_verified: bool,
 ) -> Result<()> {
-    if barrier_recovery_pending {
-        return Err(anyhow!(
-            "cannot originate barrier updates while barrier recovery is pending; complete FULL barrier recovery first"
-        ));
-    }
-    if !current_barrier_full_verified {
-        return Err(anyhow!(
-            "cannot originate barrier updates from recover-only barrier state; re-establish FULL barrier verification first"
-        ));
-    }
-    Ok(())
+    cityg_client::barrier_state_auth::ensure_full_barrier_verification_for_origin(
+        barrier_recovery_pending,
+        current_barrier_full_verified,
+    )
 }
 
 pub(super) fn ensure_supported_attested_current_state_extension(
