@@ -1,5 +1,5 @@
 use super::*;
-use crate::barrier_shared::to_core_history_commitment;
+use cityg_api_client::to_core_history_commitment;
 use cityg_client::barrier_activation::{
     ClientVisibleBarrierActivationInput,
     bundle_authored_by_local_device as bundle_authored_by_local_device_core,

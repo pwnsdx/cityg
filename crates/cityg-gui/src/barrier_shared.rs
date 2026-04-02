@@ -1,5 +1,7 @@
 use anyhow::Result;
-use cityg_api_client::{BarrierJoinRecord, HistoryCommitment};
+use cityg_api_client::{
+    BarrierJoinRecord, HistoryCommitment, to_core_history_commitment, to_core_join_snapshot_records,
+};
 
 #[allow(unused_imports)]
 pub use cityg_client::barrier::{
@@ -43,17 +45,6 @@ pub fn require_current_state_history_commitment(
     )
 }
 
-pub(crate) fn to_core_history_commitment(
-    commitment: &HistoryCommitment,
-) -> BarrierHistoryCommitment {
-    BarrierHistoryCommitment {
-        history_view_id: commitment.history_view_id,
-        history_commitment_id: commitment.history_commitment_id,
-        prev_history_commitment_id: commitment.prev_history_commitment_id,
-        history_seq: commitment.history_seq,
-    }
-}
-
 #[allow(dead_code)]
 fn from_core_history_commitment(commitment: BarrierHistoryCommitment) -> HistoryCommitment {
     HistoryCommitment {
@@ -62,22 +53,6 @@ fn from_core_history_commitment(commitment: BarrierHistoryCommitment) -> History
         prev_history_commitment_id: commitment.prev_history_commitment_id,
         history_seq: commitment.history_seq,
     }
-}
-
-fn to_core_join_snapshot_record(record: &BarrierJoinRecord) -> BarrierJoinSnapshotRecord {
-    BarrierJoinSnapshotRecord {
-        leaf_index: record.leaf_index,
-        ek_leaf: record.ek_leaf.clone(),
-    }
-}
-
-pub(crate) fn to_core_join_snapshot_records(
-    join_records: &[BarrierJoinRecord],
-) -> Vec<BarrierJoinSnapshotRecord> {
-    join_records
-        .iter()
-        .map(to_core_join_snapshot_record)
-        .collect()
 }
 
 #[allow(dead_code)]

@@ -1,7 +1,6 @@
 use super::*;
-use crate::barrier_shared::{
-    BarrierJoinSnapshotRecord, require_current_state_history_commitment, to_core_history_commitment,
-};
+use crate::barrier_shared::require_current_state_history_commitment;
+use cityg_api_client::{to_core_history_commitment, to_core_join_snapshot_records};
 use cityg_client::barrier_prevalidation::{
     BootstrapCurrentStateInput, prevalidate_bootstrap_current_state, prevalidate_full_chain_update,
     validate_bootstrap_provisioning, validate_full_chain_reason,
@@ -98,14 +97,7 @@ pub(super) async fn full_chain_check_barrier_update(
         ));
     }
 
-    let join_records_core: Vec<_> = join_resolution
-        .records
-        .iter()
-        .map(|record| BarrierJoinSnapshotRecord {
-            leaf_index: record.leaf_index,
-            ek_leaf: record.ek_leaf.clone(),
-        })
-        .collect();
+    let join_records_core = to_core_join_snapshot_records(join_resolution.records.as_slice());
     validate_full_chain_reason(
         prevalidated.genesis_local_case,
         session.barrier_state.barrier_roots_hash,
@@ -244,13 +236,7 @@ pub(super) async fn verify_join_finalize_bootstrap_current_state(
 
     let join_records = session.barrier_state.bootstrap_join_records.clone();
     let revoked_leaf_indices = session.barrier_state.bootstrap_revoked_leaf_indices.clone();
-    let join_records_core: Vec<_> = join_records
-        .iter()
-        .map(|record| BarrierJoinSnapshotRecord {
-            leaf_index: record.leaf_index,
-            ek_leaf: record.ek_leaf.clone(),
-        })
-        .collect();
+    let join_records_core = to_core_join_snapshot_records(join_records.as_slice());
     validate_bootstrap_provisioning(
         join_records_core.as_slice(),
         revoked_leaf_indices.as_slice(),

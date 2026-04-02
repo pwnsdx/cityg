@@ -1,5 +1,6 @@
 use super::*;
 use crate::barrier_shared::require_current_state_history_commitment;
+use cityg_api_client::to_core_history_commitment;
 use cityg_client::barrier_state_auth::{
     ensure_non_regressing_authenticated_current_state as ensure_non_regressing_authenticated_current_state_core,
     validate_barrier_tree_snapshot_auth as validate_barrier_tree_snapshot_auth_core,
@@ -316,10 +317,9 @@ pub(super) fn ensure_non_regressing_authenticated_current_state(
     advertised_history_authority_extension: Option<HistoryAuthorityExtension>,
     context: &str,
 ) -> Result<()> {
-    let local_history_commitment_core =
-        local_history_commitment.map(crate::barrier_shared::to_core_history_commitment);
+    let local_history_commitment_core = local_history_commitment.map(to_core_history_commitment);
     let advertised_history_commitment_core =
-        crate::barrier_shared::to_core_history_commitment(advertised_history_commitment);
+        to_core_history_commitment(advertised_history_commitment);
     ensure_non_regressing_authenticated_current_state_core(
         local_barrier_version,
         local_kem_tree_hash_after,

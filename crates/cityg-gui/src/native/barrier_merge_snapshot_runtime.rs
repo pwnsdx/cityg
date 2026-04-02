@@ -1,7 +1,8 @@
 use super::barrier_merge_ticket_runtime::PreparedBarrierMergeTicket;
 use super::*;
-use crate::barrier_shared::{to_core_history_commitment, to_core_join_snapshot_records};
-use cityg_api_client::HistoryAuthorityDescriptor;
+use cityg_api_client::{
+    HistoryAuthorityDescriptor, to_core_history_commitment, to_core_join_snapshot_records,
+};
 use cityg_client::barrier_snapshot_prepare::{
     BarrierSnapshotArtifactsInput as CoreBarrierSnapshotArtifactsInput,
     BarrierSnapshotTicketFields as CoreBarrierSnapshotTicketFields,

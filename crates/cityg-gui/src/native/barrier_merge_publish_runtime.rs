@@ -88,7 +88,7 @@ pub(super) async fn publish_barrier_merge(
         build_bundle_context,
         accept_bundle_context,
         retry_on_fs_forward_jump_group,
-        trigger_before_publish_join_finalize_fault,
+        trigger_before_publish_join_finalize_fault: _trigger_before_publish_join_finalize_fault,
     } = policy;
 
     let pending_barrier_state = BarrierPendingState {
@@ -166,7 +166,7 @@ pub(super) async fn publish_barrier_merge(
     )?;
 
     #[cfg(test)]
-    if trigger_before_publish_join_finalize_fault {
+    if _trigger_before_publish_join_finalize_fault {
         fault_injection::trigger_fault(FaultInjectionCutPoint::BeforePublishJoinFinalize, None)?;
     }
 

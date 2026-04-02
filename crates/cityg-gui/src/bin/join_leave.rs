@@ -26,8 +26,7 @@ mod websocket_replay;
 use anyhow::{Context, Result, anyhow};
 use barrier_shared::{
     DEFAULT_BARRIER_N_MAX, TICKET_RETRY_MAX_ATTEMPTS, should_retry_ticket_http_error,
-    ticket_retry_delay, to_core_history_commitment, to_core_join_snapshot_records,
-    validate_barrier_n_max,
+    ticket_retry_delay, validate_barrier_n_max,
 };
 #[cfg(test)]
 use barrier_shared::{
@@ -44,6 +43,7 @@ use ciborium::value::Value;
 use cityg_api_client::BarrierJoinRecord;
 use cityg_api_client::{
     CitygApiClient, Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment,
+    to_core_history_commitment, to_core_join_snapshot_records,
 };
 #[cfg(test)]
 use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};

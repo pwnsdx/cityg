@@ -496,6 +496,24 @@ pub struct BarrierJoinRecord {
     pub ek_leaf: Vec<u8>,
 }
 
+fn to_core_join_snapshot_record(
+    record: &BarrierJoinRecord,
+) -> cityg_client::barrier::BarrierJoinSnapshotRecord {
+    cityg_client::barrier::BarrierJoinSnapshotRecord {
+        leaf_index: record.leaf_index,
+        ek_leaf: record.ek_leaf.clone(),
+    }
+}
+
+pub fn to_core_join_snapshot_records(
+    join_records: &[BarrierJoinRecord],
+) -> Vec<cityg_client::barrier::BarrierJoinSnapshotRecord> {
+    join_records
+        .iter()
+        .map(to_core_join_snapshot_record)
+        .collect()
+}
+
 /// Revoked-leaf response bound to a specific authenticated history view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarrierResolvedRevokedLeaves {
@@ -544,6 +562,17 @@ pub struct HistoryCommitment {
     pub history_commitment_id: [u8; 32],
     pub prev_history_commitment_id: [u8; 32],
     pub history_seq: u64,
+}
+
+pub fn to_core_history_commitment(
+    commitment: &HistoryCommitment,
+) -> cityg_client::barrier::BarrierHistoryCommitment {
+    cityg_client::barrier::BarrierHistoryCommitment {
+        history_view_id: commitment.history_view_id,
+        history_commitment_id: commitment.history_commitment_id,
+        prev_history_commitment_id: commitment.prev_history_commitment_id,
+        history_seq: commitment.history_seq,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
