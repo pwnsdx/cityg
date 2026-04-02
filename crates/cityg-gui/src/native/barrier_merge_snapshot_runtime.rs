@@ -1,6 +1,7 @@
 use super::barrier_merge_ticket_runtime::PreparedBarrierMergeTicket;
 use super::*;
 use crate::barrier_shared::{to_core_history_commitment, to_core_join_snapshot_records};
+use cityg_api_client::HistoryAuthorityDescriptor;
 use cityg_client::barrier_snapshot_prepare::{
     BarrierSnapshotArtifactsInput as CoreBarrierSnapshotArtifactsInput,
     BarrierSnapshotTicketFields as CoreBarrierSnapshotTicketFields,
@@ -25,21 +26,109 @@ pub(super) struct PreparedBarrierMergeSnapshot {
     pub(super) barrier_update: BarrierUpdateBuildResult,
 }
 
+pub(super) struct BarrierSnapshotRuntimeRequest<'a> {
+    pub(super) client: &'a CitygApiClient,
+    pub(super) room_id: &'a str,
+    pub(super) gid: &'a [u8; 32],
+    pub(super) leaf_id: &'a [u8; 32],
+    pub(super) barrier_version: u64,
+    pub(super) cover_leaf_index: u64,
+    pub(super) snapshot_hash: [u8; 32],
+    pub(super) barrier_n_max: u64,
+    pub(super) max_barrier_update_bytes: u64,
+    pub(super) header: BTreeMap<u64, Value>,
+    pub(super) parities: &'a [PivotParity],
+    pub(super) cat: &'a [u8],
+    pub(super) pox_r_commit: &'a [u8],
+    pub(super) parent_root: &'a [u8],
+    pub(super) join_delta_root: &'a [u8],
+    pub(super) revoked_since_root: &'a [u8],
+    pub(super) revoked_root: &'a [u8],
+    pub(super) tswe_salt_hash: &'a [u8],
+    pub(super) ticket_history_commitment: &'a HistoryCommitment,
+    pub(super) ticket_history_authority_extension: Option<HistoryAuthorityExtension>,
+    pub(super) history_authority: Option<HistoryAuthorityDescriptor>,
+    pub(super) current_global_history_attestation_bytes: &'a [u8],
+    pub(super) merge_ticket_artifact_bytes: &'a [u8],
+    pub(super) deployment_profile_manifest_bytes: &'a [u8],
+    pub(super) pop_secret_key: &'a [u8],
+    pub(super) full_verification_target_leaf_id: Option<[u8; 32]>,
+}
+
 pub(super) async fn prepare_barrier_merge_snapshot(
     ticket: &PreparedBarrierMergeTicket,
     mode: BarrierMergeMode,
 ) -> Result<PreparedBarrierMergeSnapshot> {
-    let client = &ticket.client;
-    let room_id = ticket.room_id.as_str();
-    let gid = &ticket.gid;
-    let leaf_id = &ticket.leaf_id;
-    let barrier_version = ticket.barrier_version;
-    let cover_leaf_index = ticket.cover_leaf_index;
-    let snapshot_hash = ticket.snapshot_hash;
-    let barrier_n_max = ticket.barrier_n_max;
-    let ticket_history_commitment = &ticket.ticket_history_commitment;
-    let current_global_history_attestation_bytes =
-        ticket.current_global_history_attestation_bytes.as_slice();
+    prepare_barrier_snapshot_runtime(
+        BarrierSnapshotRuntimeRequest {
+            client: &ticket.client,
+            room_id: ticket.room_id.as_str(),
+            gid: &ticket.gid,
+            leaf_id: &ticket.leaf_id,
+            barrier_version: ticket.barrier_version,
+            cover_leaf_index: ticket.cover_leaf_index,
+            snapshot_hash: ticket.snapshot_hash,
+            barrier_n_max: ticket.barrier_n_max,
+            max_barrier_update_bytes: ticket.max_barrier_update_bytes,
+            header: ticket.header.clone(),
+            parities: &ticket.parities,
+            cat: &ticket.cat,
+            pox_r_commit: &ticket.pox_r_commit,
+            parent_root: &ticket.parent_root,
+            join_delta_root: &ticket.join_delta_root,
+            revoked_since_root: &ticket.revoked_since_root,
+            revoked_root: &ticket.revoked_root,
+            tswe_salt_hash: &ticket.tswe_salt_hash,
+            ticket_history_commitment: &ticket.ticket_history_commitment,
+            ticket_history_authority_extension: ticket.ticket_history_authority_extension,
+            history_authority: ticket.history_authority.clone(),
+            current_global_history_attestation_bytes: ticket
+                .current_global_history_attestation_bytes
+                .as_slice(),
+            merge_ticket_artifact_bytes: ticket.merge_ticket_artifact_bytes.as_slice(),
+            deployment_profile_manifest_bytes: ticket.deployment_profile_manifest_bytes.as_slice(),
+            pop_secret_key: ticket.pop_secret_key.as_slice(),
+            full_verification_target_leaf_id: None,
+        },
+        mode.reason(),
+        mode.label(),
+    )
+    .await
+}
+
+pub(super) async fn prepare_barrier_snapshot_runtime(
+    request: BarrierSnapshotRuntimeRequest<'_>,
+    barrier_update_reason: u64,
+    operation_label: &str,
+) -> Result<PreparedBarrierMergeSnapshot> {
+    let BarrierSnapshotRuntimeRequest {
+        client,
+        room_id,
+        gid,
+        leaf_id,
+        barrier_version,
+        cover_leaf_index,
+        snapshot_hash,
+        barrier_n_max,
+        max_barrier_update_bytes,
+        header,
+        parities,
+        cat,
+        pox_r_commit,
+        parent_root,
+        join_delta_root,
+        revoked_since_root,
+        revoked_root,
+        tswe_salt_hash,
+        ticket_history_commitment,
+        ticket_history_authority_extension,
+        history_authority,
+        current_global_history_attestation_bytes,
+        merge_ticket_artifact_bytes,
+        deployment_profile_manifest_bytes,
+        pop_secret_key,
+        full_verification_target_leaf_id,
+    } = request;
 
     let CoreBarrierSnapshotTicketFields {
         cat: cat_arr,
@@ -53,16 +142,15 @@ pub(super) async fn prepare_barrier_merge_snapshot(
         revocation_roots_hash,
         committed_revocation_roots_hash,
     } = derive_barrier_snapshot_ticket_fields_core(
-        &ticket.parities,
-        &ticket.cat,
-        &ticket.pox_r_commit,
-        &ticket.parent_root,
-        &ticket.join_delta_root,
-        &ticket.revoked_since_root,
-        &ticket.revoked_root,
-        &ticket.tswe_salt_hash,
+        parities,
+        cat,
+        pox_r_commit,
+        parent_root,
+        join_delta_root,
+        revoked_since_root,
+        revoked_root,
+        tswe_salt_hash,
     )?;
-    let header = ticket.header.clone();
 
     let barrier_tree_response = client
         .barrier_fetch_public_tree(room_id, &snapshot_hash)
@@ -85,7 +173,7 @@ pub(super) async fn prepare_barrier_merge_snapshot(
         .await
         .context("resolve committed barrier revoked leaf indices")?;
     let witness_selection = derive_barrier_snapshot_witness_selection_core(
-        mode.reason(),
+        barrier_update_reason,
         cover_leaf_index,
         revoked_resolution.leaf_indices.as_slice(),
         revocation_roots_hash,
@@ -106,9 +194,9 @@ pub(super) async fn prepare_barrier_merge_snapshot(
             leaf_id,
             updater_leaf: cover_leaf_index,
             barrier_version,
-            barrier_update_reason: mode.reason(),
+            barrier_update_reason,
             barrier_n_max,
-            max_barrier_update_bytes: ticket.max_barrier_update_bytes,
+            max_barrier_update_bytes,
             ticket_history_commitment: &ticket_history_commitment_core,
             snapshot_history_commitment: &snapshot_history_commitment_core,
             joins_history_commitment: &joins_history_commitment_core,
@@ -118,37 +206,31 @@ pub(super) async fn prepare_barrier_merge_snapshot(
             join_records: join_records_core.as_slice(),
             witness_revoked_leaf_indices: witness_selection.witness_revoked_leaf_indices.as_slice(),
             revocation_roots_hash,
-            pop_secret_key: ticket.pop_secret_key.as_slice(),
+            pop_secret_key,
         })?;
     let mut header = prepared_snapshot.header;
     let barrier_update =
         BarrierUpdateBuildResult::from_core(barrier_n_max, prepared_snapshot.barrier_update);
     if !current_global_history_attestation_bytes.is_empty()
-        && (mode.reason() == 0 || mode.reason() == 1)
+        && (barrier_update_reason == 0 || barrier_update_reason == 1)
     {
-        let history_authority = ticket.history_authority.as_ref().ok_or_else(|| {
+        let history_authority = history_authority.as_ref().ok_or_else(|| {
             anyhow!(
-                "{} merge ticket missing history_authority descriptor for full verification witness",
-                mode.label()
+                "{operation_label} merge ticket missing history_authority descriptor for full verification witness"
             )
         })?;
-        let history_authority_extension =
-            ticket
-                .ticket_history_authority_extension
-                .clone()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "{} merge ticket missing history_authority_extension for full verification witness",
-                        mode.label()
-                    )
-                })?;
+        let history_authority_extension = ticket_history_authority_extension.ok_or_else(|| {
+            anyhow!(
+                "{operation_label} merge ticket missing history_authority_extension for full verification witness"
+            )
+        })?;
         let full_verification_witness = client
             .barrier_issue_full_verification_witness(
                 room_id,
                 leaf_id,
-                None,
-                ticket.merge_ticket_artifact_bytes.as_slice(),
-                mode.reason(),
+                full_verification_target_leaf_id.as_ref(),
+                merge_ticket_artifact_bytes,
+                barrier_update_reason,
                 barrier_update.raw_update.as_slice(),
                 barrier_n_max,
                 ticket_history_commitment,
@@ -161,10 +243,10 @@ pub(super) async fn prepare_barrier_merge_snapshot(
                 join_resolution.records.as_slice(),
                 &witness_selection.witness_revocation_roots_hash,
                 witness_selection.witness_revoked_leaf_indices.as_slice(),
-                ticket.deployment_profile_manifest_bytes.as_slice(),
+                deployment_profile_manifest_bytes,
             )
             .await
-            .with_context(|| format!("issue full verification witness for {}", mode.label()))?;
+            .with_context(|| format!("issue full verification witness for {operation_label}"))?;
         header.insert(
             hdr::HDR_BARRIER_FULL_VERIFICATION_WITNESS,
             Value::Bytes(full_verification_witness),
