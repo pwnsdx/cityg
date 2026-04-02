@@ -1,9 +1,9 @@
 use super::*;
 pub(super) use cityg_client::barrier_crypto::generate_kbroad_keypair;
 pub(super) use cityg_client::binary::{bytes32, decode_hex_32, header_bytes32};
-pub(super) use cityg_client::bundle_headers::{
-    compute_fs_fingerprint_from_header, derive_fs_fingerprint_from_fields,
-};
+#[cfg(test)]
+pub(super) use cityg_client::bundle_headers::compute_fs_fingerprint_from_header;
+pub(super) use cityg_client::bundle_headers::derive_fs_fingerprint_from_fields;
 #[cfg(test)]
 pub(super) use cityg_client::bundle_headers::{
     header_bytes, header_bytes_opt, header_bytes32_opt, recompute_proofs_commit,
@@ -62,14 +62,6 @@ pub(super) fn format_fs_fingerprint(value: Option<&[u8; 32]>, fs_ec: u64) -> Str
     match value {
         Some(bytes) => format!("{} · fs_ec {}", fingerprint_preview_hex(bytes), fs_ec),
         None => "Not available".to_string(),
-    }
-}
-
-pub(super) fn header_policy_version(header: &BTreeMap<u64, Value>, key: u64) -> Option<String> {
-    match header.get(&key)? {
-        Value::Text(text) => Some(text.clone()),
-        Value::Integer(value) => u64::try_from(*value).ok().map(|v| v.to_string()),
-        _ => None,
     }
 }
 

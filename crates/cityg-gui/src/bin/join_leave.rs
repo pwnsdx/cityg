@@ -858,6 +858,9 @@ async fn prepare_join_session_with_identity(
 
     let accepted_bundle =
         parse_accepted_bundle_runtime_state(&stored, fs_policy_version.as_str(), fs_epoch_base_ts)?;
+    let accepted_fs_dev_prev_commit = accepted_bundle
+        .fs_dev_prev_commit
+        .ok_or_else(|| anyhow!("accepted join bundle missing fs_dev commit"))?;
     ensure_supported_attested_current_state_extension(
         "join ticket",
         current_history_authority_extension,
@@ -879,7 +882,7 @@ async fn prepare_join_session_with_identity(
         forward_state: fs_state,
         fs_ec: accepted_bundle.fs_ec,
         fs_epoch_commit: accepted_bundle.fs_epoch_commit,
-        fs_dev_prev_commit: accepted_bundle.fs_dev_prev_commit,
+        fs_dev_prev_commit: accepted_fs_dev_prev_commit,
         we_epoch_id: bundle.we_epoch_id,
         anchor_hdr_ctx: accepted_bundle.anchor_hdr_ctx,
         seed_ctx_hash: accepted_bundle.seed_ctx_hash,
@@ -1160,13 +1163,16 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
 
     let accepted_bundle =
         parse_accepted_bundle_runtime_state(&bundle, fs_policy_version.as_str(), fs_epoch_base_ts)?;
+    let accepted_fs_dev_prev_commit = accepted_bundle
+        .fs_dev_prev_commit
+        .ok_or_else(|| anyhow!("accepted bundle missing fs_dev commit"))?;
 
     forward_state.set_last_we_epoch_id(bundle.we_epoch_id);
-    forward_state.set_epoch_base_ts(fs_epoch_base_ts);
+    forward_state.set_epoch_base_ts(accepted_bundle.fs_epoch_base_ts);
     session.forward_state = forward_state;
     session.fs_ec = accepted_bundle.fs_ec;
     session.fs_epoch_commit = accepted_bundle.fs_epoch_commit;
-    session.fs_dev_prev_commit = accepted_bundle.fs_dev_prev_commit;
+    session.fs_dev_prev_commit = accepted_fs_dev_prev_commit;
     session.we_epoch_id = bundle.we_epoch_id;
     session.xk_hash = bundle.hp_binding.xk_hash;
     session.epoch_key = bundle.epoch_key;

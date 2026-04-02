@@ -1,5 +1,6 @@
 use super::epoch_sync::perform_epoch_sync;
 use super::*;
+use cityg_client::join_bundle::parse_accepted_bundle_runtime_state;
 
 pub(super) fn persist_pending_barrier_state_before_publish(
     request: &LeaveRequest,
@@ -149,25 +150,20 @@ pub(super) fn apply_local_published_barrier_merge(
     if let Some(commit) = bundle.anchor.pox_r_commit {
         session.pox_r_commit = commit;
     }
-    if let Some(fs_ec) = header_u64(&bundle.header_map, hdr::HDR_FS_EC) {
-        session.fs_ec = fs_ec;
-        session.last_accepted_ec = session.last_accepted_ec.max(fs_ec);
-    }
-    if let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_EPOCH_COMMIT) {
-        session.fs_epoch_commit = commit;
-    }
-    if bundle_authored_by_local_device(session, &bundle.header_map)
-        && let Some(commit) = header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_COMMIT)
-            .or_else(|| header_bytes32(&bundle.header_map, hdr::HDR_FS_DEV_PREV_COMMIT))
-    {
+    let accepted_bundle = parse_accepted_bundle_runtime_state(
+        &bundle,
+        session.fs_policy_version.as_str(),
+        session.fs_epoch_base_ts,
+    )?;
+    let local_bundle = bundle_authored_by_local_device(session, &bundle.header_map);
+    session.fs_ec = accepted_bundle.fs_ec;
+    session.last_accepted_ec = session.last_accepted_ec.max(accepted_bundle.fs_ec);
+    session.fs_epoch_commit = accepted_bundle.fs_epoch_commit;
+    if local_bundle && let Some(commit) = accepted_bundle.fs_dev_prev_commit {
         session.fs_dev_prev_commit = commit;
     }
-    if let Some(base_ts) = header_u64(&bundle.header_map, hdr::HDR_FS_EPOCH_BASE_TS) {
-        session.fs_epoch_base_ts = base_ts;
-    }
-    if let Some(policy) = header_policy_version(&bundle.header_map, hdr::HDR_FS_POLICY_VERSION) {
-        session.fs_policy_version = policy;
-    }
+    session.fs_epoch_base_ts = accepted_bundle.fs_epoch_base_ts;
+    session.fs_policy_version = accepted_bundle.fs_policy_version;
     session.policy_version = session.fs_policy_version.clone();
     if let Some(vrf_id) = header_text(&bundle.header_map, hdr::HDR_VRF_ID) {
         session.vrf_id = vrf_id.to_string();
@@ -181,7 +177,7 @@ pub(super) fn apply_local_published_barrier_merge(
 
     let observed_barrier_version = header_u64(&bundle.header_map, hdr::HDR_BARRIER_VERSION)
         .unwrap_or(pending_barrier_state.barrier_version);
-    let observed_fs_ec = header_u64(&bundle.header_map, hdr::HDR_FS_EC);
+    let observed_fs_ec = Some(accepted_bundle.fs_ec);
     let observed_barrier_update_reason =
         header_u64(&bundle.header_map, hdr::HDR_BARRIER_UPDATE_REASON);
     if !apply_pending_barrier_activation_with_source(
@@ -206,15 +202,8 @@ pub(super) fn apply_local_published_barrier_merge(
         .current_global_history_attestation_bytes
         .clear();
 
-    session.regular_fingerprint = Some(bundle.hp_binding.seed_ctx_hash);
-    session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
-        derive_fs_fingerprint_from_fields(
-            session.fs_policy_version.as_str(),
-            session.fs_ec,
-            &session.fs_epoch_commit,
-            session.fs_epoch_base_ts,
-        )
-    });
+    session.regular_fingerprint = Some(accepted_bundle.seed_ctx_hash);
+    session.fs_fingerprint = accepted_bundle.fs_fingerprint;
     session.fs_epoch_created_at = SystemTime::now();
     session.last_fetch_timestamp_ms = None;
     forward_state_after.set_last_we_epoch_id(session.we_epoch_id);

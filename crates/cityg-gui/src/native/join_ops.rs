@@ -295,6 +295,9 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             fs_policy_version.as_str(),
             fs_epoch_base_ts,
         )?;
+        let accepted_fs_dev_prev_commit = accepted_bundle
+            .fs_dev_prev_commit
+            .ok_or_else(|| anyhow!("accepted join bundle missing fs_dev commit"))?;
         let regular_fingerprint = Some(accepted_bundle.seed_ctx_hash);
         let fs_fingerprint = accepted_bundle.fs_fingerprint;
         let requires_bootstrap_finalize = barrier_version == 0 && parent_root == [0u8; 32];
@@ -319,7 +322,7 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             forward_state,
             fs_ec: accepted_bundle.fs_ec,
             fs_epoch_commit: accepted_bundle.fs_epoch_commit,
-            fs_dev_prev_commit: accepted_bundle.fs_dev_prev_commit,
+            fs_dev_prev_commit: accepted_fs_dev_prev_commit,
             fs_epoch_created_at: SystemTime::now(),
             fs_epoch_rotation_interval_secs: 300,
             pop_public_key: room_identity.pop_public_key.clone(),
@@ -335,8 +338,8 @@ pub(super) async fn perform_join(params: JoinParams) -> Result<AppSession> {
             policy_version,
             msphf_crs_id,
             msphf_params_id,
-            fs_policy_version,
-            fs_epoch_base_ts,
+            fs_policy_version: accepted_bundle.fs_policy_version,
+            fs_epoch_base_ts: accepted_bundle.fs_epoch_base_ts,
             fs_forward_leap_policy: FsForwardLeapPolicy {
                 h: fs_forward_leap_policy.h,
                 checkpoint_interval: fs_forward_leap_policy.checkpoint_interval,
