@@ -93,13 +93,13 @@ use pqcrypto_dilithium::dilithium5::{self, SecretKey as MlDsaSecretKey};
 use pqcrypto_kyber::kyber768;
 use pqcrypto_traits::kem::{PublicKey as KemPublicKeyTrait, SecretKey as KemSecretKeyTrait};
 use pqcrypto_traits::sign::{
-    DetachedSignature as DilithiumDetachedSignatureTrait, PublicKey as DilithiumPublicKeyTrait,
-    SecretKey as DilithiumSecretKeyTrait,
+    PublicKey as DilithiumPublicKeyTrait, SecretKey as DilithiumSecretKeyTrait,
 };
 use rand::{RngExt, rng};
 #[cfg(test)]
 use reqwest::header::CONTENT_TYPE;
 use serde::Serialize;
+#[cfg(test)]
 use serde_bytes::ByteBuf;
 use serde_json::Value as JsonValue;
 use tokio::{
@@ -950,18 +950,13 @@ async fn prepare_join_session_with_identity(
     let pop_secret =
         Box::new(MlDsaSecretKey::from_bytes(&pop_secret_key).context("invalid POP key")?);
 
-    let binding_message = (
-        ByteBuf::from(alias.as_bytes().to_vec()),
-        ByteBuf::from(pop_public_key.clone()),
-    );
-    let mut binding_message_bytes = Vec::new();
-    ciborium::ser::into_writer(&binding_message, &mut binding_message_bytes)
-        .context("encode identity binding message")?;
-    let binding_signature = dilithium5::detached_sign(&binding_message_bytes, pop_secret.as_ref());
+    let signed_binding =
+        message_auth::build_signed_identity_binding(alias, &pop_public_key, &pop_secret_key)
+            .context("build identity binding")?;
     let identity_binding = IdentityBinding {
-        alias: alias.to_string(),
-        pop_public_key: pop_public_key.clone(),
-        signature: binding_signature.as_bytes().to_vec(),
+        alias: signed_binding.alias,
+        pop_public_key: signed_binding.pop_public_key,
+        signature: signed_binding.signature,
     };
 
     let mut retry_attempt = 0u32;

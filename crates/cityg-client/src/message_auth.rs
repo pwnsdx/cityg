@@ -17,6 +17,13 @@ pub struct AuthenticatedMessage<'a> {
     pub signature: &'a [u8],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedIdentityBinding {
+    pub alias: String,
+    pub pop_public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
 pub fn encode_authenticated_message(
     timestamp_ms: u64,
     plaintext: &[u8],
@@ -179,6 +186,18 @@ pub fn sign_identity_binding(
     Ok(signature.as_bytes().to_vec())
 }
 
+pub fn build_signed_identity_binding(
+    alias: &str,
+    pop_public_key: &[u8],
+    pop_secret_key: &[u8],
+) -> Result<SignedIdentityBinding> {
+    Ok(SignedIdentityBinding {
+        alias: alias.to_string(),
+        pop_public_key: pop_public_key.to_vec(),
+        signature: sign_identity_binding(alias, pop_public_key, pop_secret_key)?,
+    })
+}
+
 pub fn encrypt_message(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
     use chacha20poly1305::{
         ChaCha20Poly1305,
@@ -262,5 +281,15 @@ mod tests {
         .expect("leaf must derive");
         assert!(verify_sender_leaf_binding(&gid, &leaf, pk1.as_bytes()).is_ok());
         assert!(verify_sender_leaf_binding(&gid, &leaf, pk2.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn build_signed_identity_binding_roundtrips_fields() -> Result<()> {
+        let (pk, sk) = dilithium5::keypair();
+        let binding = build_signed_identity_binding("alice", pk.as_bytes(), sk.as_bytes())?;
+        assert_eq!(binding.alias, "alice");
+        assert_eq!(binding.pop_public_key, pk.as_bytes());
+        assert!(!binding.signature.is_empty());
+        Ok(())
     }
 }

@@ -152,13 +152,16 @@ pub(super) fn build_identity_binding(
     pop_secret_key: &[u8],
 ) -> Result<cityg_api_client::IdentityBinding> {
     use cityg_api_client::IdentityBinding;
-    let signature =
-        cityg_client::message_auth::sign_identity_binding(alias, pop_public_key, pop_secret_key)?;
+    let binding = cityg_client::message_auth::build_signed_identity_binding(
+        alias,
+        pop_public_key,
+        pop_secret_key,
+    )?;
 
     Ok(IdentityBinding {
-        alias: alias.to_string(),
-        pop_public_key: pop_public_key.to_vec(),
-        signature,
+        alias: binding.alias,
+        pop_public_key: binding.pop_public_key,
+        signature: binding.signature,
     })
 }
 
