@@ -38,18 +38,15 @@ use ciborium::value::Integer;
 use ciborium::value::Value;
 #[cfg(test)]
 use cityg_api_client::BarrierJoinRecord;
-#[cfg(test)]
-use cityg_api_client::HistoryCommitment;
 use cityg_api_client::{
-    BarrierSnapshotPreparationRequest, CitygApiClient, Error as ApiClientError,
-    HistoryAuthorityExtension, PreparedBarrierSnapshot,
+    CitygApiClient, Error as ApiClientError, HistoryAuthorityExtension, HistoryCommitment,
+    PrepareOriginMergeTicketInput, PrepareRevocationMergeTicketInput, PreparedBarrierSnapshot,
     ensure_supported_attested_current_state_extension, is_fs_forward_jump_group_http_error,
 };
 #[cfg(test)]
 use cityg_api_client::{RoomAdminOperation, build_room_admin_proof};
 #[cfg(test)]
 use cityg_client::demo;
-use cityg_client::witness::SrxInputsOwned;
 use cityg_client::{
     ClientEpochBundle,
     barrier_crypto::generate_barrier_leaf_keypair,
@@ -175,6 +172,7 @@ fn new_api_client(server_url: &str) -> CitygApiClient {
 struct BarrierUpdateBuildResult {
     #[cfg(test)]
     raw_update: Vec<u8>,
+    kem_tree_hash_after: [u8; 32],
     k_barrier_new: [u8; 32],
 }
 
@@ -182,10 +180,15 @@ impl BarrierUpdateBuildResult {
     fn from_core(core: cityg_client::barrier_build::BarrierUpdateBuildResult) -> Self {
         #[cfg(test)]
         let raw_update = core.raw_update.clone();
-        let cityg_client::barrier_build::BarrierUpdateBuildResult { k_barrier_new, .. } = core;
+        let cityg_client::barrier_build::BarrierUpdateBuildResult {
+            kem_tree_hash_after,
+            k_barrier_new,
+            ..
+        } = core;
         Self {
             #[cfg(test)]
             raw_update,
+            kem_tree_hash_after,
             k_barrier_new: *k_barrier_new,
         }
     }
@@ -675,8 +678,10 @@ struct Session {
     seed_bundle_commit: [u8; 32],
     fs_fingerprint: Option<[u8; 32]>,
     join_finalize_auth_token: [u8; 32],
+    current_history_commitment: Option<HistoryCommitment>,
     current_history_authority_extension: Option<HistoryAuthorityExtension>,
     current_global_history_attestation_bytes: Vec<u8>,
+    kem_tree_hash_after: [u8; 32],
     stored_header_map: BTreeMap<u64, Value>,
     #[cfg(test)]
     msg_replay_state: MsgReplayState,
@@ -748,9 +753,11 @@ async fn prepare_join_session_with_identity(
         fs_policy_version,
         fs_epoch_base_ts,
         barrier_version,
+        current_history_commitment,
         current_history_authority_extension,
         current_global_history_attestation_bytes,
         join_finalize_auth_token,
+        kem_tree_hash_after,
         ..
     } = cityg_api_client::prepare_runtime_join_ticket(&ticket).map_err(anyhow::Error::from)?;
 
@@ -911,8 +918,10 @@ async fn prepare_join_session_with_identity(
         seed_bundle_commit,
         fs_fingerprint,
         join_finalize_auth_token,
+        current_history_commitment,
         current_history_authority_extension,
         current_global_history_attestation_bytes,
+        kem_tree_hash_after,
         stored_header_map: stored.header_map.clone(),
         #[cfg(test)]
         msg_replay_state: MsgReplayState::default(),
@@ -995,45 +1004,34 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         .merge_ticket_refresh_with_retry(&session.room_id, &session.leaf_id)
         .await
         .context("fetch merge ticket for join finalize")?;
-
-    if !ticket.srx_cbor.is_empty() {
-        return Err(anyhow!(
-            "join finalize merge ticket unexpectedly contained SRX payload"
-        ));
-    }
-    ensure_supported_attested_current_state_extension(
-        "join finalize merge ticket",
-        ticket.history_authority_extension,
-        ticket.current_global_history_attestation_bytes.as_slice(),
-    )?;
-
     let prepared_runtime = ticket
-        .prepare_runtime(
-            session.fs_ec,
-            session.fs_epoch_commit,
-            session.fs_dev_prev_commit,
-            0,
-        )
+        .prepare_origin_runtime(PrepareOriginMergeTicketInput {
+            operation_label: "join finalize",
+            local_barrier_version: session.barrier_version,
+            local_kem_tree_hash_after: session.kem_tree_hash_after,
+            local_current_history_commitment: session.current_history_commitment.as_ref(),
+            local_current_history_authority_extension: session.current_history_authority_extension,
+            fs_ec: session.fs_ec,
+            fs_epoch_commit: session.fs_epoch_commit,
+            fs_dev_prev_commit: session.fs_dev_prev_commit,
+            stored_max_barrier_update_bytes: 0,
+            join_finalize_auth_token: Some(session.join_finalize_auth_token),
+        })
         .map_err(anyhow::Error::from)?;
-    let parities = prepared_runtime.parities;
-    let mut header = BTreeMap::new();
-    header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
-    header.insert(
-        hdr::HDR_KBROAD_PUB,
-        Value::Bytes(ticket.kbroad_public.clone()),
-    );
     if session.join_finalize_auth_token == [0u8; 32] {
         return Err(anyhow!(
             "join finalize requires a non-zero server-issued join_finalize_auth_token"
         ));
     }
-    header.insert(
-        hdr::HDR_JOIN_FINALIZE_AUTH,
-        Value::Bytes(session.join_finalize_auth_token.to_vec()),
+    let snapshot_request = prepared_runtime.snapshot_preparation_request(
+        &session.room_id,
+        &session.gid,
+        &session.leaf_id,
+        session.pop_secret.as_bytes(),
+        2,
+        "join finalize",
     );
 
-    let snapshot_hash = prepared_runtime.snapshot_hash;
-    let barrier_n_max = prepared_runtime.barrier_n_max;
     let PreparedBarrierSnapshot {
         header,
         cat,
@@ -1049,43 +1047,24 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         revocation_roots_hash: _prepared_revocation_roots_hash,
         barrier_update,
     } = client
-        .barrier_prepare_snapshot(BarrierSnapshotPreparationRequest {
-            room_id: &session.room_id,
-            header,
-            gid: &session.gid,
-            leaf_id: &session.leaf_id,
-            barrier_version: ticket.barrier_version,
-            cover_leaf_index: prepared_runtime.cover_leaf_index,
-            snapshot_hash,
-            barrier_n_max,
-            max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
-            parities: &parities,
-            cat: &ticket.cat,
-            pox_r_commit: &ticket.pox_r_commit,
-            parent_root: &ticket.parent_root,
-            join_delta_root: &ticket.join_delta_root,
-            revoked_since_root: &ticket.revoked_since_root,
-            revoked_root: &ticket.revoked_root,
-            tswe_salt_hash: &ticket.tswe_salt_hash,
-            ticket_history_commitment: &ticket.current_history_commitment,
-            ticket_history_authority_extension: ticket.history_authority_extension,
-            history_authority: ticket.history_authority.clone(),
-            current_global_history_attestation_bytes: ticket
-                .current_global_history_attestation_bytes
-                .as_slice(),
-            merge_ticket_artifact_bytes: ticket.merge_ticket_artifact_bytes.as_slice(),
-            deployment_profile_manifest_bytes: ticket.deployment_profile_manifest_bytes.as_slice(),
-            pop_secret_key: session.pop_secret.as_bytes(),
-            full_verification_target_leaf_id: None,
-            barrier_update_reason: 2,
-            operation_label: "join finalize",
-        })
+        .barrier_prepare_snapshot(snapshot_request)
         .await
         .context("prepare join finalize barrier snapshot")?;
-    let next_barrier_version = ticket.barrier_version.saturating_add(1);
+    let cityg_api_client::PreparedOriginMergeTicket {
+        barrier_version,
+        proof_mode,
+        vrf_id,
+        policy_version,
+        msphf_crs_id,
+        msphf_params_id,
+        fs_policy_version,
+        fs_epoch_base_ts,
+        parities,
+        witness_bytes,
+        ..
+    } = prepared_runtime;
+    let next_barrier_version = barrier_version.saturating_add(1);
     let barrier_update = BarrierUpdateBuildResult::from_core(barrier_update);
-
-    let witness_bytes = prepared_runtime.witness_bytes;
     let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
         gid: &session.gid,
         cat: &cat,
@@ -1095,18 +1074,18 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         revoked_since_root: &revoked_since_root_arr,
         revoked_root: &revoked_root_arr,
         pox_r_commit: &pox_r_commit,
-        msphf_crs_id: ticket.msphf_crs_id.as_str(),
-        msphf_params_id: ticket.msphf_params_id.as_str(),
+        msphf_crs_id: msphf_crs_id.as_str(),
+        msphf_params_id: msphf_params_id.as_str(),
         srx: None,
         pop_public_key: session.pop_public_key.as_slice(),
         pop_secret_key: session.pop_secret.as_ref(),
-        proof_mode: ticket.proof_mode.as_str(),
-        vrf_id: ticket.vrf_id.as_str(),
-        policy_version: ticket.policy_version.as_str(),
+        proof_mode: proof_mode.as_str(),
+        vrf_id: vrf_id.as_str(),
+        policy_version: policy_version.as_str(),
         vrf_secret_key: session.vrf_secret_key.as_slice(),
         vrf_public_key: session.vrf_public_key.as_slice(),
-        fs_policy_version: ticket.fs_policy_version.as_str(),
-        fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+        fs_policy_version: fs_policy_version.as_str(),
+        fs_epoch_base_ts,
         barrier_version: next_barrier_version,
         fs_join: FsJoinInputs {
             fs_ec: session.fs_ec,
@@ -1248,19 +1227,21 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
     session
         .k_barrier
         .copy_from_slice(barrier_update.k_barrier_new.as_ref());
+    session.kem_tree_hash_after = barrier_update.kem_tree_hash_after;
     session.anchor_hdr_ctx = bundle.anchor.anchor_hdr_ctx.clone();
     session.seed_ctx_hash = bundle.hp_binding.seed_ctx_hash;
     session.seed_commit = bundle.hp_binding.seed_commit;
     session.seed_bundle_commit = bundle.hp_binding.seed_bundle_commit;
     session.join_finalize_auth_token = [0u8; 32];
+    session.current_history_commitment = None;
     session.current_history_authority_extension = None;
     session.current_global_history_attestation_bytes.clear();
     session.fs_fingerprint = compute_fs_fingerprint_from_header(&bundle.header_map).or_else(|| {
         derive_fs_fingerprint_from_fields(
-            ticket.fs_policy_version.as_str(),
+            fs_policy_version.as_str(),
             session.fs_ec,
             &session.fs_epoch_commit,
-            ticket.fs_epoch_base_ts,
+            fs_epoch_base_ts,
         )
     });
     session.stored_header_map = bundle.header_map.clone();
@@ -1291,17 +1272,31 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
         let current_stored_header_map = session.stored_header_map.clone();
 
         let prepared_runtime = ticket
-            .prepare_runtime(
-                current_fs_ec,
-                current_fs_epoch_commit,
-                current_fs_dev_prev_commit,
-                0,
-            )
+            .prepare_revocation_runtime(PrepareRevocationMergeTicketInput {
+                operation_label: "leave",
+                local_barrier_version: session.barrier_version,
+                local_kem_tree_hash_after: session.kem_tree_hash_after,
+                local_current_history_commitment: session.current_history_commitment.as_ref(),
+                local_current_history_authority_extension: session
+                    .current_history_authority_extension,
+                fs_ec: current_fs_ec,
+                fs_epoch_commit: current_fs_epoch_commit,
+                fs_dev_prev_commit: current_fs_dev_prev_commit,
+                stored_max_barrier_update_bytes: 0,
+            })
             .map_err(anyhow::Error::from)?;
-        let parities = prepared_runtime.parities;
+        let snapshot_request = prepared_runtime.snapshot_preparation_request(
+            &session.room_id,
+            &session.gid,
+            &session.leaf_id,
+            session.pop_secret.as_bytes(),
+            Some(session.leaf_id),
+            0,
+            "leave",
+        );
 
         if verbose {
-            for (idx, parity) in parities.iter().enumerate() {
+            for (idx, parity) in prepared_runtime.parities.iter().enumerate() {
                 println!(
                     "parity[{idx}] accept_seq={} is_join={} fs_ec_present={} fs_dev_present={} fs_epoch_present={}",
                     parity.accept_seq,
@@ -1313,20 +1308,6 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             }
         }
 
-        let srx_inputs = SrxInputsOwned::from_cbor(&ticket.srx_cbor)
-            .context("decode SRX inputs")?
-            .into_srx_inputs();
-
-        let mut header = BTreeMap::new();
-        header.insert(hdr::HDR_KBROAD_ALG, Value::Text("ml-kem-768".to_string()));
-        header.insert(
-            hdr::HDR_KBROAD_PUB,
-            Value::Bytes(ticket.kbroad_public.clone()),
-        );
-
-        let snapshot_hash = prepared_runtime.snapshot_hash;
-        let next_barrier_version = ticket.barrier_version.saturating_add(1);
-        let barrier_n_max = prepared_runtime.barrier_n_max;
         let PreparedBarrierSnapshot {
             header,
             cat,
@@ -1342,41 +1323,25 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             revocation_roots_hash: _prepared_revocation_roots_hash,
             barrier_update,
         } = client
-            .barrier_prepare_snapshot(BarrierSnapshotPreparationRequest {
-                room_id: &session.room_id,
-                header,
-                gid: &session.gid,
-                leaf_id: &session.leaf_id,
-                barrier_version: ticket.barrier_version,
-                cover_leaf_index: prepared_runtime.cover_leaf_index,
-                snapshot_hash,
-                barrier_n_max,
-                max_barrier_update_bytes: prepared_runtime.max_barrier_update_bytes,
-                parities: &parities,
-                cat: &ticket.cat,
-                pox_r_commit: &ticket.pox_r_commit,
-                parent_root: &ticket.parent_root,
-                join_delta_root: &ticket.join_delta_root,
-                revoked_since_root: &ticket.revoked_since_root,
-                revoked_root: &ticket.revoked_root,
-                tswe_salt_hash: &ticket.tswe_salt_hash,
-                ticket_history_commitment: &ticket.current_history_commitment,
-                ticket_history_authority_extension: ticket.history_authority_extension,
-                history_authority: ticket.history_authority.clone(),
-                current_global_history_attestation_bytes: ticket
-                    .current_global_history_attestation_bytes
-                    .as_slice(),
-                merge_ticket_artifact_bytes: ticket.merge_ticket_artifact_bytes.as_slice(),
-                deployment_profile_manifest_bytes: ticket
-                    .deployment_profile_manifest_bytes
-                    .as_slice(),
-                pop_secret_key: session.pop_secret.as_bytes(),
-                full_verification_target_leaf_id: Some(session.leaf_id),
-                barrier_update_reason: 0,
-                operation_label: "leave",
-            })
+            .barrier_prepare_snapshot(snapshot_request)
             .await
             .context("prepare leave barrier snapshot")?;
+        let cityg_api_client::PreparedRevocationMergeTicket {
+            barrier_version,
+            proof_mode,
+            vrf_id,
+            policy_version,
+            msphf_crs_id,
+            msphf_params_id,
+            fs_policy_version,
+            fs_epoch_base_ts,
+            parities,
+            witness_bytes,
+            srx_inputs,
+            ..
+        } = prepared_runtime;
+        let srx_inputs = srx_inputs.into_srx_inputs();
+        let next_barrier_version = barrier_version.saturating_add(1);
         let barrier_update = BarrierUpdateBuildResult::from_core(barrier_update);
 
         let prepared_orchestration = prepare_barrier_orchestration(BarrierOrchestrationInputs {
@@ -1388,18 +1353,18 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             revoked_since_root: &revoked_since_root_arr,
             revoked_root: &revoked_root_arr,
             pox_r_commit: &pox_r_commit,
-            msphf_crs_id: ticket.msphf_crs_id.as_str(),
-            msphf_params_id: ticket.msphf_params_id.as_str(),
+            msphf_crs_id: msphf_crs_id.as_str(),
+            msphf_params_id: msphf_params_id.as_str(),
             srx: Some(srx_inputs),
             pop_public_key: session.pop_public_key.as_slice(),
             pop_secret_key: session.pop_secret.as_ref(),
-            proof_mode: ticket.proof_mode.as_str(),
-            vrf_id: ticket.vrf_id.as_str(),
-            policy_version: ticket.policy_version.as_str(),
+            proof_mode: proof_mode.as_str(),
+            vrf_id: vrf_id.as_str(),
+            policy_version: policy_version.as_str(),
             vrf_secret_key: session.vrf_secret_key.as_slice(),
             vrf_public_key: session.vrf_public_key.as_slice(),
-            fs_policy_version: ticket.fs_policy_version.as_str(),
-            fs_epoch_base_ts: ticket.fs_epoch_base_ts,
+            fs_policy_version: fs_policy_version.as_str(),
+            fs_epoch_base_ts,
             barrier_version: next_barrier_version,
             fs_join: FsJoinInputs {
                 fs_ec: current_fs_ec,
@@ -1407,7 +1372,6 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
                 fs_dev_prev_commit: current_fs_dev_prev_commit,
             },
         });
-        let witness_bytes = prepared_runtime.witness_bytes;
 
         let built = build_barrier_merge_bundle_core(CoreBarrierMergeBundleInputs {
             header,
@@ -1881,8 +1845,10 @@ mod tests {
             seed_bundle_commit: [0xCD; 32],
             fs_fingerprint: None,
             join_finalize_auth_token: [0xCE; 32],
+            current_history_commitment: Some(sample_history_commitment()),
             current_history_authority_extension: None,
             current_global_history_attestation_bytes: Vec::new(),
+            kem_tree_hash_after: [0xCF; 32],
             stored_header_map: BTreeMap::new(),
             #[cfg(test)]
             msg_replay_state: MsgReplayState::default(),
@@ -4166,8 +4132,10 @@ mod tests {
             seed_bundle_commit: [0x99; 32],
             fs_fingerprint: None,
             join_finalize_auth_token: [0xAA; 32],
+            current_history_commitment: Some(sample_history_commitment()),
             current_history_authority_extension: None,
             current_global_history_attestation_bytes: Vec::new(),
+            kem_tree_hash_after: [0xBB; 32],
             stored_header_map: BTreeMap::new(),
             #[cfg(test)]
             msg_replay_state: MsgReplayState::default(),
