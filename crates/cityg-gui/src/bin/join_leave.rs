@@ -93,8 +93,6 @@ use notifications::{
     Notification, expect_membership_event, expect_message_event, spawn_notification_listener,
     websocket_url,
 };
-use pqcrypto_dilithium::dilithium5::SecretKey as MlDsaSecretKey;
-use pqcrypto_traits::sign::SecretKey as DilithiumSecretKeyTrait;
 use rand::{RngExt, rng};
 #[cfg(test)]
 use reqwest::header::CONTENT_TYPE;
@@ -656,7 +654,7 @@ struct Session {
     barrier_version: u64,
     k_barrier: [u8; 32],
     pop_public_key: Vec<u8>,
-    pop_secret: Box<MlDsaSecretKey>,
+    pop_secret: Vec<u8>,
     vrf_secret_key: Vec<u8>,
     vrf_public_key: Vec<u8>,
     forward_state: ForwardSecrecyState,
@@ -687,7 +685,7 @@ async fn prepare_join_session_with_identity(
     identity: cityg_api_client::RoomAdminIdentity,
 ) -> Result<Session> {
     let client = new_api_client(server_url);
-    let pop_secret = Box::new(identity.parse_secret_key().context("invalid POP key")?);
+    let pop_secret = identity.pop_secret_key.clone();
 
     let identity_binding = identity
         .build_identity_binding(alias)
@@ -741,10 +739,12 @@ async fn prepare_join_session_with_identity(
     let mut fs_state = join_runtime.forward_state;
     let vrf_secret_key = join_runtime.vrf_secret_key;
     let vrf_public_key = join_runtime.vrf_public_key;
+    let pop_secret_key = cityg_api_client::parse_room_admin_secret_key(pop_secret.as_slice())
+        .context("invalid POP key")?;
 
     let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
         identity.pop_public_key.as_slice(),
-        pop_secret.as_ref(),
+        &pop_secret_key,
         vrf_secret_key.as_slice(),
         vrf_public_key.as_slice(),
     );
@@ -944,7 +944,7 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         &session.room_id,
         &session.gid,
         &session.leaf_id,
-        session.pop_secret.as_bytes(),
+        session.pop_secret.as_slice(),
         2,
         "join finalize",
     );
@@ -969,10 +969,13 @@ async fn perform_join_finalize(mut session: Session) -> Result<Session> {
         .context("prepare join finalize barrier snapshot")?;
     let next_barrier_version = prepared_runtime.barrier_version.saturating_add(1);
     let barrier_update = BarrierUpdateBuildResult::from_core(barrier_update);
+    let pop_secret_key =
+        cityg_api_client::parse_room_admin_secret_key(session.pop_secret.as_slice())
+            .context("invalid POP key")?;
     let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
         &session.gid,
         session.pop_public_key.as_slice(),
-        session.pop_secret.as_ref(),
+        &pop_secret_key,
         session.vrf_secret_key.as_slice(),
         session.vrf_public_key.as_slice(),
         session.fs_ec,
@@ -1153,7 +1156,7 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             &session.room_id,
             &session.gid,
             &session.leaf_id,
-            session.pop_secret.as_bytes(),
+            session.pop_secret.as_slice(),
             Some(session.leaf_id),
             0,
             "leave",
@@ -1192,11 +1195,14 @@ async fn perform_leave(session: &Session, verbose: bool) -> Result<()> {
             .context("prepare leave barrier snapshot")?;
         let next_barrier_version = prepared_runtime.barrier_version.saturating_add(1);
         let barrier_update = BarrierUpdateBuildResult::from_core(barrier_update);
+        let pop_secret_key =
+            cityg_api_client::parse_room_admin_secret_key(session.pop_secret.as_slice())
+                .context("invalid POP key")?;
 
         let prepared_orchestration = prepared_runtime.prepare_barrier_orchestration(
             &session.gid,
             session.pop_public_key.as_slice(),
-            session.pop_secret.as_ref(),
+            &pop_secret_key,
             session.vrf_secret_key.as_slice(),
             session.vrf_public_key.as_slice(),
             current_fs_ec,
@@ -1654,7 +1660,6 @@ mod tests {
 
     fn sample_session(server_url: &str) -> Session {
         let identity = cityg_api_client::generate_room_admin_identity();
-        let pop_sk = identity.parse_secret_key().expect("valid POP key");
         Session {
             server_url: server_url.to_string(),
             room_id: hex::encode([0xAA; 32]),
@@ -1665,7 +1670,7 @@ mod tests {
             barrier_version: 1,
             k_barrier: [0x25; 32],
             pop_public_key: identity.pop_public_key,
-            pop_secret: Box::new(pop_sk),
+            pop_secret: identity.pop_secret_key,
             vrf_secret_key: vec![0x44; 32],
             vrf_public_key: vec![0x55; 32],
             forward_state: ForwardSecrecyState::with_state([0x10; 32], 7, [0x77; 32], [0x88; 32]),
@@ -3933,7 +3938,6 @@ mod tests {
     #[test]
     fn log_helpers_cover_none_fingerprint_and_non_integer_fs_ec() {
         let identity = cityg_api_client::generate_room_admin_identity();
-        let sk = identity.parse_secret_key().expect("valid POP key");
         let session = Session {
             server_url: "http://127.0.0.1:18080".to_string(),
             room_id: hex::encode([0xAA; 32]),
@@ -3944,7 +3948,7 @@ mod tests {
             barrier_version: 1,
             k_barrier: [0x05; 32],
             pop_public_key: identity.pop_public_key,
-            pop_secret: Box::new(sk),
+            pop_secret: identity.pop_secret_key,
             vrf_secret_key: vec![0x22],
             vrf_public_key: vec![0x33],
             forward_state: ForwardSecrecyState::with_state([0x12; 32], 5, [0x55; 32], [0x66; 32]),

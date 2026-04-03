@@ -113,7 +113,7 @@ pub(super) async fn send_text_message(session: &mut Session, plaintext: &str) ->
         &session.leaf_id,
         timestamp_ms,
         plaintext.as_bytes(),
-        DilithiumSecretKeyTrait::as_bytes(session.pop_secret.as_ref()),
+        session.pop_secret.as_slice(),
     )?;
     let authenticated = encode_authenticated_message(
         timestamp_ms,
