@@ -248,15 +248,15 @@ fn session_gid_from_room_id(session: &AppSession) -> [u8; 32] {
 fn install_valid_message_identities(
     session: &mut AppSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
+    let identity = cityg_api_client::generate_room_admin_identity();
     session.leaf_id = compute_leaf_id(
         LeafIdMode::PerGroup,
         &session.gid,
         "ML-DSA-65",
-        pop_public_key.as_slice(),
+        identity.pop_public_key.as_slice(),
     )?;
-    session.pop_public_key = pop_public_key;
-    session.pop_secret_key = pop_secret_key;
+    session.pop_public_key = identity.pop_public_key;
+    session.pop_secret_key = identity.pop_secret_key;
 
     let (msg_sign_pk, msg_sign_sk) = dilithium5::keypair();
     session.msg_sign_public_key = msg_sign_pk.as_bytes().to_vec();
@@ -579,15 +579,15 @@ fn apply_fetch_outcome_to_session(session: &mut AppSession, outcome: &FetchOutco
 fn install_valid_pop_identity(
     session: &mut AppSession,
 ) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    let (pop_public_key, pop_secret_key) = cityg_api_client::generate_room_admin_keypair();
+    let identity = cityg_api_client::generate_room_admin_identity();
     let leaf_id = compute_leaf_id(
         LeafIdMode::PerGroup,
         &session.gid,
         "ML-DSA-65",
-        pop_public_key.as_slice(),
+        identity.pop_public_key.as_slice(),
     )?;
-    session.pop_public_key = pop_public_key;
-    session.pop_secret_key = pop_secret_key;
+    session.pop_public_key = identity.pop_public_key;
+    session.pop_secret_key = identity.pop_secret_key;
     session.leaf_id = leaf_id;
     Ok(leaf_id)
 }
